@@ -13,6 +13,46 @@ Implemented feasibility slice on `main`:
 This document describes the code that exists today. Future adapters such as
 VMM/VNET/VFS are design targets only and are not scaffolded as code on `main`.
 
+
+## New Problem: Semantic Name Resolution
+
+The current feasibility slice parses command syntax correctly, but it assumes
+that the parsed command payload is already semantically executable.
+
+That assumption holds for the current single-host tmux slice because:
+- one `CommandEngine<TmuxState, TmuxCommand>` owns one `TmuxState`
+- one `TmuxState` owns one `HostHandle`
+- target strings like `demo:0.1` can be resolved directly against that one host
+
+It will not hold once the driver surface grows.
+
+Examples:
+- tmux multi-host mode:
+  - `connect ssh://dchung@motliehost?identity-file=... as dchung-motlie`
+  - `send dchung-motlie/demo:0.1 echo hello`
+  - `capture demo:0.1 50`
+    - uses the current selected connection when no explicit alias is given
+- future VMM mode:
+  - `exec alice uname -a`
+  - `shutdown cluster-a/alice`
+  - `pty sandbox/main`
+
+These are not parsing problems. They are semantic resolution problems:
+- choose the correct namespace / scope
+- apply current/default scope when the user omits one
+- validate the reference against session state
+- convert a parsed command into a resolved command before execution
+
+If every adapter solves this ad hoc inside `execute()`, the driver surface will
+drift:
+- different separators and namespace rules
+- different current-scope behavior
+- duplicated string-splitting logic
+- inconsistent error messages
+- inconsistent completion behavior
+
+The driver crate should own this stage once, compositionally.
+
 ## Crate Boundaries
 
 ### `libs/driver`
@@ -120,6 +160,243 @@ It does not own:
 - TUI rendering
 - subsystem business logic
 
+
+## Planned Semantic Resolution Stage
+
+### Current flow
+
+Today the engine flow is:
+
+1. tokenize shell input
+2. parse with `clap`
+3. convert `ArgMatches` into the typed command
+4. execute the typed command against mutable context
+
+That is sufficient only when:
+- parsed names need no semantic interpretation beyond `clap`
+- command execution can directly consume the parsed strings
+
+### Proposed flow
+
+The planned driver flow is:
+
+1. tokenize shell input
+2. parse with `clap`
+3. convert `ArgMatches` into the typed parsed command
+4. resolve parsed names/references against read-only context
+5. execute the resolved command against mutable context
+
+The key design rule is:
+- `clap` owns syntax
+- the driver owns semantic resolution
+- adapters own resource-specific execution
+
+### Compositional requirement
+
+This stage must be optional-by-default.
+
+If an adapter does not need semantic resolution, the design should collapse back
+to today's namespace-less behavior with no extra ceremony.
+
+That means:
+- parsed command type may equal resolved command type
+- `resolve()` may be identity
+- simple adapters pay no extra complexity tax
+
+The design must support three cases cleanly:
+
+1. identity / namespace-less adapters
+   - current single-host tmux slice
+2. scoped adapters
+   - tmux multi-host aliases like `alias/target`
+   - future VMM guest namespaces like `cluster/guest`
+3. composed app command sets
+   - app-level connect/select/disconnect plus subsystem commands
+
+### Proposed trait shape
+
+One viable evolution is:
+
+```rust
+#[async_trait::async_trait]
+pub trait CommandSet<C>: Sized {
+    type CompletionContext: Send + 'static;
+    type Resolved;
+
+    fn root_command() -> clap::Command;
+    fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self>;
+    fn completion_context(context: &C) -> Self::CompletionContext;
+
+    fn help(topic: &[String]) -> Option<String> {
+        None
+    }
+
+    fn complete(
+        request: CompletionRequest<'_>,
+        context: &Self::CompletionContext,
+    ) -> Vec<CompletionCandidate> {
+        Vec::new()
+    }
+
+    fn resolve(self, context: &C) -> DriverResult<Self::Resolved>;
+
+    async fn execute(
+        resolved: Self::Resolved,
+        context: &mut C,
+    ) -> DriverResult<CommandOutput>;
+}
+```
+
+Then the engine becomes:
+
+```rust
+let parsed = S::from_matches(&matches)?;
+let resolved = parsed.resolve(&self.context)?;
+S::execute(resolved, &mut self.context).await
+```
+
+Identity adapters use:
+- `type Resolved = Self`
+- `resolve(self, _) -> Ok(self)`
+
+This keeps the design compositional.
+
+### Alternative trait split
+
+If the single-trait shape becomes awkward in Rust, the same idea can be modeled
+as two traits:
+- parsed command trait
+- executable resolved command trait
+
+The important requirement is not the exact trait spelling. It is the presence of
+a first-class semantic resolution stage between parse and execute.
+
+## Planned Naming / Resolution Support In `libs/driver`
+
+The core driver crate should grow small generic utilities for scoped names.
+
+Planned examples:
+
+```rust
+pub struct QualifiedName<'a> {
+    pub scope: Option<&'a str>,
+    pub value: &'a str,
+}
+
+pub struct ResolvedName {
+    pub scope: String,
+    pub value: String,
+}
+
+pub fn parse_qualified_name(raw: &str) -> QualifiedName<'_>;
+```
+
+And a context-facing resolution helper pattern:
+
+```rust
+pub trait ResolveName<K> {
+    type Resolved;
+
+    fn resolve_name(&self, kind: K, raw: &str) -> DriverResult<Self::Resolved>;
+}
+```
+
+This is intentionally generic:
+- tmux can resolve connection alias + target/session
+- VMM can resolve namespace + guest / PTY / handle
+- future adapters can reuse the same structure
+
+The driver should also own the generic error vocabulary for this stage:
+- malformed qualified name
+- missing current scope
+- unknown scope
+- ambiguous name
+- resource not found in scope
+
+## Completion Impact
+
+Completion should continue to work compositionally with the new stage.
+
+Current completion remains valid:
+- static completion from `clap`
+- dynamic completion from adapter snapshots
+
+Planned additions:
+- current-scope completion for bare names
+- explicit scoped-name completion for prefixes like `alias/...`
+- scope-alias completion for app-level commands such as:
+  - `connect`
+  - `disconnect`
+  - `use`
+  - `connections`
+
+The completion rule should match the resolution rule:
+- if the user provides an explicit scope, complete inside that scope
+- otherwise use current/default scope when one exists
+
+## Verification Slice: tmux Multi-host Namespaced Mode
+
+The proposed proving slice for this design is the top-level tmux driver binary.
+
+Add an opt-in mode that turns the current single-host tmux binary into a
+multi-host session manager.
+
+### User-facing shape
+
+When enabled, the binary should support app-level commands such as:
+
+```text
+connect ssh://dchung@motliehost?identity-file=... as dchung-motlie
+connect ssh://dchung@otherhost?identity-file=... as staging
+use dchung-motlie
+connections
+disconnect staging
+```
+
+After that, tmux entity references should support:
+
+```text
+targets
+send dchung-motlie/demo:0.1 echo hello
+capture dchung-motlie/demo 50
+kill staging/build:0.1
+```
+
+And when a current connection is selected:
+
+```text
+use dchung-motlie
+send demo:0.1 echo hello
+capture demo 50
+```
+
+### Planned context shape
+
+The current one-host `TmuxState` would become a lower-level connection state.
+
+The binary-level app context would look more like:
+
+```rust
+pub struct TmuxAppState {
+    connections: BTreeMap<String, TmuxState>,
+    current: Option<String>,
+}
+```
+
+And the app-level command family would compose:
+- connection-management commands
+- tmux operational commands
+
+### Why this slice is a good proof
+
+It exercises all of the new generic concerns:
+- optional namespace resolution
+- current/default scope behavior
+- dynamic completion over scoped names
+- one command family reused inside a larger app-level command surface
+
+And it does so without requiring VMM to land first.
+
 ## clap Integration
 
 `clap` is the source of truth for static command structure.
@@ -198,6 +475,11 @@ This is intentionally a narrow slice:
 - one active watch/stream at a time
 - no attach/import persistence yet
 - no generalized resource-mode metadata yet
+
+
+The planned namespaced multi-host mode above is a future proof slice on top of
+the current single-host implementation, not a statement that it already exists
+on `main`.
 
 ### Shared frontends
 

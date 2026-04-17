@@ -60,6 +60,42 @@ Not implemented:
 - [x] Capture host-backed smoke-test artifacts
 - [x] Add driver-owned asciicast recording
 
+
+
+## Proposed Next Phase: Semantic Resolution And Namespaced Contexts
+
+Goal:
+- make name resolution a first-class driver concern instead of an ad hoc per-adapter string hack
+
+Why this is next:
+- tmux multi-host mode needs `connect <ssh> as <alias>` and `alias/<target>` semantics
+- future VMM commands will likely need namespace-aware guest references as the surface grows
+- bolting namespace parsing into each adapter `execute()` path would duplicate logic and drift over time
+
+Planned core tasks:
+- [ ] extend the `CommandSet<C>` contract with an optional semantic resolution stage
+- [ ] keep identity/no-op resolution as the default so current namespace-less adapters still work unchanged
+- [ ] add a small generic naming module under `libs/driver` for qualified-name parsing and generic resolution errors
+- [ ] document the context-side resolution helper pattern for adapters and app-level command sets
+- [ ] update completion guidance so scoped-name completion follows the same rules as scoped-name resolution
+
+Planned tmux proving slice:
+- [ ] add an opt-in namespaced multi-host mode to `bins/tmux/driver`
+- [ ] add app-level commands:
+  - [ ] `connect <ssh-uri> as <alias>`
+  - [ ] `disconnect <alias>`
+  - [ ] `use <alias>`
+  - [ ] `connections`
+- [ ] support namespaced tmux entities like `alias/<target>`
+- [ ] support current-connection fallback when the user omits an alias
+- [ ] add dynamic completion for connection aliases and scoped tmux targets
+
+Acceptance:
+- a command set that does not need semantic resolution can still behave exactly like the current design
+- adapters that do need semantic resolution can express it without re-implementing parsing hacks
+- the tmux driver can demonstrate one engine session managing multiple SSH hosts by alias
+- the design is reusable by future VMM guest/namespace-aware command sets
+
 ## Remaining Work
 
 ### Near-term
