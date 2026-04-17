@@ -4,11 +4,12 @@
 | Date | Who | Summary |
 | --- | --- | --- |
 | 2026-04-16 | @codex-asr | Added the Phase 3 decision record: sherpa-onnx remains the primary telephony-grade streaming backend, while Moonshine is the secondary batch/offline backend. Documented the measured latency/accuracy tradeoff and the implementation constraint that Moonshine currently runs CPU-only in Motlie because incremental CUDA chunking is unstable. |
+| 2026-04-16 | @codex-asr | Corrected the implementation note after the Moonshine backend switched from finish-only buffering to true chunk-driven inference. Moonshine still remains the secondary backend because the measured chunk latency is too high for telephony, not because the integration is batch-only. |
 
 ## Decision
 
 - `sherpa-onnx` remains the primary ASR backend for telephony and real-time streaming.
-- `Moonshine` is added as the secondary ASR backend for batch/offline transcription.
+- `Moonshine` is added as the secondary ASR backend for chunked streaming and offline transcription.
 
 ## Data
 
@@ -23,7 +24,7 @@
 
 - `sherpa-onnx` is about 68x faster per chunk than Moonshine on CPU.
 - Moonshine accuracy is attractive, but that does not offset the chunk-latency gap for telephony workloads.
-- Moonshine therefore fits best as the secondary batch/offline option that still shares the same PCM chunk contract as the primary backend.
+- Moonshine therefore fits best as the secondary chunk-capable backend that still shares the same PCM chunk contract as the primary backend, but is used for non-telephony workloads because its chunk latency is much higher.
 - Current Moonshine CUDA incremental behavior is unstable, so the Motlie integration keeps the backend CPU-only for now.
 
 ## Integration Shape
@@ -37,8 +38,7 @@
 ## Contract Semantics
 
 - The Moonshine backend uses the shared PCM chunk API so `.wav` files and websocket-style streams stay on one contract surface.
-- Unlike sherpa-onnx, the current Moonshine integration is intentionally batch/offline:
-  - chunks are accepted incrementally
-  - the stream buffers audio
-  - the committed transcript is emitted on final flush
-- This keeps the integration correct against the current runtime constraints without misrepresenting Moonshine as the telephony backend.
+- The current integration advances the Moonshine inference state on every `push_chunk()`.
+- When `emit_partials = true`, `push_chunk()` may emit a single interim transcript segment representing the current best full-text hypothesis.
+- `finish()` only flushes deferred normalization state and performs the final decode pass, returning a committed transcript segment.
+- Moonshine is still documented as the non-telephony backend because the measured per-chunk latency remains far above sherpa-onnx even though the integration itself is truly chunk-driven.

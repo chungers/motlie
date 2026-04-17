@@ -1,4 +1,4 @@
-//! v0.7 — Moonshine secondary ASR slice for batch/offline `.wav` transcription.
+//! v0.7 — Moonshine secondary ASR slice for chunked `.wav` transcription.
 //!
 //! Usage:
 //!   cargo run -p motlie-models --example models_v0_7 \

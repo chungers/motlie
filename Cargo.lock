@@ -5250,6 +5250,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "motlie-model",
+ "ndarray",
+ "ort",
+ "serde_json",
  "tokenizers 0.21.4",
  "tokio",
  "tracing",
