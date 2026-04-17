@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-16 | @codex-macmini-telnyx: Added an explicit media-adaptation pipeline design with typed stage contracts, marker types, and compile-time pipeline assembly guidance for codecs, resampling, framing, and model-specific normalization. | Recommended Integration Shape, Media Adaptation Pipeline, Inbound Call Handler Design, Gap Analysis |
 | 2026-04-15 | @codex-macmini-telnyx: Added the pluggable `ConversationHandler` stage, made ASR/TTS injection explicit, and documented private-host deployment plus a local getting-started flow using ngrok or Tailscale Funnel. | Overview, Recommended Integration Shape, Recommended ASR/TTS Stack, Inbound Call Handler Design, Deployment: Private Host, Getting Started: Local Deployment, Open Concerns |
 | 2026-04-15 | @codex-macmini-telnyx: Added the recommended v1 ASR/TTS stack, concrete telephony pipeline, and latency budget based on current Motlie benchmark results and backend readiness. | Recommended ASR/TTS Stack, Gap Analysis, Open Concerns |
 | 2026-04-15 | @codex-macmini-telnyx: Initial Telnyx real-time voice integration design for Motlie. Documents Telnyx API research, recommends a WebSocket media gateway over the existing ASR/TTS contracts, and outlines brownfield gaps around codecs, resampling, duplex orchestration, and deployment. | All |
@@ -18,6 +19,7 @@ This document defines a brownfield design for integrating Telnyx programmable vo
 - [Goals and Non-Goals](#goals-and-non-goals)
 - [Telnyx API Research](#telnyx-api-research)
 - [Recommended Integration Shape](#recommended-integration-shape)
+- [Media Adaptation Pipeline](#media-adaptation-pipeline)
 - [Recommended ASR/TTS Stack](#recommended-asrtts-stack)
 - [Inbound Call Handler Design](#inbound-call-handler-design)
 - [Outbound Call Handler Design](#outbound-call-handler-design)
@@ -332,6 +334,343 @@ Why:
 - it minimizes surprises across the current ASR/TTS backends
 
 If a TTS backend emits a different format, the gateway should resample before sending to Telnyx.
+
+## Media Adaptation Pipeline
+
+### Why This Must Be Explicit
+
+The speech traits in `libs/model` intentionally normalize capability shape, but they do not remove transport and model-specific media adaptation work.
+
+The Telnyx gateway still has to reconcile:
+
+- transport codecs such as `PCMU`, `PCMA`, and `L16`
+- transport pacing and chunk boundaries
+- jitter and reorder behavior
+- model-specific preferred sample rates
+- model-specific sample encodings
+- output packetization for outbound telephony pacing
+
+So the Telnyx design must not treat the audio path as “just a stream.” It should be assembled from explicit stages with typed inputs and outputs.
+
+### Stage Breakdown
+
+Recommended inbound stages:
+
+```text
+Telnyx media payload
+-> transport decode
+-> reorder / jitter normalization
+-> sample-format conversion
+-> resampling
+-> ASR framing adapter
+-> ASR model
+```
+
+Recommended outbound stages:
+
+```text
+TTS model
+-> TTS chunk drain
+-> sample-format conversion
+-> resampling
+-> telephony pacing / packetization
+-> transport encode
+-> Telnyx media payload
+```
+
+### Stage API Surface
+
+Recommended common stage shape:
+
+```rust
+pub trait Stage {
+    type In;
+    type Out;
+    type Error;
+
+    fn transform(&mut self, input: Self::In) -> Result<Self::Out, Self::Error>;
+}
+```
+
+For async boundaries such as model calls or external orchestration:
+
+```rust
+#[async_trait]
+pub trait AsyncStage {
+    type In;
+    type Out;
+    type Error;
+
+    async fn transform(&mut self, input: Self::In) -> Result<Self::Out, Self::Error>;
+}
+```
+
+Design rule:
+
+- pure media transforms such as decode, resample, and rechunk should prefer `Stage`
+- model or network boundaries should use `AsyncStage`
+- stages should transform typed media values rather than raw `Vec<u8>` wherever possible
+
+### Typed Media Values
+
+The gateway should wrap payloads in domain-specific types so a stage cannot accidentally accept “some bytes” without knowing what they represent.
+
+Recommended shapes:
+
+```rust
+use core::marker::PhantomData;
+
+pub struct Mono;
+pub struct Stereo;
+
+pub struct Hz8000;
+pub struct Hz16000;
+pub struct Hz22050;
+pub struct Hz24000;
+
+pub struct S16Le;
+pub struct F32Le;
+pub struct Pcmu;
+pub struct Pcma;
+pub struct L16;
+
+pub struct EncodedFrame<C> {
+    pub bytes: Vec<u8>,
+    pub sequence: u64,
+    pub end_of_stream: bool,
+    _codec: PhantomData<C>,
+}
+
+pub struct PcmFrame<R, Ch, E> {
+    pub bytes: Vec<u8>,
+    pub sequence: u64,
+    pub end_of_stream: bool,
+    _rate: PhantomData<R>,
+    _channels: PhantomData<Ch>,
+    _encoding: PhantomData<E>,
+}
+```
+
+This makes it impossible to confuse:
+
+- G.711 payload bytes with linear PCM
+- `8 kHz` PCM with `16 kHz` PCM
+- `S16Le` with `F32Le`
+
+without writing an explicit conversion stage.
+
+### Marker Traits
+
+Marker traits should describe what a stage consumes or produces.
+
+Recommended examples:
+
+```rust
+pub trait TelephonyCodec {}
+impl TelephonyCodec for Pcmu {}
+impl TelephonyCodec for Pcma {}
+impl TelephonyCodec for L16 {}
+
+pub trait LinearPcmEncoding {}
+impl LinearPcmEncoding for S16Le {}
+impl LinearPcmEncoding for F32Le {}
+
+pub trait SampleRateTag {}
+impl SampleRateTag for Hz8000 {}
+impl SampleRateTag for Hz16000 {}
+impl SampleRateTag for Hz22050 {}
+impl SampleRateTag for Hz24000 {}
+
+pub trait ChannelLayoutTag {}
+impl ChannelLayoutTag for Mono {}
+impl ChannelLayoutTag for Stereo {}
+```
+
+These are zero-cost type-level markers. They are there to make legal assembly obvious and illegal assembly hard.
+
+### Common Stage Contracts
+
+Recommended transport codec stage:
+
+```rust
+pub trait Decoder<C, R, Ch, E>
+where
+    C: TelephonyCodec,
+    R: SampleRateTag,
+    Ch: ChannelLayoutTag,
+    E: LinearPcmEncoding,
+{
+    fn decode(&mut self, input: EncodedFrame<C>) -> Result<PcmFrame<R, Ch, E>, MediaError>;
+}
+
+pub trait Encoder<C, R, Ch, E>
+where
+    C: TelephonyCodec,
+    R: SampleRateTag,
+    Ch: ChannelLayoutTag,
+    E: LinearPcmEncoding,
+{
+    fn encode(&mut self, input: PcmFrame<R, Ch, E>) -> Result<EncodedFrame<C>, MediaError>;
+}
+```
+
+Recommended resampler stage:
+
+```rust
+pub trait Resampler<InRate, OutRate, Ch, E>
+where
+    InRate: SampleRateTag,
+    OutRate: SampleRateTag,
+    Ch: ChannelLayoutTag,
+    E: LinearPcmEncoding,
+{
+    fn resample(
+        &mut self,
+        input: PcmFrame<InRate, Ch, E>,
+    ) -> Result<PcmFrame<OutRate, Ch, E>, MediaError>;
+}
+```
+
+Recommended sample-format conversion stage:
+
+```rust
+pub trait SampleConverter<R, Ch, InEnc, OutEnc>
+where
+    R: SampleRateTag,
+    Ch: ChannelLayoutTag,
+    InEnc: LinearPcmEncoding,
+    OutEnc: LinearPcmEncoding,
+{
+    fn convert(
+        &mut self,
+        input: PcmFrame<R, Ch, InEnc>,
+    ) -> Result<PcmFrame<R, Ch, OutEnc>, MediaError>;
+}
+```
+
+Recommended framing stage for ASR:
+
+```rust
+pub trait AsrChunker<R, Ch, E>
+where
+    R: SampleRateTag,
+    Ch: ChannelLayoutTag,
+    E: LinearPcmEncoding,
+{
+    fn push_frame(
+        &mut self,
+        input: PcmFrame<R, Ch, E>,
+    ) -> Result<Vec<motlie_model::PcmChunk>, MediaError>;
+}
+```
+
+Recommended pacing stage for telephony output:
+
+```rust
+pub trait Packetizer<R, Ch, E, C>
+where
+    R: SampleRateTag,
+    Ch: ChannelLayoutTag,
+    E: LinearPcmEncoding,
+    C: TelephonyCodec,
+{
+    fn push_frame(
+        &mut self,
+        input: PcmFrame<R, Ch, E>,
+    ) -> Result<Vec<EncodedFrame<C>>, MediaError>;
+}
+```
+
+### Behavior Contracts
+
+Each stage should document strict behavior.
+
+Decoder and encoder:
+
+- must preserve monotonic `sequence`
+- must not silently reinterpret one codec as another
+- must reject unsupported payload lengths or invalid framing with a typed error
+
+Resampler:
+
+- must preserve `end_of_stream`
+- must not change channel layout or encoding
+- must state whether it buffers internally and when buffered audio is flushed
+
+Sample converter:
+
+- must not change sample rate or channels
+- must document clipping, rounding, and saturation behavior
+
+Chunker:
+
+- must produce deterministic `PcmChunk.sequence`
+- must state whether it emits fixed frame sizes or model-tuned windows
+- must flush trailing buffered audio on end-of-stream
+
+Packetizer:
+
+- must produce telephony-sized packets at a documented cadence
+- must not emit oversized outbound payloads that increase interactive latency
+- must preserve ordering and end-of-stream semantics
+
+### Model-Specific Adaptation
+
+This design should make model requirements explicit instead of hiding them in the transport loop.
+
+Examples:
+
+- Sherpa ONNX streaming may want mono `16 kHz` PCM frames with a chunk cadence aligned to its streaming decoder.
+- Moonshine streaming may also be telephony-friendly, but it should still get its own chunker configuration if its best frame sizing differs.
+- Whisper can satisfy the `TranscriptionModel` interface, but it likely needs a different buffering policy and should not reuse the low-latency streaming defaults blindly.
+- Piper may emit one `AudioSpec`, while Qwen3-TTS may emit another; the outbound side must adapt from the actual emitted type, not from a hardcoded assumption.
+
+Design implication:
+
+- model selection determines which normalization and framing stages are assembled
+- the surrounding transport pipeline remains structurally the same
+
+### Compile-Time Pipeline Assembly
+
+The recommended assembly pattern is a typed builder or typed pipeline chain, not ad hoc wiring.
+
+Sketch:
+
+```rust
+pub struct Pipeline<S1, S2, S3> {
+    s1: S1,
+    s2: S2,
+    s3: S3,
+}
+
+impl<S1, S2, S3> Pipeline<S1, S2, S3>
+where
+    S1: Stage,
+    S2: Stage<In = S1::Out>,
+    S3: Stage<In = S2::Out>,
+{
+    pub fn run(&mut self, input: S1::In) -> Result<S3::Out, PipelineError> {
+        let a = self.s1.transform(input)?;
+        let b = self.s2.transform(a)?;
+        let c = self.s3.transform(b)?;
+        Ok(c)
+    }
+}
+```
+
+That enforces stage compatibility through `S2::In = S1::Out` and `S3::In = S2::Out`.
+
+### Recommended Safety Properties
+
+The pipeline design should make these bugs impossible or very obvious:
+
+- feeding encoded G.711 bytes directly into an ASR chunker
+- resampling a payload that is still compressed instead of decoded
+- encoding outbound telephony packets from the wrong PCM rate
+- forgetting whether a given frame is `S16Le` or `F32Le`
+- guessing whether a stage is operating on `8 kHz` or `16 kHz`
+
+The type system does not replace runtime validation, but it should prevent “everything is bytes” assembly mistakes.
 
 ### Static-Dispatch Model Injection
 
@@ -676,15 +1015,20 @@ pub struct TelnyxCallSession {
     pub stream_id: Option<String>,
     pub inbound_track: TrackState,
     pub outbound_codec: TelnyxCodec,
-    pub inbound_decoder: Box<dyn AudioDecoder>,
-    pub outbound_encoder: Box<dyn AudioEncoder>,
-    pub asr: Box<dyn TranscriptionStream>,
-    pub current_tts: Option<Box<dyn SpeechStream>>,
+    pub inbound_pipeline: InboundPipeline,
+    pub outbound_pipeline: OutboundPipeline,
+    pub asr_stream: AsrStreamRuntime,
+    pub current_tts: Option<TtsStreamRuntime>,
     pub conversation: ConversationContext,
 }
 ```
 
-Where `TelnyxAsrRuntime` and `TelnyxTtsRuntime` are concrete, feature-gated runtime wrappers selected from the compiled model set rather than open-ended trait-object slots.
+Where:
+
+- `TelnyxAsrRuntime` and `TelnyxTtsRuntime` are concrete, feature-gated runtime wrappers selected from the compiled model set rather than open-ended trait-object slots
+- `InboundPipeline` is a typed composition such as decode -> reorder -> normalize -> chunk
+- `OutboundPipeline` is a typed composition such as convert -> resample -> packetize -> encode
+- `AsrStreamRuntime` and `TtsStreamRuntime` are concrete wrappers around the currently selected runtime handles
 
 This keeps Telnyx-specific types outside the model crates while allowing ASR, TTS, and conversation logic to remain transport-agnostic.
 
@@ -1357,6 +1701,7 @@ Required additions outside `libs/model`:
 - G.711 mu-law decoder and encoder
 - G.711 A-law decoder and encoder
 - `L16` framing helpers
+- typed `EncodedFrame<C>` transport wrappers so codecs are explicit in stage signatures
 - optionally `G722` / `Opus` support if Telnyx account or call routing yields those codecs
 
 Recommendation:
@@ -1374,6 +1719,7 @@ Required gateway utilities:
 - `8 kHz` -> `16 kHz` upsampling for PSTN-originated `PCMU` / `PCMA`
 - backend-output resampling from TTS-native rates to Telnyx outbound rate
 - `f32` <-> `s16le` conversion as needed
+- typed `PcmFrame<R, Ch, E>` wrappers so rate, channels, and encoding are explicit during assembly
 
 This is a utility-layer gap, not a contract-design gap.
 
@@ -1427,6 +1773,7 @@ Potential follow-on improvements:
 - a shared audio utility module for resampling and sample-format conversion
 - a small cancellation helper around `SpeechStream` to make barge-in easier to express
 - optional timestamp metadata on `PcmChunk` if future transports need precise wall-clock alignment
+- typed stage-builder helpers in the model-adjacent layer so common decode -> normalize -> chunk and drain -> normalize -> packetize pipelines are assembled consistently
 
 These are useful, but they should not block Phase 1.
 
