@@ -2473,6 +2473,9 @@ name = "esaxx-rs"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "espeak-rs"
@@ -3554,6 +3557,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac-sha256"
+version = "1.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
+
+[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4586,6 +4595,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
+name = "lzma-rust2"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1670343e58806300d87950e3401e820b519b9384281bbabfb15e3636689ffd69"
+
+[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5230,6 +5245,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-model-moonshine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "motlie-model",
+ "ndarray",
+ "ort",
+ "serde_json",
+ "tokenizers 0.21.4",
+ "tokio",
+ "tracing",
+ "transcribe-rs",
+]
+
+[[package]]
 name = "motlie-model-ort"
 version = "0.1.0"
 dependencies = [
@@ -5264,6 +5294,17 @@ dependencies = [
  "ort",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "motlie-model-qwen3-tts-cpp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cmake",
+ "motlie-model",
  "tokio",
  "tracing",
 ]
@@ -5304,8 +5345,10 @@ dependencies = [
  "motlie-model",
  "motlie-model-llama-cpp",
  "motlie-model-mistral",
+ "motlie-model-moonshine",
  "motlie-model-piper",
  "motlie-model-qwen3-tts",
+ "motlie-model-qwen3-tts-cpp",
  "motlie-model-sherpa-onnx",
  "motlie-model-whisper-cpp",
  "serde",
@@ -5942,6 +5985,7 @@ dependencies = [
  "ort-sys",
  "smallvec 1.15.1",
  "tracing",
+ "ureq 3.3.0",
 ]
 
 [[package]]
@@ -5949,6 +5993,11 @@ name = "ort-sys"
 version = "2.0.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
+dependencies = [
+ "hmac-sha256",
+ "lzma-rust2",
+ "ureq 3.3.0",
+]
 
 [[package]]
 name = "outref"
@@ -9144,10 +9193,12 @@ dependencies = [
  "esaxx-rs",
  "fancy-regex 0.14.0",
  "getrandom 0.3.4",
+ "indicatif 0.17.11",
  "itertools 0.14.0",
  "log",
  "macro_rules_attribute",
  "monostate",
+ "onig",
  "paste",
  "rand 0.9.3",
  "rayon",
@@ -9590,6 +9641,27 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "transcribe-rs"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb9d5cfb8e68a2a8fc27fb548987473221d3cc3776a331ccde46c8bd8b2eda0f"
+dependencies = [
+ "base64 0.22.1",
+ "derive_builder",
+ "env_logger",
+ "hound",
+ "log",
+ "ndarray",
+ "once_cell",
+ "ort",
+ "regex",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
