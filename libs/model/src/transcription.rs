@@ -17,12 +17,39 @@ pub enum PcmEncoding {
     F32Le,
 }
 
+/// How a backend consumes or emits stream data internally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackendMode {
+    Batch,
+    Streaming,
+}
+
 /// Audio format specification established once per transcription stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AudioSpec {
     pub sample_rate_hz: u32,
     pub channels: u16,
     pub encoding: PcmEncoding,
+    /// Advisory chunk size in bytes. Callers should query this instead of
+    /// guessing chunk sizes for stream wiring.
+    pub preferred_chunk_bytes: usize,
+}
+
+impl AudioSpec {
+    pub fn frame_bytes(&self) -> usize {
+        let bytes_per_sample = match self.encoding {
+            PcmEncoding::S16Le => 2,
+            PcmEncoding::F32Le => 4,
+        };
+        bytes_per_sample * self.channels.max(1) as usize
+    }
+
+    pub fn normalized_chunk_size(&self) -> usize {
+        let frame_bytes = self.frame_bytes();
+        let preferred = self.preferred_chunk_bytes.max(frame_bytes);
+        let aligned = preferred - (preferred % frame_bytes);
+        aligned.max(frame_bytes)
+    }
 }
 
 /// One chunk of raw PCM audio pushed into a transcription stream.
@@ -69,6 +96,8 @@ pub struct TranscriptionUpdate {
 /// rolling-buffer state and requires ordered, exclusive access.
 #[async_trait]
 pub trait TranscriptionModel: Send + Sync {
+    fn backend_mode(&self) -> BackendMode;
+
     async fn open_stream(
         &self,
         spec: AudioSpec,
@@ -90,6 +119,8 @@ pub trait TranscriptionModel: Send + Sync {
 /// - Calling after `finish()`: impossible by construction (`finish` consumes `Box<Self>`)
 #[async_trait]
 pub trait TranscriptionStream: Send {
+    fn audio_spec(&self) -> &AudioSpec;
+
     /// Push a PCM chunk and optionally receive new transcript output.
     ///
     /// Returns `Ok(None)` when the chunk does not cross a decode boundary.
@@ -126,11 +157,26 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 1,
             encoding: PcmEncoding::S16Le,
+            preferred_chunk_bytes: 6_400,
         };
 
         assert_eq!(spec.sample_rate_hz, 16_000);
         assert_eq!(spec.channels, 1);
         assert_eq!(spec.encoding, PcmEncoding::S16Le);
+        assert_eq!(spec.preferred_chunk_bytes, 6_400);
+    }
+
+    #[test]
+    fn audio_spec_normalizes_chunk_size_to_frame_alignment() {
+        let spec = AudioSpec {
+            sample_rate_hz: 22_050,
+            channels: 2,
+            encoding: PcmEncoding::S16Le,
+            preferred_chunk_bytes: 16_001,
+        };
+
+        assert_eq!(spec.frame_bytes(), 4);
+        assert_eq!(spec.normalized_chunk_size(), 16_000);
     }
 
     #[test]

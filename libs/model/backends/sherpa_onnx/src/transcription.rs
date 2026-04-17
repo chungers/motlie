@@ -8,8 +8,8 @@ use kaldi_native_fbank::fbank::{FbankComputer, FbankOptions};
 use kaldi_native_fbank::mel::MelOptions;
 use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
+    Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
     PcmEncoding, QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions,
     TranscriptSegment, TranscriptionModel, TranscriptionParams, TranscriptionStream,
@@ -27,6 +27,7 @@ use crate::common::{
 
 const SHERPA_ONNX_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
 const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
+const PREFERRED_CHUNK_BYTES: usize = 6_400;
 const TARGET_FRAME_SHIFT_MS: u64 = 40;
 const TAIL_PADDING_SAMPLES: usize = 4_800;
 const BLANK_ID: i64 = 0;
@@ -258,9 +259,13 @@ impl BundleHandle for SherpaOnnxHandle {
 
 #[async_trait]
 impl TranscriptionModel for SherpaOnnxHandle {
+    fn backend_mode(&self) -> BackendMode {
+        BackendMode::Streaming
+    }
+
     async fn open_stream(
         &self,
-        spec: AudioSpec,
+        mut spec: AudioSpec,
         params: TranscriptionParams,
     ) -> Result<Box<dyn TranscriptionStream>, ModelError> {
         if spec.channels == 0 {
@@ -273,6 +278,7 @@ impl TranscriptionModel for SherpaOnnxHandle {
                 "transcription stream requires a non-zero sample rate".into(),
             ));
         }
+        spec.preferred_chunk_bytes = PREFERRED_CHUNK_BYTES;
 
         Ok(Box::new(SherpaOnnxStream::new(
             Arc::clone(&self.runtime),
@@ -928,6 +934,10 @@ impl SherpaOnnxStream {
 
 #[async_trait]
 impl TranscriptionStream for SherpaOnnxStream {
+    fn audio_spec(&self) -> &AudioSpec {
+        &self.spec
+    }
+
     async fn push_chunk(
         &mut self,
         chunk: PcmChunk,

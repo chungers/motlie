@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use motlie_model::{
     ArtifactPolicy, AudioSpec, PcmChunk, PcmEncoding, StartOptions, TranscriptionParams,
 };
@@ -83,6 +83,7 @@ async fn run(args: Args) -> Result<()> {
                 sample_rate_hz: wav_spec.sample_rate,
                 channels: wav_spec.channels,
                 encoding,
+                preferred_chunk_bytes: 0,
             },
             TranscriptionParams {
                 language: Some("en".into()),
@@ -94,7 +95,7 @@ async fn run(args: Args) -> Result<()> {
 
     let mut offset = 0;
     let mut sequence = 0_u64;
-    let chunk_size = 6_400;
+    let chunk_size = stream.audio_spec().normalized_chunk_size();
 
     while offset < pcm_bytes.len() {
         let end = (offset + chunk_size).min(pcm_bytes.len());

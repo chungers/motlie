@@ -106,6 +106,7 @@ async fn run(args: Args) -> Result<()> {
                 sample_rate_hz: ref_spec.sample_rate,
                 channels: ref_spec.channels,
                 encoding,
+                preferred_chunk_bytes: 0,
             },
             pcm,
             reference_text: None,

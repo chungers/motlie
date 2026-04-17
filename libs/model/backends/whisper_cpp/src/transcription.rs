@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
+    Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
     PcmEncoding, QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions,
     TranscriptSegment, TranscriptionModel, TranscriptionParams, TranscriptionStream,
@@ -13,20 +13,15 @@ use motlie_model::{
 };
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_ggml_model_path, RuntimeMetricState,
+    RuntimeMetricState, configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_ggml_model_path,
 };
 
 const WHISPER_CPP_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Ggml];
 
 /// Whisper expects mono 16 kHz f32 PCM.
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
-
-/// Decode step: trigger a decode every 500ms of new audio (8000 samples at 16kHz).
-const DECODE_STEP_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize / 2;
-
-/// Rolling window: decode the last 5 seconds of audio (80000 samples at 16kHz).
-const WINDOW_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize * 5;
+const PREFERRED_CHUNK_BYTES: usize = 16_000;
 
 /// Static bundle specification for a curated whisper.cpp-backed ASR stack.
 #[derive(Clone, Debug)]
@@ -273,20 +268,23 @@ impl BundleHandle for WhisperCppHandle {
 
 #[async_trait]
 impl TranscriptionModel for WhisperCppHandle {
+    fn backend_mode(&self) -> BackendMode {
+        BackendMode::Batch
+    }
+
     async fn open_stream(
         &self,
-        spec: AudioSpec,
+        mut spec: AudioSpec,
         params: TranscriptionParams,
     ) -> Result<Box<dyn TranscriptionStream>, ModelError> {
+        spec.preferred_chunk_bytes = PREFERRED_CHUNK_BYTES;
+
         Ok(Box::new(WhisperCppStream {
             ctx: Arc::clone(&self.ctx),
             spec,
             params,
             normalizer: NormalizerState::new(),
             pcm_buffer: Vec::new(),
-            total_samples_trimmed: 0,
-            samples_at_last_decode: 0,
-            committed_end_ms: 0,
             last_sequence: None,
             end_of_stream_received: false,
             metrics: Arc::clone(&self.metrics),
@@ -486,28 +484,15 @@ struct WhisperCppStream {
     spec: AudioSpec,
     params: TranscriptionParams,
     normalizer: NormalizerState,
-    /// Accumulated mono 16 kHz f32 PCM ready for whisper. Trimmed after each
-    /// decode to keep at most `WINDOW_SAMPLES` samples.
+    /// Accumulated mono 16 kHz f32 PCM ready for a single terminal whisper decode.
     pcm_buffer: Vec<f32>,
-    /// Total mono 16 kHz samples consumed before the current `pcm_buffer[0]`.
-    /// Used to compute absolute timestamps from window-relative decode output.
-    total_samples_trimmed: u64,
-    /// Buffer length at the time of the last decode, used to detect step boundaries.
-    /// Measured relative to the current (possibly trimmed) buffer, not absolute.
-    samples_at_last_decode: usize,
-    /// Absolute end timestamp (ms) of the last committed (final) segment. Segments
-    /// with `end_ms <= committed_end_ms` are already-emitted and skipped on the
-    /// next decode. This is stable across buffer trims because it's timestamp-based,
-    /// not index-based.
-    committed_end_ms: u64,
     last_sequence: Option<u64>,
     end_of_stream_received: bool,
     metrics: Arc<Mutex<AsrMetrics>>,
 }
 
 impl WhisperCppStream {
-    /// Decode the rolling window and return new segments, respecting `emit_partials`.
-    fn run_decode(&mut self, is_final: bool) -> Result<TranscriptionUpdate, ModelError> {
+    fn run_decode(&mut self) -> Result<TranscriptionUpdate, ModelError> {
         let started_at = Instant::now();
 
         let mut state = self
@@ -546,10 +531,7 @@ impl WhisperCppStream {
                 message: err.to_string(),
             })? as usize;
 
-        // Absolute time offset: samples trimmed before the current buffer start.
-        let buffer_offset_ms = (self.total_samples_trimmed * 1000) / WHISPER_SAMPLE_RATE as u64;
-
-        let mut all_segments = Vec::with_capacity(num_segments);
+        let mut segments = Vec::with_capacity(num_segments);
         for i in 0..num_segments as i32 {
             let text =
                 state
@@ -574,59 +556,12 @@ impl WhisperCppStream {
                     message: err.to_string(),
                 })?;
 
-            all_segments.push(TranscriptSegment {
-                start_ms: buffer_offset_ms + (t0 * 10) as u64,
-                end_ms: buffer_offset_ms + (t1 * 10) as u64,
+            segments.push(TranscriptSegment {
+                start_ms: (t0 * 10) as u64,
+                end_ms: (t1 * 10) as u64,
                 text,
-                final_segment: false,
+                final_segment: true,
             });
-        }
-
-        // Filter out already-committed segments (timestamp-based, stable across trims).
-        let new_segments: Vec<_> = all_segments
-            .into_iter()
-            .filter(|seg| seg.end_ms > self.committed_end_ms)
-            .collect();
-
-        let mut output_segments = Vec::new();
-
-        if is_final {
-            for mut seg in new_segments {
-                seg.final_segment = true;
-                if seg.end_ms > self.committed_end_ms {
-                    self.committed_end_ms = seg.end_ms;
-                }
-                output_segments.push(seg);
-            }
-        } else if self.params.emit_partials {
-            let n = new_segments.len();
-            for (i, mut seg) in new_segments.into_iter().enumerate() {
-                seg.final_segment = i < n.saturating_sub(1);
-                if seg.final_segment && seg.end_ms > self.committed_end_ms {
-                    self.committed_end_ms = seg.end_ms;
-                }
-                output_segments.push(seg);
-            }
-        } else {
-            let n = new_segments.len();
-            let finals_to_emit = n.saturating_sub(1);
-            for mut seg in new_segments.into_iter().take(finals_to_emit) {
-                seg.final_segment = true;
-                if seg.end_ms > self.committed_end_ms {
-                    self.committed_end_ms = seg.end_ms;
-                }
-                output_segments.push(seg);
-            }
-        }
-
-        self.samples_at_last_decode = self.pcm_buffer.len();
-
-        // Trim buffer to the rolling window to bound memory.
-        if self.pcm_buffer.len() > WINDOW_SAMPLES {
-            let trim = self.pcm_buffer.len() - WINDOW_SAMPLES;
-            self.pcm_buffer.drain(..trim);
-            self.total_samples_trimmed += trim as u64;
-            self.samples_at_last_decode = self.pcm_buffer.len();
         }
 
         let elapsed = started_at.elapsed();
@@ -635,14 +570,16 @@ impl WhisperCppStream {
             observe_latency(&mut m.runtime, elapsed);
         }
 
-        Ok(TranscriptionUpdate {
-            segments: output_segments,
-        })
+        Ok(TranscriptionUpdate { segments })
     }
 }
 
 #[async_trait]
 impl TranscriptionStream for WhisperCppStream {
+    fn audio_spec(&self) -> &AudioSpec {
+        &self.spec
+    }
+
     async fn push_chunk(
         &mut self,
         chunk: PcmChunk,
@@ -679,19 +616,6 @@ impl TranscriptionStream for WhisperCppStream {
             self.pcm_buffer.extend(normalized);
         }
 
-        // Trigger decode when enough new audio has accumulated since last decode.
-        let new_samples = self
-            .pcm_buffer
-            .len()
-            .saturating_sub(self.samples_at_last_decode);
-        if new_samples >= DECODE_STEP_SAMPLES {
-            let update = self.run_decode(false)?;
-            if update.segments.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(update));
-        }
-
         Ok(None)
     }
 
@@ -703,7 +627,7 @@ impl TranscriptionStream for WhisperCppStream {
         if self.pcm_buffer.is_empty() {
             return Ok(TranscriptionUpdate::default());
         }
-        self.run_decode(true)
+        self.run_decode()
     }
 }
 
@@ -729,9 +653,11 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Ggml]);
         assert_eq!(adapter.backend_kind(), BackendKind::WhisperCpp);
-        assert!(adapter
-            .capabilities()
-            .supports(CapabilityKind::Transcription));
+        assert!(
+            adapter
+                .capabilities()
+                .supports(CapabilityKind::Transcription)
+        );
         assert_eq!(adapter.quantization(), &QuantizationSupport::none());
     }
 
@@ -741,9 +667,11 @@ mod tests {
             WhisperCppTranscriptionBundle::new(WhisperCppTranscriptionSpec::whisper_base_en());
 
         assert_eq!(bundle.id().as_str(), "whisper_base_en");
-        assert!(bundle
-            .capabilities()
-            .supports(CapabilityKind::Transcription));
+        assert!(
+            bundle
+                .capabilities()
+                .supports(CapabilityKind::Transcription)
+        );
         assert_eq!(bundle.metadata().quantization, QuantizationSupport::none());
     }
 
@@ -753,6 +681,7 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 1,
             encoding: PcmEncoding::S16Le,
+            preferred_chunk_bytes: 0,
         };
         let mut norm = NormalizerState::new();
 
@@ -780,6 +709,7 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 2,
             encoding: PcmEncoding::S16Le,
+            preferred_chunk_bytes: 0,
         };
         let mut norm = NormalizerState::new();
 
@@ -812,6 +742,7 @@ mod tests {
             sample_rate_hz: 32_000,
             channels: 1,
             encoding: PcmEncoding::F32Le,
+            preferred_chunk_bytes: 0,
         };
         let mut norm = NormalizerState::new();
 
@@ -847,6 +778,7 @@ mod tests {
             sample_rate_hz: 8_000,
             channels: 1,
             encoding: PcmEncoding::F32Le,
+            preferred_chunk_bytes: 0,
         };
         let mut norm = NormalizerState::new();
 
@@ -882,6 +814,7 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 1,
             encoding: PcmEncoding::F32Le,
+            preferred_chunk_bytes: 0,
         };
         let mut norm = NormalizerState::new();
 

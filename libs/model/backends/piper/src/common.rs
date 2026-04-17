@@ -8,7 +8,7 @@ use motlie_model::{
 use serde::Deserialize;
 
 pub(crate) use motlie_model::metrics_runtime::{
-    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
+    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
 };
 
 #[derive(Clone, Debug)]
@@ -127,6 +127,7 @@ impl PiperSidecar {
                 sample_rate_hz: self.audio.sample_rate,
                 channels: 1,
                 encoding: PcmEncoding::S16Le,
+                preferred_chunk_bytes: 0,
             },
             espeak_voice: self.espeak.voice,
             num_speakers: self.num_speakers,
