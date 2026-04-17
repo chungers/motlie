@@ -54,6 +54,7 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=qwen3tts");
+    println!("cargo:libdir={}", lib_dir.display());
     if cfg!(feature = "cuda") {
         for cuda_lib_dir in discover_cuda_lib_dirs() {
             println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
