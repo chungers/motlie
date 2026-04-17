@@ -76,6 +76,8 @@ The error type currently covers:
 
 ## CommandSet Contract
 
+Current implemented contract:
+
 ```rust
 #[async_trait::async_trait]
 pub trait CommandSet<C>: Sized {
@@ -93,6 +95,36 @@ pub trait CommandSet<C>: Sized {
 }
 ```
 
+Planned extension for semantic resolution:
+
+```rust
+#[async_trait::async_trait]
+pub trait CommandSet<C>: Sized {
+    type CompletionContext: Send + 'static;
+    type Resolved;
+
+    fn root_command() -> clap::Command;
+    fn from_matches(matches: &clap::ArgMatches) -> DriverResult<Self>;
+    fn completion_context(context: &C) -> Self::CompletionContext;
+    fn help(topic: &[String]) -> Option<String> { None }
+    fn complete(
+        request: CompletionRequest<'_>,
+        context: &Self::CompletionContext,
+    ) -> Vec<CompletionCandidate> { Vec::new() }
+    fn resolve(self, context: &C) -> DriverResult<Self::Resolved>;
+    async fn execute(
+        resolved: Self::Resolved,
+        context: &mut C,
+    ) -> DriverResult<CommandOutput>;
+}
+```
+
+Planned compositional rule:
+- simple adapters use identity resolution
+- `type Resolved = Self`
+- `resolve(self, _) -> Ok(self)`
+- namespace-aware adapters return a distinct resolved type when needed
+
 Responsibilities:
 
 | Method | Purpose |
@@ -107,6 +139,19 @@ Responsibilities:
 ## CommandEngine Contract
 
 `CommandEngine<C, S>` is generic over context and command family.
+
+Current execution flow:
+- tokenize shell input
+- parse with `clap`
+- build typed parsed command
+- execute typed parsed command
+
+Planned execution flow after semantic-resolution support:
+- tokenize shell input
+- parse with `clap`
+- build typed parsed command
+- resolve parsed names/references against read-only context
+- execute resolved command against mutable context
 
 Current stable methods:
 - `new(context)`
@@ -125,6 +170,40 @@ Current built-ins:
 Important behavior:
 - `run_line()` accepts REPL-style input without requiring the command-family root name
 - `run_argv()` also accepts already-prefixed argv like `["tmux", "targets"]`
+
+
+## Planned Generic Naming Helpers
+
+This is proposed driver-core support, not implemented surface yet.
+
+```rust
+pub struct QualifiedName<'a> {
+    pub scope: Option<&'a str>,
+    pub value: &'a str,
+}
+
+pub struct ResolvedName {
+    pub scope: String,
+    pub value: String,
+}
+
+pub fn parse_qualified_name(raw: &str) -> QualifiedName<'_>;
+```
+
+Planned generic resolution traits may look like:
+
+```rust
+pub trait ResolveName<K> {
+    type Resolved;
+
+    fn resolve_name(&self, kind: K, raw: &str) -> DriverResult<Self::Resolved>;
+}
+```
+
+This support is intended for:
+- tmux connection aliases like `alias/target`
+- future VMM guest or namespace-qualified names
+- app-level command sets that compose multiple scoped adapters
 
 ## History API
 
