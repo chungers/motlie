@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "qwen3-tts.cpp backend implementations for motlie-model TTS contracts"
+links = "motlie_qwen3_tts_cpp"
 
 [lib]
 path = "src/lib.rs"
