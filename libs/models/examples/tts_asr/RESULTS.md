@@ -9,7 +9,7 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
 - ORT lib root: `~/.cache/ort.pyke.io/dfbin/aarch64-unknown-linux-gnu/<hash>`
 - eSpeak data: `/usr/lib/aarch64-linux-gnu`
 - Dataset: `libs/models/examples/tts_asr/dataset/samples.json` (`100` samples)
-- Branch base: `feature/models` merged into `codex-dgx-e2e/tts-asr-matrix`
+- Branch base: `feature/models` merged into `cld-review-models/tts-asr-e2e`
 
 ## Notes
 
@@ -23,8 +23,10 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
   `peak_resident_memory_bytes`) and correcting the aggregator's even-sample
   median computation.
 - The Qwen3-TTS ONNX pipeline path is now treated as dead/deprecated for this
-  suite and the example binaries were removed from PR `#182`. Follow-on TTS
-  work is expected to use `qwen3_tts_rs` and F5-TTS instead.
+  suite and the example binaries were removed from PR `#182`.
+- Merged backend PR `#193` added Moonshine ASR and merged backend PR `#194`
+  added qwen3-tts.cpp TTS. PR `#182` now includes four new TTS↔ASR binaries for
+  those backends; their DGX benchmark execution is pending.
 
 ## Matrix Status
 
@@ -34,10 +36,14 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
 | Piper → whisper.cpp | CUDA | Completed | 100/100 | Benchmark data captured |
 | Piper → sherpa-onnx | CPU | Completed | 100/100 | Benchmark data captured after PR `#183` |
 | Piper → sherpa-onnx | CUDA | Completed | 100/100 | Benchmark data captured after PR `#183` |
-| ~~Qwen3-TTS ONNX → whisper.cpp~~ | CPU | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
-| ~~Qwen3-TTS ONNX → whisper.cpp~~ | CUDA | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
-| ~~Qwen3-TTS ONNX → sherpa-onnx~~ | CPU | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
-| ~~Qwen3-TTS ONNX → sherpa-onnx~~ | CUDA | Removed | 0/100 | Dead/deprecated path removed from PR `#182` |
+| Piper → Moonshine | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
+| Piper → Moonshine | CUDA | Pending | 0/100 | Hybrid CUDA build will accelerate Piper only; Moonshine ASR remains CPU-only |
+| qwen3-tts.cpp → whisper.cpp | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
+| qwen3-tts.cpp → whisper.cpp | CUDA | Pending | 0/100 | Full CUDA-capable lane after merged PR `#194` |
+| qwen3-tts.cpp → sherpa-onnx | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
+| qwen3-tts.cpp → sherpa-onnx | CUDA | Pending | 0/100 | Full CUDA-capable lane after merged PRs `#193` and `#194` |
+| qwen3-tts.cpp → Moonshine | CPU | Pending | 0/100 | Binary added; DGX run not started yet |
+| qwen3-tts.cpp → Moonshine | CUDA | Pending | 0/100 | Hybrid CUDA build will accelerate qwen3-tts.cpp only; Moonshine ASR remains CPU-only |
 
 ## Aggregate Results
 
@@ -76,11 +82,14 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e`.
 - Best aggregate latency: `Piper → sherpa-onnx` CUDA (`10,870 ms`)
 - Largest CUDA gain: `Piper → whisper.cpp` (`4.38x` mean latency speedup)
 - `Piper → sherpa-onnx` sees essentially no CUDA benefit on this host. Mean
-  latency was only marginally better on CUDA (`10,870 ms`) than CPU (`11,195 ms`), with
-  the win coming from ASR model choice rather than GPU acceleration.
+  latency was only marginally better on CUDA (`10,870 ms`) than CPU (`11,195 ms`),
+  with the win coming from ASR model choice rather than GPU acceleration.
 - The refreshed RSS-enabled harness substantially increased measured TTS
   overhead versus the earlier latency-only numbers, so the current JSONLs and
   tables should be treated as the source of truth for PR `#182`.
+- The active matrix is now larger than the currently measured subset: four new
+  binaries landed with the Moonshine and qwen3-tts.cpp backend merges, but only
+  the original Piper→whisper and Piper→sherpa lanes have DGX numbers so far.
 
 ## Known Exclusions
 
@@ -91,9 +100,17 @@ decoder/vocoder exports currently produce noisy output, yielding ~100% WER
 ```
 
 These lanes have now been removed from PR `#182` entirely because their ONNX
-export state does not produce useful benchmark comparisons. Replacement work is
-expected to move to `qwen3_tts_rs` and F5-TTS instead of reviving the dead ONNX
-wrappers.
+export state does not produce useful benchmark comparisons.
+
+### Newly added, not yet benchmarked
+
+- `piper_moonshine`
+- `qwen3cpp_whisper`
+- `qwen3cpp_sherpa`
+- `qwen3cpp_moonshine`
+
+These binaries now build on the merged `feature/models` base and are queued for
+the next DGX validation pass.
 
 ## Raw Result Files
 

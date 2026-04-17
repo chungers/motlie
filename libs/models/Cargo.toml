@@ -126,6 +126,26 @@ path = "examples/tts_asr/piper_sherpa/main.rs"
 required-features = ["model-piper-en-us-ljspeech-medium", "model-sherpa-onnx-streaming"]
 
 [[example]]
+name = "tts_asr_piper_moonshine"
+path = "examples/tts_asr/piper_moonshine/main.rs"
+required-features = ["model-piper-en-us-ljspeech-medium", "model-moonshine-streaming"]
+
+[[example]]
+name = "tts_asr_qwen3cpp_whisper"
+path = "examples/tts_asr/qwen3cpp_whisper/main.rs"
+required-features = ["model-qwen3-tts-cpp", "model-whisper-base-en"]
+
+[[example]]
+name = "tts_asr_qwen3cpp_sherpa"
+path = "examples/tts_asr/qwen3cpp_sherpa/main.rs"
+required-features = ["model-qwen3-tts-cpp", "model-sherpa-onnx-streaming"]
+
+[[example]]
+name = "tts_asr_qwen3cpp_moonshine"
+path = "examples/tts_asr/qwen3cpp_moonshine/main.rs"
+required-features = ["model-qwen3-tts-cpp", "model-moonshine-streaming"]
+
+[[example]]
 name = "tts_asr_aggregate"
 path = "examples/tts_asr/aggregate/main.rs"
 

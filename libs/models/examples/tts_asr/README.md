@@ -1,8 +1,8 @@
 # TTS↔ASR End-to-End Validation Suite
 
-Active validation covers the two Piper-backed TTS→ASR pipelines by
-synthesizing text, feeding the PCM directly into transcription, and comparing
-the output against the original text via word error rate (WER).
+Active validation now targets a 2 TTS x 3 ASR matrix by synthesizing text,
+feeding the PCM directly into transcription, and comparing the output against
+the original text via word error rate (WER).
 
 ## Pipeline Matrix
 
@@ -10,13 +10,15 @@ the output against the original text via word error rate (WER).
 |----------|-----|-----|----------|
 | `piper_whisper` | Piper en_US ljspeech medium | whisper.cpp base.en | `model-piper-en-us-ljspeech-medium`, `model-whisper-base-en` |
 | `piper_sherpa` | Piper en_US ljspeech medium | sherpa-onnx streaming | `model-piper-en-us-ljspeech-medium`, `model-sherpa-onnx-streaming` |
-| ~~`qwen3_whisper`~~ | ~~Qwen3-TTS 12Hz 0.6B ONNX~~ | ~~whisper.cpp base.en~~ | Deprecated / removed from PR `#182` |
-| ~~`qwen3_sherpa`~~ | ~~Qwen3-TTS 12Hz 0.6B ONNX~~ | ~~sherpa-onnx streaming~~ | Deprecated / removed from PR `#182` |
+| `piper_moonshine` | Piper en_US ljspeech medium | Moonshine streaming EN | `model-piper-en-us-ljspeech-medium`, `model-moonshine-streaming` |
+| `qwen3cpp_whisper` | qwen3-tts.cpp 0.6B | whisper.cpp base.en | `model-qwen3-tts-cpp`, `model-whisper-base-en` |
+| `qwen3cpp_sherpa` | qwen3-tts.cpp 0.6B | sherpa-onnx streaming | `model-qwen3-tts-cpp`, `model-sherpa-onnx-streaming` |
+| `qwen3cpp_moonshine` | qwen3-tts.cpp 0.6B | Moonshine streaming EN | `model-qwen3-tts-cpp`, `model-moonshine-streaming` |
 
-The Qwen3-TTS ONNX path is now considered dead for this benchmark suite: the
-exported decoder/vocoder path produced noisy output and ~100% WER, so the PR
-no longer ships those binaries. Follow-on TTS work is moving to `qwen3_tts_rs`
-and F5-TTS instead of extending the ONNX wrappers.
+The older Qwen3-TTS ONNX path is dead for this benchmark suite: the exported
+decoder/vocoder path produced noisy output and ~100% WER, so PR `#182` no
+longer ships those binaries. The active Qwen3 lane for this matrix is now
+`qwen3-tts.cpp`.
 
 ## Test Dataset
 
@@ -32,11 +34,11 @@ and F5-TTS instead of extending the ONNX wrappers.
 
 2. Environment requirements:
    - **Piper:** ONNX Runtime (`ORT_LIB_PATH`) + eSpeak-ng data (`PIPER_ESPEAKNG_DATA_DIRECTORY`)
-   - **whisper.cpp:** Pre-downloaded `ggml-base.en.bin` under the artifact root
+   - **qwen3-tts.cpp:** cached `koboldcpp/tts` GGUF + tokenizer artifacts under the artifact root
+   - **whisper.cpp:** pre-downloaded `ggml-base.en.bin` under the artifact root
    - **sherpa-onnx:** ONNX Runtime + pre-downloaded sherpa zipformer model files
-   - **Qwen3-TTS ONNX:** Deprecated for this suite; the PR no longer builds the
-     dead example binaries. Replacement work is expected to use `qwen3_tts_rs`
-     and F5-TTS.
+   - **Moonshine:** ONNX Runtime + cached `UsefulSensors/moonshine-streaming` artifacts under the artifact root
+   - **Qwen3-TTS ONNX:** deprecated and removed from this suite
 
 ## Build
 
@@ -51,13 +53,31 @@ cargo build -p motlie-models --example tts_asr_piper_whisper \
 cargo build -p motlie-models --example tts_asr_piper_sherpa \
   --no-default-features --features model-piper-en-us-ljspeech-medium,model-sherpa-onnx-streaming
 
+# Piper + Moonshine
+cargo build -p motlie-models --example tts_asr_piper_moonshine \
+  --no-default-features --features model-piper-en-us-ljspeech-medium,model-moonshine-streaming
+
+# qwen3-tts.cpp + whisper.cpp
+cargo build -p motlie-models --example tts_asr_qwen3cpp_whisper \
+  --no-default-features --features model-qwen3-tts-cpp,model-whisper-base-en
+
+# qwen3-tts.cpp + sherpa-onnx
+cargo build -p motlie-models --example tts_asr_qwen3cpp_sherpa \
+  --no-default-features --features model-qwen3-tts-cpp,model-sherpa-onnx-streaming
+
+# qwen3-tts.cpp + Moonshine
+cargo build -p motlie-models --example tts_asr_qwen3cpp_moonshine \
+  --no-default-features --features model-qwen3-tts-cpp,model-moonshine-streaming
+
 # Aggregator (no model features needed)
 cargo build -p motlie-models --example tts_asr_aggregate --no-default-features
 ```
 
 CUDA-capable binaries are separate builds that add the relevant `*-cuda`
 features. The examples do not use a runtime `--cuda` switch; CPU vs CUDA is
-selected by the compiled feature set you run.
+selected by the compiled feature set you run. Moonshine ASR itself is CPU-only,
+but the `*_moonshine` pipelines can still have a CUDA build when the TTS side
+(`piper` or `qwen3-tts.cpp`) is compiled with its CUDA feature.
 
 ## Run the Full Matrix
 
@@ -72,6 +92,22 @@ cargo run -p motlie-models --example tts_asr_piper_whisper \
 cargo run -p motlie-models --example tts_asr_piper_sherpa \
   --no-default-features --features model-piper-en-us-ljspeech-medium,model-sherpa-onnx-streaming \
   -- --data-dir $DATA_DIR > results_piper_sherpa.jsonl 2>piper_sherpa.log
+
+cargo run -p motlie-models --example tts_asr_piper_moonshine \
+  --no-default-features --features model-piper-en-us-ljspeech-medium,model-moonshine-streaming \
+  -- --data-dir $DATA_DIR > results_piper_moonshine.jsonl 2>piper_moonshine.log
+
+cargo run -p motlie-models --example tts_asr_qwen3cpp_whisper \
+  --no-default-features --features model-qwen3-tts-cpp,model-whisper-base-en \
+  -- --data-dir $DATA_DIR > results_qwen3cpp_whisper.jsonl 2>qwen3cpp_whisper.log
+
+cargo run -p motlie-models --example tts_asr_qwen3cpp_sherpa \
+  --no-default-features --features model-qwen3-tts-cpp,model-sherpa-onnx-streaming \
+  -- --data-dir $DATA_DIR > results_qwen3cpp_sherpa.jsonl 2>qwen3cpp_sherpa.log
+
+cargo run -p motlie-models --example tts_asr_qwen3cpp_moonshine \
+  --no-default-features --features model-qwen3-tts-cpp,model-moonshine-streaming \
+  -- --data-dir $DATA_DIR > results_qwen3cpp_moonshine.jsonl 2>qwen3cpp_moonshine.log
 ```
 
 For CUDA-enabled runs, build and execute the corresponding binary with the
@@ -83,7 +119,11 @@ the aggregator can distinguish it from the CPU run.
 ```bash
 cargo run -p motlie-models --example tts_asr_aggregate --no-default-features -- \
   --input results_piper_whisper.jsonl \
-  --input results_piper_sherpa.jsonl
+  --input results_piper_sherpa.jsonl \
+  --input results_piper_moonshine.jsonl \
+  --input results_qwen3cpp_whisper.jsonl \
+  --input results_qwen3cpp_sherpa.jsonl \
+  --input results_qwen3cpp_moonshine.jsonl
 ```
 
 Or via stdin:
@@ -150,8 +190,9 @@ Measured on `2026-04-15` and refreshed on `2026-04-16` by `@codex-dgx-e2e` on
 the DGX Spark GB10 host used for PR `#182`. The `2026-04-16` refresh reran all
 committed Piper JSONLs after adding per-sample RSS capture and correcting the
 aggregator median computation. `Piper → sherpa-onnx` was rerun after the merged
-PR `#183` fix on `feature/models`. Full run notes and tables are in
-[RESULTS.md](RESULTS.md).
+PR `#183` fix on `feature/models`. The new Moonshine and `qwen3-tts.cpp` lanes
+arrived after merged backend PRs `#193` and `#194`; their DGX benchmark
+execution is next. Full run notes and tables are in [RESULTS.md](RESULTS.md).
 
 ### Matrix status
 
@@ -159,8 +200,10 @@ PR `#183` fix on `feature/models`. Full run notes and tables are in
 |----------|-----|------|-------|
 | Piper → whisper.cpp | 100/100 samples completed | 100/100 samples completed | Full benchmark data captured |
 | Piper → sherpa-onnx | 100/100 samples completed | 100/100 samples completed | Full benchmark data captured after PR `#183` |
-| ~~Qwen3-TTS ONNX → whisper.cpp~~ | Removed | Removed | Dead/deprecated path; replaced by `qwen3_tts_rs` / F5-TTS follow-on work |
-| ~~Qwen3-TTS ONNX → sherpa-onnx~~ | Removed | Removed | Dead/deprecated path; replaced by `qwen3_tts_rs` / F5-TTS follow-on work |
+| Piper → Moonshine | Pending | Pending | New binary added after merged Moonshine backend PR `#193`; Moonshine ASR is CPU-only, CUDA build only affects Piper TTS |
+| qwen3-tts.cpp → whisper.cpp | Pending | Pending | New binary added after merged qwen3-tts.cpp backend PR `#194` |
+| qwen3-tts.cpp → sherpa-onnx | Pending | Pending | New binary added after merged backend PRs `#193` and `#194` |
+| qwen3-tts.cpp → Moonshine | Pending | Pending | New binary added after merged backend PRs `#193` and `#194`; Moonshine ASR is CPU-only |
 
 ### Actual benchmark summary
 
@@ -178,41 +221,50 @@ PR `#183` fix on `feature/models`. Full run notes and tables are in
 | Piper → sherpa-onnx | 0.296 | 0.303 | 11,195 ms | 10,870 ms | 1.03x |
 | Piper → whisper.cpp | 0.464 | 0.441 | 60,223 ms | 13,754 ms | 4.38x |
 
-Overall, `Piper → sherpa-onnx` is now the best measured pipeline on this host for
-aggregate WER and end-to-end latency. `Piper → whisper.cpp` still sees the only
-material GPU acceleration in this matrix, though the refreshed RSS-enabled
-harness reduced the observed speedup relative to the earlier latency-only runs.
+Overall, `Piper → sherpa-onnx` is still the best measured pipeline on this host
+for aggregate WER and end-to-end latency. `Piper → whisper.cpp` still shows the
+only material GPU acceleration in the currently measured subset.
 
 ## Predicted Pipeline Rankings
 
-Based on model architecture characteristics (not yet validated with real data):
+Based on model architecture characteristics for the active six-pipeline matrix.
+Only the Piper rows below are backed by measured DGX data today; the new
+`qwen3-tts.cpp` and Moonshine lanes remain predictions until the next run.
 
 ### CPU (no CUDA)
 
 | Rank | Pipeline | Rationale |
 |------|----------|-----------|
-| 1 | Piper → whisper.cpp | Both CPU-optimized. Piper ~60 MiB ONNX + whisper-base.en ~142 MiB ggml. Fastest startup, lowest memory. |
-| 2 | Piper → sherpa-onnx | True streaming ASR but heavier ORT runtime overhead |
+| 1 | Piper → Moonshine | Lightest active ASR backend on CPU, paired with the already measured Piper TTS lane |
+| 2 | Piper → sherpa-onnx | Best measured Piper WER so far; likely remains strong on CPU |
+| 3 | qwen3-tts.cpp → Moonshine | Higher TTS cost than Piper but likely offset by Moonshine's lighter ASR path |
+| 4 | qwen3-tts.cpp → sherpa-onnx | Streaming ASR with a heavier TTS frontend |
+| 5 | Piper → whisper.cpp | Measured to be accurate enough, but CPU latency is much worse than sherpa |
+| 6 | qwen3-tts.cpp → whisper.cpp | Likely the slowest CPU path because both sides are heavier than the Piper+whisper baseline |
 
 ### CUDA (DGX Spark GB10)
 
 | Rank | Pipeline | Rationale |
 |------|----------|-----------|
-| 1 | Piper → sherpa-onnx | Best measured aggregate latency, but almost no GPU-specific benefit |
-| 2 | Piper → whisper.cpp | Only active lane with material GPU speedup |
+| 1 | qwen3-tts.cpp → whisper.cpp | Both halves have CUDA-capable backends, so this is the most likely full-stack accelerator win |
+| 2 | qwen3-tts.cpp → sherpa-onnx | CUDA-capable on both sides, but sherpa has shown minimal GPU payoff so far |
+| 3 | Piper → whisper.cpp | Already measured and shows the only strong GPU speedup in the suite today |
+| 4 | Piper → sherpa-onnx | Measured, but GPU benefit is marginal |
+| 5 | qwen3-tts.cpp → Moonshine | TTS may benefit from CUDA, but ASR remains CPU-only |
+| 6 | Piper → Moonshine | Piper can use CUDA, but the ASR half remains CPU-only |
 
 ### By text length
 
 | Length | Best CPU | Best CUDA |
 |--------|----------|-----------|
-| Short (5-15 words) | Piper → whisper.cpp (least overhead) | Piper → whisper.cpp (startup dominates) |
-| Medium (30-60 words) | Piper → sherpa-onnx | Piper → whisper.cpp |
-| Long (100-200 words) | Piper → sherpa-onnx (streaming) | Piper → sherpa-onnx |
-| Paragraphs (300-1000) | Piper → sherpa-onnx (memory bounded) | Piper → sherpa-onnx |
+| Short (5-15 words) | Piper → Moonshine | Piper → whisper.cpp |
+| Medium (30-60 words) | Piper → sherpa-onnx | qwen3-tts.cpp → whisper.cpp |
+| Long (100-200 words) | Piper → sherpa-onnx | qwen3-tts.cpp → sherpa-onnx |
+| Paragraphs (300-1000 words) | Piper → sherpa-onnx | qwen3-tts.cpp → sherpa-onnx |
 
-These are **PREDICTIONS** for the active Piper matrix only. The deprecated
-Qwen3-TTS ONNX path is excluded from forward-looking recommendations because the
-example binaries have been removed from PR `#182`.
+These are **predictions** for the active six-pipeline matrix. The deprecated
+Qwen3-TTS ONNX path is excluded because those binaries were removed from PR
+`#182`.
 
 ## Interpreting Results
 
@@ -221,4 +273,5 @@ example binaries have been removed from PR `#182`.
 - **Latency**: TTS + ASR combined. Lower is better.
 - **Current measured CPU recommendation**: `Piper → sherpa-onnx`
 - **Current measured CUDA recommendation**: `Piper → sherpa-onnx` for best aggregate WER/latency, or `Piper → whisper.cpp` if the main goal is GPU speedup over CPU baseline
-- **Qwen3 status**: the ONNX path is deprecated/dead for this suite and has been replaced on the roadmap by `qwen3_tts_rs` and F5-TTS
+- **New matrix status**: `Piper → Moonshine`, `qwen3-tts.cpp → whisper.cpp`, `qwen3-tts.cpp → sherpa-onnx`, and `qwen3-tts.cpp → Moonshine` now build in PR `#182` and are awaiting DGX benchmark runs
+- **Qwen3 status**: the ONNX path is deprecated/dead for this suite; the active Qwen3 lane is `qwen3-tts.cpp`
