@@ -1,10 +1,10 @@
 # `v1.05` Apple Vz Tart Guest Build / Boot Probe
 
-This directory is the first Apple Vz feasibility slice for `libs/vmm`, but its
+This directory is the first Apple Vz feasibility slice for `libs/vfs`, but its
 goal is not merely “can any Linux VM boot?”.
 
 `v1.05` should be the Apple Vz parallel of
-[`libs/vfs/examples/v1`](../../../vfs/examples/v1/README.md) as closely as
+[`libs/vfs/examples/v1`](../v1/README.md) as closely as
 possible without changing the working Cloud Hypervisor path.
 
 It is intentionally separate from the existing Cloud Hypervisor examples:
