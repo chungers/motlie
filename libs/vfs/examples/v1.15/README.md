@@ -21,6 +21,7 @@ This remains a PoC:
 - it keeps the current managed `FsServer` semantics
 - it intentionally uses an ugly transport shim under `libs/vfs/src/vz/`
 - it is allowed to be backend-specific while we prove feasibility
+- it does **not** claim final transport parity with CH yet
 
 ## What `v1.15` Proves
 
@@ -29,6 +30,7 @@ This remains a PoC:
 - the existing framed `FsOp` / `FsResult` protocol works over plain TCP
 - the `TAG <name>` handshake still provides per-guest multi-tag routing
 - the runtime remains all-userspace and ephemeral on the host
+- the managed guestfs semantics are portable enough to survive the Apple Vz path
 
 ## What `v1.15` Does Not Yet Prove
 
@@ -36,6 +38,7 @@ This remains a PoC:
 - final transport traits or adapter boundaries
 - final VFS policy work from `#134`
 - a native `vz-runner` launcher
+- final transport parity with CH's vsock path
 
 ## Transport Model
 
@@ -50,7 +53,26 @@ Each mount inside the guest:
 2. sends `TAG <name>\n`
 3. switches to framed `FsOp` / `FsResult` traffic
 
-This preserves the same guest/tag routing shape as `v1.1`.
+This preserves the same guest/tag routing shape as `v1.1`, but it is only a
+temporary feasibility bridge.
+
+The intended final Apple Vz transport is **not** Tart NAT. Apple
+Virtualization.framework exposes a virtio-socket device through:
+
+- `VZVirtioSocketDeviceConfiguration`
+- `VZVirtioSocketDevice`
+- `VZVirtioSocketListener`
+- `VZVirtioSocketConnection`
+
+That API is the closest equivalent to the CH/KVM virtio-vsock path already used
+by `v1` and `v1.1`. The likely final Vz shape is therefore:
+
+- guest `motlie-vfs-guest` speaking the existing framed protocol over a
+  `VZVirtioSocketConnection`
+- a host-side Vz adapter inside `vz-runner`
+- no dependence on general guest networking for filesystem transport
+
+`v1.15` proves filesystem feasibility, not final transport choice.
 
 ## Files
 
@@ -128,6 +150,8 @@ Each launch:
 
 - the Vz PoC currently relies on Tart's guest agent for launch-time guest config
 - the host TCP listener uses `0.0.0.0` so the guest can reach it through the Tart NAT gateway
+- that TCP/NAT path is a PoC-only bridge and should be replaced by Apple
+  virtio-socket in the final Vz transport
 - the guest user IDs differ from `v1.1` because the base Ubuntu Tart image already reserves uid `1000` for `admin`
 - the generic base build still patches the throwaway guest copy of the root workspace manifest to include `libs/vfs` before building
 - default run VM names use a timestamped suffix so repeated launches do not
@@ -140,3 +164,14 @@ The next step is the real cross-backend cleanup in:
 
 - `libs/vfs/docs/DESIGN_XBACKENDS.md`
 - `libs/vfs/docs/PLAN_XBACKENDS.md`
+
+## External References
+
+- Apple Virtualization sockets overview:
+  https://developer.apple.com/documentation/virtualization/sockets
+- `VZVirtioSocketListenerDelegate`:
+  https://developer.apple.com/documentation/virtualization/vzvirtiosocketlistenerdelegate
+- `VZVirtioSocketDevice.connect(toPort:)`:
+  https://developer.apple.com/documentation/virtualization/vzvirtiosocketdevice/connect%28toport%3Acompletionhandler%3A%29
+- VM runtime `socketDevices`:
+  https://developer.apple.com/documentation/virtualization/vzvirtualmachine/socketdevices
