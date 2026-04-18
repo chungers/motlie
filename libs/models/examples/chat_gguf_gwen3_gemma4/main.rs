@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
              GGUF-quantized weights. By default it loads Qwen3 4B (GGUF). Pass\n\
              --chat=google/gemma4_e2b_gguf to switch to Gemma 4 E2B-it (GGUF).\n\n\
              NOTE: GGUF weights are a different format from the safetensors used by the\n\
-             mistral.rs backend (chat_mistral_qwen3/chat_multimodal). They are NOT interchangeable. Each backend\n\
+             mistral.rs backend (chat_mistral_qwen3/chat_multimodal_gemma4). They are NOT interchangeable. Each backend\n\
              requires its own artifact set downloaded from its own HuggingFace repo."
         );
     }

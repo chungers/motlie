@@ -10,7 +10,7 @@ GGUF-quantized weights. It supports switching between two models at runtime:
 
 | Backend | Weight format | Qwen3-4B repo | Gemma4 E2B repo |
 |---------|--------------|---------------|-----------------|
-| **mistral.rs** (`chat_mistral_qwen3` / `chat_multimodal`) | safetensors | `Qwen/Qwen3-4B` | `google/gemma-4-E2B-it` |
+| **mistral.rs** (`chat_mistral_qwen3` / `chat_multimodal_gemma4`) | safetensors | `Qwen/Qwen3-4B` | `google/gemma-4-E2B-it` |
 | **llama.cpp** (`chat_gguf_gwen3_gemma4`) | GGUF | `Qwen/Qwen3-4B-GGUF` | `bartowski/gemma-4-E2B-it-GGUF` |
 
 The two weight formats are **not interchangeable**. Each backend requires its

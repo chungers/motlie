@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
     ArtifactPolicy, ChatMessage, ChatRequest, ChatRole, ContentPart, QuantizationBits, StartOptions,
 };
-use motlie_models::{ModelSelector, chat::ChatModels, default_artifact_root};
+use motlie_models::{chat::ChatModels, default_artifact_root};
 use std::path::Path;
 use std::time::Instant;
 
@@ -11,7 +11,6 @@ mod support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut chat_selector = None;
     let mut precision = None;
     let mut image_path = None;
     let mut download_artifacts = false;
@@ -20,8 +19,6 @@ async fn main() -> Result<()> {
     for arg in std::env::args().skip(1) {
         if arg == "--download-artifacts" {
             download_artifacts = true;
-        } else if let Some(selector) = arg.strip_prefix("--chat=") {
-            chat_selector = Some(selector.to_owned());
         } else if let Some(p) = arg.strip_prefix("--precision=") {
             precision = Some(p.to_owned());
         } else if let Some(path) = arg.strip_prefix("--image=") {
@@ -34,8 +31,8 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- \
-             [--download-artifacts] [--chat=google/gemma4_e2b] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
+            "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- \
+             [--download-artifacts] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
         );
     }
 
@@ -46,28 +43,11 @@ async fn main() -> Result<()> {
         Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
     };
 
-    let (selector_label, bundle_id, descriptor, bundle, path_kind) =
-        if let Some(selector) = chat_selector {
-            let model_selector: ModelSelector = format!("chat:{selector}")
-                .parse()
-                .with_context(|| format!("failed to parse model selector `chat:{selector}`"))?;
-            (
-                model_selector.to_string(),
-                model_selector.bundle_id(),
-                model_selector.descriptor(),
-                model_selector.bundle()?,
-                "selector",
-            )
-        } else {
-            let model = ChatModels::Gemma4E2B;
-            (
-                model.to_string(),
-                model.bundle_id(),
-                model.descriptor(),
-                model.bundle(),
-                "direct-enum",
-            )
-        };
+    let model = ChatModels::Gemma4E2B;
+    let selector_label = model.to_string();
+    let bundle_id = model.bundle_id();
+    let descriptor = model.descriptor();
+    let bundle = model.bundle();
 
     let artifact_root = default_artifact_root();
     let catalog = motlie_models::Catalog::with_defaults();
@@ -75,11 +55,10 @@ async fn main() -> Result<()> {
     println!("catalog-entry-count: {}", catalog.len());
     ensure!(
         catalog.len() == 1,
-        "chat_multimodal must be built with exactly one curated bundle feature enabled"
+        "chat_multimodal_gemma4 must be built with exactly one curated bundle feature enabled"
     );
 
     println!("bundle-selector: {selector_label}");
-    println!("resolution-path: {path_kind}");
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
     support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
