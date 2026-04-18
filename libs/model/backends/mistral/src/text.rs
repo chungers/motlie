@@ -7,9 +7,9 @@ use mistralrs::{RequestBuilder, TextModelBuilder};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
-    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, LoadedBundleDescriptor,
-    ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    CompletionModel, CompletionRequest, CompletionResponse, LoadedBundleDescriptor, ModelBundle,
+    ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport,
+    ResolvedCheckpoint, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
@@ -194,10 +194,28 @@ impl ModelBundle for MistralTextBundle {
 // Internal runtime abstraction (enables stub testing without real mistralrs)
 // ---------------------------------------------------------------------------
 
-#[async_trait]
-trait TextRuntime: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError>;
+enum TextRuntime {
+    Real(MistralTextRuntime),
+    #[cfg(test)]
+    Stub(StubTextRuntime),
+}
+
+impl TextRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.chat(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.chat(request).await,
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.complete(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.complete(request).await,
+        }
+    }
 }
 
 struct MistralTextRuntime {
@@ -205,8 +223,7 @@ struct MistralTextRuntime {
     metrics: Arc<Mutex<TextMetrics>>,
 }
 
-#[async_trait]
-impl TextRuntime for MistralTextRuntime {
+impl MistralTextRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let builder = to_request_builder(&request)?;
         let started_at = Instant::now();
@@ -284,12 +301,16 @@ fn collect_text_only_message(message: &motlie_model::ChatMessage) -> Result<Stri
 
 pub struct MistralTextHandle {
     descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn TextRuntime>,
+    runtime: TextRuntime,
     metrics: Arc<Mutex<TextMetrics>>,
 }
 
 #[async_trait]
 impl BundleHandle for MistralTextHandle {
+    type Chat = Self;
+    type Completion = Self;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -303,15 +324,15 @@ impl BundleHandle for MistralTextHandle {
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Ok(self)
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Ok(self)
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
@@ -364,7 +385,7 @@ fn new_text_handle(
             quantization,
             resolved_quantization,
         },
-        runtime: Box::new(MistralTextRuntime {
+        runtime: TextRuntime::Real(MistralTextRuntime {
             model,
             metrics: Arc::clone(&metrics),
         }),
@@ -456,8 +477,7 @@ mod tests {
 
     struct StubTextRuntime;
 
-    #[async_trait]
-    impl TextRuntime for StubTextRuntime {
+    impl StubTextRuntime {
         async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
             let prompt = request
                 .messages
@@ -526,7 +546,7 @@ mod tests {
                 .expect("test quantization support is valid"),
                 resolved_quantization: Some(QuantizationBits::Four),
             },
-            runtime: Box::new(StubTextRuntime),
+            runtime: TextRuntime::Stub(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
         };
 

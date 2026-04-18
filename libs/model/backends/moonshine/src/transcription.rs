@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    QuantizationSupport, StartOptions, TranscriptSegment, TranscriptionParams, TranscriptionUpdate,
+    CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, PcmChunk, QuantizationSupport, StartOptions,
+    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
 use ort::inputs;
@@ -218,6 +219,10 @@ struct AsrMetrics {
 
 #[async_trait]
 impl BundleHandle for MoonshineHandle {
+    type Chat = UnsupportedChat;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -248,17 +253,17 @@ impl BundleHandle for MoonshineHandle {
         })
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
