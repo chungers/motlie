@@ -14,14 +14,12 @@ use motlie_model::{
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
     CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, GenerationParams,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
-    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions,
-    TranscriptionModel,
+    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
 };
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
+    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -535,16 +533,6 @@ impl BundleHandle for LlamaCppTextHandle {
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
-        ))
-    }
-
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(
-            CapabilityKind::Transcription,
         ))
     }
 

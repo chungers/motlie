@@ -9,12 +9,11 @@ use kaldi_native_fbank::mel::MelOptions;
 use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
 use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
-    Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions,
-    TranscriptSegment, TranscriptionModel, TranscriptionParams, TranscriptionStream,
-    TranscriptionUpdate,
+    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, StartOptions, TranscriptSegment,
+    TranscriptionParams, TranscriptionUpdate,
 };
 use motlie_model_ort::build_session;
 use ndarray::ArrayView3;
@@ -257,48 +256,8 @@ impl BundleHandle for SherpaOnnxHandle {
         ))
     }
 
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Ok(self)
-    }
-
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl TranscriptionModel for SherpaOnnxHandle {
-    fn backend_mode(&self) -> BackendMode {
-        BackendMode::Streaming
-    }
-
-    async fn open_stream(
-        &self,
-        mut spec: AudioSpec,
-        params: TranscriptionParams,
-    ) -> Result<Box<dyn TranscriptionStream>, ModelError> {
-        if spec.channels == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "transcription stream requires at least one channel".into(),
-            ));
-        }
-        if spec.sample_rate_hz == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "transcription stream requires a non-zero sample rate".into(),
-            ));
-        }
-        spec.preferred_chunk_bytes = PREFERRED_CHUNK_BYTES;
-
-        Ok(Box::new(SherpaOnnxStream::new(
-            Arc::clone(&self.runtime),
-            Arc::clone(&self.metrics),
-            spec,
-            params,
-        )?))
     }
 }
 
@@ -945,12 +904,7 @@ impl SherpaOnnxStream {
     }
 }
 
-#[async_trait]
-impl TranscriptionStream for SherpaOnnxStream {
-    fn audio_spec(&self) -> &AudioSpec {
-        &self.spec
-    }
-
+impl SherpaOnnxStream {
     async fn push_chunk(
         &mut self,
         chunk: PcmChunk,
@@ -992,7 +946,7 @@ impl TranscriptionStream for SherpaOnnxStream {
         Ok(Some(TranscriptionUpdate { segments }))
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<TranscriptionUpdate, ModelError> {
+    async fn finish_stream(mut self) -> Result<TranscriptionUpdate, ModelError> {
         let tail = self.normalizer.flush();
         self.accept_samples(&tail);
         self.accept_samples(&vec![0.0; TAIL_PADDING_SAMPLES]);
@@ -1055,20 +1009,17 @@ impl TranscriptionSession for SherpaOnnxStream {
             .collect();
 
         async move {
-            TranscriptionStream::push_chunk(
-                self,
-                PcmChunk {
-                    data,
-                    sequence,
-                    end_of_stream: false,
-                },
-            )
+            self.push_chunk(PcmChunk {
+                data,
+                sequence,
+                end_of_stream: false,
+            })
             .await
         }
     }
 
     async fn finish(self) -> Result<TranscriptionUpdate, ModelError> {
-        <Self as TranscriptionStream>::finish(Box::new(self)).await
+        self.finish_stream().await
     }
 }
 

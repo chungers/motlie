@@ -98,6 +98,18 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
         return Ok(root.to_path_buf());
     }
 
+    let direct_model = root.join(Path::new(MODEL_FILE).file_name().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!("invalid curated Piper model path `{MODEL_FILE}`"))
+    })?);
+    let direct_config = root.join(Path::new(CONFIG_FILE).file_name().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!(
+            "invalid curated Piper config path `{CONFIG_FILE}`"
+        ))
+    })?);
+    if direct_model.is_file() && direct_config.is_file() {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(&repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -239,6 +251,26 @@ mod tests {
         std::fs::write(&config_path, b"test").expect("config should be writable");
 
         let resolved = resolve_local_model_path(&root).expect("direct artifact dir should resolve");
+
+        assert_eq!(resolved, root);
+        let _ = std::fs::remove_dir_all(resolved);
+    }
+
+    #[test]
+    fn local_model_resolution_accepts_flat_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("piper-flat-root-{unique}"));
+        std::fs::create_dir_all(&root).expect("direct root should be creatable");
+        std::fs::write(root.join("en_US-ljspeech-medium.onnx"), b"test")
+            .expect("flat model should be writable");
+        std::fs::write(root.join("en_US-ljspeech-medium.onnx.json"), b"test")
+            .expect("flat config should be writable");
+
+        let resolved =
+            resolve_local_model_path(&root).expect("flat direct artifact dir should resolve");
 
         assert_eq!(resolved, root);
         let _ = std::fs::remove_dir_all(resolved);

@@ -6,11 +6,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
-    Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    QuantizationSupport, SpeechModel, StartOptions, TranscriptSegment, TranscriptionModel,
-    TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
+    QuantizationSupport, StartOptions, TranscriptSegment, TranscriptionParams, TranscriptionUpdate,
 };
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
 use ort::inputs;
@@ -261,54 +260,8 @@ impl BundleHandle for MoonshineHandle {
         ))
     }
 
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Ok(self)
-    }
-
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl TranscriptionModel for MoonshineHandle {
-    fn backend_mode(&self) -> BackendMode {
-        BackendMode::Streaming
-    }
-
-    async fn open_stream(
-        &self,
-        mut spec: AudioSpec,
-        params: TranscriptionParams,
-    ) -> Result<Box<dyn TranscriptionStream>, ModelError> {
-        if spec.channels == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "audio stream must declare at least one channel".into(),
-            ));
-        }
-        if spec.sample_rate_hz == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "audio stream must declare a non-zero sample rate".into(),
-            ));
-        }
-        spec.preferred_chunk_bytes = PREFERRED_CHUNK_BYTES;
-
-        Ok(Box::new(MoonshineStream {
-            spec,
-            params,
-            runtime: Arc::clone(&self.runtime),
-            metrics: Arc::clone(&self.metrics),
-            normalizer: NormalizerState::new(),
-            state: self.runtime.create_state(),
-            total_samples: 0,
-            next_sequence: 0,
-            saw_end_of_stream: false,
-            last_partial_text: String::new(),
-        }))
     }
 }
 
@@ -1102,12 +1055,7 @@ pub struct MoonshineStream {
     last_partial_text: String,
 }
 
-#[async_trait]
-impl TranscriptionStream for MoonshineStream {
-    fn audio_spec(&self) -> &AudioSpec {
-        &self.spec
-    }
-
+impl MoonshineStream {
     async fn push_chunk(
         &mut self,
         chunk: PcmChunk,
@@ -1167,7 +1115,7 @@ impl TranscriptionStream for MoonshineStream {
         }))
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<TranscriptionUpdate, ModelError> {
+    async fn finish_stream(mut self) -> Result<TranscriptionUpdate, ModelError> {
         let mut tail = Vec::new();
         self.normalizer.flush(&mut tail);
         self.total_samples += tail.len();
@@ -1244,20 +1192,17 @@ impl TranscriptionSession for MoonshineStream {
         let sequence = self.next_sequence;
 
         async move {
-            TranscriptionStream::push_chunk(
-                self,
-                PcmChunk {
-                    data,
-                    sequence,
-                    end_of_stream: false,
-                },
-            )
+            self.push_chunk(PcmChunk {
+                data,
+                sequence,
+                end_of_stream: false,
+            })
             .await
         }
     }
 
     async fn finish(self) -> Result<TranscriptionUpdate, ModelError> {
-        <Self as TranscriptionStream>::finish(Box::new(self)).await
+        self.finish_stream().await
     }
 }
 

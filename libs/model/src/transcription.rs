@@ -1,12 +1,8 @@
-//! Streaming voice-to-text transcription contracts.
+//! Shared ASR data types.
 //!
-//! The transcription capability accepts PCM audio chunks and emits transcript
-//! segments. The stream contract standardizes on raw PCM input so both `.wav`
-//! files and live websocket audio map to the same API.
-
-use async_trait::async_trait;
-
-use crate::ModelError;
+//! The typed ASR contracts live in [`crate::typed`]. This module only carries
+//! the shared PCM/transcript data structures used across backend and bundle
+//! boundaries.
 
 /// PCM sample encoding.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -52,11 +48,13 @@ impl AudioSpec {
     }
 }
 
-/// One chunk of raw PCM audio pushed into a transcription stream.
+/// One chunk of raw PCM audio pushed into a typed streaming transcription
+/// session.
 ///
-/// The audio format is established at `TranscriptionModel::open_stream()` time
-/// and applies to all chunks in the stream. Chunks must arrive with
-/// monotonically increasing `sequence` numbers.
+/// The audio format is established by the caller's typed `AudioBuf` boundary
+/// and applies to all chunks in the session. Chunks must arrive with
+/// monotonically increasing `sequence` numbers whenever a backend keeps
+/// sequence state internally.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcmChunk {
     pub data: Vec<u8>,
@@ -86,52 +84,6 @@ pub struct TranscriptSegment {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TranscriptionUpdate {
     pub segments: Vec<TranscriptSegment>,
-}
-
-/// Streaming transcription capability.
-///
-/// `TranscriptionModel` is `Send + Sync` — it represents the shareable loaded
-/// model. Each call to `open_stream` produces an independent, stateful stream
-/// session that is `Send` but intentionally not `Sync` because it owns mutable
-/// rolling-buffer state and requires ordered, exclusive access.
-#[async_trait]
-pub trait TranscriptionModel: Send + Sync {
-    fn backend_mode(&self) -> BackendMode;
-
-    async fn open_stream(
-        &self,
-        spec: AudioSpec,
-        params: TranscriptionParams,
-    ) -> Result<Box<dyn TranscriptionStream>, ModelError>;
-}
-
-/// Live transcription stream session.
-///
-/// `TranscriptionStream` is `Send` but not `Sync`. Callers must hold exclusive
-/// access to the stream — sharing across tasks requires caller-side
-/// synchronization.
-///
-/// ## Edge-case semantics
-///
-/// - `push_chunk` after `end_of_stream = true`: returns `ModelError::InvalidConfiguration`
-/// - Non-monotonic `sequence`: returns `ModelError::InvalidConfiguration`
-/// - Empty `data` with `end_of_stream = false`: returns `Ok(None)` (no-op)
-/// - Calling after `finish()`: impossible by construction (`finish` consumes `Box<Self>`)
-#[async_trait]
-pub trait TranscriptionStream: Send {
-    fn audio_spec(&self) -> &AudioSpec;
-
-    /// Push a PCM chunk and optionally receive new transcript output.
-    ///
-    /// Returns `Ok(None)` when the chunk does not cross a decode boundary.
-    /// Returns `Ok(Some(update))` when the backend emits new segments.
-    async fn push_chunk(
-        &mut self,
-        chunk: PcmChunk,
-    ) -> Result<Option<TranscriptionUpdate>, ModelError>;
-
-    /// Finalize the stream and flush any remaining transcript output.
-    async fn finish(self: Box<Self>) -> Result<TranscriptionUpdate, ModelError>;
 }
 
 #[cfg(test)]
