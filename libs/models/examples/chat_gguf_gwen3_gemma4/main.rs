@@ -30,13 +30,13 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf -- \
+            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- \
              [--download-artifacts] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf] [--precision=q4|q8|f16] <prompt>\n\n\
              This example demonstrates chat generation via the llama.cpp backend using\n\
              GGUF-quantized weights. By default it loads Qwen3 4B (GGUF). Pass\n\
              --chat=google/gemma4_e2b_gguf to switch to Gemma 4 E2B-it (GGUF).\n\n\
              NOTE: GGUF weights are a different format from the safetensors used by the\n\
-             mistral.rs backend (chat/chat_multimodal). They are NOT interchangeable. Each backend\n\
+             mistral.rs backend (chat_mistral_qwen3/chat_multimodal). They are NOT interchangeable. Each backend\n\
              requires its own artifact set downloaded from its own HuggingFace repo."
         );
     }
