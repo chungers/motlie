@@ -69,15 +69,21 @@ async fn main() -> Result<()> {
 
     println!("=== bench_chat ===");
     println!("model: {model_name}");
-    println!("quantization: {}", match quantization {
-        Some(QuantizationBits::Four) => "ISQ Q4",
-        Some(QuantizationBits::Eight) => "ISQ Q8",
-        None => "F32",
-    });
+    println!(
+        "quantization: {}",
+        match quantization {
+            Some(QuantizationBits::Four) => "ISQ Q4",
+            Some(QuantizationBits::Eight) => "ISQ Q8",
+            None => "F32",
+        }
+    );
     println!("iterations: {iterations}");
     println!("force-cpu: {force_cpu}");
     let pa_context = std::env::var("MOTLIE_PAGED_ATTN_CONTEXT").ok();
-    println!("paged-attn-context: {}", pa_context.as_deref().unwrap_or("disabled"));
+    println!(
+        "paged-attn-context: {}",
+        pa_context.as_deref().unwrap_or("disabled")
+    );
     println!("input-words: {prompt_words}");
     println!("input-est-tokens: ~{est_tokens}");
 
@@ -181,11 +187,26 @@ async fn main() -> Result<()> {
 
     if let Some(snapshot) = handle.metric_snapshot() {
         if let Some(rt) = &snapshot.runtime {
-            println!("  peak-rss-mib: {}", rt.peak_resident_memory.map(|b| format!("{:.1}", b.0 as f64 / 1048576.0)).unwrap_or_else(|| "n/a".into()));
+            println!(
+                "  peak-rss-mib: {}",
+                rt.peak_resident_memory
+                    .map(|b| format!("{:.1}", b.0 as f64 / 1048576.0))
+                    .unwrap_or_else(|| "n/a".into())
+            );
         }
         if let Some(tg) = &snapshot.text_generation {
-            println!("  mistralrs-prompt-tps: {}", tg.avg_prompt_tokens_per_sec.map(|t| format!("{}", t.0)).unwrap_or_else(|| "n/a".into()));
-            println!("  mistralrs-gen-tps: {}", tg.avg_generated_tokens_per_sec.map(|t| format!("{}", t.0)).unwrap_or_else(|| "n/a".into()));
+            println!(
+                "  mistralrs-prompt-tps: {}",
+                tg.avg_prompt_tokens_per_sec
+                    .map(|t| format!("{}", t.0))
+                    .unwrap_or_else(|| "n/a".into())
+            );
+            println!(
+                "  mistralrs-gen-tps: {}",
+                tg.avg_generated_tokens_per_sec
+                    .map(|t| format!("{}", t.0))
+                    .unwrap_or_else(|| "n/a".into())
+            );
         }
     }
 

@@ -3,10 +3,12 @@ use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, CheckpointQuantization, ModelBundle, ModelCheckpoint, ModelError,
-    ModelIdentity,
+    BundleId, CheckpointFormat, CheckpointQuantization, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_qwen3_tts_cpp::Qwen3TtsCppSpeechAdapter;
+use motlie_model_qwen3_tts_cpp::{
+    Qwen3TtsCppHandle, Qwen3TtsCppSpeechAdapter, Qwen3TtsCppSpeechBundle, Qwen3TtsCppSpeechSpec,
+};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -21,7 +23,7 @@ const MODEL_FILE_F16: &str = "qwen3-tts-0.6b-f16.gguf";
 const TOKENIZER_FILE_F16: &str = "qwen3-tts-tokenizer-f16.gguf";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
+    catalog.register_descriptor(descriptor());
     catalog.register_model_variant(
         identity(),
         checkpoint(),
@@ -81,16 +83,12 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(Qwen3TtsCppSpeechAdapter::qwen3_tts_cpp_0_6b()),
-        Arc::new(resolve_local_model_path),
-    )
+pub fn typed_bundle() -> Qwen3TtsCppSpeechBundle {
+    Qwen3TtsCppSpeechBundle::new(Qwen3TtsCppSpeechSpec::qwen3_tts_cpp_0_6b())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<Qwen3TtsCppHandle, ModelError> {
+    typed_bundle().start_typed(options).await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
@@ -177,7 +175,7 @@ mod tests {
 
         #[cfg(feature = "model-qwen3-tts-cpp")]
         {
-            assert!(catalog.instantiate(&bundle_id).is_some());
+            assert!(catalog.instantiate(&bundle_id).is_none());
             assert!(
                 catalog
                     .bundles_for_track(EvalTrack::Speech)

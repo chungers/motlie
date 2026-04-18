@@ -3,4 +3,6 @@
 mod common;
 mod speech;
 
-pub use speech::{PiperSpeechAdapter, PiperSpeechBundle, PiperSpeechSpec};
+pub use speech::{
+    PiperHandle, PiperSpeechAdapter, PiperSpeechBundle, PiperSpeechSpec, PiperSpeechStream,
+};

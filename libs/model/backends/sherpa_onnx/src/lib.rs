@@ -8,5 +8,6 @@ mod common;
 mod transcription;
 
 pub use transcription::{
-    SherpaOnnxStreamingAdapter, SherpaOnnxStreamingBundle, SherpaOnnxStreamingSpec,
+    SherpaOnnxHandle, SherpaOnnxStream, SherpaOnnxStreamingAdapter, SherpaOnnxStreamingBundle,
+    SherpaOnnxStreamingSpec,
 };

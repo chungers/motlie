@@ -88,8 +88,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::{BundleFamily, Catalog};
-    use motlie_model::eval::EvalTrack;
     use motlie_model::CapabilityDescriptor;
+    use motlie_model::eval::EvalTrack;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -102,12 +102,16 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Chat));
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Completion));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Chat)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Completion)
+        );
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
@@ -133,9 +137,11 @@ mod tests {
         #[cfg(feature = "model-qwen3-4b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Chat)
-                .any(|b| b.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Chat)
+                    .any(|b| b.id == bundle_id)
+            );
         }
     }
 

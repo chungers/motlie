@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_piper::PiperSpeechAdapter;
+use motlie_model_piper::{PiperHandle, PiperSpeechAdapter, PiperSpeechBundle, PiperSpeechSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -19,7 +19,7 @@ const MODEL_FILE: &str = "en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx";
 const CONFIG_FILE: &str = "en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
+    catalog.register_descriptor(descriptor());
     catalog.register_model_variant(
         identity(),
         checkpoint(),
@@ -77,16 +77,12 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(PiperSpeechAdapter::en_us_ljspeech_medium()),
-        Arc::new(resolve_local_model_path),
-    )
+pub fn typed_bundle() -> PiperSpeechBundle {
+    PiperSpeechBundle::new(PiperSpeechSpec::en_us_ljspeech_medium())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<PiperHandle, ModelError> {
+    typed_bundle().start_typed(options).await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
@@ -134,7 +130,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::Catalog;
-    use motlie_model::{ArtifactPolicy, PcmEncoding, SpeechRequest, StartOptions};
+    use motlie_model::{ArtifactPolicy, SpeechRequest, StartOptions};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -143,9 +139,11 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "piper_en_us_ljspeech_medium");
         assert_eq!(descriptor.display_name, "Piper en_US ljspeech medium");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Speech));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Speech)
+        );
     }
 
     #[test]
@@ -155,10 +153,12 @@ mod tests {
 
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         {
-            assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Speech)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Speech)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
         }
     }
 
@@ -170,48 +170,40 @@ mod tests {
             return;
         };
 
-        let handle = bundle()
-            .start(StartOptions {
-                artifact_policy: Some(ArtifactPolicy::LocalOnly { root }),
-                ..Default::default()
-            })
-            .await
-            .expect("bundle should start when test artifacts are present");
+        let handle = start_typed(StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly { root }),
+            ..Default::default()
+        })
+        .await
+        .expect("typed bundle should start when test artifacts are present");
 
-        let speech = handle
-            .speech()
-            .expect("bundle should expose speech capability");
-        let mut stream = speech
-            .open_stream(SpeechRequest {
+        let mut stream = motlie_model::typed::SpeechSynthesizer::synthesize(
+            &handle,
+            SpeechRequest {
                 text: "Hello from Motlie.".into(),
                 params: Default::default(),
                 conditioning: None,
-            })
-            .await
-            .expect("speech stream should open");
+            },
+        )
+        .await
+        .expect("typed speech stream should open");
 
-        let spec = stream.audio_spec().clone();
-        assert_eq!(spec.channels, 1);
-        assert_eq!(spec.encoding, PcmEncoding::S16Le);
-
-        let mut total_bytes = 0usize;
+        let mut total_samples = 0usize;
         let mut saw_final = false;
-        while let Some(chunk) = stream
-            .next_chunk()
+        while let Some(chunk) = motlie_model::typed::SpeechStream::next_chunk(&mut stream)
             .await
-            .expect("speech stream should yield chunks")
+            .expect("typed speech stream should yield chunks")
         {
-            total_bytes += chunk.data.len();
-            saw_final = chunk.end_of_stream;
-            if saw_final {
-                break;
-            }
+            total_samples += chunk.samples().len();
+            saw_final = true;
         }
 
-        assert!(total_bytes > 0);
+        assert!(total_samples > 0);
         assert!(saw_final);
 
-        stream.finish().await.expect("finish should succeed");
+        motlie_model::typed::SpeechStream::finish(stream)
+            .await
+            .expect("finish should succeed");
         handle.shutdown().await.expect("shutdown should succeed");
     }
 }

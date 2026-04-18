@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use espeak_rs::text_to_phonemes;
+use motlie_model::typed::{AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer};
 use motlie_model::{
     BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
@@ -89,13 +90,13 @@ impl BackendAdapter for PiperSpeechAdapter {
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.model_filename)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(new_speech_handle(
+        Ok(Box::new(new_speech_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        ))
+        )))
     }
 }
 
@@ -134,6 +135,12 @@ impl ModelBundle for PiperSpeechBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+        Ok(Box::new(self.start_typed(options).await?))
+    }
+}
+
+impl PiperSpeechBundle {
+    pub async fn start_typed(&self, options: StartOptions) -> Result<PiperHandle, ModelError> {
         self.metadata
             .quantization
             .resolve(options.quantization, &self.metadata.id)?;
@@ -160,10 +167,16 @@ impl ModelBundle for PiperSpeechBundle {
     }
 }
 
-struct PiperHandle {
+pub struct PiperHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Arc<PiperRuntime>,
     metrics: Arc<Mutex<SpeechMetrics>>,
+}
+
+impl PiperHandle {
+    pub async fn shutdown(self) -> Result<(), ModelError> {
+        <Self as BundleHandle>::shutdown(Box::new(self)).await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -266,14 +279,14 @@ fn new_speech_handle(
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     runtime: Arc<PiperRuntime>,
-) -> Box<dyn BundleHandle> {
+) -> PiperHandle {
     let metrics = Arc::new(Mutex::new(SpeechMetrics::default()));
     {
         let mut state = lock_metrics(&metrics, "piper-start");
         observe_memory(&mut state.runtime);
     }
 
-    Box::new(PiperHandle {
+    PiperHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -283,7 +296,7 @@ fn new_speech_handle(
         },
         runtime,
         metrics,
-    })
+    }
 }
 
 struct PiperRuntime {
@@ -371,7 +384,7 @@ impl PiperRuntime {
 /// Piper is a non-autoregressive VITS-style model in this slice, so
 /// `open_stream()` performs the full synthesis up front and `next_chunk()`
 /// subsequently yields buffered PCM for sink adapters.
-struct PiperSpeechStream {
+pub struct PiperSpeechStream {
     audio_spec: motlie_model::AudioSpec,
     pcm: Vec<u8>,
     offset: usize,
@@ -401,6 +414,19 @@ impl PiperSpeechStream {
     }
 }
 
+fn decode_s16le_chunk(data: &[u8]) -> Result<Vec<i16>, ModelError> {
+    if !data.len().is_multiple_of(2) {
+        return Err(ModelError::InvalidConfiguration(
+            "typed Piper output expects even-length S16LE PCM chunks".into(),
+        ));
+    }
+
+    Ok(data
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect())
+}
+
 #[async_trait]
 impl SpeechStream for PiperSpeechStream {
     fn audio_spec(&self) -> &motlie_model::AudioSpec {
@@ -426,6 +452,48 @@ impl SpeechStream for PiperSpeechStream {
 
     async fn finish(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
+    }
+}
+
+impl SpeechSynthesizer for PiperHandle {
+    type Output = AudioBuf<i16, 22_050, Mono>;
+    type Stream = PiperSpeechStream;
+
+    fn synthesize(
+        &self,
+        request: SpeechRequest,
+    ) -> impl std::future::Future<Output = Result<Self::Stream, ModelError>> + Send {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        async move {
+            let started_at = Instant::now();
+            let pcm = runtime.synthesize(&request)?;
+            let elapsed = started_at.elapsed();
+
+            {
+                let mut state = lock_metrics(&metrics, "piper-typed-synthesize");
+                observe_latency(&mut state.runtime, elapsed);
+            }
+
+            PiperSpeechStream::new(runtime.config.audio_spec.clone(), pcm)
+        }
+    }
+}
+
+impl TypedSpeechStream for PiperSpeechStream {
+    type Chunk = AudioBuf<i16, 22_050, Mono>;
+
+    async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
+        let Some(chunk) = SpeechStream::next_chunk(self).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(AudioBuf::new(decode_s16le_chunk(&chunk.data)?)))
+    }
+
+    async fn finish(self) -> Result<(), ModelError> {
+        <Self as SpeechStream>::finish(Box::new(self)).await
     }
 }
 

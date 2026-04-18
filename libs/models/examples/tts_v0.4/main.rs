@@ -4,21 +4,18 @@
 //!   cargo run -p motlie-models --example models_tts_v0_4 \
 //!     --no-default-features --features model-qwen3-tts-cpp \
 //!     -- --text "Hello from Motlie." --wav /tmp/out.wav
-//!
-//! With voice cloning:
-//!   cargo run -p motlie-models --example models_tts_v0_4 \
-//!     --no-default-features --features model-qwen3-tts-cpp \
-//!     -- --text "Hello from Motlie." --wav /tmp/out.wav \
-//!        --reference-audio /path/to/reference.wav
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use motlie_model::typed::{SpeechStream, SpeechSynthesizer};
 use motlie_model::{
     ArtifactPolicy, AudioSpec, PcmEncoding, SpeechParams, SpeechRequest, StartOptions,
     VoiceConditioning,
 };
-use motlie_models::tts::TtsModels;
+use motlie_models::tts::qwen3_tts_cpp;
+
+const TARGET_SAMPLE_RATE_HZ: u32 = 24_000;
 
 fn main() -> Result<()> {
     let args = parse_args()?;
@@ -75,21 +72,19 @@ fn parse_args() -> Result<Args> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie tts_v0.4 — qwen3-tts.cpp speech synthesis ===");
+    println!("=== motlie tts_v0.4 — typed qwen3-tts.cpp synthesis ===");
     println!("wav: {}", args.wav_path.display());
 
-    let bundle = TtsModels::Qwen3TtsCpp0_6B.bundle();
-    let handle = bundle
-        .start(StartOptions {
-            artifact_policy: Some(ArtifactPolicy::LocalOnly {
-                root: args
-                    .artifact_root
-                    .unwrap_or_else(motlie_models::default_artifact_root),
-            }),
-            ..Default::default()
-        })
-        .await
-        .context("failed to start qwen3-tts.cpp bundle")?;
+    let handle = qwen3_tts_cpp::start_typed(StartOptions {
+        artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            root: args
+                .artifact_root
+                .unwrap_or_else(motlie_models::default_artifact_root),
+        }),
+        ..Default::default()
+    })
+    .await
+    .context("failed to start typed qwen3-tts.cpp bundle")?;
 
     let conditioning = if let Some(reference_audio) = &args.reference_audio {
         println!("reference: {}", reference_audio.display());
@@ -115,27 +110,33 @@ async fn run(args: Args) -> Result<()> {
         None
     };
 
-    let speech = handle
-        .speech()
-        .context("bundle should expose speech capability")?;
-    let mut stream = speech
-        .open_stream(SpeechRequest {
+    let mut stream = handle
+        .synthesize(SpeechRequest {
             text: args.text,
             params: SpeechParams::default(),
             conditioning,
         })
         .await
-        .context("failed to open speech stream")?;
+        .context("failed to open typed speech stream")?;
 
-    let audio_spec = stream.audio_spec().clone();
-    let mut writer = open_wav_writer(&args.wav_path, &audio_spec)?;
-    let mut total_bytes = 0usize;
+    let mut writer = hound::WavWriter::create(
+        &args.wav_path,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: TARGET_SAMPLE_RATE_HZ,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .with_context(|| format!("failed to create wav file `{}`", args.wav_path.display()))?;
 
+    let mut total_samples = 0usize;
     while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
-        write_pcm_samples(&mut writer, &chunk.data, audio_spec.encoding)?;
-        total_bytes += chunk.data.len();
-        if chunk.end_of_stream {
-            break;
+        total_samples += chunk.samples().len();
+        for sample in chunk.into_samples() {
+            writer
+                .write_sample(sample)
+                .context("failed to write wav sample")?;
         }
     }
 
@@ -144,61 +145,11 @@ async fn run(args: Args) -> Result<()> {
     handle.shutdown().await.context("shutdown failed")?;
 
     println!(
-        "wrote {} bytes of {:?} PCM at {} Hz to {}",
-        total_bytes,
-        audio_spec.encoding,
-        audio_spec.sample_rate_hz,
+        "wrote {} mono f32 samples at {} Hz to {}",
+        total_samples,
+        TARGET_SAMPLE_RATE_HZ,
         args.wav_path.display()
     );
-    Ok(())
-}
-
-fn open_wav_writer(
-    path: &PathBuf,
-    spec: &AudioSpec,
-) -> Result<hound::WavWriter<std::io::BufWriter<std::fs::File>>> {
-    let (sample_format, bits_per_sample) = match spec.encoding {
-        PcmEncoding::S16Le => (hound::SampleFormat::Int, 16),
-        PcmEncoding::F32Le => (hound::SampleFormat::Float, 32),
-    };
-
-    hound::WavWriter::create(
-        path,
-        hound::WavSpec {
-            channels: spec.channels,
-            sample_rate: spec.sample_rate_hz,
-            bits_per_sample,
-            sample_format,
-        },
-    )
-    .with_context(|| format!("failed to create wav file `{}`", path.display()))
-}
-
-fn write_pcm_samples(
-    writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
-    data: &[u8],
-    encoding: PcmEncoding,
-) -> Result<()> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            if !data.len().is_multiple_of(2) {
-                bail!("S16Le chunk length {} is not divisible by 2", data.len());
-            }
-            for chunk in data.chunks_exact(2) {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                writer.write_sample(sample)?;
-            }
-        }
-        PcmEncoding::F32Le => {
-            if !data.len().is_multiple_of(4) {
-                bail!("F32Le chunk length {} is not divisible by 4", data.len());
-            }
-            for chunk in data.chunks_exact(4) {
-                let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                writer.write_sample(sample)?;
-            }
-        }
-    }
     Ok(())
 }
 

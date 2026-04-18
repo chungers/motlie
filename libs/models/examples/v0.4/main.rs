@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
                 model_selector.to_string(),
                 model_selector.bundle_id(),
                 model_selector.descriptor(),
-                model_selector.bundle(),
+                model_selector.bundle()?,
                 "selector",
             )
         } else {
@@ -78,10 +78,7 @@ async fn main() -> Result<()> {
     println!("resolution-path: {path_kind}");
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
-    support::print_process_snapshot(
-        "process-before-start",
-        &support::current_process_snapshot(),
-    );
+    support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
     println!(
         "quantization: {}",
         match quantization {
@@ -230,7 +227,10 @@ async fn main() -> Result<()> {
         .shutdown()
         .await
         .context("bundle shutdown should succeed")?;
-    support::print_process_snapshot("process-after-shutdown", &support::current_process_snapshot());
+    support::print_process_snapshot(
+        "process-after-shutdown",
+        &support::current_process_snapshot(),
+    );
 
     Ok(())
 }

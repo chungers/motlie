@@ -149,9 +149,11 @@ mod tests {
         assert_eq!(descriptor.family, BundleFamily::Embeddings);
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Embeddings]);
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Embeddings));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Embeddings)
+        );
         assert_eq!(
             descriptor.capability_descriptors(),
             &[CapabilityDescriptor::embeddings()]

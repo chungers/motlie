@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use motlie_model::typed::{AudioBuf, BatchTranscriber, Mono};
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
     Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
@@ -93,13 +94,13 @@ impl BackendAdapter for WhisperCppTranscriptionAdapter {
         let model_path = resolve_ggml_model_path(checkpoint)?;
         let ctx = load_whisper_model(&model_path)?;
 
-        Ok(new_transcription_handle(
+        Ok(Box::new(new_transcription_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.capabilities.clone(),
             self.quantization.clone(),
             ctx,
-        ))
+        )))
     }
 }
 
@@ -139,6 +140,12 @@ impl ModelBundle for WhisperCppTranscriptionBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+        Ok(Box::new(self.start_typed(options).await?))
+    }
+}
+
+impl WhisperCppTranscriptionBundle {
+    pub async fn start_typed(&self, options: StartOptions) -> Result<WhisperCppHandle, ModelError> {
         // Reject unsupported quantization requests explicitly.
         self.metadata
             .quantization
@@ -194,10 +201,16 @@ fn load_whisper_model(
 // Handle
 // ---------------------------------------------------------------------------
 
-struct WhisperCppHandle {
+pub struct WhisperCppHandle {
     descriptor: LoadedBundleDescriptor,
     ctx: Arc<whisper_rs::WhisperContext>,
     metrics: Arc<Mutex<AsrMetrics>>,
+}
+
+impl WhisperCppHandle {
+    pub async fn shutdown(self) -> Result<(), ModelError> {
+        <Self as BundleHandle>::shutdown(Box::new(self)).await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -298,14 +311,14 @@ fn new_transcription_handle(
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     ctx: Arc<whisper_rs::WhisperContext>,
-) -> Box<dyn BundleHandle> {
+) -> WhisperCppHandle {
     let metrics = Arc::new(Mutex::new(AsrMetrics::default()));
     {
         let mut m = lock_metrics(&metrics, "whisper-cpp-start");
         observe_memory(&mut m.runtime);
     }
 
-    Box::new(WhisperCppHandle {
+    WhisperCppHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -315,7 +328,7 @@ fn new_transcription_handle(
         },
         ctx,
         metrics,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +492,7 @@ impl NormalizerState {
 // Streaming runtime
 // ---------------------------------------------------------------------------
 
-struct WhisperCppStream {
+pub struct WhisperCppStream {
     ctx: Arc<whisper_rs::WhisperContext>,
     spec: AudioSpec,
     params: TranscriptionParams,
@@ -493,84 +506,112 @@ struct WhisperCppStream {
 
 impl WhisperCppStream {
     fn run_decode(&mut self) -> Result<TranscriptionUpdate, ModelError> {
-        let started_at = Instant::now();
+        decode_samples(
+            &self.ctx,
+            &self.pcm_buffer,
+            &self.params,
+            Some(&self.metrics),
+        )
+    }
+}
 
-        let mut state = self
-            .ctx
-            .create_state()
+fn decode_samples(
+    ctx: &whisper_rs::WhisperContext,
+    pcm_buffer: &[f32],
+    params: &TranscriptionParams,
+    metrics: Option<&Arc<Mutex<AsrMetrics>>>,
+) -> Result<TranscriptionUpdate, ModelError> {
+    let started_at = Instant::now();
+
+    let mut state = ctx
+        .create_state()
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "whisper-cpp",
+            operation: "create_state",
+            message: err.to_string(),
+        })?;
+
+    let mut whisper_params =
+        whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+    if let Some(ref lang) = params.language {
+        whisper_params.set_language(Some(lang));
+    }
+    whisper_params.set_print_special(false);
+    whisper_params.set_print_progress(false);
+    whisper_params.set_print_realtime(false);
+    whisper_params.set_print_timestamps(false);
+    whisper_params.set_single_segment(false);
+
+    state
+        .full(whisper_params, pcm_buffer)
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "whisper-cpp",
+            operation: "full",
+            message: err.to_string(),
+        })?;
+
+    let num_segments = state
+        .full_n_segments()
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "whisper-cpp",
+            operation: "full_n_segments",
+            message: err.to_string(),
+        })? as usize;
+
+    let mut segments = Vec::with_capacity(num_segments);
+    for i in 0..num_segments as i32 {
+        let text = state
+            .full_get_segment_text(i)
             .map_err(|err| ModelError::BackendExecution {
                 backend: "whisper-cpp",
-                operation: "create_state",
+                operation: "full_get_segment_text",
+                message: err.to_string(),
+            })?;
+        let t0 = state
+            .full_get_segment_t0(i)
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "whisper-cpp",
+                operation: "full_get_segment_t0",
+                message: err.to_string(),
+            })?;
+        let t1 = state
+            .full_get_segment_t1(i)
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "whisper-cpp",
+                operation: "full_get_segment_t1",
                 message: err.to_string(),
             })?;
 
-        let mut params =
-            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        if let Some(ref lang) = self.params.language {
-            params.set_language(Some(lang));
-        }
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_single_segment(false);
+        segments.push(TranscriptSegment {
+            start_ms: (t0 * 10) as u64,
+            end_ms: (t1 * 10) as u64,
+            text,
+            final_segment: true,
+        });
+    }
 
-        state
-            .full(params, &self.pcm_buffer)
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "whisper-cpp",
-                operation: "full",
-                message: err.to_string(),
-            })?;
-
-        let num_segments = state
-            .full_n_segments()
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "whisper-cpp",
-                operation: "full_n_segments",
-                message: err.to_string(),
-            })? as usize;
-
-        let mut segments = Vec::with_capacity(num_segments);
-        for i in 0..num_segments as i32 {
-            let text =
-                state
-                    .full_get_segment_text(i)
-                    .map_err(|err| ModelError::BackendExecution {
-                        backend: "whisper-cpp",
-                        operation: "full_get_segment_text",
-                        message: err.to_string(),
-                    })?;
-            let t0 = state
-                .full_get_segment_t0(i)
-                .map_err(|err| ModelError::BackendExecution {
-                    backend: "whisper-cpp",
-                    operation: "full_get_segment_t0",
-                    message: err.to_string(),
-                })?;
-            let t1 = state
-                .full_get_segment_t1(i)
-                .map_err(|err| ModelError::BackendExecution {
-                    backend: "whisper-cpp",
-                    operation: "full_get_segment_t1",
-                    message: err.to_string(),
-                })?;
-
-            segments.push(TranscriptSegment {
-                start_ms: (t0 * 10) as u64,
-                end_ms: (t1 * 10) as u64,
-                text,
-                final_segment: true,
-            });
-        }
-
+    if let Some(metrics) = metrics {
         let elapsed = started_at.elapsed();
-        {
-            let mut m = lock_metrics(&self.metrics, "whisper-cpp-decode");
-            observe_latency(&mut m.runtime, elapsed);
-        }
+        let mut m = lock_metrics(metrics, "whisper-cpp-decode");
+        observe_latency(&mut m.runtime, elapsed);
+    }
 
-        Ok(TranscriptionUpdate { segments })
+    Ok(TranscriptionUpdate { segments })
+}
+
+impl BatchTranscriber for WhisperCppHandle {
+    type Input = AudioBuf<f32, WHISPER_SAMPLE_RATE, Mono>;
+
+    fn transcribe(
+        &self,
+        audio: Self::Input,
+        params: TranscriptionParams,
+    ) -> impl std::future::Future<Output = Result<TranscriptionUpdate, ModelError>> + Send {
+        let ctx = Arc::clone(&self.ctx);
+        let metrics = Arc::clone(&self.metrics);
+        let samples = audio.into_samples();
+
+        async move { decode_samples(&ctx, &samples, &params, Some(&metrics)) }
     }
 }
 

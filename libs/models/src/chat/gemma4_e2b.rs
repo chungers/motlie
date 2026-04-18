@@ -107,8 +107,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::{BundleFamily, Catalog};
-    use motlie_model::eval::EvalTrack;
     use motlie_model::CapabilityKind;
+    use motlie_model::eval::EvalTrack;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -147,9 +147,11 @@ mod tests {
         #[cfg(feature = "model-gemma4-e2b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Chat)
-                .any(|b| b.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Chat)
+                    .any(|b| b.id == bundle_id)
+            );
         }
     }
 

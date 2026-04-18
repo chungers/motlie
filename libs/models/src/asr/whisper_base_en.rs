@@ -3,9 +3,12 @@ use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_whisper_cpp::WhisperCppTranscriptionAdapter;
+use motlie_model_whisper_cpp::{
+    WhisperCppHandle, WhisperCppTranscriptionAdapter, WhisperCppTranscriptionBundle,
+    WhisperCppTranscriptionSpec,
+};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -15,7 +18,7 @@ use crate::{
 pub const SELECTOR: &str = "openai/whisper_base_en";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
+    catalog.register_descriptor(descriptor());
     catalog.register_model_variant(
         identity(),
         checkpoint(),
@@ -71,16 +74,12 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(WhisperCppTranscriptionAdapter::whisper_base_en()),
-        Arc::new(resolve_local_ggml_root),
-    )
+pub fn typed_bundle() -> WhisperCppTranscriptionBundle {
+    WhisperCppTranscriptionBundle::new(WhisperCppTranscriptionSpec::whisper_base_en())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<WhisperCppHandle, ModelError> {
+    typed_bundle().start_typed(options).await
 }
 
 fn resolve_local_ggml_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -130,6 +129,7 @@ mod tests {
     use super::*;
     use crate::Catalog;
     use motlie_model::CapabilityKind;
+    use motlie_model::ModelBundle;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -140,7 +140,11 @@ mod tests {
         assert_eq!(descriptor.display_name, "Whisper Base.en");
         assert_eq!(descriptor.family, BundleFamily::Whisper);
         assert_eq!(descriptor.backend, BackendKind::WhisperCpp);
-        assert!(descriptor.capabilities.supports(CapabilityKind::Transcription));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription)
+        );
         assert!(!descriptor.capabilities.supports(CapabilityKind::Chat));
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Transcription]);
 
@@ -164,7 +168,7 @@ mod tests {
 
     #[test]
     fn quantization_is_explicitly_none() {
-        let bundle = bundle();
+        let bundle = typed_bundle();
 
         assert_eq!(
             bundle.metadata().quantization,
@@ -179,10 +183,12 @@ mod tests {
 
         #[cfg(feature = "model-whisper-base-en")]
         {
-            assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Transcription)
-                .any(|b| b.id == bundle_id));
+            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Transcription)
+                    .any(|b| b.id == bundle_id)
+            );
         }
     }
 
@@ -191,8 +197,7 @@ mod tests {
         let root = unique_temp_dir();
         std::fs::create_dir_all(&root).expect("temp root should be creatable");
 
-        let error =
-            resolve_local_ggml_root(&root).expect_err("missing cache should fail closed");
+        let error = resolve_local_ggml_root(&root).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
