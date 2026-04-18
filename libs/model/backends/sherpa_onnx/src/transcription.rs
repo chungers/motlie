@@ -83,6 +83,8 @@ impl SherpaOnnxStreamingAdapter {
 
 #[async_trait]
 impl BackendAdapter for SherpaOnnxStreamingAdapter {
+    type Handle = SherpaOnnxHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &SHERPA_ONNX_FORMATS
     }
@@ -104,7 +106,7 @@ impl BackendAdapter for SherpaOnnxStreamingAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -112,13 +114,13 @@ impl BackendAdapter for SherpaOnnxStreamingAdapter {
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact_spec())?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(Box::new(new_transcription_handle(
+        Ok(new_transcription_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        )))
+        ))
     }
 }
 
@@ -144,6 +146,8 @@ impl SherpaOnnxStreamingBundle {
 
 #[async_trait]
 impl ModelBundle for SherpaOnnxStreamingBundle {
+    type Handle = SherpaOnnxHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -156,8 +160,8 @@ impl ModelBundle for SherpaOnnxStreamingBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        Ok(Box::new(self.start_typed(options).await?))
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
     }
 }
 
@@ -199,7 +203,7 @@ pub struct SherpaOnnxHandle {
 
 impl SherpaOnnxHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
-        <Self as BundleHandle>::shutdown(Box::new(self)).await
+        <Self as BundleHandle>::shutdown(self).await
     }
 }
 
@@ -256,7 +260,7 @@ impl BundleHandle for SherpaOnnxHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }

@@ -100,6 +100,8 @@ impl MistralEmbeddingAdapter {
 
 #[async_trait]
 impl BackendAdapter for MistralEmbeddingAdapter {
+    type Handle = MistralEmbeddingHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &MISTRAL_EMBEDDING_FORMATS
     }
@@ -121,7 +123,7 @@ impl BackendAdapter for MistralEmbeddingAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -169,6 +171,8 @@ impl MistralEmbeddingBundle {
 
 #[async_trait]
 impl ModelBundle for MistralEmbeddingBundle {
+    type Handle = MistralEmbeddingHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -181,7 +185,7 @@ impl ModelBundle for MistralEmbeddingBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .metadata
             .quantization
@@ -246,7 +250,7 @@ impl EmbeddingRuntime for MistralRuntime {
     }
 }
 
-struct MistralEmbeddingHandle {
+pub struct MistralEmbeddingHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Box<dyn EmbeddingRuntime>,
     metrics: Arc<Mutex<EmbeddingMetricsState>>,
@@ -284,7 +288,7 @@ impl BundleHandle for MistralEmbeddingHandle {
         Ok(self)
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -309,14 +313,14 @@ fn new_embedding_handle(
     quantization: QuantizationSupport,
     resolved_quantization: Option<QuantizationBits>,
     model: mistralrs::Model,
-) -> Box<dyn BundleHandle> {
+) -> MistralEmbeddingHandle {
     let metrics = Arc::new(Mutex::new(EmbeddingMetricsState::default()));
     {
         let mut metrics = lock_metrics(&metrics, "mistral-embeddings-start");
         observe_memory(&mut metrics.runtime);
     }
 
-    Box::new(MistralEmbeddingHandle {
+    MistralEmbeddingHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -329,7 +333,7 @@ fn new_embedding_handle(
             metrics: Arc::clone(&metrics),
         }),
         metrics,
-    })
+    }
 }
 
 async fn build_embedding_model(

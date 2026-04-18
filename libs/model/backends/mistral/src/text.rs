@@ -90,6 +90,8 @@ impl MistralTextAdapter {
 
 #[async_trait]
 impl BackendAdapter for MistralTextAdapter {
+    type Handle = MistralTextHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &MISTRAL_TEXT_FORMATS
     }
@@ -111,7 +113,7 @@ impl BackendAdapter for MistralTextAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -155,6 +157,8 @@ impl MistralTextBundle {
 
 #[async_trait]
 impl ModelBundle for MistralTextBundle {
+    type Handle = MistralTextHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -167,7 +171,7 @@ impl ModelBundle for MistralTextBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .metadata
             .quantization
@@ -278,7 +282,7 @@ fn collect_text_only_message(message: &motlie_model::ChatMessage) -> Result<Stri
 // Handle
 // ---------------------------------------------------------------------------
 
-struct MistralTextHandle {
+pub struct MistralTextHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Box<dyn TextRuntime>,
     metrics: Arc<Mutex<TextMetrics>>,
@@ -313,7 +317,7 @@ impl BundleHandle for MistralTextHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -345,14 +349,14 @@ fn new_text_handle(
     quantization: QuantizationSupport,
     resolved_quantization: Option<QuantizationBits>,
     model: mistralrs::Model,
-) -> Box<dyn BundleHandle> {
+) -> MistralTextHandle {
     let metrics = Arc::new(Mutex::new(TextMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "mistral-text-start");
         observe_memory(&mut metrics.runtime);
     }
 
-    Box::new(MistralTextHandle {
+    MistralTextHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -365,7 +369,7 @@ fn new_text_handle(
             metrics: Arc::clone(&metrics),
         }),
         metrics,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------

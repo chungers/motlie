@@ -9,7 +9,7 @@ use std::str::FromStr;
     feature = "model-google-gemma-300m",
     feature = "model-qwen3-embedding-06b"
 ))]
-use motlie_model::{BundleId, EmbeddingSpec, ModelBundle};
+use motlie_model::{BundleId, EmbeddingSpec};
 
 pub const GOOGLE_GEMMA_300M_SELECTOR: &str = "google/embeddinggemma_300m";
 pub const QWEN3_EMBEDDING_06B_SELECTOR: &str = "qwen/qwen3_embedding_06b";
@@ -76,7 +76,7 @@ impl EmbeddingModels {
         }
     }
 
-    pub fn bundle(&self) -> Box<dyn ModelBundle> {
+    pub fn bundle(&self) -> Box<dyn ErasedModelBundle> {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::bundle(),

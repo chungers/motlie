@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
     println!("input-words: {prompt_words}");
     println!("input-est-tokens: ~{est_tokens}");
 
-    let bundle: Box<dyn motlie_model::ModelBundle> = match model_name.as_str() {
+    let bundle: Box<dyn motlie_models::ErasedModelBundle> = match model_name.as_str() {
         "qwen" => {
             #[cfg(feature = "model-qwen3-4b")]
             {
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
     println!("\n--- startup ---");
     let startup_at = Instant::now();
     let handle = bundle
-        .start(StartOptions {
+        .start_erased(StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
             println!("\n--- summary ---");
             println!("status: FAILED at warmup");
             println!("error: {e}");
-            handle.shutdown().await.ok();
+            handle.shutdown_box().await.ok();
             return Ok(());
         }
     }
@@ -210,7 +210,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    handle.shutdown().await.context("shutdown failed")?;
+    handle.shutdown_box().await.context("shutdown failed")?;
     Ok(())
 }
 

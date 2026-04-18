@@ -35,7 +35,9 @@ pub use asr::AsrModels;
 pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
 use motlie_model::{
-    ArtifactPolicy, BackendAdapter, BundleMetadata, ModelError, ResolvedCheckpoint, StartOptions,
+    ArtifactPolicy, BackendAdapter, BundleHandle, BundleMetadata, ChatModel, CompletionModel,
+    EmbeddingModel, LoadedBundleDescriptor, ModelError, ModelMetricSnapshot, ResolvedCheckpoint,
+    StartOptions,
 };
 pub use motlie_model::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
@@ -46,6 +48,93 @@ pub use motlie_model::{
 pub use tts::TtsModels;
 
 type BoxError = Box<dyn StdError + Send + Sync + 'static>;
+
+#[async_trait::async_trait]
+pub trait ErasedBundleHandle: Send + Sync {
+    fn descriptor(&self) -> &LoadedBundleDescriptor;
+    fn capabilities(&self) -> &Capabilities;
+    fn supports(&self, capability: CapabilityKind) -> bool {
+        self.capabilities().supports(capability)
+    }
+    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        None
+    }
+    fn chat(&self) -> std::result::Result<&dyn ChatModel, ModelError>;
+    fn completion(&self) -> std::result::Result<&dyn CompletionModel, ModelError>;
+    fn embeddings(&self) -> std::result::Result<&dyn EmbeddingModel, ModelError>;
+    async fn shutdown_box(self: Box<Self>) -> std::result::Result<(), ModelError>;
+}
+
+#[async_trait::async_trait]
+impl<T> ErasedBundleHandle for T
+where
+    T: BundleHandle + 'static,
+{
+    fn descriptor(&self) -> &LoadedBundleDescriptor {
+        BundleHandle::descriptor(self)
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        BundleHandle::capabilities(self)
+    }
+
+    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        BundleHandle::metric_snapshot(self)
+    }
+
+    fn chat(&self) -> std::result::Result<&dyn ChatModel, ModelError> {
+        BundleHandle::chat(self)
+    }
+
+    fn completion(&self) -> std::result::Result<&dyn CompletionModel, ModelError> {
+        BundleHandle::completion(self)
+    }
+
+    fn embeddings(&self) -> std::result::Result<&dyn EmbeddingModel, ModelError> {
+        BundleHandle::embeddings(self)
+    }
+
+    async fn shutdown_box(self: Box<Self>) -> std::result::Result<(), ModelError> {
+        (*self).shutdown().await
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ErasedModelBundle: Send + Sync {
+    fn id(&self) -> &BundleId;
+    fn metadata(&self) -> &BundleMetadata;
+    fn capabilities(&self) -> &Capabilities;
+    async fn start_erased(
+        &self,
+        options: StartOptions,
+    ) -> std::result::Result<Box<dyn ErasedBundleHandle>, ModelError>;
+}
+
+#[async_trait::async_trait]
+impl<T> ErasedModelBundle for T
+where
+    T: ModelBundle + Send + Sync + 'static,
+    T::Handle: BundleHandle + 'static,
+{
+    fn id(&self) -> &BundleId {
+        ModelBundle::id(self)
+    }
+
+    fn metadata(&self) -> &BundleMetadata {
+        ModelBundle::metadata(self)
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        ModelBundle::capabilities(self)
+    }
+
+    async fn start_erased(
+        &self,
+        options: StartOptions,
+    ) -> std::result::Result<Box<dyn ErasedBundleHandle>, ModelError> {
+        Ok(Box::new(ModelBundle::start(self, options).await?))
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ModelsError {
@@ -467,17 +556,65 @@ where
     }
 }
 
+#[async_trait::async_trait]
+trait ErasedBackendAdapter: Send + Sync {
+    fn supported_formats(&self) -> &[CheckpointFormat];
+    fn backend_kind(&self) -> BackendKind;
+    fn capabilities(&self) -> &Capabilities;
+    fn quantization(&self) -> &QuantizationSupport;
+    async fn start_erased(
+        &self,
+        identity: &ModelIdentity,
+        checkpoint: &ResolvedCheckpoint,
+        options: StartOptions,
+    ) -> std::result::Result<Box<dyn ErasedBundleHandle>, ModelError>;
+}
+
+#[async_trait::async_trait]
+impl<T> ErasedBackendAdapter for T
+where
+    T: BackendAdapter + Send + Sync + 'static,
+    T::Handle: BundleHandle + 'static,
+{
+    fn supported_formats(&self) -> &[CheckpointFormat] {
+        BackendAdapter::supported_formats(self)
+    }
+
+    fn backend_kind(&self) -> BackendKind {
+        BackendAdapter::backend_kind(self)
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        BackendAdapter::capabilities(self)
+    }
+
+    fn quantization(&self) -> &QuantizationSupport {
+        BackendAdapter::quantization(self)
+    }
+
+    async fn start_erased(
+        &self,
+        identity: &ModelIdentity,
+        checkpoint: &ResolvedCheckpoint,
+        options: StartOptions,
+    ) -> std::result::Result<Box<dyn ErasedBundleHandle>, ModelError> {
+        Ok(Box::new(
+            BackendAdapter::start(self, identity, checkpoint, options).await?,
+        ))
+    }
+}
+
 #[derive(Clone)]
 struct AdapterBackedBundle {
     metadata: BundleMetadata,
     identity: ModelIdentity,
     checkpoint: ModelCheckpoint,
-    adapter: Arc<dyn BackendAdapter>,
+    adapter: Arc<dyn ErasedBackendAdapter>,
     local_resolver: Arc<dyn LocalCheckpointResolver>,
 }
 
 #[async_trait::async_trait]
-impl ModelBundle for AdapterBackedBundle {
+impl ErasedModelBundle for AdapterBackedBundle {
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -490,10 +627,10 @@ impl ModelBundle for AdapterBackedBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(
+    async fn start_erased(
         &self,
         options: StartOptions,
-    ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
+    ) -> std::result::Result<Box<dyn ErasedBundleHandle>, ModelError> {
         let StartOptions {
             artifact_policy,
             quantization,
@@ -522,7 +659,7 @@ impl ModelBundle for AdapterBackedBundle {
         };
 
         self.adapter
-            .start(
+            .start_erased(
                 &self.identity,
                 &resolved,
                 StartOptions {
@@ -541,9 +678,9 @@ pub(crate) fn adapter_backed_bundle(
     display_name: String,
     identity: ModelIdentity,
     checkpoint: ModelCheckpoint,
-    adapter: Arc<dyn BackendAdapter>,
+    adapter: Arc<dyn ErasedBackendAdapter>,
     local_resolver: Arc<dyn LocalCheckpointResolver>,
-) -> Box<dyn ModelBundle> {
+) -> Box<dyn ErasedModelBundle> {
     Box::new(AdapterBackedBundle {
         metadata: BundleMetadata {
             id: bundle_id,
@@ -709,7 +846,7 @@ impl ModelSelector {
         }
     }
 
-    pub fn bundle(&self) -> Result<Box<dyn ModelBundle>> {
+    pub fn bundle(&self) -> Result<Box<dyn ErasedModelBundle>> {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
@@ -920,14 +1057,14 @@ impl FromStr for ModelSelector {
 }
 
 trait BundleFactory: Send + Sync {
-    fn instantiate(&self) -> Box<dyn ModelBundle>;
+    fn instantiate(&self) -> Box<dyn ErasedModelBundle>;
 }
 
 impl<F> BundleFactory for F
 where
-    F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
+    F: Fn() -> Box<dyn ErasedModelBundle> + Send + Sync + 'static,
 {
-    fn instantiate(&self) -> Box<dyn ModelBundle> {
+    fn instantiate(&self) -> Box<dyn ErasedModelBundle> {
         (self)()
     }
 }
@@ -946,7 +1083,7 @@ struct CheckpointCatalogEntry {
 struct ModelCatalogEntry {
     identity: ModelIdentity,
     checkpoints: Vec<CheckpointCatalogEntry>,
-    adapters: Vec<Arc<dyn BackendAdapter>>,
+    adapters: Vec<Arc<dyn ErasedBackendAdapter>>,
 }
 
 /// In-memory registry of curated bundle descriptors and constructors.
@@ -997,7 +1134,7 @@ impl Catalog {
         factory: F,
     ) -> Option<BundleDescriptor>
     where
-        F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
+        F: Fn() -> Box<dyn ErasedModelBundle> + Send + Sync + 'static,
     {
         self.bundles
             .insert(
@@ -1030,7 +1167,7 @@ impl Catalog {
         identity: ModelIdentity,
         checkpoint: ModelCheckpoint,
         local_resolver: Arc<dyn LocalCheckpointResolver>,
-        adapter: Arc<dyn BackendAdapter>,
+        adapter: Arc<dyn ErasedBackendAdapter>,
     ) {
         let entry = self
             .models
@@ -1108,7 +1245,7 @@ impl Catalog {
             .and_then(|descriptor| descriptor.artifacts.as_ref())
     }
 
-    pub fn instantiate(&self, id: &BundleId) -> Option<Box<dyn ModelBundle>> {
+    pub fn instantiate(&self, id: &BundleId) -> Option<Box<dyn ErasedModelBundle>> {
         self.bundles
             .get(id)
             .and_then(|entry| entry.factory.as_ref().map(|factory| factory.instantiate()))
@@ -1169,7 +1306,7 @@ impl Catalog {
     pub fn instantiate_resolved(
         &self,
         resolved: &ResolvedModelDescriptor,
-    ) -> Option<Box<dyn ModelBundle>> {
+    ) -> Option<Box<dyn ErasedModelBundle>> {
         if resolved
             .identity
             .capabilities
@@ -1228,6 +1365,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ModelBundle for StubBundle {
+        type Handle = StubHandle;
+
         fn id(&self) -> &BundleId {
             &self.metadata.id
         }
@@ -1243,11 +1382,47 @@ mod tests {
         async fn start(
             &self,
             _options: motlie_model::StartOptions,
-        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError>
-        {
+        ) -> std::result::Result<Self::Handle, motlie_model::ModelError> {
             Err(motlie_model::ModelError::InvalidConfiguration(
                 "stub bundle is not startable".into(),
             ))
+        }
+    }
+
+    struct StubHandle;
+
+    #[async_trait::async_trait]
+    impl motlie_model::BundleHandle for StubHandle {
+        fn descriptor(&self) -> &motlie_model::LoadedBundleDescriptor {
+            unreachable!("stub handle is never constructed")
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            unreachable!("stub handle is never constructed")
+        }
+
+        fn chat(
+            &self,
+        ) -> std::result::Result<&dyn motlie_model::ChatModel, motlie_model::ModelError> {
+            unreachable!("stub handle is never constructed")
+        }
+
+        fn completion(
+            &self,
+        ) -> std::result::Result<&dyn motlie_model::CompletionModel, motlie_model::ModelError>
+        {
+            unreachable!("stub handle is never constructed")
+        }
+
+        fn embeddings(
+            &self,
+        ) -> std::result::Result<&dyn motlie_model::EmbeddingModel, motlie_model::ModelError>
+        {
+            unreachable!("stub handle is never constructed")
+        }
+
+        async fn shutdown(self) -> std::result::Result<(), motlie_model::ModelError> {
+            Ok(())
         }
     }
 
@@ -1260,6 +1435,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BackendAdapter for StubAdapter {
+        type Handle = StubHandle;
+
         fn supported_formats(&self) -> &[CheckpointFormat] {
             &self.supported_formats
         }
@@ -1281,7 +1458,7 @@ mod tests {
             _identity: &ModelIdentity,
             _checkpoint: &ResolvedCheckpoint,
             _options: StartOptions,
-        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
+        ) -> std::result::Result<Self::Handle, ModelError> {
             Err(ModelError::InvalidConfiguration(
                 "stub adapter is not startable".into(),
             ))

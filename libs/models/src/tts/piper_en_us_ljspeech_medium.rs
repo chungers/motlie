@@ -91,11 +91,25 @@ pub async fn start_typed(options: StartOptions) -> Result<PiperHandle, ModelErro
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
+    let model_parent = Path::new(MODEL_FILE).parent().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!("invalid curated Piper model path `{MODEL_FILE}`"))
+    })?;
+    let config_parent = Path::new(CONFIG_FILE).parent().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!(
+            "invalid curated Piper config path `{CONFIG_FILE}`"
+        ))
+    })?;
+    if model_parent != config_parent {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "curated Piper model/config paths diverge: `{MODEL_FILE}` vs `{CONFIG_FILE}`"
+        )));
+    }
+
     if [MODEL_FILE, CONFIG_FILE]
         .into_iter()
         .all(|filename| root.join(filename).is_file())
     {
-        return Ok(root.to_path_buf());
+        return Ok(root.join(model_parent));
     }
 
     let direct_model = root.join(Path::new(MODEL_FILE).file_name().ok_or_else(|| {
@@ -147,7 +161,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
         }
     }
 
-    Ok(snapshot_dir)
+    Ok(snapshot_dir.join(model_parent))
 }
 
 #[cfg(test)]
@@ -252,8 +266,8 @@ mod tests {
 
         let resolved = resolve_local_model_path(&root).expect("direct artifact dir should resolve");
 
-        assert_eq!(resolved, root);
-        let _ = std::fs::remove_dir_all(resolved);
+        assert_eq!(resolved, root.join("en/en_US/ljspeech/medium"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

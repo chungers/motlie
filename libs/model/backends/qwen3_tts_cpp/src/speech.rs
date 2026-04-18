@@ -61,6 +61,8 @@ impl Qwen3TtsCppSpeechAdapter {
 
 #[async_trait]
 impl BackendAdapter for Qwen3TtsCppSpeechAdapter {
+    type Handle = Qwen3TtsCppHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &QWEN3_TTS_CPP_FORMATS
     }
@@ -82,7 +84,7 @@ impl BackendAdapter for Qwen3TtsCppSpeechAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -90,13 +92,13 @@ impl BackendAdapter for Qwen3TtsCppSpeechAdapter {
         let artifacts = resolve_gguf_artifacts(checkpoint)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(Box::new(new_speech_handle(
+        Ok(new_speech_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        )))
+        ))
     }
 }
 
@@ -122,6 +124,8 @@ impl Qwen3TtsCppSpeechBundle {
 
 #[async_trait]
 impl ModelBundle for Qwen3TtsCppSpeechBundle {
+    type Handle = Qwen3TtsCppHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -134,8 +138,8 @@ impl ModelBundle for Qwen3TtsCppSpeechBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        Ok(Box::new(self.start_typed(options).await?))
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
     }
 }
 
@@ -182,7 +186,7 @@ pub struct Qwen3TtsCppHandle {
 
 impl Qwen3TtsCppHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
-        <Self as BundleHandle>::shutdown(Box::new(self)).await
+        <Self as BundleHandle>::shutdown(self).await
     }
 }
 
@@ -239,7 +243,7 @@ impl BundleHandle for Qwen3TtsCppHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }

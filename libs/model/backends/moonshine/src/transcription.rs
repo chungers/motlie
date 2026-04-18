@@ -90,6 +90,8 @@ impl MoonshineStreamingAdapter {
 
 #[async_trait]
 impl BackendAdapter for MoonshineStreamingAdapter {
+    type Handle = MoonshineHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &MOONSHINE_FORMATS
     }
@@ -111,20 +113,20 @@ impl BackendAdapter for MoonshineStreamingAdapter {
         identity: &ModelIdentity,
         checkpoint: &motlie_model::ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         self.quantization()
             .resolve(options.quantization, &identity.id)?;
 
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact_spec())?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(Box::new(new_transcription_handle(
+        Ok(new_transcription_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        )))
+        ))
     }
 }
 
@@ -150,6 +152,8 @@ impl MoonshineStreamingBundle {
 
 #[async_trait]
 impl ModelBundle for MoonshineStreamingBundle {
+    type Handle = MoonshineHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -162,8 +166,8 @@ impl ModelBundle for MoonshineStreamingBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        Ok(Box::new(self.start_typed(options).await?))
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
     }
 }
 
@@ -203,7 +207,7 @@ pub struct MoonshineHandle {
 
 impl MoonshineHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
-        <Self as BundleHandle>::shutdown(Box::new(self)).await
+        <Self as BundleHandle>::shutdown(self).await
     }
 }
 
@@ -260,7 +264,7 @@ impl BundleHandle for MoonshineHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }

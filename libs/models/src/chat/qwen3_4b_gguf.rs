@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
-};
+use motlie_model::{BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity};
 use motlie_model_llama_cpp::LlamaCppTextAdapter;
 
 use crate::{
@@ -75,7 +73,7 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
+pub fn bundle() -> Box<dyn crate::ErasedModelBundle> {
     let descriptor = descriptor();
     crate::adapter_backed_bundle(
         descriptor.id,

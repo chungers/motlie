@@ -20,14 +20,14 @@ use crate::{BundleFamily, BundleRequirements, PlatformConstraint};
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
 ))]
-use motlie_model::eval::EvalTrack;
+use motlie_model::BundleId;
 #[cfg(any(
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
 ))]
-use motlie_model::{BundleId, ModelBundle};
+use motlie_model::eval::EvalTrack;
 
 pub const QWEN3_4B_SELECTOR: &str = "qwen/qwen3_4b";
 pub const GEMMA4_E2B_SELECTOR: &str = "google/gemma4_e2b";
@@ -143,7 +143,7 @@ impl ChatModels {
         }
     }
 
-    pub fn bundle(&self) -> Box<dyn ModelBundle> {
+    pub fn bundle(&self) -> Box<dyn ErasedModelBundle> {
         match self {
             #[cfg(feature = "model-gemma4-e2b")]
             Self::Gemma4E2B => gemma4_e2b::bundle(),

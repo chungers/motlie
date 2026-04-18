@@ -64,6 +64,8 @@ impl Qwen3TtsSpeechAdapter {
 
 #[async_trait]
 impl BackendAdapter for Qwen3TtsSpeechAdapter {
+    type Handle = Qwen3TtsHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &QWEN3_TTS_FORMATS
     }
@@ -85,7 +87,7 @@ impl BackendAdapter for Qwen3TtsSpeechAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -93,13 +95,13 @@ impl BackendAdapter for Qwen3TtsSpeechAdapter {
         let artifacts = resolve_onnx_artifacts(checkpoint)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(Box::new(new_speech_handle(
+        Ok(new_speech_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        )))
+        ))
     }
 }
 
@@ -124,6 +126,8 @@ impl Qwen3TtsSpeechBundle {
 
 #[async_trait]
 impl ModelBundle for Qwen3TtsSpeechBundle {
+    type Handle = Qwen3TtsHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -136,8 +140,8 @@ impl ModelBundle for Qwen3TtsSpeechBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        Ok(Box::new(self.start_typed(options).await?))
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
     }
 }
 
@@ -182,7 +186,7 @@ pub struct Qwen3TtsHandle {
 
 impl Qwen3TtsHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
-        <Self as BundleHandle>::shutdown(Box::new(self)).await
+        <Self as BundleHandle>::shutdown(self).await
     }
 }
 
@@ -239,7 +243,7 @@ impl BundleHandle for Qwen3TtsHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }

@@ -115,6 +115,8 @@ impl LlamaCppTextAdapter {
 
 #[async_trait]
 impl BackendAdapter for LlamaCppTextAdapter {
+    type Handle = LlamaCppTextHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &LLAMA_CPP_TEXT_FORMATS
     }
@@ -136,7 +138,7 @@ impl BackendAdapter for LlamaCppTextAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -194,6 +196,8 @@ impl LlamaCppTextBundle {
 
 #[async_trait]
 impl ModelBundle for LlamaCppTextBundle {
+    type Handle = LlamaCppTextHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -206,7 +210,7 @@ impl ModelBundle for LlamaCppTextBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .metadata
             .quantization
@@ -501,7 +505,7 @@ fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String
 // Handle
 // ---------------------------------------------------------------------------
 
-struct LlamaCppTextHandle {
+pub struct LlamaCppTextHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Box<dyn TextRuntime>,
     metrics: Arc<Mutex<TextMetrics>>,
@@ -536,7 +540,7 @@ impl BundleHandle for LlamaCppTextHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -571,7 +575,7 @@ struct TextHandleConfig {
     context_length: u32,
 }
 
-fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn BundleHandle> {
+fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> LlamaCppTextHandle {
     let metrics = Arc::new(Mutex::new(TextMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "llama-cpp-text-start");
@@ -588,7 +592,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn Bundl
         context_length,
     } = config;
 
-    Box::new(LlamaCppTextHandle {
+    LlamaCppTextHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -604,7 +608,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn Bundl
             metrics: Arc::clone(&metrics),
         }),
         metrics,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
