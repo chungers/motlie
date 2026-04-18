@@ -1,7 +1,7 @@
 //! repl_host_v1_15: v1.15 host-side filesystem server with admin REPL.
 //!
 //! Starts one or more guest-scoped FsServer instances with MemOverlay,
-//! listens on one TCP address per guest, and serves filesystem
+//! listens on one Unix socket per guest, and serves filesystem
 //! operations. Exposes every MemOverlay API operation through a command
 //! interface.
 //!
@@ -31,45 +31,45 @@
 //!
 //! ```bash
 //! # Interactive
-//! cargo run --example repl_host_v1_15 -- --tag alice-home --dir ~/alice
+//! cargo run --example repl_host_v1_15 --features vsock -- --tag alice-home --dir ~/alice
 //!
 //! # Multi-mount (repeat --mount)
-//! cargo run --example repl_host_v1_15 -- \
-//!     --socket 0.0.0.0:5500 \
+//! cargo run --example repl_host_v1_15 --features vsock -- \
+//!     --socket /tmp/motlie-vfs.vsock_5000 \
 //!     --mount alice-home=~/alice \
 //!     --mount workspace=~/workspace
 //!
 //! # Multi-guest (repeat --guest and guest-qualified --mount)
-//! cargo run --example repl_host_v1_15 -- \
-//!     --guest alice=0.0.0.0:5501 \
+//! cargo run --example repl_host_v1_15 --features vsock -- \
+//!     --guest alice=/tmp/motlie-vfs-alice.vsock_5000 \
 //!     --mount alice:alice-home=~/alice \
 //!     --mount alice:alice-workspace=~/workspace \
-//!     --guest bob=0.0.0.0:5502 \
+//!     --guest bob=/tmp/motlie-vfs-bob.vsock_5000 \
 //!     --mount bob:bob-home=~/bob \
 //!     --mount bob:bob-workspace=~/workspace-bob
 //!
 //! # Empty admin mode, provision from REPL script
-//! cat setup-multiguest.sh.vfs | cargo run --example repl_host_v1_15 -- --empty
+//! cat setup-multiguest.sh.vfs | cargo run --example repl_host_v1_15 --features vsock -- --empty
 //!
 //! # Preferred interactive setup-file flow (keeps rustyline on a real TTY)
-//! cargo run --example repl_host_v1_15 -- --empty --script setup-multiguest.sh.vfs
+//! cargo run --example repl_host_v1_15 --features vsock -- --empty --script setup-multiguest.sh.vfs
 //!
 //! # Script then interactive
-//! cat setup-alice.sh.vfs - | cargo run --example repl_host_v1_15 -- --tag alice-home
+//! cat setup-alice.sh.vfs - | cargo run --example repl_host_v1_15 --features vsock -- --tag alice-home
 //!
 //! # Script only (server stays alive until signaled)
-//! cat setup-alice.sh.vfs | cargo run --example repl_host_v1_15 -- --tag alice-home
+//! cat setup-alice.sh.vfs | cargo run --example repl_host_v1_15 --features vsock -- --tag alice-home
 //!
 //! # Agent-driven (write commands to stdin, server stays alive)
-//! echo "layer creds 0" | cargo run --example repl_host_v1_15 -- --tag alice-home
+//! echo "layer creds 0" | cargo run --example repl_host_v1_15 --features vsock -- --tag alice-home
 //! ```
 //!
 //! # Options
 //!
 //!   --empty                 start with no guest and provision from REPL
 //!   --script <path>         execute a setup file before entering the REPL
-//!   --socket <addr>         TCP listen address (single-guest mode)
-//!   --guest <id=addr>       add a guest-scoped FsServer and listener
+//!   --socket <path>         vsock socket path (single-guest mode)
+//!   --guest <id=socket>     add a guest-scoped FsServer and listener
 //!   --mount <tag=dir>       add a mount in single-guest mode
 //!   --mount <id:tag=dir>    add a mount to one guest in multi-guest mode
 //!   --tag <name>            mount tag (single-guest mode)
@@ -87,13 +87,13 @@ use std::sync::Mutex as StdMutex;
 use anyhow::Result;
 use bytes::Bytes;
 use tempfile::TempDir;
-use tokio::net::TcpListener;
+use tokio::net::UnixListener;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
-use motlie_vfs::vz::handler::TcpConnectionHandler;
+use motlie_vfs::vsock::handler::VsockConnectionHandler;
 
 #[derive(Clone)]
 struct GuestConfig {
@@ -133,6 +133,7 @@ struct AdminState {
     startup_scripts: Vec<PathBuf>,
     _retained_tempdirs: Vec<TempDir>,
     runtime: Handle,
+    sockets_for_cleanup: Arc<StdMutex<Vec<String>>>,
 }
 
 enum MountSpec {
@@ -149,7 +150,7 @@ enum MountSpec {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut socket_path = "0.0.0.0:5500".to_string();
+    let mut socket_path = "/tmp/motlie-vfs.vsock_5000".to_string();
     let mut tag = "alice-home".to_string();
     let mut host_dir: Option<PathBuf> = None;
     let mut single_mounts: Vec<(String, PathBuf)> = Vec::new();
@@ -290,7 +291,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    eprintln!("=== motlie-vfs repl_host_v1_1 ===");
+    eprintln!("=== motlie-vfs repl_host_v1_15 ===");
     for config in &guest_configs {
         if multi_guest {
             eprintln!("Guest: {}", config.name);
@@ -317,6 +318,7 @@ async fn main() -> Result<()> {
 
     let mut admin_guests: HashMap<String, GuestRuntime> = HashMap::new();
     let mut guest_order = Vec::new();
+    let sockets_for_cleanup = Arc::new(StdMutex::new(Vec::new()));
     let runtime = Handle::current();
     let prompt_state = Arc::new(StdMutex::new("vfs> ".to_string()));
 
@@ -337,9 +339,9 @@ async fn main() -> Result<()> {
             },
         );
 
-        let listener = std::net::TcpListener::bind(&config.socket_path)?;
-        listener.set_nonblocking(true)?;
-        let listener = TcpListener::from_std(listener)?;
+        let _ = std::fs::remove_file(&config.socket_path);
+        let listener = UnixListener::bind(&config.socket_path)?;
+        push_cleanup_socket(&sockets_for_cleanup, config.socket_path.clone());
         spawn_guest_listener(
             &runtime,
             config.name.clone(),
@@ -364,12 +366,16 @@ async fn main() -> Result<()> {
         startup_scripts,
         _retained_tempdirs: retained_tempdirs,
         runtime,
+        sockets_for_cleanup: Arc::clone(&sockets_for_cleanup),
     };
 
     // Spawn the admin input handler on a blocking thread
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     tokio::task::spawn_blocking(move || {
         run_input(admin);
+        for socket_path in cleanup_sockets_snapshot(&sockets_for_cleanup) {
+            let _ = std::fs::remove_file(socket_path);
+        }
         let _ = shutdown_tx.send(());
     });
 
@@ -543,21 +549,38 @@ fn redraw_prompt(prompt_state: &Arc<StdMutex<String>>) {
     let _ = io::stderr().flush();
 }
 
+fn push_cleanup_socket(sockets_for_cleanup: &Arc<StdMutex<Vec<String>>>, socket_path: String) {
+    match sockets_for_cleanup.lock() {
+        Ok(mut sockets) => sockets.push(socket_path),
+        Err(_) => eprintln!("warning: cleanup socket list poisoned; skipping socket retention"),
+    }
+}
+
+fn cleanup_sockets_snapshot(sockets_for_cleanup: &Arc<StdMutex<Vec<String>>>) -> Vec<String> {
+    match sockets_for_cleanup.lock() {
+        Ok(sockets) => sockets.clone(),
+        Err(_) => {
+            eprintln!("warning: cleanup socket list poisoned; skipping socket cleanup");
+            Vec::new()
+        }
+    }
+}
+
 fn spawn_guest_listener(
     runtime: &Handle,
     guest_name: String,
     socket_path: String,
-    listener: TcpListener,
+    listener: UnixListener,
     server: Arc<FsServer>,
     prompt_state: Arc<StdMutex<String>>,
 ) {
-    eprintln!("Listening on {socket_path} for guest '{guest_name}' (guest filesystem TCP connections)");
+    eprintln!("Listening on {socket_path} for guest '{guest_name}' (guest filesystem connections)");
 
     runtime.spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((mut stream, _addr)) => {
-                    let tag = match motlie_vfs::vz::read_tag_handshake(&mut stream).await {
+                    let tag = match motlie_vfs::vsock::read_tag_handshake(&mut stream).await {
                         Ok(tag) => tag,
                         Err(e) => {
                             eprintln!("[{guest_name}] connection handshake error: {e}");
@@ -570,7 +593,7 @@ fn spawn_guest_listener(
                         redraw_prompt(&prompt_state);
                         continue;
                     }
-                    let handler = TcpConnectionHandler::new(Arc::clone(&server), &tag);
+                    let handler = VsockConnectionHandler::new(Arc::clone(&server), &tag);
                     let guest_name_for_conn = guest_name.clone();
                     let tag_for_conn = tag.clone();
                     let prompt_state_for_conn = Arc::clone(&prompt_state);
@@ -595,10 +618,10 @@ fn spawn_guest_listener(
 
 fn parse_guest_spec(spec: &str) -> Result<(String, String)> {
     let Some((guest, socket_path)) = spec.split_once('=') else {
-        anyhow::bail!("invalid --guest '{spec}'; expected <guest>=<listen_addr>");
+        anyhow::bail!("invalid --guest '{spec}'; expected <guest>=<socket>");
     };
     if guest.is_empty() || socket_path.is_empty() {
-        anyhow::bail!("invalid --guest '{spec}'; guest and listen_addr must be non-empty");
+        anyhow::bail!("invalid --guest '{spec}'; guest and socket must be non-empty");
     }
     Ok((guest.to_string(), socket_path.to_string()))
 }
@@ -656,16 +679,16 @@ fn provision_guest(
     identity: Option<GuestIdentity>,
 ) -> Result<()> {
     if guest_name.is_empty() || socket_path.is_empty() {
-        anyhow::bail!("provision requires non-empty guest and listen address");
+        anyhow::bail!("provision requires non-empty guest and socket");
     }
     if admin.guests.contains_key(guest_name) {
         anyhow::bail!("guest '{guest_name}' already provisioned");
     }
 
     let server = Arc::new(FsServer::builder().overlay(true).events(256).build()?);
-    let listener = std::net::TcpListener::bind(socket_path)?;
-    listener.set_nonblocking(true)?;
-    let listener = TcpListener::from_std(listener)?;
+    let _ = std::fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)?;
+    push_cleanup_socket(&admin.sockets_for_cleanup, socket_path.to_string());
     spawn_guest_listener(
         &admin.runtime,
         guest_name.to_string(),
@@ -706,14 +729,17 @@ fn add_guest_mount(admin: &mut AdminState, guest_name: &str, mount: ConfiguredMo
     Ok(())
 }
 
+#[allow(dead_code)]
 fn guest_login_name(guest_name: &str) -> &str {
     guest_name
 }
 
+#[allow(dead_code)]
 fn guest_api_socket_path(guest_name: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/motlie-vfs-{guest_name}-api.sock"))
 }
 
+#[allow(dead_code)]
 fn guest_home(runtime: &GuestRuntime, guest_name: &str) -> String {
     runtime
         .mounts
@@ -729,10 +755,12 @@ fn guest_home(runtime: &GuestRuntime, guest_name: &str) -> String {
         .unwrap_or_else(|| format!("/home/{guest_name}"))
 }
 
+#[allow(dead_code)]
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
+#[allow(dead_code)]
 fn render_mounts_yaml(runtime: &GuestRuntime) -> Result<String> {
     let mut out = String::from("mounts:\n");
     for mount in &runtime.mounts {
@@ -749,6 +777,7 @@ fn render_mounts_yaml(runtime: &GuestRuntime) -> Result<String> {
     Ok(out)
 }
 
+#[allow(dead_code)]
 fn render_cloud_init(guest_name: &str, runtime: &GuestRuntime) -> Result<String> {
     let identity = runtime.identity.ok_or_else(|| {
         anyhow::anyhow!("guest '{guest_name}' is missing uid/gid; provision with explicit uid/gid")
@@ -809,6 +838,7 @@ fn render_cloud_init(guest_name: &str, runtime: &GuestRuntime) -> Result<String>
     Ok(out)
 }
 
+#[allow(dead_code)]
 fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<String> {
     let cloud_init = render_cloud_init(guest_name, runtime)?;
     if guest_name != "alice" && guest_name != "bob" {
@@ -850,6 +880,7 @@ fn render_launch_script(guest_name: &str, runtime: &GuestRuntime) -> Result<Stri
     Ok(out)
 }
 
+#[allow(dead_code)]
 struct LaunchExecution {
     pid: u32,
     script_path: PathBuf,
@@ -857,6 +888,7 @@ struct LaunchExecution {
     serial_log_path: PathBuf,
 }
 
+#[allow(dead_code)]
 fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecution> {
     let log_dir = PathBuf::from(format!("/tmp/motlie-vfs-launch/{guest_name}"));
     std::fs::create_dir_all(&log_dir)?;
@@ -890,6 +922,7 @@ fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecuti
     })
 }
 
+#[allow(dead_code)]
 fn shutdown_guest(guest_name: &str) -> Result<()> {
     let api_socket = guest_api_socket_path(guest_name);
     if !api_socket.exists() {
@@ -950,9 +983,9 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
     match topic {
         Some("provision") => {
             out("provision <guest> <socket> <uid> <gid>");
-            out("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its TCP listener.");
+            out("  Create one guest-scoped FsServer, record the guest uid/gid contract, and bind its Unix socket listener.");
             out("  Example:");
-            out("    provision bob 0.0.0.0:5502 2001 2001");
+            out("    provision bob /tmp/motlie-vfs-bob.vsock_5000 1001 1001");
         }
         Some("mount") => {
             out("mount <guest> <tag>=<guest_path>,<host_path> [more...]");
@@ -964,16 +997,15 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
         }
         Some("launch") => {
             out("launch <guest>");
-            out("  Generate a Tart-backed Vz helper script and execute it asynchronously via /bin/zsh.");
-            out("  The helper clones the generic base guest, renders guest-specific mounts.yaml,");
-            out("  restarts motlie-vfs-guest.service, and validates the mounted content.");
-            out("  Logs land under /tmp/motlie-vfs-launch/<guest>/.");
+            out("  Not implemented inside repl_host_v1_15.");
+            out("  Use libs/vfs/examples/v1.15/launch-vz.sh --guest <guest> instead.");
             out("launch -script <guest>");
-            out("  Render the helper shell script to stdout without executing it.");
+            out("  Not implemented for v1.15.");
         }
         Some("shutdown") => {
             out("shutdown <guest>");
-            out("  Stop the Tart-backed Vz guest clone for that guest.");
+            out("  Not implemented inside repl_host_v1_15.");
+            out("  Stop the Apple Vz helper process recorded by launch-vz.sh.");
         }
         Some("use") => {
             out("use <guest>");
@@ -1040,9 +1072,9 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
                 out("  <guest> <command ...>                           — run one command against a specific guest");
                 out("  provision <guest> <socket> <uid> <gid>          — create one guest-scoped FsServer and listener");
                 out("  mount <guest> <tag>=<guest_path>,<host_path>... — add one or more mounts to a guest");
-                out("  launch <guest>                                  — generate and start a guest launch helper asynchronously");
-                out("  launch -script <guest>                          — print the guest launch helper script");
-                out("  shutdown <guest>                                — request guest shutdown via CH API socket");
+                out("  launch <guest>                                  — not implemented; use examples/v1.15/launch-vz.sh");
+                out("  launch -script <guest>                          — not implemented for v1.15");
+                out("  shutdown <guest>                                — not implemented; stop the Apple Vz helper directly");
                 out("");
             }
             out("Layer management:");
@@ -1073,9 +1105,9 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("");
             out("Input modes:");
             out("  Interactive:  stdin is a TTY → rustyline REPL");
-            out("  Preferred scripted startup: repl_host_v1_1 --script setup.vfs → script then REPL");
-            out("  Pipe + TTY:   cat script.vfs - | repl_host_v1_1 → limited terminal semantics");
-            out("  Pure pipe:    cat script.vfs | repl_host_v1_1 → script then serve until signaled");
+            out("  Preferred scripted startup: repl_host_v1_15 --script setup.vfs → script then REPL");
+            out("  Pipe + TTY:   cat script.vfs - | repl_host_v1_15 → limited terminal semantics");
+            out("  Pure pipe:    cat script.vfs | repl_host_v1_15 → script then serve until signaled");
         }
     }
 }
@@ -1207,37 +1239,13 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
             return ControlFlow::Continue;
         }
         "launch" if parts.len() == 2 || (parts.len() == 3 && parts[1] == "-script") => {
-            let render_only = parts.len() == 3;
-            let guest_name = if render_only { parts[2] } else { parts[1] };
-            match admin
-                .guests
-                .get(guest_name)
-                .ok_or_else(|| anyhow::anyhow!("unknown guest '{guest_name}'"))
-                .and_then(|runtime| render_launch_script(guest_name, runtime))
-            {
-                Ok(script) => {
-                    if render_only {
-                        emit_raw(script);
-                    } else {
-                        match execute_launch_script(guest_name, &script) {
-                            Ok(exec) => {
-                                emit_status(
-                                    admin,
-                                    format!(
-                                        "ok: launch {guest_name} pid={} script={} log={} serial={}",
-                                        exec.pid,
-                                        exec.script_path.display(),
-                                        exec.launch_log_path.display(),
-                                        exec.serial_log_path.display(),
-                                    ),
-                                );
-                            }
-                            Err(e) => emit_status(admin, format!("error: {e}")),
-                        }
-                    }
-                }
-                Err(e) => emit_status(admin, format!("error: {e}")),
-            }
+            let guest_name = if parts.len() == 3 { parts[2] } else { parts[1] };
+            emit_status(
+                admin,
+                format!(
+                    "error: launch support is not embedded in repl_host_v1_15; use libs/vfs/examples/v1.15/launch-vz.sh --guest {guest_name}"
+                ),
+            );
             return ControlFlow::Continue;
         }
         "launch" => {
@@ -1246,16 +1254,12 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
         }
         "shutdown" if parts.len() == 2 => {
             let guest_name = parts[1];
-            match shutdown_guest(guest_name) {
-                Ok(()) => emit_status(
-                    admin,
-                    format!(
-                        "ok: shutdown {guest_name} api_socket={}",
-                        guest_api_socket_path(guest_name).display()
-                    ),
+            emit_status(
+                admin,
+                format!(
+                    "error: shutdown {guest_name} is not implemented for v1.15; stop the helper pid recorded by launch-vz.sh"
                 ),
-                Err(e) => emit_status(admin, format!("error: {e}")),
-            }
+            );
             return ControlFlow::Continue;
         }
         "shutdown" => {

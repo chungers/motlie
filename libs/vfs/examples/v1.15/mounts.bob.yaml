@@ -1,6 +1,3 @@
-server:
-  host: __HOST_GATEWAY__
-  port: __HOST_PORT__
 mounts:
   - tag: bob-home
     guest_path: /home/bob

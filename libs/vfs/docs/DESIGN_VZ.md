@@ -13,20 +13,25 @@ backend design in `libs/vmm/docs/DESIGN_VZ.md`.
 `libs/vfs/examples/v1.15` is the first Apple Vz managed guestfs feasibility
 slice.
 
-What `v1.15` proved:
+What `v1.15` now implements:
 
-- a Linux guest booted through Apple Vz on this host can run
-  `motlie-vfs-guest-v1_15`
+- a Linux guest provisioned for Apple Vz can run `motlie-vfs-guest-v1_15`
 - a host-side `FsServer` can serve Alice and Bob simultaneously
 - multi-tag routing via `TAG <name>` still works
-- managed guestfs semantics survive the Apple Vz path
+- the guest path is now AF_VSOCK and the host path is now Apple
+  `VZVirtioSocketListener` -> Unix socket bridging
 
-What `v1.15` used:
+What `v1.15` now uses:
 
-- Tart as an interim signed Vz launcher
-- guest TCP over the Tart NAT gateway back to a host TCP listener
+- Tart to provision the reusable runtime disk image and guest-side services
+- a small Apple Vz helper to boot that same disk with
+  `VZVirtioSocketDeviceConfiguration`
+- guest AF_VSOCK to host Unix-socket bridging, matching the CH transport shape
 
-That transport was chosen only to prove filesystem feasibility quickly.
+What is still blocked on this unsigned development host:
+
+- completing Apple Vz VM startup through the helper without
+  `com.apple.security.virtualization`
 
 ## CH Baseline
 
@@ -45,9 +50,9 @@ That distinction matters because Vz should converge on the same architectural
 shape: a hypervisor-local side channel for filesystem traffic, not general guest
 networking.
 
-## Final Vz Transport Direction
+## Implemented Vz Transport Direction
 
-The intended final Apple Vz transport is Apple virtio-socket, not Tart NAT TCP.
+The `v1.15` runtime transport is Apple virtio-socket, not Tart NAT TCP.
 
 Virtualization.framework exposes a socket device API through:
 
@@ -58,47 +63,48 @@ Virtualization.framework exposes a socket device API through:
 
 This is the closest Apple Vz equivalent to the CH/KVM virtio-vsock transport.
 
-The expected final shape is:
+The implemented `v1.15` shape is:
 
 - the guest continues to speak the existing framed `FsOp` / `FsResult`
   protocol
 - the guest opens one connection per mount/tag over the Vz virtio-socket device
-- `vz-runner` owns the host-side `VZVirtioSocketListener`
-- `vz-runner` bridges each accepted `VZVirtioSocketConnection` into the Motlie
-  VFS protocol handler
+- a small Objective-C helper owns the host-side `VZVirtioSocketListener`
+- that helper bridges each accepted `VZVirtioSocketConnection` onto the same
+  host Unix socket path consumed by the existing `VsockConnectionHandler`
 - the filesystem transport remains local to the hypervisor boundary and does
   not depend on guest networking
 
-## Why Tart NAT Is Not Final
+## Why Tart Still Exists In `v1.15`
 
-Using guest TCP over the Tart NAT gateway is acceptable for `v1.15` because it:
+Tart still appears in `v1.15`, but only as a provisioning tool:
 
-- proved the managed guestfs semantics are portable
-- avoided blocking on the first Swift/ObjC `vz-runner` integration
-- kept the Vz slice narrow enough to answer feasibility quickly
+- it provides a signed launcher and guest agent for one-time guest provisioning
+- it lets the example reuse the same bootable raw disk image it already
+  manages under `~/.tart/vms/<name>/disk.img`
+- after provisioning, Tart is stopped and the Apple Vz helper launches that
+  same disk image for the real virtio-socket-backed runtime
 
-But it is not the intended final design because it:
+What `v1.15` no longer uses at runtime:
 
-- couples filesystem reachability to guest networking
-- is architecturally weaker than the CH/KVM vsock boundary
-- makes filesystem transport look like ordinary guest network traffic
-- would blur the line between `motlie-vfs` and `motlie-vnet`
+- guest TCP over the Tart NAT gateway
+- host TCP listeners in `motlie-vfs`
 
 ## Implications For Follow-up Work
 
 `v1.15` should be read as:
 
-- feasibility proven for managed guestfs semantics on Apple Vz
-- transport decision still open at the implementation level
-- likely final transport already clear at the design level: Apple virtio-socket
+- first implementation of the intended Apple virtio-socket transport
+- transport handoff validated up to the Apple entitlement gate
+- still not the final architectural endpoint because the helper is example-local
+  rather than the shared `libs/vmm` `vz-runner`
 
 So the next transport-focused work should move from:
 
-- Tart NAT TCP bridge
+- example-local `vz-vsock-runner.m`
 
 to:
 
-- Vz virtio-socket listener and connection handling inside `vz-runner`
+- the shared `libs/vmm` `vz-runner`
 
 without changing the higher-level `FsServer` / tag-routing model.
 

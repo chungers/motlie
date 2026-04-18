@@ -1,29 +1,24 @@
 //! motlie-vfs-guest-v1_15: Apple Vz guest-side mounter binary.
 //!
-//! Reads a mount config from YAML, connects to the host FsServer over a TCP
-//! stream, sends the same `TAG <name>\n` handshake used by the CH demo, and
-//! mounts FUSE filesystems at the configured guest paths.
+//! Reads a mount config from YAML, connects to the host FsServer over
+//! virtio-vsock, sends the same `TAG <name>\n` handshake used by the CH demo,
+//! and mounts FUSE filesystems at the configured guest paths.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use motlie_vfs::client::fuse::{v1_mount_options, FuseClient};
-use motlie_vfs::vz::client::TcpClientTransport;
+use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
 
 const CONNECT_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
+#[cfg(all(feature = "vsock", feature = "client"))]
+const HOST_CID: u32 = 2;
+#[cfg(all(feature = "vsock", feature = "client"))]
+const VMM_PORT: u32 = 5000;
 
 #[derive(serde::Deserialize)]
 struct MountConfig {
-    server: ServerConfig,
     mounts: Vec<MountEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct ServerConfig {
-    host: String,
-    port: u16,
 }
 
 #[derive(serde::Deserialize)]
@@ -44,103 +39,82 @@ fn main() -> Result<()> {
     let config: MountConfig = serde_yaml::from_str(&config_str)
         .map_err(|e| anyhow::anyhow!("failed to parse config {config_path}: {e}"))?;
 
-    eprintln!(
-        "motlie-vfs-guest-v1_15: mounting {} filesystem(s) via {}:{}",
-        config.mounts.len(),
-        config.server.host,
-        config.server.port
-    );
-    for mount in &config.mounts {
+    let specs: Vec<GuestMountSpec> = config
+        .mounts
+        .into_iter()
+        .map(|m| GuestMountSpec::new(m.tag, m.guest_path).read_only(m.read_only))
+        .collect();
+
+    eprintln!("motlie-vfs-guest-v1_15: mounting {} filesystem(s)", specs.len());
+    for spec in &specs {
         eprintln!(
             "  tag={} path={} ro={}",
-            mount.tag, mount.guest_path, mount.read_only
+            spec.tag, spec.guest_path, spec.read_only
         );
     }
 
-    let mut handles = Vec::new();
-    for mount in config.mounts {
-        let server_host = config.server.host.clone();
-        let server_port = config.server.port;
-        let tag = mount.tag.clone();
-        let guest_path = mount.guest_path.clone();
-        let read_only = mount.read_only;
+    let runner = GuestMountRunner::new(specs);
 
-        let handle = std::thread::Builder::new()
-            .name(format!("fuse-{tag}"))
-            .spawn(move || -> Result<()> {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
+    #[cfg(all(feature = "vsock", feature = "client"))]
+    let handles = {
+        use motlie_vfs::vsock::client::VsockClientTransport;
 
-                let stream = rt.block_on(async {
-                    let deadline = tokio::time::Instant::now() + CONNECT_RETRY_TIMEOUT;
-                    loop {
-                        let addr = format!("{server_host}:{server_port}");
-                        let err = match tokio::net::TcpStream::connect(&addr).await {
-                            Ok(mut stream) => {
-                                match motlie_vfs::vz::write_tag_handshake(&mut stream, &tag).await {
-                                    Ok(()) => break Ok::<_, anyhow::Error>(stream),
-                                    Err(e) => format!("handshake failed: {e}"),
-                                }
+        runner.mount_all(|tag: &str, rt: &tokio::runtime::Runtime| {
+            let tag = tag.to_string();
+            let stream = rt.block_on(async {
+                let deadline = tokio::time::Instant::now() + CONNECT_RETRY_TIMEOUT;
+
+                loop {
+                    let addr = tokio_vsock::VsockAddr::new(HOST_CID, VMM_PORT);
+                    let err = match tokio_vsock::VsockStream::connect(addr).await {
+                        Ok(mut stream) => {
+                            match motlie_vfs::vsock::write_tag_handshake(&mut stream, &tag).await {
+                                Ok(()) => break Ok::<_, anyhow::Error>(stream),
+                                Err(e) => format!("handshake failed: {e}"),
                             }
-                            Err(e) => e.to_string(),
-                        };
-
-                        if tokio::time::Instant::now() >= deadline {
-                            break Err(anyhow::anyhow!(
-                                "failed to connect guest mount tag '{}' to host {}:{} within {:?}: {}",
-                                tag,
-                                server_host,
-                                server_port,
-                                CONNECT_RETRY_TIMEOUT,
-                                err
-                            ));
                         }
+                        Err(e) => e.to_string(),
+                    };
 
-                        tokio::time::sleep(CONNECT_RETRY_DELAY).await;
+                    if tokio::time::Instant::now() >= deadline {
+                        break Err(anyhow::anyhow!(
+                            "failed to connect guest mount tag '{}' to host CID {} port {} within {:?}: {}",
+                            tag,
+                            HOST_CID,
+                            VMM_PORT,
+                            CONNECT_RETRY_TIMEOUT,
+                            err
+                        ));
                     }
-                })?;
 
-                let transport = Arc::new(TcpClientTransport::new(stream, &tag));
-                std::fs::create_dir_all(&guest_path)?;
-
-                let transport_for_fuse = Arc::clone(&transport);
-                let request_fn = move |op: motlie_vfs::core::op::FsOp| -> motlie_vfs::core::op::FsResult {
-                    let transport = Arc::clone(&transport_for_fuse);
-                    match rt.block_on(transport.request(&op)) {
-                        Ok(result) => result,
-                        Err(_) => motlie_vfs::core::op::FsResult::Error { errno: libc::EIO },
-                    }
-                };
-
-                let fuse_client = FuseClient::new(request_fn);
-                let opts = v1_mount_options(read_only);
-                fuser::mount2(fuse_client, &guest_path, &opts)?;
-
-                Ok(())
+                    tokio::time::sleep(CONNECT_RETRY_DELAY).await;
+                }
             })?;
-        handles.push(handle);
-    }
+
+            Ok(VsockClientTransport::new(stream, &tag))
+        })?
+    };
+
+    #[cfg(not(all(feature = "vsock", feature = "client")))]
+    let handles = {
+        eprintln!("motlie-vfs-guest-v1_15: vsock+client features not enabled, using stub mounts");
+        runner.mount_all_stub()?
+    };
 
     eprintln!("motlie-vfs-guest-v1_15: all mounts started, waiting...");
+    let results = handles.join_all();
     let mut mount_failed = false;
-    for (i, handle) in handles.into_iter().enumerate() {
-        match handle.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
+    for (i, result) in results.iter().enumerate() {
+        match result {
+            Ok(()) => {}
+            Err(e) => {
                 mount_failed = true;
                 eprintln!("mount {i} failed: {e}");
             }
-            Err(_) => {
-                mount_failed = true;
-                eprintln!("mount {i} panicked");
-            }
         }
     }
-
     if mount_failed {
         anyhow::bail!("one or more guest mounts failed");
     }
-
     Ok(())
 }

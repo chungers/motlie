@@ -129,7 +129,7 @@ if '"libs/vfs",' not in text:
     text = text.replace('members = [\n', 'members = [\n    "libs/vfs",\n', 1)
     root.write_text(text, encoding="utf-8")
 PY
-cargo build --manifest-path '$GUEST_SRC_DIR/libs/vfs/Cargo.toml' --release --features client --bin motlie-vfs-guest-v1_15
+cargo build --manifest-path '$GUEST_SRC_DIR/libs/vfs/Cargo.toml' --release --features vsock,client --bin motlie-vfs-guest-v1_15
 EOF
 
 echo "--- installing generic guest contract ---"

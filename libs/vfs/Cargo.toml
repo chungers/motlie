@@ -78,3 +78,4 @@ required-features = ["vsock"]
 [[example]]
 name = "repl_host_v1_15"
 path = "examples/v1.15/repl_host.rs"
+required-features = ["vsock"]

@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-17 | @vmm-vz-cdx | Add `libs/vfs/docs/DESIGN_VZ.md` and clarify that `v1.15` used Tart NAT/TCP only as a feasibility bridge; the intended final Apple Vz filesystem transport is Virtualization.framework virtio-socket, not general guest networking |
+| 2026-04-17 | @vmm-vz-cdx | Add `libs/vfs/docs/DESIGN_VZ.md` and clarify that `v1.15` now provisions runtime disks with Tart but launches them through an Apple virtio-socket helper, aligning the Vz guestfs transport with the CH vsock boundary |
 | 2026-04-17 | @vmm-vz-cdx | Add the Apple Vz `v1.05` / `v1.15` sequencing note: `libs/vfs/examples/v1.05/` is the Tart-backed guest-image / guest-contract probe, while `v1.15` remains the first managed guestfs transport slice |
 | 2026-04-06 | @codex | Record the harness ownership handoff: `v1` and `v1.1` remain VFS-owned, while the `v1.2+` example / validation harness moves to `motlie-vnet` with `libs/vnet/docs/{DESIGN,PLAN}.md` as the networking source of truth |
 | 2026-04-05 | @codex | Extend the v1 wire protocol and semantics with `Access`, xattrs, and byte-range locks; document handle-based fsync/rename behavior and the remaining lock-limitations for the compatibility pass |
@@ -118,9 +118,10 @@ v1 lives inside `libs/vfs` and targets the fastest proof of concept:
     transport
   - `v1.15` is the later Apple Vz managed guestfs transport slice that follows
     `v1.05`
-  - `v1.15` currently uses Tart NAT/TCP only as a temporary feasibility bridge;
-    the intended final Apple Vz guestfs transport is Virtualization.framework
-    virtio-socket, documented in `libs/vfs/docs/DESIGN_VZ.md`
+  - `v1.15` now uses Tart only to provision the runtime disk image; the actual
+    guestfs transport is Apple Virtualization.framework virtio-socket bridged
+    to the same host Unix socket shape used by CH, documented in
+    `libs/vfs/docs/DESIGN_VZ.md`
   - beginning with `v1.2`, the composed host / networking harness is owned by
     `motlie-vnet` under `libs/vnet/examples/v1.2/`
   - networking design / follow-up work for `v1.2+` therefore lives in
