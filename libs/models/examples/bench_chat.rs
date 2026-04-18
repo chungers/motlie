@@ -16,9 +16,10 @@
 ///   MOTLIE_PAGED_ATTN_CONTEXT=N — enable PagedAttention with N-token context budget (CUDA only)
 use anyhow::{Context, Result, bail};
 use motlie_model::{
-    ArtifactPolicy, ChatMessage, ChatModel, ChatRequest, ChatRole, QuantizationBits, StartOptions,
+    ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, QuantizationBits,
+    StartOptions,
 };
-use motlie_models::default_artifact_root;
+use motlie_models::{CuratedBundle, default_artifact_root};
 use std::time::Instant;
 
 #[tokio::main]
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
     println!("input-words: {prompt_words}");
     println!("input-est-tokens: ~{est_tokens}");
 
-    let bundle: Box<dyn motlie_models::ErasedModelBundle> = match model_name.as_str() {
+    let bundle: CuratedBundle = match model_name.as_str() {
         "qwen" => {
             #[cfg(feature = "model-qwen3-4b")]
             {
@@ -111,7 +112,7 @@ async fn main() -> Result<()> {
     println!("\n--- startup ---");
     let startup_at = Instant::now();
     let handle = bundle
-        .start_erased(StartOptions {
+        .start(StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
@@ -138,7 +139,7 @@ async fn main() -> Result<()> {
             println!("\n--- summary ---");
             println!("status: FAILED at warmup");
             println!("error: {e}");
-            handle.shutdown_box().await.ok();
+            handle.shutdown().await.ok();
             return Ok(());
         }
     }
@@ -210,11 +211,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    handle.shutdown_box().await.context("shutdown failed")?;
+    handle.shutdown().await.context("shutdown failed")?;
     Ok(())
 }
 
-async fn run_one(chat: &dyn ChatModel, prompt: &str) -> Result<(usize, f64)> {
+async fn run_one<C: ChatModel + ?Sized>(chat: &C, prompt: &str) -> Result<(usize, f64)> {
     let started = Instant::now();
     let response = chat
         .generate(ChatRequest {

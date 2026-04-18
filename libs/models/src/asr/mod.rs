@@ -73,6 +73,17 @@ impl AsrModels {
             Self::WhisperBaseEn => whisper_base_en::descriptor(),
         }
     }
+
+    pub fn bundle(&self) -> crate::CuratedBundle {
+        match self {
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn => crate::CuratedBundle::MoonshineStreamingEn,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn => crate::CuratedBundle::SherpaOnnxStreamingEn,
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn => crate::CuratedBundle::WhisperBaseEn,
+        }
+    }
 }
 
 #[cfg(any(

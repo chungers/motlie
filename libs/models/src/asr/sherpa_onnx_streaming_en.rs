@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
 use motlie_model_sherpa_onnx::{
-    SherpaOnnxHandle, SherpaOnnxStreamingAdapter, SherpaOnnxStreamingBundle,
-    SherpaOnnxStreamingSpec,
+    SherpaOnnxHandle, SherpaOnnxStreamingBundle, SherpaOnnxStreamingSpec,
 };
 
 use crate::{
@@ -25,12 +23,7 @@ const TOKENS_FILE: &str = "tokens.txt";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_onnx_root),
-        Arc::new(SherpaOnnxStreamingAdapter::zipformer_en_streaming()),
-    );
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -80,6 +73,16 @@ pub fn descriptor() -> BundleDescriptor {
             "sherpa_onnx_streaming_zipformer_en",
             &checkpoint,
         )),
+    }
+}
+
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = SherpaOnnxStreamingSpec::zipformer_en_streaming();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::SherpaOnnx,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
     }
 }
 

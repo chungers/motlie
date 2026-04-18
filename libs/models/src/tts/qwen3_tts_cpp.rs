@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
@@ -7,7 +6,7 @@ use motlie_model::{
     StartOptions,
 };
 use motlie_model_qwen3_tts_cpp::{
-    Qwen3TtsCppHandle, Qwen3TtsCppSpeechAdapter, Qwen3TtsCppSpeechBundle, Qwen3TtsCppSpeechSpec,
+    Qwen3TtsCppHandle, Qwen3TtsCppSpeechBundle, Qwen3TtsCppSpeechSpec,
 };
 
 use crate::{
@@ -24,12 +23,7 @@ const TOKENIZER_FILE_F16: &str = "qwen3-tts-tokenizer-f16.gguf";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_path),
-        Arc::new(Qwen3TtsCppSpeechAdapter::qwen3_tts_cpp_0_6b()),
-    );
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -80,6 +74,16 @@ pub fn descriptor() -> BundleDescriptor {
             "qwen3_tts_cpp_0_6b",
             &checkpoint,
         )),
+    }
+}
+
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = Qwen3TtsCppSpeechSpec::qwen3_tts_cpp_0_6b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Qwen3TtsCpp,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
     }
 }
 

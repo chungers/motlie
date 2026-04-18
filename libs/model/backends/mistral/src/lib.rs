@@ -6,9 +6,13 @@ mod multimodal;
 mod text;
 
 pub use embeddings::{
-    MistralEmbeddingAdapter, MistralEmbeddingArch, MistralEmbeddingBundle, MistralEmbeddingSpec,
+    MistralEmbeddingAdapter, MistralEmbeddingArch, MistralEmbeddingBundle, MistralEmbeddingHandle,
+    MistralEmbeddingSpec,
 };
 pub use multimodal::{
-    MistralMultimodalAdapter, MistralMultimodalArch, MistralMultimodalBundle, MistralMultimodalSpec,
+    MistralMultimodalAdapter, MistralMultimodalArch, MistralMultimodalBundle,
+    MistralMultimodalHandle, MistralMultimodalSpec,
 };
-pub use text::{MistralTextAdapter, MistralTextArch, MistralTextBundle, MistralTextSpec};
+pub use text::{
+    MistralTextAdapter, MistralTextArch, MistralTextBundle, MistralTextHandle, MistralTextSpec,
+};

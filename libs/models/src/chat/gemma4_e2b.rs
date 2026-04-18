@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use motlie_model::{BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity};
-use motlie_model_mistral::MistralMultimodalAdapter;
+use motlie_model::{
+    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
+};
+use motlie_model_mistral::{
+    MistralMultimodalBundle, MistralMultimodalHandle, MistralMultimodalSpec,
+};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
@@ -12,13 +16,8 @@ use crate::{
 pub const SELECTOR: &str = "google/gemma4_e2b";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_snapshot_root),
-        Arc::new(MistralMultimodalAdapter::gemma4()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -70,16 +69,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn crate::ErasedModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(MistralMultimodalAdapter::gemma4()),
-        Arc::new(resolve_local_snapshot_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = MistralMultimodalSpec::gemma4_e2b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::MistralRs,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::Gemma4E2B
+}
+
+pub async fn start(options: StartOptions) -> Result<MistralMultimodalHandle, ModelError> {
+    MistralMultimodalBundle::new(MistralMultimodalSpec::gemma4_e2b())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_snapshot_root,
+        )?)
+        .await
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {

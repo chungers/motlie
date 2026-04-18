@@ -74,6 +74,17 @@ impl TtsModels {
             Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::descriptor(),
         }
     }
+
+    pub fn bundle(&self) -> crate::CuratedBundle {
+        match self {
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium => crate::CuratedBundle::PiperEnUsLjspeechMedium,
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B => crate::CuratedBundle::Qwen3TtsCpp0_6B,
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B => crate::CuratedBundle::Qwen3Tts12Hz0_6B,
+        }
+    }
 }
 
 #[cfg(any(

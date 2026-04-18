@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
-    EmbeddingNormalization, EmbeddingSpec, ModelCheckpoint, ModelError, ModelIdentity,
+    EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_mistral::MistralEmbeddingAdapter;
+use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingHandle, MistralEmbeddingSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -33,13 +33,8 @@ const EMBEDDING_SPEC: EmbeddingSpec = EmbeddingSpec {
 };
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_snapshot_root),
-        Arc::new(MistralEmbeddingAdapter::embedding_gemma()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -105,16 +100,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn crate::ErasedModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(MistralEmbeddingAdapter::embedding_gemma()),
-        Arc::new(resolve_local_snapshot_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = MistralEmbeddingSpec::embeddinggemma_300m();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::MistralRs,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::GoogleGemma300m
+}
+
+pub async fn start(options: StartOptions) -> Result<MistralEmbeddingHandle, ModelError> {
+    MistralEmbeddingBundle::new(MistralEmbeddingSpec::embeddinggemma_300m())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_snapshot_root,
+        )?)
+        .await
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -233,7 +239,7 @@ mod tests {
             .instantiate(&BundleId::new("embeddinggemma_300m"))
             .expect("default catalog should instantiate embeddinggemma");
         let handle = bundle
-            .start_erased(StartOptions {
+            .start(StartOptions {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly { root: root.into() }),
                 ..Default::default()
             })
@@ -259,10 +265,7 @@ mod tests {
             "embedding vector should not contain NaN or Inf values: {vector:?}"
         );
 
-        handle
-            .shutdown_box()
-            .await
-            .expect("shutdown should succeed");
+        handle.shutdown().await.expect("shutdown should succeed");
     }
 
     fn unique_temp_dir() -> PathBuf {

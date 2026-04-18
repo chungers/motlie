@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
 use motlie_model_whisper_cpp::{
-    WhisperCppHandle, WhisperCppTranscriptionAdapter, WhisperCppTranscriptionBundle,
-    WhisperCppTranscriptionSpec,
+    WhisperCppHandle, WhisperCppTranscriptionBundle, WhisperCppTranscriptionSpec,
 };
 
 use crate::{
@@ -19,12 +17,7 @@ pub const SELECTOR: &str = "openai/whisper_base_en";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_ggml_root),
-        Arc::new(WhisperCppTranscriptionAdapter::whisper_base_en()),
-    );
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -71,6 +64,16 @@ pub fn descriptor() -> BundleDescriptor {
             "whisper_base_en",
             &checkpoint,
         )),
+    }
+}
+
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = WhisperCppTranscriptionSpec::whisper_base_en();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::WhisperCpp,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
     }
 }
 

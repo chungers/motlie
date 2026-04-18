@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_piper::{PiperHandle, PiperSpeechAdapter, PiperSpeechBundle, PiperSpeechSpec};
+use motlie_model_piper::{PiperHandle, PiperSpeechBundle, PiperSpeechSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -20,12 +19,7 @@ const CONFIG_FILE: &str = "en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.j
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_path),
-        Arc::new(PiperSpeechAdapter::en_us_ljspeech_medium()),
-    );
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -74,6 +68,16 @@ pub fn descriptor() -> BundleDescriptor {
             "piper_en_us_ljspeech_medium",
             &checkpoint,
         )),
+    }
+}
+
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = PiperSpeechSpec::en_us_ljspeech_medium();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Ort,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
     }
 }
 

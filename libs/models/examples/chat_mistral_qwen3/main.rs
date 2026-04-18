@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
-    ArtifactPolicy, ChatMessage, ChatRequest, ChatRole, QuantizationBits, StartOptions,
+    ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
+    QuantizationBits, StartOptions,
 };
 use motlie_models::{ModelSelector, chat::ChatModels, default_artifact_root};
 use std::time::Instant;
@@ -118,7 +119,7 @@ async fn main() -> Result<()> {
     let startup_sampler = support::StartupSampler::spawn("startup");
     let startup_at = Instant::now();
     let handle = bundle
-        .start_erased(StartOptions {
+        .start(StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
@@ -221,7 +222,7 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-completion", handle.metric_snapshot());
 
     handle
-        .shutdown_box()
+        .shutdown()
         .await
         .context("bundle shutdown should succeed")?;
     support::print_process_snapshot(
