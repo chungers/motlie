@@ -195,7 +195,7 @@ mod tests {
 
         #[cfg(feature = "model-whisper-base-en")]
         {
-            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(catalog.instantiate(&bundle_id).is_some());
             assert!(
                 catalog
                     .bundles_for_track(EvalTrack::Transcription)

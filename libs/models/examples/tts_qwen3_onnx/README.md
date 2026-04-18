@@ -1,7 +1,7 @@
 # `tts_qwen3_onnx` — Qwen3-TTS ONNX Example
 
-Second TTS example: Qwen3-TTS 12Hz 0.6B with optional voice cloning via
-`VoiceConditioning::ReferenceAudio`.
+Second TTS example: Qwen3-TTS 12Hz 0.6B with optional voice cloning via a
+typed `CloneReference<16000, Mono>`.
 
 ## ONNX Export Prerequisite
 
@@ -74,21 +74,23 @@ cargo run -p motlie-models --example tts_qwen3_onnx \
 
 - The example opens the curated `Qwen3-TTS 12Hz 0.6B` bundle.
 - Text is synthesized through the multi-model ONNX pipeline
-  (encoder → decoder → vocoder) via the shared `SpeechModel`/`SpeechStream` contract.
+  (encoder → decoder → vocoder) via the typed
+  `SpeechSynthesizer<SynthesisRequest>` / `SpeechStream` contract.
 - **With both `--reference-audio` and `--reference-text`:** the decoder receives
   mel conditioning from the reference audio AND tokenized reference transcript
   for full prompted cloning (3 decoder inputs: hidden, mel, ref_token_ids).
 - **With only `--reference-audio`:** audio-only mel conditioning (2 decoder inputs:
   hidden, mel). Reduced quality — a warning is logged.
 - The resulting `.wav` file uses the backend-reported sample rate and encoding.
-- Like Piper Phase 1, Qwen3-TTS performs whole-utterance synthesis in
-  `open_stream()` and then emits buffered PCM chunks through `next_chunk()`.
+- Like Piper Phase 1, Qwen3-TTS performs whole-utterance synthesis inside
+  `synthesize()` and then emits buffered typed audio chunks through
+  `next_chunk()`.
 
 ## Architecture
 
 This example demonstrates the Phase 2 TTS vertical slice:
-- Same `SpeechModel`/`SpeechStream` contract as Piper Phase 1
+- Same typed `SpeechSynthesizer` / `SpeechStream` contract as Piper Phase 1
 - Reuses the shared `motlie-model-ort` ONNX Runtime helpers
-- Adds `VoiceConditioning::ReferenceAudio` with `reference_text` for prompted cloning
+- Adds typed `CloneReference<16000, Mono>` with `reference_text` for prompted cloning
 - Multi-model ONNX pipeline (3 sessions: encoder, decoder, vocoder)
 - Greedy longest-match subword tokenizer against flattened BPE vocabulary

@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use motlie_model::{
-    ArtifactPolicy, AudioSpec, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint,
-};
+use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 use serde::Deserialize;
 
 pub(crate) use motlie_model::metrics_runtime::{
@@ -60,10 +58,8 @@ pub(crate) fn configure_artifact_policy(
 
 #[derive(Clone, Debug)]
 pub(crate) struct PiperConfig {
-    pub audio_spec: AudioSpec,
+    pub sample_rate_hz: u32,
     pub espeak_voice: String,
-    pub num_speakers: u32,
-    pub speaker_id_map: HashMap<String, i64>,
     pub phoneme_id_map: HashMap<String, Vec<i64>>,
     pub default_noise_scale: f32,
     pub default_length_scale: f32,
@@ -89,12 +85,6 @@ impl PiperConfig {
         })?;
         parsed.into_config(path)
     }
-
-    pub(crate) fn supports_speaker(&self, speaker_id: u32) -> bool {
-        self.speaker_id_map
-            .values()
-            .any(|value| *value == speaker_id as i64)
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -102,10 +92,6 @@ struct PiperSidecar {
     audio: PiperAudioConfig,
     espeak: PiperEspeakConfig,
     inference: PiperInferenceConfig,
-    #[serde(default)]
-    num_speakers: u32,
-    #[serde(default)]
-    speaker_id_map: HashMap<String, i64>,
     phoneme_id_map: HashMap<String, Vec<i64>>,
 }
 
@@ -123,15 +109,8 @@ impl PiperSidecar {
         let pad_id = first_symbol_id(&self.phoneme_id_map, "_", path)?;
 
         Ok(PiperConfig {
-            audio_spec: AudioSpec {
-                sample_rate_hz: self.audio.sample_rate,
-                channels: 1,
-                encoding: PcmEncoding::S16Le,
-                preferred_chunk_bytes: 0,
-            },
+            sample_rate_hz: self.audio.sample_rate,
             espeak_voice: self.espeak.voice,
-            num_speakers: self.num_speakers,
-            speaker_id_map: self.speaker_id_map,
             phoneme_id_map: self.phoneme_id_map,
             default_noise_scale: self.inference.noise_scale,
             default_length_scale: self.inference.length_scale,

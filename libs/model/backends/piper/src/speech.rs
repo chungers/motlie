@@ -4,13 +4,14 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use espeak_rs::text_to_phonemes;
-use motlie_model::typed::{AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer};
+use motlie_model::typed::{
+    AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer, SynthesisRequest,
+};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, PcmChunk, QuantizationSupport, ResolvedCheckpoint,
-    SpeechParams, SpeechRequest, StartOptions, UnsupportedChat, UnsupportedCompletion,
-    UnsupportedEmbeddings, VoiceConditioning,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, SpeechParams,
+    StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_ort::build_session;
 use ndarray::{Array1, Array2};
@@ -24,6 +25,7 @@ use crate::common::{
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
 const OUTPUT_CHUNK_DURATION_MS: u32 = 40;
+const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
 
 #[derive(Clone, Debug)]
 pub struct PiperSpeechSpec {
@@ -279,7 +281,7 @@ struct PiperRuntime {
 }
 
 impl PiperRuntime {
-    fn synthesize(&self, request: &SpeechRequest) -> Result<Vec<u8>, ModelError> {
+    fn synthesize(&self, request: &SynthesisRequest) -> Result<Vec<i16>, ModelError> {
         let text = request.text.trim();
         if text.is_empty() {
             return Err(ModelError::InvalidConfiguration(
@@ -292,29 +294,7 @@ impl PiperRuntime {
             ));
         }
 
-        let speaker_id = match &request.conditioning {
-            None => None,
-            Some(VoiceConditioning::SpeakerId(speaker_id)) => {
-                if self.config.num_speakers <= 1 {
-                    return Err(ModelError::InvalidConfiguration(
-                        "piper voice does not support speaker selection".into(),
-                    ));
-                }
-                if !self.config.supports_speaker(*speaker_id) {
-                    return Err(ModelError::InvalidConfiguration(format!(
-                        "speaker id `{speaker_id}` is not defined by this piper voice"
-                    )));
-                }
-                Some(*speaker_id as i64)
-            }
-            Some(VoiceConditioning::ReferenceAudio { .. }) => {
-                return Err(ModelError::InvalidConfiguration(
-                    "piper backend does not support reference-audio conditioning".into(),
-                ));
-            }
-        };
-
-        let scales = synthesis_scales(&self.config, &request.params, speaker_id)?;
+        let scales = synthesis_scales(&self.config, &request.params, None)?;
         let phoneme_batches = text_to_phonemes(text, &self.config.espeak_voice, None, true, false)
             .map_err(|err| ModelError::BackendExecution {
                 backend: "piper",
@@ -336,7 +316,7 @@ impl PiperRuntime {
                 continue;
             }
             let samples = run_inference(&self.session, &input_ids, &scales)?;
-            append_s16le_pcm(&mut pcm, &samples);
+            append_i16_samples(&mut pcm, &samples);
         }
 
         if pcm.is_empty() {
@@ -357,59 +337,35 @@ impl PiperRuntime {
 /// `open_stream()` performs the full synthesis up front and `next_chunk()`
 /// subsequently yields buffered PCM for sink adapters.
 pub struct PiperSpeechStream {
-    pcm: Vec<u8>,
+    pcm: Vec<i16>,
     offset: usize,
-    next_sequence: u64,
-    chunk_len_bytes: usize,
+    chunk_len_samples: usize,
 }
 
 impl PiperSpeechStream {
-    fn new(audio_spec: motlie_model::AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
-        let bytes_per_sample = match audio_spec.encoding {
-            motlie_model::PcmEncoding::S16Le => 2,
-            motlie_model::PcmEncoding::F32Le => 4,
-        };
+    fn new(pcm: Vec<i16>) -> Self {
         let frames_per_chunk =
-            ((audio_spec.sample_rate_hz as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
-        let chunk_len_bytes =
-            frames_per_chunk.max(1) * audio_spec.channels as usize * bytes_per_sample;
+            ((PIPER_SAMPLE_RATE_HZ as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
 
-        Ok(Self {
+        Self {
             pcm,
             offset: 0,
-            next_sequence: 0,
-            chunk_len_bytes,
-        })
+            chunk_len_samples: frames_per_chunk.max(1),
+        }
     }
-}
-
-fn decode_s16le_chunk(data: &[u8]) -> Result<Vec<i16>, ModelError> {
-    if !data.len().is_multiple_of(2) {
-        return Err(ModelError::InvalidConfiguration(
-            "typed Piper output expects even-length S16LE PCM chunks".into(),
-        ));
-    }
-
-    Ok(data
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect())
 }
 
 impl PiperSpeechStream {
-    async fn next_pcm_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError> {
+    async fn next_audio_chunk(
+        &mut self,
+    ) -> Result<Option<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>, ModelError> {
         if self.offset >= self.pcm.len() {
             return Ok(None);
         }
 
-        let end = (self.offset + self.chunk_len_bytes).min(self.pcm.len());
-        let chunk = PcmChunk {
-            data: self.pcm[self.offset..end].to_vec(),
-            sequence: self.next_sequence,
-            end_of_stream: end == self.pcm.len(),
-        };
+        let end = (self.offset + self.chunk_len_samples).min(self.pcm.len());
+        let chunk = AudioBuf::new(self.pcm[self.offset..end].to_vec());
         self.offset = end;
-        self.next_sequence = self.next_sequence.saturating_add(1);
 
         Ok(Some(chunk))
     }
@@ -420,28 +376,24 @@ impl PiperSpeechStream {
 }
 
 impl SpeechSynthesizer for PiperHandle {
+    type Request = SynthesisRequest;
     type Output = AudioBuf<i16, 22_050, Mono>;
     type Stream = PiperSpeechStream;
 
-    fn synthesize(
-        &self,
-        request: SpeechRequest,
-    ) -> impl std::future::Future<Output = Result<Self::Stream, ModelError>> + Send {
+    async fn synthesize(&self, request: Self::Request) -> Result<Self::Stream, ModelError> {
         let runtime = Arc::clone(&self.runtime);
         let metrics = Arc::clone(&self.metrics);
 
-        async move {
-            let started_at = Instant::now();
-            let pcm = runtime.synthesize(&request)?;
-            let elapsed = started_at.elapsed();
+        let started_at = Instant::now();
+        let pcm = runtime.synthesize(&request)?;
+        let elapsed = started_at.elapsed();
 
-            {
-                let mut state = lock_metrics(&metrics, "piper-typed-synthesize");
-                observe_latency(&mut state.runtime, elapsed);
-            }
-
-            PiperSpeechStream::new(runtime.config.audio_spec.clone(), pcm)
+        {
+            let mut state = lock_metrics(&metrics, "piper-typed-synthesize");
+            observe_latency(&mut state.runtime, elapsed);
         }
+
+        Ok(PiperSpeechStream::new(pcm))
     }
 }
 
@@ -449,11 +401,7 @@ impl TypedSpeechStream for PiperSpeechStream {
     type Chunk = AudioBuf<i16, 22_050, Mono>;
 
     async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
-        let Some(chunk) = self.next_pcm_chunk().await? else {
-            return Ok(None);
-        };
-
-        Ok(Some(AudioBuf::new(decode_s16le_chunk(&chunk.data)?)))
+        self.next_audio_chunk().await
     }
 
     async fn finish(self) -> Result<(), ModelError> {
@@ -470,9 +418,17 @@ struct PiperSynthesisScales {
 }
 
 fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelError> {
+    let config = PiperConfig::from_path(&artifacts.config)?;
+    if config.sample_rate_hz != PIPER_SAMPLE_RATE_HZ {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "curated Piper bundle expects {} Hz output, config declares {} Hz",
+            PIPER_SAMPLE_RATE_HZ, config.sample_rate_hz
+        )));
+    }
+
     Ok(PiperRuntime {
         session: Mutex::new(build_session("piper", &artifacts.model)?),
-        config: PiperConfig::from_path(&artifacts.config)?,
+        config,
     })
 }
 
@@ -573,12 +529,12 @@ fn run_inference(
     Ok(samples.to_vec())
 }
 
-fn append_s16le_pcm(target: &mut Vec<u8>, samples: &[f32]) {
-    target.reserve(samples.len() * 2);
+fn append_i16_samples(target: &mut Vec<i16>, samples: &[f32]) {
+    target.reserve(samples.len());
     for sample in samples {
         let clamped = sample.clamp(-1.0, 1.0);
         let as_i16 = (clamped * i16::MAX as f32) as i16;
-        target.extend_from_slice(&as_i16.to_le_bytes());
+        target.push(as_i16);
     }
 }
 
@@ -593,30 +549,19 @@ fn ort_tensor_error(err: ort::Error) -> ModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::{PcmEncoding, SpeechParams};
+    use motlie_model::SpeechParams;
 
     #[tokio::test]
-    async fn stream_emits_monotonic_chunks_and_finishes_once() {
-        let audio_spec = motlie_model::AudioSpec {
-            sample_rate_hz: 16_000,
-            channels: 1,
-            encoding: PcmEncoding::S16Le,
-            preferred_chunk_bytes: 0,
-        };
-        let pcm = vec![1_u8; 10_000];
-        let mut stream = PiperSpeechStream::new(audio_spec, pcm).expect("stream should build");
+    async fn stream_emits_chunks_and_finishes_once() {
+        let pcm = vec![1_i16; 10_000];
+        let mut stream = PiperSpeechStream::new(pcm);
 
-        let mut previous_sequence = None;
-        let mut saw_final = false;
+        let mut total = 0usize;
         while let Some(chunk) = stream.next_chunk().await.expect("chunking should succeed") {
-            if let Some(previous) = previous_sequence {
-                assert!(chunk.sequence > previous);
-            }
-            previous_sequence = Some(chunk.sequence);
-            saw_final = chunk.end_of_stream;
+            total += chunk.samples().len();
         }
 
-        assert!(saw_final);
+        assert_eq!(total, 10_000);
         assert!(
             stream
                 .next_chunk()
@@ -629,15 +574,8 @@ mod tests {
     #[test]
     fn speaking_rate_maps_to_inverse_length_scale() {
         let config = PiperConfig {
-            audio_spec: motlie_model::AudioSpec {
-                sample_rate_hz: 22_050,
-                channels: 1,
-                encoding: PcmEncoding::S16Le,
-                preferred_chunk_bytes: 0,
-            },
+            sample_rate_hz: 22_050,
             espeak_voice: "en-us".into(),
-            num_speakers: 1,
-            speaker_id_map: Default::default(),
             phoneme_id_map: Default::default(),
             default_noise_scale: 0.667,
             default_length_scale: 1.0,
@@ -670,15 +608,8 @@ mod tests {
         phoneme_id_map.insert("b".into(), vec![11]);
 
         let config = PiperConfig {
-            audio_spec: motlie_model::AudioSpec {
-                sample_rate_hz: 22_050,
-                channels: 1,
-                encoding: PcmEncoding::S16Le,
-                preferred_chunk_bytes: 0,
-            },
+            sample_rate_hz: 22_050,
             espeak_voice: "en-us".into(),
-            num_speakers: 1,
-            speaker_id_map: Default::default(),
             phoneme_id_map,
             default_noise_scale: 0.667,
             default_length_scale: 1.0,

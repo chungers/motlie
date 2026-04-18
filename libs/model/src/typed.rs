@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
 
-use crate::{ModelError, SpeechRequest, TranscriptionParams, TranscriptionUpdate};
+use crate::{ModelError, SpeechParams, TranscriptionParams, TranscriptionUpdate};
 
 pub trait ChannelLayout: Send + Sync + 'static {
     const COUNT: u16;
@@ -25,6 +25,18 @@ impl ChannelLayout for Stereo {
 pub struct AudioBuf<S, const RATE_HZ: u32, C: ChannelLayout> {
     samples: Vec<S>,
     _channels: PhantomData<C>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SynthesisRequest {
+    pub text: String,
+    pub params: SpeechParams,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CloneReference<const RATE_HZ: u32, C: ChannelLayout> {
+    pub audio: AudioBuf<f32, RATE_HZ, C>,
+    pub transcript: Option<String>,
 }
 
 impl<S, const RATE_HZ: u32, C: ChannelLayout> AudioBuf<S, RATE_HZ, C> {
@@ -203,12 +215,25 @@ pub trait TranscriptionSession: Send {
 }
 
 pub trait SpeechSynthesizer: Send + Sync {
+    type Request;
     type Output;
     type Stream: SpeechStream<Chunk = Self::Output>;
 
     fn synthesize(
         &self,
-        request: SpeechRequest,
+        request: Self::Request,
+    ) -> impl Future<Output = Result<Self::Stream, ModelError>> + Send;
+}
+
+pub trait VoiceCloneSynthesizer<const RATE_HZ: u32, C: ChannelLayout>: Send + Sync {
+    type Request;
+    type Output;
+    type Stream: SpeechStream<Chunk = Self::Output>;
+
+    fn synthesize_with_reference(
+        &self,
+        request: Self::Request,
+        reference: CloneReference<RATE_HZ, C>,
     ) -> impl Future<Output = Result<Self::Stream, ModelError>> + Send;
 }
 
@@ -223,7 +248,7 @@ pub trait SpeechStream: Send {
 
 pub async fn stream_speech_into_asr<Tts, Xform, Asr>(
     tts: &Tts,
-    request: SpeechRequest,
+    request: Tts::Request,
     transform: &Xform,
     asr: &Asr,
     params: TranscriptionParams,
@@ -276,5 +301,25 @@ mod tests {
             .transform(audio)
             .expect("resample should succeed");
         assert!((output.frame_count() as isize - 1600).abs() <= 1);
+    }
+
+    #[test]
+    fn synthesis_request_defaults_to_empty_text_and_no_optional_controls() {
+        let request = SynthesisRequest::default();
+
+        assert!(request.text.is_empty());
+        assert_eq!(request.params, SpeechParams::default());
+    }
+
+    #[test]
+    fn clone_reference_preserves_typed_audio_and_transcript() {
+        let reference = CloneReference::<16_000, Mono> {
+            audio: AudioBuf::new(vec![0.0, 0.5, -0.25]),
+            transcript: Some("hello".into()),
+        };
+
+        assert_eq!(reference.audio.sample_rate_hz(), 16_000);
+        assert_eq!(reference.audio.channels(), 1);
+        assert_eq!(reference.transcript.as_deref(), Some("hello"));
     }
 }

@@ -172,7 +172,8 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::Catalog;
-    use motlie_model::{ArtifactPolicy, SpeechRequest, StartOptions};
+    use motlie_model::typed::SynthesisRequest;
+    use motlie_model::{ArtifactPolicy, StartOptions};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -196,7 +197,7 @@ mod tests {
 
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         {
-            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(catalog.instantiate(&bundle_id).is_some());
             assert!(
                 catalog
                     .bundles_for_track(EvalTrack::Speech)
@@ -222,10 +223,9 @@ mod tests {
 
         let mut stream = motlie_model::typed::SpeechSynthesizer::synthesize(
             &handle,
-            SpeechRequest {
+            SynthesisRequest {
                 text: "Hello from Motlie.".into(),
                 params: Default::default(),
-                conditioning: None,
             },
         )
         .await

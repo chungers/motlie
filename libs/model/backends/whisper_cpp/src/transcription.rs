@@ -390,16 +390,16 @@ fn decode_samples(
 impl BatchTranscriber for WhisperCppHandle {
     type Input = AudioBuf<f32, WHISPER_SAMPLE_RATE, Mono>;
 
-    fn transcribe(
+    async fn transcribe(
         &self,
         audio: Self::Input,
         params: TranscriptionParams,
-    ) -> impl std::future::Future<Output = Result<TranscriptionUpdate, ModelError>> + Send {
+    ) -> Result<TranscriptionUpdate, ModelError> {
         let ctx = Arc::clone(&self.ctx);
         let metrics = Arc::clone(&self.metrics);
         let samples = audio.into_samples();
 
-        async move { decode_samples(&ctx, &samples, &params, Some(&metrics)) }
+        decode_samples(&ctx, &samples, &params, Some(&metrics))
     }
 }
 

@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use motlie_model::{
-    ArtifactPolicy, AudioSpec, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint,
-};
+use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 use serde::Deserialize;
 
 pub(crate) use motlie_model::metrics_runtime::{
@@ -141,15 +139,6 @@ impl Qwen3TtsConfig {
         }
 
         Ok(config)
-    }
-
-    pub(crate) fn audio_spec(&self) -> AudioSpec {
-        AudioSpec {
-            sample_rate_hz: self.sample_rate,
-            channels: 1,
-            encoding: PcmEncoding::F32Le,
-            preferred_chunk_bytes: 0,
-        }
     }
 }
 
@@ -450,68 +439,6 @@ pub(crate) fn resample_mono(samples: &[f32], src_rate: u32, dst_rate: u32) -> Ve
         output.push(sample as f32);
     }
     output
-}
-
-/// Downmix multi-channel audio to mono by averaging channels.
-pub(crate) fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-    let ch = channels as usize;
-    samples
-        .chunks_exact(ch)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
-}
-
-/// Decode raw PCM bytes into f32 samples.
-pub(crate) fn decode_pcm_to_f32(pcm: &[u8], encoding: PcmEncoding) -> Result<Vec<f32>, ModelError> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            if !pcm.len().is_multiple_of(2) {
-                return Err(ModelError::InvalidConfiguration(
-                    "S16Le reference audio length must be even".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-                .collect())
-        }
-        PcmEncoding::F32Le => {
-            if !pcm.len().is_multiple_of(4) {
-                return Err(ModelError::InvalidConfiguration(
-                    "F32Le reference audio length must be a multiple of 4".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect())
-        }
-    }
-}
-
-/// Encode f32 audio samples to PCM bytes.
-pub(crate) fn encode_pcm(samples: &[f32], encoding: PcmEncoding) -> Vec<u8> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            let mut out = Vec::with_capacity(samples.len() * 2);
-            for sample in samples {
-                let clamped = sample.clamp(-1.0, 1.0);
-                let as_i16 = (clamped * i16::MAX as f32) as i16;
-                out.extend_from_slice(&as_i16.to_le_bytes());
-            }
-            out
-        }
-        PcmEncoding::F32Le => {
-            let mut out = Vec::with_capacity(samples.len() * 4);
-            for sample in samples {
-                out.extend_from_slice(&sample.to_le_bytes());
-            }
-            out
-        }
-    }
 }
 
 #[cfg(test)]
