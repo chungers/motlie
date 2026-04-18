@@ -74,8 +74,8 @@ path = "examples/chat_mistral_qwen3/main.rs"
 required-features = ["model-qwen3-4b"]
 
 [[example]]
-name = "chat_multimodal"
-path = "examples/chat_multimodal/main.rs"
+name = "chat_multimodal_gemma4"
+path = "examples/chat_multimodal_gemma4/main.rs"
 required-features = ["model-gemma4-e2b"]
 
 [[example]]
