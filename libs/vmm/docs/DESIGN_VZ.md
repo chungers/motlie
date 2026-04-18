@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @vmm-vz-cdx | Record `libs/vfs/examples/v1.05` as the Tart-backed guest-image / guest-contract probe, document Tart as an interim signed launcher ahead of `vz-runner`, and make the `v1.05` -> `v1.15` sequencing explicit |
 | 2026-04-13 | @codex-vz | Address PR 163 review findings: declare the macOS 12 floor, add the helper entitlement/signing and build/discovery story, define the Rust↔Swift config/control contracts, harden readiness, describe vsock/cloud-init delivery, and tighten several factual details |
 | 2026-04-12 | @codex-vz | Initial design for a macOS `backend::vz` that satisfies the current `Runtime` / `VmHandle` contracts with Apple `Virtualization.framework`, recommends a Swift helper process for the first slice, and defines the portability gaps that need small API cleanup in `libs/vmm` |
 
@@ -155,6 +156,61 @@ It is viable long term, but it raises complexity immediately:
 - more unsafe surface before we have even proven the backend contract
 
 That is the wrong order for a first backend slice.
+
+## Interim `v1.05` Probe: Tart Before `vz-runner`
+
+The current `v1.05` Apple Vz work under `libs/vfs/examples/v1.05/` is not the
+final backend implementation. It is a feasibility and guest-contract probe that
+uses Tart as a temporary signed launcher while Motlie's own `vz-runner`
+packaging remains pending.
+
+`v1.05` owns:
+
+- proof that Apple Vz can boot a Linux guest on the target Apple Silicon host
+- proof that a Motlie-controlled guest variant can be provisioned on top of a
+  known-good Tart Ubuntu image
+- proof that `motlie-vfs-guest`, `mounts.yaml`, and the guest-side systemd unit
+  can be installed and validated in the guest without modifying the CH path
+
+`v1.05` does not own:
+
+- host-side `motlie-vfs` server integration
+- a Vz guestfs transport
+- managed overlay semantics
+- policy-engine semantics
+
+Those belong to the later `v1.15` slice.
+
+The temporary Tart choice is deliberate:
+
+- Tart is already distributed as a signed macOS app bundle that can launch
+  Apple `Virtualization.framework` guests
+- that lets the repo prove Linux guest viability on macOS without first
+  solving the local developer signing story for Motlie's own `vz-runner`
+- it mirrors the spirit of shelling out to Cloud Hypervisor during the CH
+  examples, while staying Vz-only and leaving the CH path untouched
+
+This does not change the phase-1 backend target:
+
+- the long-term backend still uses a Motlie-owned `vz-runner`
+- Tart is an interim launcher for the `v1.05` probe only
+
+## `v1.05` / `v1.15` Sequencing
+
+The Apple Vz decimal-versioning scheme currently means:
+
+- `v1.05`
+  - guest image / boot / guest-contract probe
+  - Tart-backed
+  - closest practical parallel to `libs/vfs/examples/v1` without attempting the
+    transport slice yet
+- `v1.15`
+  - first managed guestfs transport slice on Vz
+  - proves the host `motlie-vfs` server loop, guestfs connectivity, and the
+    first end-to-end mounted filesystem semantics
+
+The `v1.05` slice therefore reduces uncertainty for `v1.15`, but it is not a
+substitute for `v1.15`.
 
 ## Entitlements And Signing
 
