@@ -11,7 +11,7 @@ use std::str::FromStr;
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en"
 ))]
-use motlie_model::{BundleId, ModelBundle};
+use motlie_model::BundleId;
 
 pub const MOONSHINE_STREAMING_SELECTOR: &str = "moonshine/streaming_en";
 pub const SHERPA_ONNX_STREAMING_SELECTOR: &str = "sherpa-onnx/streaming_zipformer_en";
@@ -71,17 +71,6 @@ impl AsrModels {
             Self::SherpaOnnxStreamingEn => sherpa_onnx_streaming_en::descriptor(),
             #[cfg(feature = "model-whisper-base-en")]
             Self::WhisperBaseEn => whisper_base_en::descriptor(),
-        }
-    }
-
-    pub fn bundle(&self) -> Box<dyn ModelBundle> {
-        match self {
-            #[cfg(feature = "model-moonshine-streaming")]
-            Self::MoonshineStreamingEn => moonshine_streaming_en::bundle(),
-            #[cfg(feature = "model-sherpa-onnx-streaming")]
-            Self::SherpaOnnxStreamingEn => sherpa_onnx_streaming_en::bundle(),
-            #[cfg(feature = "model-whisper-base-en")]
-            Self::WhisperBaseEn => whisper_base_en::bundle(),
         }
     }
 }

@@ -9,5 +9,6 @@ mod common;
 mod transcription;
 
 pub use transcription::{
-    WhisperCppTranscriptionAdapter, WhisperCppTranscriptionBundle, WhisperCppTranscriptionSpec,
+    WhisperCppHandle, WhisperCppStream, WhisperCppTranscriptionAdapter,
+    WhisperCppTranscriptionBundle, WhisperCppTranscriptionSpec,
 };

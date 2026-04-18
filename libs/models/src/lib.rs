@@ -675,32 +675,42 @@ impl ModelSelector {
         }
     }
 
-    pub fn bundle(&self) -> Box<dyn ModelBundle> {
+    pub fn bundle(&self) -> Result<Box<dyn ModelBundle>> {
         match self {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
                 feature = "model-qwen3-tts-cpp",
                 feature = "model-qwen3-tts-0_6b"
             ))]
-            Self::Tts(model) => model.bundle(),
+            Self::Tts(model) => Err(ModelsError::ModelUnavailable {
+                selector: format!(
+                    "typed-only selector `{}` does not support erased bundle startup",
+                    model.as_str()
+                ),
+            }),
             #[cfg(any(
                 feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
-            Self::Asr(model) => model.bundle(),
+            Self::Asr(model) => Err(ModelsError::ModelUnavailable {
+                selector: format!(
+                    "typed-only selector `{}` does not support erased bundle startup",
+                    model.as_str()
+                ),
+            }),
             #[cfg(any(
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
             ))]
-            Self::Chat(model) => model.bundle(),
+            Self::Chat(model) => Ok(model.bundle()),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
                 feature = "model-qwen3-embedding-06b"
             ))]
-            Self::Embedding(model) => model.bundle(),
+            Self::Embedding(model) => Ok(model.bundle()),
         }
     }
 }
@@ -890,7 +900,7 @@ where
 
 struct CatalogEntry {
     descriptor: BundleDescriptor,
-    factory: Arc<dyn BundleFactory>,
+    factory: Option<Arc<dyn BundleFactory>>,
 }
 
 #[derive(Clone)]
@@ -960,7 +970,22 @@ impl Catalog {
                 descriptor.id.clone(),
                 CatalogEntry {
                     descriptor: descriptor.clone(),
-                    factory: Arc::new(factory),
+                    factory: Some(Arc::new(factory)),
+                },
+            )
+            .map(|entry| entry.descriptor)
+    }
+
+    pub fn register_descriptor(
+        &mut self,
+        descriptor: BundleDescriptor,
+    ) -> Option<BundleDescriptor> {
+        self.bundles
+            .insert(
+                descriptor.id.clone(),
+                CatalogEntry {
+                    descriptor: descriptor.clone(),
+                    factory: None,
                 },
             )
             .map(|entry| entry.descriptor)
@@ -1052,7 +1077,7 @@ impl Catalog {
     pub fn instantiate(&self, id: &BundleId) -> Option<Box<dyn ModelBundle>> {
         self.bundles
             .get(id)
-            .map(|entry| entry.factory.instantiate())
+            .and_then(|entry| entry.factory.as_ref().map(|factory| factory.instantiate()))
     }
 
     pub fn bundles(&self) -> impl Iterator<Item = &BundleDescriptor> {
@@ -1111,6 +1136,18 @@ impl Catalog {
         &self,
         resolved: &ResolvedModelDescriptor,
     ) -> Option<Box<dyn ModelBundle>> {
+        if resolved
+            .identity
+            .capabilities
+            .supports(CapabilityKind::Speech)
+            || resolved
+                .identity
+                .capabilities
+                .supports(CapabilityKind::Transcription)
+        {
+            return None;
+        }
+
         let entry = self.models.get(&resolved.identity.id)?;
         let checkpoint = entry
             .checkpoints

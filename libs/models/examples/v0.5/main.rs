@@ -1,27 +1,18 @@
-//! v0.5 — ASR vertical slice: `.wav` file transcription via the streaming PCM contract.
+//! v0.5 — ASR vertical slice: `.wav` file transcription through the typed batch API.
 //!
 //! Usage:
 //!   cargo run -p motlie-models --example models_v0_5 \
 //!     --no-default-features --features model-whisper-base-en \
 //!     -- --wav path/to/audio.wav
-//!
-//! Preconditions:
-//!   - The `ggml-base.en.bin` model must be pre-downloaded under the default
-//!     artifact root or the path specified by `--artifact-root`.
-//!   - The `.wav` file must be a valid PCM audio file (16-bit int or 32-bit float).
-//!     The backend normalizes any sample rate and channel count to mono 16 kHz.
-//!
-//! The example reads the `.wav` file, decodes it to raw PCM, chunks it into
-//! the streaming `TranscriptionStream` contract, and prints partial and final
-//! transcript segments as they are emitted by the backend.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use motlie_model::{
-    ArtifactPolicy, AudioSpec, PcmChunk, PcmEncoding, StartOptions, TranscriptionParams,
-};
-use motlie_models::asr::AsrModels;
+use motlie_model::typed::{AudioBuf, BatchTranscriber, Mono};
+use motlie_model::{ArtifactPolicy, StartOptions, TranscriptionParams};
+use motlie_models::asr::whisper_base_en;
+
+const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
 fn main() -> Result<()> {
     let args = parse_args()?;
@@ -71,149 +62,118 @@ fn parse_args() -> Result<Args> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie v0.5 — ASR vertical slice ===");
+    println!("=== motlie v0.5 — typed Whisper batch transcription ===");
     println!("wav:   {}", args.wav_path.display());
 
-    // 1. Read and decode the .wav file
     let reader = hound::WavReader::open(&args.wav_path)
         .with_context(|| format!("failed to open wav file: {}", args.wav_path.display()))?;
-
     let wav_spec = reader.spec();
     println!(
         "format: {} Hz, {} ch, {:?}, {} bits",
         wav_spec.sample_rate, wav_spec.channels, wav_spec.sample_format, wav_spec.bits_per_sample,
     );
 
-    let (pcm_bytes, encoding) = decode_wav(reader)?;
-    let audio_spec = AudioSpec {
-        sample_rate_hz: wav_spec.sample_rate,
-        channels: wav_spec.channels,
-        encoding,
-        preferred_chunk_bytes: 0,
-    };
+    let audio = decode_wav_to_whisper_input(reader)?;
 
-    // 2. Start the curated ASR bundle
     let artifact_root = args
         .artifact_root
         .unwrap_or_else(motlie_models::default_artifact_root);
-
     println!("artifacts: {}", artifact_root.display());
 
-    let bundle = AsrModels::WhisperBaseEn.bundle();
-    let handle = bundle
-        .start(StartOptions {
-            artifact_policy: Some(ArtifactPolicy::LocalOnly {
-                root: artifact_root,
-            }),
-            ..Default::default()
-        })
-        .await
-        .context("failed to start whisper bundle")?;
+    let handle = whisper_base_en::start_typed(StartOptions {
+        artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            root: artifact_root,
+        }),
+        ..Default::default()
+    })
+    .await
+    .context("failed to start typed whisper bundle")?;
 
-    // 3. Open a transcription stream
-    let asr = handle
-        .transcription()
-        .context("whisper bundle should expose transcription capability")?;
-
-    let mut stream = asr
-        .open_stream(
-            audio_spec,
+    let update = handle
+        .transcribe(
+            audio,
             TranscriptionParams {
                 language: args.language,
-                emit_partials: true,
+                emit_partials: false,
             },
         )
         .await
-        .context("failed to open transcription stream")?;
+        .context("typed whisper transcription failed")?;
 
-    // 4. Feed PCM chunks using the backend's preferred chunking.
-    let chunk_size = stream.audio_spec().normalized_chunk_size();
-    let total_bytes = pcm_bytes.len();
-    let mut offset = 0;
-    let mut sequence = 0u64;
-
-    println!("\n--- transcribing {} bytes of audio ---\n", total_bytes);
-
-    while offset < total_bytes {
-        let end = (offset + chunk_size).min(total_bytes);
-        let is_last = end >= total_bytes;
-
-        let chunk = PcmChunk {
-            data: pcm_bytes[offset..end].to_vec(),
-            sequence,
-            end_of_stream: is_last,
-        };
-
-        if let Some(update) = stream
-            .push_chunk(chunk)
-            .await
-            .context("push_chunk failed")?
-        {
-            for segment in &update.segments {
-                let marker = if segment.final_segment {
-                    "[final]"
-                } else {
-                    "[partial]"
-                };
-                println!(
-                    "  {marker} [{:.1}s - {:.1}s] {}",
-                    segment.start_ms as f64 / 1000.0,
-                    segment.end_ms as f64 / 1000.0,
-                    segment.text.trim()
-                );
-            }
-        }
-
-        offset = end;
-        sequence += 1;
+    for segment in &update.segments {
+        println!(
+            "[final] [{:.1}s - {:.1}s] {}",
+            segment.start_ms as f64 / 1000.0,
+            segment.end_ms as f64 / 1000.0,
+            segment.text.trim()
+        );
     }
-
-    // 5. Flush remaining audio
-    let final_update = stream.finish().await.context("finish() failed")?;
-
-    if !final_update.segments.is_empty() {
-        println!("\n--- final flush ---\n");
-        for segment in &final_update.segments {
-            println!(
-                "  [final] [{:.1}s - {:.1}s] {}",
-                segment.start_ms as f64 / 1000.0,
-                segment.end_ms as f64 / 1000.0,
-                segment.text.trim()
-            );
-        }
-    }
-
-    println!("\n--- done ---");
 
     handle.shutdown().await.context("shutdown failed")?;
 
     Ok(())
 }
 
-fn decode_wav(
+fn decode_wav_to_whisper_input(
     reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
-) -> Result<(Vec<u8>, PcmEncoding)> {
+) -> Result<AudioBuf<f32, TARGET_SAMPLE_RATE_HZ, Mono>> {
     let spec = reader.spec();
-    match spec.sample_format {
-        hound::SampleFormat::Int => {
-            let samples: Vec<i16> = reader
-                .into_samples::<i16>()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .context("failed to decode wav samples")?;
+    let samples = decode_wav_to_f32(reader)?;
+    let mono = downmix_to_mono(&samples, spec.channels);
+    let resampled = resample_linear_f32(&mono, spec.sample_rate, TARGET_SAMPLE_RATE_HZ);
+    Ok(AudioBuf::new(resampled))
+}
 
-            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-
-            Ok((bytes, PcmEncoding::S16Le))
-        }
-        hound::SampleFormat::Float => {
-            let samples: Vec<f32> = reader
-                .into_samples::<f32>()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .context("failed to decode wav samples")?;
-
-            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-
-            Ok((bytes, PcmEncoding::F32Le))
-        }
+fn decode_wav_to_f32(
+    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+) -> Result<Vec<f32>> {
+    match reader.spec().sample_format {
+        hound::SampleFormat::Int => Ok(reader
+            .into_samples::<i16>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to decode wav samples")?
+            .into_iter()
+            .map(|sample| sample as f32 / 32768.0)
+            .collect()),
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to decode wav samples"),
     }
+}
+
+fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+
+    let channels = channels as usize;
+    samples
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
+        .collect()
+}
+
+fn resample_linear_f32(samples: &[f32], input_rate_hz: u32, output_rate_hz: u32) -> Vec<f32> {
+    if samples.is_empty() || input_rate_hz == output_rate_hz {
+        return samples.to_vec();
+    }
+
+    let ratio = input_rate_hz as f64 / output_rate_hz as f64;
+    let out_len =
+        ((samples.len() as f64) * output_rate_hz as f64 / input_rate_hz as f64).ceil() as usize;
+    let max_index = samples.len().saturating_sub(1);
+    let mut output = Vec::with_capacity(out_len.max(1));
+
+    for out_idx in 0..out_len {
+        let src_pos = out_idx as f64 * ratio;
+        let left_idx = src_pos.floor() as usize;
+        let right_idx = (left_idx + 1).min(max_index);
+        let frac = (src_pos - left_idx as f64) as f32;
+        let left = samples[left_idx.min(max_index)];
+        let right = samples[right_idx];
+        output.push(left + (right - left) * frac);
+    }
+
+    output
 }

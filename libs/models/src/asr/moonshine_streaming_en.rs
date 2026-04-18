@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_moonshine::MoonshineStreamingAdapter;
+use motlie_model_moonshine::{
+    MoonshineHandle, MoonshineStreamingAdapter, MoonshineStreamingBundle, MoonshineStreamingSpec,
+};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -25,7 +27,7 @@ const STREAMING_CONFIG_FILE: &str = "onnx/small/streaming_config.json";
 const TOKENIZER_JSON_FILE: &str = "onnx/small/tokenizer.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
+    catalog.register_descriptor(descriptor());
     catalog.register_model_variant(
         identity(),
         checkpoint(),
@@ -91,16 +93,12 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(MoonshineStreamingAdapter::small_en()),
-        Arc::new(resolve_local_model_root),
-    )
+pub fn typed_bundle() -> MoonshineStreamingBundle {
+    MoonshineStreamingBundle::new(MoonshineStreamingSpec::small_en())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<MoonshineHandle, ModelError> {
+    typed_bundle().start_typed(options).await
 }
 
 fn resolve_local_model_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -166,13 +164,17 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "moonshine_streaming_en");
         assert_eq!(descriptor.display_name, "Moonshine Streaming EN");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(descriptor
-            .requirements
-            .build
-            .contains(&BuildConstraint::CpuOnly));
-        assert!(descriptor
-            .capabilities
-            .supports(CapabilityKind::Transcription));
+        assert!(
+            descriptor
+                .requirements
+                .build
+                .contains(&BuildConstraint::CpuOnly)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription)
+        );
     }
 
     #[test]
@@ -182,10 +184,12 @@ mod tests {
 
         #[cfg(feature = "model-moonshine-streaming")]
         {
-            assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Transcription)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Transcription)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
         }
     }
 

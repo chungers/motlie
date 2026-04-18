@@ -3,9 +3,12 @@ use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_sherpa_onnx::SherpaOnnxStreamingAdapter;
+use motlie_model_sherpa_onnx::{
+    SherpaOnnxHandle, SherpaOnnxStreamingAdapter, SherpaOnnxStreamingBundle,
+    SherpaOnnxStreamingSpec,
+};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -21,7 +24,7 @@ const JOINER_FILE: &str = "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
 const TOKENS_FILE: &str = "tokens.txt";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
+    catalog.register_descriptor(descriptor());
     catalog.register_model_variant(
         identity(),
         checkpoint(),
@@ -80,16 +83,12 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(SherpaOnnxStreamingAdapter::zipformer_en_streaming()),
-        Arc::new(resolve_local_onnx_root),
-    )
+pub fn typed_bundle() -> SherpaOnnxStreamingBundle {
+    SherpaOnnxStreamingBundle::new(SherpaOnnxStreamingSpec::zipformer_en_streaming())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
+    typed_bundle().start_typed(options).await
 }
 
 fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -148,9 +147,11 @@ mod tests {
             "Sherpa ONNX Streaming Zipformer EN"
         );
         assert_eq!(descriptor.backend, BackendKind::SherpaOnnx);
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Transcription));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Transcription)
+        );
     }
 
     #[test]
@@ -160,10 +161,12 @@ mod tests {
 
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         {
-            assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Transcription)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(catalog.instantiate(&bundle_id).is_none());
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Transcription)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
         }
     }
 }

@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let selector_label = model_selector.to_string();
     let bundle_id = model_selector.bundle_id();
     let descriptor = model_selector.descriptor();
-    let bundle = model_selector.bundle();
+    let bundle = model_selector.bundle()?;
 
     let artifact_root = default_artifact_root();
     let catalog = motlie_models::Catalog::with_defaults();

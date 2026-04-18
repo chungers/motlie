@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
     Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
@@ -118,13 +119,13 @@ impl BackendAdapter for MoonshineStreamingAdapter {
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.artifact_spec())?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(new_transcription_handle(
+        Ok(Box::new(new_transcription_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        ))
+        )))
     }
 }
 
@@ -163,6 +164,12 @@ impl ModelBundle for MoonshineStreamingBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+        Ok(Box::new(self.start_typed(options).await?))
+    }
+}
+
+impl MoonshineStreamingBundle {
+    pub async fn start_typed(&self, options: StartOptions) -> Result<MoonshineHandle, ModelError> {
         self.metadata
             .quantization
             .resolve(options.quantization, &self.metadata.id)?;
@@ -189,10 +196,16 @@ impl ModelBundle for MoonshineStreamingBundle {
     }
 }
 
-struct MoonshineHandle {
+pub struct MoonshineHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Arc<MoonshineRuntime>,
     metrics: Arc<Mutex<AsrMetrics>>,
+}
+
+impl MoonshineHandle {
+    pub async fn shutdown(self) -> Result<(), ModelError> {
+        <Self as BundleHandle>::shutdown(Box::new(self)).await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -305,8 +318,8 @@ fn new_transcription_handle(
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     runtime: Arc<MoonshineRuntime>,
-) -> Box<dyn BundleHandle> {
-    Box::new(MoonshineHandle {
+) -> MoonshineHandle {
+    MoonshineHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -316,7 +329,7 @@ fn new_transcription_handle(
         },
         runtime,
         metrics: Arc::new(Mutex::new(AsrMetrics::default())),
-    })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1076,7 +1089,7 @@ fn backend_exec_error(operation: &'static str, message: String) -> ModelError {
     }
 }
 
-struct MoonshineStream {
+pub struct MoonshineStream {
     spec: AudioSpec,
     params: TranscriptionParams,
     runtime: Arc<MoonshineRuntime>,
@@ -1179,6 +1192,72 @@ impl TranscriptionStream for MoonshineStream {
             }),
             _ => Ok(TranscriptionUpdate::default()),
         }
+    }
+}
+
+impl StreamingTranscriber for MoonshineHandle {
+    type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
+    type Session = MoonshineStream;
+
+    fn open_session(
+        &self,
+        params: TranscriptionParams,
+    ) -> impl std::future::Future<Output = Result<Self::Session, ModelError>> + Send {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        async move {
+            Ok(MoonshineStream {
+                spec: AudioSpec {
+                    sample_rate_hz: TARGET_SAMPLE_RATE_HZ,
+                    channels: 1,
+                    encoding: motlie_model::PcmEncoding::S16Le,
+                    preferred_chunk_bytes: PREFERRED_CHUNK_BYTES,
+                },
+                params,
+                runtime: Arc::clone(&runtime),
+                metrics,
+                normalizer: NormalizerState::new(),
+                state: runtime.create_state(),
+                total_samples: 0,
+                next_sequence: 0,
+                saw_end_of_stream: false,
+                last_partial_text: String::new(),
+            })
+        }
+    }
+}
+
+impl TranscriptionSession for MoonshineStream {
+    type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
+
+    fn ingest(
+        &mut self,
+        audio: Self::Input,
+    ) -> impl std::future::Future<Output = Result<Option<TranscriptionUpdate>, ModelError>> + Send
+    {
+        let data: Vec<u8> = audio
+            .into_samples()
+            .into_iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let sequence = self.next_sequence;
+
+        async move {
+            TranscriptionStream::push_chunk(
+                self,
+                PcmChunk {
+                    data,
+                    sequence,
+                    end_of_stream: false,
+                },
+            )
+            .await
+        }
+    }
+
+    async fn finish(self) -> Result<TranscriptionUpdate, ModelError> {
+        <Self as TranscriptionStream>::finish(Box::new(self)).await
     }
 }
 

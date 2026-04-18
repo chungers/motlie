@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use motlie_model::typed::{AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer};
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
     Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
@@ -89,13 +90,13 @@ impl BackendAdapter for Qwen3TtsCppSpeechAdapter {
         let artifacts = resolve_gguf_artifacts(checkpoint)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(new_speech_handle(
+        Ok(Box::new(new_speech_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        ))
+        )))
     }
 }
 
@@ -134,6 +135,15 @@ impl ModelBundle for Qwen3TtsCppSpeechBundle {
     }
 
     async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+        Ok(Box::new(self.start_typed(options).await?))
+    }
+}
+
+impl Qwen3TtsCppSpeechBundle {
+    pub async fn start_typed(
+        &self,
+        options: StartOptions,
+    ) -> Result<Qwen3TtsCppHandle, ModelError> {
         self.metadata
             .quantization
             .resolve(options.quantization, &self.metadata.id)?;
@@ -164,10 +174,16 @@ impl ModelBundle for Qwen3TtsCppSpeechBundle {
     }
 }
 
-struct Qwen3TtsCppHandle {
+pub struct Qwen3TtsCppHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Arc<Qwen3TtsCppRuntime>,
     metrics: Arc<Mutex<SpeechMetrics>>,
+}
+
+impl Qwen3TtsCppHandle {
+    pub async fn shutdown(self) -> Result<(), ModelError> {
+        <Self as BundleHandle>::shutdown(Box::new(self)).await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -270,14 +286,14 @@ fn new_speech_handle(
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     runtime: Arc<Qwen3TtsCppRuntime>,
-) -> Box<dyn BundleHandle> {
+) -> Qwen3TtsCppHandle {
     let metrics = Arc::new(Mutex::new(SpeechMetrics::default()));
     {
         let mut state = lock_metrics(&metrics, "qwen3-tts-cpp-start");
         observe_memory(&mut state.runtime);
     }
 
-    Box::new(Qwen3TtsCppHandle {
+    Qwen3TtsCppHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -287,7 +303,7 @@ fn new_speech_handle(
         },
         runtime,
         metrics,
-    })
+    }
 }
 
 struct Qwen3TtsCppRuntime {
@@ -358,7 +374,7 @@ fn load_runtime(artifacts: &Qwen3TtsCppArtifactPaths) -> Result<Qwen3TtsCppRunti
     })
 }
 
-struct Qwen3TtsCppSpeechStream {
+pub struct Qwen3TtsCppSpeechStream {
     audio_spec: AudioSpec,
     pcm: Vec<u8>,
     next_offset: usize,
@@ -438,6 +454,64 @@ impl SpeechStream for Qwen3TtsCppSpeechStream {
 
     async fn finish(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
+    }
+}
+
+fn decode_f32le_chunk(data: &[u8]) -> Result<Vec<f32>, ModelError> {
+    if !data.len().is_multiple_of(4) {
+        return Err(ModelError::InvalidConfiguration(
+            "typed qwen3-tts.cpp output expects f32le-aligned PCM chunks".into(),
+        ));
+    }
+
+    Ok(data
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+impl SpeechSynthesizer for Qwen3TtsCppHandle {
+    type Output = AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>;
+    type Stream = Qwen3TtsCppSpeechStream;
+
+    fn synthesize(
+        &self,
+        request: SpeechRequest,
+    ) -> impl std::future::Future<Output = Result<Self::Stream, ModelError>> + Send {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        async move {
+            let started_at = Instant::now();
+            let pcm = runtime.synthesize(&request)?;
+            let elapsed = started_at.elapsed();
+
+            {
+                let mut state = lock_metrics(&metrics, "qwen3-tts-cpp-typed-synthesize");
+                observe_latency(&mut state.runtime, elapsed);
+            }
+
+            Ok(Qwen3TtsCppSpeechStream::new(
+                runtime.audio_spec.clone(),
+                pcm,
+            ))
+        }
+    }
+}
+
+impl TypedSpeechStream for Qwen3TtsCppSpeechStream {
+    type Chunk = AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>;
+
+    async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
+        let Some(chunk) = SpeechStream::next_chunk(self).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(AudioBuf::new(decode_f32le_chunk(&chunk.data)?)))
+    }
+
+    async fn finish(self) -> Result<(), ModelError> {
+        <Self as SpeechStream>::finish(Box::new(self)).await
     }
 }
 

@@ -4,7 +4,7 @@ use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpo
 
 // Re-export shared metric types and helpers so backend code imports from one place.
 pub(crate) use motlie_model::metrics_runtime::{
-    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
+    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
 };
 
 /// Validate a resolved checkpoint has the expected ggml format and return
@@ -100,11 +100,8 @@ mod tests {
         let root = std::env::temp_dir().join("motlie-whisper-cpp-test-missing");
         std::fs::create_dir_all(&root).ok();
 
-        let err = configure_artifact_policy(
-            "ggml-base.en.bin",
-            ArtifactPolicy::LocalOnly { root },
-        )
-        .expect_err("missing ggml should fail");
+        let err = configure_artifact_policy("ggml-base.en.bin", ArtifactPolicy::LocalOnly { root })
+            .expect_err("missing ggml should fail");
 
         assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("not found")));
     }
@@ -140,8 +137,7 @@ mod tests {
             path: PathBuf::from("/tmp/fake"),
         };
 
-        let err = resolve_ggml_model_path(&checkpoint)
-            .expect_err("wrong format should fail");
+        let err = resolve_ggml_model_path(&checkpoint).expect_err("wrong format should fail");
         assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("Ggml")));
     }
 }

@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod metrics_runtime;
 pub mod speech;
 pub mod transcription;
+pub mod typed;
 pub mod units;
 
 pub use chat::{ChatMessage, ChatRole, ContentPart};
@@ -29,6 +30,12 @@ pub use speech::{SpeechModel, SpeechParams, SpeechRequest, SpeechStream, VoiceCo
 pub use transcription::{
     AudioSpec, BackendMode, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionModel,
     TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
+};
+pub use typed::{
+    AudioBuf, AudioTransform, BatchTranscriber, Compose, I16MonoResampler, I16ToF32,
+    IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
+    SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber,
+    TranscriptionSession, stream_speech_into_asr,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
