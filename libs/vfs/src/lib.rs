@@ -8,4 +8,6 @@ pub mod core;
 #[cfg(feature = "vsock")]
 pub mod vsock;
 
+pub mod vz;
+
 pub mod client;

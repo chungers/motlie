@@ -1,0 +1,7 @@
+provision alice 0.0.0.0:5501 2000 2000
+mount alice alice-home=/home/alice,/tmp/motlie-vfs-demo/alice-home alice-workspace=/workspace,/tmp/motlie-vfs-demo/alice-workspace
+use alice
+layer credentials 0
+layer workspace 10
+putattr credentials alice-home /.ssh/authorized_keys 2000 2000 600 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@dev
+put workspace alice-workspace /README.md Alice workspace mounted from the host over the v1.15 Vz TCP bridge.

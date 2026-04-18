@@ -50,6 +50,9 @@ struct FhEntry {
     lock_owners: HashSet<u64>,
 }
 
+const F_UNLCK_I32: i32 = libc::F_UNLCK as i32;
+const F_WRLCK_I32: i32 = libc::F_WRLCK as i32;
+
 // ---------------------------------------------------------------------------
 // Mount-backing boundary
 // ---------------------------------------------------------------------------
@@ -778,7 +781,7 @@ impl FsServer {
             None => FsResult::Lock {
                 start,
                 end,
-                typ: libc::F_UNLCK,
+                typ: F_UNLCK_I32,
                 pid: 0,
             },
         }
@@ -802,7 +805,7 @@ impl FsServer {
         };
 
         let mut table = self.lock_table.lock();
-        if typ == libc::F_UNLCK {
+        if typ == F_UNLCK_I32 {
             let mut changed = false;
             let remove_key = if let Some(locks) = table.get_mut(&lock_key) {
                 let before = locks.len();
@@ -2125,7 +2128,7 @@ fn ranges_overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
 }
 
 fn lock_conflicts(existing_typ: i32, requested_typ: i32) -> bool {
-    existing_typ == libc::F_WRLCK || requested_typ == libc::F_WRLCK
+    existing_typ == F_WRLCK_I32 || requested_typ == F_WRLCK_I32
 }
 
 fn find_conflict<'a>(
@@ -2176,6 +2179,18 @@ fn set_xattr(path: &Path, name: &str, value: &[u8], flags: i32, position: u32) -
     }
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
     let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    #[cfg(target_os = "macos")]
+    let rc = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            position,
+            flags,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
     let rc = unsafe {
         libc::setxattr(
             path.as_ptr(),
@@ -2209,6 +2224,18 @@ fn set_xattr(
 fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
     let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    #[cfg(target_os = "macos")]
+    let size = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
     let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
         return Err(std::io::Error::last_os_error()
@@ -2216,6 +2243,18 @@ fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
             .unwrap_or(libc::EIO));
     }
     let mut buf = vec![0u8; size as usize];
+    #[cfg(target_os = "macos")]
+    let rc = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+            0,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
     let rc = unsafe {
         libc::getxattr(
             path.as_ptr(),
@@ -2242,6 +2281,9 @@ fn get_xattr(_path: &Path, _name: &str) -> Result<Vec<u8>, i32> {
 #[cfg(unix)]
 fn list_xattrs(path: &Path) -> Result<Vec<u8>, i32> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
+    #[cfg(target_os = "macos")]
+    let size = unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0, 0) };
+    #[cfg(not(target_os = "macos"))]
     let size = unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
         return Err(std::io::Error::last_os_error()
@@ -2249,6 +2291,9 @@ fn list_xattrs(path: &Path) -> Result<Vec<u8>, i32> {
             .unwrap_or(libc::EIO));
     }
     let mut buf = vec![0u8; size as usize];
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::listxattr(path.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+    #[cfg(not(target_os = "macos"))]
     let rc = unsafe { libc::listxattr(path.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
     if rc < 0 {
         Err(std::io::Error::last_os_error()
@@ -2269,6 +2314,9 @@ fn list_xattrs(_path: &Path) -> Result<Vec<u8>, i32> {
 fn remove_xattr(path: &Path, name: &str) -> Result<(), i32> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
     let name = CString::new(name).map_err(|_| libc::EINVAL)?;
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::removexattr(path.as_ptr(), name.as_ptr(), 0) };
+    #[cfg(not(target_os = "macos"))]
     let rc = unsafe { libc::removexattr(path.as_ptr(), name.as_ptr()) };
     if rc == 0 {
         Ok(())

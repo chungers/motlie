@@ -1,0 +1,10 @@
+server:
+  host: __HOST_GATEWAY__
+  port: __HOST_PORT__
+mounts:
+  - tag: alice-home
+    guest_path: /home/alice
+    read_only: false
+  - tag: alice-workspace
+    guest_path: /workspace
+    read_only: false
