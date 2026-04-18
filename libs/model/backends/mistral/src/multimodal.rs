@@ -79,6 +79,8 @@ impl MistralMultimodalAdapter {
 
 #[async_trait]
 impl BackendAdapter for MistralMultimodalAdapter {
+    type Handle = MistralMultimodalHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &MISTRAL_MULTIMODAL_FORMATS
     }
@@ -100,7 +102,7 @@ impl BackendAdapter for MistralMultimodalAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -144,6 +146,8 @@ impl MistralMultimodalBundle {
 
 #[async_trait]
 impl ModelBundle for MistralMultimodalBundle {
+    type Handle = MistralMultimodalHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -156,7 +160,7 @@ impl ModelBundle for MistralMultimodalBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .metadata
             .quantization
@@ -269,7 +273,7 @@ fn collect_multimodal_parts(
     Ok((text, images))
 }
 
-struct MistralMultimodalHandle {
+pub struct MistralMultimodalHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Box<dyn MultimodalRuntime>,
     metrics: Arc<Mutex<MultimodalMetrics>>,
@@ -306,7 +310,7 @@ impl BundleHandle for MistralMultimodalHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -331,14 +335,14 @@ fn new_multimodal_handle(
     quantization: QuantizationSupport,
     resolved_quantization: Option<QuantizationBits>,
     model: mistralrs::Model,
-) -> Box<dyn BundleHandle> {
+) -> MistralMultimodalHandle {
     let metrics = Arc::new(Mutex::new(MultimodalMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "mistral-multimodal-start");
         observe_memory(&mut metrics.runtime);
     }
 
-    Box::new(MistralMultimodalHandle {
+    MistralMultimodalHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -351,7 +355,7 @@ fn new_multimodal_handle(
             metrics: Arc::clone(&metrics),
         }),
         metrics,
-    })
+    }
 }
 
 async fn build_multimodal_model(

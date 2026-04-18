@@ -559,15 +559,17 @@ pub struct EmbeddingResponse {
 /// Bundle definition that can be started into a loaded handle.
 #[async_trait]
 pub trait ModelBundle: Send + Sync {
+    type Handle: BundleHandle;
+
     fn id(&self) -> &BundleId;
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError>;
 }
 
 /// Loaded bundle state that exposes capability adapters.
 #[async_trait]
-pub trait BundleHandle: Send + Sync {
+pub trait BundleHandle: Send + Sync + Sized {
     fn descriptor(&self) -> &LoadedBundleDescriptor;
     fn capabilities(&self) -> &Capabilities;
     fn supports(&self, capability: CapabilityKind) -> bool {
@@ -580,12 +582,14 @@ pub trait BundleHandle: Send + Sync {
     fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
     fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
+    async fn shutdown(self) -> Result<(), ModelError>;
 }
 
 /// Backend-specific loader for one or more checkpoint formats.
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
+    type Handle: BundleHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat];
     fn backend_kind(&self) -> BackendKind;
     fn capabilities(&self) -> &Capabilities;
@@ -595,7 +599,7 @@ pub trait BackendAdapter: Send + Sync {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError>;
+    ) -> Result<Self::Handle, ModelError>;
 }
 
 /// Chat generation capability.
@@ -648,7 +652,7 @@ mod tests {
             Ok(self)
         }
 
-        async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+        async fn shutdown(self) -> Result<(), ModelError> {
             Ok(())
         }
     }

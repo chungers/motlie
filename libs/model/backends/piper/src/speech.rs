@@ -61,6 +61,8 @@ impl PiperSpeechAdapter {
 
 #[async_trait]
 impl BackendAdapter for PiperSpeechAdapter {
+    type Handle = PiperHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &PIPER_FORMATS
     }
@@ -82,7 +84,7 @@ impl BackendAdapter for PiperSpeechAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -90,13 +92,13 @@ impl BackendAdapter for PiperSpeechAdapter {
         let artifacts = resolve_onnx_artifacts(checkpoint, self.spec.model_filename)?;
         let runtime = Arc::new(load_runtime(&artifacts)?);
 
-        Ok(Box::new(new_speech_handle(
+        Ok(new_speech_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.spec.capabilities.clone(),
             self.spec.quantization.clone(),
             runtime,
-        )))
+        ))
     }
 }
 
@@ -122,6 +124,8 @@ impl PiperSpeechBundle {
 
 #[async_trait]
 impl ModelBundle for PiperSpeechBundle {
+    type Handle = PiperHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -134,8 +138,8 @@ impl ModelBundle for PiperSpeechBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        Ok(Box::new(self.start_typed(options).await?))
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
     }
 }
 
@@ -175,7 +179,7 @@ pub struct PiperHandle {
 
 impl PiperHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
-        <Self as BundleHandle>::shutdown(Box::new(self)).await
+        <Self as BundleHandle>::shutdown(self).await
     }
 }
 
@@ -232,7 +236,7 @@ impl BundleHandle for PiperHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }

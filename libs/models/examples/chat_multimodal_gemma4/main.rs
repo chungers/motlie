@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
     let startup_sampler = support::StartupSampler::spawn("startup");
     let startup_at = Instant::now();
     let handle = bundle
-        .start(StartOptions {
+        .start_erased(StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
     }
 
     handle
-        .shutdown()
+        .shutdown_box()
         .await
         .context("bundle shutdown should succeed")?;
     support::print_process_snapshot(

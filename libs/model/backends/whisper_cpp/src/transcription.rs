@@ -63,6 +63,8 @@ impl WhisperCppTranscriptionAdapter {
 
 #[async_trait]
 impl BackendAdapter for WhisperCppTranscriptionAdapter {
+    type Handle = WhisperCppHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &WHISPER_CPP_FORMATS
     }
@@ -84,7 +86,7 @@ impl BackendAdapter for WhisperCppTranscriptionAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         // Reject unsupported quantization requests explicitly.
         self.quantization
             .resolve(options.quantization, &identity.id)?;
@@ -92,13 +94,13 @@ impl BackendAdapter for WhisperCppTranscriptionAdapter {
         let model_path = resolve_ggml_model_path(checkpoint)?;
         let ctx = load_whisper_model(&model_path)?;
 
-        Ok(Box::new(new_transcription_handle(
+        Ok(new_transcription_handle(
             identity.id.clone(),
             identity.display_name.clone(),
             self.capabilities.clone(),
             self.quantization.clone(),
             ctx,
-        )))
+        ))
     }
 }
 
@@ -125,6 +127,8 @@ impl WhisperCppTranscriptionBundle {
 
 #[async_trait]
 impl ModelBundle for WhisperCppTranscriptionBundle {
+    type Handle = WhisperCppHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -137,8 +141,8 @@ impl ModelBundle for WhisperCppTranscriptionBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
-        Ok(Box::new(self.start_typed(options).await?))
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
     }
 }
 
@@ -207,7 +211,7 @@ pub struct WhisperCppHandle {
 
 impl WhisperCppHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
-        <Self as BundleHandle>::shutdown(Box::new(self)).await
+        <Self as BundleHandle>::shutdown(self).await
     }
 }
 
@@ -264,7 +268,7 @@ impl BundleHandle for WhisperCppHandle {
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }

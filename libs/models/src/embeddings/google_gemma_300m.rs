@@ -4,7 +4,7 @@ use std::sync::Arc;
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
-    EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    EmbeddingNormalization, EmbeddingSpec, ModelCheckpoint, ModelError, ModelIdentity,
 };
 use motlie_model_mistral::MistralEmbeddingAdapter;
 
@@ -105,7 +105,7 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
+pub fn bundle() -> Box<dyn crate::ErasedModelBundle> {
     let descriptor = descriptor();
     crate::adapter_backed_bundle(
         descriptor.id,
@@ -233,7 +233,7 @@ mod tests {
             .instantiate(&BundleId::new("embeddinggemma_300m"))
             .expect("default catalog should instantiate embeddinggemma");
         let handle = bundle
-            .start(StartOptions {
+            .start_erased(StartOptions {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly { root: root.into() }),
                 ..Default::default()
             })
@@ -259,7 +259,10 @@ mod tests {
             "embedding vector should not contain NaN or Inf values: {vector:?}"
         );
 
-        handle.shutdown().await.expect("shutdown should succeed");
+        handle
+            .shutdown_box()
+            .await
+            .expect("shutdown should succeed");
     }
 
     fn unique_temp_dir() -> PathBuf {

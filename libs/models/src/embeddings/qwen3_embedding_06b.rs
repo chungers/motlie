@@ -4,7 +4,7 @@ use std::sync::Arc;
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
-    EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    EmbeddingNormalization, EmbeddingSpec, ModelCheckpoint, ModelError, ModelIdentity,
 };
 use motlie_model_mistral::MistralEmbeddingAdapter;
 
@@ -97,7 +97,7 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
+pub fn bundle() -> Box<dyn crate::ErasedModelBundle> {
     let descriptor = descriptor();
     crate::adapter_backed_bundle(
         descriptor.id,
@@ -227,7 +227,7 @@ mod tests {
             .instantiate(&BundleId::new("qwen3_embedding_06b"))
             .expect("default catalog should instantiate qwen3 embedding");
         let handle = bundle
-            .start(StartOptions {
+            .start_erased(StartOptions {
                 artifact_policy: Some(ArtifactPolicy::LocalOnly { root: root.into() }),
                 quantization: Some(QuantizationBits::Eight),
                 ..Default::default()
@@ -260,7 +260,10 @@ mod tests {
             .expect_err("unsupported Q4 should fail");
         assert!(matches!(unsupported, ModelError::InvalidConfiguration(_)));
 
-        handle.shutdown().await.expect("shutdown should succeed");
+        handle
+            .shutdown_box()
+            .await
+            .expect("shutdown should succeed");
     }
 
     fn unique_temp_dir() -> PathBuf {
