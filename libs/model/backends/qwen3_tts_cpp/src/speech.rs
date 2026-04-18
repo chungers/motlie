@@ -8,11 +8,11 @@ use std::time::Instant;
 use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer};
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata,
-    Capabilities, CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
+    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    PcmEncoding, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, SpeechModel,
-    SpeechParams, SpeechRequest, SpeechStream, StartOptions, TranscriptionModel, VoiceConditioning,
+    PcmEncoding, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, SpeechParams,
+    SpeechRequest, StartOptions, VoiceConditioning,
 };
 
 use crate::common::{
@@ -239,44 +239,8 @@ impl BundleHandle for Qwen3TtsCppHandle {
         ))
     }
 
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Ok(self)
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(
-            CapabilityKind::Transcription,
-        ))
-    }
-
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl SpeechModel for Qwen3TtsCppHandle {
-    fn backend_mode(&self) -> BackendMode {
-        BackendMode::Batch
-    }
-
-    async fn open_stream(
-        &self,
-        request: SpeechRequest,
-    ) -> Result<Box<dyn SpeechStream>, ModelError> {
-        let started_at = Instant::now();
-        let pcm = self.runtime.synthesize(&request)?;
-        let elapsed = started_at.elapsed();
-
-        {
-            let mut state = lock_metrics(&self.metrics, "qwen3-tts-cpp-open-stream");
-            observe_latency(&mut state.runtime, elapsed);
-        }
-
-        Ok(Box::new(Qwen3TtsCppSpeechStream::new(
-            self.runtime.audio_spec.clone(),
-            pcm,
-        )))
     }
 }
 
@@ -413,13 +377,8 @@ impl Qwen3TtsCppSpeechStream {
     }
 }
 
-#[async_trait]
-impl SpeechStream for Qwen3TtsCppSpeechStream {
-    fn audio_spec(&self) -> &AudioSpec {
-        &self.audio_spec
-    }
-
-    async fn next_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError> {
+impl Qwen3TtsCppSpeechStream {
+    async fn next_pcm_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError> {
         if self.finished {
             return Ok(None);
         }
@@ -452,7 +411,7 @@ impl SpeechStream for Qwen3TtsCppSpeechStream {
         Ok(Some(chunk))
     }
 
-    async fn finish(self: Box<Self>) -> Result<(), ModelError> {
+    async fn finish_stream(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -503,7 +462,7 @@ impl TypedSpeechStream for Qwen3TtsCppSpeechStream {
     type Chunk = AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>;
 
     async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
-        let Some(chunk) = SpeechStream::next_chunk(self).await? else {
+        let Some(chunk) = self.next_pcm_chunk().await? else {
             return Ok(None);
         };
 
@@ -511,7 +470,7 @@ impl TypedSpeechStream for Qwen3TtsCppSpeechStream {
     }
 
     async fn finish(self) -> Result<(), ModelError> {
-        <Self as SpeechStream>::finish(Box::new(self)).await
+        self.finish_stream().await
     }
 }
 

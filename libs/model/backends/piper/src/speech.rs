@@ -6,11 +6,11 @@ use async_trait::async_trait;
 use espeak_rs::text_to_phonemes;
 use motlie_model::typed::{AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer};
 use motlie_model::{
-    BackendAdapter, BackendKind, BackendMode, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    QuantizationSupport, ResolvedCheckpoint, SpeechModel, SpeechParams, SpeechRequest,
-    SpeechStream, StartOptions, TranscriptionModel, VoiceConditioning,
+    QuantizationSupport, ResolvedCheckpoint, SpeechParams, SpeechRequest, StartOptions,
+    VoiceConditioning,
 };
 use motlie_model_ort::build_session;
 use ndarray::{Array1, Array2};
@@ -232,44 +232,8 @@ impl BundleHandle for PiperHandle {
         ))
     }
 
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Ok(self)
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(
-            CapabilityKind::Transcription,
-        ))
-    }
-
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl SpeechModel for PiperHandle {
-    fn backend_mode(&self) -> BackendMode {
-        BackendMode::Batch
-    }
-
-    async fn open_stream(
-        &self,
-        request: SpeechRequest,
-    ) -> Result<Box<dyn SpeechStream>, ModelError> {
-        let started_at = Instant::now();
-        let pcm = self.runtime.synthesize(&request)?;
-        let elapsed = started_at.elapsed();
-
-        {
-            let mut state = lock_metrics(&self.metrics, "piper-open-stream");
-            observe_latency(&mut state.runtime, elapsed);
-        }
-
-        Ok(Box::new(PiperSpeechStream::new(
-            self.runtime.config.audio_spec.clone(),
-            pcm,
-        )?))
     }
 }
 
@@ -385,7 +349,6 @@ impl PiperRuntime {
 /// `open_stream()` performs the full synthesis up front and `next_chunk()`
 /// subsequently yields buffered PCM for sink adapters.
 pub struct PiperSpeechStream {
-    audio_spec: motlie_model::AudioSpec,
     pcm: Vec<u8>,
     offset: usize,
     next_sequence: u64,
@@ -393,7 +356,7 @@ pub struct PiperSpeechStream {
 }
 
 impl PiperSpeechStream {
-    fn new(mut audio_spec: motlie_model::AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
+    fn new(audio_spec: motlie_model::AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
         let bytes_per_sample = match audio_spec.encoding {
             motlie_model::PcmEncoding::S16Le => 2,
             motlie_model::PcmEncoding::F32Le => 4,
@@ -402,10 +365,8 @@ impl PiperSpeechStream {
             ((audio_spec.sample_rate_hz as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
         let chunk_len_bytes =
             frames_per_chunk.max(1) * audio_spec.channels as usize * bytes_per_sample;
-        audio_spec.preferred_chunk_bytes = chunk_len_bytes;
 
         Ok(Self {
-            audio_spec,
             pcm,
             offset: 0,
             next_sequence: 0,
@@ -427,13 +388,8 @@ fn decode_s16le_chunk(data: &[u8]) -> Result<Vec<i16>, ModelError> {
         .collect())
 }
 
-#[async_trait]
-impl SpeechStream for PiperSpeechStream {
-    fn audio_spec(&self) -> &motlie_model::AudioSpec {
-        &self.audio_spec
-    }
-
-    async fn next_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError> {
+impl PiperSpeechStream {
+    async fn next_pcm_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError> {
         if self.offset >= self.pcm.len() {
             return Ok(None);
         }
@@ -450,7 +406,7 @@ impl SpeechStream for PiperSpeechStream {
         Ok(Some(chunk))
     }
 
-    async fn finish(self: Box<Self>) -> Result<(), ModelError> {
+    async fn finish_stream(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -485,7 +441,7 @@ impl TypedSpeechStream for PiperSpeechStream {
     type Chunk = AudioBuf<i16, 22_050, Mono>;
 
     async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
-        let Some(chunk) = SpeechStream::next_chunk(self).await? else {
+        let Some(chunk) = self.next_pcm_chunk().await? else {
             return Ok(None);
         };
 
@@ -493,7 +449,7 @@ impl TypedSpeechStream for PiperSpeechStream {
     }
 
     async fn finish(self) -> Result<(), ModelError> {
-        <Self as SpeechStream>::finish(Box::new(self)).await
+        self.finish_stream().await
     }
 }
 

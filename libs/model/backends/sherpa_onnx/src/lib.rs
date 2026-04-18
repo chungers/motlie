@@ -2,7 +2,7 @@
 //!
 //! This backend targets streaming Zipformer transducer checkpoints exported as
 //! ONNX encoder/decoder/joiner graphs. Inference runs through ONNX Runtime and
-//! exposes the existing `TranscriptionModel` / `TranscriptionStream` contract.
+//! exposes the typed `StreamingTranscriber` / `TranscriptionSession` contract.
 
 mod common;
 mod transcription;

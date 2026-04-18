@@ -9,14 +9,14 @@ use motlie_model::{
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
     CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, LoadedBundleDescriptor,
     ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions, TranscriptionModel,
+    QuantizationSupport, ResolvedCheckpoint, StartOptions,
 };
 
 use crate::common::{
-    apply_generation_params, configure_artifact_policy, lock_metrics, map_chat_role,
-    map_quantization_bits, observe_latency, observe_memory, observe_text_usage,
-    paged_attn_context_size, resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics,
-    RuntimeMetricState, TextMetricState,
+    RuntimeMetricState, TextMetricState, apply_generation_params, configure_artifact_policy,
+    lock_metrics, map_chat_role, map_quantization_bits, observe_latency, observe_memory,
+    observe_text_usage, paged_attn_context_size, resolve_local_checkpoint, should_force_cpu,
+    snapshot_text_metrics,
 };
 
 const MISTRAL_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -313,16 +313,6 @@ impl BundleHandle for MistralTextHandle {
         ))
     }
 
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(
-            CapabilityKind::Transcription,
-        ))
-    }
-
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
         Ok(())
     }
@@ -434,7 +424,9 @@ async fn build_text_model(
                 builder = builder.with_paged_attn(pa_config);
             }
             Err(err) => {
-                tracing::warn!("failed to configure PagedAttention with context size {context_size}, continuing without it: {err}");
+                tracing::warn!(
+                    "failed to configure PagedAttention with context size {context_size}, continuing without it: {err}"
+                );
             }
         }
     }

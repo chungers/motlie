@@ -26,10 +26,10 @@ pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
-pub use speech::{SpeechModel, SpeechParams, SpeechRequest, SpeechStream, VoiceConditioning};
+pub use speech::{SpeechParams, SpeechRequest, VoiceConditioning};
 pub use transcription::{
-    AudioSpec, BackendMode, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionModel,
-    TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
+    AudioSpec, BackendMode, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionParams,
+    TranscriptionUpdate,
 };
 pub use typed::{
     AudioBuf, AudioTransform, BatchTranscriber, Compose, I16MonoResampler, I16ToF32,
@@ -580,9 +580,6 @@ pub trait BundleHandle: Send + Sync {
     fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
     fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError>;
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError>;
-
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
 }
 
@@ -649,16 +646,6 @@ mod tests {
 
         fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
             Ok(self)
-        }
-
-        fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-            Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-        }
-
-        fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-            Err(ModelError::UnsupportedCapability(
-                CapabilityKind::Transcription,
-            ))
         }
 
         async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
@@ -987,46 +974,6 @@ mod tests {
         assert!(capabilities.supports(CapabilityKind::Speech));
         assert!(!capabilities.supports(CapabilityKind::Chat));
         assert!(!capabilities.supports(CapabilityKind::Embeddings));
-    }
-
-    #[tokio::test]
-    async fn embedding_handle_rejects_transcription_cleanly() {
-        let handle = FakeHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: BundleId::new("embedder"),
-                display_name: "Embedder".into(),
-                capabilities: Capabilities::embeddings_only(),
-                quantization: QuantizationSupport::none(),
-                resolved_quantization: None,
-            },
-        };
-
-        assert!(!handle.supports(CapabilityKind::Transcription));
-        assert!(matches!(
-            handle.transcription(),
-            Err(ModelError::UnsupportedCapability(
-                CapabilityKind::Transcription
-            ))
-        ));
-    }
-
-    #[tokio::test]
-    async fn embedding_handle_rejects_speech_cleanly() {
-        let handle = FakeHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: BundleId::new("embedder"),
-                display_name: "Embedder".into(),
-                capabilities: Capabilities::embeddings_only(),
-                quantization: QuantizationSupport::none(),
-                resolved_quantization: None,
-            },
-        };
-
-        assert!(!handle.supports(CapabilityKind::Speech));
-        assert!(matches!(
-            handle.speech(),
-            Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-        ));
     }
 
     #[test]

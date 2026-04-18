@@ -1,12 +1,9 @@
-//! Streaming text-to-speech synthesis contracts.
+//! Shared TTS data types.
 //!
-//! The speech capability accepts text input plus optional voice conditioning
-//! and emits PCM chunks that higher layers can write to `.wav`, local audio
-//! sinks, or telephony transports.
+//! The typed TTS contracts live in [`crate::typed`]. This module only carries
+//! the request/conditioning types that are shared across bundles and backends.
 
-use async_trait::async_trait;
-
-use crate::{AudioSpec, BackendMode, ModelError, PcmChunk};
+use crate::AudioSpec;
 
 /// Stream-scoped speech synthesis parameters.
 ///
@@ -40,40 +37,6 @@ pub struct SpeechRequest {
     pub text: String,
     pub params: SpeechParams,
     pub conditioning: Option<VoiceConditioning>,
-}
-
-/// Streaming speech-synthesis capability.
-///
-/// `SpeechModel` is `Send + Sync` — it represents the shareable loaded model.
-/// Each call to `open_stream` produces an independent, stateful stream session
-/// that is `Send` but intentionally not `Sync` because it owns mutable chunk
-/// iteration state and requires ordered, exclusive access.
-#[async_trait]
-pub trait SpeechModel: Send + Sync {
-    fn backend_mode(&self) -> BackendMode;
-
-    async fn open_stream(
-        &self,
-        request: SpeechRequest,
-    ) -> Result<Box<dyn SpeechStream>, ModelError>;
-}
-
-/// Live speech-synthesis stream session.
-///
-/// `SpeechStream` is `Send` but not `Sync`. Callers must hold exclusive access
-/// to the stream — sharing across tasks requires caller-side synchronization.
-///
-/// ## Edge-case semantics
-///
-/// - Empty or whitespace-only `SpeechRequest.text`: returns `ModelError::InvalidConfiguration`
-/// - `next_chunk()` returns `Ok(None)` only after the stream is exhausted
-/// - After the final chunk, subsequent `next_chunk()` calls must return `Ok(None)` idempotently
-/// - Calling after `finish()`: impossible by construction (`finish` consumes `Box<Self>`)
-#[async_trait]
-pub trait SpeechStream: Send {
-    fn audio_spec(&self) -> &AudioSpec;
-    async fn next_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError>;
-    async fn finish(self: Box<Self>) -> Result<(), ModelError>;
 }
 
 #[cfg(test)]

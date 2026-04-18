@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_embedding_request,
-    observe_memory, should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState,
-    RuntimeMetricState,
+    EmbeddingMetricState, RuntimeMetricState, configure_artifact_policy, lock_metrics,
+    map_quantization_bits, observe_embedding_request, observe_memory, should_force_cpu,
+    snapshot_embedding_metrics,
 };
 use async_trait::async_trait;
 use mistralrs::core::EmbeddingLoaderType;
@@ -14,7 +14,7 @@ use motlie_model::{
     CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
     EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse, LoadedBundleDescriptor,
     ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions, TranscriptionModel,
+    QuantizationSupport, ResolvedCheckpoint, StartOptions,
 };
 
 const MISTRAL_EMBEDDING_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -282,16 +282,6 @@ impl BundleHandle for MistralEmbeddingHandle {
 
     fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
         Ok(self)
-    }
-
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(
-            CapabilityKind::Transcription,
-        ))
     }
 
     async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
