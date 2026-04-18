@@ -1,0 +1,24 @@
+    tmux-cld:0         (Window, 'node', 1 pane)
+      tmux-cld:0.0     (Pane, %37)
+tmux> 〉create codex-e2e-smoke-20260411a
+Created: codex-e2e-smoke-20260411a
+tmux> 〉send codex-e2e-smoke-20260411a echo hello-from-validation
+Sent to codex-e2e-smoke-20260411a
+tmux> 〉capture codex-e2e-smoke-20260411a 20
+
+dchung@mac-mini-m4pro ~ % echo hello-from-validation
+hello-from-validation
+dchung@mac-mini-m4pro ~ %
+tmux> 〉monitor codex-e2e-smoke-20260411a
+Watching session: codex-e2e-smoke-20260411a (attached; Ctrl-C to stop live follo
+w)
+Live follow attached. Press Ctrl-C to stop and return to the prompt.
+
+dchung@mac-mini-m4pro ~ % echo hello-from-validation
+hello-from-validation
+dchung@mac-mini-m4pro ~ %
+[motliehost:codex-e2e-smoke-20260411a(%39)] echo validation-monitor-line
+validation-monitor-line
+%
+ dchung@mac-mini-m4pro ~ %
+

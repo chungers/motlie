@@ -1,0 +1,24 @@
+[seq=3 label=watching: codex-e2e-smoke-20260411a ansi=false watch=Streaming]
+  [motliehost:codex-e2e-smoke-20260411a(%39)] echo validation-monitor-line
+  validation-monitor-line
+  %
+   dchung@mac-mini-m4pro ~ %
+tmux> 〉kill codex-e2e-smoke-20260411a
+Killed: codex-e2e-smoke-20260411a
+tmux> 〉targets
+  jarvis               (Session, 1 window)
+    jarvis:0           (Window, 'node', 1 pane)
+      jarvis:0.0       (Pane, %2)
+  mistral-cdx          (Session, 1 window)
+    mistral-cdx:0      (Window, 'node', 1 pane)
+      mistral-cdx:0.0  (Pane, %0)
+  mistral-cld          (Session, 1 window)
+    mistral-cld:0      (Window, 'node', 1 pane)
+      mistral-cld:0.0  (Pane, %1)
+  tmux-cdx             (Session, 1 window)
+    tmux-cdx:0         (Window, 'node', 1 pane)
+      tmux-cdx:0.0     (Pane, %35)
+  tmux-cld             (Session, 1 window)
+    tmux-cld:0         (Window, 'node', 1 pane)
+      tmux-cld:0.0     (Pane, %37)
+tmux> 〉
