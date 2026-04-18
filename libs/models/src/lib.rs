@@ -1429,112 +1429,7 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
-    use motlie_model::BundleMetadata;
-
     use super::*;
-
-    #[derive(Clone)]
-    struct StubBundle {
-        metadata: BundleMetadata,
-    }
-
-    #[async_trait::async_trait]
-    impl ModelBundle for StubBundle {
-        type Handle = StubHandle;
-
-        fn id(&self) -> &BundleId {
-            &self.metadata.id
-        }
-
-        fn metadata(&self) -> &BundleMetadata {
-            &self.metadata
-        }
-
-        fn capabilities(&self) -> &Capabilities {
-            &self.metadata.capabilities
-        }
-
-        async fn start(
-            &self,
-            _options: motlie_model::StartOptions,
-        ) -> std::result::Result<Self::Handle, motlie_model::ModelError> {
-            Err(motlie_model::ModelError::InvalidConfiguration(
-                "stub bundle is not startable".into(),
-            ))
-        }
-    }
-
-    struct StubHandle;
-
-    #[async_trait::async_trait]
-    impl motlie_model::BundleHandle for StubHandle {
-        type Chat = motlie_model::UnsupportedChat;
-        type Completion = motlie_model::UnsupportedCompletion;
-        type Embeddings = motlie_model::UnsupportedEmbeddings;
-
-        fn descriptor(&self) -> &motlie_model::LoadedBundleDescriptor {
-            unreachable!("stub handle is never constructed")
-        }
-
-        fn capabilities(&self) -> &Capabilities {
-            unreachable!("stub handle is never constructed")
-        }
-
-        fn chat(&self) -> std::result::Result<&Self::Chat, motlie_model::ModelError> {
-            unreachable!("stub handle is never constructed")
-        }
-
-        fn completion(&self) -> std::result::Result<&Self::Completion, motlie_model::ModelError> {
-            unreachable!("stub handle is never constructed")
-        }
-
-        fn embeddings(&self) -> std::result::Result<&Self::Embeddings, motlie_model::ModelError> {
-            unreachable!("stub handle is never constructed")
-        }
-
-        async fn shutdown(self) -> std::result::Result<(), motlie_model::ModelError> {
-            Ok(())
-        }
-    }
-
-    struct StubAdapter {
-        backend: BackendKind,
-        capabilities: Capabilities,
-        quantization: QuantizationSupport,
-        supported_formats: Vec<CheckpointFormat>,
-    }
-
-    #[async_trait::async_trait]
-    impl BackendAdapter for StubAdapter {
-        type Handle = StubHandle;
-
-        fn supported_formats(&self) -> &[CheckpointFormat] {
-            &self.supported_formats
-        }
-
-        fn backend_kind(&self) -> BackendKind {
-            self.backend
-        }
-
-        fn capabilities(&self) -> &Capabilities {
-            &self.capabilities
-        }
-
-        fn quantization(&self) -> &QuantizationSupport {
-            &self.quantization
-        }
-
-        async fn start(
-            &self,
-            _identity: &ModelIdentity,
-            _checkpoint: &ResolvedCheckpoint,
-            _options: StartOptions,
-        ) -> std::result::Result<Self::Handle, ModelError> {
-            Err(ModelError::InvalidConfiguration(
-                "stub adapter is not startable".into(),
-            ))
-        }
-    }
 
     fn stub_descriptor(id: &str) -> BundleDescriptor {
         BundleDescriptor {
@@ -1620,34 +1515,10 @@ mod tests {
             display_name: "Bundle v2".into(),
             ..stub_descriptor("bundle")
         };
-        let first_for_factory = first.clone();
-        let second_for_factory = second.clone();
 
-        assert!(
-            catalog
-                .register(first.clone(), move || {
-                    Box::new(StubBundle {
-                        metadata: BundleMetadata {
-                            id: first_for_factory.id.clone(),
-                            display_name: first_for_factory.display_name.clone(),
-                            capabilities: first_for_factory.capabilities.clone(),
-                            quantization: motlie_model::QuantizationSupport::none(),
-                        },
-                    })
-                })
-                .is_none()
-        );
+        assert!(catalog.register_descriptor(first.clone()).is_none());
 
-        let replaced = catalog.register(second.clone(), move || {
-            Box::new(StubBundle {
-                metadata: BundleMetadata {
-                    id: second_for_factory.id.clone(),
-                    display_name: second_for_factory.display_name.clone(),
-                    capabilities: second_for_factory.capabilities.clone(),
-                    quantization: motlie_model::QuantizationSupport::none(),
-                },
-            })
-        });
+        let replaced = catalog.register_descriptor(second.clone());
 
         assert_eq!(replaced, Some(first));
         assert_eq!(
@@ -1695,31 +1566,8 @@ mod tests {
             }),
             ..mistral.clone()
         };
-        let mistral_capabilities = mistral.capabilities.clone();
-        let llama_capabilities = llama.capabilities.clone();
-        let mistral_for_factory = mistral.clone();
-        let llama_for_factory = llama.clone();
-
-        catalog.register(mistral.clone(), move || {
-            Box::new(StubBundle {
-                metadata: BundleMetadata {
-                    id: mistral_for_factory.id.clone(),
-                    display_name: mistral_for_factory.display_name.clone(),
-                    capabilities: mistral_capabilities.clone(),
-                    quantization: motlie_model::QuantizationSupport::none(),
-                },
-            })
-        });
-        catalog.register(llama.clone(), move || {
-            Box::new(StubBundle {
-                metadata: BundleMetadata {
-                    id: llama_for_factory.id.clone(),
-                    display_name: llama_for_factory.display_name.clone(),
-                    capabilities: llama_capabilities.clone(),
-                    quantization: motlie_model::QuantizationSupport::none(),
-                },
-            })
-        });
+        catalog.register_descriptor(mistral.clone());
+        catalog.register_descriptor(llama.clone());
         catalog.register_model_variant(
             ModelIdentity {
                 id: BundleId::new("qwen3_4b"),
@@ -1729,16 +1577,14 @@ mod tests {
                 eval_tracks: vec![EvalTrack::Chat],
                 requirements: BundleRequirements::default(),
             },
-            mistral
-                .checkpoint()
-                .expect("mistral descriptor should expose checkpoint"),
-            Arc::new(|root: &Path| Ok(root.to_path_buf())),
-            Arc::new(StubAdapter {
+            ModelVariantDescriptor {
                 backend: BackendKind::MistralRs,
                 capabilities: Capabilities::chat_and_completion(),
                 quantization: QuantizationSupport::none(),
-                supported_formats: vec![CheckpointFormat::Safetensors],
-            }),
+                checkpoint: mistral
+                    .checkpoint()
+                    .expect("mistral descriptor should expose checkpoint"),
+            },
         );
         catalog.register_model_variant(
             ModelIdentity {
@@ -1749,11 +1595,7 @@ mod tests {
                 eval_tracks: vec![EvalTrack::Chat],
                 requirements: BundleRequirements::default(),
             },
-            llama
-                .checkpoint()
-                .expect("llama descriptor should expose checkpoint"),
-            Arc::new(|root: &Path| Ok(root.to_path_buf())),
-            Arc::new(StubAdapter {
+            ModelVariantDescriptor {
                 backend: BackendKind::LlamaCpp,
                 capabilities: Capabilities::chat_and_completion(),
                 quantization: QuantizationSupport::with_recommended(
@@ -1761,8 +1603,10 @@ mod tests {
                     motlie_model::QuantizationBits::Four,
                 )
                 .expect("test quantization support should be valid"),
-                supported_formats: vec![CheckpointFormat::Gguf],
-            }),
+                checkpoint: llama
+                    .checkpoint()
+                    .expect("llama descriptor should expose checkpoint"),
+            },
         );
 
         let resolved = catalog
@@ -1778,7 +1622,10 @@ mod tests {
         assert_eq!(resolved.identity.id.as_str(), "qwen3_4b");
         assert_eq!(resolved.variant.backend, BackendKind::LlamaCpp);
         assert_eq!(resolved.variant.checkpoint.format, CheckpointFormat::Gguf);
+        #[cfg(feature = "model-qwen3-4b-gguf")]
         assert!(catalog.instantiate_resolved(&resolved).is_some());
+        #[cfg(not(feature = "model-qwen3-4b-gguf"))]
+        assert!(catalog.instantiate_resolved(&resolved).is_none());
     }
 
     #[test]

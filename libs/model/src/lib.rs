@@ -26,16 +26,13 @@ pub use generation::{
     ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
 };
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
-pub use speech::{SpeechParams, SpeechRequest, VoiceConditioning};
-pub use transcription::{
-    AudioSpec, BackendMode, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionParams,
-    TranscriptionUpdate,
-};
+pub use speech::SpeechParams;
+pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
 pub use typed::{
-    AudioBuf, AudioTransform, BatchTranscriber, Compose, I16MonoResampler, I16ToF32,
-    IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
-    SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber,
-    TranscriptionSession, stream_speech_into_asr,
+    AudioBuf, AudioTransform, BatchTranscriber, CloneReference, Compose, I16MonoResampler,
+    I16ToF32, IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
+    SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber, SynthesisRequest,
+    TranscriptionSession, VoiceCloneSynthesizer, stream_speech_into_asr,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
@@ -972,7 +969,7 @@ mod tests {
         let chat = ChatRequest::default();
         let completion = CompletionRequest::default();
         let embeddings = EmbeddingRequest::default();
-        let speech = SpeechRequest::default();
+        let speech = SynthesisRequest::default();
         let multi = EmbeddingRequest {
             inputs: vec!["one".into(), "two".into()],
         };
@@ -984,7 +981,7 @@ mod tests {
         assert!(completion.prompt.is_empty());
         assert!(embeddings.inputs.is_empty());
         assert!(speech.text.is_empty());
-        assert_eq!(speech.conditioning, None);
+        assert_eq!(speech.params, SpeechParams::default());
         assert!(chat.params.stop_sequences.is_empty());
         assert_eq!(multi.inputs.len(), 2);
         assert_eq!(response.vectors.len(), 2);

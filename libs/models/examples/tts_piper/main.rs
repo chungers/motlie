@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use motlie_model::typed::{SpeechStream, SpeechSynthesizer};
-use motlie_model::{ArtifactPolicy, SpeechParams, SpeechRequest, StartOptions};
+use motlie_model::typed::{SpeechStream, SpeechSynthesizer, SynthesisRequest};
+use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::piper_en_us_ljspeech_medium;
 
 const TARGET_SAMPLE_RATE_HZ: u32 = 22_050;
@@ -75,10 +75,9 @@ async fn run(args: Args) -> Result<()> {
     .context("failed to start typed Piper bundle")?;
 
     let mut stream = handle
-        .synthesize(SpeechRequest {
+        .synthesize(SynthesisRequest {
             text: args.text,
             params: SpeechParams::default(),
-            conditioning: None,
         })
         .await
         .context("failed to open typed speech stream")?;

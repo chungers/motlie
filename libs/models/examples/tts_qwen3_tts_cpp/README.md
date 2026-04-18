@@ -4,8 +4,8 @@ Third TTS example: `qwen3-tts.cpp` as the secondary curated TTS backend.
 
 This slice proves the GGUF/C++ runtime path end-to-end:
 - curated bundle resolution from Hugging Face cache or a direct model directory
-- `SpeechModel` / `SpeechStream` output through the Motlie generic backend
-- optional voice cloning from `VoiceConditioning::ReferenceAudio`
+- typed `SpeechSynthesizer` / `SpeechStream` output through the Motlie backend
+- optional voice cloning from a typed `CloneReference<16000, Mono>`
 - `.wav` file output for manual verification and downstream ASR round-trips
 
 ## Artifacts
@@ -58,10 +58,9 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 
 - The example opens the curated `Qwen3-TTS CPP 0.6B` bundle.
 - Text is synthesized through the pinned `qwen3-tts.cpp` submodule C API.
-- If `--reference-audio` is provided, the backend downsamples it to 24 kHz mono
-  float PCM before passing it through the voice-cloning entry point.
-- The backend performs whole-utterance synthesis in `open_stream()` and then
-  emits buffered PCM chunks through `next_chunk()`, matching the Piper and
-  Qwen ONNX TTS stream contract.
-- The resulting `.wav` file uses the runtime-reported sample rate and PCM
-  encoding.
+- If `--reference-audio` is provided, the example downsamples it to a typed
+  `CloneReference<16000, Mono>` before calling the voice-cloning entry point.
+- The backend performs whole-utterance synthesis in `synthesize()` and then
+  emits buffered typed audio chunks through `next_chunk()`, matching the Piper
+  and Qwen ONNX TTS stream contract.
+- The resulting `.wav` file uses the backend's fixed 24 kHz mono float output.

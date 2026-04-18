@@ -3,13 +3,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use motlie_model::typed::{AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer};
+use motlie_model::typed::{
+    AudioBuf, CloneReference, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer,
+    SynthesisRequest, VoiceCloneSynthesizer,
+};
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, PcmChunk, PcmEncoding, QuantizationSupport,
-    ResolvedCheckpoint, SpeechRequest, StartOptions, UnsupportedChat, UnsupportedCompletion,
-    UnsupportedEmbeddings, VoiceConditioning,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_ort::build_session;
 use ndarray::Array2;
@@ -18,12 +20,13 @@ use ort::value::Tensor;
 
 use crate::common::{
     Qwen3TtsArtifactPaths, Qwen3TtsConfig, RuntimeMetricState, Vocabulary,
-    compute_log_mel_spectrogram, configure_artifact_policy, decode_pcm_to_f32, downmix_to_mono,
-    encode_pcm, lock_metrics, observe_latency, observe_memory, resample_mono,
-    resolve_onnx_artifacts,
+    compute_log_mel_spectrogram, configure_artifact_policy, lock_metrics, observe_latency,
+    observe_memory, resample_mono, resolve_onnx_artifacts,
 };
 
 const QWEN3_TTS_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
+const OUTPUT_SAMPLE_RATE_HZ: u32 = 24_000;
+const REFERENCE_SAMPLE_RATE_HZ: u32 = 16_000;
 
 /// Duration of each output PCM chunk in milliseconds.
 const OUTPUT_CHUNK_DURATION_MS: u32 = 40;
@@ -321,7 +324,21 @@ impl TensorWithShape {
 }
 
 impl Qwen3TtsRuntime {
-    fn synthesize(&self, request: &SpeechRequest) -> Result<Vec<u8>, ModelError> {
+    fn synthesize(&self, request: &SynthesisRequest) -> Result<Vec<f32>, ModelError> {
+        let text = request.text.trim();
+        if text.is_empty() {
+            return Err(ModelError::InvalidConfiguration(
+                "speech request requires non-empty text".into(),
+            ));
+        }
+        self.synthesize_inner(text, None)
+    }
+
+    fn synthesize_with_reference(
+        &self,
+        request: &SynthesisRequest,
+        reference: &CloneReference<REFERENCE_SAMPLE_RATE_HZ, Mono>,
+    ) -> Result<Vec<f32>, ModelError> {
         let text = request.text.trim();
         if text.is_empty() {
             return Err(ModelError::InvalidConfiguration(
@@ -329,36 +346,32 @@ impl Qwen3TtsRuntime {
             ));
         }
 
-        // Encode reference audio + transcript conditioning if provided.
-        let ref_conditioning = match &request.conditioning {
-            Some(VoiceConditioning::ReferenceAudio {
-                audio_spec,
-                pcm,
-                reference_text,
-            }) => {
-                if reference_text.is_none() {
-                    tracing::warn!(
-                        "qwen3-tts voice cloning without reference_text uses audio-only \
-                         conditioning (reduced quality); the official API requires both \
-                         ref_audio and ref_text for prompted cloning"
-                    );
-                }
-                let mel = self.encode_reference_audio(audio_spec, pcm)?;
-                let ref_token_ids = reference_text
-                    .as_deref()
-                    .map(|text| self.vocab.tokenize(text));
-                Some(ReferenceConditioning { mel, ref_token_ids })
-            }
-            Some(VoiceConditioning::SpeakerId(_)) => {
-                return Err(ModelError::InvalidConfiguration(
-                    "qwen3-tts backend uses VoiceConditioning::ReferenceAudio for voice cloning; \
-                     SpeakerId is not supported"
-                        .into(),
-                ));
-            }
-            None => None,
-        };
+        if reference.audio.samples().is_empty() {
+            return Err(ModelError::InvalidConfiguration(
+                "reference audio conditioning requires non-empty audio".into(),
+            ));
+        }
 
+        if reference.transcript.is_none() {
+            tracing::warn!(
+                "qwen3-tts voice cloning without transcript uses audio-only conditioning (reduced quality)"
+            );
+        }
+
+        let mel = self.encode_reference_audio(reference.audio.samples())?;
+        let ref_token_ids = reference
+            .transcript
+            .as_deref()
+            .map(|text| self.vocab.tokenize(text));
+        let ref_conditioning = Some(ReferenceConditioning { mel, ref_token_ids });
+        self.synthesize_inner(text, ref_conditioning)
+    }
+
+    fn synthesize_inner(
+        &self,
+        text: &str,
+        ref_conditioning: Option<ReferenceConditioning>,
+    ) -> Result<Vec<f32>, ModelError> {
         // Tokenize text using the model's vocabulary.
         let token_ids = self.vocab.tokenize(text);
         if token_ids.len() <= 2 {
@@ -384,11 +397,9 @@ impl Qwen3TtsRuntime {
         )?;
         let samples = run_vocoder(&mut pipeline.vocoder, &mel, &self.config)?;
 
-        drop(pipeline); // release lock before PCM encoding
+        drop(pipeline);
 
-        let pcm = encode_pcm(&samples.data, self.config.audio_spec().encoding);
-
-        if pcm.is_empty() {
+        if samples.data.is_empty() {
             return Err(ModelError::BackendExecution {
                 backend: "qwen3-tts",
                 operation: "synthesize",
@@ -396,23 +407,11 @@ impl Qwen3TtsRuntime {
             });
         }
 
-        Ok(pcm)
+        Ok(samples.data)
     }
 
-    fn encode_reference_audio(
-        &self,
-        audio_spec: &AudioSpec,
-        pcm: &[u8],
-    ) -> Result<TensorWithShape, ModelError> {
-        let samples = decode_pcm_to_f32(pcm, audio_spec.encoding)?;
-        if samples.is_empty() {
-            return Err(ModelError::InvalidConfiguration(
-                "reference audio conditioning requires non-empty PCM data".into(),
-            ));
-        }
-
-        let mono = downmix_to_mono(&samples, audio_spec.channels);
-        let resampled = resample_mono(&mono, audio_spec.sample_rate_hz, self.config.sample_rate);
+    fn encode_reference_audio(&self, samples: &[f32]) -> Result<TensorWithShape, ModelError> {
+        let resampled = resample_mono(samples, REFERENCE_SAMPLE_RATE_HZ, self.config.sample_rate);
 
         let mel_channels = self.config.mel_channels as usize;
         let mel = compute_log_mel_spectrogram(
@@ -602,46 +601,35 @@ fn run_vocoder(
 /// PCM for sink adapters. A truly streaming implementation would require
 /// autoregressive token generation, which is deferred to a future iteration.
 pub struct Qwen3TtsSpeechStream {
-    pcm: Vec<u8>,
+    samples: Vec<f32>,
     offset: usize,
-    next_sequence: u64,
-    chunk_len_bytes: usize,
+    chunk_len_samples: usize,
 }
 
 impl Qwen3TtsSpeechStream {
-    fn new(audio_spec: AudioSpec, pcm: Vec<u8>) -> Result<Self, ModelError> {
-        let bytes_per_sample = match audio_spec.encoding {
-            PcmEncoding::S16Le => 2,
-            PcmEncoding::F32Le => 4,
-        };
-        let frames_per_chunk =
-            ((audio_spec.sample_rate_hz as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
-        let chunk_len_bytes =
-            frames_per_chunk.max(1) * audio_spec.channels as usize * bytes_per_sample;
+    fn new(samples: Vec<f32>) -> Self {
+        let chunk_len_samples =
+            ((OUTPUT_SAMPLE_RATE_HZ as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
 
-        Ok(Self {
-            pcm,
+        Self {
+            samples,
             offset: 0,
-            next_sequence: 0,
-            chunk_len_bytes,
-        })
+            chunk_len_samples: chunk_len_samples.max(1),
+        }
     }
 }
 
 impl Qwen3TtsSpeechStream {
-    async fn next_pcm_chunk(&mut self) -> Result<Option<PcmChunk>, ModelError> {
-        if self.offset >= self.pcm.len() {
+    async fn next_audio_chunk(
+        &mut self,
+    ) -> Result<Option<AudioBuf<f32, OUTPUT_SAMPLE_RATE_HZ, Mono>>, ModelError> {
+        if self.offset >= self.samples.len() {
             return Ok(None);
         }
 
-        let end = (self.offset + self.chunk_len_bytes).min(self.pcm.len());
-        let chunk = PcmChunk {
-            data: self.pcm[self.offset..end].to_vec(),
-            sequence: self.next_sequence,
-            end_of_stream: end == self.pcm.len(),
-        };
+        let end = (self.offset + self.chunk_len_samples).min(self.samples.len());
+        let chunk = AudioBuf::new(self.samples[self.offset..end].to_vec());
         self.offset = end;
-        self.next_sequence = self.next_sequence.saturating_add(1);
 
         Ok(Some(chunk))
     }
@@ -651,54 +639,59 @@ impl Qwen3TtsSpeechStream {
     }
 }
 
-fn decode_f32le_chunk(data: &[u8]) -> Result<Vec<f32>, ModelError> {
-    if !data.len().is_multiple_of(4) {
-        return Err(ModelError::InvalidConfiguration(
-            "typed Qwen3-TTS output expects f32le-aligned PCM chunks".into(),
-        ));
-    }
-
-    Ok(data
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
-}
-
 impl SpeechSynthesizer for Qwen3TtsHandle {
-    type Output = AudioBuf<f32, 24_000, Mono>;
+    type Request = SynthesisRequest;
+    type Output = AudioBuf<f32, OUTPUT_SAMPLE_RATE_HZ, Mono>;
     type Stream = Qwen3TtsSpeechStream;
 
-    fn synthesize(
-        &self,
-        request: SpeechRequest,
-    ) -> impl std::future::Future<Output = Result<Self::Stream, ModelError>> + Send {
+    async fn synthesize(&self, request: Self::Request) -> Result<Self::Stream, ModelError> {
         let runtime = Arc::clone(&self.runtime);
         let metrics = Arc::clone(&self.metrics);
 
-        async move {
-            let started_at = Instant::now();
-            let pcm = runtime.synthesize(&request)?;
-            let elapsed = started_at.elapsed();
+        let started_at = Instant::now();
+        let pcm = runtime.synthesize(&request)?;
+        let elapsed = started_at.elapsed();
 
-            {
-                let mut state = lock_metrics(&metrics, "qwen3-tts-typed-synthesize");
-                observe_latency(&mut state.runtime, elapsed);
-            }
-
-            Qwen3TtsSpeechStream::new(runtime.config.audio_spec(), pcm)
+        {
+            let mut state = lock_metrics(&metrics, "qwen3-tts-typed-synthesize");
+            observe_latency(&mut state.runtime, elapsed);
         }
+
+        Ok(Qwen3TtsSpeechStream::new(pcm))
+    }
+}
+
+impl VoiceCloneSynthesizer<REFERENCE_SAMPLE_RATE_HZ, Mono> for Qwen3TtsHandle {
+    type Request = SynthesisRequest;
+    type Output = AudioBuf<f32, OUTPUT_SAMPLE_RATE_HZ, Mono>;
+    type Stream = Qwen3TtsSpeechStream;
+
+    async fn synthesize_with_reference(
+        &self,
+        request: Self::Request,
+        reference: CloneReference<REFERENCE_SAMPLE_RATE_HZ, Mono>,
+    ) -> Result<Self::Stream, ModelError> {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        let started_at = Instant::now();
+        let pcm = runtime.synthesize_with_reference(&request, &reference)?;
+        let elapsed = started_at.elapsed();
+
+        {
+            let mut state = lock_metrics(&metrics, "qwen3-tts-typed-clone");
+            observe_latency(&mut state.runtime, elapsed);
+        }
+
+        Ok(Qwen3TtsSpeechStream::new(pcm))
     }
 }
 
 impl TypedSpeechStream for Qwen3TtsSpeechStream {
-    type Chunk = AudioBuf<f32, 24_000, Mono>;
+    type Chunk = AudioBuf<f32, OUTPUT_SAMPLE_RATE_HZ, Mono>;
 
     async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
-        let Some(chunk) = self.next_pcm_chunk().await? else {
-            return Ok(None);
-        };
-
-        Ok(Some(AudioBuf::new(decode_f32le_chunk(&chunk.data)?)))
+        self.next_audio_chunk().await
     }
 
     async fn finish(self) -> Result<(), ModelError> {
@@ -766,51 +759,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_emits_monotonic_chunks_and_finishes() {
-        let audio_spec = AudioSpec {
-            sample_rate_hz: 22_050,
-            channels: 1,
-            encoding: PcmEncoding::F32Le,
-            preferred_chunk_bytes: 0,
-        };
-        let pcm = vec![0_u8; 10_000];
-        let mut stream = Qwen3TtsSpeechStream::new(audio_spec, pcm).expect("stream should build");
+    async fn stream_emits_chunks_and_finishes() {
+        let pcm = vec![0.25_f32; 10_000];
+        let mut stream = Qwen3TtsSpeechStream::new(pcm);
 
-        let mut prev_seq = None;
-        let mut saw_final = false;
+        let mut total = 0usize;
         while let Some(chunk) = TypedSpeechStream::next_chunk(&mut stream)
             .await
             .expect("should succeed")
         {
-            if let Some(prev) = prev_seq {
-                assert!(chunk.sequence > prev);
-            }
-            prev_seq = Some(chunk.sequence);
-            saw_final = chunk.end_of_stream;
+            total += chunk.samples().len();
         }
 
-        assert!(saw_final);
+        assert_eq!(total, 10_000);
         assert!(
             TypedSpeechStream::next_chunk(&mut stream)
                 .await
                 .expect("should stay exhausted")
                 .is_none()
         );
-    }
-
-    #[test]
-    fn encode_pcm_s16le_round_trips() {
-        use crate::common::{decode_pcm_to_f32, encode_pcm};
-
-        let samples = vec![0.5_f32, -0.5, 0.0, 1.0, -1.0];
-        let encoded = encode_pcm(&samples, PcmEncoding::S16Le);
-        assert_eq!(encoded.len(), samples.len() * 2);
-
-        let decoded =
-            decode_pcm_to_f32(&encoded, PcmEncoding::S16Le).expect("round-trip should succeed");
-        for (orig, dec) in samples.iter().zip(decoded.iter()) {
-            assert!((orig - dec).abs() < 0.001, "orig={orig}, decoded={dec}");
-        }
     }
 
     #[test]

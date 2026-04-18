@@ -6,11 +6,11 @@ use std::time::Instant;
 use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
-    ModelIdentity, ModelMetricSnapshot, PcmChunk, QuantizationSupport, StartOptions,
-    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, StartOptions, TranscriptSegment,
+    TranscriptionParams, TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion,
+    UnsupportedEmbeddings,
 };
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
 use ort::inputs;
@@ -19,14 +19,12 @@ use ort::value::TensorRef;
 use serde_json::Value;
 
 use crate::common::{
-    MoonshineArtifactPaths, MoonshineArtifactSpec, NormalizerState, RuntimeMetricState,
-    StagedModelDir, configure_artifact_policy, lock_metrics, observe_latency,
-    resolve_onnx_artifacts,
+    MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState, StagedModelDir,
+    configure_artifact_policy, lock_metrics, observe_latency, resolve_onnx_artifacts,
 };
 
 const MOONSHINE_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
 const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
-const PREFERRED_CHUNK_BYTES: usize = 6_400;
 const CHUNK_SIZE: usize = 1_280;
 const TOKENS_PER_SECOND: f32 = 6.5;
 const NUM_THREADS: usize = 4;
@@ -1052,45 +1050,28 @@ fn backend_exec_error(operation: &'static str, message: String) -> ModelError {
 }
 
 pub struct MoonshineStream {
-    spec: AudioSpec,
     params: TranscriptionParams,
     runtime: Arc<MoonshineRuntime>,
     metrics: Arc<Mutex<AsrMetrics>>,
-    normalizer: NormalizerState,
     state: StreamingState,
     total_samples: usize,
-    next_sequence: u64,
-    saw_end_of_stream: bool,
     last_partial_text: String,
 }
 
 impl MoonshineStream {
-    async fn push_chunk(
+    async fn ingest_chunk(
         &mut self,
-        chunk: PcmChunk,
+        audio: AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>,
     ) -> Result<Option<TranscriptionUpdate>, ModelError> {
-        if self.saw_end_of_stream {
-            return Err(ModelError::InvalidConfiguration(
-                "push_chunk called after end_of_stream".into(),
-            ));
-        }
-        if chunk.sequence != self.next_sequence {
-            return Err(ModelError::InvalidConfiguration(format!(
-                "expected chunk sequence {}, got {}",
-                self.next_sequence, chunk.sequence
-            )));
-        }
+        let normalized: Vec<f32> = audio
+            .into_samples()
+            .into_iter()
+            .map(|sample| sample as f32 / 32768.0)
+            .collect();
 
-        self.next_sequence += 1;
-        if chunk.end_of_stream {
-            self.saw_end_of_stream = true;
-        }
-
-        if chunk.data.is_empty() && !chunk.end_of_stream {
+        if normalized.is_empty() {
             return Ok(None);
         }
-
-        let normalized = self.normalizer.normalize(&chunk.data, &self.spec)?;
         self.total_samples += normalized.len();
 
         let started = Instant::now();
@@ -1125,14 +1106,10 @@ impl MoonshineStream {
     }
 
     async fn finish_stream(mut self) -> Result<TranscriptionUpdate, ModelError> {
-        let mut tail = Vec::new();
-        self.normalizer.flush(&mut tail);
-        self.total_samples += tail.len();
-
         let started = Instant::now();
         let final_text =
             self.runtime
-                .infer_chunk(&mut self.state, &tail, true, self.total_samples)?;
+                .infer_chunk(&mut self.state, &[], true, self.total_samples)?;
         {
             let mut metrics = lock_metrics(&self.metrics, "moonshine-finish");
             observe_latency(&mut metrics.runtime, started.elapsed());
@@ -1156,58 +1133,29 @@ impl StreamingTranscriber for MoonshineHandle {
     type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
     type Session = MoonshineStream;
 
-    fn open_session(
-        &self,
-        params: TranscriptionParams,
-    ) -> impl std::future::Future<Output = Result<Self::Session, ModelError>> + Send {
+    async fn open_session(&self, params: TranscriptionParams) -> Result<Self::Session, ModelError> {
         let runtime = Arc::clone(&self.runtime);
         let metrics = Arc::clone(&self.metrics);
 
-        async move {
-            Ok(MoonshineStream {
-                spec: AudioSpec {
-                    sample_rate_hz: TARGET_SAMPLE_RATE_HZ,
-                    channels: 1,
-                    encoding: motlie_model::PcmEncoding::S16Le,
-                    preferred_chunk_bytes: PREFERRED_CHUNK_BYTES,
-                },
-                params,
-                runtime: Arc::clone(&runtime),
-                metrics,
-                normalizer: NormalizerState::new(),
-                state: runtime.create_state(),
-                total_samples: 0,
-                next_sequence: 0,
-                saw_end_of_stream: false,
-                last_partial_text: String::new(),
-            })
-        }
+        Ok(MoonshineStream {
+            params,
+            runtime: Arc::clone(&runtime),
+            metrics,
+            state: runtime.create_state(),
+            total_samples: 0,
+            last_partial_text: String::new(),
+        })
     }
 }
 
 impl TranscriptionSession for MoonshineStream {
     type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
 
-    fn ingest(
+    async fn ingest(
         &mut self,
         audio: Self::Input,
-    ) -> impl std::future::Future<Output = Result<Option<TranscriptionUpdate>, ModelError>> + Send
-    {
-        let data: Vec<u8> = audio
-            .into_samples()
-            .into_iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect();
-        let sequence = self.next_sequence;
-
-        async move {
-            self.push_chunk(PcmChunk {
-                data,
-                sequence,
-                end_of_stream: false,
-            })
-            .await
-        }
+    ) -> Result<Option<TranscriptionUpdate>, ModelError> {
+        self.ingest_chunk(audio).await
     }
 
     async fn finish(self) -> Result<TranscriptionUpdate, ModelError> {
