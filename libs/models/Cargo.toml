@@ -116,3 +116,4 @@ required-features = ["model-piper-en-us-ljspeech-medium"]
 [[example]]
 name = "bench_chat"
 path = "examples/bench_chat.rs"
+required-features = ["model-qwen3-4b"]

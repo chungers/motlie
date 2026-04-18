@@ -1,13 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_qwen3_tts::{
-    Qwen3TtsHandle, Qwen3TtsSpeechAdapter, Qwen3TtsSpeechBundle, Qwen3TtsSpeechSpec,
-};
+use motlie_model_qwen3_tts::{Qwen3TtsHandle, Qwen3TtsSpeechBundle, Qwen3TtsSpeechSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -37,12 +34,7 @@ const VOCAB_FILE: &str = "vocab.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_path),
-        Arc::new(Qwen3TtsSpeechAdapter::qwen3_tts_12hz_0_6b()),
-    );
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -94,6 +86,16 @@ pub fn descriptor() -> BundleDescriptor {
             "qwen3_tts_12hz_0_6b",
             &checkpoint,
         )),
+    }
+}
+
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = Qwen3TtsSpeechSpec::qwen3_tts_12hz_0_6b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Ort,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
     }
 }
 

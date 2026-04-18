@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail, ensure};
-use motlie_model::{ArtifactPolicy, EmbeddingRequest, QuantizationBits, StartOptions};
+use motlie_model::{
+    ArtifactPolicy, BundleHandle, EmbeddingModel, EmbeddingRequest, QuantizationBits, StartOptions,
+};
 use motlie_models::{ModelSelector, default_artifact_root, download_bundle_artifacts};
 use std::time::Instant;
 
@@ -116,7 +118,7 @@ async fn main() -> Result<()> {
     let startup_sampler = support::StartupSampler::spawn("startup");
     let startup_at = Instant::now();
     let handle = bundle
-        .start_erased(StartOptions {
+        .start(StartOptions {
             artifact_policy: Some(ArtifactPolicy::LocalOnly {
                 root: artifact_root.clone(),
             }),
@@ -193,7 +195,7 @@ async fn main() -> Result<()> {
     );
 
     handle
-        .shutdown_box()
+        .shutdown()
         .await
         .context("bundle shutdown should succeed")?;
     support::print_process_snapshot(
@@ -211,8 +213,8 @@ fn available_embedding_selectors() -> Vec<&'static str> {
     ]
 }
 
-async fn run_pair_demo(
-    embeddings: &dyn motlie_model::EmbeddingModel,
+async fn run_pair_demo<E: motlie_model::EmbeddingModel + ?Sized>(
+    embeddings: &E,
     label: &str,
     first: &str,
     second: &str,

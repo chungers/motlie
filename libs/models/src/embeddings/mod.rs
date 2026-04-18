@@ -76,7 +76,7 @@ impl EmbeddingModels {
         }
     }
 
-    pub fn bundle(&self) -> Box<dyn crate::ErasedModelBundle> {
+    pub fn bundle(&self) -> crate::CuratedBundle {
         match self {
             #[cfg(feature = "model-google-gemma-300m")]
             Self::GoogleGemma300m => google_gemma_300m::bundle(),

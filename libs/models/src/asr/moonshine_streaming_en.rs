@@ -1,13 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_moonshine::{
-    MoonshineHandle, MoonshineStreamingAdapter, MoonshineStreamingBundle, MoonshineStreamingSpec,
-};
+use motlie_model_moonshine::{MoonshineHandle, MoonshineStreamingBundle, MoonshineStreamingSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -28,12 +25,7 @@ const TOKENIZER_JSON_FILE: &str = "onnx/small/tokenizer.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
     catalog.register_descriptor(descriptor());
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_root),
-        Arc::new(MoonshineStreamingAdapter::small_en()),
-    );
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -90,6 +82,16 @@ pub fn descriptor() -> BundleDescriptor {
             "moonshine_streaming_en",
             &checkpoint,
         )),
+    }
+}
+
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = MoonshineStreamingSpec::small_en();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Ort,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
     }
 }
 
