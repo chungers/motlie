@@ -3,6 +3,9 @@
 Second TTS example: Qwen3-TTS 12Hz 0.6B with optional voice cloning via a
 typed `CloneReference<16000, Mono>`.
 
+Canonical build prerequisites live in
+[`libs/models/docs/BUILD_MODELS.md`](../../docs/BUILD_MODELS.md).
+
 ## ONNX Export Prerequisite
 
 The upstream `Qwen/Qwen3-TTS-12Hz-0.6B-Base` model uses safetensors format.

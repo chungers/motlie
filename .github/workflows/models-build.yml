@@ -1,0 +1,50 @@
+name: curated model build
+
+on:
+  pull_request:
+    paths:
+      - "libs/model/src/**"
+      - "libs/model/backends/**"
+      - "libs/models/**"
+      - "scripts/check_models_build_prereqs.sh"
+      - "scripts/check_curated_model_examples.sh"
+      - ".github/workflows/models-build.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  push:
+    branches:
+      - main
+    paths:
+      - "libs/model/src/**"
+      - "libs/model/backends/**"
+      - "libs/models/**"
+      - "scripts/check_models_build_prereqs.sh"
+      - "scripts/check_curated_model_examples.sh"
+      - ".github/workflows/models-build.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  curated-model-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libespeak-ng-dev pkg-config
+
+      - name: Check curated model build prerequisites
+        run: ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule
+
+      - name: Check curated model examples
+        run: ./scripts/check_curated_model_examples.sh --mode check

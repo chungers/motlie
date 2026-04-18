@@ -2,6 +2,9 @@
 
 Third TTS example: `qwen3-tts.cpp` as the secondary curated TTS backend.
 
+Canonical build prerequisites live in
+[`libs/models/docs/BUILD_MODELS.md`](../../docs/BUILD_MODELS.md).
+
 This slice proves the GGUF/C++ runtime path end-to-end:
 - curated bundle resolution from Hugging Face cache or a direct model directory
 - typed `SpeechSynthesizer` / `SpeechStream` output through the Motlie backend

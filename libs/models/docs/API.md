@@ -7,6 +7,7 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-04-17 | @codex-asr: Renamed the shipped example targets from versioned names to capability/model names (`embeddings`, `chat_mistral_qwen3`, `chat_multimodal_gemma4`, `chat_gguf_gwen3_gemma4`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`) and updated the documented commands and paths. | Example Program, Notes |
+| 2026-04-18 | @codex-asr: Added `docs/BUILD_MODELS.md` as the canonical prerequisite/build guide for curated model backends and linked the API surface to the script/CI entry points that enforce those checks. | Overview, Notes |
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/models` catalog and descriptor shapes. Reflects the current scaffold, not the final loaded-bundle runtime API. | All |
 | 2026-04-07 | @codex-researcher: Added explicit curated artifact-control examples and updated the first embedding slice to use the real `mistralrs` builder path with separate pre-download support. | Overview, API Sketch, Notes |
 | 2026-04-07 | @codex-researcher: Added the `examples/v0.1` runnable example for the current curated embedding bundle. | Example Program |
@@ -41,6 +42,11 @@ The first concrete `libs/models` API is an in-memory `Catalog` of curated bundle
 - evaluation-track membership
 - curated bundle instantiation
 - explicit artifact download control separate from backend cache population
+
+For build/runtime prerequisites of the shipped model backends, see
+[`BUILD_MODELS.md`](./BUILD_MODELS.md). That document is the source of truth for
+host dependencies such as `libespeak-ng`, ONNX Runtime, and the `qwen3-tts.cpp`
+submodule.
 
 The goal is to make the product-facing bundle layer tangible before the runtime-facing bundle handle APIs are finalized.
 
