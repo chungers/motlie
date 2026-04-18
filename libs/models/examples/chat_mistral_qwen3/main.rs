@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat -- \
+            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- \
              [--download-artifacts] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
         );
     }
@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
     println!("catalog-entry-count: {}", catalog.len());
     ensure!(
         catalog.len() == 1,
-        "chat must be built with exactly one curated bundle feature enabled"
+        "chat_mistral_qwen3 must be built with exactly one curated bundle feature enabled"
     );
 
     println!("bundle-selector: {selector_label}");

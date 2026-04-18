@@ -69,8 +69,8 @@ path = "examples/embeddings/main.rs"
 required-features = ["model-google-gemma-300m", "model-qwen3-embedding-06b"]
 
 [[example]]
-name = "chat"
-path = "examples/chat/main.rs"
+name = "chat_mistral_qwen3"
+path = "examples/chat_mistral_qwen3/main.rs"
 required-features = ["model-qwen3-4b"]
 
 [[example]]
@@ -79,8 +79,8 @@ path = "examples/chat_multimodal/main.rs"
 required-features = ["model-gemma4-e2b"]
 
 [[example]]
-name = "chat_gguf"
-path = "examples/chat_gguf/main.rs"
+name = "chat_gguf_gwen3_gemma4"
+path = "examples/chat_gguf_gwen3_gemma4/main.rs"
 required-features = ["model-qwen3-4b-gguf"]
 
 [[example]]
