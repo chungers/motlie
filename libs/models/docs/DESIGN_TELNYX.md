@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-17 | @codex-macmini-telnyx: Removed the remaining `Box<dyn>` streaming-response sketch from `ConversationHandler` and replaced it with an associated `TextStream` type so the design remains static-dispatch at the gateway surface. | Closed-Enum Selection, Conversation Handler Contract, Streaming Conversation Responses |
 | 2026-04-17 | @codex-macmini-telnyx: Tightened the execution policy so the first live Telnyx implementation and validation slice is explicitly `Sherpa + Piper`. Other pairings remain documented as follow-on combinations, not peer initial targets. | Overview, Goals and Non-Goals, Concrete Combination Requirements |
 | 2026-04-16 | @codex-macmini-telnyx: Split the proposed implementation into provider-agnostic `libs/voice` and Telnyx-specific `libs/voice_telnyx`, and documented the crate hierarchy plus API surfaces explicitly in both DESIGN and PLAN. | Overview, Recommended Integration Shape, Crate Hierarchy and API Surfaces, Deployment: Private Host, Getting Started: Local Deployment |
 | 2026-04-16 | @codex-macmini-telnyx: Added an explicit media-adaptation pipeline design with typed stage contracts, marker types, and compile-time pipeline assembly guidance for codecs, resampling, framing, and model-specific normalization. | Recommended Integration Shape, Media Adaptation Pipeline, Inbound Call Handler Design, Gap Analysis |
@@ -1086,7 +1087,7 @@ Design implication:
 
 ### Closed-Enum Selection
 
-For builds that include more than one ASR or TTS backend, the gateway should prefer closed enums over trait objects.
+For builds that include more than one ASR or TTS backend, the gateway must use closed enums rather than trait objects.
 
 Sketch:
 
@@ -1136,6 +1137,7 @@ Recommended Rust shapes:
 
 ```rust
 use async_trait::async_trait;
+use futures_core::Stream;
 use std::collections::BTreeMap;
 
 pub struct ConversationTurn {
@@ -1161,11 +1163,19 @@ pub struct ConversationError {
 
 #[async_trait]
 pub trait ConversationHandler: Send + Sync {
+    type TextStream: Stream<Item = Result<String, ConversationError>> + Send;
+
     async fn handle(
         &self,
         transcript: &str,
         context: &mut ConversationContext,
-    ) -> Result<String, ConversationError>;
+    ) -> String;
+
+    async fn handle_streaming(
+        &self,
+        transcript: &str,
+        context: &mut ConversationContext,
+    ) -> Self::TextStream;
 }
 ```
 
@@ -1186,25 +1196,23 @@ The handler should also support a streaming mode for lower latency so partial te
 Recommended extension path:
 
 ```rust
-use core::pin::Pin;
 use futures_core::Stream;
-
-pub type TextChunkStream =
-    Pin<Box<dyn Stream<Item = Result<String, ConversationError>> + Send>>;
 
 #[async_trait]
 pub trait ConversationHandler: Send + Sync {
+    type TextStream: Stream<Item = Result<String, ConversationError>> + Send;
+
     async fn handle(
         &self,
         transcript: &str,
         context: &mut ConversationContext,
-    ) -> Result<String, ConversationError>;
+    ) -> String;
 
     async fn handle_streaming(
         &self,
         transcript: &str,
         context: &mut ConversationContext,
-    ) -> Result<TextChunkStream, ConversationError>;
+    ) -> Self::TextStream;
 }
 ```
 
