@@ -3,6 +3,9 @@
 This example demonstrates the Phase 2 ASR vertical slice using the
 `sherpa-onnx` Zipformer backend.
 
+Canonical build prerequisites live in
+[`libs/models/docs/BUILD_MODELS.md`](../../docs/BUILD_MODELS.md).
+
 ## Run
 
 ```bash

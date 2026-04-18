@@ -3,6 +3,9 @@
 This example demonstrates the Phase 1 TTS vertical slice using the curated
 Piper `en_US-ljspeech-medium` ONNX voice.
 
+Canonical build prerequisites live in
+[`libs/models/docs/BUILD_MODELS.md`](../../docs/BUILD_MODELS.md).
+
 ## Run
 
 ```bash

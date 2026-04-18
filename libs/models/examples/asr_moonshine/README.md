@@ -3,6 +3,9 @@
 This example demonstrates the curated Moonshine streaming bundle through the
 typed streaming ASR contract.
 
+Canonical build prerequisites live in
+[`libs/models/docs/BUILD_MODELS.md`](../../docs/BUILD_MODELS.md).
+
 ## Run
 
 ```bash
