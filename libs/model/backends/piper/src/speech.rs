@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use espeak_rs::text_to_phonemes;
 use motlie_model::typed::{
     AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer, SynthesisRequest,
 };
@@ -13,14 +12,15 @@ use motlie_model::{
     ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, SpeechParams,
     StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
+use motlie_model_espeak_ng::text_to_phonemes;
 use motlie_model_ort::build_session;
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
-    observe_latency, observe_memory, resolve_onnx_artifacts,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -562,13 +562,11 @@ mod tests {
         }
 
         assert_eq!(total, 10_000);
-        assert!(
-            stream
-                .next_chunk()
-                .await
-                .expect("stream should stay exhausted")
-                .is_none()
-        );
+        assert!(stream
+            .next_chunk()
+            .await
+            .expect("stream should stay exhausted")
+            .is_none());
     }
 
     #[test]
