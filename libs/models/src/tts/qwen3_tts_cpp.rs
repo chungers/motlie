@@ -88,7 +88,12 @@ pub fn typed_bundle() -> Qwen3TtsCppSpeechBundle {
 }
 
 pub async fn start_typed(options: StartOptions) -> Result<Qwen3TtsCppHandle, ModelError> {
-    typed_bundle().start_typed(options).await
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_path,
+        )?)
+        .await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {

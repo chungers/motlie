@@ -29,7 +29,7 @@ cargo run -p motlie-models --example asr_whisper \
 | Flag | Description |
 |------|-------------|
 | `--wav <path>` | Path to the `.wav` file to transcribe (required) |
-| `--artifact-root <path>` | Override the default HF cache root for model artifacts |
+| `--artifact-root <path>` | Override the default HF cache root or pass a pre-resolved artifact directory |
 | `--language <code>` | Language hint (e.g., `en`); defaults to auto-detect |
 
 ## Expected Output

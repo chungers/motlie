@@ -228,6 +228,40 @@ pub fn resolve_hf_gguf_snapshot(
     Ok(snapshot_dir)
 }
 
+#[cfg(any(
+    feature = "model-whisper-base-en",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "model-moonshine-streaming",
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-0_6b",
+    feature = "model-qwen3-tts-cpp",
+))]
+pub(crate) fn resolve_typed_artifact_policy(
+    options: StartOptions,
+    resolver: impl FnOnce(&Path) -> std::result::Result<PathBuf, motlie_model::ModelError>,
+) -> std::result::Result<StartOptions, motlie_model::ModelError> {
+    let StartOptions {
+        artifact_policy,
+        quantization,
+        unpack_root,
+        max_concurrency,
+    } = options;
+
+    let artifact_policy = match artifact_policy {
+        Some(ArtifactPolicy::LocalOnly { root }) => Some(ArtifactPolicy::LocalOnly {
+            root: resolver(&root)?,
+        }),
+        other => other,
+    };
+
+    Ok(StartOptions {
+        artifact_policy,
+        quantization,
+        unpack_root,
+        max_concurrency,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleArtifacts {
     pub control_name: &'static str,
@@ -1266,6 +1300,67 @@ mod tests {
             eval_tracks: vec![EvalTrack::Embeddings],
             artifacts: None,
         }
+    }
+
+    #[cfg(any(
+        feature = "model-whisper-base-en",
+        feature = "model-sherpa-onnx-streaming",
+        feature = "model-moonshine-streaming",
+        feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-qwen3-tts-0_6b",
+        feature = "model-qwen3-tts-cpp",
+    ))]
+    #[test]
+    fn resolve_typed_artifact_policy_rewrites_local_only_root() {
+        let options = StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+                root: PathBuf::from("/tmp/cache"),
+            }),
+            quantization: Some(motlie_model::QuantizationBits::Four),
+            unpack_root: Some(PathBuf::from("/tmp/unpack")),
+            max_concurrency: Some(2),
+        };
+
+        let resolved =
+            resolve_typed_artifact_policy(options, |root| Ok(root.join("snapshots/commit")))
+                .expect("local-only policy should resolve");
+
+        assert_eq!(
+            resolved.artifact_policy,
+            Some(ArtifactPolicy::LocalOnly {
+                root: PathBuf::from("/tmp/cache/snapshots/commit"),
+            })
+        );
+        assert_eq!(
+            resolved.quantization,
+            Some(motlie_model::QuantizationBits::Four)
+        );
+        assert_eq!(resolved.unpack_root, Some(PathBuf::from("/tmp/unpack")));
+        assert_eq!(resolved.max_concurrency, Some(2));
+    }
+
+    #[cfg(any(
+        feature = "model-whisper-base-en",
+        feature = "model-sherpa-onnx-streaming",
+        feature = "model-moonshine-streaming",
+        feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-qwen3-tts-0_6b",
+        feature = "model-qwen3-tts-cpp",
+    ))]
+    #[test]
+    fn resolve_typed_artifact_policy_leaves_allow_fetch_unchanged() {
+        let options = StartOptions {
+            artifact_policy: Some(ArtifactPolicy::AllowFetch {
+                root: Some(PathBuf::from("/tmp/cache")),
+            }),
+            ..Default::default()
+        };
+
+        let resolved =
+            resolve_typed_artifact_policy(options.clone(), |_| unreachable!("resolver unused"))
+                .expect("allow-fetch policy should remain unchanged");
+
+        assert_eq!(resolved, options);
     }
 
     #[test]

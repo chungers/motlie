@@ -98,10 +98,30 @@ pub fn typed_bundle() -> MoonshineStreamingBundle {
 }
 
 pub async fn start_typed(options: StartOptions) -> Result<MoonshineHandle, ModelError> {
-    typed_bundle().start_typed(options).await
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_root,
+        )?)
+        .await
 }
 
 fn resolve_local_model_root(root: &Path) -> Result<PathBuf, ModelError> {
+    if [
+        FRONTEND_FILE,
+        ENCODER_FILE,
+        ADAPTER_FILE,
+        CROSS_KV_FILE,
+        DECODER_KV_FILE,
+        STREAMING_CONFIG_FILE,
+        TOKENIZER_JSON_FILE,
+    ]
+    .into_iter()
+    .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -223,5 +243,31 @@ mod tests {
         assert_eq!(resolved, snapshot_dir);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_root_resolver_accepts_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("moonshine-direct-root-{unique}"));
+        std::fs::create_dir_all(root.join("onnx/small")).expect("should create model dir");
+        for filename in [
+            FRONTEND_FILE,
+            ENCODER_FILE,
+            ADAPTER_FILE,
+            CROSS_KV_FILE,
+            DECODER_KV_FILE,
+            STREAMING_CONFIG_FILE,
+            TOKENIZER_JSON_FILE,
+        ] {
+            std::fs::write(root.join(filename), b"test").expect("should write artifact");
+        }
+
+        let resolved = resolve_local_model_root(&root).expect("direct artifact dir should resolve");
+        assert_eq!(resolved, root);
+
+        let _ = std::fs::remove_dir_all(resolved);
     }
 }

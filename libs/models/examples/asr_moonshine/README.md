@@ -14,7 +14,8 @@ cargo run -p motlie-models --example asr_moonshine \
 ## Preconditions
 
 - The curated Moonshine artifacts must already be downloaded under the default
-  artifact root or the path passed with `--artifact-root`.
+  HF cache root, or `--artifact-root` may point directly at the resolved
+  artifact directory that contains the Moonshine `.ort` files.
 - A compatible ONNX Runtime installation must be provided explicitly for the
   `ort` crate. Set `ORT_LIB_PATH` unless ONNX Runtime is already discoverable
   via `pkg-config` or another explicit system installation path.
