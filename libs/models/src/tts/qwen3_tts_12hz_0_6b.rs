@@ -102,10 +102,28 @@ pub fn typed_bundle() -> Qwen3TtsSpeechBundle {
 }
 
 pub async fn start_typed(options: StartOptions) -> Result<Qwen3TtsHandle, ModelError> {
-    typed_bundle().start_typed(options).await
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_path,
+        )?)
+        .await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
+    if [
+        ENCODER_FILE,
+        DECODER_FILE,
+        VOCODER_FILE,
+        CONFIG_FILE,
+        VOCAB_FILE,
+    ]
+    .into_iter()
+    .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(&repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -273,6 +291,27 @@ mod tests {
 
         assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn local_resolution_accepts_direct_artifact_dir() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+
+        for filename in [
+            ENCODER_FILE,
+            DECODER_FILE,
+            VOCODER_FILE,
+            CONFIG_FILE,
+            VOCAB_FILE,
+        ] {
+            std::fs::write(root.join(filename), "stub").expect("stub file should be writable");
+        }
+
+        let resolved = resolve_local_model_path(&root).expect("direct dir should resolve");
+
+        assert_eq!(resolved, root);
+        std::fs::remove_dir_all(&resolved).ok();
     }
 
     fn unique_temp_dir() -> PathBuf {

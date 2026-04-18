@@ -82,10 +82,22 @@ pub fn typed_bundle() -> PiperSpeechBundle {
 }
 
 pub async fn start_typed(options: StartOptions) -> Result<PiperHandle, ModelError> {
-    typed_bundle().start_typed(options).await
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_path,
+        )?)
+        .await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
+    if [MODEL_FILE, CONFIG_FILE]
+        .into_iter()
+        .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(&repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -123,7 +135,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
         }
     }
 
-    Ok(snapshot_dir.join(MODEL_FILE))
+    Ok(snapshot_dir)
 }
 
 #[cfg(test)]
@@ -131,6 +143,7 @@ mod tests {
     use super::*;
     use crate::Catalog;
     use motlie_model::{ArtifactPolicy, SpeechRequest, StartOptions};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -205,5 +218,29 @@ mod tests {
             .await
             .expect("finish should succeed");
         handle.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[test]
+    fn local_model_resolution_accepts_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("piper-direct-root-{unique}"));
+        let model_path = root.join(MODEL_FILE);
+        let config_path = root.join(CONFIG_FILE);
+        std::fs::create_dir_all(
+            model_path
+                .parent()
+                .expect("model file should have a parent directory"),
+        )
+        .expect("direct root should be creatable");
+        std::fs::write(&model_path, b"test").expect("model should be writable");
+        std::fs::write(&config_path, b"test").expect("config should be writable");
+
+        let resolved = resolve_local_model_path(&root).expect("direct artifact dir should resolve");
+
+        assert_eq!(resolved, root);
+        let _ = std::fs::remove_dir_all(resolved);
     }
 }

@@ -79,10 +79,19 @@ pub fn typed_bundle() -> WhisperCppTranscriptionBundle {
 }
 
 pub async fn start_typed(options: StartOptions) -> Result<WhisperCppHandle, ModelError> {
-    typed_bundle().start_typed(options).await
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_ggml_root,
+        )?)
+        .await
 }
 
 fn resolve_local_ggml_root(root: &Path) -> Result<PathBuf, ModelError> {
+    if root.join("ggml-base.en.bin").is_file() {
+        return Ok(root.to_path_buf());
+    }
+
     // For ggml single-file artifacts, the HF cache layout puts files in a
     // snapshot directory. We navigate refs/main → snapshots/{commit}/.
     let repo_folder = "models--ggerganov--whisper.cpp";
@@ -217,6 +226,18 @@ mod tests {
 
         assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn local_ggml_resolution_accepts_direct_artifact_dir() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("temp root should be creatable");
+        std::fs::write(root.join("ggml-base.en.bin"), "stub").expect("model should be writable");
+
+        let resolved = resolve_local_ggml_root(&root).expect("direct artifact dir should resolve");
+
+        assert_eq!(resolved, root);
+        std::fs::remove_dir_all(&resolved).ok();
     }
 
     fn unique_temp_dir() -> PathBuf {

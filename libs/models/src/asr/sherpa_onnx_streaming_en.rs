@@ -88,10 +88,22 @@ pub fn typed_bundle() -> SherpaOnnxStreamingBundle {
 }
 
 pub async fn start_typed(options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
-    typed_bundle().start_typed(options).await
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_onnx_root,
+        )?)
+        .await
 }
 
 fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
+    if [ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE]
+        .into_iter()
+        .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(&repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -136,6 +148,7 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::Catalog;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -168,5 +181,23 @@ mod tests {
                     .any(|bundle| bundle.id == bundle_id)
             );
         }
+    }
+
+    #[test]
+    fn local_root_resolution_accepts_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sherpa-direct-root-{unique}"));
+        std::fs::create_dir_all(&root).expect("direct root should be creatable");
+        for filename in [ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE] {
+            std::fs::write(root.join(filename), b"test").expect("artifact should be writable");
+        }
+
+        let resolved = resolve_local_onnx_root(&root).expect("direct artifact dir should resolve");
+
+        assert_eq!(resolved, root);
+        let _ = std::fs::remove_dir_all(resolved);
     }
 }

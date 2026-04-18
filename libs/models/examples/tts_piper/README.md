@@ -14,7 +14,8 @@ cargo run -p motlie-models --example tts_piper \
 ## Preconditions
 
 - The curated Piper artifacts must already be downloaded under the default
-  artifact root or the path passed with `--artifact-root`.
+  HF cache root, or `--artifact-root` may point directly at the resolved
+  artifact directory that contains the voice ONNX + JSON sidecar.
 - The env-gated test path uses `MOTLIE_TEST_PIPER_ARTIFACT_ROOT` to point at
   the same Hugging Face cache root.
 - A compatible ONNX Runtime installation must be provided explicitly for the
