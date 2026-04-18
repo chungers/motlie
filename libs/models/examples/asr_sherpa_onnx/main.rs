@@ -1,7 +1,7 @@
-//! v0.6 — ASR streaming Zipformer via the typed streaming API.
+//! asr_sherpa_onnx — streaming Zipformer ASR via the typed streaming API.
 //!
 //! Usage:
-//!   cargo run -p motlie-models --example models_v0_6 \
+//!   cargo run -p motlie-models --example asr_sherpa_onnx \
 //!     --no-default-features --features model-sherpa-onnx-streaming \
 //!     -- --wav path/to/audio.wav
 
@@ -55,7 +55,7 @@ fn parse_args() -> Result<Args> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie v0.6 — typed sherpa-onnx streaming ASR ===");
+    println!("=== motlie asr_sherpa_onnx — typed sherpa-onnx streaming ASR ===");
     println!("wav: {}", args.wav_path.display());
 
     let reader = hound::WavReader::open(&args.wav_path)

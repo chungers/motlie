@@ -1,4 +1,4 @@
-# `motlie-models` v0.4 Example — llama.cpp Backend (GGUF)
+# `motlie-models` `chat_gguf` Example — llama.cpp Backend (GGUF)
 
 This example demonstrates chat generation via the **llama.cpp** backend using
 GGUF-quantized weights. It supports switching between two models at runtime:
@@ -10,8 +10,8 @@ GGUF-quantized weights. It supports switching between two models at runtime:
 
 | Backend | Weight format | Qwen3-4B repo | Gemma4 E2B repo |
 |---------|--------------|---------------|-----------------|
-| **mistral.rs** (v0.2/v0.3) | safetensors | `Qwen/Qwen3-4B` | `google/gemma-4-E2B-it` |
-| **llama.cpp** (v0.4) | GGUF | `Qwen/Qwen3-4B-GGUF` | `bartowski/gemma-4-E2B-it-GGUF` |
+| **mistral.rs** (`chat` / `chat_multimodal`) | safetensors | `Qwen/Qwen3-4B` | `google/gemma-4-E2B-it` |
+| **llama.cpp** (`chat_gguf`) | GGUF | `Qwen/Qwen3-4B-GGUF` | `bartowski/gemma-4-E2B-it-GGUF` |
 
 The two weight formats are **not interchangeable**. Each backend requires its
 own artifact set. However, both target the identical upstream model
@@ -53,7 +53,7 @@ Or let the example perform the curated download first:
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
-  --example models_v0_4 -- --download-artifacts "What is Rust's ownership model?"
+  --example chat_gguf -- --download-artifacts "What is Rust's ownership model?"
 ```
 
 For Gemma 4, enable both features:
@@ -61,7 +61,7 @@ For Gemma 4, enable both features:
 ```sh
 cargo run -p motlie-models --no-default-features \
   --features model-qwen3-4b-gguf,model-gemma4-e2b-gguf \
-  --example models_v0_4 -- --download-artifacts --chat=google/gemma4_e2b_gguf \
+  --example chat_gguf -- --download-artifacts --chat=google/gemma4_e2b_gguf \
   "What is Rust's ownership model?"
 ```
 
@@ -71,7 +71,7 @@ Default path (Qwen3 4B, GGUF Q4_K_M, using existing local artifacts):
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
-  --example models_v0_4 -- "What is Rust's ownership model?"
+  --example chat_gguf -- "What is Rust's ownership model?"
 ```
 
 Switch to Gemma 4 (requires both features enabled):
@@ -79,7 +79,7 @@ Switch to Gemma 4 (requires both features enabled):
 ```sh
 cargo run -p motlie-models --no-default-features \
   --features model-qwen3-4b-gguf,model-gemma4-e2b-gguf \
-  --example models_v0_4 -- --chat=google/gemma4_e2b_gguf \
+  --example chat_gguf -- --chat=google/gemma4_e2b_gguf \
   "Summarize ownership in one paragraph"
 ```
 
@@ -87,7 +87,7 @@ Full precision (F16, no quantization):
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
-  --example models_v0_4 -- --precision=f16 "What is Rust's ownership model?"
+  --example chat_gguf -- --precision=f16 "What is Rust's ownership model?"
 ```
 
 ## Preconditions

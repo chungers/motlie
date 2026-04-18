@@ -1,4 +1,4 @@
-# tts_v0.4 — qwen3-tts.cpp Phase 3 Vertical Slice
+# `tts_qwen3_tts_cpp` — qwen3-tts.cpp Example
 
 Third TTS example: `qwen3-tts.cpp` as the secondary curated TTS backend.
 
@@ -31,7 +31,7 @@ git submodule update --init --recursive \
 ### Basic synthesis
 
 ```bash
-cargo run -p motlie-models --example models_tts_v0_4 \
+cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   --no-default-features --features model-qwen3-tts-cpp \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts-cpp.wav
 ```
@@ -39,7 +39,7 @@ cargo run -p motlie-models --example models_tts_v0_4 \
 ### With voice cloning
 
 ```bash
-cargo run -p motlie-models --example models_tts_v0_4 \
+cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   --no-default-features --features model-qwen3-tts-cpp \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts-cpp.wav \
      --reference-audio /path/to/reference.wav

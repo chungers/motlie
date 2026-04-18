@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @codex-asr | Renamed the curated example targets from versioned names to capability/model names and updated the plan references accordingly (`embeddings`, `chat`, `chat_multimodal`, `chat_gguf`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`). |
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/models` vertical slice work. Covers the curated catalog, constructor registration, and the first `embeddinggemma_300m` bundle wired through the Mistral backend. |
 | 2026-04-07 | @codex-researcher | Marked the completed catalog, descriptor, artifact-control, and verification work for the first embedding slice. | Phases 1-4 |
 | 2026-04-07 | @codex-researcher | Updated the bundle plan after the NaN investigation. The `embeddinggemma_300m` descriptor now captures the full sentence-transformers module stack, and an env-gated catalog test verifies finite local-only embeddings end to end. |
@@ -116,7 +117,7 @@ Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel
 
 ### 5.3 — Example and verification
 
-- [x] Add `examples/v0.2` demonstrating chat, multi-turn, completion, ISQ quantization.
+- [x] Add `examples/chat` demonstrating chat, multi-turn, completion, ISQ quantization.
 - [x] `cargo check -p motlie-models`
 - [x] `cargo test -p motlie-models --lib`
 - [x] `cargo check -p motlie-models --no-default-features`
@@ -139,9 +140,9 @@ Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel
 
 ### 6.3 — Example and verification
 
-- [x] Add `examples/v0.3` demonstrating text-only and image+text chat through the Gemma 4 bundle, with optional `--download-artifacts` for the convenience path.
+- [x] Add `examples/chat_multimodal` demonstrating text-only and image+text chat through the Gemma 4 bundle, with optional `--download-artifacts` for the convenience path.
 - [x] `cargo test -p motlie-models --lib`
-- [x] `cargo build -p motlie-models --example models_v0_3`
+- [x] `cargo build -p motlie-models --example chat_multimodal`
 - [ ] Env-gated end-to-end example run with pre-downloaded Gemma 4 E2B-it artifacts.
 
 ## Phase 7: Qwen3-Embedding-0.6B Curated Bundle
@@ -162,13 +163,13 @@ Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel
 
 - [x] Add `model-qwen3-embedding-06b` Cargo feature and include it in the default curated slice.
 - [x] Extend `EmbeddingModels`, `ModelSelector`, and `Catalog::with_defaults()` with the new embedding bundle under the same per-bundle feature-gating convention as the earlier slices.
-- [x] Add tests for selector round-trip, disabled-feature `ModelUnavailable`, and the single-embedding-build helper used by `v0.1`.
+- [x] Add tests for selector round-trip, disabled-feature `ModelUnavailable`, and the single-embedding-build helper used by `embeddings`.
 
 ### 7.4 — Example and verification
 
-- [x] Update `examples/v0.1` into the shared embedding comparison binary built with both embedding bundle features enabled, requiring `--embedding=...` to choose the model at download/run time.
-- [x] Add optional `--precision=q4|q8|f32` handling to `v0.1`; bundle metadata enforces the supported subset at startup.
+- [x] Update `examples/embeddings` into the shared embedding comparison binary built with both embedding bundle features enabled, requiring `--embedding=...` to choose the model at download/run time.
+- [x] Add optional `--precision=q4|q8|f32` handling to `embeddings`; bundle metadata enforces the supported subset at startup.
 - [x] `cargo test -p motlie-model-mistral --lib`
 - [x] `cargo test -p motlie-models --lib`
-- [x] `cargo build -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1`
+- [x] `cargo build -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings`
 - [ ] Env-gated end-to-end example run with pre-downloaded Qwen3-Embedding-0.6B artifacts.

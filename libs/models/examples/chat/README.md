@@ -1,4 +1,4 @@
-# `motlie-models` v0.2 Example
+# `motlie-models` `chat` Example
 
 This example demonstrates the curated Qwen3-4B chat bundle with ISQ quantization.
 
@@ -21,25 +21,25 @@ This example demonstrates the curated Qwen3-4B chat bundle with ISQ quantization
 Default path (direct enum, ISQ Q4):
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- "What is Rust's ownership model?"
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat -- "What is Rust's ownership model?"
 ```
 
 Parser-driven selector:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- --chat=qwen/qwen3_4b "Explain borrow checking"
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat -- --chat=qwen/qwen3_4b "Explain borrow checking"
 ```
 
 Full precision (no quantization):
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- --precision=f32 "What is Rust's ownership model?"
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat -- --precision=f32 "What is Rust's ownership model?"
 ```
 
 Pre-download artifacts:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- --download-artifacts "What is Rust?"
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat -- --download-artifacts "What is Rust?"
 ```
 
 ## Preconditions

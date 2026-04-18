@@ -1,7 +1,7 @@
-//! v0.5 — ASR vertical slice: `.wav` file transcription through the typed batch API.
+//! asr_whisper — Whisper `.wav` transcription through the typed batch API.
 //!
 //! Usage:
-//!   cargo run -p motlie-models --example models_v0_5 \
+//!   cargo run -p motlie-models --example asr_whisper \
 //!     --no-default-features --features model-whisper-base-en \
 //!     -- --wav path/to/audio.wav
 
@@ -62,7 +62,7 @@ fn parse_args() -> Result<Args> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie v0.5 — typed Whisper batch transcription ===");
+    println!("=== motlie asr_whisper — typed Whisper batch transcription ===");
     println!("wav:   {}", args.wav_path.display());
 
     let reader = hound::WavReader::open(&args.wav_path)

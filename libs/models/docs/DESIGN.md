@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-17 | @codex-asr: Renamed the shipped examples from versioned names to capability/model names and updated the documented example paths accordingly. | Architecture, API Sketch |
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/models` as the curated bundle catalog and composition crate over `libs/model`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
 | 2026-04-07 | @codex-researcher: Clarified that curated local model download is an explicit `libs/models` control, separate from backend cache-miss behavior. | Packaging and Deployment Model, Release Assembly Utility |
 | 2026-04-08 | @codex-researcher: Clarified that `libs/models` public fallible APIs should use typed library errors rather than `anyhow`, and specified the first vertical-slice artifact contract for `embeddinggemma_300m`. | Solution, Bundle Catalog Model, Packaging and Deployment Model |

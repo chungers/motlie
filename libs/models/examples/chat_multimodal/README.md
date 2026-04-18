@@ -1,4 +1,4 @@
-# `motlie-models` v0.3 Example
+# `motlie-models` `chat_multimodal` Example
 
 This example demonstrates the single Gemma 4 E2B-it multimodal chat flow for this bundle. It supports both:
 
@@ -33,7 +33,7 @@ Or let the example perform the curated download first:
 
 ```sh
 export HF_TOKEN=...
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- --download-artifacts "What is Rust's ownership model?"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- --download-artifacts "What is Rust's ownership model?"
 ```
 
 ## Step 2: Run the Example
@@ -41,25 +41,25 @@ cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --e
 Default path (direct enum, text-only, ISQ Q4, using existing local artifacts only):
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- "What is Rust's ownership model?"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- "What is Rust's ownership model?"
 ```
 
 Parser-driven selector:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- --chat=google/gemma4_e2b "Summarize ownership in one paragraph"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- --chat=google/gemma4_e2b "Summarize ownership in one paragraph"
 ```
 
 Image + text:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- --image=photo.jpg "Describe this image"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- --image=photo.jpg "Describe this image"
 ```
 
 Full precision (no quantization):
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- --precision=f32 "What is Rust's ownership model?"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- --precision=f32 "What is Rust's ownership model?"
 ```
 
 ## Preconditions

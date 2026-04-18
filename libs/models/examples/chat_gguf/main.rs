@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use motlie_model::{
     ArtifactPolicy, ChatMessage, ChatRequest, ChatRole, QuantizationBits, StartOptions,
 };
@@ -30,16 +30,22 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- \
-             [--download-artifacts] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
+            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf -- \
+             [--download-artifacts] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf] [--precision=q4|q8|f16] <prompt>\n\n\
+             This example demonstrates chat generation via the llama.cpp backend using\n\
+             GGUF-quantized weights. By default it loads Qwen3 4B (GGUF). Pass\n\
+             --chat=google/gemma4_e2b_gguf to switch to Gemma 4 E2B-it (GGUF).\n\n\
+             NOTE: GGUF weights are a different format from the safetensors used by the\n\
+             mistral.rs backend (chat/chat_multimodal). They are NOT interchangeable. Each backend\n\
+             requires its own artifact set downloaded from its own HuggingFace repo."
         );
     }
 
     let quantization = match precision.as_deref() {
         Some("q4") | None => Some(QuantizationBits::Four),
         Some("q8") => Some(QuantizationBits::Eight),
-        Some("f32") => None,
-        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
+        Some("f16") => None,
+        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f16"),
     };
 
     let (selector_label, bundle_id, descriptor, bundle, path_kind) =
@@ -55,7 +61,7 @@ async fn main() -> Result<()> {
                 "selector",
             )
         } else {
-            let model = ChatModels::Qwen3_4B;
+            let model = ChatModels::Qwen3_4B_Gguf;
             (
                 model.to_string(),
                 model.bundle_id(),
@@ -66,14 +72,8 @@ async fn main() -> Result<()> {
         };
 
     let artifact_root = default_artifact_root();
-    let catalog = motlie_models::Catalog::with_defaults();
 
-    println!("catalog-entry-count: {}", catalog.len());
-    ensure!(
-        catalog.len() == 1,
-        "models_v0_2 must be built with exactly one curated bundle feature enabled"
-    );
-
+    println!("backend: llama.cpp (GGUF)");
     println!("bundle-selector: {selector_label}");
     println!("resolution-path: {path_kind}");
     println!("bundle-id: {}", bundle_id.as_str());
@@ -82,21 +82,22 @@ async fn main() -> Result<()> {
     println!(
         "quantization: {}",
         match quantization {
-            Some(QuantizationBits::Four) => "ISQ Q4",
-            Some(QuantizationBits::Eight) => "ISQ Q8",
-            None => "F32 (none)",
+            Some(QuantizationBits::Four) => "GGUF Q4_K_M",
+            Some(QuantizationBits::Eight) => "GGUF Q8_0",
+            None => "GGUF F16 (no quantization)",
         }
     );
 
     if download_artifacts {
+        let catalog = motlie_models::Catalog::with_defaults();
         let summary =
             motlie_models::download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
                 .with_context(|| {
-                    format!("failed to download curated artifacts for `{bundle_id}`")
+                    format!("failed to download curated GGUF artifacts for `{bundle_id}`")
                 })?;
         println!("downloaded-files: {}", summary.downloaded.len());
     } else {
-        println!("downloaded-files: skipped (using existing local artifacts only)");
+        println!("downloaded-files: skipped (using existing local GGUF artifacts only)");
     }
 
     println!("display-name: {}", descriptor.display_name);
@@ -114,7 +115,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    println!("starting bundle (this includes ISQ quantization if enabled)...");
+    println!("starting bundle (loading GGUF weights)...");
     let startup_sampler = support::StartupSampler::spawn("startup");
     let startup_at = Instant::now();
     let handle = bundle
@@ -126,7 +127,7 @@ async fn main() -> Result<()> {
             ..Default::default()
         })
         .await
-        .context("bundle startup should succeed from local artifacts")?;
+        .context("bundle startup should succeed from pre-downloaded local GGUF artifacts")?;
     let startup_elapsed = startup_at.elapsed();
     let startup_stats = startup_sampler.finish().await;
     println!(
@@ -138,7 +139,9 @@ async fn main() -> Result<()> {
     support::print_process_snapshot("process-after-start", &support::current_process_snapshot());
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
-    let chat = handle.chat().context("qwen3 bundle should expose chat")?;
+    let chat = handle
+        .chat()
+        .context("llama.cpp bundle should expose chat")?;
 
     // Single-turn request.
     println!("\n--- single-turn ---");
@@ -197,7 +200,7 @@ async fn main() -> Result<()> {
     println!("\n--- completion ---");
     let completion = handle
         .completion()
-        .context("qwen3 bundle should expose completion")?;
+        .context("llama.cpp bundle should expose completion")?;
     let completion_started_at = Instant::now();
     let completion_response = completion
         .complete(motlie_model::CompletionRequest {
