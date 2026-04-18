@@ -10,10 +10,10 @@ use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
 use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, StartOptions, TranscriptSegment,
-    TranscriptionParams, TranscriptionUpdate,
+    CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, PcmChunk, PcmEncoding, QuantizationSupport,
+    ResolvedCheckpoint, StartOptions, TranscriptSegment, TranscriptionParams, TranscriptionUpdate,
+    UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_ort::build_session;
 use ndarray::ArrayView3;
@@ -214,6 +214,10 @@ struct AsrMetrics {
 
 #[async_trait]
 impl BundleHandle for SherpaOnnxHandle {
+    type Chat = UnsupportedChat;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -244,17 +248,17 @@ impl BundleHandle for SherpaOnnxHandle {
         })
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))

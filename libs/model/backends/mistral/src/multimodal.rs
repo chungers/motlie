@@ -6,9 +6,10 @@ use image::DynamicImage;
 use mistralrs::{ModelBuilder, RequestBuilder};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, ChatRequest, ChatResponse, CheckpointFormat, CompletionModel,
-    ContentPart, EmbeddingModel, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
-    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    CapabilityKind, ChatModel, ChatRequest, ChatResponse, CheckpointFormat, ContentPart,
+    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
+    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions, UnsupportedCompletion,
+    UnsupportedEmbeddings,
 };
 
 use crate::common::{
@@ -180,9 +181,20 @@ impl ModelBundle for MistralMultimodalBundle {
     }
 }
 
-#[async_trait]
-trait MultimodalRuntime: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
+enum MultimodalRuntime {
+    Real(MistralMultimodalRuntime),
+    #[cfg(test)]
+    Stub(StubMultimodalRuntime),
+}
+
+impl MultimodalRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.chat(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.chat(request).await,
+        }
+    }
 }
 
 struct MistralMultimodalRuntime {
@@ -190,8 +202,7 @@ struct MistralMultimodalRuntime {
     metrics: Arc<Mutex<MultimodalMetrics>>,
 }
 
-#[async_trait]
-impl MultimodalRuntime for MistralMultimodalRuntime {
+impl MistralMultimodalRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let builder = to_request_builder(&request)?;
         let started_at = Instant::now();
@@ -275,12 +286,16 @@ fn collect_multimodal_parts(
 
 pub struct MistralMultimodalHandle {
     descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn MultimodalRuntime>,
+    runtime: MultimodalRuntime,
     metrics: Arc<Mutex<MultimodalMetrics>>,
 }
 
 #[async_trait]
 impl BundleHandle for MistralMultimodalHandle {
+    type Chat = Self;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -294,17 +309,17 @@ impl BundleHandle for MistralMultimodalHandle {
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Ok(self)
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
@@ -350,7 +365,7 @@ fn new_multimodal_handle(
             quantization,
             resolved_quantization,
         },
-        runtime: Box::new(MistralMultimodalRuntime {
+        runtime: MultimodalRuntime::Real(MistralMultimodalRuntime {
             model,
             metrics: Arc::clone(&metrics),
         }),
@@ -433,8 +448,7 @@ mod tests {
 
     struct StubMultimodalRuntime;
 
-    #[async_trait]
-    impl MultimodalRuntime for StubMultimodalRuntime {
+    impl StubMultimodalRuntime {
         async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
             let last_text = request
                 .messages
@@ -501,7 +515,7 @@ mod tests {
                 .expect("test quantization support is valid"),
                 resolved_quantization: Some(QuantizationBits::Four),
             },
-            runtime: Box::new(StubMultimodalRuntime),
+            runtime: MultimodalRuntime::Stub(StubMultimodalRuntime),
             metrics: Arc::new(Mutex::new(MultimodalMetrics::default())),
         };
 

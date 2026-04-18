@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer};
 use motlie_model::{
     AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, SpeechRequest, StartOptions,
-    VoiceConditioning,
+    CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, PcmChunk, PcmEncoding, QuantizationSupport,
+    ResolvedCheckpoint, SpeechRequest, StartOptions, UnsupportedChat, UnsupportedCompletion,
+    UnsupportedEmbeddings, VoiceConditioning,
 };
 use motlie_model_ort::build_session;
 use ndarray::Array2;
@@ -197,6 +197,10 @@ struct SpeechMetrics {
 
 #[async_trait]
 impl BundleHandle for Qwen3TtsHandle {
+    type Chat = UnsupportedChat;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -227,17 +231,17 @@ impl BundleHandle for Qwen3TtsHandle {
         })
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))

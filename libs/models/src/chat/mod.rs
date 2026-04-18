@@ -143,7 +143,7 @@ impl ChatModels {
         }
     }
 
-    pub fn bundle(&self) -> Box<dyn ErasedModelBundle> {
+    pub fn bundle(&self) -> Box<dyn crate::ErasedModelBundle> {
         match self {
             #[cfg(feature = "model-gemma4-e2b")]
             Self::Gemma4E2B => gemma4_e2b::bundle(),

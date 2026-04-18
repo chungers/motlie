@@ -570,6 +570,10 @@ pub trait ModelBundle: Send + Sync {
 /// Loaded bundle state that exposes capability adapters.
 #[async_trait]
 pub trait BundleHandle: Send + Sync + Sized {
+    type Chat: ChatModel;
+    type Completion: CompletionModel;
+    type Embeddings: EmbeddingModel;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor;
     fn capabilities(&self) -> &Capabilities;
     fn supports(&self, capability: CapabilityKind) -> bool {
@@ -579,9 +583,9 @@ pub trait BundleHandle: Send + Sync + Sized {
         None
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
+    fn chat(&self) -> Result<&Self::Chat, ModelError>;
+    fn completion(&self) -> Result<&Self::Completion, ModelError>;
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError>;
     async fn shutdown(self) -> Result<(), ModelError>;
 }
 
@@ -620,6 +624,46 @@ pub trait EmbeddingModel: Send + Sync {
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError>;
 }
 
+/// Marker model used when a bundle does not support chat generation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnsupportedChat;
+
+#[async_trait]
+impl ChatModel for UnsupportedChat {
+    async fn generate(&self, _request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
+    }
+}
+
+/// Marker model used when a bundle does not support text completion.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnsupportedCompletion;
+
+#[async_trait]
+impl CompletionModel for UnsupportedCompletion {
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ModelError> {
+        Err(ModelError::UnsupportedCapability(
+            CapabilityKind::Completion,
+        ))
+    }
+}
+
+/// Marker model used when a bundle does not support embeddings.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnsupportedEmbeddings;
+
+#[async_trait]
+impl EmbeddingModel for UnsupportedEmbeddings {
+    async fn embed(&self, _request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        Err(ModelError::UnsupportedCapability(
+            CapabilityKind::Embeddings,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +674,10 @@ mod tests {
 
     #[async_trait]
     impl BundleHandle for FakeHandle {
+        type Chat = UnsupportedChat;
+        type Completion = UnsupportedCompletion;
+        type Embeddings = Self;
+
         fn descriptor(&self) -> &LoadedBundleDescriptor {
             &self.descriptor
         }
@@ -638,17 +686,17 @@ mod tests {
             &self.descriptor.capabilities
         }
 
-        fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+        fn chat(&self) -> Result<&Self::Chat, ModelError> {
             Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
         }
 
-        fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+        fn completion(&self) -> Result<&Self::Completion, ModelError> {
             Err(ModelError::UnsupportedCapability(
                 CapabilityKind::Completion,
             ))
         }
 
-        fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+        fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
             Ok(self)
         }
 

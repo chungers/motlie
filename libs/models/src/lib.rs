@@ -83,15 +83,18 @@ where
     }
 
     fn chat(&self) -> std::result::Result<&dyn ChatModel, ModelError> {
-        BundleHandle::chat(self)
+        let model: &T::Chat = BundleHandle::chat(self)?;
+        Ok(model)
     }
 
     fn completion(&self) -> std::result::Result<&dyn CompletionModel, ModelError> {
-        BundleHandle::completion(self)
+        let model: &T::Completion = BundleHandle::completion(self)?;
+        Ok(model)
     }
 
     fn embeddings(&self) -> std::result::Result<&dyn EmbeddingModel, ModelError> {
-        BundleHandle::embeddings(self)
+        let model: &T::Embeddings = BundleHandle::embeddings(self)?;
+        Ok(model)
     }
 
     async fn shutdown_box(self: Box<Self>) -> std::result::Result<(), ModelError> {
@@ -1393,6 +1396,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl motlie_model::BundleHandle for StubHandle {
+        type Chat = motlie_model::UnsupportedChat;
+        type Completion = motlie_model::UnsupportedCompletion;
+        type Embeddings = motlie_model::UnsupportedEmbeddings;
+
         fn descriptor(&self) -> &motlie_model::LoadedBundleDescriptor {
             unreachable!("stub handle is never constructed")
         }
@@ -1401,23 +1408,15 @@ mod tests {
             unreachable!("stub handle is never constructed")
         }
 
-        fn chat(
-            &self,
-        ) -> std::result::Result<&dyn motlie_model::ChatModel, motlie_model::ModelError> {
+        fn chat(&self) -> std::result::Result<&Self::Chat, motlie_model::ModelError> {
             unreachable!("stub handle is never constructed")
         }
 
-        fn completion(
-            &self,
-        ) -> std::result::Result<&dyn motlie_model::CompletionModel, motlie_model::ModelError>
-        {
+        fn completion(&self) -> std::result::Result<&Self::Completion, motlie_model::ModelError> {
             unreachable!("stub handle is never constructed")
         }
 
-        fn embeddings(
-            &self,
-        ) -> std::result::Result<&dyn motlie_model::EmbeddingModel, motlie_model::ModelError>
-        {
+        fn embeddings(&self) -> std::result::Result<&Self::Embeddings, motlie_model::ModelError> {
             unreachable!("stub handle is never constructed")
         }
 

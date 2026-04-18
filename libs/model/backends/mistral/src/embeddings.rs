@@ -11,10 +11,10 @@ use mistralrs::core::EmbeddingLoaderType;
 use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    EmbeddingRequest as ModelEmbeddingRequest, EmbeddingResponse, LoadedBundleDescriptor,
-    ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    CapabilityKind, CheckpointFormat, EmbeddingModel, EmbeddingRequest as ModelEmbeddingRequest,
+    EmbeddingResponse, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
+    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    UnsupportedChat, UnsupportedCompletion,
 };
 
 const MISTRAL_EMBEDDING_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -204,9 +204,20 @@ impl ModelBundle for MistralEmbeddingBundle {
     }
 }
 
-#[async_trait]
-trait EmbeddingRuntime: Send + Sync {
-    async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError>;
+enum EmbeddingRuntime {
+    Real(MistralRuntime),
+    #[cfg(test)]
+    Stub(StubRuntime),
+}
+
+impl EmbeddingRuntime {
+    async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.embed(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.embed(request).await,
+        }
+    }
 }
 
 struct MistralRuntime {
@@ -214,8 +225,7 @@ struct MistralRuntime {
     metrics: Arc<Mutex<EmbeddingMetricsState>>,
 }
 
-#[async_trait]
-impl EmbeddingRuntime for MistralRuntime {
+impl MistralRuntime {
     async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
         let input_count = request.inputs.len();
         let builder = request
@@ -252,12 +262,16 @@ impl EmbeddingRuntime for MistralRuntime {
 
 pub struct MistralEmbeddingHandle {
     descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn EmbeddingRuntime>,
+    runtime: EmbeddingRuntime,
     metrics: Arc<Mutex<EmbeddingMetricsState>>,
 }
 
 #[async_trait]
 impl BundleHandle for MistralEmbeddingHandle {
+    type Chat = UnsupportedChat;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = Self;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -274,17 +288,17 @@ impl BundleHandle for MistralEmbeddingHandle {
         ))
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Ok(self)
     }
 
@@ -328,7 +342,7 @@ fn new_embedding_handle(
             quantization,
             resolved_quantization,
         },
-        runtime: Box::new(MistralRuntime {
+        runtime: EmbeddingRuntime::Real(MistralRuntime {
             model,
             metrics: Arc::clone(&metrics),
         }),
@@ -401,8 +415,7 @@ mod tests {
 
     struct StubRuntime;
 
-    #[async_trait]
-    impl EmbeddingRuntime for StubRuntime {
+    impl StubRuntime {
         async fn embed(
             &self,
             request: ModelEmbeddingRequest,
@@ -466,7 +479,7 @@ mod tests {
                 quantization: QuantizationSupport::none(),
                 resolved_quantization: None,
             },
-            runtime: Box::new(StubRuntime),
+            runtime: EmbeddingRuntime::Stub(StubRuntime),
             metrics: Arc::new(Mutex::new(EmbeddingMetricsState::default())),
         };
 

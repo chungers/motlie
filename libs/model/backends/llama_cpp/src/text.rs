@@ -12,9 +12,9 @@ use llama_cpp_2::sampling::LlamaSampler;
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
-    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, GenerationParams,
+    CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
-    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
@@ -237,10 +237,28 @@ impl ModelBundle for LlamaCppTextBundle {
 // Internal runtime abstraction (enables stub testing without real llama.cpp)
 // ---------------------------------------------------------------------------
 
-#[async_trait]
-trait TextRuntime: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError>;
+enum TextRuntime {
+    Real(LlamaCppRuntime),
+    #[cfg(test)]
+    Stub(StubTextRuntime),
+}
+
+impl TextRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.chat(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.chat(request).await,
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.complete(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.complete(request).await,
+        }
+    }
 }
 
 struct LlamaCppRuntime {
@@ -263,8 +281,7 @@ struct LlamaCppRuntime {
 unsafe impl Send for LlamaCppRuntime {}
 unsafe impl Sync for LlamaCppRuntime {}
 
-#[async_trait]
-impl TextRuntime for LlamaCppRuntime {
+impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let prompt = format_chat_prompt(self.arch, &request)?;
         self.generate_text(&prompt, &request.params).await
@@ -507,12 +524,16 @@ fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String
 
 pub struct LlamaCppTextHandle {
     descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn TextRuntime>,
+    runtime: TextRuntime,
     metrics: Arc<Mutex<TextMetrics>>,
 }
 
 #[async_trait]
 impl BundleHandle for LlamaCppTextHandle {
+    type Chat = Self;
+    type Completion = Self;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -526,15 +547,15 @@ impl BundleHandle for LlamaCppTextHandle {
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Ok(self)
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Ok(self)
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
@@ -600,7 +621,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> LlamaCppTextH
             quantization,
             resolved_quantization,
         },
-        runtime: Box::new(LlamaCppRuntime {
+        runtime: TextRuntime::Real(LlamaCppRuntime {
             backend: built.backend,
             model: built.model,
             arch,
@@ -756,8 +777,7 @@ mod tests {
 
     struct StubTextRuntime;
 
-    #[async_trait]
-    impl TextRuntime for StubTextRuntime {
+    impl StubTextRuntime {
         async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
             let prompt = request
                 .messages
@@ -872,7 +892,7 @@ mod tests {
                 .expect("test quantization support is valid"),
                 resolved_quantization: Some(QuantizationBits::Four),
             },
-            runtime: Box::new(StubTextRuntime),
+            runtime: TextRuntime::Stub(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
         };
 
