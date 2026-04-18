@@ -1,4 +1,4 @@
-# tts_v0.1 — Piper TTS Vertical Slice
+# `tts_piper` — Piper TTS Example
 
 This example demonstrates the Phase 1 TTS vertical slice using the curated
 Piper `en_US-ljspeech-medium` ONNX voice.
@@ -6,7 +6,7 @@ Piper `en_US-ljspeech-medium` ONNX voice.
 ## Run
 
 ```bash
-cargo run -p motlie-models --example models_tts_v0_1 \
+cargo run -p motlie-models --example tts_piper \
   --no-default-features --features model-piper-en-us-ljspeech-medium \
   -- --text "Hello from Motlie." --wav /tmp/motlie-tts.wav
 ```

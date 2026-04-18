@@ -1,4 +1,4 @@
-# v0.6 — Sherpa ONNX Streaming ASR
+# `asr_sherpa_onnx` — Sherpa ONNX Streaming ASR
 
 This example demonstrates the Phase 2 ASR vertical slice using the
 `sherpa-onnx` Zipformer backend.
@@ -6,7 +6,7 @@ This example demonstrates the Phase 2 ASR vertical slice using the
 ## Run
 
 ```bash
-cargo run -p motlie-models --example models_v0_6 \
+cargo run -p motlie-models --example asr_sherpa_onnx \
   --no-default-features --features model-sherpa-onnx-streaming \
   -- --wav /path/to/audio.wav
 ```

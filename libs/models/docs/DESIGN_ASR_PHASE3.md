@@ -3,6 +3,7 @@
 ## Changelog
 | Date | Who | Summary |
 | --- | --- | --- |
+| 2026-04-17 | @codex-asr | Renamed the shipped Moonshine example path from `v0.7` to `asr_moonshine`. |
 | 2026-04-16 | @codex-asr | Added the Phase 3 decision record: sherpa-onnx remains the primary telephony-grade streaming backend, while Moonshine is the secondary batch/offline backend. Documented the measured latency/accuracy tradeoff and the implementation constraint that Moonshine currently runs CPU-only in Motlie because incremental CUDA chunking is unstable. |
 | 2026-04-16 | @codex-asr | Corrected the implementation note after the Moonshine backend switched from finish-only buffering to true chunk-driven inference. Moonshine still remains the secondary backend because the measured chunk latency is too high for telephony, not because the integration is batch-only. |
 
@@ -33,7 +34,7 @@
 - Runtime substrate: ONNX Runtime via `transcribe-rs` Moonshine streaming runtime
 - Contract: existing `TranscriptionModel` / `TranscriptionStream`
 - Curated bundle: `libs/models/src/asr/moonshine_streaming_en.rs`
-- Example: `libs/models/examples/v0.7/main.rs`
+- Example: `libs/models/examples/asr_moonshine/main.rs`
 
 ## Contract Semantics
 

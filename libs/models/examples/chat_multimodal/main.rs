@@ -1,8 +1,9 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
-    ArtifactPolicy, ChatMessage, ChatRequest, ChatRole, QuantizationBits, StartOptions,
+    ArtifactPolicy, ChatMessage, ChatRequest, ChatRole, ContentPart, QuantizationBits, StartOptions,
 };
 use motlie_models::{ModelSelector, chat::ChatModels, default_artifact_root};
+use std::path::Path;
 use std::time::Instant;
 
 #[path = "../support.rs"]
@@ -12,6 +13,7 @@ mod support;
 async fn main() -> Result<()> {
     let mut chat_selector = None;
     let mut precision = None;
+    let mut image_path = None;
     let mut download_artifacts = false;
     let mut input_parts = Vec::new();
 
@@ -22,6 +24,8 @@ async fn main() -> Result<()> {
             chat_selector = Some(selector.to_owned());
         } else if let Some(p) = arg.strip_prefix("--precision=") {
             precision = Some(p.to_owned());
+        } else if let Some(path) = arg.strip_prefix("--image=") {
+            image_path = Some(path.to_owned());
         } else {
             input_parts.push(arg);
         }
@@ -30,22 +34,16 @@ async fn main() -> Result<()> {
     let input = input_parts.join(" ");
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example models_v0_4 -- \
-             [--download-artifacts] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf] [--precision=q4|q8|f16] <prompt>\n\n\
-             This example demonstrates chat generation via the llama.cpp backend using\n\
-             GGUF-quantized weights. By default it loads Qwen3 4B (GGUF). Pass\n\
-             --chat=google/gemma4_e2b_gguf to switch to Gemma 4 E2B-it (GGUF).\n\n\
-             NOTE: GGUF weights are a different format from the safetensors used by the\n\
-             mistral.rs backend (v0.2/v0.3). They are NOT interchangeable. Each backend\n\
-             requires its own artifact set downloaded from its own HuggingFace repo."
+            "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- \
+             [--download-artifacts] [--chat=google/gemma4_e2b] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
         );
     }
 
     let quantization = match precision.as_deref() {
         Some("q4") | None => Some(QuantizationBits::Four),
         Some("q8") => Some(QuantizationBits::Eight),
-        Some("f16") => None,
-        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f16"),
+        Some("f32") => None,
+        Some(other) => bail!("unknown precision `{other}` — use q4, q8, or f32"),
     };
 
     let (selector_label, bundle_id, descriptor, bundle, path_kind) =
@@ -61,7 +59,7 @@ async fn main() -> Result<()> {
                 "selector",
             )
         } else {
-            let model = ChatModels::Qwen3_4B_Gguf;
+            let model = ChatModels::Gemma4E2B;
             (
                 model.to_string(),
                 model.bundle_id(),
@@ -72,8 +70,14 @@ async fn main() -> Result<()> {
         };
 
     let artifact_root = default_artifact_root();
+    let catalog = motlie_models::Catalog::with_defaults();
 
-    println!("backend: llama.cpp (GGUF)");
+    println!("catalog-entry-count: {}", catalog.len());
+    ensure!(
+        catalog.len() == 1,
+        "chat_multimodal must be built with exactly one curated bundle feature enabled"
+    );
+
     println!("bundle-selector: {selector_label}");
     println!("resolution-path: {path_kind}");
     println!("bundle-id: {}", bundle_id.as_str());
@@ -82,22 +86,21 @@ async fn main() -> Result<()> {
     println!(
         "quantization: {}",
         match quantization {
-            Some(QuantizationBits::Four) => "GGUF Q4_K_M",
-            Some(QuantizationBits::Eight) => "GGUF Q8_0",
-            None => "GGUF F16 (no quantization)",
+            Some(QuantizationBits::Four) => "ISQ Q4",
+            Some(QuantizationBits::Eight) => "ISQ Q8",
+            None => "F32 (none)",
         }
     );
 
     if download_artifacts {
-        let catalog = motlie_models::Catalog::with_defaults();
         let summary =
             motlie_models::download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
                 .with_context(|| {
-                    format!("failed to download curated GGUF artifacts for `{bundle_id}`")
+                    format!("failed to download curated artifacts for `{bundle_id}`")
                 })?;
         println!("downloaded-files: {}", summary.downloaded.len());
     } else {
-        println!("downloaded-files: skipped (using existing local GGUF artifacts only)");
+        println!("downloaded-files: skipped (using existing local artifacts only)");
     }
 
     println!("display-name: {}", descriptor.display_name);
@@ -115,7 +118,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    println!("starting bundle (loading GGUF weights)...");
+    println!("starting bundle (this includes ISQ quantization if enabled)...");
     let startup_sampler = support::StartupSampler::spawn("startup");
     let startup_at = Instant::now();
     let handle = bundle
@@ -127,7 +130,7 @@ async fn main() -> Result<()> {
             ..Default::default()
         })
         .await
-        .context("bundle startup should succeed from pre-downloaded local GGUF artifacts")?;
+        .context("bundle startup should succeed from pre-downloaded local artifacts")?;
     let startup_elapsed = startup_at.elapsed();
     let startup_stats = startup_sampler.finish().await;
     println!(
@@ -139,89 +142,74 @@ async fn main() -> Result<()> {
     support::print_process_snapshot("process-after-start", &support::current_process_snapshot());
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
-    let chat = handle
-        .chat()
-        .context("llama.cpp bundle should expose chat")?;
+    let chat = handle.chat().context("gemma4 bundle should expose chat")?;
 
-    // Single-turn request.
-    println!("\n--- single-turn ---");
+    println!("\n--- text-only chat ---");
     let started_at = Instant::now();
     let response = chat
         .generate(ChatRequest {
             messages: vec![
-                ChatMessage::new(ChatRole::System, "Be concise. Answer in one paragraph."),
-                ChatMessage::new(ChatRole::User, &input),
+                ChatMessage::text(ChatRole::System, "Be concise. Answer in one paragraph."),
+                ChatMessage::text(ChatRole::User, &input),
             ],
             ..Default::default()
         })
         .await
-        .context("chat generation should succeed")?;
+        .context("text-only chat generation should succeed")?;
     let latency = started_at.elapsed();
 
     println!("prompt: {input}");
     println!("response: {}", response.content);
     println!("latency-ms: {:.2}", latency.as_secs_f64() * 1000.0);
     support::print_process_snapshot(
-        "process-after-single-turn",
+        "process-after-text-chat",
         &support::current_process_snapshot(),
     );
-    support::print_model_metrics("model-metrics-after-single-turn", handle.metric_snapshot());
+    support::print_model_metrics("model-metrics-after-text-chat", handle.metric_snapshot());
 
-    // Multi-turn follow-up.
-    println!("\n--- multi-turn follow-up ---");
-    let followup_started_at = Instant::now();
-    let followup = chat
-        .generate(ChatRequest {
-            messages: vec![
-                ChatMessage::new(ChatRole::System, "Be concise. Answer in one paragraph."),
-                ChatMessage::new(ChatRole::User, &input),
-                ChatMessage::new(ChatRole::Assistant, &response.content),
-                ChatMessage::new(ChatRole::User, "Now explain that in simpler terms."),
-            ],
-            ..Default::default()
-        })
-        .await
-        .context("multi-turn chat should succeed")?;
-    let followup_latency = followup_started_at.elapsed();
+    if let Some(image_path) = image_path {
+        println!("\n--- image + text chat ---");
+        let image_bytes = std::fs::read(&image_path)
+            .with_context(|| format!("failed to read image `{image_path}`"))?;
+        let media_type = infer_media_type(&image_path)
+            .with_context(|| format!("unsupported image type for `{image_path}`"))?;
+        let image_started_at = Instant::now();
+        let image_response = chat
+            .generate(ChatRequest {
+                messages: vec![
+                    ChatMessage::text(
+                        ChatRole::System,
+                        "Be concise. Describe visible details and answer the question.",
+                    ),
+                    ChatMessage::with_parts(
+                        ChatRole::User,
+                        vec![
+                            ContentPart::image(image_bytes, media_type),
+                            ContentPart::text(input.clone()),
+                        ],
+                    ),
+                ],
+                ..Default::default()
+            })
+            .await
+            .context("image+text chat generation should succeed")?;
+        let image_latency = image_started_at.elapsed();
 
-    println!("follow-up-prompt: Now explain that in simpler terms.");
-    println!("follow-up-response: {}", followup.content);
-    println!(
-        "follow-up-latency-ms: {:.2}",
-        followup_latency.as_secs_f64() * 1000.0
-    );
-    support::print_process_snapshot(
-        "process-after-follow-up",
-        &support::current_process_snapshot(),
-    );
-    support::print_model_metrics("model-metrics-after-follow-up", handle.metric_snapshot());
-
-    // Completion path.
-    println!("\n--- completion ---");
-    let completion = handle
-        .completion()
-        .context("llama.cpp bundle should expose completion")?;
-    let completion_started_at = Instant::now();
-    let completion_response = completion
-        .complete(motlie_model::CompletionRequest {
-            prompt: format!("Complete this sentence: {input}"),
-            ..Default::default()
-        })
-        .await
-        .context("completion should succeed")?;
-    let completion_latency = completion_started_at.elapsed();
-
-    println!("completion-prompt: Complete this sentence: {input}");
-    println!("completion-response: {}", completion_response.content);
-    println!(
-        "completion-latency-ms: {:.2}",
-        completion_latency.as_secs_f64() * 1000.0
-    );
-    support::print_process_snapshot(
-        "process-after-completion",
-        &support::current_process_snapshot(),
-    );
-    support::print_model_metrics("model-metrics-after-completion", handle.metric_snapshot());
+        println!("image-path: {image_path}");
+        println!("image-response: {}", image_response.content);
+        println!(
+            "image-latency-ms: {:.2}",
+            image_latency.as_secs_f64() * 1000.0
+        );
+        support::print_process_snapshot(
+            "process-after-image-chat",
+            &support::current_process_snapshot(),
+        );
+        support::print_model_metrics("model-metrics-after-image-chat", handle.metric_snapshot());
+    } else {
+        println!("\n--- image + text chat ---");
+        println!("skipped: pass --image=/path/to/image to exercise the multimodal path");
+    }
 
     handle
         .shutdown()
@@ -233,4 +221,21 @@ async fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+fn infer_media_type(path: &str) -> Result<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => Ok("image/jpeg"),
+        Some("png") => Ok("image/png"),
+        Some("webp") => Ok("image/webp"),
+        Some("gif") => Ok("image/gif"),
+        Some("bmp") => Ok("image/bmp"),
+        Some(other) => bail!("unsupported image extension `{other}`"),
+        None => bail!("missing image extension"),
+    }
 }

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @codex-asr | Renamed the shipped ASR example targets and paths to `asr_whisper`, `asr_sherpa_onnx`, and `asr_moonshine`, and updated the build-plan references accordingly. |
 | 2026-04-14 | @codex-asr | Added the concrete Phase 2 `sherpa-onnx` follow-on slice to keep the PLAN aligned with the implemented backend crate, curated bundle, feature flags, explicit ONNX Runtime provisioning, and `models_v0_6` example. |
 | 2026-04-13 | @codex-asr | Addressed R1 review feedback by adding explicit tasks for the stream-scoped `AudioSpec`, `Option<TranscriptionUpdate>`, runtime metrics, exact brownfield file touch points, `QuantizationSupport::none()`, and the websocket deferral details for the first implementation slice. |
 | 2026-04-12 | @codex-asr | Initial PLAN for the first ASR vertical slice. Covers the brownfield contract extension in `libs/model`, a new `whisper.cpp` backend crate, the curated `whisper_base_en` bundle in `libs/models`, and example validation for `.wav` and websocket-fed PCM. |
@@ -164,11 +165,11 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.1 - `.wav` example
 
-- [ ] Add `examples/v0.5/main.rs` as the first ASR example binary.
+- [ ] Add `examples/asr_whisper/main.rs` as the first ASR example binary.
   DESIGN reference: `API Sketch`
 - [ ] Support `--wav <path>` by decoding the file to PCM and feeding the stream contract.
   DESIGN reference: `Streaming PCM API Contract`, `API Sketch`
-- [ ] Document expected preconditions and output in `examples/v0.5/README.md`.
+- [ ] Document expected preconditions and output in `examples/asr_whisper/README.md`.
   DESIGN reference: `API Sketch`
 
 ### 4.2 - Websocket-fed PCM example path
@@ -186,7 +187,7 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.3 - Example feature wiring
 
-- [ ] Add a `models_v0_5` example target with `required-features = ["model-whisper-base-en"]`.
+- [ ] Add an `asr_whisper` example target with `required-features = ["model-whisper-base-en"]`.
   DESIGN reference: `Curated Bundle Design in libs/models`, `Feature Flag Design`
 - [ ] Ensure the example builds with and without `whisper-cpp-cuda` as appropriate for the local environment.
   DESIGN reference: `Feature Flag Design`
@@ -209,7 +210,7 @@ Land the first curated ASR slice with concrete verification commands and env-gat
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] `cargo test -p motlie-models --lib --no-default-features --features "model-whisper-base-en"`
   DESIGN reference: `Testing Scope for PLAN`
-- [ ] `cargo build -p motlie-models --example models_v0_5 --no-default-features --features "model-whisper-base-en"`
+- [ ] `cargo build -p motlie-models --example asr_whisper --no-default-features --features "model-whisper-base-en"`
   DESIGN reference: `Testing Scope for PLAN`
 
 ### 5.2 - Env-gated runtime checks
@@ -244,7 +245,7 @@ Track the true-streaming ONNX backend as the second ASR slice on top of the same
   DESIGN reference: `Phase 2 Extension: sherpa-onnx`, `Curated Bundle Design in libs/models`
 - [x] Add `model-sherpa-onnx-streaming` and `sherpa-onnx-cuda` feature flags in `libs/models`.
   DESIGN reference: `Feature Flag Design`
-- [x] Add the `models_v0_6` example demonstrating `.wav` input over the shared streaming PCM contract.
+- [x] Add the `asr_sherpa_onnx` example demonstrating `.wav` input over the shared streaming PCM contract.
   DESIGN reference: `Phase 2 Extension: sherpa-onnx`, `API Sketch`
 - [x] Document ONNX Runtime and artifact preconditions in the example README.
   DESIGN reference: `Phase 2 Extension: sherpa-onnx`, `Testing Scope for PLAN`
@@ -261,9 +262,9 @@ Track the true-streaming ONNX backend as the second ASR slice on top of the same
   DESIGN reference: `Testing Scope for PLAN`
 - [x] `cargo test -p motlie-models --lib --no-default-features --features "model-sherpa-onnx-streaming"`
   DESIGN reference: `Testing Scope for PLAN`
-- [x] `cargo clippy -p motlie-models --lib --example models_v0_6 --no-default-features --features "model-sherpa-onnx-streaming" -- -D warnings`
+- [x] `cargo clippy -p motlie-models --lib --example asr_sherpa_onnx --no-default-features --features "model-sherpa-onnx-streaming" -- -D warnings`
   DESIGN reference: `Testing Scope for PLAN`
-- [x] `cargo build -p motlie-models --example models_v0_6 --no-default-features --features "model-sherpa-onnx-streaming"`
+- [x] `cargo build -p motlie-models --example asr_sherpa_onnx --no-default-features --features "model-sherpa-onnx-streaming"`
   DESIGN reference: `Testing Scope for PLAN`
 
 ## Phase 6: Brownfield Cleanup and Follow-Through

@@ -1,6 +1,6 @@
-# v0.5 — ASR Vertical Slice
+# `asr_whisper` — Whisper ASR Example
 
-First ASR example: `.wav` file transcription via the streaming PCM contract.
+Whisper `.wav` transcription through the typed batch contract.
 
 ## Preconditions
 
@@ -19,7 +19,7 @@ First ASR example: `.wav` file transcription via the streaming PCM contract.
 ## Run
 
 ```sh
-cargo run -p motlie-models --example models_v0_5 \
+cargo run -p motlie-models --example asr_whisper \
   --no-default-features --features model-whisper-base-en \
   -- --wav path/to/audio.wav
 ```
@@ -35,21 +35,16 @@ cargo run -p motlie-models --example models_v0_5 \
 ## Expected Output
 
 ```
-=== motlie v0.5 — ASR vertical slice ===
+=== motlie asr_whisper — typed Whisper batch transcription ===
 wav:   path/to/audio.wav
 format: 16000 Hz, 1 ch, Int, 16 bits
 artifacts: ../../artifacts/models/hf-cache
-
---- transcribing 640000 bytes of audio ---
-
-  [final] [0.0s - 5.0s]  Hello world, this is a test.
-
---- done ---
+[final] [0.0s - 5.0s] Hello world, this is a test.
 ```
 
 ## Architecture
 
-The example demonstrates the source-adaptation boundary from the DESIGN:
+The example demonstrates the source-adaptation boundary from the strict typed API:
 - `.wav` decoding is caller-side (using the `hound` crate)
-- PCM chunks are fed into the model-layer `TranscriptionStream` contract
-- The backend normalizes to its native format (mono f32 16kHz) internally
+- caller-side adaptation produces `AudioBuf<f32, 16000, Mono>`
+- the backend runs as a batch transcriber rather than a chunked streaming session

@@ -1,7 +1,7 @@
-//! tts_v0.1 — TTS vertical slice: synthesize text and write a `.wav` file.
+//! tts_piper — synthesize text and write a `.wav` file.
 //!
 //! Usage:
-//!   cargo run -p motlie-models --example models_tts_v0_1 \
+//!   cargo run -p motlie-models --example tts_piper \
 //!     --no-default-features --features model-piper-en-us-ljspeech-medium \
 //!     -- --text "Hello from Motlie." --wav /tmp/out.wav
 
@@ -60,7 +60,7 @@ fn parse_args() -> Result<Args> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie tts_v0.1 — typed Piper speech synthesis ===");
+    println!("=== motlie tts_piper — typed Piper speech synthesis ===");
     println!("wav:  {}", args.wav_path.display());
 
     let handle = piper_en_us_ljspeech_medium::start_typed(StartOptions {

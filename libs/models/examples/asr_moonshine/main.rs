@@ -1,7 +1,7 @@
-//! v0.7 — Moonshine secondary ASR slice through the typed streaming API.
+//! asr_moonshine — Moonshine ASR slice through the typed streaming API.
 //!
 //! Usage:
-//!   cargo run -p motlie-models --example models_v0_7 \
+//!   cargo run -p motlie-models --example asr_moonshine \
 //!     --no-default-features --features model-moonshine-streaming \
 //!     -- --wav path/to/audio.wav
 
@@ -55,7 +55,7 @@ fn parse_args() -> Result<Args> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie v0.7 — typed Moonshine streaming ASR ===");
+    println!("=== motlie asr_moonshine — typed Moonshine streaming ASR ===");
     println!("wav: {}", args.wav_path.display());
 
     let reader = hound::WavReader::open(&args.wav_path)

@@ -1,4 +1,4 @@
-# tts_v0.2 — Qwen3-TTS Phase 2 Vertical Slice
+# `tts_qwen3_onnx` — Qwen3-TTS ONNX Example
 
 Second TTS example: Qwen3-TTS 12Hz 0.6B with optional voice cloning via
 `VoiceConditioning::ReferenceAudio`.
@@ -23,7 +23,7 @@ BPE-merged subword tokens plus `<bos>`, `<eos>`, `<unk>`. See
 ### Basic synthesis (no cloning)
 
 ```bash
-cargo run -p motlie-models --example models_tts_v0_2 \
+cargo run -p motlie-models --example tts_qwen3_onnx \
   --no-default-features --features model-qwen3-tts-0_6b \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts.wav
 ```
@@ -33,7 +33,7 @@ cargo run -p motlie-models --example models_tts_v0_2 \
 Full quality cloning requires both `--reference-audio` and `--reference-text`:
 
 ```bash
-cargo run -p motlie-models --example models_tts_v0_2 \
+cargo run -p motlie-models --example tts_qwen3_onnx \
   --no-default-features --features model-qwen3-tts-0_6b \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts.wav \
      --reference-audio /path/to/reference.wav \
@@ -47,7 +47,7 @@ reduced-quality mode — the official Qwen3-TTS API requires both ref_audio
 and ref_text for prompted cloning.
 
 ```bash
-cargo run -p motlie-models --example models_tts_v0_2 \
+cargo run -p motlie-models --example tts_qwen3_onnx \
   --no-default-features --features model-qwen3-tts-0_6b \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts.wav \
      --reference-audio /path/to/reference.wav

@@ -1,4 +1,4 @@
-# `motlie-models` v0.1 Example
+# `motlie-models` `embeddings` Example
 
 This example demonstrates the curated embedding slice in `libs/models`.
 
@@ -30,16 +30,16 @@ The bundle returns normalized embedding vectors. In practice that means:
 
 ## Run
 
-Build `v0.1` with both embedding bundles compiled in. If `--embedding` is omitted, the example defaults to `google/embeddinggemma_300m`:
+Build `embeddings` with both embedding bundles compiled in. If `--embedding` is omitted, the example defaults to `google/embeddinggemma_300m`:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- --embedding=google/embeddinggemma_300m "motlie curated model bundle"
 ```
 
 Run the same binary against Qwen instead:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
 ```
 
 The binary is intentionally built with knowledge of both curated embedding bundles. `--embedding=...` lets you switch to Qwen explicitly.
@@ -47,8 +47,8 @@ The binary is intentionally built with knowledge of both curated embedding bundl
 If you want the example to prefetch curated artifacts before startup, use the same selector:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=google/embeddinggemma_300m --download-artifacts "motlie curated model bundle"
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --download-artifacts --precision=q8 "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- --embedding=google/embeddinggemma_300m --download-artifacts "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- --embedding=qwen/qwen3_embedding_06b --download-artifacts --precision=q8 "motlie curated model bundle"
 ```
 
 ## Preconditions
@@ -90,6 +90,6 @@ A successful run should show the similar pair with a noticeably higher cosine si
 
 ## Source
 
-- example entrypoint: [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
+- example entrypoint: [main.rs](main.rs)
 - bundle definition: [google_gemma_300m.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/src/embeddings/google_gemma_300m.rs)
 - bundle definition: [qwen3_embedding_06b.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/src/embeddings/qwen3_embedding_06b.rs)

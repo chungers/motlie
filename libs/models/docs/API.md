@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-17 | @codex-asr: Renamed the shipped example targets from versioned names to capability/model names (`embeddings`, `chat`, `chat_multimodal`, `chat_gguf`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`) and updated the documented commands and paths. | Example Program, Notes |
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/models` catalog and descriptor shapes. Reflects the current scaffold, not the final loaded-bundle runtime API. | All |
 | 2026-04-07 | @codex-researcher: Added explicit curated artifact-control examples and updated the first embedding slice to use the real `mistralrs` builder path with separate pre-download support. | Overview, API Sketch, Notes |
 | 2026-04-07 | @codex-researcher: Added the `examples/v0.1` runnable example for the current curated embedding bundle. | Example Program |
@@ -223,8 +224,8 @@ assert_eq!(response.vectors[0].len(), 768);
 
 The runnable realization of this flow is:
 
-- [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
-- [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
+- [main.rs](../examples/embeddings/main.rs)
+- [README.md](../examples/embeddings/README.md)
 
 ### Selecting Bundles for an Evaluation Track
 
@@ -339,42 +340,42 @@ cargo run -p motlie-models --bin motlie-models-download -- --hf-token-env HF_TOK
 
 The runnable examples for this crate are:
 
-- `v0.1` embedding slice
-  - [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
-  - [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
-- `v0.2` text-only chat slice
-  - [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.2/README.md)
-  - [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.2/main.rs)
-- `v0.3` Gemma multimodal slice
-  - [README.md](/tmp/motlie-issue142/libs/models/examples/v0.3/README.md)
-  - [main.rs](/tmp/motlie-issue142/libs/models/examples/v0.3/main.rs)
+- `embeddings` embedding slice
+  - [README.md](../examples/embeddings/README.md)
+  - [main.rs](../examples/embeddings/main.rs)
+- `chat` text-only chat slice
+  - [README.md](../examples/chat/README.md)
+  - [main.rs](../examples/chat/main.rs)
+- `chat_multimodal` Gemma multimodal slice
+  - [README.md](../examples/chat_multimodal/README.md)
+  - [main.rs](../examples/chat_multimodal/main.rs)
 
-The versioned examples are explicit about which curated bundles are compiled into the binary. `v0.2` and `v0.3` remain single-bundle builds; `v0.1` is the embedding comparison example and is built with both embedding bundles compiled in.
+The examples are explicit about which curated bundles are compiled into the binary. `chat` and `chat_multimodal` remain single-bundle builds; `embeddings` is the embedding comparison example and is built with both embedding bundles compiled in.
 
-Embedding example (`v0.1`):
-
-```sh
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- "motlie curated model bundle"
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
-```
-
-Text-only chat example (`v0.2`):
+Embedding example (`embeddings`):
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- "What is Rust's ownership model?"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
 ```
 
-Gemma multimodal example (`v0.3`) with optional curated download:
+Text-only chat example (`chat`):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat -- "What is Rust's ownership model?"
+```
+
+Gemma multimodal example (`chat_multimodal`) with optional curated download:
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --bin motlie-models-download -- --hf-token-env HF_TOKEN gemma4_e2b
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- "Describe ownership in one paragraph"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- "Describe ownership in one paragraph"
 ```
 
 Or:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- --download-artifacts "Describe ownership in one paragraph"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal -- --download-artifacts "Describe ownership in one paragraph"
 ```
 
 ## Curator Implementation
@@ -408,13 +409,13 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m` or `EmbeddingModels::Qwen3Embedding06B`; `ModelSelector` is the parser-friendly wrapper above that.
 - Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
-- The embedding caller path should be understandable by reading the `v0.1` example; the text-only chat caller path by reading `v0.2`; and the multimodal chat caller path by reading `v0.3`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_embedding_06b`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
+- The embedding caller path should be understandable by reading the `embeddings` example; the text-only chat caller path by reading `chat`; and the multimodal chat caller path by reading `chat_multimodal`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_embedding_06b`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
 - Current runtime-metrics support in the examples comes from the `libs/model` handle contract and the `mistral` backend implementation. It uses `sysinfo` for current RSS on macOS and Linux and keeps peak RSS as the maximum sample observed by Motlie during the handle lifetime.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
-- `qwen3_embedding_06b` currently advertises `QuantizationSupport::without_recommended([Q8])`, so `v0.1 --precision=q8` is supported for that bundle while omitted precision still means F32.
+- `qwen3_embedding_06b` currently advertises `QuantizationSupport::without_recommended([Q8])`, so `embeddings --precision=q8` is supported for that bundle while omitted precision still means F32.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
-- The `v0.1` example is now a two-bundle comparison binary. It prints `catalog-entry-count: 2`, lists the compiled embedding selectors, defaults to Gemma when `--embedding` is omitted, and still allows explicit `--embedding=...` selection for either curated embedder.
+- The `embeddings` example is now a two-bundle comparison binary. It prints `catalog-entry-count: 2`, lists the compiled embedding selectors, defaults to Gemma when `--embedding` is omitted, and still allows explicit `--embedding=...` selection for either curated embedder.
 
 ## Next Step
 

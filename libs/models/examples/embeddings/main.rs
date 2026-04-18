@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let selector = embedding_selector.unwrap_or_else(|| DEFAULT_EMBEDDING_SELECTOR.to_owned());
     if input.trim().is_empty() {
         bail!(
-            "usage: cargo run -p motlie-models --no-default-features --features 'model-google-gemma-300m model-qwen3-embedding-06b' --example models_v0_1 -- [--embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b] [--download-artifacts] [--precision=q4|q8|f32] <text to embed>"
+            "usage: cargo run -p motlie-models --no-default-features --features 'model-google-gemma-300m model-qwen3-embedding-06b' --example embeddings -- [--embedding=google/embeddinggemma_300m|qwen/qwen3_embedding_06b] [--download-artifacts] [--precision=q4|q8|f32] <text to embed>"
         );
     }
 
@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     println!("default-embedding-selector: {DEFAULT_EMBEDDING_SELECTOR}");
     ensure!(
         catalog.len() == 2,
-        "models_v0_1 must be built with exactly the two curated embedding bundle features enabled"
+        "embeddings must be built with exactly the two curated embedding bundle features enabled"
     );
 
     println!("bundle-selector: {selector_label}");

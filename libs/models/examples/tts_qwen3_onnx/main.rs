@@ -1,8 +1,8 @@
-//! tts_v0.4 — qwen3-tts.cpp vertical slice: synthesize text to `.wav`.
+//! tts_qwen3_onnx — Qwen3-TTS synthesis with optional voice cloning.
 //!
 //! Usage:
-//!   cargo run -p motlie-models --example models_tts_v0_4 \
-//!     --no-default-features --features model-qwen3-tts-cpp \
+//!   cargo run -p motlie-models --example tts_qwen3_onnx \
+//!     --no-default-features --features model-qwen3-tts-0_6b \
 //!     -- --text "Hello from Motlie." --wav /tmp/out.wav
 
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use motlie_model::{
     ArtifactPolicy, AudioSpec, PcmEncoding, SpeechParams, SpeechRequest, StartOptions,
     VoiceConditioning,
 };
-use motlie_models::tts::qwen3_tts_cpp;
+use motlie_models::tts::qwen3_tts_12hz_0_6b;
 
 const TARGET_SAMPLE_RATE_HZ: u32 = 24_000;
 
@@ -28,6 +28,7 @@ struct Args {
     wav_path: PathBuf,
     artifact_root: Option<PathBuf>,
     reference_audio: Option<PathBuf>,
+    reference_text: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -35,6 +36,7 @@ fn parse_args() -> Result<Args> {
     let mut wav_path = None;
     let mut artifact_root = None;
     let mut reference_audio = None;
+    let mut reference_text = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -59,6 +61,9 @@ fn parse_args() -> Result<Args> {
                         .context("--reference-audio requires a path argument")?,
                 ));
             }
+            "--reference-text" => {
+                reference_text = Some(args.next().context("--reference-text requires a value")?);
+            }
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -68,14 +73,15 @@ fn parse_args() -> Result<Args> {
         wav_path: wav_path.context("--wav <path> is required")?,
         artifact_root,
         reference_audio,
+        reference_text,
     })
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie tts_v0.4 — typed qwen3-tts.cpp synthesis ===");
-    println!("wav: {}", args.wav_path.display());
+    println!("=== motlie tts_qwen3_onnx — typed Qwen3-TTS speech synthesis ===");
+    println!("wav:  {}", args.wav_path.display());
 
-    let handle = qwen3_tts_cpp::start_typed(StartOptions {
+    let handle = qwen3_tts_12hz_0_6b::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
             root: args
                 .artifact_root
@@ -84,16 +90,12 @@ async fn run(args: Args) -> Result<()> {
         ..Default::default()
     })
     .await
-    .context("failed to start typed qwen3-tts.cpp bundle")?;
+    .context("failed to start typed qwen3-tts bundle")?;
 
-    let conditioning = if let Some(reference_audio) = &args.reference_audio {
-        println!("reference: {}", reference_audio.display());
-        let reader = hound::WavReader::open(reference_audio).with_context(|| {
-            format!(
-                "failed to open reference audio `{}`",
-                reference_audio.display()
-            )
-        })?;
+    let conditioning = if let Some(ref_path) = &args.reference_audio {
+        println!("reference: {}", ref_path.display());
+        let reader = hound::WavReader::open(ref_path)
+            .with_context(|| format!("failed to open reference audio: {}", ref_path.display()))?;
         let ref_spec = reader.spec();
         let (pcm, encoding) = decode_wav(reader)?;
         Some(VoiceConditioning::ReferenceAudio {
@@ -104,7 +106,7 @@ async fn run(args: Args) -> Result<()> {
                 preferred_chunk_bytes: 0,
             },
             pcm,
-            reference_text: None,
+            reference_text: args.reference_text.clone(),
         })
     } else {
         None
@@ -162,23 +164,17 @@ fn decode_wav(
             let samples: Vec<i16> = reader
                 .into_samples::<i16>()
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .context("failed to decode integer wav samples")?;
-            let mut pcm = Vec::with_capacity(samples.len() * 2);
-            for sample in samples {
-                pcm.extend_from_slice(&sample.to_le_bytes());
-            }
-            Ok((pcm, PcmEncoding::S16Le))
+                .context("failed to decode wav samples")?;
+            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+            Ok((bytes, PcmEncoding::S16Le))
         }
         hound::SampleFormat::Float => {
             let samples: Vec<f32> = reader
                 .into_samples::<f32>()
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .context("failed to decode float wav samples")?;
-            let mut pcm = Vec::with_capacity(samples.len() * 4);
-            for sample in samples {
-                pcm.extend_from_slice(&sample.to_le_bytes());
-            }
-            Ok((pcm, PcmEncoding::F32Le))
+                .context("failed to decode wav samples")?;
+            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+            Ok((bytes, PcmEncoding::F32Le))
         }
     }
 }
