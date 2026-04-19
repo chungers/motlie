@@ -89,8 +89,7 @@ pub fn print_model_metrics(label: &str, snapshot: Option<ModelMetricSnapshot>) {
     if let Some(embeddings) = snapshot.embeddings {
         println!(
             "  embeddings: request-count={:?} input-count={:?}",
-            embeddings.request_count,
-            embeddings.input_count
+            embeddings.request_count, embeddings.input_count
         );
     }
 }

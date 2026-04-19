@@ -1,0 +1,25 @@
+[package]
+name = "motlie-model-whisper-cpp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "whisper.cpp backend implementations for motlie-model ASR contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+cuda = ["whisper-rs/cuda"]
+
+[dependencies]
+async-trait = "0.1.89"
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+whisper-rs = "0.13"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

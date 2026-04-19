@@ -12,15 +12,14 @@ use llama_cpp_2::sampling::LlamaSampler;
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
-    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, GenerationParams,
+    CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
     LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
-    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
+    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -116,6 +115,8 @@ impl LlamaCppTextAdapter {
 
 #[async_trait]
 impl BackendAdapter for LlamaCppTextAdapter {
+    type Handle = LlamaCppTextHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &LLAMA_CPP_TEXT_FORMATS
     }
@@ -137,7 +138,7 @@ impl BackendAdapter for LlamaCppTextAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -195,6 +196,8 @@ impl LlamaCppTextBundle {
 
 #[async_trait]
 impl ModelBundle for LlamaCppTextBundle {
+    type Handle = LlamaCppTextHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -207,7 +210,7 @@ impl ModelBundle for LlamaCppTextBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .metadata
             .quantization
@@ -234,10 +237,28 @@ impl ModelBundle for LlamaCppTextBundle {
 // Internal runtime abstraction (enables stub testing without real llama.cpp)
 // ---------------------------------------------------------------------------
 
-#[async_trait]
-trait TextRuntime: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError>;
+enum TextRuntime {
+    Real(LlamaCppRuntime),
+    #[cfg(test)]
+    Stub(StubTextRuntime),
+}
+
+impl TextRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.chat(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.chat(request).await,
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.complete(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.complete(request).await,
+        }
+    }
 }
 
 struct LlamaCppRuntime {
@@ -260,8 +281,7 @@ struct LlamaCppRuntime {
 unsafe impl Send for LlamaCppRuntime {}
 unsafe impl Sync for LlamaCppRuntime {}
 
-#[async_trait]
-impl TextRuntime for LlamaCppRuntime {
+impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let prompt = format_chat_prompt(self.arch, &request)?;
         self.generate_text(&prompt, &request.params).await
@@ -502,14 +522,18 @@ fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String
 // Handle
 // ---------------------------------------------------------------------------
 
-struct LlamaCppTextHandle {
+pub struct LlamaCppTextHandle {
     descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn TextRuntime>,
+    runtime: TextRuntime,
     metrics: Arc<Mutex<TextMetrics>>,
 }
 
 #[async_trait]
 impl BundleHandle for LlamaCppTextHandle {
+    type Chat = Self;
+    type Completion = Self;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -523,21 +547,21 @@ impl BundleHandle for LlamaCppTextHandle {
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Ok(self)
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Ok(self)
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -572,7 +596,7 @@ struct TextHandleConfig {
     context_length: u32,
 }
 
-fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn BundleHandle> {
+fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> LlamaCppTextHandle {
     let metrics = Arc::new(Mutex::new(TextMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "llama-cpp-text-start");
@@ -589,7 +613,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn Bundl
         context_length,
     } = config;
 
-    Box::new(LlamaCppTextHandle {
+    LlamaCppTextHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -597,7 +621,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn Bundl
             quantization,
             resolved_quantization,
         },
-        runtime: Box::new(LlamaCppRuntime {
+        runtime: TextRuntime::Real(LlamaCppRuntime {
             backend: built.backend,
             model: built.model,
             arch,
@@ -605,7 +629,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> Box<dyn Bundl
             metrics: Arc::clone(&metrics),
         }),
         metrics,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -753,8 +777,7 @@ mod tests {
 
     struct StubTextRuntime;
 
-    #[async_trait]
-    impl TextRuntime for StubTextRuntime {
+    impl StubTextRuntime {
         async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
             let prompt = request
                 .messages
@@ -869,7 +892,7 @@ mod tests {
                 .expect("test quantization support is valid"),
                 resolved_quantization: Some(QuantizationBits::Four),
             },
-            runtime: Box::new(StubTextRuntime),
+            runtime: TextRuntime::Stub(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
         };
 
