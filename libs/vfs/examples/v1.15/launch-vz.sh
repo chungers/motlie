@@ -351,6 +351,81 @@ for line in sys.stdin:
 ' "$NAT_MAC"
 }
 
+probe_guest_ip_via_ssh() {
+  python3 - "$NAT_MAC" <<'PY'
+import sys
+
+target = sys.argv[1].strip().lower()
+
+def normalize(mac: str) -> str:
+    parts = [part for part in mac.split(":") if part]
+    return ":".join(f"{int(part, 16):x}" for part in parts)
+
+print(normalize(target))
+PY
+}
+
+guest_mac_for_ip() {
+  local ip_addr="$1"
+  expect <<EOF
+set timeout 10
+log_user 0
+set output ""
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "ip -o link show enp0s1 | grep link/ether"
+expect {
+  "password:" {
+    send "admin\r"
+    exp_continue
+  }
+  -re ".+" {
+    append output \$expect_out(0,string)
+    exp_continue
+  }
+  eof {
+    if {\$output ne ""} {
+      puts \$output
+    }
+  }
+  timeout {
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
+}
+EOF
+}
+
+probe_guest_ip_by_ssh() {
+  local target_mac=""
+  target_mac="$(probe_guest_ip_via_ssh)"
+  local candidate=""
+  local candidate_mac=""
+  for candidate in 192.168.64.{2..40}; do
+    nc -z -w 1 "$candidate" 22 >/dev/null 2>&1 || continue
+    candidate_mac="$(guest_mac_for_ip "$candidate" 2>/dev/null | python3 -c '
+import re
+import sys
+
+def normalize(mac: str) -> str:
+    parts = [part for part in mac.split(":") if part]
+    return ":".join(f"{int(part, 16):x}" for part in parts)
+
+text = sys.stdin.read()
+match = re.search(r"link/ether\s+([0-9a-fA-F:]+)", text)
+if match:
+    print(normalize(match.group(1).lower()))
+' 2>/dev/null || true)"
+    if [[ -n "$candidate_mac" && "$candidate_mac" == "$target_mac" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 wait_for_guest_ip() {
   local attempts=0
   local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
@@ -371,6 +446,11 @@ wait_for_guest_ip() {
       for candidate in 192.168.64.{2..40}; do
         nc -z -w 1 "$candidate" 22 >/dev/null 2>&1 || true
       done
+      ip_addr="$(probe_guest_ip_by_ssh || true)"
+      if [[ -n "$ip_addr" ]]; then
+        echo "$ip_addr"
+        return 0
+      fi
     fi
     sleep 0.5
     attempts=$(( attempts + 1 ))
@@ -547,7 +627,7 @@ fi
 if ! id -u '$LOGIN_USER' >/dev/null 2>&1; then
   printf 'admin\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
 fi
-printf 'admin\n' | sudo -S sh -c "echo '$LOGIN_USER:testpass' | chpasswd"
+printf 'admin\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
 printf 'admin\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
 printf 'admin\n' | sudo -S chown root:root /workspace
 printf 'admin\n' | sudo -S chmod 0755 /workspace
