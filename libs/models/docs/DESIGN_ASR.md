@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-17 | @codex-asr: Renamed the ASR example paths to `asr_whisper`, `asr_sherpa_onnx`, and `asr_moonshine` and updated the design references accordingly. | API Sketch, Testing Scope for PLAN |
 | 2026-04-14 | @codex-asr: Documented the implemented Phase 2 `sherpa-onnx` backend slice, including explicit ONNX Runtime provisioning, curated bundle wiring, and feature-flag status alongside the original `whisper.cpp` recommendation. | Overview, Research Summary, Recommended Vertical Slice, Generic Backend Design, Feature Flag Design, Alternatives Considered |
 | 2026-04-13 | @codex-asr: Addressed R1 review feedback by stream-scoping `AudioSpec`, changing `push_chunk()` to return `Option`, documenting `Send`/not-`Sync` stream ownership, making quantization explicit, tightening edge-case semantics, and narrowing the first implementation slice to the `.wav` path. | Core Contract Changes in `libs/model`, Generic Backend Design, Curated Bundle Design in `libs/models`, Streaming PCM API Contract, Migration and Compatibility Strategy, API Sketch, Testing Scope for PLAN |
 | 2026-04-12 | @codex-asr: Initial brownfield design for a voice-to-text (ASR) vertical slice in the Motlie model stack. Recommends a `whisper.cpp` backend with a curated `whisper-base.en` bundle, documents the streaming PCM contract, and evaluates `faster-whisper` and streaming ONNX alternatives. | All |
@@ -724,7 +725,7 @@ The `.wav` path is a caller-side adapter:
 3. chunk into `PcmChunk`
 4. feed the same ASR stream
 
-This should be demonstrated in a versioned example under `libs/models/examples/v0.5`.
+This should be demonstrated in `libs/models/examples/asr_whisper`.
 
 ### Websocket Source Adaptation
 

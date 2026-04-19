@@ -4,9 +4,8 @@ use motlie_model::{ArtifactPolicy, ModelError};
 
 // Re-export shared metric types and helpers so backend code imports from one place.
 pub(crate) use motlie_model::metrics_runtime::{
-    lock_metrics, observe_latency, observe_memory, observe_text_generation,
-    snapshot_text_metrics, RuntimeMetricState, TextMetricState,
-    should_force_cpu,
+    RuntimeMetricState, TextMetricState, lock_metrics, observe_latency, observe_memory,
+    observe_text_generation, should_force_cpu, snapshot_text_metrics,
 };
 
 #[derive(Debug)]
@@ -79,11 +78,9 @@ mod tests {
         let root = std::env::temp_dir().join("motlie-llama-cpp-test-missing");
         std::fs::create_dir_all(&root).ok();
 
-        let err = configure_artifact_policy(
-            "model-Q4_K_M.gguf",
-            ArtifactPolicy::LocalOnly { root },
-        )
-        .expect_err("missing GGUF should fail");
+        let err =
+            configure_artifact_policy("model-Q4_K_M.gguf", ArtifactPolicy::LocalOnly { root })
+                .expect_err("missing GGUF should fail");
 
         assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("not found")));
     }

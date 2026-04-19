@@ -1,0 +1,16 @@
+[package]
+name = "motlie-model-espeak-ng"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal Motlie-owned eSpeak-ng bindings for Piper phonemization"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+
+[dependencies]
+thiserror.workspace = true
