@@ -1,5 +1,11 @@
 # motlie-vfs Apple Vz Transport Design
 
+## Changelog
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-19 | @vmm-vz-cdx | Record the native Apple Vz `v1.15` transport shape, clarify Tart's reduced role to base-image scaffolding, and document the current signed-helper / virtio-socket operator flow |
+
 ## Scope
 
 This document records the Apple Vz-specific guest filesystem transport decision

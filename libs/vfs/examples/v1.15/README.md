@@ -114,6 +114,11 @@ than the earlier Tart NAT/TCP feasibility bridge.
 
 ## Files
 
+Parallel operator docs:
+
+- [`VZ-HARNESS.md`](./VZ-HARNESS.md)
+- [`IMAGE.md`](./IMAGE.md)
+
 | File | Purpose |
 |------|---------|
 | `build-guest.sh` | Build one generic Tart-backed base guest image |

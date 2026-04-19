@@ -50,9 +50,6 @@ struct FhEntry {
     lock_owners: HashSet<u64>,
 }
 
-const F_UNLCK_I32: i32 = libc::F_UNLCK as i32;
-const F_WRLCK_I32: i32 = libc::F_WRLCK as i32;
-
 // ---------------------------------------------------------------------------
 // Mount-backing boundary
 // ---------------------------------------------------------------------------
@@ -781,7 +778,7 @@ impl FsServer {
             None => FsResult::Lock {
                 start,
                 end,
-                typ: F_UNLCK_I32,
+                typ: unlocked_lock_type(),
                 pid: 0,
             },
         }
@@ -805,7 +802,7 @@ impl FsServer {
         };
 
         let mut table = self.lock_table.lock();
-        if typ == F_UNLCK_I32 {
+        if typ == unlocked_lock_type() {
             let mut changed = false;
             let remove_key = if let Some(locks) = table.get_mut(&lock_key) {
                 let before = locks.len();
@@ -2128,7 +2125,17 @@ fn ranges_overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
 }
 
 fn lock_conflicts(existing_typ: i32, requested_typ: i32) -> bool {
-    existing_typ == F_WRLCK_I32 || requested_typ == F_WRLCK_I32
+    existing_typ == write_lock_type() || requested_typ == write_lock_type()
+}
+
+#[inline]
+fn unlocked_lock_type() -> i32 {
+    libc::F_UNLCK as i32
+}
+
+#[inline]
+fn write_lock_type() -> i32 {
+    libc::F_WRLCK as i32
 }
 
 fn find_conflict<'a>(

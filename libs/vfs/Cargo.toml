@@ -18,7 +18,7 @@ server-core = []
 vsock = ["server-core", "bincode-codec", "dep:tokio-vsock"]
 
 # FUSE client for the v1 guest path
-client = ["dep:fuser"]
+client = ["dep:fuser", "vsock"]
 
 # Wire encodings
 bincode-codec = ["dep:bincode"]
