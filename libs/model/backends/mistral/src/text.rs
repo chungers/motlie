@@ -7,16 +7,16 @@ use mistralrs::{RequestBuilder, TextModelBuilder};
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
-    CompletionModel, CompletionRequest, CompletionResponse, EmbeddingModel, LoadedBundleDescriptor,
-    ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
-    QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    CompletionModel, CompletionRequest, CompletionResponse, LoadedBundleDescriptor, ModelBundle,
+    ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport,
+    ResolvedCheckpoint, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    apply_generation_params, configure_artifact_policy, lock_metrics, map_chat_role,
-    map_quantization_bits, observe_latency, observe_memory, observe_text_usage,
-    paged_attn_context_size, resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics,
-    RuntimeMetricState, TextMetricState,
+    RuntimeMetricState, TextMetricState, apply_generation_params, configure_artifact_policy,
+    lock_metrics, map_chat_role, map_quantization_bits, observe_latency, observe_memory,
+    observe_text_usage, paged_attn_context_size, resolve_local_checkpoint, should_force_cpu,
+    snapshot_text_metrics,
 };
 
 const MISTRAL_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -90,6 +90,8 @@ impl MistralTextAdapter {
 
 #[async_trait]
 impl BackendAdapter for MistralTextAdapter {
+    type Handle = MistralTextHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &MISTRAL_TEXT_FORMATS
     }
@@ -111,7 +113,7 @@ impl BackendAdapter for MistralTextAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -155,6 +157,8 @@ impl MistralTextBundle {
 
 #[async_trait]
 impl ModelBundle for MistralTextBundle {
+    type Handle = MistralTextHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -167,7 +171,7 @@ impl ModelBundle for MistralTextBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
         let resolved_quantization = self
             .metadata
             .quantization
@@ -190,10 +194,28 @@ impl ModelBundle for MistralTextBundle {
 // Internal runtime abstraction (enables stub testing without real mistralrs)
 // ---------------------------------------------------------------------------
 
-#[async_trait]
-trait TextRuntime: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError>;
+enum TextRuntime {
+    Real(MistralTextRuntime),
+    #[cfg(test)]
+    Stub(StubTextRuntime),
+}
+
+impl TextRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.chat(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.chat(request).await,
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        match self {
+            Self::Real(runtime) => runtime.complete(request).await,
+            #[cfg(test)]
+            Self::Stub(runtime) => runtime.complete(request).await,
+        }
+    }
 }
 
 struct MistralTextRuntime {
@@ -201,8 +223,7 @@ struct MistralTextRuntime {
     metrics: Arc<Mutex<TextMetrics>>,
 }
 
-#[async_trait]
-impl TextRuntime for MistralTextRuntime {
+impl MistralTextRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let builder = to_request_builder(&request)?;
         let started_at = Instant::now();
@@ -278,14 +299,18 @@ fn collect_text_only_message(message: &motlie_model::ChatMessage) -> Result<Stri
 // Handle
 // ---------------------------------------------------------------------------
 
-struct MistralTextHandle {
+pub struct MistralTextHandle {
     descriptor: LoadedBundleDescriptor,
-    runtime: Box<dyn TextRuntime>,
+    runtime: TextRuntime,
     metrics: Arc<Mutex<TextMetrics>>,
 }
 
 #[async_trait]
 impl BundleHandle for MistralTextHandle {
+    type Chat = Self;
+    type Completion = Self;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -299,21 +324,21 @@ impl BundleHandle for MistralTextHandle {
         Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Ok(self)
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Ok(self)
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
     }
 
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
     }
 }
@@ -345,14 +370,14 @@ fn new_text_handle(
     quantization: QuantizationSupport,
     resolved_quantization: Option<QuantizationBits>,
     model: mistralrs::Model,
-) -> Box<dyn BundleHandle> {
+) -> MistralTextHandle {
     let metrics = Arc::new(Mutex::new(TextMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "mistral-text-start");
         observe_memory(&mut metrics.runtime);
     }
 
-    Box::new(MistralTextHandle {
+    MistralTextHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -360,12 +385,12 @@ fn new_text_handle(
             quantization,
             resolved_quantization,
         },
-        runtime: Box::new(MistralTextRuntime {
+        runtime: TextRuntime::Real(MistralTextRuntime {
             model,
             metrics: Arc::clone(&metrics),
         }),
         metrics,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +449,9 @@ async fn build_text_model(
                 builder = builder.with_paged_attn(pa_config);
             }
             Err(err) => {
-                tracing::warn!("failed to configure PagedAttention with context size {context_size}, continuing without it: {err}");
+                tracing::warn!(
+                    "failed to configure PagedAttention with context size {context_size}, continuing without it: {err}"
+                );
             }
         }
     }
@@ -450,8 +477,7 @@ mod tests {
 
     struct StubTextRuntime;
 
-    #[async_trait]
-    impl TextRuntime for StubTextRuntime {
+    impl StubTextRuntime {
         async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
             let prompt = request
                 .messages
@@ -520,7 +546,7 @@ mod tests {
                 .expect("test quantization support is valid"),
                 resolved_quantization: Some(QuantizationBits::Four),
             },
-            runtime: Box::new(StubTextRuntime),
+            runtime: TextRuntime::Stub(StubTextRuntime),
             metrics: Arc::new(Mutex::new(TextMetrics::default())),
         };
 

@@ -1,0 +1,31 @@
+[package]
+name = "motlie-model-piper"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Piper ONNX speech backend implementations for motlie-model TTS contracts"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+cuda = ["motlie-model-ort/cuda", "ort/cuda"]
+
+[dependencies]
+async-trait = "0.1.89"
+motlie-model = { path = "../..", features = ["metrics-runtime"] }
+motlie-model-espeak-ng = { path = "../espeak_ng" }
+motlie-model-ort = { path = "../ort" }
+ndarray = "0.17"
+# TODO(@codex-tts): upgrade `ort` to stable 2.x once it is released.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

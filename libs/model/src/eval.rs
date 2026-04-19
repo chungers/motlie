@@ -13,7 +13,9 @@ pub enum EvalTrack {
     Classification,
     Embeddings,
     Reasoning,
+    Speech,
     Summarization,
+    Transcription,
 }
 
 impl EvalTrack {
@@ -26,6 +28,8 @@ impl EvalTrack {
     pub fn primary_for_descriptor(descriptor: &CapabilityDescriptor) -> Option<Self> {
         match descriptor.kind {
             CapabilityKind::Embeddings => Some(Self::Embeddings),
+            CapabilityKind::Speech => Some(Self::Speech),
+            CapabilityKind::Transcription => Some(Self::Transcription),
             _ => None,
         }
     }
@@ -117,6 +121,26 @@ mod tests {
         assert_eq!(
             EvalTrack::primary_for_descriptor(&descriptor),
             Some(EvalTrack::Embeddings)
+        );
+    }
+
+    #[test]
+    fn transcription_capability_maps_to_transcription_track() {
+        let descriptor = CapabilityDescriptor::transcription_stream();
+
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&descriptor),
+            Some(EvalTrack::Transcription)
+        );
+    }
+
+    #[test]
+    fn speech_capability_maps_to_speech_track() {
+        let descriptor = CapabilityDescriptor::speech_stream();
+
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&descriptor),
+            Some(EvalTrack::Speech)
         );
     }
 
