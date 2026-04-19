@@ -144,7 +144,9 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::Catalog;
-    use motlie_model::{ArtifactPolicy, EmbeddingRequest, StartOptions};
+    use motlie_model::{
+        ArtifactPolicy, BundleHandle, EmbeddingModel, EmbeddingRequest, StartOptions,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

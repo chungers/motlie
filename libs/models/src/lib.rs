@@ -1635,7 +1635,7 @@ mod tests {
         #[cfg(feature = "model-google-gemma-300m")]
         {
             let bundle_id = BundleId::new("embeddinggemma_300m");
-            assert!(catalog.len() >= 1);
+            assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
             assert!(
                 catalog
