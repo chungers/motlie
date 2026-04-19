@@ -2,12 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-15-base}"
-TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-180}"
+TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-900}"
 SERVICE_FILE="$SCRIPT_DIR/motlie-vfs-guest.service"
 VALIDATE_UNIT_FILE="$SCRIPT_DIR/motlie-vfs-validate.service"
 RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
+RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
+SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
+SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
 KEEP_RUNNING=0
 
 zmodload zsh/datetime
@@ -21,16 +25,23 @@ require_cmd() {
 
 require_cmd tart
 require_cmd python3
-require_cmd stat
+require_cmd git
+require_cmd tar
+require_cmd expect
+require_cmd scp
+require_cmd ssh
+require_cmd nc
+require_cmd arp
 
 GUEST_NAME="alice"
 RUN_VM_NAME=""
-ENABLE_NAT=0
+ENABLE_NAT=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --guest) GUEST_NAME="$2"; shift 2 ;;
     --vm-name) RUN_VM_NAME="$2"; shift 2 ;;
     --enable-nat) ENABLE_NAT=1; shift ;;
+    --no-nat) ENABLE_NAT=0; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -47,6 +58,8 @@ case "$GUEST_NAME" in
     HOST_WORKSPACE_DIR="/tmp/motlie-vfs-demo/alice-workspace"
     EXPECTED_WORKSPACE_README="Alice workspace mounted from the host over the v1.15 Vz virtio-socket bridge."
     EXPECTED_ENV_LINE="ALICE_API_KEY=demo-alice"
+    GUEST_HOSTNAME="motlie-v1-15-alice"
+    NAT_MAC="02:4d:6f:74:61:11"
     ;;
   bob)
     RUN_VM_NAME="${RUN_VM_NAME:-motlie-v1-15-bob-$(date +%s)}"
@@ -59,6 +72,8 @@ case "$GUEST_NAME" in
     HOST_WORKSPACE_DIR="/tmp/motlie-vfs-demo/bob-workspace"
     EXPECTED_WORKSPACE_README="Bob workspace mounted from the host over the v1.15 Vz virtio-socket bridge."
     EXPECTED_ENV_LINE="BOB_API_KEY=demo-bob"
+    GUEST_HOSTNAME="motlie-v1-15-bob"
+    NAT_MAC="02:4d:6f:74:62:15"
     ;;
   *)
     echo "guest must be alice or bob" >&2
@@ -67,13 +82,13 @@ case "$GUEST_NAME" in
 esac
 
 RUN_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-run.log"
-PROVISION_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-provision.log"
 RESULT_JSON="$ARTIFACTS_DIR/${GUEST_NAME}-launch-result.json"
 SERIAL_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-serial.log"
 VALIDATION_TOKEN="$RUN_VM_NAME"
-WORKSPACE_SENTINEL="$HOST_WORKSPACE_DIR/.motlie-vfs-validation-${VALIDATION_TOKEN}.json"
-HOME_SENTINEL="$HOST_HOME_DIR/.motlie-vfs-validation-${VALIDATION_TOKEN}.json"
+WORKSPACE_SENTINEL_GUEST="/workspace/.motlie-vfs-validation-${VALIDATION_TOKEN}.json"
+HOME_SENTINEL_GUEST="/home/$LOGIN_USER/.motlie-vfs-validation-${VALIDATION_TOKEN}.json"
 RUNNER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid"
+GUEST_IP_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-ip.txt"
 
 local_vm_exists() {
   tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
@@ -101,45 +116,129 @@ if local_vm_exists "$RUN_VM_NAME"; then
 fi
 
 mkdir -p "$ARTIFACTS_DIR"
-rm -f "$WORKSPACE_SENTINEL" "$HOME_SENTINEL" "$RUN_LOG" "$PROVISION_LOG" "$SERIAL_LOG" "$RUNNER_PID_FILE"
+rm -f "$RUN_LOG" "$SERIAL_LOG" "$RUNNER_PID_FILE" "$GUEST_IP_FILE"
 
-echo "--- cloning guest VM for provisioning ---"
-tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
-
-echo "--- booting guest with Tart for provisioning ---"
-: > "$PROVISION_LOG"
-START_EPOCH="$EPOCHREALTIME"
-tart run --no-graphics "$RUN_VM_NAME" >"$PROVISION_LOG" 2>&1 &
-TART_PID="$!"
-
-IP_ADDR=""
-ATTEMPTS=0
-MAX_ATTEMPTS=$(( TIMEOUT_SECONDS * 2 ))
-while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
-  if ! kill -0 "$TART_PID" >/dev/null 2>&1; then
-    echo "tart run exited early during provisioning; log follows:" >&2
-    cat "$PROVISION_LOG" >&2
-    exit 1
-  fi
-  IP_ADDR="$(tart ip "$RUN_VM_NAME" 2>/dev/null || true)"
-  if [[ -n "$IP_ADDR" ]]; then
-    break
-  fi
-  sleep 0.5
-  ATTEMPTS=$(( ATTEMPTS + 1 ))
-done
-
-if [[ -z "$IP_ADDR" ]]; then
-  echo "timed out waiting for guest IP during provisioning" >&2
-  cat "$PROVISION_LOG" >&2 || true
-  exit 1
-fi
-
-READY_EPOCH="$EPOCHREALTIME"
-PROVISION_BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
+guest_copy() {
+  local src="$1"
+  local dst="$2"
+  local ip_addr="$3"
+  expect <<EOF
+set timeout -1
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" admin@${ip_addr}:$dst
+expect "password:"
+send "admin\r"
+expect eof
+EOF
+}
 
 guest_bash() {
-  tart exec -i "$RUN_VM_NAME" bash -seuo pipefail
+  local ip_addr="$1"
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  expect <<EOF
+set timeout -1
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" admin@${ip_addr}:/tmp/motlie-vfs-remote.sh
+expect "password:"
+send "admin\r"
+expect eof
+EOF
+  rm -f "$remote_script"
+  expect <<EOF
+set timeout -1
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -seuo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
+expect "password:"
+send "admin\r"
+expect eof
+EOF
+}
+
+probe_guest_ip() {
+  local candidate
+  for candidate in 192.168.64.{2..40}; do
+    nc -z -w 1 "$candidate" 22 >/dev/null 2>&1 || true
+  done
+  arp -an | python3 -c '
+import re
+import sys
+
+target = sys.argv[1].strip().lower()
+
+def normalize(mac: str) -> str:
+    parts = [part for part in mac.split(":") if part]
+    return ":".join(f"{int(part, 16):x}" for part in parts)
+
+target = normalize(target)
+
+for line in sys.stdin:
+    match = re.search(r"\(([^)]+)\)\s+at\s+([0-9a-fA-F:]+)", line)
+    if not match:
+        continue
+    ip_addr, mac = match.groups()
+    if normalize(mac.lower()) == target:
+        print(ip_addr)
+        break
+' "$NAT_MAC"
+}
+
+wait_for_guest_ip() {
+  local attempts=0
+  local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
+  local ip_addr=""
+  while [[ $attempts -lt $max_attempts ]]; do
+    if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
+      echo "vz-vsock-runner exited early; log follows:" >&2
+      cat "$RUN_LOG" >&2 || true
+      exit 1
+    fi
+    ip_addr="$(probe_guest_ip || true)"
+    if [[ -n "$ip_addr" ]]; then
+      echo "$ip_addr"
+      return 0
+    fi
+    sleep 0.5
+    attempts=$(( attempts + 1 ))
+  done
+  return 1
+}
+
+wait_for_guest_ssh() {
+  local ip_addr="$1"
+  local attempts=0
+  local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
+  while [[ $attempts -lt $max_attempts ]]; do
+    if nc -z "$ip_addr" 22 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+    attempts=$(( attempts + 1 ))
+  done
+  return 1
+}
+
+guest_capture() {
+  local ip_addr="$1"
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  expect <<EOF
+set timeout -1
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" admin@${ip_addr}:/tmp/motlie-vfs-capture.sh
+expect "password:"
+send "admin\r"
+expect eof
+EOF
+  rm -f "$remote_script"
+  expect <<EOF
+set timeout -1
+log_user 0
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -seuo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
+expect "password:"
+send "admin\r"
+expect {
+  eof { puts $expect_out(buffer) }
+}
+EOF
 }
 
 VALIDATE_SCRIPT_CONTENT="$(python3 - "$LOGIN_USER" "$EXPECTED_WORKSPACE_README" "$EXPECTED_ENV_LINE" "$VALIDATION_TOKEN" <<'PY'
@@ -217,36 +316,20 @@ print(script, end="")
 PY
 )"
 
-echo "--- provisioning guest identity and mount contract ---"
-cat "$MOUNTS_FILE" | tart exec -i "$RUN_VM_NAME" bash -lc "cat > /tmp/mounts.yaml"
-cat "$SERVICE_FILE" | tart exec -i "$RUN_VM_NAME" bash -lc "cat > /tmp/motlie-vfs-guest.service"
-cat "$VALIDATE_UNIT_FILE" | tart exec -i "$RUN_VM_NAME" bash -lc "cat > /tmp/motlie-vfs-validate.service"
-printf "%s" "$VALIDATE_SCRIPT_CONTENT" | tart exec -i "$RUN_VM_NAME" bash -lc "cat > /tmp/motlie-vfs-v1_15-validate.sh"
+echo "--- cloning guest VM disk ---"
+tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
 
-guest_bash <<EOF
-if ! getent group '$LOGIN_USER' >/dev/null 2>&1; then
-  sudo groupadd -g $GID_NUM '$LOGIN_USER'
+echo "--- packing Motlie source tree ---"
+COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git -C "$REPO_ROOT" ls-files -z | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --disable-copyfile --no-mac-metadata --no-xattrs --null -czf "$SOURCE_TARBALL" -C "$REPO_ROOT" --files-from -
+
+if [[ -n "$RUNNER_BIN_OVERRIDE" ]]; then
+  RUNNER_BIN="$RUNNER_BIN_OVERRIDE"
+elif [[ "$SKIP_RUNNER_BUILD" == "1" ]]; then
+  RUNNER_BIN="$SCRIPT_DIR/artifacts/build/vz-vsock-runner"
+else
+  echo "--- building Vz virtio-socket helper ---"
+  RUNNER_BIN="$($RUNNER_BUILD_SCRIPT)"
 fi
-if ! id -u '$LOGIN_USER' >/dev/null 2>&1; then
-  sudo useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
-fi
-sudo install -d -m 0755 /workspace
-sudo install -d -m 0755 /etc/motlie-vfs
-sudo install -m 0644 /tmp/mounts.yaml /etc/motlie-vfs/mounts.yaml
-sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
-sudo install -D -m 0644 /tmp/motlie-vfs-validate.service /etc/systemd/system/motlie-vfs-validate.service
-sudo install -D -m 0755 /tmp/motlie-vfs-v1_15-validate.sh /usr/local/bin/motlie-vfs-v1_15-validate.sh
-sudo systemctl unmask motlie-vfs-guest.service || true
-sudo systemctl daemon-reload
-sudo systemctl enable motlie-vfs-validate.service >/dev/null 2>&1 || true
-EOF
-
-echo "--- stopping Tart provisioning guest ---"
-tart stop "$RUN_VM_NAME" >/dev/null
-wait "$TART_PID" || true
-
-echo "--- building Vz virtio-socket helper ---"
-RUNNER_BIN="$($RUNNER_BUILD_SCRIPT)"
 chmod +x "$RUNNER_BIN"
 
 VM_DIR="$HOME/.tart/vms/$RUN_VM_NAME"
@@ -256,6 +339,7 @@ MACHINE_ID_PATH="$VM_DIR/machine-id.bin"
 
 echo "--- launching Apple Vz helper ---"
 : > "$RUN_LOG"
+START_EPOCH="$EPOCHREALTIME"
 RUNNER_ARGS=(
   --disk "$DISK_PATH"
   --nvram "$NVRAM_PATH"
@@ -267,13 +351,70 @@ RUNNER_ARGS=(
   --cpu-count 4
 )
 if [[ "$ENABLE_NAT" -eq 1 ]]; then
-  RUNNER_ARGS+=(--enable-nat)
+  RUNNER_ARGS+=(--enable-nat --nat-mac "$NAT_MAC")
 fi
 "$RUNNER_BIN" \
   "${RUNNER_ARGS[@]}" \
   >"$RUN_LOG" 2>&1 &
 RUNNER_PID="$!"
 echo "$RUNNER_PID" > "$RUNNER_PID_FILE"
+
+echo "--- resolving native guest IP ---"
+IP_ADDR="$(wait_for_guest_ip)" || {
+  echo "timed out waiting for native guest IP" >&2
+  cat "$RUN_LOG" >&2 || true
+  exit 1
+}
+echo "$IP_ADDR" > "$GUEST_IP_FILE"
+
+echo "--- waiting for guest SSH ---"
+wait_for_guest_ssh "$IP_ADDR" || {
+  echo "timed out waiting for guest SSH at $IP_ADDR" >&2
+  [[ -f "$SERIAL_LOG" ]] && cat "$SERIAL_LOG" >&2 || true
+  exit 1
+}
+
+echo "--- provisioning guest over native Vz NAT ---"
+guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz "$IP_ADDR"
+guest_copy "$MOUNTS_FILE" "/tmp/mounts.${GUEST_NAME}.yaml" "$IP_ADDR"
+guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service "$IP_ADDR"
+guest_copy "$VALIDATE_UNIT_FILE" /tmp/motlie-vfs-validate.service "$IP_ADDR"
+printf '%s' "$VALIDATE_SCRIPT_CONTENT" > "$ARTIFACTS_DIR/${GUEST_NAME}-validate.sh"
+guest_copy "$ARTIFACTS_DIR/${GUEST_NAME}-validate.sh" "/tmp/${GUEST_NAME}-validate.sh" "$IP_ADDR"
+
+guest_bash "$IP_ADDR" <<EOF
+printf 'admin\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME'
+printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie /workspace /etc/motlie-vfs
+if ! getent group '$LOGIN_USER' >/dev/null 2>&1; then
+  printf 'admin\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
+fi
+if ! id -u '$LOGIN_USER' >/dev/null 2>&1; then
+  printf 'admin\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
+fi
+printf 'admin\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
+printf 'admin\n' | sudo -S apt-get update
+printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2
+export PATH="/home/admin/.cargo/bin:\$PATH"
+if ! command -v cargo >/dev/null 2>&1; then
+  curl https://sh.rustup.rs -sSf | sh -s -- -y
+fi
+printf 'admin\n' | sudo -S rm -rf /var/lib/motlie/src /var/lib/motlie/target
+printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie/src
+printf 'admin\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
+printf 'admin\n' | sudo -S chown -R admin:admin /var/lib/motlie
+cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_15 --target-dir /var/lib/motlie/src/target
+printf 'admin\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_15 /usr/local/bin/motlie-vfs-guest-v1_15
+printf 'admin\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
+printf 'admin\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
+printf 'admin\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-validate.service /etc/systemd/system/motlie-vfs-validate.service
+printf 'admin\n' | sudo -S install -D -m 0755 /tmp/${GUEST_NAME}-validate.sh /usr/local/bin/motlie-vfs-v1_15-validate.sh
+printf 'admin\n' | sudo -S systemctl daemon-reload
+printf 'admin\n' | sudo -S systemctl enable motlie-vfs-guest.service
+printf 'admin\n' | sudo -S systemctl enable motlie-vfs-validate.service
+printf 'admin\n' | sudo -S systemctl restart motlie-vfs-guest.service
+printf 'admin\n' | sudo -S systemctl restart motlie-vfs-validate.service
+EOF
+rm -f "$ARTIFACTS_DIR/${GUEST_NAME}-validate.sh"
 
 VALIDATION_OK=0
 for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
@@ -282,55 +423,78 @@ for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
     cat "$RUN_LOG" >&2 || true
     exit 1
   fi
-  if [[ -f "$WORKSPACE_SENTINEL" && -f "$HOME_SENTINEL" ]]; then
-    STATUS="$(python3 - "$WORKSPACE_SENTINEL" "$HOME_SENTINEL" <<'PY'
+  VALIDATION_JSON="$(guest_capture "$IP_ADDR" <<EOF
+if [ -f '$WORKSPACE_SENTINEL_GUEST' ] && [ -f '$HOME_SENTINEL_GUEST' ]; then
+  python3 - <<'PY2'
+import json
+from pathlib import Path
+
+paths = [
+    Path('$WORKSPACE_SENTINEL_GUEST'),
+    Path('$HOME_SENTINEL_GUEST'),
+]
+payloads = [json.loads(path.read_text(encoding='utf-8')) for path in paths]
+result = {
+    'status': 'ok' if all(payload.get('status') == 'ok' for payload in payloads) else 'mismatch',
+    'workspace': payloads[0],
+    'home': payloads[1],
+}
+print(json.dumps(result, sort_keys=True))
+PY2
+fi
+EOF
+)"
+  if [[ -n "$VALIDATION_JSON" ]]; then
+    STATUS="$(python3 - <<'PY'
 import json
 import sys
 
-paths = sys.argv[1:]
-statuses = []
-for path in paths:
-    with open(path, 'r', encoding='utf-8') as fh:
-        statuses.append(json.load(fh).get('status'))
-print('ok' if statuses and all(s == 'ok' for s in statuses) else 'mismatch')
+payload = json.loads(sys.stdin.read())
+print(payload['status'])
 PY
-)"
+<<<"$VALIDATION_JSON")"
     if [[ "$STATUS" == "ok" ]]; then
+      printf '%s\n' "$VALIDATION_JSON" >"$ARTIFACTS_DIR/${GUEST_NAME}-validation.json"
       VALIDATION_OK=1
       break
     fi
-    echo "validation sentinel reported mismatch" >&2
-    cat "$WORKSPACE_SENTINEL" >&2 || true
-    cat "$HOME_SENTINEL" >&2 || true
+    echo "guest validation reported mismatch" >&2
+    printf '%s\n' "$VALIDATION_JSON" >&2
     exit 1
   fi
   sleep 1
 done
 
 if [[ "$VALIDATION_OK" -ne 1 ]]; then
-  echo "timed out waiting for host-backed validation sentinels" >&2
+  echo "timed out waiting for guest validation sentinels" >&2
   cat "$RUN_LOG" >&2 || true
   [[ -f "$SERIAL_LOG" ]] && cat "$SERIAL_LOG" >&2 || true
   exit 1
 fi
 
-python3 - "$RESULT_JSON" "$RUN_VM_NAME" "$PROVISION_BOOT_SECONDS" "$SOCKET_PATH" "$RUNNER_PID" "$WORKSPACE_SENTINEL" "$HOME_SENTINEL" <<'PY'
+READY_EPOCH="$EPOCHREALTIME"
+BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
+
+python3 - "$RESULT_JSON" "$RUN_VM_NAME" "$BOOT_SECONDS" "$SOCKET_PATH" "$RUNNER_PID" "$IP_ADDR" "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" <<'PY'
 import json
 import sys
 
-path, vm_name, boot_seconds, socket_path, runner_pid, workspace_sentinel, home_sentinel = sys.argv[1:]
+path, vm_name, boot_seconds, socket_path, runner_pid, ip_addr, validation_json_path = sys.argv[1:]
+with open(validation_json_path, "r", encoding="utf-8") as fh:
+    validation_payload = json.load(fh)
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(
         {
             "backend": "vz-vsock-runner",
             "vm_name": vm_name,
-            "provision_boot_to_ip_seconds": float(boot_seconds),
+            "boot_to_validation_seconds": float(boot_seconds),
             "unix_socket_path": socket_path,
             "runner_pid": int(runner_pid),
+            "guest_ip": ip_addr,
             "validation": {
-                "workspace_sentinel": workspace_sentinel,
-                "home_sentinel": home_sentinel,
+                "guest_validation_json": validation_json_path,
                 "mounts_ready": True,
+                "guest": validation_payload,
             },
         },
         fh,

@@ -12,6 +12,7 @@ SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-300}"
 GUEST_SRC_DIR="/home/admin/motlie-src"
 SERVICE_FILE="$REPO_ROOT/libs/vfs/examples/v1.15/motlie-vfs-guest.service"
+DATASOURCE_CFG_FILE="$REPO_ROOT/libs/vfs/examples/v1.15/99_motlie_vz.cfg"
 
 zmodload zsh/datetime
 
@@ -28,6 +29,10 @@ require_cmd tart
 require_cmd git
 require_cmd tar
 require_cmd python3
+require_cmd expect
+require_cmd scp
+require_cmd ssh
+require_cmd nc
 
 local_vm_exists() {
   tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
@@ -87,11 +92,54 @@ if [[ -z "$IP_ADDR" ]]; then
   exit 1
 fi
 
+echo "--- waiting for guest SSH ---"
+ATTEMPTS=0
+while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
+  if nc -z "$IP_ADDR" 22 >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+  ATTEMPTS=$(( ATTEMPTS + 1 ))
+done
+if [[ $ATTEMPTS -ge $MAX_ATTEMPTS ]]; then
+  echo "timed out waiting for guest SSH after ${TIMEOUT_SECONDS}s" >&2
+  exit 1
+fi
+
 READY_EPOCH="$EPOCHREALTIME"
 BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
 
 guest_bash() {
-  tart exec -i "$BASE_VM_NAME" bash -seuo pipefail
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  expect <<EOF
+set timeout -1
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" admin@${IP_ADDR}:/tmp/motlie-vfs-remote.sh
+expect "password:"
+send "admin\r"
+expect eof
+EOF
+  rm -f "$remote_script"
+  expect <<EOF
+set timeout -1
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${IP_ADDR} "bash -seuo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
+expect "password:"
+send "admin\r"
+expect eof
+EOF
+}
+
+guest_copy() {
+  local src="$1"
+  local dst="$2"
+  expect <<EOF
+set timeout -1
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" admin@${IP_ADDR}:$dst
+expect "password:"
+send "admin\r"
+expect eof
+EOF
 }
 
 echo "--- installing guest prerequisites ---"
@@ -108,8 +156,9 @@ fi
 EOF
 
 echo "--- uploading Motlie source tree into guest ---"
-cat "$SOURCE_TARBALL" | tart exec -i "$BASE_VM_NAME" bash -lc "cat > /tmp/motlie-src.tar.gz"
-cat "$SERVICE_FILE" | tart exec -i "$BASE_VM_NAME" bash -lc "cat > /tmp/motlie-vfs-guest.service"
+guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz
+guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service
+guest_copy "$DATASOURCE_CFG_FILE" /tmp/99_motlie_vz.cfg
 guest_bash <<EOF
 rm -rf '$GUEST_SRC_DIR'
 mkdir -p '$GUEST_SRC_DIR'
@@ -136,9 +185,19 @@ echo "--- installing generic guest contract ---"
 guest_bash <<EOF
 sudo install -D -m 0755 "\$HOME/motlie-target/release/motlie-vfs-guest-v1_15" /usr/local/bin/motlie-vfs-guest-v1_15
 sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
+sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_vz.cfg
 sudo mkdir -p /etc/motlie-vfs
 sudo systemctl unmask motlie-vfs-guest.service || true
 sudo systemctl daemon-reload
+sudo systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true
+EOF
+
+echo "--- cleaning cloud-init state for reusable base image ---"
+guest_bash <<'EOF'
+sudo cloud-init clean --logs --machine-id --seed
+sudo rm -rf /var/lib/cloud/*
+sudo truncate -s 0 /etc/machine-id
+sudo mkdir -p /var/lib/cloud
 EOF
 
 GUEST_BINARY="$(guest_bash <<'EOF'
@@ -172,7 +231,15 @@ PY
 echo "--- result written ---"
 cat "$RESULT_JSON"
 
-echo "--- stopping base guest ---"
-tart stop "$BASE_VM_NAME" >/dev/null
+echo "--- shutting down base guest gracefully ---"
+expect <<EOF
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${IP_ADDR} "sudo shutdown -h now"
+expect {
+  "password:" { send "admin\r"; exp_continue }
+  eof
+}
+EOF
+wait "$RUN_PID" || true
 
 echo "=== success ==="

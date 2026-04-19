@@ -15,7 +15,8 @@ The difference is the launcher and host bridge:
 
 - CH `v1.1`: guest vsock -> host Unix socket
 - Vz `v1.15`: guest virtio-socket -> Apple `VZVirtioSocketListener` ->
-  host Unix socket, with Tart used only to provision the runtime disk
+  host Unix socket, with guest-specific runtime provisioning delivered over the
+  native runner's NAT/SSH path after boot
 
 This remains a PoC:
 
@@ -27,8 +28,10 @@ This remains a PoC:
 ## What `v1.15` Implements
 
 - Apple Vz guests can boot from a shared Tart-backed base image
-- a guest-specific clone can be reprovisioned, stopped, and handed off to an
-  Apple Vz helper using `VZVirtioSocketDeviceConfiguration`
+- a guest-specific clone can be booted directly by the Apple Vz helper without
+  a Tart runtime handoff
+- guest-specific userspace provisioning happens after native boot over the
+  runner's NAT/SSH path, not through Tart runtime commands
 - the host-side `FsServer` and Unix socket layout match the `v1.1` CH shape
 - the guest-side binary now uses Linux AF_VSOCK, not guest TCP
 - the helper bridges `VZVirtioSocketConnection.fileDescriptor` onto the same
@@ -51,23 +54,28 @@ This remains a PoC:
 - `repl_host_v1_15` successfully provisions and listens on:
   - `/tmp/motlie-vfs-alice.vsock_5000`
   - `/tmp/motlie-vfs-bob.vsock_5000`
-- `build-guest.sh` successfully builds `motlie-vfs-guest-v1_15` in-guest with
-  `--features vsock,client` and installs the systemd units
+- `build-guest.sh` successfully produces a reusable stock Ubuntu base clone
 - `build-vz-runner.sh` successfully compiles the example-local Apple Vz helper
-- `launch-vz.sh --guest alice` successfully:
-  - clones and reprovisions the Tart base guest
-  - stops Tart after provisioning
-  - launches the Apple Vz helper with the expected virtio-socket / Unix-socket
-    arguments
+- a signed `vz-vsock-runner` has already been shown to boot the guest directly
+  to a serial login prompt on this machine
+- `launch-vz.sh --guest alice` now completes a native boot, provisions the live
+  guest over runner NAT/SSH, starts `motlie-vfs-guest.service`, and validates
+  the mounted guest view against the same `README.md`, `.env`, and
+  `.ssh/authorized_keys` expectations used by `v1.1`
 
-The current runtime stop point is Apple entitlement enforcement:
+The current operator stop point is helper signing from the developer shell:
 
-- the helper exits at VM configuration/start with:
-  `The process doesn’t have the "com.apple.security.virtualization" entitlement.`
+- the example-local helper must be signed with
+  `com.apple.security.virtualization` after each rebuild
+- `build-vz-runner.sh` supports this through
+  `MOTLIE_VZ_CODESIGN_IDENTITY` and `MOTLIE_VZ_ENTITLEMENTS_FILE`
+- from my noninteractive session, `codesign` still fails against the user
+  keychain with `errSecInternalComponent`, so the final signing step must be
+  done from the developer shell on this host
 
-So `v1.15` now proves the transport wiring and the launch handoff, but a fully
-successful Apple Vz runtime still requires the signed helper boundary already
-called out in the Vz design docs.
+So `v1.15` now proves the native transport wiring and native launch model, and
+the remaining stop point is the signed-helper developer workflow rather than
+Tart runtime dependence.
 
 ## Transport Model
 
@@ -84,10 +92,11 @@ Each mount inside the guest:
 
 On the host:
 
-1. the helper boots the guest from the provisioned Tart disk image
+1. the helper boots the guest from the cloned Tart disk image
 2. the helper configures one `VZVirtioSocketDeviceConfiguration`
 3. the helper installs a `VZVirtioSocketListener` on port `5000`
-4. on each guest connection, the helper bridges the
+4. after boot, `launch-vz.sh` provisions the guest over NAT/SSH
+5. on each guest connection, the helper bridges the
    `VZVirtioSocketConnection.fileDescriptor` onto the guest's Unix socket path
 
 This preserves the same guest/tag routing shape as `v1.1`, but with Apple
@@ -107,9 +116,9 @@ than the earlier Tart NAT/TCP feasibility bridge.
 
 | File | Purpose |
 |------|---------|
-| `build-guest.sh` | Build one generic Tart-backed base guest with `motlie-vfs-guest-v1_15` installed |
+| `build-guest.sh` | Build one generic Tart-backed base guest image |
 | `build-vz-runner.sh` | Compile the Apple Vz helper that exposes `VZVirtioSocketListener` |
-| `launch-vz.sh` | Clone and provision one guest-specific Tart VM, stop it, then boot the disk through the Apple Vz helper |
+| `launch-vz.sh` | Clone one guest-specific VM disk, boot it through the Apple Vz helper, provision the guest over native NAT/SSH, then validate the mounted guest view |
 | `vz-vsock-runner.m` | Minimal Apple Vz helper that bridges `VZVirtioSocketConnection.fileDescriptor` to a host Unix socket |
 | `repl_host.rs` | Host-side multi-guest REPL example using the same Unix socket / vsock bridge shape as `v1.1` |
 | `mounts.alice.yaml` | Alice guest mount template |
@@ -123,12 +132,8 @@ than the earlier Tart NAT/TCP feasibility bridge.
 - macOS on Apple Silicon
 - Tart installed and working
 - Rust toolchain on the host
-- the ability to run a helper with `com.apple.security.virtualization`
+- the ability to sign and run a helper with `com.apple.security.virtualization`
 - no `sudo` required on the host
-
-The guest provisioning step installs build dependencies and Rust inside the VM.
-The Apple Vz helper itself still requires the virtualization entitlement at
-runtime.
 
 ## Quick Start
 
@@ -172,27 +177,31 @@ cd libs/vfs/examples/v1.15
 
 Each launch:
 
-- clones the generic base guest
-- boots it once with Tart for guest provisioning only
-- installs guest-specific `mounts.yaml`
-- creates the guest user and mount directories
-- installs a oneshot validation unit that writes host-visible sentinel files
-- stops Tart
-- launches the same disk image through the Apple Vz helper with a
-  `VZVirtioSocketListener`
-- waits for host-visible validation sentinels under the mounted backing
-  directories
+- clones the generic base guest disk
+- launches the guest directly through the Apple Vz helper with:
+  - the cloned root disk
+  - a `VZVirtioSocketListener`
+- resolves the guest IP over the helper's NAT network
+- provisions the guest directly over SSH:
+  - creates the guest user
+  - installs build prerequisites
+  - builds and installs `motlie-vfs-guest-v1_15`
+  - installs `mounts.yaml` and the systemd units
+- waits for guest-side validation sentinels written through the mounted VFS
+  paths and stores the validation JSON locally under `artifacts/`
 
 ## Current Caveats
 
-- Tart is still used for guest provisioning because it is the easiest signed
-  launcher available on this host
+- Tart is still used to source and clone the reusable base disk image, but not
+  to run the guest for the `v1.15` native path
 - the final runtime launch now goes through Apple virtio-socket rather than
   guest TCP/NAT
-- the helper still requires the virtualization entitlement, so unsigned local
-  runs will fail at VM configuration validation/start
-- the guest user IDs differ from `v1.1` because the base Ubuntu Tart image already reserves uid `1000` for `admin`
-- the generic base build still patches the throwaway guest copy of the root workspace manifest to include `libs/vfs` before building
+- guest provisioning currently happens after native boot over SSH; it is not
+  yet an offline image-build flow
+- the helper still requires the virtualization entitlement, so rebuilt helpers
+  must be signed before launch
+- the guest user IDs differ from `v1.1` because the base Ubuntu Tart image
+  already reserves uid `1000` for `admin`
 - default run VM names use a timestamped suffix so repeated launches do not
   depend on `tart delete` for cleanup
 

@@ -60,13 +60,17 @@ static int connect_unix_socket(NSString *path) {
 @property(nonatomic, strong) NSMutableSet<BridgeSession *> *sessions;
 @property(nonatomic, copy) NSString *unixSocketPath;
 @property(nonatomic, assign) uint32_t vsockPort;
+@property(nonatomic, strong) dispatch_queue_t vmQueue;
 - (instancetype)initWithUnixSocketPath:(NSString *)unixSocketPath vsockPort:(uint32_t)vsockPort;
 - (BOOL)startWithDiskPath:(NSString *)diskPath
+               seedDiskPath:(nullable NSString *)seedDiskPath
                 nvramPath:(nullable NSString *)nvramPath
             machineIDPath:(nullable NSString *)machineIDPath
                serialPath:(nullable NSString *)serialPath
+         useStdioConsole:(BOOL)useStdioConsole
                memoryMiB:(NSUInteger)memoryMiB
                 cpuCount:(NSUInteger)cpuCount
+                  natMAC:(nullable NSString *)natMAC
                enableNAT:(BOOL)enableNAT
                    error:(NSError **)error;
 - (void)addSession:(BridgeSession *)session;
@@ -199,6 +203,7 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         _unixSocketPath = [unixSocketPath copy];
         _vsockPort = vsockPort;
         _sessions = [NSMutableSet set];
+        _vmQueue = dispatch_queue_create("motlie.vfs.v1_15.vz_runner", DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
@@ -216,11 +221,14 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
 }
 
 - (BOOL)startWithDiskPath:(NSString *)diskPath
+               seedDiskPath:(nullable NSString *)seedDiskPath
                 nvramPath:(nullable NSString *)nvramPath
             machineIDPath:(nullable NSString *)machineIDPath
                serialPath:(nullable NSString *)serialPath
+         useStdioConsole:(BOOL)useStdioConsole
                memoryMiB:(NSUInteger)memoryMiB
                 cpuCount:(NSUInteger)cpuCount
+                  natMAC:(nullable NSString *)natMAC
                enableNAT:(BOOL)enableNAT
                    error:(NSError **)error {
     NSURL *diskURL = [NSURL fileURLWithPath:diskPath];
@@ -236,6 +244,27 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
 
     VZVirtioBlockDeviceConfiguration *block = [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:attachment];
     VZVirtioSocketDeviceConfiguration *socketConfig = [[VZVirtioSocketDeviceConfiguration alloc] init];
+    NSMutableArray<VZStorageDeviceConfiguration *> *storageDevices = [NSMutableArray arrayWithObject:block];
+    NSString *loggedNatMAC = @"(disabled)";
+
+    NSMutableArray<VZUSBControllerConfiguration *> *usbControllers = [NSMutableArray array];
+    if (seedDiskPath.length > 0) {
+        NSURL *seedURL = [NSURL fileURLWithPath:seedDiskPath];
+        VZDiskImageStorageDeviceAttachment *seedAttachment =
+            [[VZDiskImageStorageDeviceAttachment alloc] initWithURL:seedURL
+                                                           readOnly:YES
+                                                        cachingMode:VZDiskImageCachingModeAutomatic
+                                                synchronizationMode:VZDiskImageSynchronizationModeFsync
+                                                              error:error];
+        if (!seedAttachment) {
+            return NO;
+        }
+        VZUSBMassStorageDeviceConfiguration *seedUSB =
+            [[VZUSBMassStorageDeviceConfiguration alloc] initWithAttachment:seedAttachment];
+        VZXHCIControllerConfiguration *xhci = [[VZXHCIControllerConfiguration alloc] init];
+        xhci.usbDevices = @[ seedUSB ];
+        [usbControllers addObject:xhci];
+    }
 
     VZVirtualMachineConfiguration *config = [[VZVirtualMachineConfiguration alloc] init];
     config.CPUCount = cpuCount;
@@ -273,28 +302,52 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         }
     }
     config.platform = platform;
-    config.storageDevices = @[ block ];
+    config.storageDevices = storageDevices;
     config.socketDevices = @[ socketConfig ];
+    config.usbControllers = usbControllers;
 
-    if (serialPath.length > 0) {
-        NSError *serialError = nil;
-        NSURL *serialURL = [NSURL fileURLWithPath:serialPath];
-        VZFileSerialPortAttachment *serialAttachment = [[VZFileSerialPortAttachment alloc] initWithURL:serialURL append:YES error:&serialError];
-        if (!serialAttachment) {
-            if (error) {
-                *error = serialError;
-            }
-            return NO;
-        }
+    if (useStdioConsole || serialPath.length > 0) {
         VZVirtioConsoleDeviceSerialPortConfiguration *serial = [[VZVirtioConsoleDeviceSerialPortConfiguration alloc] init];
-        serial.attachment = serialAttachment;
+        if (useStdioConsole) {
+            NSFileHandle *stdinHandle = [[NSFileHandle alloc] initWithFileDescriptor:STDIN_FILENO closeOnDealloc:NO];
+            NSFileHandle *stdoutHandle = [[NSFileHandle alloc] initWithFileDescriptor:STDOUT_FILENO closeOnDealloc:NO];
+            serial.attachment = [[VZFileHandleSerialPortAttachment alloc] initWithFileHandleForReading:stdinHandle
+                                                                                   fileHandleForWriting:stdoutHandle];
+        } else {
+            NSError *serialError = nil;
+            NSURL *serialURL = [NSURL fileURLWithPath:serialPath];
+            VZFileSerialPortAttachment *serialAttachment = [[VZFileSerialPortAttachment alloc] initWithURL:serialURL append:YES error:&serialError];
+            if (!serialAttachment) {
+                if (error) {
+                    *error = serialError;
+                }
+                return NO;
+            }
+            serial.attachment = serialAttachment;
+        }
         config.serialPorts = @[ serial ];
     }
 
     if (enableNAT) {
         VZVirtioNetworkDeviceConfiguration *net = [[VZVirtioNetworkDeviceConfiguration alloc] init];
         net.attachment = [[VZNATNetworkDeviceAttachment alloc] init];
-        net.MACAddress = [VZMACAddress randomLocallyAdministeredAddress];
+        VZMACAddress *macAddress = nil;
+        if (natMAC.length > 0) {
+            macAddress = [[VZMACAddress alloc] initWithString:natMAC];
+            if (!macAddress) {
+                if (error) {
+                    NSString *message = [NSString stringWithFormat:@"invalid NAT MAC address: %@", natMAC];
+                    *error = [NSError errorWithDomain:@"motlie.vfs.v1_15.vz"
+                                                 code:3
+                                             userInfo:@{NSLocalizedDescriptionKey: message}];
+                }
+                return NO;
+            }
+        } else {
+            macAddress = [VZMACAddress randomLocallyAdministeredAddress];
+        }
+        net.MACAddress = macAddress;
+        loggedNatMAC = macAddress.string;
         config.networkDevices = @[ net ];
     }
 
@@ -302,25 +355,26 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         return NO;
     }
 
-    dispatch_queue_t queue = dispatch_queue_create("motlie.vfs.v1_15.vz_runner", DISPATCH_QUEUE_SERIAL);
-    self.vm = [[VZVirtualMachine alloc] initWithConfiguration:config queue:queue];
-    self.vmDelegate = [[VmDelegate alloc] init];
-    self.vm.delegate = self.vmDelegate;
-
-    VZVirtioSocketDevice *socketDevice = (VZVirtioSocketDevice *)self.vm.socketDevices.firstObject;
-    self.socketDelegate = [[SocketListenerDelegate alloc] initWithRunner:self];
-    VZVirtioSocketListener *listener = [[VZVirtioSocketListener alloc] init];
-    listener.delegate = self.socketDelegate;
-    [socketDevice setSocketListener:listener forPort:self.vsockPort];
-
     __block BOOL started = NO;
     __block NSError *startError = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [self.vm startWithCompletionHandler:^(NSError * _Nullable errorOrNil) {
-        startError = errorOrNil;
-        started = (errorOrNil == nil);
-        dispatch_semaphore_signal(sem);
-    }];
+    dispatch_sync(self.vmQueue, ^{
+        self.vm = [[VZVirtualMachine alloc] initWithConfiguration:config queue:self.vmQueue];
+        self.vmDelegate = [[VmDelegate alloc] init];
+        self.vm.delegate = self.vmDelegate;
+
+        VZVirtioSocketDevice *socketDevice = (VZVirtioSocketDevice *)self.vm.socketDevices.firstObject;
+        self.socketDelegate = [[SocketListenerDelegate alloc] initWithRunner:self];
+        VZVirtioSocketListener *listener = [[VZVirtioSocketListener alloc] init];
+        listener.delegate = self.socketDelegate;
+        [socketDevice setSocketListener:listener forPort:self.vsockPort];
+
+        [self.vm startWithCompletionHandler:^(NSError * _Nullable errorOrNil) {
+            startError = errorOrNil;
+            started = (errorOrNil == nil);
+            dispatch_semaphore_signal(sem);
+        }];
+    });
     dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
 
     if (!started) {
@@ -330,10 +384,12 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         return NO;
     }
 
-    fprintf(stderr, "vz-vsock-runner started: disk=%s port=%u socket=%s\n",
+    fprintf(stderr, "vz-vsock-runner started: disk=%s seed=%s port=%u socket=%s nat-mac=%s\n",
             diskPath.UTF8String,
+            seedDiskPath.length > 0 ? seedDiskPath.UTF8String : "(none)",
             self.vsockPort,
-            self.unixSocketPath.UTF8String);
+            self.unixSocketPath.UTF8String,
+            loggedNatMAC.UTF8String);
     return YES;
 }
 
@@ -349,10 +405,13 @@ static void install_signal_handler(int signum, dispatch_block_t block) {
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         NSString *diskPath = nil;
+        NSString *seedDiskPath = nil;
         NSString *nvramPath = nil;
         NSString *machineIDPath = nil;
         NSString *serialPath = nil;
         NSString *unixSocketPath = nil;
+        NSString *natMAC = nil;
+        BOOL useStdioConsole = NO;
         NSUInteger memoryMiB = 4096;
         NSUInteger cpuCount = 4;
         uint32_t vsockPort = 5000;
@@ -362,14 +421,20 @@ int main(int argc, const char * argv[]) {
             NSString *arg = [NSString stringWithUTF8String:argv[i]];
             if ([arg isEqualToString:@"--disk"] && i + 1 < argc) {
                 diskPath = [NSString stringWithUTF8String:argv[++i]];
+            } else if ([arg isEqualToString:@"--seed-disk"] && i + 1 < argc) {
+                seedDiskPath = [NSString stringWithUTF8String:argv[++i]];
             } else if ([arg isEqualToString:@"--nvram"] && i + 1 < argc) {
                 nvramPath = [NSString stringWithUTF8String:argv[++i]];
             } else if ([arg isEqualToString:@"--machine-id"] && i + 1 < argc) {
                 machineIDPath = [NSString stringWithUTF8String:argv[++i]];
             } else if ([arg isEqualToString:@"--serial-log"] && i + 1 < argc) {
                 serialPath = [NSString stringWithUTF8String:argv[++i]];
+            } else if ([arg isEqualToString:@"--stdio-console"]) {
+                useStdioConsole = YES;
             } else if ([arg isEqualToString:@"--unix-socket"] && i + 1 < argc) {
                 unixSocketPath = [NSString stringWithUTF8String:argv[++i]];
+            } else if ([arg isEqualToString:@"--nat-mac"] && i + 1 < argc) {
+                natMAC = [NSString stringWithUTF8String:argv[++i]];
             } else if ([arg isEqualToString:@"--vsock-port"] && i + 1 < argc) {
                 vsockPort = (uint32_t)strtoul(argv[++i], NULL, 10);
             } else if ([arg isEqualToString:@"--memory-mib"] && i + 1 < argc) {
@@ -385,18 +450,21 @@ int main(int argc, const char * argv[]) {
         }
 
         if (diskPath.length == 0 || unixSocketPath.length == 0) {
-            fprintf(stderr, "usage: vz-vsock-runner --disk <path> --unix-socket <path> [--nvram <path>] [--machine-id <path>] [--serial-log <path>] [--vsock-port <port>] [--memory-mib <mib>] [--cpu-count <count>] [--enable-nat]\n");
+            fprintf(stderr, "usage: vz-vsock-runner --disk <path> --unix-socket <path> [--seed-disk <path>] [--nvram <path>] [--machine-id <path>] [--serial-log <path> | --stdio-console] [--nat-mac <mac>] [--vsock-port <port>] [--memory-mib <mib>] [--cpu-count <count>] [--enable-nat]\n");
             return 2;
         }
 
         VzVsockRunner *runner = [[VzVsockRunner alloc] initWithUnixSocketPath:unixSocketPath vsockPort:vsockPort];
         NSError *error = nil;
         if (![runner startWithDiskPath:diskPath
+                          seedDiskPath:seedDiskPath
                              nvramPath:nvramPath
                          machineIDPath:machineIDPath
                             serialPath:serialPath
+                      useStdioConsole:useStdioConsole
                             memoryMiB:memoryMiB
                              cpuCount:cpuCount
+                               natMAC:natMAC
                             enableNAT:enableNAT
                                 error:&error]) {
             fprintf(stderr, "failed to start Vz VM: %s\n", error.localizedDescription.UTF8String);
