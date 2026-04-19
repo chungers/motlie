@@ -94,6 +94,24 @@ local_vm_exists() {
   tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
 }
 
+require_host_socket_ready() {
+  python3 - "$SOCKET_PATH" <<'PY'
+import socket
+import sys
+
+path = sys.argv[1]
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(1.0)
+try:
+    sock.connect(path)
+except Exception as exc:
+    print(f"host unix socket not ready: {path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
 cleanup() {
   if [[ "$KEEP_RUNNING" -eq 0 ]]; then
     if [[ -f "$RUNNER_PID_FILE" ]]; then
@@ -162,6 +180,7 @@ if ! local_vm_exists "$BASE_VM_NAME"; then
   echo "base VM '$BASE_VM_NAME' not found; run ./build-guest.sh first" >&2
   exit 1
 fi
+require_host_socket_ready
 
 if local_vm_exists "$RUN_VM_NAME"; then
   if [[ "$REUSE_VM" == "1" ]]; then
@@ -176,7 +195,8 @@ if local_vm_exists "$RUN_VM_NAME"; then
 fi
 
 mkdir -p "$ARTIFACTS_DIR"
-rm -f "$RUN_LOG" "$SERIAL_LOG" "$RUNNER_PID_FILE" "$GUEST_IP_FILE"
+rm -f "$RUN_LOG" "$SERIAL_LOG" "$RUNNER_PID_FILE" "$GUEST_IP_FILE" "$RESULT_JSON" \
+  "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json"
 
 guest_copy() {
   local src="$1"
