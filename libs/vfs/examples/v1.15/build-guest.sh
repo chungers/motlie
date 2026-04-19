@@ -199,17 +199,17 @@ EOF
 
 echo "--- installing generic guest contract ---"
 guest_bash <<'EOF'
-sudo install -D -m 0755 "\$HOME/motlie-target/release/motlie-vfs-guest-v1_15" /usr/local/bin/motlie-vfs-guest-v1_15
+sudo install -D -m 0755 "$HOME/motlie-target/release/motlie-vfs-guest-v1_15" /usr/local/bin/motlie-vfs-guest-v1_15
 sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
 sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_vz.cfg
 sudo mkdir -p /etc/motlie-vfs
 sudo mkdir -p /etc/profile.d
 cat <<'TMUXEOF' | sudo tee /etc/profile.d/tmux-auto.sh >/dev/null
-if [ -n "\$SSH_CONNECTION" ] && [ -z "\$TMUX" ] && command -v tmux >/dev/null 2>&1; then
-    if tmux has-session -t "\$USER" 2>/dev/null; then
+if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+    if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
         sleep 1
-        exec tmux attach-session -t "\$USER"
+        exec tmux attach-session -t "$USER"
     else
         printf "Start tmux session? [Y/n] (auto-yes in 3s) "
         if read -r -n 1 -t 3 answer; then
@@ -218,17 +218,17 @@ if [ -n "\$SSH_CONNECTION" ] && [ -z "\$TMUX" ] && command -v tmux >/dev/null 2>
             answer=Y
             echo
         fi
-        case "\$answer" in
+        case "$answer" in
             n|N) ;;
-            *) exec tmux new-session -s "\$USER" ;;
+            *) exec tmux new-session -s "$USER" ;;
         esac
     fi
 fi
 TMUXEOF
 cat <<'DOTENVEOF' | sudo tee /etc/profile.d/dotenv.sh >/dev/null
-if [ -f "\$HOME/.env" ]; then
+if [ -f "$HOME/.env" ]; then
     set -a
-    . "\$HOME/.env"
+    . "$HOME/.env"
     set +a
 fi
 DOTENVEOF
