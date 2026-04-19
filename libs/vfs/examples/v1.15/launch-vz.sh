@@ -12,7 +12,7 @@ RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
-KEEP_RUNNING=0
+KEEP_RUNNING="${MOTLIE_VZ_KEEP_RUNNING:-0}"
 REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
 
 zmodload zsh/datetime
@@ -37,6 +37,7 @@ require_cmd arp
 GUEST_NAME="alice"
 RUN_VM_NAME=""
 ENABLE_NAT=1
+REUSED_VM=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --guest) GUEST_NAME="$2"; shift 2 ;;
@@ -99,6 +100,10 @@ cleanup() {
       kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
       rm -f "$RUNNER_PID_FILE"
     fi
+    if [[ "$REUSED_VM" -eq 0 ]] && [[ -n "$RUN_VM_NAME" ]] && local_vm_exists "$RUN_VM_NAME"; then
+      tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
+      tart delete "$RUN_VM_NAME" >/dev/null 2>&1 || true
+    fi
   fi
 }
 
@@ -158,7 +163,6 @@ if ! local_vm_exists "$BASE_VM_NAME"; then
   exit 1
 fi
 
-REUSED_VM=0
 if local_vm_exists "$RUN_VM_NAME"; then
   if [[ "$REUSE_VM" == "1" ]]; then
     echo "--- reusing existing guest VM '$RUN_VM_NAME' ---"
@@ -647,13 +651,14 @@ fi
 READY_EPOCH="$EPOCHREALTIME"
 BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
 
-python3 - "$RESULT_JSON" "$RUN_VM_NAME" "$BOOT_SECONDS" "$SOCKET_PATH" "$RUNNER_PID" "$IP_ADDR" "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" <<'PY'
+python3 - "$RESULT_JSON" "$RUN_VM_NAME" "$BOOT_SECONDS" "$SOCKET_PATH" "$RUNNER_PID" "$IP_ADDR" "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$KEEP_RUNNING" <<'PY'
 import json
 import sys
 
-path, vm_name, boot_seconds, socket_path, runner_pid, ip_addr, validation_json_path = sys.argv[1:]
+path, vm_name, boot_seconds, socket_path, runner_pid, ip_addr, validation_json_path, keep_running = sys.argv[1:]
 with open(validation_json_path, "r", encoding="utf-8") as fh:
     validation_payload = json.load(fh)
+keep_running_bool = keep_running == "1"
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(
         {
@@ -661,7 +666,8 @@ with open(path, "w", encoding="utf-8") as fh:
             "vm_name": vm_name,
             "boot_to_validation_seconds": float(boot_seconds),
             "unix_socket_path": socket_path,
-            "runner_pid": int(runner_pid),
+            "runner_pid": int(runner_pid) if keep_running_bool else None,
+            "kept_running": keep_running_bool,
             "guest_ip": ip_addr,
             "validation": {
                 "guest_validation_json": validation_json_path,
@@ -676,7 +682,10 @@ with open(path, "w", encoding="utf-8") as fh:
     fh.write("\n")
 PY
 
-KEEP_RUNNING=1
 echo "--- result written ---"
 cat "$RESULT_JSON"
-echo "=== guest running through Apple virtio-socket ==="
+if [[ "$KEEP_RUNNING" -eq 1 ]]; then
+  echo "=== guest left running through Apple virtio-socket ==="
+else
+  echo "=== guest validated and scheduled for cleanup ==="
+fi

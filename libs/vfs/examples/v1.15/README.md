@@ -188,23 +188,7 @@ Each launch:
   - installs `mounts.yaml` and the systemd units
 - validates the mounted guest view directly over SSH and stores the validation
   JSON locally under `artifacts/`
-
-For repeated local iterations against the same explicit VM name, you can reuse
-the existing guest instead of deleting and recloning it:
-
-```bash
-cd libs/vfs/examples/v1.15
-MOTLIE_VZ_REUSE_VM=1 ./launch-vz.sh --guest alice --vm-name motlie-v1-15-alice-iter
-```
-
-```bash
-cd libs/vfs/examples/v1.15
-MOTLIE_VZ_REUSE_VM=1 ./launch-vz.sh --guest bob --vm-name motlie-v1-15-bob-iter
-```
-
-Reuse mode keeps the stable iter VM, restarts it through the native Apple Vz
-runner, and only rebuilds the guest binary if the installed guest contract is
-missing or broken.
+- tears down the native runner and per-run guest VM by default after validation
 
 ## Current Caveats
 
@@ -218,11 +202,15 @@ missing or broken.
   must be signed before launch
 - the guest user IDs differ from `v1.1` because the base Ubuntu Tart image
   already reserves uid `1000` for `admin`
-- for repeated local hardening/debug loops, prefer a stable explicit `--vm-name`
-  such as `motlie-v1-15-alice-iter` / `motlie-v1-15-bob-iter` so reruns reuse
-  the same approval path
-- for repeat runs against the same stable iter VM, set `MOTLIE_VZ_REUSE_VM=1`
-  to skip the delete/reclone cycle and reuse the existing guest disk
+- the intended default lifecycle is fresh clone -> provision -> validate ->
+  clean teardown, leaving no lingering per-run VM, runner, pid file, or MAC/IP
+  allocation behind on the host
+- `MOTLIE_VZ_REUSE_VM=1` exists only as a temporary local debugging escape
+  hatch while hardening this script; it is not the intended contract for
+  `v1.15` and should not drive later slices such as `v1.25`
+- if you intentionally want to retain a successful run for manual inspection,
+  set `MOTLIE_VZ_KEEP_RUNNING=1`; otherwise the script cleans up the per-run VM
+  after success
 
 ## Expected Next Step
 
