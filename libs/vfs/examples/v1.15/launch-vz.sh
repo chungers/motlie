@@ -85,8 +85,6 @@ RUN_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/${GUEST_NAME}-launch-result.json"
 SERIAL_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-serial.log"
 VALIDATION_TOKEN="$RUN_VM_NAME"
-WORKSPACE_SENTINEL_GUEST="/workspace/.motlie-vfs-validation-${VALIDATION_TOKEN}.json"
-HOME_SENTINEL_GUEST="/home/$LOGIN_USER/.motlie-vfs-validation-${VALIDATION_TOKEN}.json"
 RUNNER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid"
 GUEST_IP_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-ip.txt"
 
@@ -125,9 +123,13 @@ guest_copy() {
   expect <<EOF
 set timeout -1
 spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" admin@${ip_addr}:$dst
-expect "password:"
-send "admin\r"
-expect eof
+expect {
+  "password:" {
+    send "admin\r"
+    exp_continue
+  }
+  eof
+}
 EOF
 }
 
@@ -139,25 +141,34 @@ guest_bash() {
   expect <<EOF
 set timeout -1
 spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" admin@${ip_addr}:/tmp/motlie-vfs-remote.sh
-expect "password:"
-send "admin\r"
-expect eof
+expect {
+  "password:" {
+    send "admin\r"
+    exp_continue
+  }
+  eof
+}
 EOF
   rm -f "$remote_script"
   expect <<EOF
 set timeout -1
+log_user 0
 spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -seuo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
-expect "password:"
-send "admin\r"
-expect eof
+expect {
+  "password:" {
+    send "admin\r"
+    exp_continue
+  }
+  eof {
+    if {[info exists expect_out(buffer)]} {
+      puts \$expect_out(buffer)
+    }
+  }
+}
 EOF
 }
 
 probe_guest_ip() {
-  local candidate
-  for candidate in 192.168.64.{2..40}; do
-    nc -z -w 1 "$candidate" 22 >/dev/null 2>&1 || true
-  done
   arp -an | python3 -c '
 import re
 import sys
@@ -196,6 +207,12 @@ wait_for_guest_ip() {
       echo "$ip_addr"
       return 0
     fi
+    if (( attempts % 10 == 0 )); then
+      local candidate
+      for candidate in 192.168.64.{2..40}; do
+        nc -z -w 1 "$candidate" 22 >/dev/null 2>&1 || true
+      done
+    fi
     sleep 0.5
     attempts=$(( attempts + 1 ))
   done
@@ -224,97 +241,32 @@ guest_capture() {
   expect <<EOF
 set timeout -1
 spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" admin@${ip_addr}:/tmp/motlie-vfs-capture.sh
-expect "password:"
-send "admin\r"
-expect eof
+expect {
+  "password:" {
+    send "admin\r"
+    exp_continue
+  }
+  eof
+}
 EOF
   rm -f "$remote_script"
   expect <<EOF
 set timeout -1
 log_user 0
 spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -seuo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
-expect "password:"
-send "admin\r"
 expect {
-  eof { puts $expect_out(buffer) }
+  "password:" {
+    send "admin\r"
+    exp_continue
+  }
+  eof {
+    if {[info exists expect_out(buffer)]} {
+      puts \$expect_out(buffer)
+    }
+  }
 }
 EOF
 }
-
-VALIDATE_SCRIPT_CONTENT="$(python3 - "$LOGIN_USER" "$EXPECTED_WORKSPACE_README" "$EXPECTED_ENV_LINE" "$VALIDATION_TOKEN" <<'PY'
-import json
-import sys
-
-login_user, expected_readme, expected_env, token = sys.argv[1:]
-script = f"""#!/bin/bash
-set -euo pipefail
-
-LOGIN_USER={json.dumps(login_user)}
-EXPECTED_README={json.dumps(expected_readme)}
-EXPECTED_ENV={json.dumps(expected_env)}
-TOKEN={json.dumps(token)}
-WORKSPACE_SENTINEL=\"/workspace/.motlie-vfs-validation-${{TOKEN}}.json\"
-HOME_SENTINEL=\"/home/${{LOGIN_USER}}/.motlie-vfs-validation-${{TOKEN}}.json\"
-deadline=$((SECONDS + 120))
-
-while [ \"$SECONDS\" -lt \"$deadline\" ]; do
-  if mountpoint -q /workspace && mountpoint -q /home/${{LOGIN_USER}} && [ -f /workspace/README.md ] && [ -f /home/${{LOGIN_USER}}/.env ] && [ -s /home/${{LOGIN_USER}}/.ssh/authorized_keys ]; then
-    python3 - <<'PY2'
-import json
-from pathlib import Path
-
-login_user = {json.dumps(login_user)}
-expected_readme = {json.dumps(expected_readme)}
-expected_env = {json.dumps(expected_env)}
-token = {json.dumps(token)}
-
-actual_readme = Path('/workspace/README.md').read_text(encoding='utf-8').strip()
-actual_env = Path(f'/home/{{login_user}}/.env').read_text(encoding='utf-8').strip()
-authorized_keys = Path(f'/home/{{login_user}}/.ssh/authorized_keys').read_text(encoding='utf-8').strip()
-
-payload = {{
-    'token': token,
-    'guest_user': login_user,
-    'status': 'ok' if actual_readme == expected_readme and actual_env == expected_env and bool(authorized_keys) else 'mismatch',
-    'workspace_readme': actual_readme,
-    'expected_workspace_readme': expected_readme,
-    'env_line': actual_env,
-    'expected_env_line': expected_env,
-    'authorized_keys_present': bool(authorized_keys),
-}}
-
-workspace_path = Path(f'/workspace/.motlie-vfs-validation-{{token}}.json')
-home_path = Path(f'/home/{{login_user}}/.motlie-vfs-validation-{{token}}.json')
-workspace_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\\n', encoding='utf-8')
-home_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\\n', encoding='utf-8')
-PY2
-    exit 0
-  fi
-  sleep 1
-done
-
-python3 - <<'PY2'
-import json
-from pathlib import Path
-
-token = {json.dumps(token)}
-login_user = {json.dumps(login_user)}
-payload = {{
-    'token': token,
-    'guest_user': login_user,
-    'status': 'timeout',
-}}
-workspace_path = Path(f'/workspace/.motlie-vfs-validation-{{token}}.json')
-home_path = Path(f'/home/{{login_user}}/.motlie-vfs-validation-{{token}}.json')
-workspace_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\\n', encoding='utf-8')
-home_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\\n', encoding='utf-8')
-PY2
-
-exit 1
-"""
-print(script, end="")
-PY
-)"
 
 echo "--- cloning guest VM disk ---"
 tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
@@ -378,9 +330,6 @@ echo "--- provisioning guest over native Vz NAT ---"
 guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz "$IP_ADDR"
 guest_copy "$MOUNTS_FILE" "/tmp/mounts.${GUEST_NAME}.yaml" "$IP_ADDR"
 guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service "$IP_ADDR"
-guest_copy "$VALIDATE_UNIT_FILE" /tmp/motlie-vfs-validate.service "$IP_ADDR"
-printf '%s' "$VALIDATE_SCRIPT_CONTENT" > "$ARTIFACTS_DIR/${GUEST_NAME}-validate.sh"
-guest_copy "$ARTIFACTS_DIR/${GUEST_NAME}-validate.sh" "/tmp/${GUEST_NAME}-validate.sh" "$IP_ADDR"
 
 guest_bash "$IP_ADDR" <<EOF
 printf 'admin\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME'
@@ -406,15 +355,43 @@ cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --
 printf 'admin\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_15 /usr/local/bin/motlie-vfs-guest-v1_15
 printf 'admin\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
 printf 'admin\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
-printf 'admin\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-validate.service /etc/systemd/system/motlie-vfs-validate.service
-printf 'admin\n' | sudo -S install -D -m 0755 /tmp/${GUEST_NAME}-validate.sh /usr/local/bin/motlie-vfs-v1_15-validate.sh
 printf 'admin\n' | sudo -S systemctl daemon-reload
 printf 'admin\n' | sudo -S systemctl enable motlie-vfs-guest.service
-printf 'admin\n' | sudo -S systemctl enable motlie-vfs-validate.service
 printf 'admin\n' | sudo -S systemctl restart motlie-vfs-guest.service
-printf 'admin\n' | sudo -S systemctl restart motlie-vfs-validate.service
 EOF
-rm -f "$ARTIFACTS_DIR/${GUEST_NAME}-validate.sh"
+
+POST_PROVISION_CHECK="$(guest_capture "$IP_ADDR" <<'EOF'
+python3 - <<'PY2'
+import json
+from pathlib import Path
+
+payload = {
+    "mounts_yaml": Path("/etc/motlie-vfs/mounts.yaml").exists(),
+    "guest_bin": Path("/usr/local/bin/motlie-vfs-guest-v1_15").exists(),
+    "service_unit": Path("/etc/systemd/system/motlie-vfs-guest.service").exists(),
+}
+print(json.dumps(payload, sort_keys=True))
+PY2
+EOF
+)"
+POST_PROVISION_CHECK="$(printf '%s' "$POST_PROVISION_CHECK" | tr -d '\r' | sed -n '/^{.*}$/p' | tail -n 1)"
+if [[ -z "$POST_PROVISION_CHECK" ]]; then
+  echo "guest post-provision verification returned no JSON" >&2
+  exit 1
+fi
+POST_PROVISION_OK="$(printf '%s' "$POST_PROVISION_CHECK" | python3 - <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.stdin.read())
+print("ok" if all(payload.values()) else "bad")
+PY
+)"
+if [[ "$POST_PROVISION_OK" != "ok" ]]; then
+  echo "guest post-provision verification failed" >&2
+  printf '%s\n' "$POST_PROVISION_CHECK" >&2
+  exit 1
+fi
 
 VALIDATION_OK=0
 for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
@@ -424,35 +401,61 @@ for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
     exit 1
   fi
   VALIDATION_JSON="$(guest_capture "$IP_ADDR" <<EOF
-if [ -f '$WORKSPACE_SENTINEL_GUEST' ] && [ -f '$HOME_SENTINEL_GUEST' ]; then
-  python3 - <<'PY2'
+python3 - <<'PY2'
 import json
 from pathlib import Path
 
-paths = [
-    Path('$WORKSPACE_SENTINEL_GUEST'),
-    Path('$HOME_SENTINEL_GUEST'),
-]
-payloads = [json.loads(path.read_text(encoding='utf-8')) for path in paths]
+login_user = '$LOGIN_USER'
+expected_readme = '$EXPECTED_WORKSPACE_README'
+expected_env = '$EXPECTED_ENV_LINE'
+token = '$VALIDATION_TOKEN'
+
+workspace_mount = Path('/workspace')
+home_mount = Path(f'/home/{login_user}')
+workspace_readme_path = workspace_mount / 'README.md'
+env_path = home_mount / '.env'
+auth_path = home_mount / '.ssh' / 'authorized_keys'
+
 result = {
-    'status': 'ok' if all(payload.get('status') == 'ok' for payload in payloads) else 'mismatch',
-    'workspace': payloads[0],
-    'home': payloads[1],
+    'token': token,
+    'guest_user': login_user,
+    'workspace_mountpoint': workspace_mount.is_mount(),
+    'home_mountpoint': home_mount.is_mount(),
 }
+
+if not (result['workspace_mountpoint'] and result['home_mountpoint'] and workspace_readme_path.exists() and env_path.exists() and auth_path.exists()):
+    print('')
+    raise SystemExit(0)
+
+workspace_readme = workspace_readme_path.read_text(encoding='utf-8').strip()
+env_line = env_path.read_text(encoding='utf-8').strip()
+authorized_keys = auth_path.read_text(encoding='utf-8').strip()
+result.update({
+    'workspace_readme': workspace_readme,
+    'expected_workspace_readme': expected_readme,
+    'env_line': env_line,
+    'expected_env_line': expected_env,
+    'authorized_keys_present': bool(authorized_keys),
+})
+result['status'] = 'ok' if (
+    workspace_readme == expected_readme
+    and env_line == expected_env
+    and bool(authorized_keys)
+) else 'mismatch'
 print(json.dumps(result, sort_keys=True))
 PY2
-fi
 EOF
-)"
-  if [[ -n "$VALIDATION_JSON" ]]; then
-    STATUS="$(python3 - <<'PY'
+)" 
+  VALIDATION_JSON="$(printf '%s' "$VALIDATION_JSON" | tr -d '\r' | sed -n '/^{.*}$/p' | tail -n 1)"
+  if [[ -n "${VALIDATION_JSON//[[:space:]]/}" ]]; then
+    STATUS="$(printf '%s' "$VALIDATION_JSON" | python3 - <<'PY'
 import json
 import sys
 
 payload = json.loads(sys.stdin.read())
 print(payload['status'])
 PY
-<<<"$VALIDATION_JSON")"
+)"
     if [[ "$STATUS" == "ok" ]]; then
       printf '%s\n' "$VALIDATION_JSON" >"$ARTIFACTS_DIR/${GUEST_NAME}-validation.json"
       VALIDATION_OK=1

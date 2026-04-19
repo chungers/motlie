@@ -125,7 +125,6 @@ than the earlier Tart NAT/TCP feasibility bridge.
 | `mounts.bob.yaml` | Bob guest mount template |
 | `setup-multiguest.sh.vfs` | Host REPL provisioning script for both guests |
 | `motlie-vfs-guest.service` | Guest-side systemd service for `motlie-vfs-guest-v1_15` |
-| `motlie-vfs-validate.service` | Guest-side oneshot validation unit that writes host-visible sentinel files |
 
 ## Host Requirements
 
@@ -187,8 +186,8 @@ Each launch:
   - installs build prerequisites
   - builds and installs `motlie-vfs-guest-v1_15`
   - installs `mounts.yaml` and the systemd units
-- waits for guest-side validation sentinels written through the mounted VFS
-  paths and stores the validation JSON locally under `artifacts/`
+- validates the mounted guest view directly over SSH and stores the validation
+  JSON locally under `artifacts/`
 
 ## Current Caveats
 
