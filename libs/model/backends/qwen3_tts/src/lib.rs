@@ -17,4 +17,7 @@
 mod common;
 mod speech;
 
-pub use speech::{Qwen3TtsSpeechAdapter, Qwen3TtsSpeechBundle, Qwen3TtsSpeechSpec};
+pub use speech::{
+    Qwen3TtsHandle, Qwen3TtsSpeechAdapter, Qwen3TtsSpeechBundle, Qwen3TtsSpeechSpec,
+    Qwen3TtsSpeechStream,
+};

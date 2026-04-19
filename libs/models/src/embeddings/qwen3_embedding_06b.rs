@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
     BundleId, CapabilityDescriptor, CheckpointFormat, ContentKind, EmbeddingDistance,
     EmbeddingNormalization, EmbeddingSpec, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_mistral::MistralEmbeddingAdapter;
+use motlie_model_mistral::{MistralEmbeddingBundle, MistralEmbeddingHandle, MistralEmbeddingSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -26,13 +26,8 @@ const EMBEDDING_SPEC: EmbeddingSpec = EmbeddingSpec {
 };
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_snapshot_root),
-        Arc::new(MistralEmbeddingAdapter::qwen3_embedding()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -97,16 +92,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(MistralEmbeddingAdapter::qwen3_embedding()),
-        Arc::new(resolve_local_snapshot_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = MistralEmbeddingSpec::qwen3_embedding_06b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::MistralRs,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::Qwen3Embedding06B
+}
+
+pub async fn start(options: StartOptions) -> Result<MistralEmbeddingHandle, ModelError> {
+    MistralEmbeddingBundle::new(MistralEmbeddingSpec::qwen3_embedding_06b())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_snapshot_root,
+        )?)
+        .await
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -128,7 +134,10 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::Catalog;
-    use motlie_model::{ArtifactPolicy, EmbeddingRequest, QuantizationBits, StartOptions};
+    use motlie_model::{
+        ArtifactPolicy, BundleHandle, EmbeddingModel, EmbeddingRequest, QuantizationBits,
+        StartOptions,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -139,9 +148,11 @@ mod tests {
         assert_eq!(descriptor.family, BundleFamily::Embeddings);
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Embeddings]);
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Embeddings));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Embeddings)
+        );
         assert_eq!(
             descriptor.capability_descriptors(),
             &[CapabilityDescriptor::embeddings()]
@@ -172,7 +183,7 @@ mod tests {
 
     #[test]
     fn q8_is_supported_but_q4_is_rejected() {
-        let quantization = bundle().metadata().quantization.clone();
+        let quantization = variant_descriptor().quantization.clone();
 
         assert_eq!(quantization.recommended(), None);
         assert!(quantization.supports(motlie_model::QuantizationBits::Eight));

@@ -4,23 +4,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
+use motlie_model::{
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, StartOptions, TranscriptSegment,
+    TranscriptionParams, TranscriptionUpdate, UnsupportedChat, UnsupportedCompletion,
+    UnsupportedEmbeddings,
+};
 use ndarray::{ArrayD, ArrayViewD, IxDyn};
 use ort::inputs;
 use ort::session::Session;
 use ort::value::TensorRef;
 use serde_json::Value;
-use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    QuantizationSupport, SpeechModel, StartOptions, TranscriptSegment, TranscriptionModel,
-    TranscriptionParams, TranscriptionStream, TranscriptionUpdate,
-};
 
 use crate::common::{
+    MoonshineArtifactPaths, MoonshineArtifactSpec, RuntimeMetricState, StagedModelDir,
     configure_artifact_policy, lock_metrics, observe_latency, resolve_onnx_artifacts,
-    MoonshineArtifactPaths, MoonshineArtifactSpec, NormalizerState, RuntimeMetricState,
-    StagedModelDir,
 };
 
 const MOONSHINE_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
@@ -89,6 +89,8 @@ impl MoonshineStreamingAdapter {
 
 #[async_trait]
 impl BackendAdapter for MoonshineStreamingAdapter {
+    type Handle = MoonshineHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &MOONSHINE_FORMATS
     }
@@ -110,7 +112,7 @@ impl BackendAdapter for MoonshineStreamingAdapter {
         identity: &ModelIdentity,
         checkpoint: &motlie_model::ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         self.quantization()
             .resolve(options.quantization, &identity.id)?;
 
@@ -149,6 +151,8 @@ impl MoonshineStreamingBundle {
 
 #[async_trait]
 impl ModelBundle for MoonshineStreamingBundle {
+    type Handle = MoonshineHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -161,7 +165,13 @@ impl ModelBundle for MoonshineStreamingBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
+    }
+}
+
+impl MoonshineStreamingBundle {
+    pub async fn start_typed(&self, options: StartOptions) -> Result<MoonshineHandle, ModelError> {
         self.metadata
             .quantization
             .resolve(options.quantization, &self.metadata.id)?;
@@ -188,10 +198,16 @@ impl ModelBundle for MoonshineStreamingBundle {
     }
 }
 
-struct MoonshineHandle {
+pub struct MoonshineHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Arc<MoonshineRuntime>,
     metrics: Arc<Mutex<AsrMetrics>>,
+}
+
+impl MoonshineHandle {
+    pub async fn shutdown(self) -> Result<(), ModelError> {
+        <Self as BundleHandle>::shutdown(self).await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -201,6 +217,10 @@ struct AsrMetrics {
 
 #[async_trait]
 impl BundleHandle for MoonshineHandle {
+    type Chat = UnsupportedChat;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -231,65 +251,24 @@ impl BundleHandle for MoonshineHandle {
         })
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
     }
 
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Ok(self)
-    }
-
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl TranscriptionModel for MoonshineHandle {
-    async fn open_stream(
-        &self,
-        spec: AudioSpec,
-        params: TranscriptionParams,
-    ) -> Result<Box<dyn TranscriptionStream>, ModelError> {
-        if spec.channels == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "audio stream must declare at least one channel".into(),
-            ));
-        }
-        if spec.sample_rate_hz == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "audio stream must declare a non-zero sample rate".into(),
-            ));
-        }
-
-        Ok(Box::new(MoonshineStream {
-            spec,
-            params,
-            runtime: Arc::clone(&self.runtime),
-            metrics: Arc::clone(&self.metrics),
-            normalizer: NormalizerState::new(),
-            state: self.runtime.create_state(),
-            total_samples: 0,
-            next_sequence: 0,
-            saw_end_of_stream: false,
-            last_partial_text: String::new(),
-        }))
     }
 }
 
@@ -299,8 +278,8 @@ fn new_transcription_handle(
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     runtime: Arc<MoonshineRuntime>,
-) -> Box<dyn BundleHandle> {
-    Box::new(MoonshineHandle {
+) -> MoonshineHandle {
+    MoonshineHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -310,7 +289,7 @@ fn new_transcription_handle(
         },
         runtime,
         metrics: Arc::new(Mutex::new(AsrMetrics::default())),
-    })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -332,20 +311,22 @@ struct StreamingConfig {
 impl StreamingConfig {
     fn load(model_dir: &Path) -> Result<Self, ModelError> {
         let config_path = model_dir.join("streaming_config.json");
-        let contents = fs::read_to_string(&config_path).map_err(|err| ModelError::BackendInitialization {
-            backend: "moonshine",
-            message: format!(
-                "failed to read Moonshine streaming config `{}`: {err}",
-                config_path.display()
-            ),
-        })?;
-        let json: Value = serde_json::from_str(&contents).map_err(|err| ModelError::BackendInitialization {
-            backend: "moonshine",
-            message: format!(
-                "failed to parse Moonshine streaming config `{}`: {err}",
-                config_path.display()
-            ),
-        })?;
+        let contents =
+            fs::read_to_string(&config_path).map_err(|err| ModelError::BackendInitialization {
+                backend: "moonshine",
+                message: format!(
+                    "failed to read Moonshine streaming config `{}`: {err}",
+                    config_path.display()
+                ),
+            })?;
+        let json: Value =
+            serde_json::from_str(&contents).map_err(|err| ModelError::BackendInitialization {
+                backend: "moonshine",
+                message: format!(
+                    "failed to parse Moonshine streaming config `{}`: {err}",
+                    config_path.display()
+                ),
+            })?;
 
         let get_usize = |key: &str| -> usize {
             json.get(key).and_then(|value| value.as_i64()).unwrap_or(0) as usize
@@ -615,8 +596,9 @@ impl MoonshineRuntime {
             return Ok(());
         }
 
-        let audio_dyn = ArrayD::from_shape_vec(IxDyn(&[1, audio_chunk.len()]), audio_chunk.to_vec())
-            .map_err(|err| backend_exec_error("process_audio_chunk", err.to_string()))?;
+        let audio_dyn =
+            ArrayD::from_shape_vec(IxDyn(&[1, audio_chunk.len()]), audio_chunk.to_vec())
+                .map_err(|err| backend_exec_error("process_audio_chunk", err.to_string()))?;
         let sample_buffer_dyn =
             ArrayD::from_shape_vec(IxDyn(&[1, 79]), state.sample_buffer.clone())
                 .map_err(|err| backend_exec_error("process_audio_chunk", err.to_string()))?;
@@ -633,10 +615,12 @@ impl MoonshineRuntime {
         let frame_count_dyn = ArrayD::from_shape_vec(IxDyn(&[1]), vec![state.frame_count])
             .map_err(|err| backend_exec_error("process_audio_chunk", err.to_string()))?;
 
-        let mut frontend = self
-            .frontend
-            .lock()
-            .map_err(|_| backend_exec_error("process_audio_chunk", "frontend session mutex poisoned".into()))?;
+        let mut frontend = self.frontend.lock().map_err(|_| {
+            backend_exec_error(
+                "process_audio_chunk",
+                "frontend session mutex poisoned".into(),
+            )
+        })?;
         let outputs = frontend
             .run(inputs![
                 "audio_chunk" => TensorRef::from_array_view(audio_dyn.view()).map_err(ort_exec_error("process_audio_chunk"))?,
@@ -650,28 +634,34 @@ impl MoonshineRuntime {
 
         let features = output_tensor_f32(&outputs, "features", "process_audio_chunk")?;
         let feat_shape = &features.shape;
-        let num_features = feat_shape
-            .get(1)
-            .copied()
-            .ok_or_else(|| backend_exec_error("process_audio_chunk", "features missing dim 1".into()))?
-            as i32;
+        let num_features = feat_shape.get(1).copied().ok_or_else(|| {
+            backend_exec_error("process_audio_chunk", "features missing dim 1".into())
+        })? as i32;
         if num_features > 0 {
             let feat_size = feat_shape
                 .get(1)
                 .zip(feat_shape.get(2))
                 .map(|(a, b)| a * b)
-                .ok_or_else(|| backend_exec_error("process_audio_chunk", "features missing dims".into()))?;
+                .ok_or_else(|| {
+                    backend_exec_error("process_audio_chunk", "features missing dims".into())
+                })?;
             state
                 .accumulated_features
                 .extend_from_slice(&features.data[..feat_size]);
             state.accumulated_feature_count += num_features;
         }
 
-        let sample_buffer_out = output_tensor_f32(&outputs, "sample_buffer_out", "process_audio_chunk")?;
+        let sample_buffer_out =
+            output_tensor_f32(&outputs, "sample_buffer_out", "process_audio_chunk")?;
         state.sample_buffer = sample_buffer_out
             .data
             .get(..79)
-            .ok_or_else(|| backend_exec_error("process_audio_chunk", "sample_buffer_out shorter than 79 samples".into()))?
+            .ok_or_else(|| {
+                backend_exec_error(
+                    "process_audio_chunk",
+                    "sample_buffer_out shorter than 79 samples".into(),
+                )
+            })?
             .to_vec();
 
         let sample_len_out = output_tensor_i64(&outputs, "sample_len_out", "process_audio_chunk")?;
@@ -683,13 +673,18 @@ impl MoonshineRuntime {
         let conv2_out = output_tensor_f32(&outputs, "conv2_buffer_out", "process_audio_chunk")?;
         state.conv2_buffer = pad_or_truncate(&conv2_out.data, self.config.c1 * 4);
 
-        let frame_count_out = output_tensor_i64(&outputs, "frame_count_out", "process_audio_chunk")?;
+        let frame_count_out =
+            output_tensor_i64(&outputs, "frame_count_out", "process_audio_chunk")?;
         state.frame_count = first_i64(&frame_count_out, "frame_count_out", "process_audio_chunk")?;
 
         Ok(())
     }
 
-    fn encode_streaming(&self, state: &mut StreamingState, is_final: bool) -> Result<i32, ModelError> {
+    fn encode_streaming(
+        &self,
+        state: &mut StreamingState,
+        is_final: bool,
+    ) -> Result<i32, ModelError> {
         let total_features = state.accumulated_feature_count;
         if total_features == 0 {
             return Ok(0);
@@ -719,10 +714,9 @@ impl MoonshineRuntime {
         )
         .map_err(|err| backend_exec_error("encode_streaming", err.to_string()))?;
 
-        let mut encoder = self
-            .encoder
-            .lock()
-            .map_err(|_| backend_exec_error("encode_streaming", "encoder session mutex poisoned".into()))?;
+        let mut encoder = self.encoder.lock().map_err(|_| {
+            backend_exec_error("encode_streaming", "encoder session mutex poisoned".into())
+        })?;
         let enc_outputs = encoder
             .run(inputs!["features" => TensorRef::from_array_view(features_view).map_err(ort_exec_error("encode_streaming"))?])
             .map_err(ort_exec_error("encode_streaming"))?;
@@ -763,10 +757,9 @@ impl MoonshineRuntime {
         let pos_offset_view = ArrayViewD::from_shape(IxDyn(&[1]), &pos_offset_val)
             .map_err(|err| backend_exec_error("encode_streaming", err.to_string()))?;
 
-        let mut adapter = self
-            .adapter
-            .lock()
-            .map_err(|_| backend_exec_error("encode_streaming", "adapter session mutex poisoned".into()))?;
+        let mut adapter = self.adapter.lock().map_err(|_| {
+            backend_exec_error("encode_streaming", "adapter session mutex poisoned".into())
+        })?;
         let adapter_outputs = adapter
             .run(inputs![
                 "encoded" => TensorRef::from_array_view(enc_slice_view).map_err(ort_exec_error("encode_streaming"))?,
@@ -800,10 +793,9 @@ impl MoonshineRuntime {
         )
         .map_err(|err| backend_exec_error("compute_cross_kv", err.to_string()))?;
 
-        let mut cross_kv = self
-            .cross_kv
-            .lock()
-            .map_err(|_| backend_exec_error("compute_cross_kv", "cross_kv session mutex poisoned".into()))?;
+        let mut cross_kv = self.cross_kv.lock().map_err(|_| {
+            backend_exec_error("compute_cross_kv", "cross_kv session mutex poisoned".into())
+        })?;
         let outputs = cross_kv
             .run(inputs!["memory" => TensorRef::from_array_view(memory_view).map_err(ort_exec_error("compute_cross_kv"))?])
             .map_err(ort_exec_error("compute_cross_kv"))?;
@@ -825,7 +817,11 @@ impl MoonshineRuntime {
         Ok(())
     }
 
-    fn decode_step_logits(&self, state: &mut StreamingState, token: i64) -> Result<Vec<f32>, ModelError> {
+    fn decode_step_logits(
+        &self,
+        state: &mut StreamingState,
+        token: i64,
+    ) -> Result<Vec<f32>, ModelError> {
         if !state.cross_kv_valid {
             self.compute_cross_kv(state)?;
         }
@@ -866,10 +862,12 @@ impl MoonshineRuntime {
         let v_cross_view = ArrayViewD::from_shape(IxDyn(&cross_shape), &state.v_cross)
             .map_err(|err| backend_exec_error("decode_step_logits", err.to_string()))?;
 
-        let mut decoder_kv = self
-            .decoder_kv
-            .lock()
-            .map_err(|_| backend_exec_error("decode_step_logits", "decoder_kv session mutex poisoned".into()))?;
+        let mut decoder_kv = self.decoder_kv.lock().map_err(|_| {
+            backend_exec_error(
+                "decode_step_logits",
+                "decoder_kv session mutex poisoned".into(),
+            )
+        })?;
         let outputs = decoder_kv
             .run(inputs![
                 "token" => TensorRef::from_array_view(token_view).map_err(ort_exec_error("decode_step_logits"))?,
@@ -882,15 +880,11 @@ impl MoonshineRuntime {
 
         let k_self_out = output_tensor_f32(&outputs, "out_k_self", "decode_step_logits")?;
         let v_self_out = output_tensor_f32(&outputs, "out_v_self", "decode_step_logits")?;
-        let new_cache_len = *k_self_out
-            .shape
-            .get(3)
-            .ok_or_else(|| backend_exec_error("decode_step_logits", "out_k_self missing dim 3".into()))?
-            as i32;
-        let new_cache_size = self.config.depth
-            * self.config.nheads
-            * new_cache_len as usize
-            * self.config.head_dim;
+        let new_cache_len = *k_self_out.shape.get(3).ok_or_else(|| {
+            backend_exec_error("decode_step_logits", "out_k_self missing dim 3".into())
+        })? as i32;
+        let new_cache_size =
+            self.config.depth * self.config.nheads * new_cache_len as usize * self.config.head_dim;
         state.k_self = k_self_out.data[..new_cache_size].to_vec();
         state.v_self = v_self_out.data[..new_cache_size].to_vec();
         state.cache_seq_len = new_cache_len;
@@ -899,7 +893,11 @@ impl MoonshineRuntime {
         Ok(logits.data[..self.config.vocab_size].to_vec())
     }
 
-    fn decode_transcript(&self, state: &StreamingState, total_samples: usize) -> Result<String, ModelError> {
+    fn decode_transcript(
+        &self,
+        state: &StreamingState,
+        total_samples: usize,
+    ) -> Result<String, ModelError> {
         let mut decode_state = state.clone();
         let mut greedy = GreedyDecoder::new(self.config.eos_id);
         let duration_sec = total_samples as f32 / TARGET_SAMPLE_RATE_HZ as f32;
@@ -949,18 +947,21 @@ fn load_component_session(model_dir: &Path, name: &str) -> Result<Session, Model
             backend: "moonshine",
             message: format!("failed to create ORT session builder for `{name}`: {err}"),
         })?;
-        let mut builder = builder
-            .with_intra_threads(NUM_THREADS)
-            .map_err(|err| ModelError::BackendInitialization {
+        let mut builder = builder.with_intra_threads(NUM_THREADS).map_err(|err| {
+            ModelError::BackendInitialization {
                 backend: "moonshine",
                 message: format!("failed to configure ORT threads for `{name}`: {err}"),
-            })?;
+            }
+        })?;
 
         return builder
             .commit_from_file(&path)
             .map_err(|err| ModelError::BackendInitialization {
                 backend: "moonshine",
-                message: format!("failed to load Moonshine component `{}`: {err}", path.display()),
+                message: format!(
+                    "failed to load Moonshine component `{}`: {err}",
+                    path.display()
+                ),
             });
     }
 
@@ -1014,7 +1015,11 @@ fn output_tensor_i64(
     Ok(OwnedTensor { shape, data })
 }
 
-fn first_i64(array: &OwnedTensor<i64>, name: &str, operation: &'static str) -> Result<i64, ModelError> {
+fn first_i64(
+    array: &OwnedTensor<i64>,
+    name: &str,
+    operation: &'static str,
+) -> Result<i64, ModelError> {
     array
         .data
         .first()
@@ -1044,50 +1049,35 @@ fn backend_exec_error(operation: &'static str, message: String) -> ModelError {
     }
 }
 
-struct MoonshineStream {
-    spec: AudioSpec,
+pub struct MoonshineStream {
     params: TranscriptionParams,
     runtime: Arc<MoonshineRuntime>,
     metrics: Arc<Mutex<AsrMetrics>>,
-    normalizer: NormalizerState,
     state: StreamingState,
     total_samples: usize,
-    next_sequence: u64,
-    saw_end_of_stream: bool,
     last_partial_text: String,
 }
 
-#[async_trait]
-impl TranscriptionStream for MoonshineStream {
-    async fn push_chunk(&mut self, chunk: PcmChunk) -> Result<Option<TranscriptionUpdate>, ModelError> {
-        if self.saw_end_of_stream {
-            return Err(ModelError::InvalidConfiguration(
-                "push_chunk called after end_of_stream".into(),
-            ));
-        }
-        if chunk.sequence != self.next_sequence {
-            return Err(ModelError::InvalidConfiguration(format!(
-                "expected chunk sequence {}, got {}",
-                self.next_sequence, chunk.sequence
-            )));
-        }
+impl MoonshineStream {
+    async fn ingest_chunk(
+        &mut self,
+        audio: AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>,
+    ) -> Result<Option<TranscriptionUpdate>, ModelError> {
+        let normalized: Vec<f32> = audio
+            .into_samples()
+            .into_iter()
+            .map(|sample| sample as f32 / 32768.0)
+            .collect();
 
-        self.next_sequence += 1;
-        if chunk.end_of_stream {
-            self.saw_end_of_stream = true;
-        }
-
-        if chunk.data.is_empty() && !chunk.end_of_stream {
+        if normalized.is_empty() {
             return Ok(None);
         }
-
-        let normalized = self.normalizer.normalize(&chunk.data, &self.spec)?;
         self.total_samples += normalized.len();
 
         let started = Instant::now();
-        let maybe_text = self
-            .runtime
-            .infer_chunk(&mut self.state, &normalized, false, self.total_samples)?;
+        let maybe_text =
+            self.runtime
+                .infer_chunk(&mut self.state, &normalized, false, self.total_samples)?;
         {
             let mut metrics = lock_metrics(&self.metrics, "moonshine-push");
             observe_latency(&mut metrics.runtime, started.elapsed());
@@ -1115,15 +1105,11 @@ impl TranscriptionStream for MoonshineStream {
         }))
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<TranscriptionUpdate, ModelError> {
-        let mut tail = Vec::new();
-        self.normalizer.flush(&mut tail);
-        self.total_samples += tail.len();
-
+    async fn finish_stream(mut self) -> Result<TranscriptionUpdate, ModelError> {
         let started = Instant::now();
-        let final_text = self
-            .runtime
-            .infer_chunk(&mut self.state, &tail, true, self.total_samples)?;
+        let final_text =
+            self.runtime
+                .infer_chunk(&mut self.state, &[], true, self.total_samples)?;
         {
             let mut metrics = lock_metrics(&self.metrics, "moonshine-finish");
             observe_latency(&mut metrics.runtime, started.elapsed());
@@ -1140,6 +1126,40 @@ impl TranscriptionStream for MoonshineStream {
             }),
             _ => Ok(TranscriptionUpdate::default()),
         }
+    }
+}
+
+impl StreamingTranscriber for MoonshineHandle {
+    type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
+    type Session = MoonshineStream;
+
+    async fn open_session(&self, params: TranscriptionParams) -> Result<Self::Session, ModelError> {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        Ok(MoonshineStream {
+            params,
+            runtime: Arc::clone(&runtime),
+            metrics,
+            state: runtime.create_state(),
+            total_samples: 0,
+            last_partial_text: String::new(),
+        })
+    }
+}
+
+impl TranscriptionSession for MoonshineStream {
+    type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
+
+    async fn ingest(
+        &mut self,
+        audio: Self::Input,
+    ) -> Result<Option<TranscriptionUpdate>, ModelError> {
+        self.ingest_chunk(audio).await
+    }
+
+    async fn finish(self) -> Result<TranscriptionUpdate, ModelError> {
+        self.finish_stream().await
     }
 }
 

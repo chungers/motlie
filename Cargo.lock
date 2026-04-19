@@ -2478,29 +2478,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "espeak-rs"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d648355e4824dd2b37fcc84af3cbc234f96ae4f7c515fea2df7094f98453edd0"
-dependencies = [
- "espeak-rs-sys",
- "ffi-support",
- "once_cell",
- "regex",
-]
-
-[[package]]
-name = "espeak-rs-sys"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eeb333310ae915d57961a6bbc67f53ef7b313a9ee80d393d55c0f27f1b65c848"
-dependencies = [
- "bindgen 0.69.5",
- "cmake",
- "glob",
-]
-
-[[package]]
 name = "exr"
 version = "1.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2614,16 +2591,6 @@ checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
 dependencies = [
  "rand_core 0.6.4",
  "subtle",
-]
-
-[[package]]
-name = "ffi-support"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27838c6815cfe9de2d3aeb145ffd19e565f577414b33f3bdbf42fe040e9e0ff6"
-dependencies = [
- "lazy_static",
- "log",
 ]
 
 [[package]]
@@ -5212,6 +5179,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-model-espeak-ng"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "motlie-model-eval"
 version = "0.1.0"
 dependencies = [
@@ -5272,8 +5246,8 @@ name = "motlie-model-piper"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "espeak-rs",
  "motlie-model",
+ "motlie-model-espeak-ng",
  "motlie-model-ort",
  "ndarray",
  "ort",

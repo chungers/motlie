@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, CheckpointQuantization, ModelBundle, ModelCheckpoint, ModelError,
-    ModelIdentity,
+    BundleId, CheckpointFormat, CheckpointQuantization, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_qwen3_tts_cpp::Qwen3TtsCppSpeechAdapter;
+use motlie_model_qwen3_tts_cpp::{
+    Qwen3TtsCppHandle, Qwen3TtsCppSpeechBundle, Qwen3TtsCppSpeechSpec,
+};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -21,13 +22,8 @@ const MODEL_FILE_F16: &str = "qwen3-tts-0.6b-f16.gguf";
 const TOKENIZER_FILE_F16: &str = "qwen3-tts-tokenizer-f16.gguf";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_path),
-        Arc::new(Qwen3TtsCppSpeechAdapter::qwen3_tts_cpp_0_6b()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -81,16 +77,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(Qwen3TtsCppSpeechAdapter::qwen3_tts_cpp_0_6b()),
-        Arc::new(resolve_local_model_path),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = Qwen3TtsCppSpeechSpec::qwen3_tts_cpp_0_6b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Qwen3TtsCpp,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn typed_bundle() -> Qwen3TtsCppSpeechBundle {
+    Qwen3TtsCppSpeechBundle::new(Qwen3TtsCppSpeechSpec::qwen3_tts_cpp_0_6b())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<Qwen3TtsCppHandle, ModelError> {
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_path,
+        )?)
+        .await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {

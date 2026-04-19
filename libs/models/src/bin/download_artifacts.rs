@@ -1,6 +1,6 @@
 use motlie_model::BundleId;
 use motlie_models::{
-    default_artifact_root, download_bundle_artifacts_with_options, ArtifactDownloadOptions, Catalog,
+    ArtifactDownloadOptions, Catalog, default_artifact_root, download_bundle_artifacts_with_options,
 };
 
 fn main() {
@@ -10,7 +10,7 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1).peekable();
     let artifact_root = default_artifact_root();
     let catalog = Catalog::with_defaults();
@@ -22,7 +22,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--hf-token-env" => {
                 let var_name = args
                     .next()
-                    .ok_or("expected env var name after `--hf-token-env`")?;
+                    .ok_or_else(|| "expected env var name after `--hf-token-env`".to_string())?;
                 let token = std::env::var(&var_name).map_err(|err| {
                     format!("failed to read Hugging Face token from env var `{var_name}`: {err}")
                 })?;
@@ -31,7 +31,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--hf-token-file" => {
                 let path = args
                     .next()
-                    .ok_or("expected file path after `--hf-token-file`")?;
+                    .ok_or_else(|| "expected file path after `--hf-token-file`".to_string())?;
                 let token = std::fs::read_to_string(&path).map_err(|err| {
                     format!("failed to read Hugging Face token file `{path}`: {err}")
                 })?;
@@ -55,7 +55,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &bundle_id,
             &artifact_root,
             &download_options,
-        )?;
+        )
+        .map_err(|err| err.to_string())?;
 
         println!(
             "bundle={} files={} root={}",

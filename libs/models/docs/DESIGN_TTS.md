@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @codex-asr | Renamed the shipped TTS example paths to `tts_piper`, `tts_qwen3_onnx`, and `tts_qwen3_tts_cpp` and updated the design references accordingly. |
 | 2026-04-16 | @codex-tts | Replaced the large vendored `qwen3-tts.cpp` source tree with a pinned git submodule at `libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` (`predict-woo/qwen3-tts.cpp` @ `7a762e2ad4bacc6fdda81d81bf10a09ffb546f29`). Tightened the build/docs contract so fresh checkouts explicitly require `git submodule update --init --recursive` before building the backup TTS backend. |
 | 2026-04-16 | @codex-tts | Implemented the official backup TTS track with a submodule-backed `qwen3-tts.cpp` backend (`motlie-model-qwen3-tts-cpp`), curated GGUF bundle wiring, and the `tts_v0.4` example. Recorded the project-level decision rationale: Piper remains primary for real-time CPU, `qwen3-tts.cpp` is the secondary cloning-capable backend, and `qwen3_tts_rs`, F5-TTS ONNX, and Fish Speech are now explicitly dropped. Local validation produced real intelligible speech on CPU; the optional CUDA build compiled and clippy-checked on GB10, but local runtime still fell back to CPU with `ggml_cuda_init: no CUDA-capable device is detected`. |
 | 2026-04-15 | @codex-tts | Added a reproducible Qwen3-TTS ONNX export runbook and checked in the export script under `libs/models/scripts/`. Documented the current adapter-graph workaround and the gap between the official Qwen runtime and the current Rust backend contract. |
@@ -808,7 +809,7 @@ Recommended phase-3 shape:
 - feature flags:
   `model-qwen3-tts-cpp`,
   `qwen3-tts-cpp-cuda`
-- example path: `examples/tts_v0.4`
+- example path: `examples/tts_qwen3_tts_cpp`
 - validation target:
   real artifact-backed `.wav` synthesis,
   reference-audio cloning path through `VoiceConditioning::ReferenceAudio`,

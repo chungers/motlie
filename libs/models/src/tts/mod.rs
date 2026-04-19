@@ -11,7 +11,7 @@ use std::str::FromStr;
     feature = "model-qwen3-tts-cpp",
     feature = "model-qwen3-tts-0_6b",
 ))]
-use motlie_model::{BundleId, ModelBundle};
+use motlie_model::BundleId;
 
 pub const PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR: &str = "piper/en_us_ljspeech_medium";
 pub const QWEN3_TTS_CPP_0_6B_SELECTOR: &str = "qwen/qwen3_tts_cpp_0_6b";
@@ -75,14 +75,14 @@ impl TtsModels {
         }
     }
 
-    pub fn bundle(&self) -> Box<dyn ModelBundle> {
+    pub fn bundle(&self) -> crate::CuratedBundle {
         match self {
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
-            Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::bundle(),
+            Self::PiperEnUsLjspeechMedium => crate::CuratedBundle::PiperEnUsLjspeechMedium,
             #[cfg(feature = "model-qwen3-tts-cpp")]
-            Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp::bundle(),
+            Self::Qwen3TtsCpp0_6B => crate::CuratedBundle::Qwen3TtsCpp0_6B,
             #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::bundle(),
+            Self::Qwen3Tts12Hz0_6B => crate::CuratedBundle::Qwen3Tts12Hz0_6B,
         }
     }
 }

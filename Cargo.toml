@@ -6,6 +6,7 @@ members = [
     "libs/model",
     "libs/model/backends/moonshine",
     "libs/model/backends/mistral",
+    "libs/model/backends/espeak_ng",
     "libs/model/backends/llama_cpp",
     "libs/model/backends/ort",
     "libs/model/backends/piper",
