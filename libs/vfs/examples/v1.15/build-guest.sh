@@ -145,7 +145,23 @@ EOF
 echo "--- installing guest prerequisites ---"
 guest_bash <<'EOF'
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  build-essential \
+  pkg-config \
+  libfuse3-dev \
+  libfuse3-3 \
+  fuse3 \
+  curl \
+  ca-certificates \
+  tar \
+  gzip \
+  iproute2 \
+  tmux \
+  locales
+sudo sed -i '/^en_US.UTF-8 UTF-8$/d' /etc/locale.gen
+printf 'en_US.UTF-8 UTF-8\n' | sudo tee -a /etc/locale.gen >/dev/null
+sudo locale-gen en_US.UTF-8
+sudo update-locale LANG=en_US.UTF-8
 EOF
 
 echo "--- installing Rust toolchain in guest if needed ---"
@@ -182,11 +198,53 @@ cargo build --manifest-path '$GUEST_SRC_DIR/libs/vfs/Cargo.toml' --release --fea
 EOF
 
 echo "--- installing generic guest contract ---"
-guest_bash <<EOF
+guest_bash <<'EOF'
 sudo install -D -m 0755 "\$HOME/motlie-target/release/motlie-vfs-guest-v1_15" /usr/local/bin/motlie-vfs-guest-v1_15
 sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
 sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_vz.cfg
 sudo mkdir -p /etc/motlie-vfs
+sudo mkdir -p /etc/profile.d
+cat <<'TMUXEOF' | sudo tee /etc/profile.d/tmux-auto.sh >/dev/null
+if [ -n "\$SSH_CONNECTION" ] && [ -z "\$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+    if tmux has-session -t "\$USER" 2>/dev/null; then
+        echo "Attaching to existing tmux session..."
+        sleep 1
+        exec tmux attach-session -t "\$USER"
+    else
+        printf "Start tmux session? [Y/n] (auto-yes in 3s) "
+        if read -r -n 1 -t 3 answer; then
+            echo
+        else
+            answer=Y
+            echo
+        fi
+        case "\$answer" in
+            n|N) ;;
+            *) exec tmux new-session -s "\$USER" ;;
+        esac
+    fi
+fi
+TMUXEOF
+cat <<'DOTENVEOF' | sudo tee /etc/profile.d/dotenv.sh >/dev/null
+if [ -f "\$HOME/.env" ]; then
+    set -a
+    . "\$HOME/.env"
+    set +a
+fi
+DOTENVEOF
+sudo chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh
+cat <<'MOTDEOF' | sudo tee /etc/motd >/dev/null
+                    _   _ _
+  _ __ ___   ___ | |_| (_) ___
+ | '_ ` _ \ / _ \| __| | |/ _ \
+ | | | | | | (_) | |_| | |  __/
+ |_| |_| |_|\___/ \__|_|_|\___|
+
+v1.15 multi-guest demo (Apple Vz)
+MOTDEOF
+if ! grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
+  printf 'user_allow_other\n' | sudo tee -a /etc/fuse.conf >/dev/null
+fi
 sudo systemctl unmask motlie-vfs-guest.service || true
 sudo systemctl daemon-reload
 sudo systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true

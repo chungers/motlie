@@ -60,7 +60,7 @@ case "$GUEST_NAME" in
     HOST_WORKSPACE_DIR="/tmp/motlie-vfs-demo/alice-workspace"
     EXPECTED_WORKSPACE_README="Alice workspace mounted from the host over the v1.15 Vz virtio-socket bridge."
     EXPECTED_ENV_LINE="ALICE_API_KEY=demo-alice"
-    GUEST_HOSTNAME="motlie-v1-15-alice"
+    GUEST_HOSTNAME="motlie-alice"
     NAT_MAC="02:4d:6f:74:61:11"
     ;;
   bob)
@@ -74,7 +74,7 @@ case "$GUEST_NAME" in
     HOST_WORKSPACE_DIR="/tmp/motlie-vfs-demo/bob-workspace"
     EXPECTED_WORKSPACE_README="Bob workspace mounted from the host over the v1.15 Vz virtio-socket bridge."
     EXPECTED_ENV_LINE="BOB_API_KEY=demo-bob"
-    GUEST_HOSTNAME="motlie-v1-15-bob"
+    GUEST_HOSTNAME="motlie-bob"
     NAT_MAC="02:4d:6f:74:62:15"
     ;;
   *)
@@ -547,7 +547,10 @@ fi
 if ! id -u '$LOGIN_USER' >/dev/null 2>&1; then
   printf 'admin\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
 fi
+printf 'admin\n' | sudo -S sh -c "echo '$LOGIN_USER:testpass' | chpasswd"
 printf 'admin\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
+printf 'admin\n' | sudo -S chown root:root /workspace
+printf 'admin\n' | sudo -S chmod 0755 /workspace
 if ! dpkg -s build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 >/dev/null 2>&1; then
   printf 'admin\n' | sudo -S apt-get update
   printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2

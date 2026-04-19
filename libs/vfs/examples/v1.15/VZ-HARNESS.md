@@ -97,6 +97,19 @@ Each launch performs:
 5. direct validation of the mounted guest view
 6. clean teardown by default
 
+Operator-visible guest UX is intentionally close to `v1.1`:
+
+- MOTD banner on SSH login
+- `tmux` installed with the same auto-attach / auto-start prompt
+- `~/.env` auto-sourced via `/etc/profile.d/dotenv.sh`
+- `user_allow_other` present in `/etc/fuse.conf`
+- guest passwords:
+  - `alice:testpass`
+  - `bob:testpass`
+- guest hostnames:
+  - `motlie-alice`
+  - `motlie-bob`
+
 ## Lifecycle Contract
 
 The intended default lifecycle is:

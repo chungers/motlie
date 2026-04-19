@@ -195,6 +195,17 @@ Each launch:
   JSON locally under `artifacts/`
 - tears down the native runner and per-run guest VM by default after validation
 
+Operator-visible guest UX now tracks the CH `v1.1` shape more closely:
+
+- `/etc/motd` carries a `v1.15 multi-guest demo (Apple Vz)` banner
+- `tmux` is installed and interactive SSH logins auto-offer a per-user session
+- `/etc/profile.d/dotenv.sh` auto-sources `~/.env` on login
+- `/etc/fuse.conf` includes `user_allow_other`
+- locale is generated as `en_US.UTF-8`
+- guest logins use:
+  - `alice:testpass`
+  - `bob:testpass`
+
 ## Current Caveats
 
 - Tart is still used to source and clone the reusable base disk image, but not
@@ -207,6 +218,9 @@ Each launch:
   must be signed before launch
 - the guest user IDs differ from `v1.1` because the base Ubuntu Tart image
   already reserves uid `1000` for `admin`
+- the guest hostnames follow the CH shape:
+  - `motlie-alice`
+  - `motlie-bob`
 - the intended default lifecycle is fresh clone -> provision -> validate ->
   clean teardown, leaving no lingering per-run VM, runner, pid file, or MAC/IP
   allocation behind on the host

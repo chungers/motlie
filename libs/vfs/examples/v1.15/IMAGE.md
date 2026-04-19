@@ -43,6 +43,12 @@ The builder intentionally keeps the base generic:
 - no Alice/Bob identity
 - no guest-specific mount config
 - no guest-scoped validation state
+- but it does now carry the operator-facing shared UX also present in `v1.1`:
+  - `tmux`
+  - login-time `~/.env` sourcing
+  - `user_allow_other`
+  - `en_US.UTF-8`
+  - a `v1.15 multi-guest demo (Apple Vz)` MOTD banner
 
 Those guest-specific changes happen at launch time after the native Vz boot.
 
