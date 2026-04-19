@@ -14,7 +14,6 @@ repl = ["commands-tmux", "motlie-driver/repl", "dep:reedline", "dep:shlex"]
 tui = ["commands-tmux", "motlie-driver/tui", "dep:ratatui", "dep:crossterm", "dep:ansi-to-tui", "dep:motlie-tmux"]
 
 [dependencies]
-anyhow.workspace = true
 tokio.workspace = true
 motlie-driver = { path = "../../../libs/driver", default-features = false }
 motlie-tmux = { path = "../../../libs/tmux", optional = true }
