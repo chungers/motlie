@@ -62,7 +62,7 @@ pub fn dot_1bit(query: &[f32], code: &[u8]) -> f32 {
 /// * `query` - Float32 query vector
 /// * `code` - Packed 2-bit codes (4 values per byte, LSB first)
 /// * `values` - Lookup table mapping levels 0-3 to float values.
-///              For RaBitQ: `[-1.5, -0.5, 0.5, 1.5]`
+///   For RaBitQ: `[-1.5, -0.5, 0.5, 1.5]`
 ///
 /// # Returns
 /// Dot product approximation
