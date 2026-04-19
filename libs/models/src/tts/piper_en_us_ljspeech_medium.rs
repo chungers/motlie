@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_piper::PiperSpeechAdapter;
+use motlie_model_piper::{PiperHandle, PiperSpeechBundle, PiperSpeechSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -19,13 +18,8 @@ const MODEL_FILE: &str = "en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx";
 const CONFIG_FILE: &str = "en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_path),
-        Arc::new(PiperSpeechAdapter::en_us_ljspeech_medium()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -77,19 +71,63 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(PiperSpeechAdapter::en_us_ljspeech_medium()),
-        Arc::new(resolve_local_model_path),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = PiperSpeechSpec::en_us_ljspeech_medium();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Ort,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn typed_bundle() -> PiperSpeechBundle {
+    PiperSpeechBundle::new(PiperSpeechSpec::en_us_ljspeech_medium())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<PiperHandle, ModelError> {
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_path,
+        )?)
+        .await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
+    let model_parent = Path::new(MODEL_FILE).parent().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!("invalid curated Piper model path `{MODEL_FILE}`"))
+    })?;
+    let config_parent = Path::new(CONFIG_FILE).parent().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!(
+            "invalid curated Piper config path `{CONFIG_FILE}`"
+        ))
+    })?;
+    if model_parent != config_parent {
+        return Err(ModelError::InvalidConfiguration(format!(
+            "curated Piper model/config paths diverge: `{MODEL_FILE}` vs `{CONFIG_FILE}`"
+        )));
+    }
+
+    if [MODEL_FILE, CONFIG_FILE]
+        .into_iter()
+        .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.join(model_parent));
+    }
+
+    let direct_model = root.join(Path::new(MODEL_FILE).file_name().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!("invalid curated Piper model path `{MODEL_FILE}`"))
+    })?);
+    let direct_config = root.join(Path::new(CONFIG_FILE).file_name().ok_or_else(|| {
+        ModelError::InvalidConfiguration(format!(
+            "invalid curated Piper config path `{CONFIG_FILE}`"
+        ))
+    })?);
+    if direct_model.is_file() && direct_config.is_file() {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(&repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -127,14 +165,16 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
         }
     }
 
-    Ok(snapshot_dir.join(MODEL_FILE))
+    Ok(snapshot_dir.join(model_parent))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Catalog;
-    use motlie_model::{ArtifactPolicy, PcmEncoding, SpeechRequest, StartOptions};
+    use motlie_model::typed::SynthesisRequest;
+    use motlie_model::{ArtifactPolicy, StartOptions};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -143,9 +183,11 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "piper_en_us_ljspeech_medium");
         assert_eq!(descriptor.display_name, "Piper en_US ljspeech medium");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Speech));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Speech)
+        );
     }
 
     #[test]
@@ -156,9 +198,11 @@ mod tests {
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Speech)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Speech)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
         }
     }
 
@@ -170,48 +214,83 @@ mod tests {
             return;
         };
 
-        let handle = bundle()
-            .start(StartOptions {
-                artifact_policy: Some(ArtifactPolicy::LocalOnly { root }),
-                ..Default::default()
-            })
-            .await
-            .expect("bundle should start when test artifacts are present");
+        let handle = start_typed(StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly { root }),
+            ..Default::default()
+        })
+        .await
+        .expect("typed bundle should start when test artifacts are present");
 
-        let speech = handle
-            .speech()
-            .expect("bundle should expose speech capability");
-        let mut stream = speech
-            .open_stream(SpeechRequest {
+        let mut stream = motlie_model::typed::SpeechSynthesizer::synthesize(
+            &handle,
+            SynthesisRequest {
                 text: "Hello from Motlie.".into(),
                 params: Default::default(),
-                conditioning: None,
-            })
-            .await
-            .expect("speech stream should open");
+            },
+        )
+        .await
+        .expect("typed speech stream should open");
 
-        let spec = stream.audio_spec().clone();
-        assert_eq!(spec.channels, 1);
-        assert_eq!(spec.encoding, PcmEncoding::S16Le);
-
-        let mut total_bytes = 0usize;
+        let mut total_samples = 0usize;
         let mut saw_final = false;
-        while let Some(chunk) = stream
-            .next_chunk()
+        while let Some(chunk) = motlie_model::typed::SpeechStream::next_chunk(&mut stream)
             .await
-            .expect("speech stream should yield chunks")
+            .expect("typed speech stream should yield chunks")
         {
-            total_bytes += chunk.data.len();
-            saw_final = chunk.end_of_stream;
-            if saw_final {
-                break;
-            }
+            total_samples += chunk.samples().len();
+            saw_final = true;
         }
 
-        assert!(total_bytes > 0);
+        assert!(total_samples > 0);
         assert!(saw_final);
 
-        stream.finish().await.expect("finish should succeed");
+        motlie_model::typed::SpeechStream::finish(stream)
+            .await
+            .expect("finish should succeed");
         handle.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[test]
+    fn local_model_resolution_accepts_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("piper-direct-root-{unique}"));
+        let model_path = root.join(MODEL_FILE);
+        let config_path = root.join(CONFIG_FILE);
+        std::fs::create_dir_all(
+            model_path
+                .parent()
+                .expect("model file should have a parent directory"),
+        )
+        .expect("direct root should be creatable");
+        std::fs::write(&model_path, b"test").expect("model should be writable");
+        std::fs::write(&config_path, b"test").expect("config should be writable");
+
+        let resolved = resolve_local_model_path(&root).expect("direct artifact dir should resolve");
+
+        assert_eq!(resolved, root.join("en/en_US/ljspeech/medium"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_model_resolution_accepts_flat_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("piper-flat-root-{unique}"));
+        std::fs::create_dir_all(&root).expect("direct root should be creatable");
+        std::fs::write(root.join("en_US-ljspeech-medium.onnx"), b"test")
+            .expect("flat model should be writable");
+        std::fs::write(root.join("en_US-ljspeech-medium.onnx.json"), b"test")
+            .expect("flat config should be writable");
+
+        let resolved =
+            resolve_local_model_path(&root).expect("flat direct artifact dir should resolve");
+
+        assert_eq!(resolved, root);
+        let _ = std::fs::remove_dir_all(resolved);
     }
 }

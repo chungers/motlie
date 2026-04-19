@@ -1,0 +1,3 @@
+[submodule "libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp"]
+	path = libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
+	url = https://github.com/predict-woo/qwen3-tts.cpp.git

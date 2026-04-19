@@ -3,7 +3,6 @@
 //! This crate owns the bundle/catalog layer above `motlie-model`.
 
 use std::collections::BTreeMap;
-use std::error::Error as StdError;
 #[cfg(any(
     feature = "model-qwen3-4b",
     feature = "model-qwen3-4b-gguf",
@@ -12,14 +11,15 @@ use std::error::Error as StdError;
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-cpp",
     feature = "model-qwen3-tts-0_6b",
+    feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 
 pub mod asr;
 pub mod chat;
@@ -29,11 +29,39 @@ pub mod tts;
 use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 
+#[cfg(feature = "model-qwen3-4b-gguf")]
+use motlie_model_llama_cpp::LlamaCppTextHandle;
+#[cfg(feature = "model-gemma4-e2b-gguf")]
+use motlie_model_llama_cpp::LlamaCppTextHandle as GemmaGgufHandle;
+#[cfg(any(
+    feature = "model-google-gemma-300m",
+    feature = "model-qwen3-embedding-06b"
+))]
+use motlie_model_mistral::MistralEmbeddingHandle;
+#[cfg(feature = "model-gemma4-e2b")]
+use motlie_model_mistral::MistralMultimodalHandle;
+#[cfg(feature = "model-qwen3-4b")]
+use motlie_model_mistral::MistralTextHandle;
+#[cfg(feature = "model-moonshine-streaming")]
+use motlie_model_moonshine::MoonshineHandle;
+#[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+use motlie_model_piper::PiperHandle;
+#[cfg(feature = "model-qwen3-tts-0_6b")]
+use motlie_model_qwen3_tts::Qwen3TtsHandle;
+#[cfg(feature = "model-qwen3-tts-cpp")]
+use motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle;
+#[cfg(feature = "model-sherpa-onnx-streaming")]
+use motlie_model_sherpa_onnx::SherpaOnnxHandle;
+#[cfg(feature = "model-whisper-base-en")]
+use motlie_model_whisper_cpp::WhisperCppHandle;
+
 pub use asr::AsrModels;
 pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
 use motlie_model::{
-    ArtifactPolicy, BackendAdapter, BundleMetadata, ModelError, ResolvedCheckpoint, StartOptions,
+    ArtifactPolicy, BundleHandle, ChatModel, CompletionModel, EmbeddingModel,
+    LoadedBundleDescriptor, ModelError, ModelMetricSnapshot, StartOptions, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 pub use motlie_model::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
@@ -42,8 +70,6 @@ pub use motlie_model::{
     PlatformConstraint, QuantizationSupport,
 };
 pub use tts::TtsModels;
-
-type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
 #[derive(Debug, Error)]
 pub enum ModelsError {
@@ -57,23 +83,15 @@ pub enum ModelsError {
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to create Hugging Face API client")]
-    HuggingFaceClient {
-        #[source]
-        source: BoxError,
-    },
-    #[error("failed to inspect model repo `{repo}`")]
-    InspectModelRepo {
-        repo: &'static str,
-        #[source]
-        source: BoxError,
-    },
-    #[error("failed to download `{filename}` from repo `{repo}`")]
+    #[error("failed to create Hugging Face API client: {message}")]
+    HuggingFaceClient { message: String },
+    #[error("failed to inspect model repo `{repo}`: {message}")]
+    InspectModelRepo { repo: &'static str, message: String },
+    #[error("failed to download `{filename}` from repo `{repo}`: {message}")]
     DownloadArtifact {
         repo: &'static str,
         filename: String,
-        #[source]
-        source: BoxError,
+        message: String,
     },
     #[error("unknown embedding model selector `{selector}`")]
     UnknownEmbeddingModel { selector: String },
@@ -94,10 +112,6 @@ pub enum ModelsError {
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
-
-fn models_error_to_model_error(error: ModelsError) -> ModelError {
-    ModelError::InvalidConfiguration(error.to_string())
-}
 
 /// Resolve a Hugging Face cache root to the concrete snapshot directory for a model.
 ///
@@ -226,6 +240,412 @@ pub fn resolve_hf_gguf_snapshot(
     Ok(snapshot_dir)
 }
 
+#[cfg(any(
+    feature = "model-qwen3-4b",
+    feature = "model-qwen3-4b-gguf",
+    feature = "model-gemma4-e2b",
+    feature = "model-gemma4-e2b-gguf",
+    feature = "model-google-gemma-300m",
+    feature = "model-qwen3-embedding-06b",
+    feature = "model-whisper-base-en",
+    feature = "model-sherpa-onnx-streaming",
+    feature = "model-moonshine-streaming",
+    feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-0_6b",
+    feature = "model-qwen3-tts-cpp",
+))]
+pub(crate) fn resolve_typed_artifact_policy(
+    options: StartOptions,
+    resolver: impl FnOnce(&Path) -> std::result::Result<PathBuf, motlie_model::ModelError>,
+) -> std::result::Result<StartOptions, motlie_model::ModelError> {
+    let StartOptions {
+        artifact_policy,
+        quantization,
+        unpack_root,
+        max_concurrency,
+    } = options;
+
+    let artifact_policy = match artifact_policy {
+        Some(ArtifactPolicy::LocalOnly { root }) => Some(ArtifactPolicy::LocalOnly {
+            root: resolver(&root)?,
+        }),
+        other => other,
+    };
+
+    Ok(StartOptions {
+        artifact_policy,
+        quantization,
+        unpack_root,
+        max_concurrency,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[allow(non_camel_case_types)]
+pub enum CuratedBundle {
+    #[cfg(feature = "model-qwen3-4b")]
+    Qwen3_4B,
+    #[cfg(feature = "model-gemma4-e2b")]
+    Gemma4E2B,
+    #[cfg(feature = "model-qwen3-4b-gguf")]
+    Qwen3_4B_Gguf,
+    #[cfg(feature = "model-gemma4-e2b-gguf")]
+    Gemma4E2B_Gguf,
+    #[cfg(feature = "model-google-gemma-300m")]
+    GoogleGemma300m,
+    #[cfg(feature = "model-qwen3-embedding-06b")]
+    Qwen3Embedding06B,
+    #[cfg(feature = "model-whisper-base-en")]
+    WhisperBaseEn,
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreamingEn,
+    #[cfg(feature = "model-moonshine-streaming")]
+    MoonshineStreamingEn,
+    #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+    PiperEnUsLjspeechMedium,
+    #[cfg(feature = "model-qwen3-tts-0_6b")]
+    Qwen3Tts12Hz0_6B,
+    #[cfg(feature = "model-qwen3-tts-cpp")]
+    Qwen3TtsCpp0_6B,
+}
+
+impl CuratedBundle {
+    pub fn bundle_id(&self) -> BundleId {
+        self.descriptor().id
+    }
+
+    pub fn descriptor(&self) -> BundleDescriptor {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B => chat::qwen3_4b::descriptor(),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B => chat::gemma4_e2b::descriptor(),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf => chat::qwen3_4b_gguf::descriptor(),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf => chat::gemma4_e2b_gguf::descriptor(),
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m => embeddings::google_gemma_300m::descriptor(),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B => embeddings::qwen3_embedding_06b::descriptor(),
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn => asr::whisper_base_en::descriptor(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::descriptor(),
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn => asr::moonshine_streaming_en::descriptor(),
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::descriptor(),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B => tts::qwen3_tts_12hz_0_6b::descriptor(),
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::descriptor(),
+        }
+    }
+
+    pub async fn start(
+        &self,
+        options: StartOptions,
+    ) -> std::result::Result<CuratedHandle, ModelError> {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B => chat::qwen3_4b::start(options)
+                .await
+                .map(CuratedHandle::Qwen3_4B),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B => chat::gemma4_e2b::start(options)
+                .await
+                .map(CuratedHandle::Gemma4E2B),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf => chat::qwen3_4b_gguf::start(options)
+                .await
+                .map(CuratedHandle::Qwen3_4B_Gguf),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf => chat::gemma4_e2b_gguf::start(options)
+                .await
+                .map(CuratedHandle::Gemma4E2B_Gguf),
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m => embeddings::google_gemma_300m::start(options)
+                .await
+                .map(CuratedHandle::GoogleGemma300m),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B => embeddings::qwen3_embedding_06b::start(options)
+                .await
+                .map(CuratedHandle::Qwen3Embedding06B),
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn => asr::whisper_base_en::start_typed(options)
+                .await
+                .map(CuratedHandle::WhisperBaseEn),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn => asr::sherpa_onnx_streaming_en::start_typed(options)
+                .await
+                .map(CuratedHandle::SherpaOnnxStreamingEn),
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn => asr::moonshine_streaming_en::start_typed(options)
+                .await
+                .map(CuratedHandle::MoonshineStreamingEn),
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::start_typed(options)
+                .await
+                .map(CuratedHandle::PiperEnUsLjspeechMedium),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B => tts::qwen3_tts_12hz_0_6b::start_typed(options)
+                .await
+                .map(CuratedHandle::Qwen3Tts12Hz0_6B),
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::start_typed(options)
+                .await
+                .map(CuratedHandle::Qwen3TtsCpp0_6B),
+        }
+    }
+}
+
+#[allow(non_camel_case_types)]
+pub enum CuratedHandle {
+    #[cfg(feature = "model-qwen3-4b")]
+    Qwen3_4B(MistralTextHandle),
+    #[cfg(feature = "model-gemma4-e2b")]
+    Gemma4E2B(MistralMultimodalHandle),
+    #[cfg(feature = "model-qwen3-4b-gguf")]
+    Qwen3_4B_Gguf(LlamaCppTextHandle),
+    #[cfg(feature = "model-gemma4-e2b-gguf")]
+    Gemma4E2B_Gguf(GemmaGgufHandle),
+    #[cfg(feature = "model-google-gemma-300m")]
+    GoogleGemma300m(MistralEmbeddingHandle),
+    #[cfg(feature = "model-qwen3-embedding-06b")]
+    Qwen3Embedding06B(MistralEmbeddingHandle),
+    #[cfg(feature = "model-whisper-base-en")]
+    WhisperBaseEn(WhisperCppHandle),
+    #[cfg(feature = "model-sherpa-onnx-streaming")]
+    SherpaOnnxStreamingEn(SherpaOnnxHandle),
+    #[cfg(feature = "model-moonshine-streaming")]
+    MoonshineStreamingEn(MoonshineHandle),
+    #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+    PiperEnUsLjspeechMedium(PiperHandle),
+    #[cfg(feature = "model-qwen3-tts-0_6b")]
+    Qwen3Tts12Hz0_6B(Qwen3TtsHandle),
+    #[cfg(feature = "model-qwen3-tts-cpp")]
+    Qwen3TtsCpp0_6B(Qwen3TtsCppHandle),
+}
+
+#[async_trait::async_trait]
+impl BundleHandle for CuratedHandle {
+    type Chat = Self;
+    type Completion = Self;
+    type Embeddings = Self;
+
+    fn descriptor(&self) -> &LoadedBundleDescriptor {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.descriptor(),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(handle) => handle.descriptor(),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.descriptor(),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.descriptor(),
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(handle) => handle.descriptor(),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(handle) => handle.descriptor(),
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn(handle) => handle.descriptor(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn(handle) => handle.descriptor(),
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn(handle) => handle.descriptor(),
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium(handle) => handle.descriptor(),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B(handle) => handle.descriptor(),
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B(handle) => handle.descriptor(),
+        }
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.capabilities(),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(handle) => handle.capabilities(),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.capabilities(),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.capabilities(),
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(handle) => handle.capabilities(),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(handle) => handle.capabilities(),
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn(handle) => handle.capabilities(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn(handle) => handle.capabilities(),
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn(handle) => handle.capabilities(),
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium(handle) => handle.capabilities(),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B(handle) => handle.capabilities(),
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B(handle) => handle.capabilities(),
+        }
+    }
+
+    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B(handle) => handle.metric_snapshot(),
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B(handle) => handle.metric_snapshot(),
+        }
+    }
+
+    fn chat(&self) -> std::result::Result<&Self::Chat, ModelError> {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(_) => Ok(self),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(_) => Ok(self),
+            _ => Err(ModelError::UnsupportedCapability(CapabilityKind::Chat)),
+        }
+    }
+
+    fn completion(&self) -> std::result::Result<&Self::Completion, ModelError> {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(_) => Ok(self),
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(_) => Ok(self),
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(_) => Ok(self),
+            _ => Err(ModelError::UnsupportedCapability(
+                CapabilityKind::Completion,
+            )),
+        }
+    }
+
+    fn embeddings(&self) -> std::result::Result<&Self::Embeddings, ModelError> {
+        match self {
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(_) => Ok(self),
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(_) => Ok(self),
+            _ => Err(ModelError::UnsupportedCapability(
+                CapabilityKind::Embeddings,
+            )),
+        }
+    }
+
+    async fn shutdown(self) -> std::result::Result<(), ModelError> {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-whisper-base-en")]
+            Self::WhisperBaseEn(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-sherpa-onnx-streaming")]
+            Self::SherpaOnnxStreamingEn(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-moonshine-streaming")]
+            Self::MoonshineStreamingEn(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+            Self::PiperEnUsLjspeechMedium(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-qwen3-tts-0_6b")]
+            Self::Qwen3Tts12Hz0_6B(handle) => handle.shutdown().await,
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp0_6B(handle) => handle.shutdown().await,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatModel for CuratedHandle {
+    async fn generate(
+        &self,
+        request: motlie_model::ChatRequest,
+    ) -> std::result::Result<motlie_model::ChatResponse, ModelError> {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.generate(request).await,
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.generate(request).await,
+            _ => UnsupportedChat.generate(request).await,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CompletionModel for CuratedHandle {
+    async fn complete(
+        &self,
+        request: motlie_model::CompletionRequest,
+    ) -> std::result::Result<motlie_model::CompletionResponse, ModelError> {
+        match self {
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(handle) => handle.complete(request).await,
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4B_Gguf(handle) => handle.complete(request).await,
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2B_Gguf(handle) => handle.complete(request).await,
+            _ => UnsupportedCompletion.complete(request).await,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EmbeddingModel for CuratedHandle {
+    async fn embed(
+        &self,
+        request: motlie_model::EmbeddingRequest,
+    ) -> std::result::Result<motlie_model::EmbeddingResponse, ModelError> {
+        match self {
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300m(handle) => handle.embed(request).await,
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(handle) => handle.embed(request).await,
+            _ => UnsupportedEmbeddings.embed(request).await,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundleArtifacts {
     pub control_name: &'static str,
@@ -322,14 +742,14 @@ fn download_checkpoint_artifacts_with_options(
                 .with_token(options.hf_token.clone())
                 .build()
                 .map_err(|source| ModelsError::HuggingFaceClient {
-                    source: Box::new(source),
+                    message: source.to_string(),
                 })?;
             let repo_api = api.model((*repo).to_string());
             let info = repo_api
                 .info()
                 .map_err(|source| ModelsError::InspectModelRepo {
                     repo,
-                    source: Box::new(source),
+                    message: source.to_string(),
                 })?;
 
             let mut downloaded = Vec::new();
@@ -339,7 +759,7 @@ fn download_checkpoint_artifacts_with_options(
                         ModelsError::DownloadArtifact {
                             repo,
                             filename: sibling.rfilename.clone(),
-                            source: Box::new(source),
+                            message: source.to_string(),
                         }
                     })?;
                     downloaded.push(path);
@@ -408,120 +828,6 @@ pub(crate) fn bundle_artifacts_from_checkpoint(
     }
 }
 
-impl ArtifactDownloadOptions {
-    fn from_env() -> Self {
-        Self {
-            hf_token: std::env::var("HF_TOKEN")
-                .ok()
-                .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok()),
-        }
-    }
-}
-
-trait LocalCheckpointResolver: Send + Sync {
-    fn resolve(&self, root: &Path) -> std::result::Result<PathBuf, ModelError>;
-}
-
-impl<F> LocalCheckpointResolver for F
-where
-    F: Fn(&Path) -> std::result::Result<PathBuf, ModelError> + Send + Sync + 'static,
-{
-    fn resolve(&self, root: &Path) -> std::result::Result<PathBuf, ModelError> {
-        (self)(root)
-    }
-}
-
-#[derive(Clone)]
-struct AdapterBackedBundle {
-    metadata: BundleMetadata,
-    identity: ModelIdentity,
-    checkpoint: ModelCheckpoint,
-    adapter: Arc<dyn BackendAdapter>,
-    local_resolver: Arc<dyn LocalCheckpointResolver>,
-}
-
-#[async_trait::async_trait]
-impl ModelBundle for AdapterBackedBundle {
-    fn id(&self) -> &BundleId {
-        &self.metadata.id
-    }
-
-    fn metadata(&self) -> &BundleMetadata {
-        &self.metadata
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.metadata.capabilities
-    }
-
-    async fn start(
-        &self,
-        options: StartOptions,
-    ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-        let StartOptions {
-            artifact_policy,
-            quantization,
-            unpack_root,
-            max_concurrency,
-        } = options;
-
-        let artifact_root = match artifact_policy {
-            Some(ArtifactPolicy::LocalOnly { root }) => root,
-            Some(ArtifactPolicy::AllowFetch { root }) => {
-                let root = root.unwrap_or_else(default_artifact_root);
-                download_checkpoint_artifacts_with_options(
-                    &self.checkpoint,
-                    &root,
-                    &ArtifactDownloadOptions::from_env(),
-                )
-                .map_err(models_error_to_model_error)?;
-                root
-            }
-            None => default_artifact_root(),
-        };
-
-        let resolved = ResolvedCheckpoint {
-            checkpoint: self.checkpoint.clone(),
-            path: self.local_resolver.resolve(&artifact_root)?,
-        };
-
-        self.adapter
-            .start(
-                &self.identity,
-                &resolved,
-                StartOptions {
-                    artifact_policy: None,
-                    quantization,
-                    unpack_root,
-                    max_concurrency,
-                },
-            )
-            .await
-    }
-}
-
-pub(crate) fn adapter_backed_bundle(
-    bundle_id: BundleId,
-    display_name: String,
-    identity: ModelIdentity,
-    checkpoint: ModelCheckpoint,
-    adapter: Arc<dyn BackendAdapter>,
-    local_resolver: Arc<dyn LocalCheckpointResolver>,
-) -> Box<dyn ModelBundle> {
-    Box::new(AdapterBackedBundle {
-        metadata: BundleMetadata {
-            id: bundle_id,
-            display_name,
-            capabilities: adapter.capabilities().clone(),
-            quantization: adapter.quantization().clone(),
-        },
-        identity,
-        checkpoint,
-        adapter,
-        local_resolver,
-    })
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelVariantDescriptor {
     pub backend: BackendKind,
@@ -547,10 +853,12 @@ pub struct ResolvedModelDescriptor {
 pub enum ModelSelector {
     #[cfg(any(
         feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-qwen3-tts-cpp",
         feature = "model-qwen3-tts-0_6b",
     ))]
     Tts(TtsModels),
     #[cfg(any(
+        feature = "model-moonshine-streaming",
         feature = "model-sherpa-onnx-streaming",
         feature = "model-whisper-base-en"
     ))]
@@ -577,16 +885,23 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-cpp",
     feature = "model-qwen3-tts-0_6b",
+    feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
 impl ModelSelector {
     pub fn as_str(&self) -> String {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => format!("tts:{}", model.as_str()),
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
@@ -608,9 +923,14 @@ impl ModelSelector {
 
     pub fn bundle_id(&self) -> BundleId {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.bundle_id(),
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
@@ -632,9 +952,14 @@ impl ModelSelector {
 
     pub fn descriptor(&self) -> BundleDescriptor {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             Self::Tts(model) => model.descriptor(),
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
@@ -654,27 +979,32 @@ impl ModelSelector {
         }
     }
 
-    pub fn bundle(&self) -> Box<dyn ModelBundle> {
+    pub fn bundle(&self) -> Result<CuratedBundle> {
         match self {
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
-            Self::Tts(model) => model.bundle(),
             #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
+            Self::Tts(model) => Ok(model.bundle()),
+            #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
-            Self::Asr(model) => model.bundle(),
+            Self::Asr(model) => Ok(model.bundle()),
             #[cfg(any(
                 feature = "model-qwen3-4b",
                 feature = "model-qwen3-4b-gguf",
                 feature = "model-gemma4-e2b",
                 feature = "model-gemma4-e2b-gguf",
             ))]
-            Self::Chat(model) => model.bundle(),
+            Self::Chat(model) => Ok(model.bundle()),
             #[cfg(any(
                 feature = "model-google-gemma-300m",
                 feature = "model-qwen3-embedding-06b"
             ))]
-            Self::Embedding(model) => model.bundle(),
+            Self::Embedding(model) => Ok(model.bundle()),
         }
     }
 }
@@ -687,7 +1017,9 @@ impl ModelSelector {
     feature = "model-gemma4-e2b",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
+    feature = "model-qwen3-tts-cpp",
     feature = "model-qwen3-tts-0_6b",
+    feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
 ))]
@@ -708,15 +1040,29 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
+            #[cfg(not(feature = "model-qwen3-tts-cpp"))]
+            if raw == tts::QWEN3_TTS_CPP_0_6B_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-qwen3-tts-0_6b"))]
             if raw == tts::QWEN3_TTS_12HZ_0_6B_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b"))]
+            #[cfg(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            ))]
             return Ok(Self::Tts(raw.parse()?));
-            #[cfg(not(any(feature = "model-piper-en-us-ljspeech-medium", feature = "model-qwen3-tts-0_6b")))]
+            #[cfg(not(any(
+                feature = "model-piper-en-us-ljspeech-medium",
+                feature = "model-qwen3-tts-cpp",
+                feature = "model-qwen3-tts-0_6b"
+            )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
             });
@@ -793,6 +1139,12 @@ impl FromStr for ModelSelector {
         }
 
         if let Some(raw) = value.strip_prefix("asr:") {
+            #[cfg(not(feature = "model-moonshine-streaming"))]
+            if raw == asr::MOONSHINE_STREAMING_SELECTOR {
+                return Err(ModelsError::ModelUnavailable {
+                    selector: value.to_owned(),
+                });
+            }
             #[cfg(not(feature = "model-sherpa-onnx-streaming"))]
             if raw == asr::SHERPA_ONNX_STREAMING_SELECTOR {
                 return Err(ModelsError::ModelUnavailable {
@@ -806,11 +1158,13 @@ impl FromStr for ModelSelector {
                 });
             }
             #[cfg(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             ))]
             return Ok(Self::Asr(raw.parse()?));
             #[cfg(not(any(
+                feature = "model-moonshine-streaming",
                 feature = "model-sherpa-onnx-streaming",
                 feature = "model-whisper-base-en"
             )))]
@@ -825,40 +1179,103 @@ impl FromStr for ModelSelector {
     }
 }
 
-trait BundleFactory: Send + Sync {
-    fn instantiate(&self) -> Box<dyn ModelBundle>;
-}
-
-impl<F> BundleFactory for F
-where
-    F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
-{
-    fn instantiate(&self) -> Box<dyn ModelBundle> {
-        (self)()
+fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
+    match id.as_str() {
+        #[cfg(feature = "model-qwen3-4b")]
+        "qwen3_4b" => Some(CuratedBundle::Qwen3_4B),
+        #[cfg(feature = "model-gemma4-e2b")]
+        "gemma4_e2b" => Some(CuratedBundle::Gemma4E2B),
+        #[cfg(feature = "model-qwen3-4b-gguf")]
+        "qwen3_4b_gguf" => Some(CuratedBundle::Qwen3_4B_Gguf),
+        #[cfg(feature = "model-gemma4-e2b-gguf")]
+        "gemma4_e2b_gguf" => Some(CuratedBundle::Gemma4E2B_Gguf),
+        #[cfg(feature = "model-google-gemma-300m")]
+        "embeddinggemma_300m" => Some(CuratedBundle::GoogleGemma300m),
+        #[cfg(feature = "model-qwen3-embedding-06b")]
+        "qwen3_embedding_06b" => Some(CuratedBundle::Qwen3Embedding06B),
+        #[cfg(feature = "model-whisper-base-en")]
+        "whisper_base_en" => Some(CuratedBundle::WhisperBaseEn),
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        "sherpa_onnx_streaming_zipformer_en" => Some(CuratedBundle::SherpaOnnxStreamingEn),
+        #[cfg(feature = "model-moonshine-streaming")]
+        "moonshine_streaming_en" => Some(CuratedBundle::MoonshineStreamingEn),
+        #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+        "piper_en_us_ljspeech_medium" => Some(CuratedBundle::PiperEnUsLjspeechMedium),
+        #[cfg(feature = "model-qwen3-tts-0_6b")]
+        "qwen3_tts_12hz_0_6b" => Some(CuratedBundle::Qwen3Tts12Hz0_6B),
+        #[cfg(feature = "model-qwen3-tts-cpp")]
+        "qwen3_tts_cpp_0_6b" => Some(CuratedBundle::Qwen3TtsCpp0_6B),
+        _ => None,
     }
 }
 
-struct CatalogEntry {
-    descriptor: BundleDescriptor,
-    factory: Arc<dyn BundleFactory>,
-}
-
-#[derive(Clone)]
-struct CheckpointCatalogEntry {
-    checkpoint: ModelCheckpoint,
-    local_resolver: Arc<dyn LocalCheckpointResolver>,
+fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBundle> {
+    match (
+        resolved.identity.id.as_str(),
+        resolved.variant.backend,
+        resolved.variant.checkpoint.format,
+    ) {
+        #[cfg(feature = "model-qwen3-4b")]
+        ("qwen3_4b", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
+            Some(CuratedBundle::Qwen3_4B)
+        }
+        #[cfg(feature = "model-gemma4-e2b")]
+        ("gemma4_e2b", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
+            Some(CuratedBundle::Gemma4E2B)
+        }
+        #[cfg(feature = "model-qwen3-4b-gguf")]
+        ("qwen3_4b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
+            Some(CuratedBundle::Qwen3_4B_Gguf)
+        }
+        #[cfg(feature = "model-gemma4-e2b-gguf")]
+        ("gemma4_e2b", BackendKind::LlamaCpp, CheckpointFormat::Gguf) => {
+            Some(CuratedBundle::Gemma4E2B_Gguf)
+        }
+        #[cfg(feature = "model-google-gemma-300m")]
+        ("embeddinggemma_300m", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
+            Some(CuratedBundle::GoogleGemma300m)
+        }
+        #[cfg(feature = "model-qwen3-embedding-06b")]
+        ("qwen3_embedding_06b", BackendKind::MistralRs, CheckpointFormat::Safetensors) => {
+            Some(CuratedBundle::Qwen3Embedding06B)
+        }
+        #[cfg(feature = "model-whisper-base-en")]
+        ("whisper_base_en", BackendKind::WhisperCpp, CheckpointFormat::Ggml) => {
+            Some(CuratedBundle::WhisperBaseEn)
+        }
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        ("sherpa_onnx_streaming_zipformer_en", BackendKind::SherpaOnnx, CheckpointFormat::Onnx) => {
+            Some(CuratedBundle::SherpaOnnxStreamingEn)
+        }
+        #[cfg(feature = "model-moonshine-streaming")]
+        ("moonshine_streaming_en", BackendKind::Ort, CheckpointFormat::Onnx) => {
+            Some(CuratedBundle::MoonshineStreamingEn)
+        }
+        #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+        ("piper_en_us_ljspeech_medium", BackendKind::Ort, CheckpointFormat::Onnx) => {
+            Some(CuratedBundle::PiperEnUsLjspeechMedium)
+        }
+        #[cfg(feature = "model-qwen3-tts-0_6b")]
+        ("qwen3_tts_12hz_0_6b", BackendKind::Ort, CheckpointFormat::Onnx) => {
+            Some(CuratedBundle::Qwen3Tts12Hz0_6B)
+        }
+        #[cfg(feature = "model-qwen3-tts-cpp")]
+        ("qwen3_tts_cpp_0_6b", BackendKind::Qwen3TtsCpp, CheckpointFormat::Gguf) => {
+            Some(CuratedBundle::Qwen3TtsCpp0_6B)
+        }
+        _ => None,
+    }
 }
 
 struct ModelCatalogEntry {
     identity: ModelIdentity,
-    checkpoints: Vec<CheckpointCatalogEntry>,
-    adapters: Vec<Arc<dyn BackendAdapter>>,
+    variants: Vec<ModelVariantDescriptor>,
 }
 
 /// In-memory registry of curated bundle descriptors and constructors.
 #[derive(Default)]
 pub struct Catalog {
-    bundles: BTreeMap<BundleId, CatalogEntry>,
+    bundles: BTreeMap<BundleId, BundleDescriptor>,
     models: BTreeMap<BundleId, ModelCatalogEntry>,
 }
 
@@ -884,8 +1301,12 @@ impl Catalog {
         chat::gemma4_e2b_gguf::register(&mut catalog);
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
+        #[cfg(feature = "model-qwen3-tts-cpp")]
+        tts::qwen3_tts_cpp::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-0_6b")]
         tts::qwen3_tts_12hz_0_6b::register(&mut catalog);
+        #[cfg(feature = "model-moonshine-streaming")]
+        asr::moonshine_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         asr::sherpa_onnx_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-whisper-base-en")]
@@ -893,65 +1314,34 @@ impl Catalog {
         catalog
     }
 
-    pub fn register<F>(
+    pub fn register_descriptor(
         &mut self,
         descriptor: BundleDescriptor,
-        factory: F,
-    ) -> Option<BundleDescriptor>
-    where
-        F: Fn() -> Box<dyn ModelBundle> + Send + Sync + 'static,
-    {
+    ) -> Option<BundleDescriptor> {
         self.bundles
-            .insert(
-                descriptor.id.clone(),
-                CatalogEntry {
-                    descriptor: descriptor.clone(),
-                    factory: Arc::new(factory),
-                },
-            )
-            .map(|entry| entry.descriptor)
+            .insert(descriptor.id.clone(), descriptor.clone())
     }
 
     pub(crate) fn register_model_variant(
         &mut self,
         identity: ModelIdentity,
-        checkpoint: ModelCheckpoint,
-        local_resolver: Arc<dyn LocalCheckpointResolver>,
-        adapter: Arc<dyn BackendAdapter>,
+        variant: ModelVariantDescriptor,
     ) {
         let entry = self
             .models
             .entry(identity.id.clone())
             .or_insert_with(|| ModelCatalogEntry {
                 identity: identity.clone(),
-                checkpoints: Vec::new(),
-                adapters: Vec::new(),
+                variants: Vec::new(),
             });
         entry.identity = identity;
-
-        if !entry
-            .checkpoints
-            .iter()
-            .any(|existing| existing.checkpoint == checkpoint)
-        {
-            entry.checkpoints.push(CheckpointCatalogEntry {
-                checkpoint,
-                local_resolver,
-            });
-        }
-
-        if !entry.adapters.iter().any(|existing| {
-            existing.backend_kind() == adapter.backend_kind()
-                && existing.supported_formats() == adapter.supported_formats()
-                && existing.capabilities() == adapter.capabilities()
-                && existing.quantization() == adapter.quantization()
-        }) {
-            entry.adapters.push(adapter);
+        if !entry.variants.iter().any(|existing| existing == &variant) {
+            entry.variants.push(variant);
         }
     }
 
     pub fn bundle(&self, id: &BundleId) -> Option<&BundleDescriptor> {
-        self.bundles.get(id).map(|entry| &entry.descriptor)
+        self.bundles.get(id)
     }
 
     pub fn model(&self, id: &BundleId) -> Option<&ModelIdentity> {
@@ -967,26 +1357,7 @@ impl Catalog {
         id: &BundleId,
     ) -> Option<impl Iterator<Item = ModelVariantDescriptor>> {
         let entry = self.models.get(id)?;
-        let variants = entry
-            .adapters
-            .iter()
-            .flat_map(|adapter| {
-                entry
-                    .checkpoints
-                    .iter()
-                    .filter(move |checkpoint| {
-                        adapter
-                            .supported_formats()
-                            .contains(&checkpoint.checkpoint.format)
-                    })
-                    .map(move |checkpoint| ModelVariantDescriptor {
-                        backend: adapter.backend_kind(),
-                        capabilities: adapter.capabilities().clone(),
-                        quantization: adapter.quantization().clone(),
-                        checkpoint: checkpoint.checkpoint.clone(),
-                    })
-            })
-            .collect::<Vec<_>>();
+        let variants = entry.variants.clone();
         Some(variants.into_iter())
     }
 
@@ -995,20 +1366,17 @@ impl Catalog {
             .and_then(|descriptor| descriptor.artifacts.as_ref())
     }
 
-    pub fn instantiate(&self, id: &BundleId) -> Option<Box<dyn ModelBundle>> {
-        self.bundles
-            .get(id)
-            .map(|entry| entry.factory.instantiate())
+    pub fn instantiate(&self, id: &BundleId) -> Option<CuratedBundle> {
+        bundle_from_id(id)
     }
 
     pub fn bundles(&self) -> impl Iterator<Item = &BundleDescriptor> {
-        self.bundles.values().map(|entry| &entry.descriptor)
+        self.bundles.values()
     }
 
     pub fn bundles_for_track(&self, track: EvalTrack) -> impl Iterator<Item = &BundleDescriptor> {
         self.bundles
             .values()
-            .map(|entry| &entry.descriptor)
             .filter(move |descriptor| descriptor.supports_track(track))
     }
 
@@ -1019,32 +1387,22 @@ impl Catalog {
     ) -> Option<ResolvedModelDescriptor> {
         let entry = self.models.get(id)?;
 
-        let exact = entry.adapters.iter().find_map(|adapter| {
+        let exact = entry.variants.iter().find_map(|variant| {
             let backend_ok = options
                 .backend_preference
-                .is_none_or(|backend| adapter.backend_kind() == backend);
+                .is_none_or(|backend| variant.backend == backend);
             if !backend_ok {
                 return None;
             }
 
-            entry.checkpoints.iter().find_map(|checkpoint| {
-                let format_ok = options
-                    .format_preference
-                    .is_none_or(|format| checkpoint.checkpoint.format == format);
-                let supported = adapter
-                    .supported_formats()
-                    .contains(&checkpoint.checkpoint.format);
-                if !format_ok || !supported {
-                    return None;
-                }
+            let format_ok = options
+                .format_preference
+                .is_none_or(|format| variant.checkpoint.format == format);
+            if !format_ok {
+                return None;
+            }
 
-                Some(ModelVariantDescriptor {
-                    backend: adapter.backend_kind(),
-                    capabilities: adapter.capabilities().clone(),
-                    quantization: adapter.quantization().clone(),
-                    checkpoint: checkpoint.checkpoint.clone(),
-                })
-            })
+            Some(variant.clone())
         })?;
 
         Some(ResolvedModelDescriptor {
@@ -1056,29 +1414,8 @@ impl Catalog {
     pub fn instantiate_resolved(
         &self,
         resolved: &ResolvedModelDescriptor,
-    ) -> Option<Box<dyn ModelBundle>> {
-        let entry = self.models.get(&resolved.identity.id)?;
-        let checkpoint = entry
-            .checkpoints
-            .iter()
-            .find(|existing| existing.checkpoint == resolved.variant.checkpoint)?;
-        let adapter = entry.adapters.iter().find(|existing| {
-            existing.backend_kind() == resolved.variant.backend
-                && existing.capabilities() == &resolved.variant.capabilities
-                && existing.quantization() == &resolved.variant.quantization
-                && existing
-                    .supported_formats()
-                    .contains(&resolved.variant.checkpoint.format)
-        })?;
-
-        Some(adapter_backed_bundle(
-            resolved.identity.id.clone(),
-            resolved.identity.display_name.clone(),
-            resolved.identity.clone(),
-            checkpoint.checkpoint.clone(),
-            Arc::clone(adapter),
-            Arc::clone(&checkpoint.local_resolver),
-        ))
+    ) -> Option<CuratedBundle> {
+        bundle_from_resolved(resolved)
     }
 
     pub fn len(&self) -> usize {
@@ -1092,76 +1429,7 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
-    use motlie_model::BundleMetadata;
-
     use super::*;
-
-    #[derive(Clone)]
-    struct StubBundle {
-        metadata: BundleMetadata,
-    }
-
-    #[async_trait::async_trait]
-    impl ModelBundle for StubBundle {
-        fn id(&self) -> &BundleId {
-            &self.metadata.id
-        }
-
-        fn metadata(&self) -> &BundleMetadata {
-            &self.metadata
-        }
-
-        fn capabilities(&self) -> &Capabilities {
-            &self.metadata.capabilities
-        }
-
-        async fn start(
-            &self,
-            _options: motlie_model::StartOptions,
-        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, motlie_model::ModelError>
-        {
-            Err(motlie_model::ModelError::InvalidConfiguration(
-                "stub bundle is not startable".into(),
-            ))
-        }
-    }
-
-    struct StubAdapter {
-        backend: BackendKind,
-        capabilities: Capabilities,
-        quantization: QuantizationSupport,
-        supported_formats: Vec<CheckpointFormat>,
-    }
-
-    #[async_trait::async_trait]
-    impl BackendAdapter for StubAdapter {
-        fn supported_formats(&self) -> &[CheckpointFormat] {
-            &self.supported_formats
-        }
-
-        fn backend_kind(&self) -> BackendKind {
-            self.backend
-        }
-
-        fn capabilities(&self) -> &Capabilities {
-            &self.capabilities
-        }
-
-        fn quantization(&self) -> &QuantizationSupport {
-            &self.quantization
-        }
-
-        async fn start(
-            &self,
-            _identity: &ModelIdentity,
-            _checkpoint: &ResolvedCheckpoint,
-            _options: StartOptions,
-        ) -> std::result::Result<Box<dyn motlie_model::BundleHandle>, ModelError> {
-            Err(ModelError::InvalidConfiguration(
-                "stub adapter is not startable".into(),
-            ))
-        }
-    }
 
     fn stub_descriptor(id: &str) -> BundleDescriptor {
         BundleDescriptor {
@@ -1177,6 +1445,67 @@ mod tests {
         }
     }
 
+    #[cfg(any(
+        feature = "model-whisper-base-en",
+        feature = "model-sherpa-onnx-streaming",
+        feature = "model-moonshine-streaming",
+        feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-qwen3-tts-0_6b",
+        feature = "model-qwen3-tts-cpp",
+    ))]
+    #[test]
+    fn resolve_typed_artifact_policy_rewrites_local_only_root() {
+        let options = StartOptions {
+            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+                root: PathBuf::from("/tmp/cache"),
+            }),
+            quantization: Some(motlie_model::QuantizationBits::Four),
+            unpack_root: Some(PathBuf::from("/tmp/unpack")),
+            max_concurrency: Some(2),
+        };
+
+        let resolved =
+            resolve_typed_artifact_policy(options, |root| Ok(root.join("snapshots/commit")))
+                .expect("local-only policy should resolve");
+
+        assert_eq!(
+            resolved.artifact_policy,
+            Some(ArtifactPolicy::LocalOnly {
+                root: PathBuf::from("/tmp/cache/snapshots/commit"),
+            })
+        );
+        assert_eq!(
+            resolved.quantization,
+            Some(motlie_model::QuantizationBits::Four)
+        );
+        assert_eq!(resolved.unpack_root, Some(PathBuf::from("/tmp/unpack")));
+        assert_eq!(resolved.max_concurrency, Some(2));
+    }
+
+    #[cfg(any(
+        feature = "model-whisper-base-en",
+        feature = "model-sherpa-onnx-streaming",
+        feature = "model-moonshine-streaming",
+        feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-qwen3-tts-0_6b",
+        feature = "model-qwen3-tts-cpp",
+    ))]
+    #[test]
+    fn resolve_typed_artifact_policy_leaves_allow_fetch_unchanged() {
+        let options = StartOptions {
+            artifact_policy: Some(ArtifactPolicy::AllowFetch {
+                root: Some(PathBuf::from("/tmp/cache")),
+            }),
+            ..Default::default()
+        };
+
+        let resolved =
+            resolve_typed_artifact_policy(options.clone(), |_| unreachable!("resolver unused"))
+                .expect("allow-fetch policy should remain unchanged");
+
+        assert_eq!(resolved, options);
+    }
+
     #[test]
     fn register_overwrites_prior_descriptor() {
         let mut catalog = Catalog::new();
@@ -1186,32 +1515,10 @@ mod tests {
             display_name: "Bundle v2".into(),
             ..stub_descriptor("bundle")
         };
-        let first_for_factory = first.clone();
-        let second_for_factory = second.clone();
 
-        assert!(catalog
-            .register(first.clone(), move || {
-                Box::new(StubBundle {
-                    metadata: BundleMetadata {
-                        id: first_for_factory.id.clone(),
-                        display_name: first_for_factory.display_name.clone(),
-                        capabilities: first_for_factory.capabilities.clone(),
-                        quantization: motlie_model::QuantizationSupport::none(),
-                    },
-                })
-            })
-            .is_none());
+        assert!(catalog.register_descriptor(first.clone()).is_none());
 
-        let replaced = catalog.register(second.clone(), move || {
-            Box::new(StubBundle {
-                metadata: BundleMetadata {
-                    id: second_for_factory.id.clone(),
-                    display_name: second_for_factory.display_name.clone(),
-                    capabilities: second_for_factory.capabilities.clone(),
-                    quantization: motlie_model::QuantizationSupport::none(),
-                },
-            })
-        });
+        let replaced = catalog.register_descriptor(second.clone());
 
         assert_eq!(replaced, Some(first));
         assert_eq!(
@@ -1259,31 +1566,8 @@ mod tests {
             }),
             ..mistral.clone()
         };
-        let mistral_capabilities = mistral.capabilities.clone();
-        let llama_capabilities = llama.capabilities.clone();
-        let mistral_for_factory = mistral.clone();
-        let llama_for_factory = llama.clone();
-
-        catalog.register(mistral.clone(), move || {
-            Box::new(StubBundle {
-                metadata: BundleMetadata {
-                    id: mistral_for_factory.id.clone(),
-                    display_name: mistral_for_factory.display_name.clone(),
-                    capabilities: mistral_capabilities.clone(),
-                    quantization: motlie_model::QuantizationSupport::none(),
-                },
-            })
-        });
-        catalog.register(llama.clone(), move || {
-            Box::new(StubBundle {
-                metadata: BundleMetadata {
-                    id: llama_for_factory.id.clone(),
-                    display_name: llama_for_factory.display_name.clone(),
-                    capabilities: llama_capabilities.clone(),
-                    quantization: motlie_model::QuantizationSupport::none(),
-                },
-            })
-        });
+        catalog.register_descriptor(mistral.clone());
+        catalog.register_descriptor(llama.clone());
         catalog.register_model_variant(
             ModelIdentity {
                 id: BundleId::new("qwen3_4b"),
@@ -1293,16 +1577,14 @@ mod tests {
                 eval_tracks: vec![EvalTrack::Chat],
                 requirements: BundleRequirements::default(),
             },
-            mistral
-                .checkpoint()
-                .expect("mistral descriptor should expose checkpoint"),
-            Arc::new(|root: &Path| Ok(root.to_path_buf())),
-            Arc::new(StubAdapter {
+            ModelVariantDescriptor {
                 backend: BackendKind::MistralRs,
                 capabilities: Capabilities::chat_and_completion(),
                 quantization: QuantizationSupport::none(),
-                supported_formats: vec![CheckpointFormat::Safetensors],
-            }),
+                checkpoint: mistral
+                    .checkpoint()
+                    .expect("mistral descriptor should expose checkpoint"),
+            },
         );
         catalog.register_model_variant(
             ModelIdentity {
@@ -1313,11 +1595,7 @@ mod tests {
                 eval_tracks: vec![EvalTrack::Chat],
                 requirements: BundleRequirements::default(),
             },
-            llama
-                .checkpoint()
-                .expect("llama descriptor should expose checkpoint"),
-            Arc::new(|root: &Path| Ok(root.to_path_buf())),
-            Arc::new(StubAdapter {
+            ModelVariantDescriptor {
                 backend: BackendKind::LlamaCpp,
                 capabilities: Capabilities::chat_and_completion(),
                 quantization: QuantizationSupport::with_recommended(
@@ -1325,8 +1603,10 @@ mod tests {
                     motlie_model::QuantizationBits::Four,
                 )
                 .expect("test quantization support should be valid"),
-                supported_formats: vec![CheckpointFormat::Gguf],
-            }),
+                checkpoint: llama
+                    .checkpoint()
+                    .expect("llama descriptor should expose checkpoint"),
+            },
         );
 
         let resolved = catalog
@@ -1342,7 +1622,10 @@ mod tests {
         assert_eq!(resolved.identity.id.as_str(), "qwen3_4b");
         assert_eq!(resolved.variant.backend, BackendKind::LlamaCpp);
         assert_eq!(resolved.variant.checkpoint.format, CheckpointFormat::Gguf);
+        #[cfg(feature = "model-qwen3-4b-gguf")]
         assert!(catalog.instantiate_resolved(&resolved).is_some());
+        #[cfg(not(feature = "model-qwen3-4b-gguf"))]
+        assert!(catalog.instantiate_resolved(&resolved).is_none());
     }
 
     #[test]
@@ -1352,11 +1635,13 @@ mod tests {
         #[cfg(feature = "model-google-gemma-300m")]
         {
             let bundle_id = BundleId::new("embeddinggemma_300m");
-            assert!(catalog.len() >= 1);
+            assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1375,9 +1660,11 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)

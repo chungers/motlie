@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_llama_cpp::LlamaCppTextAdapter;
+use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextHandle, LlamaCppTextSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
@@ -14,13 +14,8 @@ use crate::{
 pub const SELECTOR: &str = "google/gemma4_e2b_gguf";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_gguf_root),
-        Arc::new(LlamaCppTextAdapter::gemma4()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -79,16 +74,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(LlamaCppTextAdapter::gemma4()),
-        Arc::new(resolve_local_gguf_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = LlamaCppTextSpec::gemma4_e2b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::LlamaCpp,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::Gemma4E2B_Gguf
+}
+
+pub async fn start(options: StartOptions) -> Result<LlamaCppTextHandle, ModelError> {
+    LlamaCppTextBundle::new(LlamaCppTextSpec::gemma4_e2b())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_gguf_root,
+        )?)
+        .await
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {

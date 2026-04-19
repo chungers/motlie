@@ -16,8 +16,8 @@ cuda = ["motlie-model-ort/cuda", "ort/cuda"]
 
 [dependencies]
 async-trait = "0.1.89"
-espeak-rs = { version = "0.1.9", default-features = false }
 motlie-model = { path = "../..", features = ["metrics-runtime"] }
+motlie-model-espeak-ng = { path = "../espeak_ng" }
 motlie-model-ort = { path = "../ort" }
 ndarray = "0.17"
 # TODO(@codex-tts): upgrade `ort` to stable 2.x once it is released.

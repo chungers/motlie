@@ -84,7 +84,7 @@ mod neon;
 #[inline]
 pub fn dot_1bit(query: &[f32], code: &[u8]) -> f32 {
     debug_assert!(
-        code.len() >= (query.len() + 7) / 8,
+        code.len() >= query.len().div_ceil(8),
         "Code length {} too short for {} dimensions",
         code.len(),
         query.len()
@@ -142,7 +142,7 @@ pub fn dot_1bit(query: &[f32], code: &[u8]) -> f32 {
 #[inline]
 pub fn dot_2bit_lookup(query: &[f32], code: &[u8], values: &[f32; 4]) -> f32 {
     debug_assert!(
-        code.len() >= (query.len() * 2 + 7) / 8,
+        code.len() >= (query.len() * 2).div_ceil(8),
         "Code length {} too short for {} dimensions (2-bit)",
         code.len(),
         query.len()
@@ -205,7 +205,7 @@ pub fn dot_2bit_lookup(query: &[f32], code: &[u8], values: &[f32; 4]) -> f32 {
 #[inline]
 pub fn dot_4bit_linear(query: &[f32], code: &[u8], scale: f32, offset: f32) -> f32 {
     debug_assert!(
-        code.len() >= (query.len() + 1) / 2,
+        code.len() >= query.len().div_ceil(2),
         "Code length {} too short for {} dimensions (4-bit)",
         code.len(),
         query.len()
