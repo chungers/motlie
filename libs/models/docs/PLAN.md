@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-18 | @codex-asr | Added Phase 8 for the reusable strict audio-ingress follow-through required by issue `#198` and Telnyx PR `#186`. This phase keeps provider-agnostic decode/resample/chunking invariants out of the Telnyx adapter crate while making the first telephony vertical slice consume the typed model boundary explicitly. |
 | 2026-04-17 | @codex-asr | Renamed the curated example targets from versioned names to capability/model names and updated the plan references accordingly (`embeddings`, `chat_mistral_qwen3`, `chat_multimodal_gemma4`, `chat_gguf_gwen3_gemma4`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`). |
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/models` vertical slice work. Covers the curated catalog, constructor registration, and the first `embeddinggemma_300m` bundle wired through the Mistral backend. |
 | 2026-04-07 | @codex-researcher | Marked the completed catalog, descriptor, artifact-control, and verification work for the first embedding slice. | Phases 1-4 |
@@ -173,3 +174,43 @@ Add the first curated chat bundle to validate the `ChatModel` + `CompletionModel
 - [x] `cargo test -p motlie-models --lib`
 - [x] `cargo build -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings`
 - [ ] Env-gated end-to-end example run with pre-downloaded Qwen3-Embedding-0.6B artifacts.
+
+## Phase 8: Strict Audio-Ingress Follow-Through for Live Voice
+
+Keep the reusable audio invariants with the model/voice layers rather than in a
+provider-specific Telnyx adapter. This phase is derived from `DESIGN.md`:
+`Strict Typed Audio Boundary`, `Transport and Telephony Ingress Boundary`, and
+`Testing Scope for PLAN`.
+
+### 8.1 — Reusable typed ingress and transform surface
+
+- [ ] Finalize the provider-agnostic typed ingress story so live voice adapters
+  terminate in explicit `AudioBuf<...>` values rather than raw PCM bytes.
+- [ ] Add the reusable transform types that the first telephony slice depends on
+  where they belong in the shared stack:
+  decode, sample-format conversion, resample, channel normalization, and
+  explicit chunk/framing adapters.
+- [ ] Keep those transforms closed over concrete input/output types so invalid
+  pairings fail at compile time instead of being deferred to runtime.
+
+### 8.2 — First telephony pairing contract
+
+- [ ] Write down the only supported first live path explicitly:
+  `G.711 mu-law 8 kHz mono -> decoded typed PCM -> resampled 16 kHz mono PCM -> sherpa-onnx`.
+- [ ] Write down the outbound first live path explicitly:
+  `Piper PCM -> explicit normalize/resample -> telephony encode`.
+- [ ] Reject undeclared pairings in the first live voice slice rather than
+  letting transport code broaden the backend matrix ad hoc.
+
+### 8.3 — Verification
+
+- [ ] Add compile-fail coverage for invalid typed audio compositions, for example
+  feeding the wrong sample type, wrong sample rate, or wrong channel layout into
+  a backend session.
+- [ ] Keep every shipped ASR/TTS example on the typed API surface and reject
+  example-only helper paths that reintroduce raw byte PCM or erased capability
+  adapters.
+- [ ] Add an integration test or example path that exercises the first telephony
+  adaptation chain without any provider-specific network transport in the loop.
+- [ ] Add the corresponding script/CI hook once that path exists so the
+  telephony-ingress contract does not regress back to byte-oriented plumbing.
