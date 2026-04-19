@@ -13,6 +13,7 @@ RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
 KEEP_RUNNING=0
+REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
 
 zmodload zsh/datetime
 
@@ -157,10 +158,17 @@ if ! local_vm_exists "$BASE_VM_NAME"; then
   exit 1
 fi
 
+REUSED_VM=0
 if local_vm_exists "$RUN_VM_NAME"; then
-  echo "--- removing existing guest VM '$RUN_VM_NAME' for rerun ---"
-  tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
-  tart delete "$RUN_VM_NAME" >/dev/null
+  if [[ "$REUSE_VM" == "1" ]]; then
+    echo "--- reusing existing guest VM '$RUN_VM_NAME' ---"
+    tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
+    REUSED_VM=1
+  else
+    echo "--- removing existing guest VM '$RUN_VM_NAME' for rerun ---"
+    tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
+    tart delete "$RUN_VM_NAME" >/dev/null
+  fi
 fi
 
 mkdir -p "$ARTIFACTS_DIR"
@@ -399,16 +407,17 @@ if {\$exit_code != 0} {
 EOF
 }
 
-echo "--- cloning guest VM disk ---"
-tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
-
 BASE_VM_DIR="$HOME/.tart/vms/$BASE_VM_NAME"
 RUN_VM_DIR="$HOME/.tart/vms/$RUN_VM_NAME"
-BASE_DISK_PATH="$BASE_VM_DIR/disk.img"
-RUN_DISK_PATH="$RUN_VM_DIR/disk.img"
-if [[ -f "$BASE_DISK_PATH" && -f "$RUN_DISK_PATH" ]]; then
-  echo "--- materializing writable guest disk copy ---"
-  python3 - "$BASE_DISK_PATH" "$RUN_DISK_PATH" <<'PY'
+if [[ "$REUSED_VM" -eq 0 ]]; then
+  echo "--- cloning guest VM disk ---"
+  tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
+
+  BASE_DISK_PATH="$BASE_VM_DIR/disk.img"
+  RUN_DISK_PATH="$RUN_VM_DIR/disk.img"
+  if [[ -f "$BASE_DISK_PATH" && -f "$RUN_DISK_PATH" ]]; then
+    echo "--- materializing writable guest disk copy ---"
+    python3 - "$BASE_DISK_PATH" "$RUN_DISK_PATH" <<'PY'
 import os
 import shutil
 import sys
@@ -421,6 +430,7 @@ with open(src, "rb") as rf, open(tmp, "wb") as wf:
     shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
 os.replace(tmp, dst)
 PY
+  fi
 fi
 
 echo "--- packing Motlie source tree ---"
@@ -499,16 +509,20 @@ if ! dpkg -s build-essential pkg-config libfuse3-dev curl ca-certificates tar gz
   printf 'admin\n' | sudo -S apt-get update
   printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2
 fi
-export PATH="/home/admin/.cargo/bin:\$PATH"
-if ! command -v cargo >/dev/null 2>&1; then
-  curl https://sh.rustup.rs -sSf | sh -s -- -y
+if [[ ! -x /usr/local/bin/motlie-vfs-guest-v1_15 ]]; then
+  export PATH="/home/admin/.cargo/bin:\$PATH"
+  if ! command -v cargo >/dev/null 2>&1 || ! rustc -vV >/dev/null 2>&1; then
+    rm -rf /home/admin/.cargo /home/admin/.rustup
+    curl https://sh.rustup.rs -sSf | sh -s -- -y
+    export PATH="/home/admin/.cargo/bin:\$PATH"
+  fi
+  printf 'admin\n' | sudo -S rm -rf /var/lib/motlie/src /var/lib/motlie/target
+  printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie/src
+  printf 'admin\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
+  printf 'admin\n' | sudo -S chown -R admin:admin /var/lib/motlie
+  cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_15 --target-dir /var/lib/motlie/src/target
+  printf 'admin\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_15 /usr/local/bin/motlie-vfs-guest-v1_15
 fi
-printf 'admin\n' | sudo -S rm -rf /var/lib/motlie/src /var/lib/motlie/target
-printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie/src
-printf 'admin\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
-printf 'admin\n' | sudo -S chown -R admin:admin /var/lib/motlie
-cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_15 --target-dir /var/lib/motlie/src/target
-printf 'admin\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_15 /usr/local/bin/motlie-vfs-guest-v1_15
 printf 'admin\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
 printf 'admin\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
 printf 'admin\n' | sudo -S systemctl daemon-reload
