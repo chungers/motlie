@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use motlie_model::{ArtifactPolicy, AudioSpec, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint};
+use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 use serde::Deserialize;
 
 pub(crate) use motlie_model::metrics_runtime::{
-    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
+    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
 };
 
 /// Paths to the three ONNX model components, config, and vocabulary.
@@ -140,14 +140,6 @@ impl Qwen3TtsConfig {
 
         Ok(config)
     }
-
-    pub(crate) fn audio_spec(&self) -> AudioSpec {
-        AudioSpec {
-            sample_rate_hz: self.sample_rate,
-            channels: 1,
-            encoding: PcmEncoding::F32Le,
-        }
-    }
 }
 
 /// Vocabulary loaded from vocab.json: maps tokens to integer IDs.
@@ -218,15 +210,18 @@ impl Vocabulary {
         for &(token, id) in entries {
             map.insert(token.to_string(), id);
         }
-        let unk_id = map.get("<unk>").copied().ok_or_else(|| {
-            ModelError::InvalidConfiguration("test vocab missing <unk>".into())
-        })?;
-        let bos_id = map.get("<bos>").copied().ok_or_else(|| {
-            ModelError::InvalidConfiguration("test vocab missing <bos>".into())
-        })?;
-        let eos_id = map.get("<eos>").copied().ok_or_else(|| {
-            ModelError::InvalidConfiguration("test vocab missing <eos>".into())
-        })?;
+        let unk_id = map
+            .get("<unk>")
+            .copied()
+            .ok_or_else(|| ModelError::InvalidConfiguration("test vocab missing <unk>".into()))?;
+        let bos_id = map
+            .get("<bos>")
+            .copied()
+            .ok_or_else(|| ModelError::InvalidConfiguration("test vocab missing <bos>".into()))?;
+        let eos_id = map
+            .get("<eos>")
+            .copied()
+            .ok_or_else(|| ModelError::InvalidConfiguration("test vocab missing <eos>".into()))?;
         let max_token_len = map
             .keys()
             .filter(|k| !k.starts_with('<'))
@@ -349,8 +344,7 @@ fn compute_power_spectrum(
                 } else {
                     0.0
                 };
-                let angle =
-                    -2.0 * std::f64::consts::PI * k as f64 * n as f64 / fft_size as f64;
+                let angle = -2.0 * std::f64::consts::PI * k as f64 * n as f64 / fft_size as f64;
                 real += sample * angle.cos();
                 imag += sample * angle.sin();
             }
@@ -447,68 +441,6 @@ pub(crate) fn resample_mono(samples: &[f32], src_rate: u32, dst_rate: u32) -> Ve
     output
 }
 
-/// Downmix multi-channel audio to mono by averaging channels.
-pub(crate) fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-    let ch = channels as usize;
-    samples
-        .chunks_exact(ch)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
-}
-
-/// Decode raw PCM bytes into f32 samples.
-pub(crate) fn decode_pcm_to_f32(pcm: &[u8], encoding: PcmEncoding) -> Result<Vec<f32>, ModelError> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            if !pcm.len().is_multiple_of(2) {
-                return Err(ModelError::InvalidConfiguration(
-                    "S16Le reference audio length must be even".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-                .collect())
-        }
-        PcmEncoding::F32Le => {
-            if !pcm.len().is_multiple_of(4) {
-                return Err(ModelError::InvalidConfiguration(
-                    "F32Le reference audio length must be a multiple of 4".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect())
-        }
-    }
-}
-
-/// Encode f32 audio samples to PCM bytes.
-pub(crate) fn encode_pcm(samples: &[f32], encoding: PcmEncoding) -> Vec<u8> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            let mut out = Vec::with_capacity(samples.len() * 2);
-            for sample in samples {
-                let clamped = sample.clamp(-1.0, 1.0);
-                let as_i16 = (clamped * i16::MAX as f32) as i16;
-                out.extend_from_slice(&as_i16.to_le_bytes());
-            }
-            out
-        }
-        PcmEncoding::F32Le => {
-            let mut out = Vec::with_capacity(samples.len() * 4);
-            for sample in samples {
-                out.extend_from_slice(&sample.to_le_bytes());
-            }
-            out
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,7 +453,9 @@ mod tests {
         let paths = build_artifact_paths(&root);
         let err = validate_artifacts(&paths).expect_err("missing components should fail");
 
-        assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("does not exist")));
+        assert!(
+            matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("does not exist"))
+        );
     }
 
     #[test]
@@ -593,12 +527,8 @@ mod tests {
 
     #[test]
     fn tokenizer_empty_text_produces_only_bos_eos() {
-        let vocab = Vocabulary::from_entries(&[
-            ("<unk>", 0),
-            ("<bos>", 1),
-            ("<eos>", 2),
-        ])
-        .expect("test vocab");
+        let vocab = Vocabulary::from_entries(&[("<unk>", 0), ("<bos>", 1), ("<eos>", 2)])
+            .expect("test vocab");
 
         let ids = vocab.tokenize("");
         assert_eq!(ids, vec![1, 2]);
@@ -606,12 +536,8 @@ mod tests {
 
     #[test]
     fn tokenizer_all_unknown_advances_one_char_at_a_time() {
-        let vocab = Vocabulary::from_entries(&[
-            ("<unk>", 0),
-            ("<bos>", 1),
-            ("<eos>", 2),
-        ])
-        .expect("test vocab");
+        let vocab = Vocabulary::from_entries(&[("<unk>", 0), ("<bos>", 1), ("<eos>", 2)])
+            .expect("test vocab");
 
         let ids = vocab.tokenize("xyz");
         // Each char is unknown, advances by 1

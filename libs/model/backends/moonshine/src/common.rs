@@ -3,12 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint};
+use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 use tokenizers::Tokenizer;
 
-pub(crate) use motlie_model::metrics_runtime::{lock_metrics, observe_latency, RuntimeMetricState};
-
-const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
+pub(crate) use motlie_model::metrics_runtime::{RuntimeMetricState, lock_metrics, observe_latency};
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -262,119 +260,6 @@ fn write_token_bytes(out: &mut Vec<u8>, bytes: Vec<u8>) -> Result<(), ModelError
     Ok(())
 }
 
-/// Per-stream normalization state that carries incomplete PCM and resampler
-/// state across chunk boundaries so arbitrary chunking remains lossless.
-pub(crate) struct NormalizerState {
-    pending_bytes: Vec<u8>,
-    pending_channel_samples: Vec<f32>,
-    resample_cursor: f64,
-    resampling_active: bool,
-    carry_sample: Option<f32>,
-}
-
-impl NormalizerState {
-    pub(crate) fn new() -> Self {
-        Self {
-            pending_bytes: Vec::new(),
-            pending_channel_samples: Vec::new(),
-            resample_cursor: 0.0,
-            resampling_active: false,
-            carry_sample: None,
-        }
-    }
-
-    pub(crate) fn flush(&mut self, pcm_buffer: &mut Vec<f32>) {
-        if self.resampling_active {
-            if let Some(carry) = self.carry_sample.take() {
-                pcm_buffer.push(carry);
-            }
-        }
-    }
-
-    pub(crate) fn normalize(
-        &mut self,
-        data: &[u8],
-        spec: &motlie_model::AudioSpec,
-    ) -> Result<Vec<f32>, ModelError> {
-        let mut raw = std::mem::take(&mut self.pending_bytes);
-        raw.extend_from_slice(data);
-
-        let sample_bytes = match spec.encoding {
-            PcmEncoding::S16Le => 2,
-            PcmEncoding::F32Le => 4,
-        };
-        let aligned_len = raw.len() - (raw.len() % sample_bytes);
-        self.pending_bytes = raw[aligned_len..].to_vec();
-        let aligned = &raw[..aligned_len];
-
-        let decoded: Vec<f32> = match spec.encoding {
-            PcmEncoding::S16Le => aligned
-                .chunks_exact(2)
-                .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0)
-                .collect(),
-            PcmEncoding::F32Le => aligned
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect(),
-        };
-
-        let mono = if spec.channels <= 1 {
-            decoded
-        } else {
-            let channels = spec.channels as usize;
-            let mut all_samples = std::mem::take(&mut self.pending_channel_samples);
-            all_samples.extend(decoded);
-
-            let complete_frames = all_samples.len() / channels;
-            let used = complete_frames * channels;
-            self.pending_channel_samples = all_samples[used..].to_vec();
-
-            all_samples[..used]
-                .chunks_exact(channels)
-                .map(|frame| frame.iter().sum::<f32>() / spec.channels as f32)
-                .collect()
-        };
-
-        if spec.sample_rate_hz == TARGET_SAMPLE_RATE_HZ || mono.is_empty() {
-            self.resampling_active = false;
-            if let Some(&last) = mono.last() {
-                self.carry_sample = Some(last);
-            }
-            return Ok(mono);
-        }
-
-        self.resampling_active = true;
-
-        let samples: Vec<f32> = if let Some(carry) = self.carry_sample {
-            let mut combined = Vec::with_capacity(1 + mono.len());
-            combined.push(carry);
-            combined.extend_from_slice(&mono);
-            combined
-        } else {
-            mono
-        };
-
-        let ratio = spec.sample_rate_hz as f64 / TARGET_SAMPLE_RATE_HZ as f64;
-        let mut output = Vec::new();
-        let mut cursor = self.resample_cursor;
-
-        while (cursor as usize) + 1 < samples.len() {
-            let idx = cursor as usize;
-            let frac = cursor - idx as f64;
-            let interpolated =
-                samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac;
-            output.push(interpolated as f32);
-            cursor += ratio;
-        }
-
-        let last_idx = samples.len().saturating_sub(1) as f64;
-        self.resample_cursor = (cursor - last_idx).max(0.0);
-        self.carry_sample = samples.last().copied();
-
-        Ok(output)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,41 +271,9 @@ mod tests {
     }
 
     #[test]
-    fn s16le_decode_requires_even_length() {
-        let mut norm = NormalizerState::new();
-        let spec = motlie_model::AudioSpec {
-            sample_rate_hz: TARGET_SAMPLE_RATE_HZ,
-            channels: 1,
-            encoding: PcmEncoding::S16Le,
-        };
-
-        let out = norm.normalize(&[1], &spec).expect("partial sample should be buffered");
-        assert!(out.is_empty());
-    }
-
-    #[test]
     fn oversized_token_lengths_fail_with_explicit_error() {
         let err = write_token_bytes(&mut Vec::new(), vec![0_u8; 16_384])
             .expect_err("oversized token must fail");
         assert!(matches!(err, ModelError::InvalidConfiguration(msg) if msg.contains("16,383")));
-    }
-
-    #[test]
-    fn normalizer_flushes_deferred_resample_tail() {
-        let mut norm = NormalizerState::new();
-        let spec = motlie_model::AudioSpec {
-            sample_rate_hz: 8_000,
-            channels: 1,
-            encoding: PcmEncoding::F32Le,
-        };
-        let input = [0.0_f32, 1.0_f32];
-        let bytes: Vec<u8> = input.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-
-        let out = norm.normalize(&bytes, &spec).expect("normalize should succeed");
-        assert!(!out.is_empty());
-
-        let mut flushed = out.clone();
-        norm.flush(&mut flushed);
-        assert!(flushed.len() >= out.len());
     }
 }

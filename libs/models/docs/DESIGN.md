@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-18 | @codex-asr: Documented the post-`#201` strict typed audio boundary and the remaining reusable telephony-ingress work needed by issue `#198` and Telnyx PR `#186`. Also removed the outdated trait-object backend-factory note so the design matches the current static-dispatch implementation. | Architecture, Backend Composition, Testing Scope for PLAN, Open Concerns |
+| 2026-04-17 | @codex-asr: Renamed the shipped examples from versioned names to capability/model names and updated the documented example paths accordingly. | Architecture, API Sketch |
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/models` as the curated bundle catalog and composition crate over `libs/model`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
 | 2026-04-07 | @codex-researcher: Clarified that curated local model download is an explicit `libs/models` control, separate from backend cache-miss behavior. | Packaging and Deployment Model, Release Assembly Utility |
 | 2026-04-08 | @codex-researcher: Clarified that `libs/models` public fallible APIs should use typed library errors rather than `anyhow`, and specified the first vertical-slice artifact contract for `embeddinggemma_300m`. | Solution, Bundle Catalog Model, Packaging and Deployment Model |
@@ -154,6 +156,66 @@ This split is intentional:
 6. The loaded handle exposes capability adapters through `libs/model` traits
 
 This keeps runtime-specific and packaging-specific logic behind the bundle constructor path while preserving a common contract for callers.
+
+### Strict Typed Audio Boundary
+
+For ASR and TTS bundles, the correctness boundary is now the typed audio path in
+`libs/model`, not runtime PCM metadata. The canonical public contracts are:
+
+- `AudioBuf<S, const RATE_HZ: u32, C>`
+- `AudioTransform`
+- `BatchTranscriber`
+- `StreamingTranscriber`
+- `SpeechSynthesizer`
+- `CloneReference<RATE_HZ, C>`
+
+Implications:
+
+- curated ASR/TTS backends consume and emit typed PCM buffers rather than
+  ad hoc `Vec<u8>` chunk streams
+- TTS-to-ASR composition must happen through explicit typed transforms
+- curated ASR/TTS bundle selection remains a closed, feature-gated set compiled
+  into enum dispatch rather than a runtime plugin or registry path
+- a transport or telephony adapter may not feed encoded bytes directly into a
+  model session; it must first produce the exact `AudioBuf<...>` expected by the
+  selected backend
+- shipped ASR/TTS examples must use the same typed contracts as production code
+  so example binaries cannot silently bypass the invariant checks
+
+This is the key response to issue `#198`: the model layer should make silent
+sample-rate, encoding, and channel-layout mismatches structurally harder, and
+eventually impossible, to express.
+
+### Transport and Telephony Ingress Boundary
+
+The typed ASR/TTS model boundary is necessary but not sufficient for live voice
+integrations such as Telnyx PR `#186`. A second correctness boundary exists
+above the model crates wherever provider payloads first enter Motlie.
+
+The generic part of that problem is not Telnyx-specific:
+
+- telephony codecs such as G.711 mu-law and A-law
+- source sample rates such as `8000 Hz`
+- packet/frame duration and reordering
+- chunking/framing for backend ingestion
+- explicit resample and sample-format conversion
+
+Those stages should remain provider-agnostic and should terminate in the same
+typed `AudioBuf<...>` contracts used by `libs/model`. Provider-specific crates
+such as the Telnyx adapter should own protocol schemas and session orchestration,
+but they should not invent a parallel audio typing story.
+
+Design requirement for the first telephony vertical slice:
+
+- inbound telephony payloads must become a typed decoded frame
+- decoded PCM must become an explicit `AudioBuf<...>`
+- resampling / normalization must be an explicit transform stage
+- backend ingestion begins only after the typed PCM shape matches the backend
+  contract exactly
+
+Until that ingress layer exists, live integrations can still reintroduce the
+same class of silent runtime failures that `#201` eliminated inside the curated
+model layer.
 
 ## Framework Principles
 
@@ -465,20 +527,15 @@ Generic backend implementations should live under `libs/model/backends/*`, not i
 
 `libs/models` may expose backend choice in descriptor metadata for observability, but applications should not instantiate backend adapters directly.
 
-Recommended internal trait:
+The current curated path is static-dispatch:
 
-```rust
-trait BackendFactory {
-    async fn start_bundle(
-        &self,
-        descriptor: &BundleDescriptor,
-        artifacts: &ResolvedArtifacts,
-        options: &StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError>;
-}
-```
+- `libs/models` performs feature-gated enum dispatch over the compiled-in
+  curated bundles
+- `libs/model` uses concrete associated handle/session types for capabilities
+- new backend composition work must not reintroduce trait objects or an erased
+  plugin registry for curated ASR/TTS bundles
 
-This trait is not required to be public in v1. The important boundary is structural:
+The important boundary is structural:
 
 - `libs/model/backends/mistral` owns generic `mistral.rs` contract implementations
 - `libs/model/backends/ort` owns generic ORT contract implementations
@@ -647,6 +704,10 @@ PLAN must specify concrete tests for:
 - catalog metadata used to select bundles for evaluation tracks
 - unsupported-capability behavior for embedding-only or chat-only bundles
 - feature-gated build surfaces
+- compile-fail coverage for invalid typed audio compositions so wrong-rate or
+  wrong-encoding paths fail during development rather than in live voice runs
+- explicit validation for the telephony-to-model adaptation boundary used by the
+  first live voice slice (`decode -> normalize -> resample -> ingest`)
 
 If protected or encrypted bundle packaging enters scope, PLAN must add explicit verification for key handling, integrity checks, and failure behavior.
 
@@ -656,3 +717,8 @@ If protected or encrypted bundle packaging enters scope, PLAN must add explicit 
 - Whether `Catalog` should be fully static in v1 or support external registration hooks
 - How much backend choice should be exposed in descriptor metadata for observability and support diagnostics
 - Whether bundle manifests should live in Rust code, generated tables, or external metadata files
+- The reusable typed telephony-ingress layer described by issue `#198` and
+  Telnyx PR `#186` is not fully landed yet. `#201` establishes the typed
+  PCM/model boundary, but provider-agnostic decoded-frame / codec / resample /
+  chunking stages still need to be formalized so live integrations cannot fall
+  back to ad hoc byte plumbing.

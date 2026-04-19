@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use motlie_model::{
-    ArtifactPolicy, AudioSpec, CheckpointFormat, ModelError, PcmEncoding, ResolvedCheckpoint,
-};
+use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 
 pub(crate) use motlie_model::metrics_runtime::{
     RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
@@ -59,14 +57,6 @@ pub(crate) fn configure_artifact_policy(
     };
 
     resolve_from_model_root(&model_root)
-}
-
-pub(crate) fn audio_spec() -> AudioSpec {
-    AudioSpec {
-        sample_rate_hz: DEFAULT_SAMPLE_RATE_HZ,
-        channels: 1,
-        encoding: PcmEncoding::F32Le,
-    }
 }
 
 fn resolve_from_model_root(root: &Path) -> Result<Qwen3TtsCppArtifactPaths, ModelError> {
@@ -163,66 +153,6 @@ pub(crate) fn resample_mono(samples: &[f32], src_rate: u32, dst_rate: u32) -> Ve
     output
 }
 
-pub(crate) fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-
-    let ch = channels as usize;
-    samples
-        .chunks_exact(ch)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
-}
-
-pub(crate) fn decode_pcm_to_f32(pcm: &[u8], encoding: PcmEncoding) -> Result<Vec<f32>, ModelError> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            if !pcm.len().is_multiple_of(2) {
-                return Err(ModelError::InvalidConfiguration(
-                    "S16Le reference audio length must be even".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-                .collect())
-        }
-        PcmEncoding::F32Le => {
-            if !pcm.len().is_multiple_of(4) {
-                return Err(ModelError::InvalidConfiguration(
-                    "F32Le reference audio length must be a multiple of 4".into(),
-                ));
-            }
-            Ok(pcm
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect())
-        }
-    }
-}
-
-pub(crate) fn encode_pcm(samples: &[f32], encoding: PcmEncoding) -> Vec<u8> {
-    match encoding {
-        PcmEncoding::S16Le => {
-            let mut out = Vec::with_capacity(samples.len() * 2);
-            for sample in samples {
-                let clamped = sample.clamp(-1.0, 1.0);
-                let as_i16 = (clamped * i16::MAX as f32) as i16;
-                out.extend_from_slice(&as_i16.to_le_bytes());
-            }
-            out
-        }
-        PcmEncoding::F32Le => {
-            let mut out = Vec::with_capacity(samples.len() * 4);
-            for sample in samples {
-                out.extend_from_slice(&sample.to_le_bytes());
-            }
-            out
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,19 +176,5 @@ mod tests {
         assert_eq!(resolved.tokenizer, root.join(TOKENIZER_FILE_F16));
 
         std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn downmix_to_mono_averages_channels() {
-        let mono = downmix_to_mono(&[1.0, -1.0, 0.5, 0.5], 2);
-        assert_eq!(mono, vec![0.0, 0.5]);
-    }
-
-    #[test]
-    fn encode_and_decode_f32_round_trip() {
-        let samples = vec![0.25_f32, -0.5_f32, 0.75_f32];
-        let encoded = encode_pcm(&samples, PcmEncoding::F32Le);
-        let decoded = decode_pcm_to_f32(&encoded, PcmEncoding::F32Le).expect("f32 should decode");
-        assert_eq!(decoded, samples);
     }
 }

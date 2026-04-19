@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_moonshine::MoonshineStreamingAdapter;
+use motlie_model_moonshine::{MoonshineHandle, MoonshineStreamingBundle, MoonshineStreamingSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -25,13 +24,8 @@ const STREAMING_CONFIG_FILE: &str = "onnx/small/streaming_config.json";
 const TOKENIZER_JSON_FILE: &str = "onnx/small/tokenizer.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_root),
-        Arc::new(MoonshineStreamingAdapter::small_en()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -91,19 +85,45 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(MoonshineStreamingAdapter::small_en()),
-        Arc::new(resolve_local_model_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = MoonshineStreamingSpec::small_en();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Ort,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn typed_bundle() -> MoonshineStreamingBundle {
+    MoonshineStreamingBundle::new(MoonshineStreamingSpec::small_en())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<MoonshineHandle, ModelError> {
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_root,
+        )?)
+        .await
 }
 
 fn resolve_local_model_root(root: &Path) -> Result<PathBuf, ModelError> {
+    if [
+        FRONTEND_FILE,
+        ENCODER_FILE,
+        ADAPTER_FILE,
+        CROSS_KV_FILE,
+        DECODER_KV_FILE,
+        STREAMING_CONFIG_FILE,
+        TOKENIZER_JSON_FILE,
+    ]
+    .into_iter()
+    .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -166,13 +186,17 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "moonshine_streaming_en");
         assert_eq!(descriptor.display_name, "Moonshine Streaming EN");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(descriptor
-            .requirements
-            .build
-            .contains(&BuildConstraint::CpuOnly));
-        assert!(descriptor
-            .capabilities
-            .supports(CapabilityKind::Transcription));
+        assert!(
+            descriptor
+                .requirements
+                .build
+                .contains(&BuildConstraint::CpuOnly)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription)
+        );
     }
 
     #[test]
@@ -183,9 +207,11 @@ mod tests {
         #[cfg(feature = "model-moonshine-streaming")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Transcription)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Transcription)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
         }
     }
 
@@ -219,5 +245,31 @@ mod tests {
         assert_eq!(resolved, snapshot_dir);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_root_resolver_accepts_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("moonshine-direct-root-{unique}"));
+        std::fs::create_dir_all(root.join("onnx/small")).expect("should create model dir");
+        for filename in [
+            FRONTEND_FILE,
+            ENCODER_FILE,
+            ADAPTER_FILE,
+            CROSS_KV_FILE,
+            DECODER_KV_FILE,
+            STREAMING_CONFIG_FILE,
+            TOKENIZER_JSON_FILE,
+        ] {
+            std::fs::write(root.join(filename), b"test").expect("should write artifact");
+        }
+
+        let resolved = resolve_local_model_root(&root).expect("direct artifact dir should resolve");
+        assert_eq!(resolved, root);
+
+        let _ = std::fs::remove_dir_all(resolved);
     }
 }

@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_mistral::MistralTextAdapter;
+use motlie_model_mistral::{MistralTextBundle, MistralTextHandle, MistralTextSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
@@ -14,13 +14,8 @@ use crate::{
 pub const SELECTOR: &str = "qwen/qwen3_4b";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_snapshot_root),
-        Arc::new(MistralTextAdapter::qwen3()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -68,16 +63,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(MistralTextAdapter::qwen3()),
-        Arc::new(resolve_local_snapshot_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = MistralTextSpec::qwen3_4b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::MistralRs,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::Qwen3_4B
+}
+
+pub async fn start(options: StartOptions) -> Result<MistralTextHandle, ModelError> {
+    MistralTextBundle::new(MistralTextSpec::qwen3_4b())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_snapshot_root,
+        )?)
+        .await
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -88,8 +94,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::{BundleFamily, Catalog};
-    use motlie_model::eval::EvalTrack;
     use motlie_model::CapabilityDescriptor;
+    use motlie_model::eval::EvalTrack;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -102,12 +108,16 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Chat));
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Completion));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Chat)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Completion)
+        );
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
@@ -133,9 +143,11 @@ mod tests {
         #[cfg(feature = "model-qwen3-4b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Chat)
-                .any(|b| b.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Chat)
+                    .any(|b| b.id == bundle_id)
+            );
         }
     }
 

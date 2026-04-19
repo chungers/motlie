@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_qwen3_tts::Qwen3TtsSpeechAdapter;
+use motlie_model_qwen3_tts::{Qwen3TtsHandle, Qwen3TtsSpeechBundle, Qwen3TtsSpeechSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
@@ -34,13 +33,8 @@ const CONFIG_FILE: &str = "config.json";
 const VOCAB_FILE: &str = "vocab.json";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_model_path),
-        Arc::new(Qwen3TtsSpeechAdapter::qwen3_tts_12hz_0_6b()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -95,19 +89,43 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(Qwen3TtsSpeechAdapter::qwen3_tts_12hz_0_6b()),
-        Arc::new(resolve_local_model_path),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = Qwen3TtsSpeechSpec::qwen3_tts_12hz_0_6b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::Ort,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn typed_bundle() -> Qwen3TtsSpeechBundle {
+    Qwen3TtsSpeechBundle::new(Qwen3TtsSpeechSpec::qwen3_tts_12hz_0_6b())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<Qwen3TtsHandle, ModelError> {
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_model_path,
+        )?)
+        .await
 }
 
 fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
+    if [
+        ENCODER_FILE,
+        DECODER_FILE,
+        VOCODER_FILE,
+        CONFIG_FILE,
+        VOCAB_FILE,
+    ]
+    .into_iter()
+    .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(&repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -136,7 +154,13 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
         )));
     }
 
-    for filename in [ENCODER_FILE, DECODER_FILE, VOCODER_FILE, CONFIG_FILE, VOCAB_FILE] {
+    for filename in [
+        ENCODER_FILE,
+        DECODER_FILE,
+        VOCODER_FILE,
+        CONFIG_FILE,
+        VOCAB_FILE,
+    ] {
         let path = snapshot_dir.join(filename);
         if !path.exists() {
             return Err(ModelError::InvalidConfiguration(format!(
@@ -156,6 +180,7 @@ mod tests {
     use super::*;
     use crate::Catalog;
     use motlie_model::CapabilityKind;
+    use motlie_model::ModelBundle;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -194,7 +219,7 @@ mod tests {
 
     #[test]
     fn quantization_is_explicitly_none() {
-        let bundle = bundle();
+        let bundle = typed_bundle();
 
         assert_eq!(
             bundle.metadata().quantization,
@@ -210,9 +235,11 @@ mod tests {
         #[cfg(feature = "model-qwen3-tts-0_6b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Speech)
-                .any(|b| b.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Speech)
+                    .any(|b| b.id == bundle_id)
+            );
         }
     }
 
@@ -221,8 +248,7 @@ mod tests {
         let root = unique_temp_dir();
         std::fs::create_dir_all(&root).expect("temp root should be creatable");
 
-        let error =
-            resolve_local_model_path(&root).expect_err("missing cache should fail closed");
+        let error = resolve_local_model_path(&root).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
@@ -236,8 +262,8 @@ mod tests {
         let _snapshot = create_fake_hf_cache(&root);
         // Snapshot exists but has no ONNX files.
 
-        let error = resolve_local_model_path(&root)
-            .expect_err("missing ONNX components should fail");
+        let error =
+            resolve_local_model_path(&root).expect_err("missing ONNX components should fail");
 
         assert!(matches!(
             error,
@@ -252,16 +278,42 @@ mod tests {
         let root = unique_temp_dir();
         let snapshot = create_fake_hf_cache(&root);
 
-        for filename in [ENCODER_FILE, DECODER_FILE, VOCODER_FILE, CONFIG_FILE, VOCAB_FILE] {
-            std::fs::write(snapshot.join(filename), "stub")
-                .expect("stub file should be writable");
+        for filename in [
+            ENCODER_FILE,
+            DECODER_FILE,
+            VOCODER_FILE,
+            CONFIG_FILE,
+            VOCAB_FILE,
+        ] {
+            std::fs::write(snapshot.join(filename), "stub").expect("stub file should be writable");
         }
 
-        let resolved = resolve_local_model_path(&root)
-            .expect("complete ONNX artifacts should resolve");
+        let resolved =
+            resolve_local_model_path(&root).expect("complete ONNX artifacts should resolve");
 
         assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn local_resolution_accepts_direct_artifact_dir() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+
+        for filename in [
+            ENCODER_FILE,
+            DECODER_FILE,
+            VOCODER_FILE,
+            CONFIG_FILE,
+            VOCAB_FILE,
+        ] {
+            std::fs::write(root.join(filename), "stub").expect("stub file should be writable");
+        }
+
+        let resolved = resolve_local_model_path(&root).expect("direct dir should resolve");
+
+        assert_eq!(resolved, root);
+        std::fs::remove_dir_all(&resolved).ok();
     }
 
     fn unique_temp_dir() -> PathBuf {

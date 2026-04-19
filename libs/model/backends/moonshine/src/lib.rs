@@ -10,5 +10,6 @@ mod common;
 mod transcription;
 
 pub use transcription::{
-    MoonshineStreamingAdapter, MoonshineStreamingBundle, MoonshineStreamingSpec,
+    MoonshineHandle, MoonshineStream, MoonshineStreamingAdapter, MoonshineStreamingBundle,
+    MoonshineStreamingSpec,
 };

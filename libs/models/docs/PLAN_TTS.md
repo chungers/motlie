@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-17 | @codex-asr | Renamed the shipped TTS example targets and paths to `tts_piper`, `tts_qwen3_onnx`, and `tts_qwen3_tts_cpp`, and updated the plan references accordingly. |
 | 2026-04-16 | @codex-tts | Replaced the large `qwen3-tts.cpp` vendor tree with a pinned git submodule at `libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` and tightened the build/docs contract around `git submodule update --init --recursive` for fresh checkouts. |
 | 2026-04-16 | @codex-tts | Implemented the official backup TTS backend `motlie-model-qwen3-tts-cpp` with a submodule-backed C API wrapper, curated GGUF bundle wiring, and the `tts_v0.4` example. Validated real CPU synthesis from local GGUF artifacts, validated the optional CUDA build/clippy path on GB10, and documented the current local CUDA runtime fallback to CPU. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS slice: `motlie-model-qwen3-tts` backend with multi-model ONNX pipeline, vocabulary-based tokenizer, proper log-mel reference-audio conditioning, shape-preserving tensor pipeline, curated bundle `qwen3_tts_12hz_0_6b`, and `tts_v0.2` example with voice cloning. Runtime boundary is in-process ONNX via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite. |
@@ -185,11 +186,11 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.1 - `.wav` example
 
-- [x] Add `examples/tts_v0.1/main.rs` as the first TTS example binary.
+- [x] Add `examples/tts_piper/main.rs` as the first TTS example binary.
   DESIGN reference: `API Sketch`, `Output Adapter Boundary`
 - [x] Support `--text <value>` and `--wav <path>` by opening a speech stream and collecting PCM into a `.wav` sink.
   DESIGN reference: `Streaming PCM API Contract`, `Output Adapter Boundary`
-- [x] Document expected preconditions and output in `examples/tts_v0.1/README.md`.
+- [x] Document expected preconditions and output in `examples/tts_piper/README.md`.
   DESIGN reference: `API Sketch`
 
 ### 4.2 - Local playback sink
@@ -213,7 +214,7 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.4 - Example feature wiring
 
-- [x] Add a `models_tts_v0_1` example target with `required-features = ["model-piper-en-us-ljspeech-medium"]`.
+- [x] Add a `tts_piper` example target with `required-features = ["model-piper-en-us-ljspeech-medium"]`.
   DESIGN reference: `Feature Flag Design`
 - [x] Ensure the example builds both with default CPU features and, where available, with `piper-cuda`.
   DESIGN reference: `Feature Flag Design`
@@ -236,7 +237,7 @@ Land the first curated TTS slice with concrete verification commands and env-gat
   DESIGN reference: `Testing Scope for PLAN`
 - [x] `cargo test -p motlie-models --lib --no-default-features --features "model-piper-en-us-ljspeech-medium"`
   DESIGN reference: `Testing Scope for PLAN`
-- [x] `cargo build -p motlie-models --example models_tts_v0_1 --no-default-features --features "model-piper-en-us-ljspeech-medium"`
+- [x] `cargo build -p motlie-models --example tts_piper --no-default-features --features "model-piper-en-us-ljspeech-medium"`
   DESIGN reference: `Testing Scope for PLAN`
 
 ### 5.2 - Env-gated runtime checks
@@ -280,10 +281,10 @@ Only start this after the Piper slice is stable and the speech contract has held
 
 - [x] Add one `.wav` parity example that uses the same sink contract as the Piper example.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Output Adapter Boundary`
-  @cld-review-models 2026-04-15 — `tts_v0.2` example with `--text` and `--wav` flags.
+  @cld-review-models 2026-04-15 — `tts_qwen3_onnx` example with `--text` and `--wav` flags.
 - [x] Add one reference-audio cloning example using `VoiceConditioning::ReferenceAudio`.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Streaming PCM API Contract`
-  @cld-review-models 2026-04-15 — `--reference-audio` and `--reference-text` flags in `tts_v0.2`.
+  @cld-review-models 2026-04-15 — `--reference-audio` and `--reference-text` flags in `tts_qwen3_onnx`.
 - [ ] Add one CUDA-oriented smoke test on GB10-class hardware when such hardware is available in the validation environment.
   DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
 
@@ -313,7 +314,7 @@ This phase is the official backup-TTS track attached to issue `#188`.
 
 ### 7.3 - End-to-end validation
 
-- [x] Add the `.wav` parity example `tts_v0.4`.
+- [x] Add the `.wav` parity example `tts_qwen3_tts_cpp`.
   DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`, `Output Adapter Boundary`
 - [x] Validate real CPU synthesis from local GGUF artifacts and confirm that the emitted `.wav` is valid 24 kHz mono output.
   DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
