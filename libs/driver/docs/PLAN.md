@@ -7,7 +7,7 @@ The first feasibility milestone is largely complete.
 Implemented:
 - `libs/driver` crate
 - `CommandEngine<C, S>`
-- `CommandSet<C>` with `CompletionContext`, `help()`, and async `execute()`
+- `CommandSet<C>` with `CompletionContext`, `help()`, semantic `resolve_command()`, and async `execute()`
 - `clap` integration for parse/help/completion analysis
 - generic retained history buffer
 - driver-owned asciicast recorder
@@ -59,6 +59,43 @@ Not implemented:
 - [x] Build selective tmux-driver feature combinations
 - [x] Capture host-backed smoke-test artifacts
 - [x] Add driver-owned asciicast recording
+
+
+
+## Proposed Next Phase: Semantic Resolution And Namespaced Contexts
+
+Goal:
+- make name resolution a first-class driver concern instead of an ad hoc per-adapter string hack
+
+Why this is next:
+- tmux multi-host mode needs `connect <ssh> as <alias>` and `alias/<target>` semantics
+- future VMM commands will likely need namespace-aware guest references as the surface grows
+- bolting namespace parsing into each adapter `execute()` path would duplicate logic and drift over time
+
+Planned core tasks:
+- [x] extend the `CommandSet<C>` contract with an optional sync `resolve_command()` stage ([Planned Semantic Resolution Stage](DESIGN.md#planned-semantic-resolution-stage), [Proposed trait shape](DESIGN.md#proposed-trait-shape), [Sync resolution rule](DESIGN.md#sync-resolution-rule))
+- [x] keep identity/no-op resolution as the default so current namespace-less adapters still work with only one-line boilerplate ([Compositional requirement](DESIGN.md#compositional-requirement))
+- [x] add a small generic naming module under `libs/driver` for qualified-name parsing and concrete generic resolution errors ([Planned Naming / Resolution Support In `libs/driver`](DESIGN.md#planned-naming--resolution-support-in-libsdriver))
+- [x] document the context-side resolution helper pattern for adapters and app-level command sets ([Shared namespace, adapter-relative resolution](DESIGN.md#shared-namespace-adapter-relative-resolution))
+- [x] update completion guidance so scoped-name completion follows the same rules as scoped-name resolution ([Completion Impact](DESIGN.md#completion-impact))
+
+Planned tmux proving slice:
+- [x] add an opt-in `--multi-host` mode to `bins/tmux/driver` while keeping single-host mode as the default ([Verification Slice: tmux Multi-host Namespaced Mode](DESIGN.md#verification-slice-tmux-multi-host-namespaced-mode))
+- [x] add app-level commands as an outer command family:
+  - [x] `connect <ssh-uri> as <alias>`
+  - [x] `disconnect <alias>`
+  - [x] `use <alias>`
+  - [x] `connections`
+  - references: [Planned composed command-family shape](DESIGN.md#planned-composed-command-family-shape), [Lifecycle rule for `disconnect`](DESIGN.md#lifecycle-rule-for-disconnect)
+- [x] support namespaced tmux entities like `alias/<target>` and preserve bare-name compatibility once `current` is set ([Verification Slice: tmux Multi-host Namespaced Mode](DESIGN.md#verification-slice-tmux-multi-host-namespaced-mode))
+- [x] support current-connection fallback when the user omits an alias ([Verification Slice: tmux Multi-host Namespaced Mode](DESIGN.md#verification-slice-tmux-multi-host-namespaced-mode))
+- [x] add dynamic completion for connection aliases and scoped tmux targets ([Completion Impact](DESIGN.md#completion-impact))
+
+Acceptance:
+- a command set that does not need semantic resolution can still behave exactly like the current design
+- adapters that do need semantic resolution can express it without re-implementing parsing hacks
+- the tmux driver can demonstrate one engine session managing multiple SSH hosts by alias
+- the design is reusable by future VMM guest/namespace-aware command sets
 
 ## Remaining Work
 
