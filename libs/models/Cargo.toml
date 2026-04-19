@@ -36,7 +36,7 @@ whisper-cpp-cuda = ["dep:motlie-model-whisper-cpp", "motlie-model-whisper-cpp/cu
 cuda = ["dep:motlie-model-mistral", "motlie-model-mistral/cuda"]
 cudnn = ["dep:motlie-model-mistral", "motlie-model-mistral/cudnn"]
 flash-attn = ["dep:motlie-model-mistral", "motlie-model-mistral/flash-attn"]
-metal = ["dep:motlie-model-mistral", "motlie-model-mistral/metal"]
+metal = []
 accelerate = ["dep:motlie-model-mistral", "motlie-model-mistral/accelerate"]
 
 [dependencies]
