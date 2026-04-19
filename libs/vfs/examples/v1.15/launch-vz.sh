@@ -103,14 +103,64 @@ cleanup() {
 
 trap cleanup EXIT
 
+kill_stale_runners() {
+  local stale_pids=()
+  local stale_pid=""
+  while read -r stale_pid; do
+    [[ -n "$stale_pid" ]] || continue
+    stale_pids+=("$stale_pid")
+  done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+    /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
+  ')
+
+  if [[ "${#stale_pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  printf '%s\n' "--- terminating stale Vz runners for $GUEST_NAME ---"
+  kill "${stale_pids[@]}" >/dev/null 2>&1 || true
+
+  local attempts=0
+  while [[ $attempts -lt 20 ]]; do
+    local survivors=()
+    while read -r stale_pid; do
+      [[ -n "$stale_pid" ]] || continue
+      survivors+=("$stale_pid")
+    done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+      /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
+    ')
+    if [[ "${#survivors[@]}" -eq 0 ]]; then
+      return 0
+    fi
+    sleep 0.5
+    attempts=$(( attempts + 1 ))
+    if [[ $attempts -eq 10 ]]; then
+      kill -9 "${survivors[@]}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  echo "failed to terminate stale Vz runners for $GUEST_NAME" >&2
+  ps -Ao pid,etime,command | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+    /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print }
+  ' >&2 || true
+  exit 1
+}
+
+if [[ -f "$RUNNER_PID_FILE" ]]; then
+  kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
+  rm -f "$RUNNER_PID_FILE"
+fi
+kill_stale_runners
+
 if ! local_vm_exists "$BASE_VM_NAME"; then
   echo "base VM '$BASE_VM_NAME' not found; run ./build-guest.sh first" >&2
   exit 1
 fi
 
 if local_vm_exists "$RUN_VM_NAME"; then
-  echo "guest VM '$RUN_VM_NAME' already exists; pass --vm-name with a unique value" >&2
-  exit 1
+  echo "--- removing existing guest VM '$RUN_VM_NAME' for rerun ---"
+  tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
+  tart delete "$RUN_VM_NAME" >/dev/null
 fi
 
 mkdir -p "$ARTIFACTS_DIR"
@@ -128,7 +178,42 @@ expect {
     send "admin\r"
     exp_continue
   }
-  eof
+  eof {}
+  timeout {
+    puts stderr "scp timed out: $src -> $dst"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
+}
+EOF
+}
+
+guest_fetch() {
+  local src="$1"
+  local dst="$2"
+  local ip_addr="$3"
+  expect <<EOF
+set timeout -1
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr}:$src "$dst"
+expect {
+  "password:" {
+    send "admin\r"
+    exp_continue
+  }
+  eof {}
+  timeout {
+    puts stderr "scp timed out: ${src} -> ${dst}"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
 }
 EOF
 }
@@ -146,24 +231,47 @@ expect {
     send "admin\r"
     exp_continue
   }
-  eof
+  eof {}
+  timeout {
+    puts stderr "scp timed out: remote guest bash script"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
 }
 EOF
   rm -f "$remote_script"
   expect <<EOF
 set timeout -1
 log_user 0
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -seuo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
+set output ""
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
 expect {
   "password:" {
     send "admin\r"
     exp_continue
   }
+  -re ".+" {
+    append output \$expect_out(0,string)
+    exp_continue
+  }
   eof {
-    if {[info exists expect_out(buffer)]} {
-      puts \$expect_out(buffer)
+    if {\$output ne ""} {
+      puts \$output
     }
   }
+  timeout {
+    puts stderr "ssh timed out: remote guest bash script"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
 }
 EOF
 }
@@ -246,30 +354,74 @@ expect {
     send "admin\r"
     exp_continue
   }
-  eof
+  eof {}
+  timeout {
+    puts stderr "scp timed out: remote guest capture script"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
 }
 EOF
   rm -f "$remote_script"
   expect <<EOF
 set timeout -1
 log_user 0
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -seuo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
+set output ""
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
 expect {
   "password:" {
     send "admin\r"
     exp_continue
   }
+  -re ".+" {
+    append output \$expect_out(0,string)
+    exp_continue
+  }
   eof {
-    if {[info exists expect_out(buffer)]} {
-      puts \$expect_out(buffer)
+    if {\$output ne ""} {
+      puts \$output
     }
   }
+  timeout {
+    puts stderr "ssh timed out: remote guest capture script"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
 }
 EOF
 }
 
 echo "--- cloning guest VM disk ---"
 tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
+
+BASE_VM_DIR="$HOME/.tart/vms/$BASE_VM_NAME"
+RUN_VM_DIR="$HOME/.tart/vms/$RUN_VM_NAME"
+BASE_DISK_PATH="$BASE_VM_DIR/disk.img"
+RUN_DISK_PATH="$RUN_VM_DIR/disk.img"
+if [[ -f "$BASE_DISK_PATH" && -f "$RUN_DISK_PATH" ]]; then
+  echo "--- materializing writable guest disk copy ---"
+  python3 - "$BASE_DISK_PATH" "$RUN_DISK_PATH" <<'PY'
+import os
+import shutil
+import sys
+
+src, dst = sys.argv[1:]
+tmp = dst + ".tmp-copy"
+if os.path.exists(tmp):
+    os.remove(tmp)
+with open(src, "rb") as rf, open(tmp, "wb") as wf:
+    shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
+os.replace(tmp, dst)
+PY
+fi
 
 echo "--- packing Motlie source tree ---"
 COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git -C "$REPO_ROOT" ls-files -z | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --disable-copyfile --no-mac-metadata --no-xattrs --null -czf "$SOURCE_TARBALL" -C "$REPO_ROOT" --files-from -
@@ -284,7 +436,7 @@ else
 fi
 chmod +x "$RUNNER_BIN"
 
-VM_DIR="$HOME/.tart/vms/$RUN_VM_NAME"
+VM_DIR="$RUN_VM_DIR"
 DISK_PATH="$VM_DIR/disk.img"
 NVRAM_PATH="$VM_DIR/nvram.bin"
 MACHINE_ID_PATH="$VM_DIR/machine-id.bin"
@@ -332,7 +484,9 @@ guest_copy "$MOUNTS_FILE" "/tmp/mounts.${GUEST_NAME}.yaml" "$IP_ADDR"
 guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service "$IP_ADDR"
 
 guest_bash "$IP_ADDR" <<EOF
-printf 'admin\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME'
+printf 'admin\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
+printf 'admin\n' | sudo -S umount -lf /workspace >/dev/null 2>&1 || true
+printf 'admin\n' | sudo -S umount -lf /home/$LOGIN_USER >/dev/null 2>&1 || true
 printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie /workspace /etc/motlie-vfs
 if ! getent group '$LOGIN_USER' >/dev/null 2>&1; then
   printf 'admin\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
@@ -341,8 +495,10 @@ if ! id -u '$LOGIN_USER' >/dev/null 2>&1; then
   printf 'admin\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
 fi
 printf 'admin\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
-printf 'admin\n' | sudo -S apt-get update
-printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2
+if ! dpkg -s build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 >/dev/null 2>&1; then
+  printf 'admin\n' | sudo -S apt-get update
+  printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2
+fi
 export PATH="/home/admin/.cargo/bin:\$PATH"
 if ! command -v cargo >/dev/null 2>&1; then
   curl https://sh.rustup.rs -sSf | sh -s -- -y
@@ -360,7 +516,11 @@ printf 'admin\n' | sudo -S systemctl enable motlie-vfs-guest.service
 printf 'admin\n' | sudo -S systemctl restart motlie-vfs-guest.service
 EOF
 
-POST_PROVISION_CHECK="$(guest_capture "$IP_ADDR" <<'EOF'
+POST_PROVISION_REMOTE_JSON="/tmp/motlie-vfs-post-provision.json"
+POST_PROVISION_OK=0
+POST_PROVISION_CHECK=""
+for _ in $(seq 1 10); do
+  guest_bash "$IP_ADDR" <<EOF
 python3 - <<'PY2'
 import json
 from pathlib import Path
@@ -370,37 +530,37 @@ payload = {
     "guest_bin": Path("/usr/local/bin/motlie-vfs-guest-v1_15").exists(),
     "service_unit": Path("/etc/systemd/system/motlie-vfs-guest.service").exists(),
 }
-print(json.dumps(payload, sort_keys=True))
+Path("$POST_PROVISION_REMOTE_JSON").write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 PY2
 EOF
-)"
-POST_PROVISION_CHECK="$(printf '%s' "$POST_PROVISION_CHECK" | tr -d '\r' | sed -n '/^{.*}$/p' | tail -n 1)"
-if [[ -z "$POST_PROVISION_CHECK" ]]; then
-  echo "guest post-provision verification returned no JSON" >&2
-  exit 1
-fi
-POST_PROVISION_OK="$(printf '%s' "$POST_PROVISION_CHECK" | python3 - <<'PY'
-import json
-import sys
-
-payload = json.loads(sys.stdin.read())
-print("ok" if all(payload.values()) else "bad")
-PY
-)"
-if [[ "$POST_PROVISION_OK" != "ok" ]]; then
+  POST_PROVISION_LOCAL_JSON="$(mktemp)"
+  guest_fetch "$POST_PROVISION_REMOTE_JSON" "$POST_PROVISION_LOCAL_JSON" "$IP_ADDR"
+  POST_PROVISION_CHECK="$(cat "$POST_PROVISION_LOCAL_JSON")"
+  rm -f "$POST_PROVISION_LOCAL_JSON"
+  if [[ -n "$POST_PROVISION_CHECK" ]]; then
+    POST_PROVISION_STATE="$(printf '%s' "$POST_PROVISION_CHECK" | python3 -c 'import json,sys; payload=json.loads(sys.stdin.read()); print("ok" if all(payload.values()) else "bad")')"
+    if [[ "$POST_PROVISION_STATE" == "ok" ]]; then
+      POST_PROVISION_OK=1
+      break
+    fi
+  fi
+  sleep 1
+done
+if [[ "$POST_PROVISION_OK" -ne 1 ]]; then
   echo "guest post-provision verification failed" >&2
   printf '%s\n' "$POST_PROVISION_CHECK" >&2
   exit 1
 fi
 
 VALIDATION_OK=0
+VALIDATION_REMOTE_JSON="/tmp/motlie-vfs-validation.json"
 for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
   if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
     echo "vz-vsock-runner exited early; log follows:" >&2
     cat "$RUN_LOG" >&2 || true
     exit 1
   fi
-  VALIDATION_JSON="$(guest_capture "$IP_ADDR" <<EOF
+  guest_bash "$IP_ADDR" <<EOF
 python3 - <<'PY2'
 import json
 from pathlib import Path
@@ -424,7 +584,7 @@ result = {
 }
 
 if not (result['workspace_mountpoint'] and result['home_mountpoint'] and workspace_readme_path.exists() and env_path.exists() and auth_path.exists()):
-    print('')
+    Path('$VALIDATION_REMOTE_JSON').write_text('', encoding='utf-8')
     raise SystemExit(0)
 
 workspace_readme = workspace_readme_path.read_text(encoding='utf-8').strip()
@@ -442,20 +602,15 @@ result['status'] = 'ok' if (
     and env_line == expected_env
     and bool(authorized_keys)
 ) else 'mismatch'
-print(json.dumps(result, sort_keys=True))
+Path('$VALIDATION_REMOTE_JSON').write_text(json.dumps(result, sort_keys=True) + '\n', encoding='utf-8')
 PY2
 EOF
-)" 
-  VALIDATION_JSON="$(printf '%s' "$VALIDATION_JSON" | tr -d '\r' | sed -n '/^{.*}$/p' | tail -n 1)"
+  VALIDATION_LOCAL_JSON="$(mktemp)"
+  guest_fetch "$VALIDATION_REMOTE_JSON" "$VALIDATION_LOCAL_JSON" "$IP_ADDR"
+  VALIDATION_JSON="$(cat "$VALIDATION_LOCAL_JSON")"
+  rm -f "$VALIDATION_LOCAL_JSON"
   if [[ -n "${VALIDATION_JSON//[[:space:]]/}" ]]; then
-    STATUS="$(printf '%s' "$VALIDATION_JSON" | python3 - <<'PY'
-import json
-import sys
-
-payload = json.loads(sys.stdin.read())
-print(payload['status'])
-PY
-)"
+    STATUS="$(printf '%s' "$VALIDATION_JSON" | python3 -c 'import json,sys; payload=json.loads(sys.stdin.read()); print(payload["status"])')"
     if [[ "$STATUS" == "ok" ]]; then
       printf '%s\n' "$VALIDATION_JSON" >"$ARTIFACTS_DIR/${GUEST_NAME}-validation.json"
       VALIDATION_OK=1

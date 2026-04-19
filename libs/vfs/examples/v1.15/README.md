@@ -166,12 +166,12 @@ In separate terminals:
 
 ```bash
 cd libs/vfs/examples/v1.15
-./launch-vz.sh --guest alice
+./launch-vz.sh --guest alice --vm-name motlie-v1-15-alice-iter
 ```
 
 ```bash
 cd libs/vfs/examples/v1.15
-./launch-vz.sh --guest bob
+./launch-vz.sh --guest bob --vm-name motlie-v1-15-bob-iter
 ```
 
 Each launch:
@@ -201,8 +201,9 @@ Each launch:
   must be signed before launch
 - the guest user IDs differ from `v1.1` because the base Ubuntu Tart image
   already reserves uid `1000` for `admin`
-- default run VM names use a timestamped suffix so repeated launches do not
-  depend on `tart delete` for cleanup
+- for repeated local hardening/debug loops, prefer a stable explicit `--vm-name`
+  such as `motlie-v1-15-alice-iter` / `motlie-v1-15-bob-iter` so reruns reuse
+  the same approval path
 
 ## Expected Next Step
 
