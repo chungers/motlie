@@ -7,6 +7,15 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+static void print_usage(FILE *stream) {
+    fprintf(stream,
+            "usage: vz-vsock-runner --disk <path> --unix-socket <path> "
+            "[--seed-disk <path>] [--nvram <path>] [--machine-id <path>] "
+            "[--serial-log <path> | --stdio-console] [--nat-mac <mac>] "
+            "[--vsock-port <port>] [--memory-mib <mib>] [--cpu-count <count>] "
+            "[--enable-nat]\n");
+}
+
 static int connect_unix_socket(NSString *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -419,6 +428,10 @@ int main(int argc, const char * argv[]) {
 
         for (int i = 1; i < argc; i++) {
             NSString *arg = [NSString stringWithUTF8String:argv[i]];
+            if ([arg isEqualToString:@"--help"] || [arg isEqualToString:@"-h"]) {
+                print_usage(stdout);
+                return 0;
+            }
             if ([arg isEqualToString:@"--disk"] && i + 1 < argc) {
                 diskPath = [NSString stringWithUTF8String:argv[++i]];
             } else if ([arg isEqualToString:@"--seed-disk"] && i + 1 < argc) {
@@ -450,7 +463,23 @@ int main(int argc, const char * argv[]) {
         }
 
         if (diskPath.length == 0 || unixSocketPath.length == 0) {
-            fprintf(stderr, "usage: vz-vsock-runner --disk <path> --unix-socket <path> [--seed-disk <path>] [--nvram <path>] [--machine-id <path>] [--serial-log <path> | --stdio-console] [--nat-mac <mac>] [--vsock-port <port>] [--memory-mib <mib>] [--cpu-count <count>] [--enable-nat]\n");
+            print_usage(stderr);
+            return 2;
+        }
+        if (serialPath.length > 0 && useStdioConsole) {
+            fprintf(stderr, "--serial-log and --stdio-console are mutually exclusive\n");
+            return 2;
+        }
+        if (!enableNAT && natMAC.length > 0) {
+            fprintf(stderr, "--nat-mac requires --enable-nat\n");
+            return 2;
+        }
+        if (vsockPort == 0) {
+            fprintf(stderr, "--vsock-port must be greater than zero\n");
+            return 2;
+        }
+        if (memoryMiB == 0 || cpuCount == 0) {
+            fprintf(stderr, "--memory-mib and --cpu-count must be greater than zero\n");
             return 2;
         }
 

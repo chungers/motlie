@@ -112,6 +112,25 @@ finally:
 PY
 }
 
+print_failure_context() {
+  echo "--- runner log tail ---" >&2
+  if [[ -f "$RUN_LOG" ]]; then
+    tail -n 80 "$RUN_LOG" >&2 || true
+  else
+    echo "(missing $RUN_LOG)" >&2
+  fi
+  echo "--- serial log tail ---" >&2
+  if [[ -f "$SERIAL_LOG" ]]; then
+    tail -n 80 "$SERIAL_LOG" >&2 || true
+  else
+    echo "(missing $SERIAL_LOG)" >&2
+  fi
+  if [[ -f "$GUEST_IP_FILE" ]]; then
+    echo "--- guest ip ---" >&2
+    cat "$GUEST_IP_FILE" >&2 || true
+  fi
+}
+
 cleanup() {
   if [[ "$KEEP_RUNNING" -eq 0 ]]; then
     if [[ -f "$RUNNER_PID_FILE" ]]; then
@@ -339,7 +358,7 @@ wait_for_guest_ip() {
   while [[ $attempts -lt $max_attempts ]]; do
     if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
       echo "vz-vsock-runner exited early; log follows:" >&2
-      cat "$RUN_LOG" >&2 || true
+      print_failure_context
       exit 1
     fi
     ip_addr="$(probe_guest_ip || true)"
@@ -500,7 +519,7 @@ echo "$RUNNER_PID" > "$RUNNER_PID_FILE"
 echo "--- resolving native guest IP ---"
 IP_ADDR="$(wait_for_guest_ip)" || {
   echo "timed out waiting for native guest IP" >&2
-  cat "$RUN_LOG" >&2 || true
+  print_failure_context
   exit 1
 }
 echo "$IP_ADDR" > "$GUEST_IP_FILE"
@@ -508,7 +527,7 @@ echo "$IP_ADDR" > "$GUEST_IP_FILE"
 echo "--- waiting for guest SSH ---"
 wait_for_guest_ssh "$IP_ADDR" || {
   echo "timed out waiting for guest SSH at $IP_ADDR" >&2
-  [[ -f "$SERIAL_LOG" ]] && cat "$SERIAL_LOG" >&2 || true
+  print_failure_context
   exit 1
 }
 
@@ -595,7 +614,7 @@ VALIDATION_REMOTE_JSON="/tmp/motlie-vfs-validation.json"
 for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
   if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
     echo "vz-vsock-runner exited early; log follows:" >&2
-    cat "$RUN_LOG" >&2 || true
+    print_failure_context
     exit 1
   fi
   guest_bash "$IP_ADDR" <<EOF
@@ -663,8 +682,7 @@ done
 
 if [[ "$VALIDATION_OK" -ne 1 ]]; then
   echo "timed out waiting for guest validation sentinels" >&2
-  cat "$RUN_LOG" >&2 || true
-  [[ -f "$SERIAL_LOG" ]] && cat "$SERIAL_LOG" >&2 || true
+  print_failure_context
   exit 1
 fi
 
