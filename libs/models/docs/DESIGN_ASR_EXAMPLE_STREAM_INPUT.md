@@ -1,0 +1,217 @@
+# ASR Example Stream Input Design
+
+## Status: Proposed
+
+## Change Log
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-19 | @codex-tts | Initial brownfield design for stdin WAV support in all shipped ASR examples so they compose directly with the TTS example stdout WAV contract from issue #208. |
+
+This document defines the example-layer behavior for streamed WAV input in the
+shipped ASR binaries under `libs/models/examples/`.
+
+Scope is intentionally narrow:
+
+- `asr_whisper`
+- `asr_sherpa_onnx`
+- `asr_moonshine`
+
+The goal is to make those binaries consume either a `.wav` file path or a WAV
+byte stream from stdin while keeping transcript output on stdout.
+
+## Problem
+
+The current ASR examples only support one input source:
+
+- `--wav <path>` points at a filesystem path
+
+That blocks direct shell composition with the TTS examples. Even after the TTS
+examples can emit WAV on stdout, the ASR side still cannot accept that stream
+without an intermediate temp file.
+
+## Goals
+
+- Preserve current `--wav <path>` behavior.
+- Allow WAV input from stdin when `--wav` is omitted.
+- Keep transcript text on stdout.
+- Keep diagnostics on stderr when stdin/stdout are used as a machine pipeline.
+- Keep the shared input/output behavior identical across all shipped ASR
+  examples.
+
+## Non-Goals
+
+- Changing the core typed ASR contracts in `motlie_model`.
+- Adding microphone capture in this slice.
+- Defining a structured JSON transcript protocol in this slice.
+- Making batch Whisper behave like true incremental streaming. It remains a
+  batch transcription backend even when its WAV arrives over stdin.
+
+## Affected Binaries
+
+The same feature applies to all current shipped ASR binaries:
+
+1. `libs/models/examples/asr_whisper/main.rs`
+2. `libs/models/examples/asr_sherpa_onnx/main.rs`
+3. `libs/models/examples/asr_moonshine/main.rs`
+
+The implementation should add shared example-layer helpers so future ASR
+examples inherit the same input/output behavior automatically.
+
+## Required Behavior
+
+Every ASR example must support both input modes:
+
+### File Mode
+
+If `--wav <path>` is present, the binary reads the WAV file from that path.
+This remains the default explicit path-based mode.
+
+### Pipeline Mode
+
+If `--wav` is omitted, the binary reads a WAV byte stream from stdin.
+
+This is the command-line composition target for this feature. The intended UX
+is:
+
+```bash
+echo "hello world" | tts_program | asr_program
+```
+
+and also:
+
+```bash
+cat input.wav | asr_program
+```
+
+In pipeline mode:
+
+- stdin is treated as binary WAV input
+- stdout is reserved for transcript text
+- diagnostics must go to stderr
+
+## Proposed Shared CLI
+
+Common flags for every ASR example:
+
+- `--wav <path>`: optional file input override
+- `--artifact-root <path>`: optional curated artifact root override
+
+Backend-specific flags remain additive:
+
+- `asr_whisper`: `--language <code>`
+- `asr_sherpa_onnx`: no extra common-input changes in this slice
+- `asr_moonshine`: no extra common-input changes in this slice
+
+Common input rules:
+
+- `--wav <path>` means read that file
+- no `--wav` means read WAV from stdin
+- empty stdin should fail clearly
+
+## Stdout Transcript Contract
+
+Stdout should stay simple in this slice: plain text transcript lines, not a new
+container format.
+
+The examples may continue to print their current text lines such as `[final]`
+or `[partial]`, but machine-readable transcript output must not be mixed with
+diagnostics on stdout in pipeline mode.
+
+That means:
+
+- transcript lines stay on stdout
+- progress, format, and artifact-path logging move to stderr when using stdin
+  or stdout in a pipeline
+
+This keeps shell composition easy while avoiding a new protocol decision.
+
+## Feasibility
+
+This is practical with the current crate stack.
+
+Important implementation detail:
+
+- `hound::WavWriter` requires `Seek`, which is why TTS stdout needed special
+  handling
+- `hound::WavReader` only requires `Read`
+
+So stdin WAV input is simpler than stdout WAV output. A `BufReader<std::io::Stdin>`
+can be passed directly into `hound::WavReader::new(...)`.
+
+## Backend-Specific Notes
+
+### Whisper
+
+`asr_whisper` is still a batch backend. In stdin mode it will read and decode
+the entire WAV stream, normalize it to `AudioBuf<f32, 16000, Mono>`, and only
+then call `transcribe(...)`.
+
+That is still useful for shell composition, but it is not low-latency
+incremental transcription.
+
+### Sherpa ONNX
+
+`asr_sherpa_onnx` already operates as a streaming session after audio decode.
+In this slice, stdin support means:
+
+- decode WAV from stdin
+- normalize to 16 kHz mono
+- ingest fixed-size demo chunks into the typed session
+
+### Moonshine
+
+`asr_moonshine` follows the same source adaptation pattern as sherpa:
+
+- decode WAV from stdin
+- normalize to 16 kHz mono
+- ingest fixed-size chunks into the typed session
+
+## Layering
+
+This belongs in the example layer, not the backend layer.
+
+The backends already consume typed audio buffers. The examples should:
+
+- parse CLI
+- choose WAV source: file or stdin
+- decode and normalize WAV
+- print transcript text to stdout
+- keep diagnostics on stderr for pipeline safety
+
+That implies adding shared example-layer support for:
+
+- common ASR argument parsing
+- stdin/file WAV source selection
+- stderr-safe logging decisions
+
+## Error Handling
+
+The binaries must:
+
+- return a non-zero exit code on invalid arguments
+- fail clearly on empty or invalid stdin WAV input
+- fail clearly when WAV decode fails
+- keep diagnostics off stdout in pipeline mode
+
+## Validation
+
+The implementation should prove:
+
+1. each binary still accepts `--wav <path>`
+2. each binary accepts WAV from stdin when `--wav` is omitted
+3. transcript text remains on stdout
+4. diagnostics move to stderr in pipeline mode
+5. `tts_example | asr_example` works for at least one paired pipeline
+
+## Alternatives Considered
+
+### Keep ASR examples path-only
+
+Rejected. That would keep the shell composition story incomplete and force temp
+files even after TTS stdout improves.
+
+### Add a new transcript framing protocol
+
+Rejected for this slice. Plain text on stdout is enough for command-line use and
+does not block a later richer protocol if needed.
