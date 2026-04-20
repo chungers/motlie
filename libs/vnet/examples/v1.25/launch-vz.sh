@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
-BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-15-base}"
+BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-25-base-iter}"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-900}"
 SERVICE_FILE="$SCRIPT_DIR/motlie-vfs-guest.service"
 VALIDATE_UNIT_FILE="$SCRIPT_DIR/motlie-vfs-validate.service"
@@ -57,9 +57,11 @@ case "$GUEST_NAME" in
     GID_NUM=1000
     SOCKET_PATH="/tmp/motlie-vnet-alice.vsock_5000"
     HOST_HOME_DIR="/tmp/motlie-vnet-demo/alice-home"
+    HOST_AGENT_STATE_DIR="/tmp/motlie-vnet-demo/alice-agent-state"
     HOST_WORKSPACE_DIR="/tmp/motlie-vnet-demo/alice-workspace"
     EXPECTED_WORKSPACE_README="Alice workspace mounted from the host."
-    EXPECTED_ENV_LINE=""
+    EXPECTED_AGENT_STATE_README="Dedicated read-write agent-state layer for Codex and Claude lives here."
+    EXPECTED_ENV_LINE="ALICE_API_KEY=demo-alice"
     GUEST_HOSTNAME="motlie-alice"
     NAT_MAC="02:4d:6f:74:61:11"
     ;;
@@ -71,9 +73,11 @@ case "$GUEST_NAME" in
     GID_NUM=1001
     SOCKET_PATH="/tmp/motlie-vnet-bob.vsock_5000"
     HOST_HOME_DIR="/tmp/motlie-vnet-demo/bob-home"
+    HOST_AGENT_STATE_DIR="/tmp/motlie-vnet-demo/bob-agent-state"
     HOST_WORKSPACE_DIR="/tmp/motlie-vnet-demo/bob-workspace"
     EXPECTED_WORKSPACE_README="Bob workspace mounted from the host."
-    EXPECTED_ENV_LINE=""
+    EXPECTED_AGENT_STATE_README="Dedicated read-write agent-state layer for Codex and Claude lives here."
+    EXPECTED_ENV_LINE="BOB_API_KEY=demo-bob"
     GUEST_HOSTNAME="motlie-bob"
     NAT_MAC="02:4d:6f:74:62:15"
     ;;
@@ -261,6 +265,12 @@ expect {
     exit 124
   }
 }
+
+require_host_fixture_dirs() {
+  mkdir -p "$HOST_HOME_DIR/.ssh" "$HOST_HOME_DIR/.config" "$HOST_AGENT_STATE_DIR" "$HOST_WORKSPACE_DIR"
+}
+
+require_host_fixture_dirs
 catch wait result
 set exit_code [lindex \$result 3]
 if {\$exit_code != 0} {
@@ -619,23 +629,45 @@ guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service "$IP_ADDR"
 guest_bash "$IP_ADDR" <<EOF
 printf 'admin\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
 printf 'admin\n' | sudo -S umount -lf /workspace >/dev/null 2>&1 || true
+printf 'admin\n' | sudo -S umount -lf /agent-state >/dev/null 2>&1 || true
 printf 'admin\n' | sudo -S umount -lf /home/$LOGIN_USER >/dev/null 2>&1 || true
-printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie /workspace /etc/motlie-vfs
-if ! getent group '$LOGIN_USER' >/dev/null 2>&1; then
+printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie /workspace /agent-state /etc/motlie-vfs
+existing_gid="\$(getent group '$LOGIN_USER' | cut -d: -f3 || true)"
+if [[ -z "\$existing_gid" ]]; then
+  gid_owner="\$(getent group $GID_NUM | cut -d: -f1 || true)"
+  if [[ -n "\$gid_owner" && "\$gid_owner" != '$LOGIN_USER' ]]; then
+    echo "gid $GID_NUM already belongs to \$gid_owner; cannot provision $LOGIN_USER" >&2
+    exit 1
+  fi
   printf 'admin\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
+elif [[ "\$existing_gid" != "$GID_NUM" ]]; then
+  echo "guest group $LOGIN_USER has gid \$existing_gid but expected $GID_NUM" >&2
+  exit 1
 fi
-if ! id -u '$LOGIN_USER' >/dev/null 2>&1; then
+
+existing_uid="\$(id -u '$LOGIN_USER' 2>/dev/null || true)"
+if [[ -z "\$existing_uid" ]]; then
+  uid_owner="\$(getent passwd $UID_NUM | cut -d: -f1 || true)"
+  if [[ -n "\$uid_owner" && "\$uid_owner" != '$LOGIN_USER' ]]; then
+    echo "uid $UID_NUM already belongs to \$uid_owner; cannot provision $LOGIN_USER" >&2
+    exit 1
+  fi
   printf 'admin\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
+elif [[ "\$existing_uid" != "$UID_NUM" ]]; then
+  echo "guest user $LOGIN_USER has uid \$existing_uid but expected $UID_NUM" >&2
+  exit 1
 fi
 printf 'admin\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
 printf 'admin\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
 printf 'admin\n' | sudo -S chown root:root /workspace
 printf 'admin\n' | sudo -S chmod 0755 /workspace
-if ! dpkg -s build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 >/dev/null 2>&1; then
+printf 'admin\n' | sudo -S chown root:root /agent-state
+printf 'admin\n' | sudo -S chmod 0755 /agent-state
+if ! dpkg -s build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 dnsutils >/dev/null 2>&1; then
   printf 'admin\n' | sudo -S apt-get update
-  printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2
+  printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 dnsutils
 fi
-if [[ ! -x /usr/local/bin/motlie-vfs-guest-v1_15 ]]; then
+if [[ ! -x /usr/local/bin/motlie-vfs-guest ]]; then
   export PATH="/home/admin/.cargo/bin:\$PATH"
   if ! command -v cargo >/dev/null 2>&1 || ! rustc -vV >/dev/null 2>&1; then
     rm -rf /home/admin/.cargo /home/admin/.rustup
@@ -646,14 +678,15 @@ if [[ ! -x /usr/local/bin/motlie-vfs-guest-v1_15 ]]; then
   printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie/src
   printf 'admin\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
   printf 'admin\n' | sudo -S chown -R admin:admin /var/lib/motlie
-  cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_15 --target-dir /var/lib/motlie/src/target
-  printf 'admin\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_15 /usr/local/bin/motlie-vfs-guest-v1_15
+  cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_1 --target-dir /var/lib/motlie/src/target
+  printf 'admin\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_1 /usr/local/bin/motlie-vfs-guest
 fi
 printf 'admin\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
 printf 'admin\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
 printf 'admin\n' | sudo -S systemctl daemon-reload
 printf 'admin\n' | sudo -S systemctl enable motlie-vfs-guest.service
 printf 'admin\n' | sudo -S systemctl restart motlie-vfs-guest.service
+printf 'admin\n' | sudo -S systemctl restart motlie-agent-state.service || true
 EOF
 
 POST_PROVISION_REMOTE_JSON="/tmp/motlie-vfs-post-provision.json"
@@ -667,8 +700,9 @@ from pathlib import Path
 
 payload = {
     "mounts_yaml": Path("/etc/motlie-vfs/mounts.yaml").exists(),
-    "guest_bin": Path("/usr/local/bin/motlie-vfs-guest-v1_15").exists(),
+    "guest_bin": Path("/usr/local/bin/motlie-vfs-guest").exists(),
     "service_unit": Path("/etc/systemd/system/motlie-vfs-guest.service").exists(),
+    "agent_state_service_unit": Path("/etc/systemd/system/motlie-agent-state.service").exists(),
 }
 Path("$POST_PROVISION_REMOTE_JSON").write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 PY2
@@ -703,44 +737,98 @@ for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
   guest_bash "$IP_ADDR" <<EOF
 python3 - <<'PY2'
 import json
+import os
+import subprocess
 from pathlib import Path
 
 login_user = '$LOGIN_USER'
 expected_readme = '$EXPECTED_WORKSPACE_README'
+expected_agent_state_readme = '$EXPECTED_AGENT_STATE_README'
 expected_env = '$EXPECTED_ENV_LINE'
 token = '$VALIDATION_TOKEN'
 
 workspace_mount = Path('/workspace')
 home_mount = Path(f'/home/{login_user}')
+agent_state_mount = Path('/agent-state')
 workspace_readme_path = workspace_mount / 'README.md'
+agent_state_readme_path = agent_state_mount / 'README.md'
 env_path = home_mount / '.env'
 auth_path = home_mount / '.ssh' / 'authorized_keys'
+codex_link = home_mount / '.codex'
+claude_link = home_mount / '.claude'
+claude_code_link = home_mount / '.config' / 'claude-code'
 
 result = {
     'token': token,
     'guest_user': login_user,
     'workspace_mountpoint': workspace_mount.is_mount(),
     'home_mountpoint': home_mount.is_mount(),
+    'agent_state_mountpoint': agent_state_mount.is_mount(),
 }
 
-if not (result['workspace_mountpoint'] and result['home_mountpoint'] and workspace_readme_path.exists() and env_path.exists() and auth_path.exists()):
+required_paths_exist = (
+    workspace_readme_path.exists()
+    and agent_state_readme_path.exists()
+    and env_path.exists()
+    and auth_path.exists()
+    and codex_link.exists()
+    and claude_link.exists()
+    and claude_code_link.exists()
+)
+
+if not (result['workspace_mountpoint'] and result['home_mountpoint'] and result['agent_state_mountpoint'] and required_paths_exist):
     Path('$VALIDATION_REMOTE_JSON').write_text('', encoding='utf-8')
     raise SystemExit(0)
 
 workspace_readme = workspace_readme_path.read_text(encoding='utf-8').strip()
+agent_state_readme = agent_state_readme_path.read_text(encoding='utf-8').strip()
 env_line = env_path.read_text(encoding='utf-8').strip()
 authorized_keys = auth_path.read_text(encoding='utf-8').strip()
+
+def link_target(path: Path) -> str:
+    return os.readlink(path) if path.is_symlink() else ''
+
+def command_ok(cmd):
+    completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+    return completed.returncode == 0, completed.stdout.strip(), completed.stderr.strip()
+
+dns_ok, dns_stdout, dns_stderr = command_ok(['getent', 'ahostsv4', 'example.com'])
+curl_ok, curl_stdout, curl_stderr = command_ok(['curl', '-fsS', '--max-time', '20', 'https://example.com'])
+codex_ok = subprocess.run(['bash', '-lc', 'command -v codex'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+claude_ok = subprocess.run(['bash', '-lc', 'command -v claude'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+
 result.update({
     'workspace_readme': workspace_readme,
     'expected_workspace_readme': expected_readme,
+    'agent_state_readme': agent_state_readme,
+    'expected_agent_state_readme': expected_agent_state_readme,
     'env_line': env_line,
     'expected_env_line': expected_env,
     'authorized_keys_present': bool(authorized_keys),
+    'codex_link': link_target(codex_link),
+    'claude_link': link_target(claude_link),
+    'claude_code_link': link_target(claude_code_link),
+    'codex_cli_present': codex_ok,
+    'claude_cli_present': claude_ok,
+    'dns_lookup_ok': dns_ok,
+    'dns_lookup_sample': dns_stdout.splitlines()[0] if dns_stdout else '',
+    'dns_lookup_error': dns_stderr,
+    'internet_ok': curl_ok,
+    'internet_error': curl_stderr,
+    'internet_sample': curl_stdout[:120],
 })
 result['status'] = 'ok' if (
     workspace_readme == expected_readme
+    and agent_state_readme == expected_agent_state_readme
     and env_line == expected_env
     and bool(authorized_keys)
+    and link_target(codex_link) == '/agent-state/codex'
+    and link_target(claude_link) == '/agent-state/claude'
+    and link_target(claude_code_link) == '/agent-state/claude-code'
+    and codex_ok
+    and claude_ok
+    and dns_ok
+    and curl_ok
 ) else 'mismatch'
 Path('$VALIDATION_REMOTE_JSON').write_text(json.dumps(result, sort_keys=True) + '\n', encoding='utf-8')
 PY2

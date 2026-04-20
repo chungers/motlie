@@ -1,288 +1,488 @@
-#!/usr/bin/env bash
-# build-guest.sh — Build the generic shared base image set for v1.2.
-#
-# Produces:
-#   artifacts/base/rootfs.squashfs   — shared Debian rootfs for alice+bob
-#   artifacts/base/Image|vmlinux.bin — shared CH-compatible kernel
-#
-# Guest identity is not baked here. Alice/Bob differences are created by
-# launch-ch.sh as runtime writable overlays.
-
+#!/bin/zsh
 set -euo pipefail
 
-die() {
-    echo "ERROR: $*" >&2
-    exit 1
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
+BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-25-base-iter}"
+SOURCE_IMAGE="${MOTLIE_VZ_SOURCE_IMAGE:-ghcr.io/cirruslabs/ubuntu@sha256:1e23e6fe5a6d3fb2089652229a09d71742617758b15aa311cecf1c05985d3021}"
+RUN_LOG="$ARTIFACTS_DIR/build-run.log"
+RESULT_JSON="$ARTIFACTS_DIR/build-result.json"
+SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
+TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-300}"
+GUEST_SRC_DIR="/home/admin/motlie-src"
+BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
+BOOTSTRAP_PASS="${MOTLIE_VZ_BOOTSTRAP_PASS:-admin}"
+SERVICE_FILE="$SCRIPT_DIR/motlie-vfs-guest.service"
+DATASOURCE_CFG_FILE="$SCRIPT_DIR/99_motlie_vz.cfg"
+
+zmodload zsh/datetime
+
+mkdir -p "$ARTIFACTS_DIR"
 
 require_cmd() {
-    local cmd="$1"
-    local install_hint="$2"
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        die "$cmd not found. Install: $install_hint"
-    fi
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 1
+  fi
 }
 
-passwd_primary_gid() {
-    getent passwd "$USER" | cut -d: -f4
+require_cmd tart
+require_cmd git
+require_cmd tar
+require_cmd python3
+require_cmd expect
+require_cmd scp
+require_cmd ssh
+require_cmd nc
+
+local_vm_exists() {
+  tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
 }
 
-passwd_primary_group() {
-    getent group "$(passwd_primary_gid)" | cut -d: -f1
+cleanup() {
+  if local_vm_exists "$BASE_VM_NAME"; then
+    tart stop "$BASE_VM_NAME" >/dev/null 2>&1 || true
+  fi
 }
 
-check_unshare_prereqs() {
-    local current_gid expected_gid expected_group
+trap cleanup EXIT
 
-    current_gid="$(id -g)"
-    expected_gid="$(passwd_primary_gid)"
-    expected_group="$(passwd_primary_group)"
+echo "=== Vz v1.25 base guest build ==="
+echo "Base VM:      $BASE_VM_NAME"
+echo "Source image: $SOURCE_IMAGE"
 
-    if [ -z "$expected_gid" ] || [ -z "$expected_group" ]; then
-        die "failed to resolve passwd primary gid/group for $USER"
-    fi
+if local_vm_exists "$BASE_VM_NAME"; then
+  echo "--- deleting stale base VM clone ---"
+  tart delete "$BASE_VM_NAME" >/dev/null || true
+fi
 
-    if [ "$current_gid" != "$expected_gid" ]; then
-        cat >&2 <<EOF
-ERROR: mmdebstrap --mode=unshare requires this shell's primary gid to match the
-passwd entry for $USER.
+echo "--- cloning base image ---"
+tart clone "$SOURCE_IMAGE" "$BASE_VM_NAME" >/dev/null
 
-Current shell gid: $current_gid ($(id -gn))
-Passwd primary gid: $expected_gid ($expected_group)
+echo "--- packing Motlie source tree ---"
+COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git -C "$REPO_ROOT" ls-files -z | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --disable-copyfile --no-mac-metadata --no-xattrs --null -czf "$SOURCE_TARBALL" -C "$REPO_ROOT" --files-from -
 
-Try one of:
-  1. Open a fresh login shell for $USER
-  2. Run: exec newgrp
-  3. Use a rootful fallback: MMDEBSTRAP_MODE=root ./build-guest.sh
+echo "--- starting guest ---"
+: > "$RUN_LOG"
+START_EPOCH="$EPOCHREALTIME"
+tart run --no-graphics "$BASE_VM_NAME" >"$RUN_LOG" 2>&1 &
+RUN_PID="$!"
+
+IP_ADDR=""
+ATTEMPTS=0
+MAX_ATTEMPTS=$(( TIMEOUT_SECONDS * 2 ))
+while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
+  if ! kill -0 "$RUN_PID" >/dev/null 2>&1; then
+    echo "tart run exited early; log follows:" >&2
+    cat "$RUN_LOG" >&2
+    exit 1
+  fi
+
+  IP_ADDR="$(tart ip "$BASE_VM_NAME" 2>/dev/null || true)"
+  if [[ -n "$IP_ADDR" ]]; then
+    break
+  fi
+
+  sleep 0.5
+  ATTEMPTS=$(( ATTEMPTS + 1 ))
+done
+
+if [[ -z "$IP_ADDR" ]]; then
+  echo "timed out waiting for guest IP after ${TIMEOUT_SECONDS}s" >&2
+  cat "$RUN_LOG" >&2 || true
+  exit 1
+fi
+
+echo "--- waiting for guest SSH ---"
+ATTEMPTS=0
+while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
+  if nc -z "$IP_ADDR" 22 >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+  ATTEMPTS=$(( ATTEMPTS + 1 ))
+done
+if [[ $ATTEMPTS -ge $MAX_ATTEMPTS ]]; then
+  echo "timed out waiting for guest SSH after ${TIMEOUT_SECONDS}s" >&2
+  exit 1
+fi
+
+READY_EPOCH="$EPOCHREALTIME"
+BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
+
+guest_bash() {
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  expect <<EOF
+set timeout -1
+set password_tries 0
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${BOOTSTRAP_USER}@${IP_ADDR}:/tmp/motlie-vnet-remote.sh
+expect {
+  "password:" {
+    incr password_tries
+    if {\$password_tries > 3} {
+      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      exit 97
+    }
+    send "${BOOTSTRAP_PASS}\r"
+    exp_continue
+  }
+  "Permission denied" {
+    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    exit 98
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    if {\$exit_code != 0} {
+      exit \$exit_code
+    }
+  }
+}
 EOF
+  rm -f "$remote_script"
+  expect <<EOF
+set timeout -1
+set password_tries 0
+  spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-remote.sh </dev/null"
+expect {
+  "password:" {
+    incr password_tries
+    if {\$password_tries > 3} {
+      puts stderr "ssh auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      exit 97
+    }
+    send "${BOOTSTRAP_PASS}\r"
+    exp_continue
+  }
+  "Permission denied" {
+    puts stderr "ssh permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    exit 98
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    if {\$exit_code != 0} {
+      exit \$exit_code
+    }
+  }
+}
+EOF
+}
+
+guest_copy() {
+  local src="$1"
+  local dst="$2"
+  expect <<EOF
+set timeout -1
+set password_tries 0
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" ${BOOTSTRAP_USER}@${IP_ADDR}:$dst
+expect {
+  "password:" {
+    incr password_tries
+    if {\$password_tries > 3} {
+      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      exit 97
+    }
+    send "${BOOTSTRAP_PASS}\r"
+    exp_continue
+  }
+  "Permission denied" {
+    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    exit 98
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    if {\$exit_code != 0} {
+      exit \$exit_code
+    }
+  }
+}
+EOF
+}
+
+guest_fetch() {
+  local src="$1"
+  local dst="$2"
+  expect <<EOF
+set timeout -1
+set password_tries 0
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${IP_ADDR}:$src "$dst"
+expect {
+  "password:" {
+    incr password_tries
+    if {\$password_tries > 3} {
+      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      exit 97
+    }
+    send "${BOOTSTRAP_PASS}\r"
+    exp_continue
+  }
+  "Permission denied" {
+    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    exit 98
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    if {\$exit_code != 0} {
+      exit \$exit_code
+    }
+  }
+}
+EOF
+}
+
+guest_capture() {
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  expect <<EOF
+set timeout -1
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${BOOTSTRAP_USER}@${IP_ADDR}:/tmp/motlie-vnet-capture.sh
+expect "password:"
+send "${BOOTSTRAP_PASS}\r"
+expect eof
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
+}
+EOF
+  rm -f "$remote_script"
+  expect <<EOF
+set timeout -1
+log_user 0
+set output ""
+set password_tries 0
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-capture.sh </dev/null"
+expect {
+  "password:" {
+    incr password_tries
+    if {\$password_tries > 3} {
+      puts stderr "ssh auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      exit 97
+    }
+    send "${BOOTSTRAP_PASS}\r"
+    exp_continue
+  }
+  "Permission denied" {
+    puts stderr "ssh permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    exit 98
+  }
+  -re ".+" {
+    append output \$expect_out(0,string)
+    exp_continue
+  }
+  eof {
+    if {\$output ne ""} {
+      puts \$output
+    }
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
+}
+EOF
+}
+
+tart_guest_bash() {
+  local run_user="$1"
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  guest_copy "$remote_script" /tmp/motlie-vnet-tart.sh
+  rm -f "$remote_script"
+  guest_bash <<'EOF'
+sudo chmod 0644 /tmp/motlie-vnet-tart.sh
+EOF
+  if [[ "$run_user" == "admin" ]]; then
+    tart exec "$BASE_VM_NAME" bash -euo pipefail /tmp/motlie-vnet-tart.sh
+  else
+    tart exec "$BASE_VM_NAME" sudo -u "$run_user" bash -euo pipefail /tmp/motlie-vnet-tart.sh
+  fi
+}
+
+tart_guest_capture() {
+  local run_user="$1"
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  guest_copy "$remote_script" /tmp/motlie-vnet-tart-capture.sh
+  rm -f "$remote_script"
+  guest_bash <<'EOF'
+sudo chmod 0644 /tmp/motlie-vnet-tart-capture.sh
+EOF
+  if [[ "$run_user" == "admin" ]]; then
+    tart exec "$BASE_VM_NAME" bash -euo pipefail /tmp/motlie-vnet-tart-capture.sh
+  else
+    tart exec "$BASE_VM_NAME" sudo -u "$run_user" bash -euo pipefail /tmp/motlie-vnet-tart-capture.sh
+  fi
+}
+
+echo "--- installing guest prerequisites ---"
+guest_bash <<'EOF'
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  build-essential \
+  pkg-config \
+  libfuse3-dev \
+  libfuse3-3 \
+  fuse3 \
+  curl \
+  ca-certificates \
+  tar \
+  gzip \
+  iproute2 \
+  tmux \
+  locales \
+  bubblewrap \
+  dnsutils \
+  python3 \
+  npm
+sudo sed -i '/^en_US.UTF-8 UTF-8$/d' /etc/locale.gen
+printf 'en_US.UTF-8 UTF-8\n' | sudo tee -a /etc/locale.gen >/dev/null
+sudo locale-gen en_US.UTF-8
+sudo update-locale LANG=en_US.UTF-8
+EOF
+
+echo "--- installing Rust toolchain in guest if needed ---"
+guest_bash <<'EOF'
+if ! command -v cargo >/dev/null 2>&1; then
+  curl https://sh.rustup.rs -sSf | sh -s -- -y
+fi
+EOF
+
+echo "--- uploading Motlie source tree into guest ---"
+guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz
+guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service
+guest_copy "$DATASOURCE_CFG_FILE" /tmp/99_motlie_vz.cfg
+guest_bash <<EOF
+rm -rf '$GUEST_SRC_DIR'
+mkdir -p '$GUEST_SRC_DIR'
+tar -xzf /tmp/motlie-src.tar.gz -C '$GUEST_SRC_DIR'
+EOF
+
+echo "--- building guest binaries and CLIs in guest ---"
+guest_bash <<EOF
+export PATH="\$HOME/.cargo/bin:\$PATH"
+export CARGO_TARGET_DIR="\$HOME/motlie-target"
+python3 - <<'PY'
+from pathlib import Path
+
+root = Path("$GUEST_SRC_DIR/Cargo.toml")
+text = root.read_text(encoding="utf-8")
+if '"libs/vfs",' not in text:
+    text = text.replace('members = [\n', 'members = [\n    "libs/vfs",\n', 1)
+    root.write_text(text, encoding="utf-8")
+PY
+cargo build --manifest-path '$GUEST_SRC_DIR/libs/vfs/Cargo.toml' --release --features vsock,client --bin motlie-vfs-guest-v1_1
+sudo npm install -g @openai/codex
+sudo npm install -g @anthropic-ai/claude-code
+EOF
+
+echo "--- installing converged v1.25 guest contract ---"
+guest_bash <<'EOF'
+sudo install -D -m 0755 "$HOME/motlie-target/release/motlie-vfs-guest-v1_1" /usr/local/bin/motlie-vfs-guest
+sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
+sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_vz.cfg
+sudo mkdir -p /etc/motlie-vfs
+sudo mkdir -p /etc/profile.d
+EOF
+
+echo "--- creating bootstrap user for identity remap ---"
+tart_guest_bash admin <<'EOF'
+if ! id -u motlie-build >/dev/null 2>&1; then
+    sudo groupadd -f -g 2002 motlie-build
+    sudo useradd -m -u 2002 -g 2002 -s /bin/bash motlie-build
+fi
+echo "motlie-build:admin" | sudo chpasswd
+sudo usermod -aG sudo motlie-build || true
+printf '%s\n' 'motlie-build ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-motlie-build >/dev/null
+sudo chown root:root /etc/sudoers.d/90-motlie-build
+sudo chmod 0440 /etc/sudoers.d/90-motlie-build
+EOF
+
+BOOTSTRAP_READY="$(tart_guest_capture admin <<'EOF'
+if id -u motlie-build >/dev/null 2>&1 && sudo -u motlie-build sudo -n true >/dev/null 2>&1; then
+  echo ok
+fi
+EOF
+)"
+if [[ "${BOOTSTRAP_READY##*$'\n'}" != "ok" && "$BOOTSTRAP_READY" != "ok" ]]; then
+  echo "motlie-build bootstrap user is not ready for passwordless sudo" >&2
+  exit 1
+fi
+
+tart_guest_bash motlie-build <<'EOF'
+
+remap_conflicting_identity() {
+    user_name="$1"
+    target_uid="$2"
+    target_gid="$3"
+    remap_uid="$4"
+    remap_gid="$5"
+
+    current_uid="$(id -u "$user_name" 2>/dev/null || true)"
+    current_gid="$(getent group "$user_name" | cut -d: -f3 || true)"
+
+    if [ "$current_uid" = "$target_uid" ]; then
+        sudo usermod -u "$remap_uid" "$user_name"
+        sudo find / -xdev -uid "$target_uid" -exec chown -h "$remap_uid" {} + 2>/dev/null || true
+    fi
+    if [ "$current_gid" = "$target_gid" ]; then
+        sudo groupmod -g "$remap_gid" "$user_name"
+        sudo find / -xdev -gid "$target_gid" -exec chgrp -h "$remap_gid" {} + 2>/dev/null || true
+    fi
+}
+
+ensure_guest_identity() {
+    user_name="$1"
+    target_uid="$2"
+    target_gid="$3"
+    password="$4"
+
+    existing_gid="$(getent group "$user_name" | cut -d: -f3 || true)"
+    if [ -z "$existing_gid" ]; then
+        gid_owner="$(getent group "$target_gid" | cut -d: -f1 || true)"
+        if [ -n "$gid_owner" ] && [ "$gid_owner" != "$user_name" ]; then
+            echo "gid $target_gid already belongs to $gid_owner" >&2
+            exit 1
+        fi
+        sudo groupadd -g "$target_gid" "$user_name"
+    elif [ "$existing_gid" != "$target_gid" ]; then
+        echo "group $user_name has gid $existing_gid but expected $target_gid" >&2
         exit 1
     fi
 
-    if ! grep -q "^${USER}:" /etc/subuid; then
-        die "/etc/subuid has no entry for $USER"
+    existing_uid="$(id -u "$user_name" 2>/dev/null || true)"
+    if [ -z "$existing_uid" ]; then
+        uid_owner="$(getent passwd "$target_uid" | cut -d: -f1 || true)"
+        if [ -n "$uid_owner" ] && [ "$uid_owner" != "$user_name" ]; then
+            echo "uid $target_uid already belongs to $uid_owner" >&2
+            exit 1
+        fi
+        sudo useradd -m -u "$target_uid" -g "$target_gid" -s /bin/bash "$user_name"
+    elif [ "$existing_uid" != "$target_uid" ]; then
+        echo "user $user_name has uid $existing_uid but expected $target_uid" >&2
+        exit 1
     fi
-    if ! grep -q "^${USER}:" /etc/subgid; then
-        die "/etc/subgid has no entry for $USER"
-    fi
+
+    sudo usermod -aG sudo "$user_name" || true
+    echo "$user_name:$password" | sudo chpasswd
 }
 
-run_mmdebstrap() {
-    local target="$1"
-    shift
+remap_conflicting_identity admin 1000 1000 2000 2000
+remap_conflicting_identity ubuntu 1001 1001 2001 2001
+ensure_guest_identity alice 1000 1000 testpass
+ensure_guest_identity bob 1001 1001 testpass
 
-    local -a cmd=(
-        mmdebstrap
-        --mode="$MMDEBSTRAP_MODE"
-        --arch="$DEBOOTSTRAP_ARCH"
-        --variant=minbase
-        --format=squashfs
-        --keyring=/usr/share/keyrings/debian-archive-keyring.gpg
-        "$@"
-        "$DEBIAN_SUITE" "$target" "$DEBIAN_MIRROR"
-    )
-
-    if [ "$MMDEBSTRAP_MODE" = "unshare" ]; then
-        check_unshare_prereqs
-        "${cmd[@]}"
-        return
-    fi
-
-    if [ "$MMDEBSTRAP_MODE" = "root" ] || [ "$MMDEBSTRAP_MODE" = "sudo" ]; then
-        if [ "$EUID" -eq 0 ]; then
-            "${cmd[@]}"
-        else
-            sudo "${cmd[@]}"
-            sudo chown "$(id -u):$(id -g)" "$target"
-        fi
-        return
-    fi
-
-    "${cmd[@]}"
-}
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-IMAGE_BUILD_GIT_SHA="$(git -C "$WORKSPACE_ROOT" rev-parse HEAD)"
-IMAGE_BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-GUEST_BINARY=""
-KERNEL_MODE="download"
-MMDEBSTRAP_MODE="${MMDEBSTRAP_MODE:-unshare}"
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --guest)
-            die "v1.2 builds one generic base image; guest selection moved to launch-ch.sh"
-            ;;
-        --guest-binary) GUEST_BINARY="$2"; shift 2 ;;
-        --kernel) KERNEL_MODE="$2"; shift 2 ;;
-        --base-only) shift ;;
-        --overlay-only)
-            die "--overlay-only no longer applies; launch-ch.sh creates per-guest runtime overlays"
-            ;;
-        *) die "Unknown argument: $1" ;;
-    esac
-done
-
-case "$KERNEL_MODE" in
-    download|build|skip) ;;
-    *) die "--kernel must be one of: download, build, skip" ;;
-esac
-
-case "$MMDEBSTRAP_MODE" in
-    auto|sudo|root|unshare|fakeroot|fakechroot|chrootless) ;;
-    *) die "MMDEBSTRAP_MODE must be one of: auto, sudo, root, unshare, fakeroot, fakechroot, chrootless" ;;
-esac
-
-HOST_ARCH="$(uname -m)"
-case "$HOST_ARCH" in
-    x86_64)
-        RUST_TARGET="x86_64-unknown-linux-gnu"
-        DEBOOTSTRAP_ARCH="amd64"
-        KERNEL_IMAGE="vmlinux.bin"
-        KERNEL_RELEASE_ASSET="vmlinux"
-        KERNEL_BUILD_TARGET="bzImage"
-        KERNEL_BUILD_OUTPUT="arch/x86/boot/compressed/vmlinux.bin"
-        ;;
-    aarch64)
-        RUST_TARGET="aarch64-unknown-linux-gnu"
-        DEBOOTSTRAP_ARCH="arm64"
-        KERNEL_IMAGE="Image"
-        KERNEL_RELEASE_ASSET="Image-arm64"
-        KERNEL_BUILD_TARGET="Image"
-        KERNEL_BUILD_OUTPUT="arch/arm64/boot/Image"
-        ;;
-    *)
-        die "unsupported host architecture: $HOST_ARCH"
-        ;;
-esac
-
-CH_KERNEL_RELEASE="ch-release-v6.16.9-20251112"
-CH_KERNEL_URL="https://github.com/cloud-hypervisor/linux/releases/download/${CH_KERNEL_RELEASE}/${KERNEL_RELEASE_ASSET}"
-
-require_cmd mmdebstrap "sudo apt install mmdebstrap squashfs-tools-ng e2fsprogs uidmap debian-archive-keyring"
-require_cmd tar2sqfs "sudo apt install squashfs-tools-ng"
-
-if [ ! -f /usr/share/keyrings/debian-archive-keyring.gpg ]; then
-    die "Debian archive keyring not found. Install: sudo apt install debian-archive-keyring"
-fi
-
-APPARMOR_USERNS=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)
-if [ "$APPARMOR_USERNS" = "1" ] && [ "$MMDEBSTRAP_MODE" = "unshare" ]; then
-    die "AppArmor restricts unprivileged user namespaces. Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
-fi
-
-DEBIAN_SUITE="bookworm"
-DEBIAN_MIRROR="http://deb.debian.org/debian"
-BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
-BASE_ROOTFS="$BASE_ARTIFACTS/rootfs.squashfs"
-BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
-BASE_HOSTNAME="motlie-vnet-v12"
-EGRESS_MAC="12:34:56:78:90:ab"
-
-echo "=== motlie-vnet v1.2 base image builder ==="
-echo "Host arch:          $HOST_ARCH"
-echo "Rust target:        $RUST_TARGET"
-echo "Debian arch:        $DEBOOTSTRAP_ARCH"
-echo "Kernel mode:        $KERNEL_MODE"
-echo "mmdebstrap mode:    $MMDEBSTRAP_MODE"
-echo "Base dir:           $BASE_ARTIFACTS"
-echo ""
-
-mkdir -p "$BASE_ARTIFACTS"
-
-if [ -z "$GUEST_BINARY" ]; then
-    echo "--- Step 1: Building motlie-vfs-guest-v1_1 ($RUST_TARGET) ---"
-    (cd "$WORKSPACE_ROOT" && cargo build --release \
-        --features vsock,client \
-        -p motlie-vfs --bin motlie-vfs-guest-v1_1)
-    GUEST_BINARY="$WORKSPACE_ROOT/target/release/motlie-vfs-guest-v1_1"
-    echo "Guest binary: $GUEST_BINARY"
-    file "$GUEST_BINARY"
-    echo ""
-fi
-
-if [ ! -f "$GUEST_BINARY" ]; then
-    die "guest binary not found at $GUEST_BINARY"
-fi
-
-echo "--- Step 2: Kernel ($KERNEL_MODE) ---"
-case "$KERNEL_MODE" in
-    download)
-        if [ -f "$BASE_KERNEL" ]; then
-            echo "Kernel already exists: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
-        else
-            echo "Downloading pre-built kernel from cloud-hypervisor/linux..."
-            wget -q --show-progress -O "$BASE_KERNEL" "$CH_KERNEL_URL"
-            echo "Kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
-        fi
-        ;;
-    build)
-        KERNEL_SRC="/tmp/motlie-vnet-kernel-$$"
-        echo "Cloning cloud-hypervisor/linux into $KERNEL_SRC..."
-        git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
-            -b ch-6.12.8 "$KERNEL_SRC"
-        (
-            cd "$KERNEL_SRC"
-            make ch_defconfig
-            cat >> .config << 'KEOF'
-CONFIG_SQUASHFS=y
-CONFIG_SQUASHFS_ZSTD=y
-CONFIG_OVERLAY_FS=y
-KEOF
-            make olddefconfig
-            make "$KERNEL_BUILD_TARGET" -j"$(nproc)"
-            cp "$KERNEL_BUILD_OUTPUT" "$BASE_KERNEL"
-        )
-        rm -rf "$KERNEL_SRC"
-        echo "Kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
-        ;;
-    skip)
-        if [ ! -f "$BASE_KERNEL" ]; then
-            echo "WARNING: kernel not found at $BASE_KERNEL"
-            echo "Place a CH-compatible kernel there before running launch-ch.sh."
-        else
-            echo "Using existing kernel: $BASE_KERNEL ($(du -h "$BASE_KERNEL" | cut -f1))"
-        fi
-        ;;
-esac
-echo ""
-
-echo "--- Step 3: Building shared Debian squashfs root image ---"
-GUEST_BINARY_ABS="$(realpath "$GUEST_BINARY")"
-OVERLAY_INIT_ABS="$(realpath "$SCRIPT_DIR/overlay-init")"
-
-run_mmdebstrap "$BASE_ROOTFS" \
-    --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,tmux,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,cloud-init,locales,sudo,python3,npm \
-    --customize-hook='chroot "$1" systemctl enable ssh' \
-    --customize-hook='chroot "$1" systemctl enable systemd-networkd' \
-    --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service' \
-    --customize-hook='rm -f "$1/etc/systemd/system/systemd-networkd-wait-online.service" "$1/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"' \
-    --customize-hook='printf "en_US.UTF-8 UTF-8\n" > "$1/etc/locale.gen"' \
-    --customize-hook='chroot "$1" locale-gen en_US.UTF-8' \
-    --customize-hook='chroot "$1" update-locale LANG=en_US.UTF-8' \
-    --customize-hook='chroot "$1" groupadd -g 1000 alice' \
-    --customize-hook='chroot "$1" useradd -m -u 1000 -g alice -s /bin/bash alice' \
-    --customize-hook='chroot "$1" usermod -aG sudo alice' \
-    --customize-hook='echo "alice:testpass" | chroot "$1" chpasswd' \
-    --customize-hook='chroot "$1" groupadd -g 1001 bob' \
-    --customize-hook='chroot "$1" useradd -m -u 1001 -g bob -s /bin/bash bob' \
-    --customize-hook='chroot "$1" usermod -aG sudo bob' \
-    --customize-hook='echo "bob:testpass" | chroot "$1" chpasswd' \
-    --customize-hook='sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" "$1/etc/ssh/sshd_config"' \
-    --customize-hook='echo "root:rootpass" | chroot "$1" chpasswd' \
-    --customize-hook='chroot "$1" ssh-keygen -A' \
-    --customize-hook='chroot "$1" npm install -g @openai/codex' \
-    --customize-hook='chroot "$1" npm install -g @anthropic-ai/claude-code' \
-    --customize-hook='mkdir -p "$1/etc/motlie-vfs"' \
-    --customize-hook='cat > "$1/etc/profile.d/dotenv.sh" << "DOTENVEOF"
-if [ -f "$HOME/.env" ]; then
-    set -a
-    . "$HOME/.env"
-    set +a
-fi
-DOTENVEOF' \
-    --customize-hook='cat > "$1/etc/profile.d/tmux-auto.sh" << "TMUXEOF"
+cat <<'TMUXEOF' | sudo tee /etc/profile.d/tmux-auto.sh >/dev/null
 if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
     if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
@@ -302,8 +502,15 @@ if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1
         esac
     fi
 fi
-TMUXEOF' \
-    --customize-hook='cat > "$1/etc/profile.d/agent-state.sh" << "AGENTEOF"
+TMUXEOF
+cat <<'DOTENVEOF' | sudo tee /etc/profile.d/dotenv.sh >/dev/null
+if [ -f "$HOME/.env" ]; then
+    set -a
+    . "$HOME/.env"
+    set +a
+fi
+DOTENVEOF
+cat <<'AGENTEOF' | sudo tee /etc/profile.d/agent-state.sh >/dev/null
 agent_state_root=/agent-state
 codex_root="$agent_state_root/codex"
 codex_sqlite_root="$codex_root/sqlite"
@@ -314,8 +521,8 @@ if [ -d "$agent_state_root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ "${US
     export CODEX_HOME="$codex_root"
     export CODEX_SQLITE_HOME="$codex_sqlite_root"
 fi
-AGENTEOF' \
-    --customize-hook='cat > "$1/usr/local/bin/motlie-agent-state-setup" << "AGENTSVCEOF"
+AGENTEOF
+cat <<'AGENTSVCEOF' | sudo tee /usr/local/bin/motlie-agent-state-setup >/dev/null
 #!/bin/sh
 set -eu
 
@@ -350,48 +557,22 @@ for user_name in alice bob; do
         setup_user "$user_name"
     fi
 done
-AGENTSVCEOF' \
-    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-agent-state-setup"' \
-    --customize-hook="cat > \"\$1/etc/systemd/network/20-egress.network\" << \"NETEOF\"
-[Match]
-Name=eth1
-MACAddress=$EGRESS_MAC
+AGENTSVCEOF
+cat <<'MOTDEOF' | sudo tee /etc/motd >/dev/null
+                    _   _ _
+  _ __ ___   ___ | |_| (_) ___
+ | '_ ` _ \ / _ \| __| | |/ _ \
+ | | | | | | (_) | |_| | |  __/
+ |_| |_| |_|\___/ \__|_|_|\___|
 
-[Network]
-ConfigureWithoutCarrier=yes
-NETEOF" \
-    --customize-hook='cat > "$1/usr/local/bin/motlie-vnet-egress-setup" << "EGRESSEOF"
-#!/bin/sh
-set -eu
-
-ip link set eth1 up || exit 0
-ip addr replace 10.0.2.15/24 dev eth1
-ip route replace 10.0.2.0/24 dev eth1 scope link src 10.0.2.15
-ip route replace default via 10.0.2.2 dev eth1 metric 100
-ip route del default dev eth0 2>/dev/null || true
-cat > /etc/resolv.conf << "RESOLVEOF"
-nameserver 10.0.2.3
-options edns0
-RESOLVEOF
-EGRESSEOF' \
-    --customize-hook='chmod 755 "$1/usr/local/bin/motlie-vnet-egress-setup"' \
-    --customize-hook='cat > "$1/etc/systemd/system/motlie-vfs-guest.service" << "SVCEOF"
-[Unit]
-Description=motlie-vfs guest filesystem mounter
-ConditionPathExists=/etc/motlie-vfs/mounts.yaml
-After=local-fs.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/motlie-vfs-guest /etc/motlie-vfs/mounts.yaml
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF' \
-    --customize-hook='chroot "$1" systemctl enable motlie-vfs-guest' \
-    --customize-hook='cat > "$1/etc/systemd/system/motlie-agent-state.service" << "AGENTUNITEOF"
+v1.25 Apple Vz vnet / agent-state demo
+MOTDEOF
+if ! grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
+  printf 'user_allow_other\n' | sudo tee -a /etc/fuse.conf >/dev/null
+fi
+sudo chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh
+sudo chmod 0755 /usr/local/bin/motlie-agent-state-setup
+cat <<'AGENTUNITEOF' | sudo tee /etc/systemd/system/motlie-agent-state.service >/dev/null
 [Unit]
 Description=Link agent state into mounted guest home
 After=motlie-vfs-guest.service
@@ -405,54 +586,94 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-AGENTUNITEOF' \
-    --customize-hook='chroot "$1" systemctl enable motlie-agent-state' \
-    --customize-hook='cat > "$1/etc/systemd/system/motlie-vnet-egress.service" << "EGRESSUNITEOF"
-[Unit]
-Description=Configure static v1.2 egress NIC
-After=systemd-networkd.service
-Wants=systemd-networkd.service
-ConditionPathExists=/sys/class/net/eth1
+AGENTUNITEOF
+sudo systemctl unmask motlie-vfs-guest.service || true
+sudo systemctl daemon-reload
+sudo systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true
+sudo systemctl enable motlie-agent-state.service >/dev/null 2>&1 || true
+EOF
 
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/motlie-vnet-egress-setup
-RemainAfterExit=yes
+echo "--- cleaning cloud-init state for reusable base image ---"
+tart_guest_bash admin <<'EOF'
+sudo cloud-init clean --logs --machine-id --seed
+sudo rm -rf /var/lib/cloud/*
+sudo truncate -s 0 /etc/machine-id
+sudo mkdir -p /var/lib/cloud
+EOF
 
-[Install]
-WantedBy=multi-user.target
-EGRESSUNITEOF' \
-    --customize-hook='chroot "$1" systemctl enable motlie-vnet-egress' \
-    --customize-hook="echo \"$BASE_HOSTNAME\" > \"\$1/etc/hostname\"" \
-    --customize-hook='cat > "$1/etc/motd" << "MOTDEOF"
-                    _   _ _
-  _ __ ___   ___ | |_| (_) ___
- | '"'"'_ ` _ \ / _ \| __| | |/ _ \
- | | | | | | (_) | |_| | |  __/
- |_| |_| |_|\___/ \__|_|_|\___|
+GUEST_BINARY="/usr/local/bin/motlie-vfs-guest"
 
-v1.2 split-network / agent-state demo
-Build: __MOTLIE_IMAGE_BUILD_GIT_SHA__
-Built At: __MOTLIE_IMAGE_BUILD_TIME_UTC__
-MOTDEOF' \
-    --customize-hook='sed -i "s/__MOTLIE_IMAGE_BUILD_GIT_SHA__/'"$IMAGE_BUILD_GIT_SHA"'/g" "$1/etc/motd"' \
-    --customize-hook='sed -i "s/__MOTLIE_IMAGE_BUILD_TIME_UTC__/'"$IMAGE_BUILD_TIME_UTC"'/g" "$1/etc/motd"' \
-    --customize-hook='cat > "$1/etc/fstab" << "FSTABEOF"
-proc        /proc    proc    defaults        0      0
-sysfs       /sys     sysfs   defaults        0      0
-devtmpfs    /dev     devtmpfs defaults       0      0
-FSTABEOF' \
-    --customize-hook='echo "user_allow_other" >> "$1/etc/fuse.conf"' \
-    --customize-hook="upload $GUEST_BINARY_ABS /usr/local/bin/motlie-vfs-guest" \
-    --customize-hook="chmod 755 \"\$1/usr/local/bin/motlie-vfs-guest\"" \
-    --customize-hook="upload $OVERLAY_INIT_ABS /sbin/overlay-init" \
-    --customize-hook="chmod 755 \"\$1/sbin/overlay-init\"" \
-    --customize-hook='chroot "$1" apt-get clean' \
-    --customize-hook='rm -rf "$1/var/lib/apt/lists"/*'
+IDENTITY_PAYLOAD="$(tart_guest_capture admin <<'EOF'
+python3 - <<'PY'
+import json
+import pwd
+import grp
 
-echo "Shared squashfs image: $BASE_ROOTFS ($(du -h "$BASE_ROOTFS" | cut -f1))"
-echo ""
-echo "=== Build complete ==="
-ls -lh "$BASE_ARTIFACTS/"
-echo ""
-echo "Next: ./launch-ch.sh --guest alice --admin-net=tap --egress-net=tap"
+def passwd_entry(name: str):
+    try:
+        entry = pwd.getpwnam(name)
+        return {"name": entry.pw_name, "uid": entry.pw_uid, "gid": entry.pw_gid, "home": entry.pw_dir}
+    except KeyError:
+        return None
+
+def group_entry(name: str):
+    try:
+        entry = grp.getgrnam(name)
+        return {"name": entry.gr_name, "gid": entry.gr_gid}
+    except KeyError:
+        return None
+
+payload = {
+    "passwd": {
+        "admin": passwd_entry("admin"),
+        "alice": passwd_entry("alice"),
+        "bob": passwd_entry("bob"),
+    },
+    "group": {
+        "admin": group_entry("admin"),
+        "alice": group_entry("alice"),
+        "bob": group_entry("bob"),
+    },
+}
+print(json.dumps(payload, sort_keys=True))
+PY
+EOF
+)"
+
+python3 - "$RESULT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PAYLOAD" <<'PY'
+import json
+import sys
+
+path, vm_name, ip_addr, boot_seconds, guest_binary, identity_payload = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "backend": "vz-tart",
+            "vm_name": vm_name,
+            "ip_addr": ip_addr,
+            "boot_to_ip_seconds": float(boot_seconds),
+            "guest_contract": {
+                "motlie_vfs_guest_path": guest_binary,
+                "users": {
+                    "alice": {"uid": 1000, "gid": 1000, "password": "testpass"},
+                    "bob": {"uid": 1001, "gid": 1001, "password": "testpass"},
+                },
+                "agent_state": "/agent-state",
+            },
+            "identity_probe": json.loads(identity_payload),
+        },
+        fh,
+        indent=2,
+        sort_keys=True,
+    )
+    fh.write("\n")
+PY
+
+echo "--- result written ---"
+cat "$RESULT_JSON"
+
+echo "--- shutting down base guest gracefully ---"
+tart exec "$BASE_VM_NAME" sudo shutdown -h now >/dev/null 2>&1 || true
+wait "$RUN_PID" || true
+
+echo "=== success ==="

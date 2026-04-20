@@ -135,6 +135,13 @@ This tree is now scaffolded for Apple Vz work:
 It is not yet claiming validated end-to-end `v1.2` networking parity on Apple
 Vz. That proof is the work of this issue.
 
+For local iteration, the default VM names are intentionally stable:
+
+- base image: `motlie-v1-25-base-iter`
+- guest runs: `motlie-v1-25-alice-iter` / `motlie-v1-25-bob-iter`
+
+Each rerun replaces those VMs in place instead of creating new suffixed names.
+
 ## Files
 
 | File | Purpose |
@@ -146,4 +153,3 @@ Vz. That proof is the work of this issue.
 | `launch-vz.sh` | Native Apple Vz launcher scaffold for the `v1.25` slice |
 | `vz-vsock-runner.m` | Current example-local Apple Vz helper |
 | `build-guest.sh` | Inherited `v1.2` CH guest-image builder, still to be adapted/converged for Vz |
-

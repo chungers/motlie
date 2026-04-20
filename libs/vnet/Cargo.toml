@@ -40,3 +40,7 @@ serde = { version = "1.0", features = ["derive"] }
 [[example]]
 name = "repl_host_v1_2"
 path = "examples/v1.2/repl_host.rs"
+
+[[example]]
+name = "repl_host_v1_25"
+path = "examples/v1.25/repl_host.rs"
