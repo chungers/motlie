@@ -1,0 +1,13 @@
+[Unit]
+Description=motlie-vfs validation sentinel writer (v1.15 Vz)
+After=motlie-vfs-guest.service
+Requires=motlie-vfs-guest.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motlie-vfs-v1_15-validate.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
