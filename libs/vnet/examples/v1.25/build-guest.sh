@@ -112,25 +112,31 @@ READY_EPOCH="$EPOCHREALTIME"
 BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
 
 guest_bash() {
+  guest_bash_as "$BOOTSTRAP_USER" "$BOOTSTRAP_PASS"
+}
+
+guest_bash_as() {
+  local run_user="$1"
+  local run_pass="$2"
   local remote_script
   remote_script="$(mktemp)"
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${BOOTSTRAP_USER}@${IP_ADDR}:/tmp/motlie-vnet-remote.sh
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:/tmp/motlie-vnet-remote.sh
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      puts stderr "scp auth failed for ${run_user}@${IP_ADDR}"
       exit 97
     }
-    send "${BOOTSTRAP_PASS}\r"
+    send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    puts stderr "scp permission denied for ${run_user}@${IP_ADDR}"
     exit 98
   }
   eof {
@@ -146,19 +152,19 @@ EOF
   expect <<EOF
 set timeout -1
 set password_tries 0
-  spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-remote.sh </dev/null"
+  spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-remote.sh </dev/null"
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "ssh auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      puts stderr "ssh auth failed for ${run_user}@${IP_ADDR}"
       exit 97
     }
-    send "${BOOTSTRAP_PASS}\r"
+    send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "ssh permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    puts stderr "ssh permission denied for ${run_user}@${IP_ADDR}"
     exit 98
   }
   eof {
@@ -237,19 +243,40 @@ EOF
 }
 
 guest_capture() {
+  guest_capture_as "$BOOTSTRAP_USER" "$BOOTSTRAP_PASS"
+}
+
+guest_capture_as() {
+  local run_user="$1"
+  local run_pass="$2"
   local remote_script
   remote_script="$(mktemp)"
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${BOOTSTRAP_USER}@${IP_ADDR}:/tmp/motlie-vnet-capture.sh
-expect "password:"
-send "${BOOTSTRAP_PASS}\r"
-expect eof
-catch wait result
-set exit_code [lindex \$result 3]
-if {\$exit_code != 0} {
-  exit \$exit_code
+set password_tries 0
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:/tmp/motlie-vnet-capture.sh
+expect {
+  "password:" {
+    incr password_tries
+    if {\$password_tries > 3} {
+      puts stderr "scp auth failed for ${run_user}@${IP_ADDR}"
+      exit 97
+    }
+    send "${run_pass}\r"
+    exp_continue
+  }
+  "Permission denied" {
+    puts stderr "scp permission denied for ${run_user}@${IP_ADDR}"
+    exit 98
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    if {\$exit_code != 0} {
+      exit \$exit_code
+    }
+  }
 }
 EOF
   rm -f "$remote_script"
@@ -258,19 +285,19 @@ set timeout -1
 log_user 0
 set output ""
 set password_tries 0
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-capture.sh </dev/null"
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-capture.sh </dev/null"
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "ssh auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      puts stderr "ssh auth failed for ${run_user}@${IP_ADDR}"
       exit 97
     }
-    send "${BOOTSTRAP_PASS}\r"
+    send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "ssh permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    puts stderr "ssh permission denied for ${run_user}@${IP_ADDR}"
     exit 98
   }
   -re ".+" {
@@ -289,40 +316,6 @@ if {\$exit_code != 0} {
   exit \$exit_code
 }
 EOF
-}
-
-tart_guest_bash() {
-  local run_user="$1"
-  local remote_script
-  remote_script="$(mktemp)"
-  cat >"$remote_script"
-  guest_copy "$remote_script" /tmp/motlie-vnet-tart.sh
-  rm -f "$remote_script"
-  guest_bash <<'EOF'
-sudo chmod 0644 /tmp/motlie-vnet-tart.sh
-EOF
-  if [[ "$run_user" == "admin" ]]; then
-    tart exec "$BASE_VM_NAME" bash -euo pipefail /tmp/motlie-vnet-tart.sh
-  else
-    tart exec "$BASE_VM_NAME" sudo -u "$run_user" bash -euo pipefail /tmp/motlie-vnet-tart.sh
-  fi
-}
-
-tart_guest_capture() {
-  local run_user="$1"
-  local remote_script
-  remote_script="$(mktemp)"
-  cat >"$remote_script"
-  guest_copy "$remote_script" /tmp/motlie-vnet-tart-capture.sh
-  rm -f "$remote_script"
-  guest_bash <<'EOF'
-sudo chmod 0644 /tmp/motlie-vnet-tart-capture.sh
-EOF
-  if [[ "$run_user" == "admin" ]]; then
-    tart exec "$BASE_VM_NAME" bash -euo pipefail /tmp/motlie-vnet-tart-capture.sh
-  else
-    tart exec "$BASE_VM_NAME" sudo -u "$run_user" bash -euo pipefail /tmp/motlie-vnet-tart-capture.sh
-  fi
 }
 
 echo "--- installing guest prerequisites ---"
@@ -396,7 +389,7 @@ sudo mkdir -p /etc/profile.d
 EOF
 
 echo "--- creating bootstrap user for identity remap ---"
-tart_guest_bash admin <<'EOF'
+guest_bash_as admin admin <<'EOF'
 if ! id -u motlie-build >/dev/null 2>&1; then
     sudo groupadd -f -g 2002 motlie-build
     sudo useradd -m -u 2002 -g 2002 -s /bin/bash motlie-build
@@ -408,7 +401,7 @@ sudo chown root:root /etc/sudoers.d/90-motlie-build
 sudo chmod 0440 /etc/sudoers.d/90-motlie-build
 EOF
 
-BOOTSTRAP_READY="$(tart_guest_capture admin <<'EOF'
+BOOTSTRAP_READY="$(guest_capture_as admin admin <<'EOF'
 if id -u motlie-build >/dev/null 2>&1 && sudo -u motlie-build sudo -n true >/dev/null 2>&1; then
   echo ok
 fi
@@ -419,7 +412,7 @@ if [[ "${BOOTSTRAP_READY##*$'\n'}" != "ok" && "$BOOTSTRAP_READY" != "ok" ]]; the
   exit 1
 fi
 
-tart_guest_bash motlie-build <<'EOF'
+guest_bash_as motlie-build admin <<'EOF'
 
 remap_conflicting_identity() {
     user_name="$1"
@@ -594,7 +587,7 @@ sudo systemctl enable motlie-agent-state.service >/dev/null 2>&1 || true
 EOF
 
 echo "--- cleaning cloud-init state for reusable base image ---"
-tart_guest_bash admin <<'EOF'
+guest_bash_as admin admin <<'EOF'
 sudo cloud-init clean --logs --machine-id --seed
 sudo rm -rf /var/lib/cloud/*
 sudo truncate -s 0 /etc/machine-id
@@ -603,7 +596,7 @@ EOF
 
 GUEST_BINARY="/usr/local/bin/motlie-vfs-guest"
 
-IDENTITY_PAYLOAD="$(tart_guest_capture admin <<'EOF'
+IDENTITY_PAYLOAD="$(guest_capture_as admin admin <<'EOF'
 python3 - <<'PY'
 import json
 import pwd
