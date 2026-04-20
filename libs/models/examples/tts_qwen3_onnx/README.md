@@ -31,6 +31,14 @@ cargo run -p motlie-models --example tts_qwen3_onnx \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts.wav
 ```
 
+If `--wav` is omitted, the example writes WAV bytes to stdout:
+
+```bash
+echo "Hello from Motlie." | cargo run -p motlie-models --example tts_qwen3_onnx \
+  --no-default-features --features model-qwen3-tts-0_6b \
+  -- > /tmp/motlie-qwen3-tts.wav
+```
+
 ### With prompted voice cloning (reference audio + transcript)
 
 Full quality cloning requires both `--reference-audio` and `--reference-text`:
@@ -60,8 +68,8 @@ cargo run -p motlie-models --example tts_qwen3_onnx \
 
 | Flag | Description |
 |------|-------------|
-| `--text <value>` | Text to synthesize (required) |
-| `--wav <path>` | Output `.wav` file path (required) |
+| `--text <value>` | Text to synthesize (optional; stdin is used when omitted) |
+| `--wav <path>` | Output `.wav` file path (optional; stdout WAV is used when omitted) |
 | `--artifact-root <path>` | Override the default HF cache root for ONNX artifacts |
 | `--reference-audio <path>` | `.wav` file for voice cloning conditioning (optional) |
 | `--reference-text <value>` | Transcript of the reference audio for prompted cloning (optional, recommended when `--reference-audio` is used) |
@@ -84,10 +92,13 @@ cargo run -p motlie-models --example tts_qwen3_onnx \
   for full prompted cloning (3 decoder inputs: hidden, mel, ref_token_ids).
 - **With only `--reference-audio`:** audio-only mel conditioning (2 decoder inputs:
   hidden, mel). Reduced quality — a warning is logged.
-- The resulting `.wav` file uses the backend-reported sample rate and encoding.
+- The resulting `.wav` output uses the backend-reported sample rate and encoding,
+  whether written to a file or stdout.
 - Like Piper Phase 1, Qwen3-TTS performs whole-utterance synthesis inside
   `synthesize()` and then emits buffered typed audio chunks through
   `next_chunk()`.
+- Diagnostics are written to stderr so stdout stays clean when it is carrying
+  WAV bytes.
 
 ## Architecture
 

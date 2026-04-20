@@ -15,6 +15,11 @@ use motlie_model::typed::{
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::qwen3_tts_cpp;
 
+#[path = "../audio_support.rs"]
+mod audio_support;
+#[path = "../tts_support.rs"]
+mod tts_support;
+
 const TARGET_SAMPLE_RATE_HZ: u32 = 24_000;
 const REFERENCE_SAMPLE_RATE_HZ: u32 = 16_000;
 
@@ -25,8 +30,8 @@ fn main() -> Result<()> {
 }
 
 struct Args {
-    text: String,
-    wav_path: PathBuf,
+    text: Option<String>,
+    wav_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
     reference_audio: Option<PathBuf>,
 }
@@ -65,16 +70,24 @@ fn parse_args() -> Result<Args> {
     }
 
     Ok(Args {
-        text: text.context("--text <value> is required")?,
-        wav_path: wav_path.context("--wav <path> is required")?,
+        text,
+        wav_path,
         artifact_root,
         reference_audio,
     })
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie tts_qwen3_tts_cpp — typed qwen3-tts.cpp synthesis ===");
-    println!("wav: {}", args.wav_path.display());
+    let io = tts_support::resolve_text_and_output(args.text, args.wav_path)?;
+    tts_support::log_status("=== motlie tts_qwen3_tts_cpp — typed qwen3-tts.cpp synthesis ===");
+    match &io.output {
+        tts_support::TtsOutput::WavFile(path) => {
+            tts_support::log_status(&format!("wav: {}", path.display()));
+        }
+        tts_support::TtsOutput::Stdout => {
+            tts_support::log_status("wav: <stdout>");
+        }
+    }
 
     let handle = qwen3_tts_cpp::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -88,18 +101,13 @@ async fn run(args: Args) -> Result<()> {
     .context("failed to start typed qwen3-tts.cpp bundle")?;
 
     let request = SynthesisRequest {
-        text: args.text,
+        text: io.text,
         params: SpeechParams::default(),
     };
 
     let mut stream = if let Some(reference_audio) = &args.reference_audio {
-        println!("reference: {}", reference_audio.display());
-        let reader = hound::WavReader::open(reference_audio).with_context(|| {
-            format!(
-                "failed to open reference audio `{}`",
-                reference_audio.display()
-            )
-        })?;
+        tts_support::log_status(&format!("reference: {}", reference_audio.display()));
+        let (_, reader) = audio_support::open_wav_reader(Some(reference_audio.as_path()))?;
         let reference = decode_wav_to_reference(reader)?;
         handle
             .synthesize_with_reference(
@@ -118,100 +126,33 @@ async fn run(args: Args) -> Result<()> {
             .context("failed to open typed speech stream")?
     };
 
-    let mut writer = hound::WavWriter::create(
-        &args.wav_path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: TARGET_SAMPLE_RATE_HZ,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .with_context(|| format!("failed to create wav file `{}`", args.wav_path.display()))?;
-
-    let mut total_samples = 0usize;
+    let mut samples = Vec::new();
     while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
-        total_samples += chunk.samples().len();
-        for sample in chunk.into_samples() {
-            writer
-                .write_sample(sample)
-                .context("failed to write wav sample")?;
-        }
+        samples.extend(chunk.into_samples());
     }
 
-    writer.finalize().context("failed to finalize wav file")?;
+    tts_support::write_wav(&io.output, TARGET_SAMPLE_RATE_HZ, &samples)?;
     stream.finish().await.context("finish failed")?;
     handle.shutdown().await.context("shutdown failed")?;
 
-    println!(
+    tts_support::log_status(&format!(
         "wrote {} mono f32 samples at {} Hz to {}",
-        total_samples,
+        samples.len(),
         TARGET_SAMPLE_RATE_HZ,
-        args.wav_path.display()
-    );
+        match &io.output {
+            tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
+            tts_support::TtsOutput::Stdout => "<stdout>".into(),
+        }
+    ));
     Ok(())
 }
 
-fn decode_wav_to_reference(
-    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+fn decode_wav_to_reference<R: std::io::Read>(
+    reader: hound::WavReader<R>,
 ) -> Result<AudioBuf<f32, REFERENCE_SAMPLE_RATE_HZ, Mono>> {
-    let spec = reader.spec();
-    let samples = decode_wav_to_f32(reader)?;
-    let mono = downmix_to_mono(&samples, spec.channels);
-    let resampled = resample_linear_f32(&mono, spec.sample_rate, REFERENCE_SAMPLE_RATE_HZ);
+    let (spec, samples) = audio_support::decode_wav_to_f32(reader)?;
+    let mono = audio_support::downmix_to_mono(&samples, spec.channels);
+    let resampled =
+        audio_support::resample_linear_f32(&mono, spec.sample_rate, REFERENCE_SAMPLE_RATE_HZ);
     Ok(AudioBuf::new(resampled))
-}
-
-fn decode_wav_to_f32(
-    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
-) -> Result<Vec<f32>> {
-    match reader.spec().sample_format {
-        hound::SampleFormat::Int => Ok(reader
-            .into_samples::<i16>()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to decode integer wav samples")?
-            .into_iter()
-            .map(|sample| sample as f32 / 32768.0)
-            .collect()),
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to decode float wav samples"),
-    }
-}
-
-fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-
-    let channels = channels as usize;
-    samples
-        .chunks_exact(channels)
-        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
-        .collect()
-}
-
-fn resample_linear_f32(samples: &[f32], input_rate_hz: u32, output_rate_hz: u32) -> Vec<f32> {
-    if samples.is_empty() || input_rate_hz == output_rate_hz {
-        return samples.to_vec();
-    }
-
-    let ratio = input_rate_hz as f64 / output_rate_hz as f64;
-    let out_len =
-        ((samples.len() as f64) * output_rate_hz as f64 / input_rate_hz as f64).ceil() as usize;
-    let max_index = samples.len().saturating_sub(1);
-    let mut output = Vec::with_capacity(out_len.max(1));
-
-    for out_idx in 0..out_len {
-        let src_pos = out_idx as f64 * ratio;
-        let left_idx = src_pos.floor() as usize;
-        let right_idx = (left_idx + 1).min(max_index);
-        let frac = (src_pos - left_idx as f64) as f32;
-        let left = samples[left_idx.min(max_index)];
-        let right = samples[right_idx];
-        output.push(left + (right - left) * frac);
-    }
-
-    output
 }

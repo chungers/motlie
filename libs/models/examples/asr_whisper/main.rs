@@ -12,6 +12,11 @@ use motlie_model::typed::{AudioBuf, BatchTranscriber, Mono};
 use motlie_model::{ArtifactPolicy, StartOptions, TranscriptionParams};
 use motlie_models::asr::whisper_base_en;
 
+#[path = "../asr_support.rs"]
+mod asr_support;
+#[path = "../audio_support.rs"]
+mod audio_support;
+
 const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
 fn main() -> Result<()> {
@@ -22,7 +27,7 @@ fn main() -> Result<()> {
 }
 
 struct Args {
-    wav_path: PathBuf,
+    wav_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
     language: Option<String>,
 }
@@ -53,7 +58,6 @@ fn parse_args() -> Result<Args> {
         }
     }
 
-    let wav_path = wav_path.context("--wav <path> is required")?;
     Ok(Args {
         wav_path,
         artifact_root,
@@ -62,23 +66,25 @@ fn parse_args() -> Result<Args> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie asr_whisper — typed Whisper batch transcription ===");
-    println!("wav:   {}", args.wav_path.display());
+    asr_support::log_status("=== motlie asr_whisper — typed Whisper batch transcription ===");
+    let input = asr_support::open_asr_input(args.wav_path)?;
+    asr_support::log_status(&format!(
+        "wav:   {}",
+        asr_support::describe_input(&input.source)
+    ));
 
-    let reader = hound::WavReader::open(&args.wav_path)
-        .with_context(|| format!("failed to open wav file: {}", args.wav_path.display()))?;
-    let wav_spec = reader.spec();
-    println!(
+    let wav_spec = input.reader.spec();
+    asr_support::log_status(&format!(
         "format: {} Hz, {} ch, {:?}, {} bits",
         wav_spec.sample_rate, wav_spec.channels, wav_spec.sample_format, wav_spec.bits_per_sample,
-    );
+    ));
 
-    let audio = decode_wav_to_whisper_input(reader)?;
+    let audio = decode_wav_to_whisper_input(input.reader)?;
 
     let artifact_root = args
         .artifact_root
         .unwrap_or_else(motlie_models::default_artifact_root);
-    println!("artifacts: {}", artifact_root.display());
+    asr_support::log_status(&format!("artifacts: {}", artifact_root.display()));
 
     let handle = whisper_base_en::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -114,66 +120,12 @@ async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn decode_wav_to_whisper_input(
-    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+fn decode_wav_to_whisper_input<R: std::io::Read>(
+    reader: hound::WavReader<R>,
 ) -> Result<AudioBuf<f32, TARGET_SAMPLE_RATE_HZ, Mono>> {
-    let spec = reader.spec();
-    let samples = decode_wav_to_f32(reader)?;
-    let mono = downmix_to_mono(&samples, spec.channels);
-    let resampled = resample_linear_f32(&mono, spec.sample_rate, TARGET_SAMPLE_RATE_HZ);
+    let (spec, samples) = audio_support::decode_wav_to_f32(reader)?;
+    let mono = audio_support::downmix_to_mono(&samples, spec.channels);
+    let resampled =
+        audio_support::resample_linear_f32(&mono, spec.sample_rate, TARGET_SAMPLE_RATE_HZ);
     Ok(AudioBuf::new(resampled))
-}
-
-fn decode_wav_to_f32(
-    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
-) -> Result<Vec<f32>> {
-    match reader.spec().sample_format {
-        hound::SampleFormat::Int => Ok(reader
-            .into_samples::<i16>()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to decode wav samples")?
-            .into_iter()
-            .map(|sample| sample as f32 / 32768.0)
-            .collect()),
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to decode wav samples"),
-    }
-}
-
-fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
-    }
-
-    let channels = channels as usize;
-    samples
-        .chunks_exact(channels)
-        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
-        .collect()
-}
-
-fn resample_linear_f32(samples: &[f32], input_rate_hz: u32, output_rate_hz: u32) -> Vec<f32> {
-    if samples.is_empty() || input_rate_hz == output_rate_hz {
-        return samples.to_vec();
-    }
-
-    let ratio = input_rate_hz as f64 / output_rate_hz as f64;
-    let out_len =
-        ((samples.len() as f64) * output_rate_hz as f64 / input_rate_hz as f64).ceil() as usize;
-    let max_index = samples.len().saturating_sub(1);
-    let mut output = Vec::with_capacity(out_len.max(1));
-
-    for out_idx in 0..out_len {
-        let src_pos = out_idx as f64 * ratio;
-        let left_idx = src_pos.floor() as usize;
-        let right_idx = (left_idx + 1).min(max_index);
-        let frac = (src_pos - left_idx as f64) as f32;
-        let left = samples[left_idx.min(max_index)];
-        let right = samples[right_idx];
-        output.push(left + (right - left) * frac);
-    }
-
-    output
 }

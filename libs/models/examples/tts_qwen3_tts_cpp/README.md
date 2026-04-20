@@ -39,6 +39,14 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts-cpp.wav
 ```
 
+If `--wav` is omitted, the example writes WAV bytes to stdout:
+
+```bash
+echo "Hello from Motlie." | cargo run -p motlie-models --example tts_qwen3_tts_cpp \
+  --no-default-features --features model-qwen3-tts-cpp \
+  -- > /tmp/motlie-qwen3-tts-cpp.wav
+```
+
 ### With voice cloning
 
 ```bash
@@ -52,8 +60,8 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 
 | Flag | Description |
 |------|-------------|
-| `--text <value>` | Text to synthesize (required) |
-| `--wav <path>` | Output `.wav` file path (required) |
+| `--text <value>` | Text to synthesize (optional; stdin is used when omitted) |
+| `--wav <path>` | Output `.wav` file path (optional; stdout WAV is used when omitted) |
 | `--artifact-root <path>` | Override the default HF cache root for GGUF artifacts |
 | `--reference-audio <path>` | Optional `.wav` file used for voice cloning |
 
@@ -66,4 +74,7 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 - The backend performs whole-utterance synthesis in `synthesize()` and then
   emits buffered typed audio chunks through `next_chunk()`, matching the Piper
   and Qwen ONNX TTS stream contract.
-- The resulting `.wav` file uses the backend's fixed 24 kHz mono float output.
+- The resulting `.wav` output uses the backend's fixed 24 kHz mono float output,
+  whether written to a file or stdout.
+- Diagnostics are written to stderr so stdout stays clean when it is carrying
+  WAV bytes.
