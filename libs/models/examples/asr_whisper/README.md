@@ -24,11 +24,18 @@ cargo run -p motlie-models --example asr_whisper \
   -- --wav path/to/audio.wav
 ```
 
+If `--wav` is omitted, the example reads a WAV stream from stdin:
+
+```sh
+cat path/to/audio.wav | cargo run -p motlie-models --example asr_whisper \
+  --no-default-features --features model-whisper-base-en --
+```
+
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `--wav <path>` | Path to the `.wav` file to transcribe (required) |
+| `--wav <path>` | Path to the `.wav` file to transcribe (optional; stdin is used when omitted) |
 | `--artifact-root <path>` | Override the default HF cache root or pass a pre-resolved artifact directory |
 | `--language <code>` | Language hint (e.g., `en`); defaults to auto-detect |
 
@@ -48,3 +55,5 @@ The example demonstrates the source-adaptation boundary from the strict typed AP
 - `.wav` decoding is caller-side (using the `hound` crate)
 - caller-side adaptation produces `AudioBuf<f32, 16000, Mono>`
 - the backend runs as a batch transcriber rather than a chunked streaming session
+- transcript text is written to stdout, while diagnostics move to stderr in
+  stdin pipeline mode

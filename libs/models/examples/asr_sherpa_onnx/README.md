@@ -14,6 +14,13 @@ cargo run -p motlie-models --example asr_sherpa_onnx \
   -- --wav /path/to/audio.wav
 ```
 
+If `--wav` is omitted, the example reads a WAV stream from stdin:
+
+```bash
+cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
+  --no-default-features --features model-sherpa-onnx-streaming --
+```
+
 ## Preconditions
 
 - The curated sherpa-onnx artifacts must already be downloaded under the
@@ -34,3 +41,5 @@ cargo run -p motlie-models --example asr_sherpa_onnx \
 - Audio is streamed through the shared PCM transcription contract.
 - Incremental transcript updates are printed as `[partial]` and `[final]`
   segments while the file is processed.
+- If `--wav` is omitted, the example reads binary WAV input from stdin.
+- Transcript text stays on stdout; diagnostics move to stderr in pipeline mode.

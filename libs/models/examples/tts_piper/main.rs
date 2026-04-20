@@ -12,6 +12,9 @@ use motlie_model::typed::{SpeechStream, SpeechSynthesizer, SynthesisRequest};
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::piper_en_us_ljspeech_medium;
 
+#[path = "../tts_support.rs"]
+mod tts_support;
+
 const TARGET_SAMPLE_RATE_HZ: u32 = 22_050;
 
 fn main() -> Result<()> {
@@ -21,8 +24,8 @@ fn main() -> Result<()> {
 }
 
 struct Args {
-    text: String,
-    wav_path: PathBuf,
+    text: Option<String>,
+    wav_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
 }
 
@@ -53,15 +56,23 @@ fn parse_args() -> Result<Args> {
     }
 
     Ok(Args {
-        text: text.context("--text <value> is required")?,
-        wav_path: wav_path.context("--wav <path> is required")?,
+        text,
+        wav_path,
         artifact_root,
     })
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie tts_piper — typed Piper speech synthesis ===");
-    println!("wav:  {}", args.wav_path.display());
+    let io = tts_support::resolve_text_and_output(args.text, args.wav_path)?;
+    tts_support::log_status("=== motlie tts_piper — typed Piper speech synthesis ===");
+    match &io.output {
+        tts_support::TtsOutput::WavFile(path) => {
+            tts_support::log_status(&format!("wav:  {}", path.display()));
+        }
+        tts_support::TtsOutput::Stdout => {
+            tts_support::log_status("wav:  <stdout>");
+        }
+    }
 
     let handle = piper_en_us_ljspeech_medium::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -76,42 +87,29 @@ async fn run(args: Args) -> Result<()> {
 
     let mut stream = handle
         .synthesize(SynthesisRequest {
-            text: args.text,
+            text: io.text,
             params: SpeechParams::default(),
         })
         .await
         .context("failed to open typed speech stream")?;
 
-    let mut writer = hound::WavWriter::create(
-        &args.wav_path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: TARGET_SAMPLE_RATE_HZ,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        },
-    )
-    .with_context(|| format!("failed to create wav file `{}`", args.wav_path.display()))?;
-
-    let mut total_samples = 0usize;
+    let mut samples = Vec::new();
     while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
-        total_samples += chunk.samples().len();
-        for sample in chunk.into_samples() {
-            writer
-                .write_sample(sample)
-                .context("failed to write wav sample")?;
-        }
+        samples.extend(chunk.into_samples());
     }
 
-    writer.finalize().context("failed to finalize wav file")?;
+    tts_support::write_wav(&io.output, TARGET_SAMPLE_RATE_HZ, &samples)?;
     stream.finish().await.context("finish failed")?;
     handle.shutdown().await.context("shutdown failed")?;
 
-    println!(
+    tts_support::log_status(&format!(
         "wrote {} mono i16 samples at {} Hz to {}",
-        total_samples,
+        samples.len(),
         TARGET_SAMPLE_RATE_HZ,
-        args.wav_path.display()
-    );
+        match &io.output {
+            tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
+            tts_support::TtsOutput::Stdout => "<stdout>".into(),
+        }
+    ));
     Ok(())
 }
