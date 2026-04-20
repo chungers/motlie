@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-19 | @codex-tts | Revised the stdout design around simple shell composition. TTS examples now target streamed WAV on stdout instead of a custom framed PCM protocol so they can pipe directly into `ssh`, `afplay`, `ffmpeg`, or any ASR tool that accepts WAV from stdin. |
 | 2026-04-19 | @codex-tts | Initial brownfield design for issue #208. Defines a uniform stdin/stdout pipeline mode for all shipped TTS example binaries while preserving `--wav` file output. |
 
 This document defines the example-layer behavior for streamed output in the
@@ -40,7 +41,8 @@ need one shared contract rather than three backend-shaped CLIs.
 
 - Preserve current `--wav <path>` behavior.
 - Add a pipeline mode that reads synthesis text from stdin.
-- Emit framed stream output on stdout so another process can consume it.
+- Emit a valid WAV byte stream on stdout so another process can consume it
+  directly.
 - Keep the shared flags and mode selection identical across all shipped TTS
   examples.
 - Keep backend-specific flags additive and explicit, not implicit.
@@ -52,6 +54,7 @@ need one shared contract rather than three backend-shaped CLIs.
 - Adding playback to these binaries in this slice.
 - Making every backend support every advanced flag. Only the common behavior
   must match.
+- Defining a generic transport-neutral chunk protocol for stdout in this slice.
 
 ## Affected Binaries
 
@@ -83,20 +86,35 @@ This lets a caller pipe text in while still targeting `.wav`.
 
 ### Pipeline Mode
 
-If `--stdout-stream` is present, the binary:
+If `--wav` is not present, the binary:
 
 - reads synthesis text from stdin unless `--text` is provided
-- emits a framed stream to stdout
+- emits a valid WAV byte stream to stdout
 - emits no human-readable progress lines on stdout
 
 Human-readable logging must go to stderr in pipeline mode so stdout remains a
-clean machine-readable stream.
+clean machine-readable WAV stream.
 
-If neither `--wav` nor `--stdout-stream` is given, argument parsing should fail
-with a clear error because the sink is ambiguous.
+This is the command-line composition target for this feature. The intended UX is
+simple shell piping, for example:
 
-If both are given, the initial slice should reject that combination to keep the
-first implementation simple and deterministic.
+```bash
+echo "hello world" | cargo run -p motlie-models --example tts_piper \
+  --no-default-features --features model-piper-en-us-ljspeech-medium \
+  -- > out.wav
+```
+
+and remote/local playback, for example:
+
+```bash
+echo "hello world" | program | ssh mac-host 'afplay -'
+```
+
+or:
+
+```bash
+echo "hello world" | program | ffmpeg -i pipe:0 -f null -
+```
 
 ## Proposed Shared CLI
 
@@ -105,14 +123,15 @@ Common flags for every TTS example:
 - `--text <value>`: optional direct text input
 - `--artifact-root <path>`: optional curated artifact root override
 - `--wav <path>`: write a `.wav` file
-- `--stdout-stream`: write framed PCM chunks to stdout
 
 Common input rules:
 
-- exactly one sink must be selected: `--wav` or `--stdout-stream`
 - text source may be either `--text` or stdin
 - if both stdin text and `--text` are provided, `--text` wins and stdin is
   ignored for this slice
+- sink selection is:
+  - `--wav <path>`: file output
+  - no `--wav`: stdout WAV stream
 
 Backend-specific flags remain allowed:
 
@@ -120,40 +139,56 @@ Backend-specific flags remain allowed:
 - `tts_qwen3_tts_cpp`: `--reference-audio`
 - `tts_piper`: no backend-specific flags in the current slice
 
-## Stream Framing Contract
+## Stdout WAV Contract
 
-Stdout pipeline mode needs an explicit framing layer. Raw PCM by itself is not
-enough because downstream tools need the audio format and chunk boundaries.
+Stdout pipeline mode should emit a valid WAV container, not raw PCM and not a
+custom chunk protocol.
 
-The proposed initial framing is:
+Why:
 
-1. one UTF-8 JSON header line
-2. repeated binary chunk frames
+- the user requirement is simple shell composition
+- `ssh`, `afplay`, `ffmpeg`, and other CLI tools already understand WAV
+- a TTS binary that writes WAV to stdout can also feed any ASR binary that
+  accepts WAV from stdin
+- it removes the need for a Motlie-specific adapter just to turn stdout into a
+  file or player input
 
-Header example:
+This means the example layer needs a stdout-safe WAV writer.
 
-```json
-{"version":1,"encoding":"pcm_s16le","sample_rate_hz":22050,"channels":1}
-```
+Important implementation constraint:
 
-Header rules:
+- `hound::WavWriter` requires `Write + Seek`
+- stdout pipes are not seekable
+- so the examples need a small dedicated writer for stdout mode that emits a
+  streaming-safe WAV header and then writes audio bytes as they arrive
 
-- newline-delimited UTF-8 JSON
-- emitted exactly once before any audio frame
-- describes the PCM payload format for every subsequent frame
+The file-path mode may keep using `hound` because a regular file is seekable.
 
-Chunk frame rules:
+The stdout-mode writer must:
 
-- 4-byte little-endian unsigned payload length
-- exactly that many PCM bytes immediately after the length field
-- zero-length payload marks end of stream
+- emit a correct WAV header for the backend output format
+- write samples incrementally as chunks arrive
+- terminate cleanly at EOF without writing diagnostics to stdout
 
-Why this design:
+The initial implementation should target the current backend output shapes:
 
-- simple to generate from Rust examples
-- simple to consume from another Rust tool or shell adapter
-- stable enough to support a later `stdout-stream -> wav` adapter
-- avoids mixing binary PCM with human-readable progress text
+- Piper: mono `i16` at `22050 Hz`
+- Qwen3 ONNX: mono `f32` at backend-reported `24000 Hz`
+- qwen3-tts.cpp: mono `f32` at backend-reported `24000 Hz`
+
+## TTS to ASR Composition
+
+Yes, this design intentionally supports piping a TTS example into an ASR binary
+that accepts a WAV file stream from stdin.
+
+That composition works if the ASR binary:
+
+- reads WAV from stdin instead of requiring a filesystem path
+- is willing to consume a forward-only stream until EOF
+
+This TTS work does not automatically make the existing ASR examples support
+stdin WAV input, but it removes the TTS-side blocker by making stdout a normal
+WAV stream instead of a custom protocol.
 
 ## Layering
 
@@ -164,7 +199,9 @@ The core speech model contract already yields PCM chunks. The examples should:
 - parse CLI
 - choose text source
 - choose sink
-- translate `SpeechStream` output into either `.wav` or framed stdout bytes
+- translate `SpeechStream` output into either:
+  - `.wav` file bytes through the existing file writer path
+  - stdout WAV bytes through a dedicated non-seekable writer
 
 That implies adding a small shared helper module under `libs/models/examples/`
 for:
@@ -172,7 +209,7 @@ for:
 - common TTS argument parsing
 - stdin text loading
 - `.wav` sink writing
-- stdout framing
+- stdout WAV writing
 
 ## Error Handling
 
@@ -189,16 +226,23 @@ The implementation should prove:
 
 1. each binary still writes `.wav`
 2. each binary can read text from stdin
-3. each binary can emit framed stdout stream output
-4. a simple adapter can consume that stdout stream and write a `.wav`
+3. each binary can emit a valid WAV stream on stdout
+4. the stdout WAV stream can be consumed by standard CLI tools
 5. backend-specific flags still work where supported
 
 ## Alternatives Considered
 
-### Raw PCM on stdout without framing
+### Raw PCM on stdout
 
 Rejected. Downstream tools would not know sample rate, encoding, or end of
 stream without out-of-band coordination.
+
+### Custom framed PCM protocol on stdout
+
+Rejected for this issue. It solves a more general transport problem than the
+current requirement and makes simple shell composition worse. Telnyx or other
+transport adapters can be added later on top of the same speech stream contract
+without making the TTS examples speak a custom stdout protocol now.
 
 ### New core-model stream type
 
