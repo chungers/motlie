@@ -16,6 +16,15 @@ BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
 BOOTSTRAP_PASS="${MOTLIE_VZ_BOOTSTRAP_PASS:-admin}"
 SERVICE_FILE="$SCRIPT_DIR/motlie-vfs-guest.service"
 DATASOURCE_CFG_FILE="$SCRIPT_DIR/99_motlie_vz.cfg"
+RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
+RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
+SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
+RUNNER_PID_FILE="$ARTIFACTS_DIR/build-runner.pid"
+SERIAL_LOG="$ARTIFACTS_DIR/build-serial.log"
+SOCKET_PATH="/tmp/motlie-vnet-build.vsock_5000"
+NAT_MAC="${MOTLIE_VZ_BUILD_NAT_MAC:-02:4d:6f:74:62:25}"
+SEED_DIR="$ARTIFACTS_DIR/build-seed"
+SEED_IMAGE="$ARTIFACTS_DIR/build-seed.dmg"
 
 zmodload zsh/datetime
 
@@ -36,15 +45,20 @@ require_cmd expect
 require_cmd scp
 require_cmd ssh
 require_cmd nc
+require_cmd arp
+require_cmd hdiutil
 
 local_vm_exists() {
   tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
 }
 
 cleanup() {
-  if local_vm_exists "$BASE_VM_NAME"; then
-    tart stop "$BASE_VM_NAME" >/dev/null 2>&1 || true
+  if [[ -f "$RUNNER_PID_FILE" ]]; then
+    kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
+    rm -f "$RUNNER_PID_FILE"
   fi
+  rm -f "$SEED_IMAGE"
+  rm -rf "$SEED_DIR"
 }
 
 trap cleanup EXIT
@@ -64,50 +78,290 @@ tart clone "$SOURCE_IMAGE" "$BASE_VM_NAME" >/dev/null
 echo "--- packing Motlie source tree ---"
 COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git -C "$REPO_ROOT" ls-files -z | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --disable-copyfile --no-mac-metadata --no-xattrs --null -czf "$SOURCE_TARBALL" -C "$REPO_ROOT" --files-from -
 
-echo "--- starting guest ---"
+kill_stale_runners() {
+  local stale_pids=()
+  local stale_pid=""
+  while read -r stale_pid; do
+    [[ -n "$stale_pid" ]] || continue
+    stale_pids+=("$stale_pid")
+  done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+    /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
+  ')
+
+  if [[ "${#stale_pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  kill "${stale_pids[@]}" >/dev/null 2>&1 || true
+
+  local attempts=0
+  while [[ $attempts -lt 20 ]]; do
+    local survivors=()
+    while read -r stale_pid; do
+      [[ -n "$stale_pid" ]] || continue
+      survivors+=("$stale_pid")
+    done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+      /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
+    ')
+    if [[ "${#survivors[@]}" -eq 0 ]]; then
+      return 0
+    fi
+    sleep 0.5
+    attempts=$(( attempts + 1 ))
+    if [[ $attempts -eq 10 ]]; then
+      kill -9 "${survivors[@]}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  echo "failed to terminate stale build Vz runners" >&2
+  exit 1
+}
+
+probe_guest_ip() {
+  arp -an | python3 -c '
+import re
+import sys
+
+target = sys.argv[1].strip().lower()
+
+def normalize(mac: str) -> str:
+    parts = [part for part in mac.split(":") if part]
+    return ":".join(f"{int(part, 16):x}" for part in parts)
+
+target = normalize(target)
+
+for line in sys.stdin:
+    match = re.search(r"\(([^)]+)\)\s+at\s+([0-9a-fA-F:]+)", line)
+    if not match:
+        continue
+    ip_addr, mac = match.groups()
+    if normalize(mac.lower()) == target:
+        print(ip_addr)
+        break
+' "$NAT_MAC"
+}
+
+probe_guest_ip_via_ssh() {
+  python3 - "$NAT_MAC" <<'PY'
+import sys
+
+target = sys.argv[1].strip().lower()
+
+def normalize(mac: str) -> str:
+    parts = [part for part in mac.split(":") if part]
+    return ":".join(f"{int(part, 16):x}" for part in parts)
+
+print(normalize(target))
+PY
+}
+
+guest_mac_for_ip() {
+  local ip_addr="$1"
+  expect <<EOF
+set timeout 10
+log_user 0
+set output ""
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${ip_addr} "ip -o link show enp0s1 | grep link/ether"
+expect {
+  "password:" {
+    send "${BOOTSTRAP_PASS}\r"
+    exp_continue
+  }
+  -re ".+" {
+    append output \$expect_out(0,string)
+    exp_continue
+  }
+  eof {
+    if {\$output ne ""} {
+      puts \$output
+    }
+  }
+  timeout {
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
+}
+EOF
+}
+
+probe_guest_ip_by_ssh() {
+  local target_mac=""
+  target_mac="$(probe_guest_ip_via_ssh)"
+  local candidate=""
+  local candidate_mac=""
+  for candidate in 192.168.64.{2..40}; do
+    ssh_ready_for_password_prompt "$candidate" || continue
+    candidate_mac="$(guest_mac_for_ip "$candidate" 2>/dev/null | python3 -c '
+import re
+import sys
+
+def normalize(mac: str) -> str:
+    parts = [part for part in mac.split(":") if part]
+    return ":".join(f"{int(part, 16):x}" for part in parts)
+
+text = sys.stdin.read()
+match = re.search(r"link/ether\s+([0-9a-fA-F:]+)", text)
+if match:
+    print(normalize(match.group(1).lower()))
+' 2>/dev/null || true)"
+    if [[ -n "$candidate_mac" && "$candidate_mac" == "$target_mac" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ssh_ready_for_password_prompt() {
+  local ip_addr="$1"
+  expect <<EOF
+set timeout 5
+log_user 0
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 ${BOOTSTRAP_USER}@${ip_addr} true
+expect {
+  "password:" {
+    exit 0
+  }
+  "Permission denied" {
+    exit 0
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    exit \$exit_code
+  }
+  timeout {
+    exit 124
+  }
+}
+EOF
+}
+
+wait_for_guest_ip() {
+  local attempts=0
+  local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
+  local ip_addr=""
+  while [[ $attempts -lt $max_attempts ]]; do
+    if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
+      echo "vz-vsock-runner exited early; log follows:" >&2
+      cat "$RUN_LOG" >&2 || true
+      [[ -f "$SERIAL_LOG" ]] && tail -n 80 "$SERIAL_LOG" >&2 || true
+      exit 1
+    fi
+    ip_addr="$(probe_guest_ip || true)"
+    if [[ -n "$ip_addr" ]]; then
+      echo "$ip_addr"
+      return 0
+    fi
+    if (( attempts % 10 == 0 )); then
+      ip_addr="$(probe_guest_ip_by_ssh || true)"
+      if [[ -n "$ip_addr" ]]; then
+        echo "$ip_addr"
+        return 0
+      fi
+    fi
+    sleep 0.5
+    attempts=$(( attempts + 1 ))
+  done
+  return 1
+}
+
+wait_for_guest_ssh() {
+  local ip_addr="$1"
+  local attempts=0
+  local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
+  while [[ $attempts -lt $max_attempts ]]; do
+    if ssh_ready_for_password_prompt "$ip_addr" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+    attempts=$(( attempts + 1 ))
+  done
+  return 1
+}
+
+kill_stale_runners
+rm -f "$RUNNER_PID_FILE" "$SERIAL_LOG" "$SEED_IMAGE"
+rm -rf "$SEED_DIR"
+
+echo "--- rendering native NoCloud seed disk ---"
+mkdir -p "$SEED_DIR"
+cat >"$SEED_DIR/meta-data" <<EOF
+instance-id: ${BASE_VM_NAME}
+local-hostname: motlie-v1-25-build
+EOF
+cat >"$SEED_DIR/user-data" <<'EOF'
+#cloud-config
+users:
+  - default
+  - name: admin
+    gecos: Motlie Build Bootstrap
+    plain_text_passwd: admin
+    lock_passwd: false
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+ssh_pwauth: true
+disable_root: true
+package_update: false
+chpasswd:
+  expire: false
+runcmd:
+  - [ systemctl, enable, --now, ssh ]
+EOF
+hdiutil create -quiet -fs FAT32 -volname CIDATA -srcfolder "$SEED_DIR" -ov -format UDRW "$SEED_IMAGE"
+
+if [[ -n "$RUNNER_BIN_OVERRIDE" ]]; then
+  RUNNER_BIN="$RUNNER_BIN_OVERRIDE"
+elif [[ "$SKIP_RUNNER_BUILD" == "1" ]]; then
+  RUNNER_BIN="$SCRIPT_DIR/artifacts/build/vz-vsock-runner"
+else
+  echo "--- building Vz virtio-socket helper ---"
+  RUNNER_BIN="$($RUNNER_BUILD_SCRIPT)"
+fi
+chmod +x "$RUNNER_BIN"
+
+VM_DIR="$HOME/.tart/vms/$BASE_VM_NAME"
+DISK_PATH="$VM_DIR/disk.img"
+NVRAM_PATH="$VM_DIR/nvram.bin"
+MACHINE_ID_PATH="$VM_DIR/machine-id.bin"
+
+echo "--- starting guest via native Apple Vz runner ---"
 : > "$RUN_LOG"
 START_EPOCH="$EPOCHREALTIME"
-tart run --no-graphics "$BASE_VM_NAME" >"$RUN_LOG" 2>&1 &
-RUN_PID="$!"
+"$RUNNER_BIN" \
+  --disk "$DISK_PATH" \
+  --nvram "$NVRAM_PATH" \
+  --machine-id "$MACHINE_ID_PATH" \
+  --serial-log "$SERIAL_LOG" \
+  --seed-disk "$SEED_IMAGE" \
+  --unix-socket "$SOCKET_PATH" \
+  --vsock-port 5000 \
+  --memory-mib 4096 \
+  --cpu-count 4 \
+  --enable-nat \
+  --nat-mac "$NAT_MAC" \
+  >"$RUN_LOG" 2>&1 &
+RUNNER_PID="$!"
+echo "$RUNNER_PID" > "$RUNNER_PID_FILE"
 
-IP_ADDR=""
-ATTEMPTS=0
-MAX_ATTEMPTS=$(( TIMEOUT_SECONDS * 2 ))
-while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
-  if ! kill -0 "$RUN_PID" >/dev/null 2>&1; then
-    echo "tart run exited early; log follows:" >&2
-    cat "$RUN_LOG" >&2
-    exit 1
-  fi
-
-  IP_ADDR="$(tart ip "$BASE_VM_NAME" 2>/dev/null || true)"
-  if [[ -n "$IP_ADDR" ]]; then
-    break
-  fi
-
-  sleep 0.5
-  ATTEMPTS=$(( ATTEMPTS + 1 ))
-done
-
-if [[ -z "$IP_ADDR" ]]; then
+IP_ADDR="$(wait_for_guest_ip)" || {
   echo "timed out waiting for guest IP after ${TIMEOUT_SECONDS}s" >&2
   cat "$RUN_LOG" >&2 || true
+  [[ -f "$SERIAL_LOG" ]] && tail -n 80 "$SERIAL_LOG" >&2 || true
   exit 1
-fi
+}
 
 echo "--- waiting for guest SSH ---"
-ATTEMPTS=0
-while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
-  if nc -z "$IP_ADDR" 22 >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.5
-  ATTEMPTS=$(( ATTEMPTS + 1 ))
-done
-if [[ $ATTEMPTS -ge $MAX_ATTEMPTS ]]; then
+wait_for_guest_ssh "$IP_ADDR" || {
   echo "timed out waiting for guest SSH after ${TIMEOUT_SECONDS}s" >&2
+  cat "$RUN_LOG" >&2 || true
+  [[ -f "$SERIAL_LOG" ]] && tail -n 80 "$SERIAL_LOG" >&2 || true
   exit 1
-fi
+}
 
 READY_EPOCH="$EPOCHREALTIME"
 BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
@@ -739,7 +993,7 @@ with open(identity_probe_json, "r", encoding="utf-8") as fh:
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(
         {
-            "backend": "vz-tart",
+            "backend": "vz-native",
             "vm_name": vm_name,
             "ip_addr": ip_addr,
             "boot_to_ip_seconds": float(boot_seconds),
@@ -764,7 +1018,22 @@ echo "--- result written ---"
 cat "$RESULT_JSON"
 
 echo "--- shutting down base guest gracefully ---"
-tart exec "$BASE_VM_NAME" sudo shutdown -h now >/dev/null 2>&1 || true
-wait "$RUN_PID" || true
+guest_bash_as admin admin <<'EOF'
+sudo shutdown -h now || true
+EOF
+for _ in {1..40}; do
+  if [[ ! -f "$RUNNER_PID_FILE" ]]; then
+    break
+  fi
+  if ! kill -0 "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1; then
+    rm -f "$RUNNER_PID_FILE"
+    break
+  fi
+  sleep 0.5
+done
+if [[ -f "$RUNNER_PID_FILE" ]]; then
+  kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
+  rm -f "$RUNNER_PID_FILE"
+fi
 
 echo "=== success ==="
