@@ -6,6 +6,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-25-base-iter}"
 SOURCE_IMAGE="${MOTLIE_VZ_SOURCE_IMAGE:-ghcr.io/cirruslabs/ubuntu@sha256:1e23e6fe5a6d3fb2089652229a09d71742617758b15aa311cecf1c05985d3021}"
+SOURCE_DISK_PATH="${MOTLIE_VZ_SOURCE_DISK:-}"
+SOURCE_NVRAM_PATH="${MOTLIE_VZ_SOURCE_NVRAM:-}"
+SOURCE_MACHINE_ID_PATH="${MOTLIE_VZ_SOURCE_MACHINE_ID:-}"
 RUN_LOG="$ARTIFACTS_DIR/build-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/build-result.json"
 IDENTITY_PROBE_JSON="$ARTIFACTS_DIR/identity-probe.json"
@@ -25,6 +28,7 @@ SOCKET_PATH="/tmp/motlie-vnet-build.vsock_5000"
 NAT_MAC="${MOTLIE_VZ_BUILD_NAT_MAC:-02:4d:6f:74:62:25}"
 SEED_DIR="$ARTIFACTS_DIR/build-seed"
 SEED_IMAGE="$ARTIFACTS_DIR/build-seed.dmg"
+WORK_VM_DIR="$ARTIFACTS_DIR/${BASE_VM_NAME}.vm"
 
 zmodload zsh/datetime
 
@@ -37,7 +41,6 @@ require_cmd() {
   fi
 }
 
-require_cmd tart
 require_cmd git
 require_cmd tar
 require_cmd python3
@@ -48,9 +51,16 @@ require_cmd nc
 require_cmd arp
 require_cmd hdiutil
 
-local_vm_exists() {
-  tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
-}
+USE_TART_SOURCE=1
+if [[ -n "$SOURCE_DISK_PATH" || -n "$SOURCE_NVRAM_PATH" || -n "$SOURCE_MACHINE_ID_PATH" ]]; then
+  if [[ -z "$SOURCE_DISK_PATH" || -z "$SOURCE_NVRAM_PATH" ]]; then
+    echo "MOTLIE_VZ_SOURCE_DISK and MOTLIE_VZ_SOURCE_NVRAM must be set together" >&2
+    exit 1
+  fi
+  USE_TART_SOURCE=0
+else
+  require_cmd tart
+fi
 
 cleanup() {
   if [[ -f "$RUNNER_PID_FILE" ]]; then
@@ -65,15 +75,70 @@ trap cleanup EXIT
 
 echo "=== Vz v1.25 base guest build ==="
 echo "Base VM:      $BASE_VM_NAME"
-echo "Source image: $SOURCE_IMAGE"
-
-if local_vm_exists "$BASE_VM_NAME"; then
-  echo "--- deleting stale base VM clone ---"
-  tart delete "$BASE_VM_NAME" >/dev/null || true
+if [[ "$USE_TART_SOURCE" -eq 1 ]]; then
+  echo "Source image: $SOURCE_IMAGE"
+else
+  echo "Source disk:  $SOURCE_DISK_PATH"
 fi
 
-echo "--- cloning base image ---"
-tart clone "$SOURCE_IMAGE" "$BASE_VM_NAME" >/dev/null
+rm -rf "$WORK_VM_DIR"
+mkdir -p "$WORK_VM_DIR"
+
+materialize_work_vm() {
+  local src_disk="$1"
+  local src_nvram="$2"
+  local src_machine_id="${3:-}"
+  python3 - "$src_disk" "$src_nvram" "$src_machine_id" "$WORK_VM_DIR" <<'PY'
+import os
+import shutil
+import sys
+
+src_disk, src_nvram, src_machine_id, out_dir = sys.argv[1:]
+os.makedirs(out_dir, exist_ok=True)
+for src, name in (
+    (src_disk, "disk.img"),
+    (src_nvram, "nvram.bin"),
+):
+    dst = os.path.join(out_dir, name)
+    tmp = dst + ".tmp-copy"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    with open(src, "rb") as rf, open(tmp, "wb") as wf:
+        shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
+    os.replace(tmp, dst)
+
+machine_id_dst = os.path.join(out_dir, "machine-id.bin")
+if src_machine_id:
+    tmp = machine_id_dst + ".tmp-copy"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    with open(src_machine_id, "rb") as rf, open(tmp, "wb") as wf:
+        shutil.copyfileobj(rf, wf, length=1024 * 1024)
+    os.replace(tmp, machine_id_dst)
+else:
+    with open(machine_id_dst, "wb"):
+        pass
+PY
+}
+
+if [[ "$USE_TART_SOURCE" -eq 1 ]]; then
+  local_vm_exists() {
+    tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
+  }
+
+  if local_vm_exists "$BASE_VM_NAME"; then
+    echo "--- deleting stale base VM clone ---"
+    tart delete "$BASE_VM_NAME" >/dev/null || true
+  fi
+
+  echo "--- cloning base image ---"
+  tart clone "$SOURCE_IMAGE" "$BASE_VM_NAME" >/dev/null
+  materialize_work_vm "$HOME/.tart/vms/$BASE_VM_NAME/disk.img" "$HOME/.tart/vms/$BASE_VM_NAME/nvram.bin" "$HOME/.tart/vms/$BASE_VM_NAME/machine-id.bin"
+  tart delete "$BASE_VM_NAME" >/dev/null || true
+else
+  echo "--- materializing native build VM from source artifacts ---"
+  materialize_work_vm "$SOURCE_DISK_PATH" "$SOURCE_NVRAM_PATH" "$SOURCE_MACHINE_ID_PATH"
+fi
 
 echo "--- packing Motlie source tree ---"
 COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git -C "$REPO_ROOT" ls-files -z | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --disable-copyfile --no-mac-metadata --no-xattrs --null -czf "$SOURCE_TARBALL" -C "$REPO_ROOT" --files-from -
@@ -324,7 +389,7 @@ else
 fi
 chmod +x "$RUNNER_BIN"
 
-VM_DIR="$HOME/.tart/vms/$BASE_VM_NAME"
+VM_DIR="$WORK_VM_DIR"
 DISK_PATH="$VM_DIR/disk.img"
 NVRAM_PATH="$VM_DIR/nvram.bin"
 MACHINE_ID_PATH="$VM_DIR/machine-id.bin"
