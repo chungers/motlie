@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-20 | @codex-tts | Removed the non-functional `tts_qwen3_onnx` binary from the shipped example set in the example-stream-output PR. The ONNX backend remains tracked separately, but the shipped TTS example set is now Piper plus `qwen3-tts.cpp`. |
 | 2026-04-17 | @codex-asr | Renamed the shipped TTS example targets and paths to `tts_piper`, `tts_qwen3_onnx`, and `tts_qwen3_tts_cpp`, and updated the plan references accordingly. |
 | 2026-04-16 | @codex-tts | Replaced the large `qwen3-tts.cpp` vendor tree with a pinned git submodule at `libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` and tightened the build/docs contract around `git submodule update --init --recursive` for fresh checkouts. |
 | 2026-04-16 | @codex-tts | Implemented the official backup TTS backend `motlie-model-qwen3-tts-cpp` with a submodule-backed C API wrapper, curated GGUF bundle wiring, and the `tts_v0.4` example. Validated real CPU synthesis from local GGUF artifacts, validated the optional CUDA build/clippy path on GB10, and documented the current local CUDA runtime fallback to CPU. |

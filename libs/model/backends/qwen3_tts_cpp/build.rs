@@ -46,7 +46,13 @@ fn main() {
     }
     if cfg!(target_env = "gnu") {
         config.define("CMAKE_EXE_LINKER_FLAGS", "-fopenmp");
-        config.define("CMAKE_SHARED_LINKER_FLAGS", "-fopenmp");
+        let mut shared_linker_flags = String::from("-fopenmp");
+        if cfg!(target_os = "linux") {
+            // Keep qwen3-tts.cpp's bundled ggml symbols local to libqwen3tts so
+            // co-linked backends like whisper.cpp do not interpose them.
+            shared_linker_flags.push_str(" -Wl,-Bsymbolic");
+        }
+        config.define("CMAKE_SHARED_LINKER_FLAGS", shared_linker_flags);
     }
 
     let dst = config.build();

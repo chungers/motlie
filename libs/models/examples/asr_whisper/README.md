@@ -38,15 +38,12 @@ cat path/to/audio.wav | cargo run -p motlie-models --example asr_whisper \
 | `--wav <path>` | Path to the `.wav` file to transcribe (optional; stdin is used when omitted) |
 | `--artifact-root <path>` | Override the default HF cache root or pass a pre-resolved artifact directory |
 | `--language <code>` | Language hint (e.g., `en`); defaults to auto-detect |
+| `--quiet` | Suppress example-layer and backend-native stderr diagnostics |
 
 ## Expected Output
 
-```
-=== motlie asr_whisper — typed Whisper batch transcription ===
-wav:   path/to/audio.wav
-format: 16000 Hz, 1 ch, Int, 16 bits
-artifacts: ../../artifacts/models/hf-cache
-[final] [0.0s - 5.0s] Hello world, this is a test.
+```text
+Hello world, this is a test.
 ```
 
 ## Architecture
@@ -55,5 +52,6 @@ The example demonstrates the source-adaptation boundary from the strict typed AP
 - `.wav` decoding is caller-side (using the `hound` crate)
 - caller-side adaptation produces `AudioBuf<f32, 16000, Mono>`
 - the backend runs as a batch transcriber rather than a chunked streaming session
-- transcript text is written to stdout, while diagnostics move to stderr in
-  stdin pipeline mode
+- transcript text is written to stdout as one final plain-text line
+- diagnostics move to stderr in stdin pipeline mode, and `--quiet` suppresses
+  example-layer and backend-native stderr logging

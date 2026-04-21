@@ -56,6 +56,7 @@ thiserror.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 hound = "3.5"
+libc = "0.2"
 sysinfo = "0.36.1"
 tokio.workspace = true
 
@@ -97,11 +98,6 @@ required-features = ["model-sherpa-onnx-streaming"]
 name = "asr_moonshine"
 path = "examples/asr_moonshine/main.rs"
 required-features = ["model-moonshine-streaming"]
-
-[[example]]
-name = "tts_qwen3_onnx"
-path = "examples/tts_qwen3_onnx/main.rs"
-required-features = ["model-qwen3-tts-0_6b"]
 
 [[example]]
 name = "tts_qwen3_tts_cpp"

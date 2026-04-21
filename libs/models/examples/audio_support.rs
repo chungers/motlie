@@ -31,7 +31,9 @@ pub fn open_wav_reader(path: Option<&Path>) -> Result<(WavInput, DynWavReader)> 
     }
 }
 
-pub fn decode_wav_to_f32<R: Read>(reader: hound::WavReader<R>) -> Result<(hound::WavSpec, Vec<f32>)> {
+pub fn decode_wav_to_f32<R: Read>(
+    reader: hound::WavReader<R>,
+) -> Result<(hound::WavSpec, Vec<f32>)> {
     let spec = reader.spec();
     let samples = match spec.sample_format {
         hound::SampleFormat::Int => reader

@@ -6,6 +6,9 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-20 | @codex-tts: Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The documented shell-composition contract now covers only `tts_piper` and `tts_qwen3_tts_cpp` on the TTS side. | Example Program, Notes |
+| 2026-04-21 | @codex-tts: Updated the speech example shell contract so `--quiet` suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. | Example Program, Notes |
+| 2026-04-20 | @codex-tts: Tightened the shipped speech example shell contract after live pipe validation. ASR examples now default to one final plain-text transcript on stdout, with `--partials` reserved for streaming event output on the streaming backends, and all shipped TTS/ASR examples now accept `--quiet` to suppress example-layer stderr diagnostics. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Documented the new example-level shell composition contract for speech I/O. Shipped TTS examples now default to stdout WAV when `--wav` is omitted, and shipped ASR examples now default to stdin WAV when `--wav` is omitted, so examples can compose directly through Unix pipes. | Example Program, Notes |
 | 2026-04-17 | @codex-asr: Renamed the shipped example targets from versioned names to capability/model names (`embeddings`, `chat_mistral_qwen3`, `chat_multimodal_gemma4`, `chat_gguf_gwen3_gemma4`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`) and updated the documented commands and paths. | Example Program, Notes |
 | 2026-04-18 | @codex-asr: Added `docs/BUILD_MODELS.md` as the canonical prerequisite/build guide for curated model backends and linked the API surface to the script/CI entry points that enforce those checks. | Overview, Notes |
@@ -361,7 +364,7 @@ The examples are explicit about which curated bundles are compiled into the bina
 
 The shipped speech examples now also share a simple shell-composition contract:
 
-- TTS examples (`tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`) write WAV to `--wav <path>` when provided, or to stdout when `--wav` is omitted.
+- TTS examples (`tts_piper`, `tts_qwen3_tts_cpp`) write WAV to `--wav <path>` when provided, or to stdout when `--wav` is omitted.
 - ASR examples (`asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`) read WAV from `--wav <path>` when provided, or from stdin when `--wav` is omitted.
 - Transcript text stays on stdout for ASR; diagnostics move to stderr in pipeline mode.
 

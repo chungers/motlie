@@ -64,6 +64,7 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 | `--wav <path>` | Output `.wav` file path (optional; stdout WAV is used when omitted) |
 | `--artifact-root <path>` | Override the default HF cache root for GGUF artifacts |
 | `--reference-audio <path>` | Optional `.wav` file used for voice cloning |
+| `--quiet` | Suppress example-layer and backend-native stderr diagnostics |
 
 ## Expected Behavior
 
@@ -78,3 +79,4 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   whether written to a file or stdout.
 - Diagnostics are written to stderr so stdout stays clean when it is carrying
   WAV bytes.
+- `--quiet` suppresses example-layer and backend-native stderr diagnostics.

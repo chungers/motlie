@@ -16,6 +16,8 @@ use motlie_models::asr::whisper_base_en;
 mod asr_support;
 #[path = "../audio_support.rs"]
 mod audio_support;
+#[path = "../quiet_support.rs"]
+mod quiet_support;
 
 const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
@@ -30,12 +32,14 @@ struct Args {
     wav_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
     language: Option<String>,
+    quiet: bool,
 }
 
 fn parse_args() -> Result<Args> {
     let mut wav_path: Option<PathBuf> = None;
     let mut artifact_root: Option<PathBuf> = None;
     let mut language: Option<String> = None;
+    let mut quiet = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -54,6 +58,7 @@ fn parse_args() -> Result<Args> {
             "--language" => {
                 language = Some(args.next().context("--language requires a language code")?);
             }
+            "--quiet" => quiet = true,
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -62,29 +67,44 @@ fn parse_args() -> Result<Args> {
         wav_path,
         artifact_root,
         language,
+        quiet,
     })
 }
 
 async fn run(args: Args) -> Result<()> {
-    asr_support::log_status("=== motlie asr_whisper — typed Whisper batch transcription ===");
+    asr_support::log_status(
+        args.quiet,
+        "=== motlie asr_whisper — typed Whisper batch transcription ===",
+    );
     let input = asr_support::open_asr_input(args.wav_path)?;
-    asr_support::log_status(&format!(
-        "wav:   {}",
-        asr_support::describe_input(&input.source)
-    ));
+    asr_support::log_status(
+        args.quiet,
+        &format!("wav:   {}", asr_support::describe_input(&input.source)),
+    );
 
     let wav_spec = input.reader.spec();
-    asr_support::log_status(&format!(
-        "format: {} Hz, {} ch, {:?}, {} bits",
-        wav_spec.sample_rate, wav_spec.channels, wav_spec.sample_format, wav_spec.bits_per_sample,
-    ));
+    asr_support::log_status(
+        args.quiet,
+        &format!(
+            "format: {} Hz, {} ch, {:?}, {} bits",
+            wav_spec.sample_rate,
+            wav_spec.channels,
+            wav_spec.sample_format,
+            wav_spec.bits_per_sample,
+        ),
+    );
 
     let audio = decode_wav_to_whisper_input(input.reader)?;
 
     let artifact_root = args
         .artifact_root
         .unwrap_or_else(motlie_models::default_artifact_root);
-    asr_support::log_status(&format!("artifacts: {}", artifact_root.display()));
+    asr_support::log_status(
+        args.quiet,
+        &format!("artifacts: {}", artifact_root.display()),
+    );
+    let _quiet_stderr = quiet_support::QuietStderrGuard::maybe_enable(args.quiet)
+        .context("failed to enable quiet stderr mode")?;
 
     let handle = whisper_base_en::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -106,14 +126,7 @@ async fn run(args: Args) -> Result<()> {
         .await
         .context("typed whisper transcription failed")?;
 
-    for segment in &update.segments {
-        println!(
-            "[final] [{:.1}s - {:.1}s] {}",
-            segment.start_ms as f64 / 1000.0,
-            segment.end_ms as f64 / 1000.0,
-            segment.text.trim()
-        );
-    }
+    asr_support::print_plain_transcript(&update.segments);
 
     handle.shutdown().await.context("shutdown failed")?;
 
