@@ -8,6 +8,21 @@ use std::io;
 
 use thiserror::Error;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VoiceSampleFormat {
+    Int,
+    Float,
+}
+
+impl From<hound::SampleFormat> for VoiceSampleFormat {
+    fn from(value: hound::SampleFormat) -> Self {
+        match value {
+            hound::SampleFormat::Int => Self::Int,
+            hound::SampleFormat::Float => Self::Float,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum VoiceError {
     #[error("i/o error: {0}")]
@@ -28,7 +43,7 @@ pub enum VoiceError {
         "unsupported wav sample format {sample_format:?} with {bits_per_sample} bits per sample"
     )]
     UnsupportedWavSampleFormat {
-        sample_format: hound::SampleFormat,
+        sample_format: VoiceSampleFormat,
         bits_per_sample: u16,
     },
     #[error("wav data payload length {data_len} is not divisible by sample width {sample_width}")]

@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use crate::{Result, VoiceError};
+use crate::{Result, VoiceError, VoiceSampleFormat};
 
 pub fn decode_samples_to_f32<R: Read>(
     reader: hound::WavReader<R>,
@@ -16,7 +16,7 @@ pub fn decode_samples_to_f32<R: Read>(
                 .collect(),
             bits_per_sample => {
                 return Err(VoiceError::UnsupportedWavSampleFormat {
-                    sample_format: hound::SampleFormat::Int,
+                    sample_format: VoiceSampleFormat::Int,
                     bits_per_sample,
                 });
             }
@@ -27,7 +27,7 @@ pub fn decode_samples_to_f32<R: Read>(
                 .collect::<std::result::Result<Vec<_>, _>>()?,
             bits_per_sample => {
                 return Err(VoiceError::UnsupportedWavSampleFormat {
-                    sample_format: hound::SampleFormat::Float,
+                    sample_format: VoiceSampleFormat::Float,
                     bits_per_sample,
                 });
             }
@@ -83,7 +83,7 @@ pub fn decode_wav_data_bytes(spec: &hound::WavSpec, data: &[u8]) -> Result<Vec<f
             .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect()),
         (sample_format, bits_per_sample) => Err(VoiceError::UnsupportedWavSampleFormat {
-            sample_format,
+            sample_format: sample_format.into(),
             bits_per_sample,
         }),
     }
