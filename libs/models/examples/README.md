@@ -29,27 +29,13 @@ These are the average results from the 60-run validation matrix:
 
 Lower is better.
 
-```text
-tts_piper -> asr_whisper          0.042 | ####
-tts_qwen3_tts_cpp -> asr_moonshine 0.050 | #####
-tts_qwen3_tts_cpp -> asr_whisper   0.055 | ######
-tts_piper -> asr_moonshine         0.260 | ##########################
-tts_piper -> asr_sherpa_onnx       0.272 | ###########################
-tts_qwen3_tts_cpp -> asr_sherpa_onnx 0.300 | ##############################
-```
+![Average WER by speech pipeline](./assets/speech_pipeline_wer.svg)
 
 ### Average Elapsed Time
 
 Lower is better.
 
-```text
-tts_piper -> asr_whisper            2.4 s | ##
-tts_piper -> asr_sherpa_onnx        2.5 s | ##
-tts_piper -> asr_moonshine         12.1 s | ############
-tts_qwen3_tts_cpp -> asr_sherpa_onnx 20.6 s | #####################
-tts_qwen3_tts_cpp -> asr_whisper   24.1 s | ########################
-tts_qwen3_tts_cpp -> asr_moonshine 30.0 s | ##############################
-```
+![Average elapsed time by speech pipeline](./assets/speech_pipeline_latency.svg)
 
 ### Comparison Table
 
