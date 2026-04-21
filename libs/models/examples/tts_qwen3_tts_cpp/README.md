@@ -31,12 +31,27 @@ git submodule update --init --recursive \
   libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
 ```
 
+Linux linker note:
+
+- Motlie's `build.rs` for `qwen3-tts.cpp` adds `-Wl,-Bsymbolic` so the shared
+  `libqwen3tts` keeps its bundled `ggml` symbols local when it is co-linked
+  with other `ggml` users such as `whisper.cpp`. Without that, `tts_qwen3_tts_cpp`
+  pipelines into ASR examples can fail due to symbol interposition.
+
 ### Basic synthesis
 
 ```bash
 cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   --no-default-features --features model-qwen3-tts-cpp \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts-cpp.wav
+```
+
+If `--wav` is omitted, the example writes WAV bytes to stdout:
+
+```bash
+echo "Hello from Motlie." | cargo run -p motlie-models --example tts_qwen3_tts_cpp \
+  --no-default-features --features model-qwen3-tts-cpp \
+  -- > /tmp/motlie-qwen3-tts-cpp.wav
 ```
 
 ### With voice cloning
@@ -52,10 +67,11 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 
 | Flag | Description |
 |------|-------------|
-| `--text <value>` | Text to synthesize (required) |
-| `--wav <path>` | Output `.wav` file path (required) |
+| `--text <value>` | Text to synthesize (optional; stdin is used when omitted) |
+| `--wav <path>` | Output `.wav` file path (optional; stdout WAV is used when omitted) |
 | `--artifact-root <path>` | Override the default HF cache root for GGUF artifacts |
 | `--reference-audio <path>` | Optional `.wav` file used for voice cloning |
+| `--quiet` | Suppress example-layer and backend-native stderr diagnostics |
 
 ## Expected Behavior
 
@@ -66,4 +82,57 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 - The backend performs whole-utterance synthesis in `synthesize()` and then
   emits buffered typed audio chunks through `next_chunk()`, matching the Piper
   and Qwen ONNX TTS stream contract.
-- The resulting `.wav` file uses the backend's fixed 24 kHz mono float output.
+- The resulting `.wav` output uses the backend's fixed 24 kHz mono float output,
+  whether written to a file or stdout.
+- When stdout is used, the example writes an aligned indefinite-length WAV
+  header and then flushes chunks incrementally so downstream consumers can read
+  until EOF without waiting for the full utterance buffer.
+- Diagnostics are written to stderr so stdout stays clean when it is carrying
+  WAV bytes.
+- `--quiet` suppresses example-layer and backend-native stderr diagnostics.
+  Because that is a whole-process stderr redirect, panic output may also be
+  silent while `--quiet` is active.
+- `--reference-audio` currently uses simple linear resampling to 16 kHz mono
+  with no anti-alias filter. That is acceptable for an example-layer cloning
+  path but is still a known quality limitation for high-rate reference audio.
+
+## Stream To macOS `play` Over SSH
+
+If Homebrew `sox` is installed on the remote Mac host, the stdout WAV stream can
+be piped directly over SSH into `/opt/homebrew/bin/play -t wav -`.
+
+Recommended artifact env var:
+
+```bash
+export QWEN3_TTS_CPP_ARTIFACT_ROOT="/tmp/qwen3-tts-models"
+```
+
+### Short input
+
+```bash
+printf '%s\n' "Hello from qwen3-tts.cpp over SSH." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Medium input
+
+```bash
+printf '%s\n' "This is a medium-length qwen3-tts.cpp synthesis sample streamed over SSH to a macOS host for immediate playback through Homebrew sox." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Long input
+
+```bash
+printf '%s\n' "qwen3-tts.cpp can also handle longer shell-composed utterances where text arrives on standard input, the example writes a WAV container to standard output, SSH forwards that byte stream to the remote macOS host, and Homebrew sox plays it without any intermediate file staging." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```

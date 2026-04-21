@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="320" viewBox="0 0 960 320" role="img" aria-labelledby="title desc">
+  <title id="title">Average elapsed time by TTS to ASR pipeline</title>
+  <desc id="desc">Horizontal bar chart comparing average elapsed wall time in seconds across six TTS to ASR example pipelines.</desc>
+  <rect width="960" height="320" fill="#fbfaf6"/>
+  <text x="32" y="36" font-family="Georgia, serif" font-size="24" fill="#1f2933">Average elapsed time by pipeline</text>
+  <text x="32" y="58" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#52606d">Lower is better. Values are average wall-clock seconds for the 10 prompt runs in each pipeline.</text>
+  <line x1="290" y1="82" x2="290" y2="278" stroke="#cbd2d9" stroke-width="1"/>
+  <line x1="436" y1="82" x2="436" y2="278" stroke="#e4e7eb" stroke-width="1"/>
+  <line x1="582" y1="82" x2="582" y2="278" stroke="#e4e7eb" stroke-width="1"/>
+  <line x1="728" y1="82" x2="728" y2="278" stroke="#e4e7eb" stroke-width="1"/>
+  <text x="290" y="298" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#52606d">0s</text>
+  <text x="436" y="298" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#52606d">10s</text>
+  <text x="582" y="298" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#52606d">20s</text>
+  <text x="728" y="298" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#52606d">30s</text>
+  <g font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1f2933">
+    <text x="32" y="98">tts_piper → asr_whisper</text>
+    <rect x="290" y="84" width="35" height="18" rx="4" fill="#0b7285"/>
+    <text x="333" y="98" font-size="12" fill="#0b7285">2.4s</text>
+
+    <text x="32" y="130">tts_piper → asr_sherpa_onnx</text>
+    <rect x="290" y="116" width="37" height="18" rx="4" fill="#127a6b"/>
+    <text x="335" y="130" font-size="12" fill="#127a6b">2.5s</text>
+
+    <text x="32" y="162">tts_piper → asr_moonshine</text>
+    <rect x="290" y="148" width="177" height="18" rx="4" fill="#2f9e44"/>
+    <text x="475" y="162" font-size="12" fill="#2f9e44">12.1s</text>
+
+    <text x="32" y="194">tts_qwen3_tts_cpp → asr_sherpa_onnx</text>
+    <rect x="290" y="180" width="301" height="18" rx="4" fill="#d9480f"/>
+    <text x="599" y="194" font-size="12" fill="#d9480f">20.6s</text>
+
+    <text x="32" y="226">tts_qwen3_tts_cpp → asr_whisper</text>
+    <rect x="290" y="212" width="352" height="18" rx="4" fill="#e67700"/>
+    <text x="650" y="226" font-size="12" fill="#e67700">24.1s</text>
+
+    <text x="32" y="258">tts_qwen3_tts_cpp → asr_moonshine</text>
+    <rect x="290" y="244" width="438" height="18" rx="4" fill="#c92a2a"/>
+    <text x="736" y="258" font-size="12" fill="#c92a2a">30.0s</text>
+  </g>
+</svg>

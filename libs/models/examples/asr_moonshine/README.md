@@ -14,6 +14,21 @@ cargo run -p motlie-models --example asr_moonshine \
   -- --wav /path/to/audio.wav
 ```
 
+If `--wav` is omitted, the example reads a WAV stream from stdin:
+
+```bash
+cat /path/to/audio.wav | cargo run -p motlie-models --example asr_moonshine \
+  --no-default-features --features model-moonshine-streaming --
+```
+
+To preserve event-style streaming output on stdout, add `--partials`:
+
+```bash
+cat /path/to/audio.wav | cargo run -p motlie-models --example asr_moonshine \
+  --no-default-features --features model-moonshine-streaming \
+  -- --partials
+```
+
 ## Preconditions
 
 - The curated Moonshine artifacts must already be downloaded under the default
@@ -28,5 +43,9 @@ cargo run -p motlie-models --example asr_moonshine \
 
 - The example opens the curated `Moonshine Streaming EN` bundle.
 - Audio is streamed through the typed `StreamingTranscriber` session.
-- Partial output is disabled in this example, so only the final transcript is
-  printed after `finish()`.
+- By default stdout prints one final plain-text transcript line after
+  `finish()`.
+- `--partials` switches stdout to `[partial]` / `[final]` event lines.
+- If `--wav` is omitted, the example reads binary WAV input from stdin.
+- Transcript text stays on stdout; diagnostics move to stderr in pipeline mode.
+- `--quiet` suppresses example-layer and backend-native stderr diagnostics.
