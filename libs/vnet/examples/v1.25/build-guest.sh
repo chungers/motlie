@@ -8,6 +8,7 @@ BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-25-base-iter}"
 SOURCE_IMAGE="${MOTLIE_VZ_SOURCE_IMAGE:-ghcr.io/cirruslabs/ubuntu@sha256:1e23e6fe5a6d3fb2089652229a09d71742617758b15aa311cecf1c05985d3021}"
 RUN_LOG="$ARTIFACTS_DIR/build-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/build-result.json"
+IDENTITY_PROBE_JSON="$ARTIFACTS_DIR/identity-probe.json"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-300}"
 GUEST_SRC_DIR="/home/admin/motlie-src"
@@ -118,13 +119,19 @@ guest_bash() {
 guest_bash_as() {
   local run_user="$1"
   local run_pass="$2"
+  local sudo_pass="${3:-}"
+  local remote_path="/home/${run_user}/.motlie-vnet-remote.sh"
+  local remote_exec="chmod 0700 ${remote_path} && bash -euo pipefail ${remote_path} </dev/null"
+  if [[ -n "$sudo_pass" ]]; then
+    remote_exec="chmod 0700 ${remote_path} && printf '%s\n' '${sudo_pass}' | sudo -S -p '' bash -euo pipefail ${remote_path} </dev/null"
+  fi
   local remote_script
   remote_script="$(mktemp)"
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:/tmp/motlie-vnet-remote.sh
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:${remote_path}
 expect {
   "password:" {
     incr password_tries
@@ -152,7 +159,7 @@ EOF
   expect <<EOF
 set timeout -1
 set password_tries 0
-  spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-remote.sh </dev/null"
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "${remote_exec}"
 expect {
   "password:" {
     incr password_tries
@@ -173,6 +180,64 @@ expect {
     if {\$exit_code != 0} {
       exit \$exit_code
     }
+  }
+}
+EOF
+}
+
+guest_bash_as_capture() {
+  local run_user="$1"
+  local run_pass="$2"
+  local sudo_pass="${3:-}"
+  local remote_path="/home/${run_user}/.motlie-vnet-remote.sh"
+  local remote_exec="chmod 0700 ${remote_path} && bash -euo pipefail ${remote_path} </dev/null"
+  if [[ -n "$sudo_pass" ]]; then
+    remote_exec="chmod 0700 ${remote_path} && printf '%s\n' '${sudo_pass}' | sudo -S -p '' bash -euo pipefail ${remote_path} </dev/null"
+  fi
+  local remote_script
+  remote_script="$(mktemp)"
+  cat >"$remote_script"
+  expect <<EOF
+set timeout -1
+set password_tries 0
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:${remote_path}
+expect {
+  "password:" {
+    incr password_tries
+    if {\$password_tries > 3} {
+      puts stderr "scp auth failed for ${run_user}@${IP_ADDR}"
+      exit 97
+    }
+    send "${run_pass}\r"
+    exp_continue
+  }
+  "Permission denied" {
+    puts stderr "scp permission denied for ${run_user}@${IP_ADDR}"
+    exit 98
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    if {\$exit_code != 0} {
+      exit \$exit_code
+    }
+  }
+}
+EOF
+  rm -f "$remote_script"
+  expect <<EOF
+set timeout -1
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "${remote_exec}"
+expect {
+  "password:" {
+    send_user "password-prompt\\n"
+    send "${run_pass}\r"
+    exp_continue
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    exit \$exit_code
   }
 }
 EOF
@@ -249,13 +314,19 @@ guest_capture() {
 guest_capture_as() {
   local run_user="$1"
   local run_pass="$2"
+  local sudo_pass="${3:-}"
+  local remote_path="/home/${run_user}/.motlie-vnet-capture.sh"
+  local remote_exec="chmod 0700 ${remote_path} && bash -euo pipefail ${remote_path} </dev/null"
+  if [[ -n "$sudo_pass" ]]; then
+    remote_exec="chmod 0700 ${remote_path} && printf '%s\n' '${sudo_pass}' | sudo -S -p '' bash -euo pipefail ${remote_path} </dev/null"
+  fi
   local remote_script
   remote_script="$(mktemp)"
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:/tmp/motlie-vnet-capture.sh
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:${remote_path}
 expect {
   "password:" {
     incr password_tries
@@ -280,12 +351,12 @@ expect {
 }
 EOF
   rm -f "$remote_script"
-  expect <<EOF
+expect <<EOF
 set timeout -1
 log_user 0
 set output ""
 set password_tries 0
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "bash -euo pipefail /tmp/motlie-vnet-capture.sh </dev/null"
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "${remote_exec}"
 expect {
   "password:" {
     incr password_tries
@@ -395,24 +466,34 @@ if ! id -u motlie-build >/dev/null 2>&1; then
     sudo useradd -m -u 2002 -g 2002 -s /bin/bash motlie-build
 fi
 echo "motlie-build:admin" | sudo chpasswd
+sudo usermod -U motlie-build || true
 sudo usermod -aG sudo motlie-build || true
 printf '%s\n' 'motlie-build ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-motlie-build >/dev/null
 sudo chown root:root /etc/sudoers.d/90-motlie-build
 sudo chmod 0440 /etc/sudoers.d/90-motlie-build
 EOF
 
-BOOTSTRAP_READY="$(guest_capture_as admin admin <<'EOF'
-if id -u motlie-build >/dev/null 2>&1 && sudo -u motlie-build sudo -n true >/dev/null 2>&1; then
-  echo ok
-fi
+if ! guest_bash_as motlie-build admin admin <<'EOF'
+true
 EOF
-)"
-if [[ "${BOOTSTRAP_READY##*$'\n'}" != "ok" && "$BOOTSTRAP_READY" != "ok" ]]; then
-  echo "motlie-build bootstrap user is not ready for passwordless sudo" >&2
+then
+  echo "--- motlie-build bootstrap diagnostics ---" >&2
+  guest_bash <<'EOF' >&2 || true
+set -x
+getent passwd motlie-build || true
+sudo passwd -S motlie-build || true
+sudo -l -U motlie-build || true
+grep -R "AllowUsers\\|PasswordAuthentication\\|KbdInteractiveAuthentication\\|UsePAM" /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null || true
+EOF
+  guest_bash_as_capture motlie-build admin admin <<'EOF' >&2 || true
+id
+true
+EOF
+  echo "motlie-build bootstrap user is not ready for sudo-backed remap execution" >&2
   exit 1
 fi
 
-guest_bash_as motlie-build admin <<'EOF'
+guest_bash_as motlie-build admin admin <<'EOF'
 
 remap_conflicting_identity() {
     user_name="$1"
@@ -425,12 +506,26 @@ remap_conflicting_identity() {
     current_gid="$(getent group "$user_name" | cut -d: -f3 || true)"
 
     if [ "$current_uid" = "$target_uid" ]; then
-        sudo usermod -u "$remap_uid" "$user_name"
-        sudo find / -xdev -uid "$target_uid" -exec chown -h "$remap_uid" {} + 2>/dev/null || true
+        loginctl terminate-user "$user_name" >/dev/null 2>&1 || true
+        systemctl stop "user@${target_uid}.service" >/dev/null 2>&1 || true
+        pkill -KILL -u "$target_uid" >/dev/null 2>&1 || true
+        for _ in 1 2 3 4 5; do
+            if ! pgrep -u "$target_uid" >/dev/null 2>&1; then
+                break
+            fi
+            sleep 1
+        done
+        if pgrep -u "$target_uid" >/dev/null 2>&1; then
+            echo "uid $target_uid is still active; cannot remap $user_name" >&2
+            ps -u "$target_uid" -o pid,ppid,user,tty,comm,args >&2 || true
+            exit 1
+        fi
+        usermod -u "$remap_uid" "$user_name"
+        find / -xdev -uid "$target_uid" -exec chown -h "$remap_uid" {} + 2>/dev/null || true
     fi
     if [ "$current_gid" = "$target_gid" ]; then
-        sudo groupmod -g "$remap_gid" "$user_name"
-        sudo find / -xdev -gid "$target_gid" -exec chgrp -h "$remap_gid" {} + 2>/dev/null || true
+        groupmod -g "$remap_gid" "$user_name"
+        find / -xdev -gid "$target_gid" -exec chgrp -h "$remap_gid" {} + 2>/dev/null || true
     fi
 }
 
@@ -447,7 +542,7 @@ ensure_guest_identity() {
             echo "gid $target_gid already belongs to $gid_owner" >&2
             exit 1
         fi
-        sudo groupadd -g "$target_gid" "$user_name"
+        groupadd -g "$target_gid" "$user_name"
     elif [ "$existing_gid" != "$target_gid" ]; then
         echo "group $user_name has gid $existing_gid but expected $target_gid" >&2
         exit 1
@@ -460,14 +555,14 @@ ensure_guest_identity() {
             echo "uid $target_uid already belongs to $uid_owner" >&2
             exit 1
         fi
-        sudo useradd -m -u "$target_uid" -g "$target_gid" -s /bin/bash "$user_name"
+        useradd -m -u "$target_uid" -g "$target_gid" -s /bin/bash "$user_name"
     elif [ "$existing_uid" != "$target_uid" ]; then
         echo "user $user_name has uid $existing_uid but expected $target_uid" >&2
         exit 1
     fi
 
-    sudo usermod -aG sudo "$user_name" || true
-    echo "$user_name:$password" | sudo chpasswd
+    usermod -aG sudo "$user_name" || true
+    echo "$user_name:$password" | chpasswd
 }
 
 remap_conflicting_identity admin 1000 1000 2000 2000
@@ -475,7 +570,7 @@ remap_conflicting_identity ubuntu 1001 1001 2001 2001
 ensure_guest_identity alice 1000 1000 testpass
 ensure_guest_identity bob 1001 1001 testpass
 
-cat <<'TMUXEOF' | sudo tee /etc/profile.d/tmux-auto.sh >/dev/null
+cat <<'TMUXEOF' > /etc/profile.d/tmux-auto.sh
 if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
     if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
@@ -496,14 +591,14 @@ if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1
     fi
 fi
 TMUXEOF
-cat <<'DOTENVEOF' | sudo tee /etc/profile.d/dotenv.sh >/dev/null
+cat <<'DOTENVEOF' > /etc/profile.d/dotenv.sh
 if [ -f "$HOME/.env" ]; then
     set -a
     . "$HOME/.env"
     set +a
 fi
 DOTENVEOF
-cat <<'AGENTEOF' | sudo tee /etc/profile.d/agent-state.sh >/dev/null
+cat <<'AGENTEOF' > /etc/profile.d/agent-state.sh
 agent_state_root=/agent-state
 codex_root="$agent_state_root/codex"
 codex_sqlite_root="$codex_root/sqlite"
@@ -515,7 +610,7 @@ if [ -d "$agent_state_root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ "${US
     export CODEX_SQLITE_HOME="$codex_sqlite_root"
 fi
 AGENTEOF
-cat <<'AGENTSVCEOF' | sudo tee /usr/local/bin/motlie-agent-state-setup >/dev/null
+cat <<'AGENTSVCEOF' > /usr/local/bin/motlie-agent-state-setup
 #!/bin/sh
 set -eu
 
@@ -551,7 +646,7 @@ for user_name in alice bob; do
     fi
 done
 AGENTSVCEOF
-cat <<'MOTDEOF' | sudo tee /etc/motd >/dev/null
+cat <<'MOTDEOF' > /etc/motd
                     _   _ _
   _ __ ___   ___ | |_| (_) ___
  | '_ ` _ \ / _ \| __| | |/ _ \
@@ -561,11 +656,11 @@ cat <<'MOTDEOF' | sudo tee /etc/motd >/dev/null
 v1.25 Apple Vz vnet / agent-state demo
 MOTDEOF
 if ! grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
-  printf 'user_allow_other\n' | sudo tee -a /etc/fuse.conf >/dev/null
+  printf 'user_allow_other\n' >> /etc/fuse.conf
 fi
-sudo chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh
-sudo chmod 0755 /usr/local/bin/motlie-agent-state-setup
-cat <<'AGENTUNITEOF' | sudo tee /etc/systemd/system/motlie-agent-state.service >/dev/null
+chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh
+chmod 0755 /usr/local/bin/motlie-agent-state-setup
+cat <<'AGENTUNITEOF' > /etc/systemd/system/motlie-agent-state.service
 [Unit]
 Description=Link agent state into mounted guest home
 After=motlie-vfs-guest.service
@@ -580,10 +675,10 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 AGENTUNITEOF
-sudo systemctl unmask motlie-vfs-guest.service || true
-sudo systemctl daemon-reload
-sudo systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true
-sudo systemctl enable motlie-agent-state.service >/dev/null 2>&1 || true
+systemctl unmask motlie-vfs-guest.service || true
+systemctl daemon-reload
+systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true
+systemctl enable motlie-agent-state.service >/dev/null 2>&1 || true
 EOF
 
 echo "--- cleaning cloud-init state for reusable base image ---"
@@ -596,7 +691,7 @@ EOF
 
 GUEST_BINARY="/usr/local/bin/motlie-vfs-guest"
 
-IDENTITY_PAYLOAD="$(guest_capture_as admin admin <<'EOF'
+guest_bash_as admin admin <<'EOF'
 python3 - <<'PY'
 import json
 import pwd
@@ -628,16 +723,19 @@ payload = {
         "bob": group_entry("bob"),
     },
 }
-print(json.dumps(payload, sort_keys=True))
+with open("/tmp/motlie-identity-probe.json", "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, sort_keys=True)
 PY
 EOF
-)"
+guest_fetch /tmp/motlie-identity-probe.json "$IDENTITY_PROBE_JSON"
 
-python3 - "$RESULT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PAYLOAD" <<'PY'
+python3 - "$RESULT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PROBE_JSON" <<'PY'
 import json
 import sys
 
-path, vm_name, ip_addr, boot_seconds, guest_binary, identity_payload = sys.argv[1:]
+path, vm_name, ip_addr, boot_seconds, guest_binary, identity_probe_json = sys.argv[1:]
+with open(identity_probe_json, "r", encoding="utf-8") as fh:
+    identity_payload = json.load(fh)
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(
         {
@@ -653,7 +751,7 @@ with open(path, "w", encoding="utf-8") as fh:
                 },
                 "agent_state": "/agent-state",
             },
-            "identity_probe": json.loads(identity_payload),
+            "identity_probe": identity_payload,
         },
         fh,
         indent=2,

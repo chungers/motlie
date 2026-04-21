@@ -3,6 +3,16 @@ use std::path::{Path, PathBuf};
 
 use crate::VnetError;
 
+#[cfg(target_os = "linux")]
+fn default_dns_ipv4() -> Ipv4Addr {
+    crate::slirp::parse_host_dns()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_dns_ipv4() -> Ipv4Addr {
+    Ipv4Addr::new(10, 0, 2, 3)
+}
+
 /// A single host-to-guest TCP port forward rule (optional debug/demo helper).
 /// libslirp binds `bind_addr:host_port` on the host and forwards accepted
 /// connections to `guest_ipv4:guest_port` inside the virtual network.
@@ -155,7 +165,7 @@ impl VnetConfigBuilder {
         // Resolve DNS at build() time if not explicitly set.
         let dns_ipv4 = self
             .dns_ipv4
-            .unwrap_or_else(crate::slirp::parse_host_dns);
+            .unwrap_or_else(default_dns_ipv4);
 
         Ok(VnetConfig {
             socket_path,

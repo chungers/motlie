@@ -87,6 +87,9 @@ case "$GUEST_NAME" in
     ;;
 esac
 
+CONTROL_USER="$LOGIN_USER"
+CONTROL_PASSWORD="testpass"
+
 RUN_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/${GUEST_NAME}-launch-result.json"
 SERIAL_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-serial.log"
@@ -227,10 +230,10 @@ guest_copy() {
   local ip_addr="$3"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" admin@${ip_addr}:$dst
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" ${CONTROL_USER}@${ip_addr}:$dst
 expect {
   "password:" {
-    send "admin\r"
+    send "${CONTROL_PASSWORD}\r"
     exp_continue
   }
   eof {}
@@ -253,10 +256,10 @@ guest_fetch() {
   local ip_addr="$3"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr}:$src "$dst"
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr}:$src "$dst"
 expect {
   "password:" {
-    send "admin\r"
+    send "${CONTROL_PASSWORD}\r"
     exp_continue
   }
   eof {}
@@ -265,12 +268,6 @@ expect {
     exit 124
   }
 }
-
-require_host_fixture_dirs() {
-  mkdir -p "$HOST_HOME_DIR/.ssh" "$HOST_HOME_DIR/.config" "$HOST_AGENT_STATE_DIR" "$HOST_WORKSPACE_DIR"
-}
-
-require_host_fixture_dirs
 catch wait result
 set exit_code [lindex \$result 3]
 if {\$exit_code != 0} {
@@ -279,6 +276,12 @@ if {\$exit_code != 0} {
 EOF
 }
 
+require_host_fixture_dirs() {
+  mkdir -p "$HOST_HOME_DIR/.ssh" "$HOST_HOME_DIR/.config" "$HOST_AGENT_STATE_DIR" "$HOST_WORKSPACE_DIR"
+}
+
+require_host_fixture_dirs
+
 guest_bash() {
   local ip_addr="$1"
   local remote_script
@@ -286,10 +289,10 @@ guest_bash() {
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" admin@${ip_addr}:/tmp/motlie-vfs-remote.sh
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${ip_addr}:/tmp/motlie-vfs-remote.sh
 expect {
   "password:" {
-    send "admin\r"
+    send "${CONTROL_PASSWORD}\r"
     exp_continue
   }
   eof {}
@@ -309,10 +312,10 @@ EOF
 set timeout -1
 log_user 0
 set output ""
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
 expect {
   "password:" {
-    send "admin\r"
+    send "${CONTROL_PASSWORD}\r"
     exp_continue
   }
   -re ".+" {
@@ -381,10 +384,10 @@ guest_mac_for_ip() {
 set timeout 10
 log_user 0
 set output ""
-spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "ip -o link show enp0s1 | grep link/ether"
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr} "ip -o link show enp0s1 | grep link/ether"
 expect {
   "password:" {
-    send "admin\r"
+    send "${CONTROL_PASSWORD}\r"
     exp_continue
   }
   -re ".+" {
@@ -489,10 +492,10 @@ guest_capture() {
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" admin@${ip_addr}:/tmp/motlie-vfs-capture.sh
+spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${ip_addr}:/tmp/motlie-vfs-capture.sh
 expect {
   "password:" {
-    send "admin\r"
+    send "${CONTROL_PASSWORD}\r"
     exp_continue
   }
   eof {}
@@ -512,10 +515,10 @@ EOF
 set timeout -1
 log_user 0
 set output ""
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
+spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
 expect {
   "password:" {
-    send "admin\r"
+    send "${CONTROL_PASSWORD}\r"
     exp_continue
   }
   -re ".+" {
@@ -627,11 +630,11 @@ guest_copy "$MOUNTS_FILE" "/tmp/mounts.${GUEST_NAME}.yaml" "$IP_ADDR"
 guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service "$IP_ADDR"
 
 guest_bash "$IP_ADDR" <<EOF
-printf 'admin\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
-printf 'admin\n' | sudo -S umount -lf /workspace >/dev/null 2>&1 || true
-printf 'admin\n' | sudo -S umount -lf /agent-state >/dev/null 2>&1 || true
-printf 'admin\n' | sudo -S umount -lf /home/$LOGIN_USER >/dev/null 2>&1 || true
-printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie /workspace /agent-state /etc/motlie-vfs
+printf '${CONTROL_PASSWORD}\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
+printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /workspace >/dev/null 2>&1 || true
+printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /agent-state >/dev/null 2>&1 || true
+printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /home/$LOGIN_USER >/dev/null 2>&1 || true
+printf '${CONTROL_PASSWORD}\n' | sudo -S mkdir -p /var/lib/motlie /workspace /agent-state /etc/motlie-vfs
 existing_gid="\$(getent group '$LOGIN_USER' | cut -d: -f3 || true)"
 if [[ -z "\$existing_gid" ]]; then
   gid_owner="\$(getent group $GID_NUM | cut -d: -f1 || true)"
@@ -639,7 +642,7 @@ if [[ -z "\$existing_gid" ]]; then
     echo "gid $GID_NUM already belongs to \$gid_owner; cannot provision $LOGIN_USER" >&2
     exit 1
   fi
-  printf 'admin\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
+  printf '${CONTROL_PASSWORD}\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
 elif [[ "\$existing_gid" != "$GID_NUM" ]]; then
   echo "guest group $LOGIN_USER has gid \$existing_gid but expected $GID_NUM" >&2
   exit 1
@@ -652,41 +655,76 @@ if [[ -z "\$existing_uid" ]]; then
     echo "uid $UID_NUM already belongs to \$uid_owner; cannot provision $LOGIN_USER" >&2
     exit 1
   fi
-  printf 'admin\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
+  printf '${CONTROL_PASSWORD}\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
 elif [[ "\$existing_uid" != "$UID_NUM" ]]; then
   echo "guest user $LOGIN_USER has uid \$existing_uid but expected $UID_NUM" >&2
   exit 1
 fi
-printf 'admin\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
-printf 'admin\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
-printf 'admin\n' | sudo -S chown root:root /workspace
-printf 'admin\n' | sudo -S chmod 0755 /workspace
-printf 'admin\n' | sudo -S chown root:root /agent-state
-printf 'admin\n' | sudo -S chmod 0755 /agent-state
+printf '${CONTROL_PASSWORD}\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
+printf '${CONTROL_PASSWORD}\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
+printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /workspace
+printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0755 /workspace
+printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /agent-state
+printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0755 /agent-state
 if ! dpkg -s build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 dnsutils >/dev/null 2>&1; then
-  printf 'admin\n' | sudo -S apt-get update
-  printf 'admin\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 dnsutils
+  printf '${CONTROL_PASSWORD}\n' | sudo -S apt-get update
+  printf '${CONTROL_PASSWORD}\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config libfuse3-dev curl ca-certificates tar gzip iproute2 dnsutils
+fi
+if ! dpkg -s npm >/dev/null 2>&1; then
+  printf '${CONTROL_PASSWORD}\n' | sudo -S apt-get update
+  printf '${CONTROL_PASSWORD}\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y npm
 fi
 if [[ ! -x /usr/local/bin/motlie-vfs-guest ]]; then
-  export PATH="/home/admin/.cargo/bin:\$PATH"
+  export PATH="/home/$LOGIN_USER/.cargo/bin:\$PATH"
   if ! command -v cargo >/dev/null 2>&1 || ! rustc -vV >/dev/null 2>&1; then
-    rm -rf /home/admin/.cargo /home/admin/.rustup
+    rm -rf /home/$LOGIN_USER/.cargo /home/$LOGIN_USER/.rustup
     curl https://sh.rustup.rs -sSf | sh -s -- -y
-    export PATH="/home/admin/.cargo/bin:\$PATH"
+    export PATH="/home/$LOGIN_USER/.cargo/bin:\$PATH"
   fi
-  printf 'admin\n' | sudo -S rm -rf /var/lib/motlie/src /var/lib/motlie/target
-  printf 'admin\n' | sudo -S mkdir -p /var/lib/motlie/src
-  printf 'admin\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
-  printf 'admin\n' | sudo -S chown -R admin:admin /var/lib/motlie
+  printf '${CONTROL_PASSWORD}\n' | sudo -S rm -rf /var/lib/motlie/src /var/lib/motlie/target
+  printf '${CONTROL_PASSWORD}\n' | sudo -S mkdir -p /var/lib/motlie/src
+  printf '${CONTROL_PASSWORD}\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
+  printf '${CONTROL_PASSWORD}\n' | sudo -S chown -R $LOGIN_USER:$LOGIN_USER /var/lib/motlie
   cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_1 --target-dir /var/lib/motlie/src/target
-  printf 'admin\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_1 /usr/local/bin/motlie-vfs-guest
+  printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_1 /usr/local/bin/motlie-vfs-guest
 fi
-printf 'admin\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
-printf 'admin\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
-printf 'admin\n' | sudo -S systemctl daemon-reload
-printf 'admin\n' | sudo -S systemctl enable motlie-vfs-guest.service
-printf 'admin\n' | sudo -S systemctl restart motlie-vfs-guest.service
-printf 'admin\n' | sudo -S systemctl restart motlie-agent-state.service || true
+if ! command -v codex >/dev/null 2>&1; then
+  printf '${CONTROL_PASSWORD}\n' | sudo -S npm install -g @openai/codex
+fi
+if ! command -v claude >/dev/null 2>&1; then
+  printf '${CONTROL_PASSWORD}\n' | sudo -S npm install -g @anthropic-ai/claude-code
+fi
+NPM_GLOBAL_PREFIX="$(npm prefix -g 2>/dev/null || true)"
+if [[ -n "\$NPM_GLOBAL_PREFIX" ]]; then
+  if [[ -x "\$NPM_GLOBAL_PREFIX/bin/codex" && ! -x /usr/local/bin/codex ]]; then
+    printf '${CONTROL_PASSWORD}\n' | sudo -S ln -s "\$NPM_GLOBAL_PREFIX/bin/codex" /usr/local/bin/codex
+  fi
+  if [[ -x "\$NPM_GLOBAL_PREFIX/bin/claude" && ! -x /usr/local/bin/claude ]]; then
+    printf '${CONTROL_PASSWORD}\n' | sudo -S ln -s "\$NPM_GLOBAL_PREFIX/bin/claude" /usr/local/bin/claude
+  fi
+fi
+if ! command -v codex >/dev/null 2>&1; then
+  cat <<'CODEXWRAP' >/tmp/codex
+#!/bin/sh
+exec npm exec --yes @openai/codex -- "$@"
+CODEXWRAP
+  chmod 0755 /tmp/codex
+  printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/codex /usr/local/bin/codex
+fi
+if ! command -v claude >/dev/null 2>&1; then
+  cat <<'CLAUDEWRAP' >/tmp/claude
+#!/bin/sh
+exec npm exec --yes @anthropic-ai/claude-code -- "$@"
+CLAUDEWRAP
+  chmod 0755 /tmp/claude
+  printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/claude /usr/local/bin/claude
+fi
+printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
+printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl daemon-reload
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl enable motlie-vfs-guest.service
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-agent-state.service || true
 EOF
 
 POST_PROVISION_REMOTE_JSON="/tmp/motlie-vfs-post-provision.json"
@@ -789,13 +827,25 @@ def link_target(path: Path) -> str:
     return os.readlink(path) if path.is_symlink() else ''
 
 def command_ok(cmd):
-    completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+    env = os.environ.copy()
+    env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+    completed = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30, env=env)
     return completed.returncode == 0, completed.stdout.strip(), completed.stderr.strip()
+
+def first_executable(candidates):
+    for candidate in candidates:
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return ''
 
 dns_ok, dns_stdout, dns_stderr = command_ok(['getent', 'ahostsv4', 'example.com'])
 curl_ok, curl_stdout, curl_stderr = command_ok(['curl', '-fsS', '--max-time', '20', 'https://example.com'])
-codex_ok = subprocess.run(['bash', '-lc', 'command -v codex'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0
-claude_ok = subprocess.run(['bash', '-lc', 'command -v claude'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+codex_path = first_executable(['/usr/local/bin/codex', '/usr/bin/codex', '/bin/codex'])
+claude_path = first_executable(['/usr/local/bin/claude', '/usr/bin/claude', '/bin/claude'])
+codex_shell_ok, codex_shell_out, codex_shell_err = command_ok(['bash', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v codex'])
+claude_shell_ok, claude_shell_out, claude_shell_err = command_ok(['bash', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v claude'])
+codex_ok = bool(codex_path)
+claude_ok = bool(claude_path)
 
 result.update({
     'workspace_readme': workspace_readme,
@@ -808,8 +858,16 @@ result.update({
     'codex_link': link_target(codex_link),
     'claude_link': link_target(claude_link),
     'claude_code_link': link_target(claude_code_link),
+    'codex_cli_path': codex_path,
     'codex_cli_present': codex_ok,
+    'codex_shell_lookup_ok': codex_shell_ok,
+    'codex_shell_lookup': codex_shell_out,
+    'codex_shell_lookup_error': codex_shell_err,
+    'claude_cli_path': claude_path,
     'claude_cli_present': claude_ok,
+    'claude_shell_lookup_ok': claude_shell_ok,
+    'claude_shell_lookup': claude_shell_out,
+    'claude_shell_lookup_error': claude_shell_err,
     'dns_lookup_ok': dns_ok,
     'dns_lookup_sample': dns_stdout.splitlines()[0] if dns_stdout else '',
     'dns_lookup_error': dns_stderr,

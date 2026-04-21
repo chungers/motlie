@@ -14,11 +14,14 @@
 //!
 //! This design avoids unsafe Send impls on libslirp's C state.
 
+#[cfg(target_os = "linux")]
 pub mod slirp;
+#[cfg(target_os = "linux")]
 mod backend;
 mod error;
 mod config;
 
 pub use config::{PortForward, VnetConfig};
 pub use error::VnetError;
+#[cfg(target_os = "linux")]
 pub use backend::{VnetBackend, VnetHandle};

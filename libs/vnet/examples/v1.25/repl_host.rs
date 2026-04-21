@@ -98,10 +98,25 @@ use tokio::net::UnixListener;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
+#[cfg(target_os = "linux")]
+use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle as HostVnetHandle};
+
+#[cfg(not(target_os = "linux"))]
+struct HostVnetHandle;
+
+#[cfg(not(target_os = "linux"))]
+impl HostVnetHandle {
+    fn is_alive(&self) -> bool {
+        false
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
 
 fn build_git_sha() -> &'static str {
     option_env!("MOTLIE_VNET_BUILD_GIT_SHA").unwrap_or("unknown")
@@ -150,6 +165,7 @@ enum EgressNet {
     None,
     Tap,
     VhostUser,
+    VzNat,
 }
 
 impl AdminNet {
@@ -175,6 +191,7 @@ impl EgressNet {
             "none" => Ok(Self::None),
             "tap" => Ok(Self::Tap),
             "vhost-user" => Ok(Self::VhostUser),
+            "vz-nat" => Ok(Self::VzNat),
             _ => anyhow::bail!("egress-net must be one of: none, tap, vhost-user"),
         }
     }
@@ -184,6 +201,7 @@ impl EgressNet {
             Self::None => "none",
             Self::Tap => "tap",
             Self::VhostUser => "vhost-user",
+            Self::VzNat => "vz-nat",
         }
     }
 }
@@ -192,9 +210,10 @@ fn validate_network_modes(admin_net: AdminNet, egress_net: EgressNet) -> Result<
     match (admin_net, egress_net) {
         (AdminNet::None, EgressNet::None)
         | (AdminNet::Tap, EgressNet::Tap)
-        | (AdminNet::Tap, EgressNet::VhostUser) => Ok(()),
+        | (AdminNet::Tap, EgressNet::VhostUser)
+        | (AdminNet::None, EgressNet::VzNat) => Ok(()),
         _ => anyhow::bail!(
-            "supported launch modes are --admin-net=none --egress-net=none, --admin-net=tap --egress-net=tap, and --admin-net=tap --egress-net=vhost-user"
+            "supported launch modes are --admin-net=none --egress-net=none, --admin-net=tap --egress-net=tap, --admin-net=tap --egress-net=vhost-user, and --admin-net=none --egress-net=vz-nat"
         ),
     }
 }
@@ -212,7 +231,7 @@ struct AdminState {
     sockets_for_cleanup: Arc<StdMutex<Vec<String>>>,
     admin_net: AdminNet,
     egress_net: EgressNet,
-    vnet_handles: HashMap<String, VnetHandle>,
+    vnet_handles: HashMap<String, HostVnetHandle>,
     launch_pids: HashMap<String, u32>,
 }
 
@@ -238,8 +257,16 @@ async fn main() -> Result<()> {
     let mut empty_mode = false;
     let mut startup_scripts: Vec<PathBuf> = Vec::new();
     let mut retained_tempdirs = Vec::new();
-    let mut admin_net = AdminNet::Tap;
-    let mut egress_net = EgressNet::VhostUser;
+    let mut admin_net = if cfg!(target_os = "macos") {
+        AdminNet::None
+    } else {
+        AdminNet::Tap
+    };
+    let mut egress_net = if cfg!(target_os = "macos") {
+        EgressNet::VzNat
+    } else {
+        EgressNet::VhostUser
+    };
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -1236,10 +1263,25 @@ fn shutdown_guest(guest_name: &str, pid: Option<u32>) -> Result<ShutdownOutcome>
 }
 
 fn ensure_vnet_backend(admin: &mut AdminState, guest_name: &str) -> Result<Option<PathBuf>> {
+    if admin.egress_net == EgressNet::VzNat {
+        emit_status(
+            admin,
+            format!("ok: vnet {guest_name} mode=vz-nat (Apple Vz NAT egress)"),
+        );
+        return Ok(None);
+    }
+
     if admin.egress_net != EgressNet::VhostUser {
         return Ok(None);
     }
 
+    #[cfg(not(target_os = "linux"))]
+    {
+        anyhow::bail!("vhost-user egress is only supported on Linux hosts");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
     let socket_path = guest_vnet_socket_path(guest_name);
 
     if let Some(handle) = admin.vnet_handles.get_mut(guest_name) {
@@ -1278,6 +1320,7 @@ fn ensure_vnet_backend(admin: &mut AdminState, guest_name: &str) -> Result<Optio
         ),
     );
     Ok(Some(socket_path))
+    }
 }
 
 // ---------------------------------------------------------------------------
