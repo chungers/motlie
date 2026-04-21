@@ -4,6 +4,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-21 | @codex-tts: Added an explicit comparative observations section that summarizes the six pipeline combinations by average WER, latency range, and qualitative behavior so the results can be read without scanning all 60 rows. | Summary, Comparative Observations |
 | 2026-04-20 | @codex-tts: Added the first end-to-end 2x3 shell-pipeline validation matrix for the shipped TTS and ASR examples, covering 60 runs with per-case input, output, elapsed time, and normalized word error rate. | All |
 
 ## Scope
@@ -65,6 +66,62 @@ already documented as non-functional for real speech output.
   consistently higher average WER on both TTS sources.
 - `asr_moonshine` has mixed behavior: it is strong with qwen3-tts.cpp, but it
   exited non-zero and returned blank output on two Piper prompts.
+
+## Comparative Observations
+
+### By TTS source
+
+- `tts_piper` is still the pragmatic shell default when the goal is fast local
+  turnaround. Its fastest usable pairings (`asr_whisper` and
+  `asr_sherpa_onnx`) both averaged about `2.4 s` to `2.5 s` per run across the
+  prompt set, which is roughly `10x` faster than the best qwen3-tts.cpp
+  pipeline on this host.
+- `tts_qwen3_tts_cpp` produces recognizer-friendly speech quality, but the
+  latency cost is large. Its three ASR pairings averaged `20.6 s`, `24.1 s`,
+  and `30.0 s`, with long-prompt maxima of `38.5 s`, `42.5 s`, and `76.9 s`.
+- In quality terms, `tts_qwen3_tts_cpp` is not uniformly better than Piper for
+  these shell pipelines. It helps Moonshine materially, but it does not improve
+  Sherpa and is only slightly behind Piper when both are paired with Whisper.
+
+### By ASR backend
+
+- `asr_whisper` is the most stable recognizer in this matrix. With Piper it
+  produced the best overall average WER (`0.042`), and with qwen3-tts.cpp it
+  stayed nearly as good (`0.055`) without any non-zero exits.
+- `asr_sherpa_onnx` is the most brittle recognizer in this matrix. Average WER
+  stayed high for both TTS sources (`0.272` with Piper, `0.300` with
+  qwen3-tts.cpp), and the qwen3-tts.cpp path produced one catastrophic `QQQ...`
+  output at WER `1.000`.
+- `asr_moonshine` is the most source-sensitive recognizer. It was poor and
+  failure-prone with Piper (avg WER `0.260`, two blank-output exits), but it
+  became one of the best pairings with qwen3-tts.cpp (avg WER `0.050`, no
+  exits).
+
+### Best and worst combinations
+
+- Best accuracy overall: `tts_piper -> asr_whisper`, avg WER `0.042`, avg
+  elapsed `2.4 s`, worst observed WER `0.125`.
+- Best qwen3-tts.cpp pairing: `tts_qwen3_tts_cpp -> asr_moonshine`, avg WER
+  `0.050`, avg elapsed `30.0 s`, worst observed WER `0.159`.
+- Best speed overall: `tts_piper -> asr_whisper`, min/max elapsed `2.176 s` to
+  `2.963 s`.
+- Worst robustness overall: `tts_piper -> asr_moonshine`, avg WER `0.260` with
+  two non-zero ASR exits and blank outputs on cases `6` and `8`.
+- Worst long-tail recognition quality: `tts_qwen3_tts_cpp -> asr_sherpa_onnx`,
+  avg WER `0.300`, worst observed WER `1.000`, and heavy degradation on the
+  longer technical prompts.
+
+### Practical readout
+
+- If the operator wants the best shell-pipeline experience on this host today,
+  use `tts_piper -> asr_whisper`.
+- If the operator specifically wants to validate qwen3-tts.cpp audio quality in
+  a round-trip pipeline, use `tts_qwen3_tts_cpp -> asr_whisper` for stable
+  transcripts or `tts_qwen3_tts_cpp -> asr_moonshine` for the best measured WER
+  at the cost of much higher latency.
+- Avoid treating Sherpa as the default verification backend for TTS quality
+  comparisons. Its outputs were noisy enough that it obscures whether the error
+  comes from the TTS source or from the recognizer itself.
 
 ## Per-Pipeline Results
 
