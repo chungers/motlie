@@ -29,6 +29,7 @@ NAT_MAC="${MOTLIE_VZ_BUILD_NAT_MAC:-02:4d:6f:74:62:25}"
 SEED_DIR="$ARTIFACTS_DIR/build-seed"
 SEED_IMAGE="$ARTIFACTS_DIR/build-seed.dmg"
 WORK_VM_DIR="$ARTIFACTS_DIR/${BASE_VM_NAME}.vm"
+NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$ARTIFACTS_DIR/source-base.vm}"
 
 zmodload zsh/datetime
 
@@ -59,7 +60,18 @@ if [[ -n "$SOURCE_DISK_PATH" || -n "$SOURCE_NVRAM_PATH" || -n "$SOURCE_MACHINE_I
   fi
   USE_TART_SOURCE=0
 else
-  require_cmd tart
+  if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin" ]]; then
+    SOURCE_DISK_PATH="$NATIVE_SOURCE_VM_DIR/disk.img"
+    SOURCE_NVRAM_PATH="$NATIVE_SOURCE_VM_DIR/nvram.bin"
+    if [[ -f "$NATIVE_SOURCE_VM_DIR/machine-id.bin" ]]; then
+      SOURCE_MACHINE_ID_PATH="$NATIVE_SOURCE_VM_DIR/machine-id.bin"
+    else
+      SOURCE_MACHINE_ID_PATH=""
+    fi
+    USE_TART_SOURCE=0
+  else
+    require_cmd tart
+  fi
 fi
 
 cleanup() {
@@ -80,6 +92,7 @@ if [[ "$USE_TART_SOURCE" -eq 1 ]]; then
 else
   echo "Source disk:  $SOURCE_DISK_PATH"
 fi
+echo "Native cache: $NATIVE_SOURCE_VM_DIR"
 
 rm -rf "$WORK_VM_DIR"
 mkdir -p "$WORK_VM_DIR"
@@ -133,7 +146,11 @@ if [[ "$USE_TART_SOURCE" -eq 1 ]]; then
 
   echo "--- cloning base image ---"
   tart clone "$SOURCE_IMAGE" "$BASE_VM_NAME" >/dev/null
-  materialize_work_vm "$HOME/.tart/vms/$BASE_VM_NAME/disk.img" "$HOME/.tart/vms/$BASE_VM_NAME/nvram.bin" "$HOME/.tart/vms/$BASE_VM_NAME/machine-id.bin"
+  local tart_machine_id="$HOME/.tart/vms/$BASE_VM_NAME/machine-id.bin"
+  if [[ ! -f "$tart_machine_id" ]]; then
+    tart_machine_id=""
+  fi
+  materialize_work_vm "$HOME/.tart/vms/$BASE_VM_NAME/disk.img" "$HOME/.tart/vms/$BASE_VM_NAME/nvram.bin" "$tart_machine_id"
   tart delete "$BASE_VM_NAME" >/dev/null || true
 else
   echo "--- materializing native build VM from source artifacts ---"
@@ -1081,6 +1098,28 @@ PY
 
 echo "--- result written ---"
 cat "$RESULT_JSON"
+
+echo "--- caching native source artifacts ---"
+rm -rf "$NATIVE_SOURCE_VM_DIR"
+mkdir -p "$NATIVE_SOURCE_VM_DIR"
+python3 - "$WORK_VM_DIR" "$NATIVE_SOURCE_VM_DIR" <<'PY'
+import os
+import shutil
+import sys
+
+src_dir, dst_dir = sys.argv[1:]
+for name in ("disk.img", "nvram.bin", "machine-id.bin"):
+    src = os.path.join(src_dir, name)
+    if not os.path.exists(src):
+        continue
+    dst = os.path.join(dst_dir, name)
+    tmp = dst + ".tmp-copy"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    with open(src, "rb") as rf, open(tmp, "wb") as wf:
+        shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
+    os.replace(tmp, dst)
+PY
 
 echo "--- shutting down base guest gracefully ---"
 guest_bash_as admin admin <<'EOF'

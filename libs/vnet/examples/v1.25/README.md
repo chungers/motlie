@@ -129,11 +129,19 @@ This tree is now scaffolded for Apple Vz work:
 - `launch-vz.sh`, `build-vz-runner.sh`, `vz-vsock-runner.m`, and
   `vz.entitlements` are imported from the validated `v1.15` slice as the
   starting native runtime path
+- `build-guest.sh` now builds the base image through the same native Vz
+  runtime path and caches a native source-artifact set under
+  `artifacts/source-base.vm`
 - the inherited `v1.2` guest mount YAML and REPL data remain the source of
   truth for the intended guest-visible contract
 
-It is not yet claiming validated end-to-end `v1.2` networking parity on Apple
-Vz. That proof is the work of this issue.
+The practical Tart status is now:
+
+- Tart is no longer used for guest runtime boot, provisioning, validation, or
+  image-build boot/provision/shutdown loops
+- the default builder path prefers cached native source artifacts
+- Tart remains only as a fallback source-image materialization path when that
+  native cache does not yet exist
 
 For local iteration, the default VM names are intentionally stable:
 
@@ -152,4 +160,4 @@ Each rerun replaces those VMs in place instead of creating new suffixed names.
 | `build-vz-runner.sh` | Build the example-local signed Apple Vz helper |
 | `launch-vz.sh` | Native Apple Vz launcher scaffold for the `v1.25` slice |
 | `vz-vsock-runner.m` | Current example-local Apple Vz helper |
-| `build-guest.sh` | Inherited `v1.2` CH guest-image builder, still to be adapted/converged for Vz |
+| `build-guest.sh` | Native Apple Vz guest-image builder with cached source-artifact fallback away from Tart |
