@@ -60,7 +60,6 @@ pub enum WavSink<S: WavSample> {
     },
     Stdout {
         writer: StreamingWavWriter<std::io::Stdout, S>,
-        _sample: PhantomData<S>,
     },
 }
 
@@ -86,10 +85,7 @@ impl<S: WavSample> WavSink<S> {
             TtsOutput::Stdout => {
                 let writer = StreamingWavWriter::new(std::io::stdout(), sample_rate_hz, 1)
                     .context("failed to start stdout wav stream")?;
-                Ok(Self::Stdout {
-                    writer,
-                    _sample: PhantomData,
-                })
+                Ok(Self::Stdout { writer })
             }
         }
     }
