@@ -842,8 +842,8 @@ dns_ok, dns_stdout, dns_stderr = command_ok(['getent', 'ahostsv4', 'example.com'
 curl_ok, curl_stdout, curl_stderr = command_ok(['curl', '-fsS', '--max-time', '20', 'https://example.com'])
 codex_path = first_executable(['/usr/local/bin/codex', '/usr/bin/codex', '/bin/codex'])
 claude_path = first_executable(['/usr/local/bin/claude', '/usr/bin/claude', '/bin/claude'])
-codex_shell_ok, codex_shell_out, codex_shell_err = command_ok(['bash', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v codex'])
-claude_shell_ok, claude_shell_out, claude_shell_err = command_ok(['bash', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v claude'])
+codex_shell_ok, codex_shell_out, codex_shell_err = command_ok(['env', '-u', 'SSH_CONNECTION', 'TMUX=1', 'bash', '--noprofile', '--norc', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v codex'])
+claude_shell_ok, claude_shell_out, claude_shell_err = command_ok(['env', '-u', 'SSH_CONNECTION', 'TMUX=1', 'bash', '--noprofile', '--norc', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v claude'])
 codex_ok = bool(codex_path)
 claude_ok = bool(claude_path)
 
