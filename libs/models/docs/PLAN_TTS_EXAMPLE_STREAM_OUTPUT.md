@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Reworked the stdout WAV sink to write incrementally with an aligned indefinite-length header, added shutdown-safe handle cleanup, and paired it with a tolerant stdin-side ASR parser so `tts | asr` works without temp files. |
 | 2026-04-20 | @codex-tts | Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The implementation/validation scope now covers Piper and `qwen3-tts.cpp` only. |
 | 2026-04-21 | @codex-tts | Implemented quiet-mode stderr redirection so backend-native logs are suppressed as well as example-layer diagnostics in pipe-heavy workflows. |
 | 2026-04-20 | @codex-tts | Added the shared `--quiet` flag to the shipped TTS example contract so example-layer stderr logging can be suppressed in pipe-heavy workflows. |
@@ -35,6 +36,9 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
   DESIGN reference: `Required Behavior`
 - [x] Add a stdout-safe WAV writer for non-seekable output streams.
   DESIGN reference: `Stdout WAV Contract`
+- [x] Make the stdout sink incremental rather than buffering the whole
+  utterance before the first byte is written.
+  DESIGN reference: `Stdout WAV Contract`
 - [x] Route diagnostics to stderr in pipeline mode.
   DESIGN reference: `Error Handling`
 
@@ -61,7 +65,7 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
 
 ### 3.1 - Update example READMEs
 
-- [x] Document file mode for all three binaries.
+- [x] Document file mode for both shipped binaries.
   DESIGN reference: `Required Behavior`
 - [x] Document pipeline mode with stdin text and stdout WAV examples.
   DESIGN reference: `Required Behavior`, `Stdout WAV Contract`

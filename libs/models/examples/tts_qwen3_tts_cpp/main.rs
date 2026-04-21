@@ -17,12 +17,13 @@ use motlie_models::tts::qwen3_tts_cpp;
 
 #[path = "../audio_support.rs"]
 mod audio_support;
+#[path = "../bundle_support.rs"]
+mod bundle_support;
 #[path = "../quiet_support.rs"]
 mod quiet_support;
 #[path = "../tts_support.rs"]
 mod tts_support;
 
-const TARGET_SAMPLE_RATE_HZ: u32 = 24_000;
 const REFERENCE_SAMPLE_RATE_HZ: u32 = 16_000;
 
 fn main() -> Result<()> {
@@ -116,49 +117,67 @@ async fn run(args: Args) -> Result<()> {
         params: SpeechParams::default(),
     };
 
-    let mut stream = if let Some(reference_audio) = &args.reference_audio {
-        tts_support::log_status(
-            args.quiet,
-            &format!("reference: {}", reference_audio.display()),
-        );
-        let (_, reader) = audio_support::open_wav_reader(Some(reference_audio.as_path()))?;
-        let reference = decode_wav_to_reference(reader)?;
-        handle
-            .synthesize_with_reference(
-                request,
-                CloneReference::<REFERENCE_SAMPLE_RATE_HZ, Mono> {
-                    audio: reference,
-                    transcript: None,
-                },
-            )
-            .await
-            .context("failed to open typed cloned speech stream")?
-    } else {
-        handle
-            .synthesize(request)
-            .await
-            .context("failed to open typed speech stream")?
+    let output_label = match &io.output {
+        tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
+        tts_support::TtsOutput::Stdout => "<stdout>".into(),
     };
+    let (sample_count, sample_rate_hz) = bundle_support::run_with_shutdown(handle, |handle| {
+        Box::pin(async move {
+            let mut stream = if let Some(reference_audio) = &args.reference_audio {
+                tts_support::log_status(
+                    args.quiet,
+                    &format!("reference: {}", reference_audio.display()),
+                );
+                let (_, reader) = audio_support::open_wav_reader(Some(reference_audio.as_path()))?;
+                let reference = decode_wav_to_reference(reader)?;
+                handle
+                    .synthesize_with_reference(
+                        request,
+                        CloneReference::<REFERENCE_SAMPLE_RATE_HZ, Mono> {
+                            audio: reference,
+                            transcript: None,
+                        },
+                    )
+                    .await
+                    .context("failed to open typed cloned speech stream")?
+            } else {
+                handle
+                    .synthesize(request)
+                    .await
+                    .context("failed to open typed speech stream")?
+            };
 
-    let mut samples = Vec::new();
-    while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
-        samples.extend(chunk.into_samples());
-    }
+            let first_chunk = stream
+                .next_chunk()
+                .await
+                .context("next_chunk failed")?
+                .context("typed qwen3-tts.cpp stream produced no audio chunks")?;
+            let sample_rate_hz = first_chunk.sample_rate_hz();
+            let mut sample_count = 0usize;
+            let mut sink = tts_support::WavSink::<f32>::new(&io.output, sample_rate_hz)?;
 
-    tts_support::write_wav(&io.output, TARGET_SAMPLE_RATE_HZ, &samples)?;
-    stream.finish().await.context("finish failed")?;
-    handle.shutdown().await.context("shutdown failed")?;
+            let first_samples = first_chunk.into_samples();
+            sample_count += first_samples.len();
+            sink.write_chunk(&first_samples)?;
+
+            while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
+                let samples = chunk.into_samples();
+                sample_count += samples.len();
+                sink.write_chunk(&samples)?;
+            }
+
+            stream.finish().await.context("finish failed")?;
+            sink.finalize()?;
+            Ok((sample_count, sample_rate_hz))
+        })
+    })
+    .await?;
 
     tts_support::log_status(
         args.quiet,
         &format!(
             "wrote {} mono f32 samples at {} Hz to {}",
-            samples.len(),
-            TARGET_SAMPLE_RATE_HZ,
-            match &io.output {
-                tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
-                tts_support::TtsOutput::Stdout => "<stdout>".into(),
-            }
+            sample_count, sample_rate_hz, output_label
         ),
     );
     Ok(())

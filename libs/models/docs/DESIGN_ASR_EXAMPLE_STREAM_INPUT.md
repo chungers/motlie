@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Replaced the earlier “plain `hound` on stdin” assumption with a tolerant example-layer stdin WAV parser so the ASR examples can consume the aligned indefinite-length WAV headers emitted by the TTS stdout pipeline. |
 | 2026-04-21 | @codex-tts | Tightened `--quiet` so it suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. |
 | 2026-04-20 | @codex-tts | Refined the stdout contract after live TTS→ASR pipe validation. ASR examples now default to one final plain-text transcript line on stdout, add `--partials` for streaming event output, and add `--quiet` to suppress example-layer stderr diagnostics. |
 | 2026-04-19 | @codex-tts | Initial brownfield design for stdin WAV support in all shipped ASR examples so they compose directly with the TTS example stdout WAV contract from issue #208. |
@@ -140,6 +141,8 @@ That means:
 - `--quiet` suppresses both example-layer diagnostics and backend-native stderr
   logging by redirecting process stderr to `/dev/null` for the quiet execution
   window
+- as on the TTS side, this is intentionally whole-process and best-effort:
+  panic diagnostics may be silent while `--quiet` is active
 
 This keeps shell composition easy while avoiding a new protocol decision.
 
@@ -147,14 +150,18 @@ This keeps shell composition easy while avoiding a new protocol decision.
 
 This is practical with the current crate stack.
 
-Important implementation detail:
+Important implementation details:
 
 - `hound::WavWriter` requires `Seek`, which is why TTS stdout needed special
   handling
-- `hound::WavReader` only requires `Read`
+- the TTS stdout path now emits an aligned indefinite-length `data` chunk so it
+  can start writing immediately without buffering the full utterance
+- `hound::WavReader` does not tolerate that header shape cleanly on stdin, so
+  the ASR examples use a small example-layer parser for stdin mode instead of
+  passing stdin directly to `hound`
 
-So stdin WAV input is simpler than stdout WAV output. A `BufReader<std::io::Stdin>`
-can be passed directly into `hound::WavReader::new(...)`.
+File-path mode still uses `hound` normally. Stdin mode uses the tolerant parser
+only so the example binaries can compose directly with the TTS stdout contract.
 
 ## Backend-Specific Notes
 
@@ -172,7 +179,7 @@ incremental transcription.
 `asr_sherpa_onnx` already operates as a streaming session after audio decode.
 In this slice, stdin support means:
 
-- decode WAV from stdin
+- decode WAV from stdin through the tolerant example-layer parser
 - normalize to 16 kHz mono
 - ingest fixed-size demo chunks into the typed session
 
@@ -180,7 +187,7 @@ In this slice, stdin support means:
 
 `asr_moonshine` follows the same source adaptation pattern as sherpa:
 
-- decode WAV from stdin
+- decode WAV from stdin through the tolerant example-layer parser
 - normalize to 16 kHz mono
 - ingest fixed-size chunks into the typed session
 

@@ -44,6 +44,8 @@ impl Drop for QuietStderrGuard {
     fn drop(&mut self) {
         let stderr_fd = std::io::stderr().as_raw_fd();
         unsafe {
+            // Best-effort restoration only. Quiet mode intentionally suppresses
+            // backend-native stderr wholesale, including panic output.
             libc::dup2(self.saved_stderr_fd, stderr_fd);
             libc::close(self.saved_stderr_fd);
         }

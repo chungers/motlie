@@ -369,6 +369,8 @@ The shipped speech examples now also share a simple shell-composition contract:
 - TTS examples (`tts_piper`, `tts_qwen3_tts_cpp`) write WAV to `--wav <path>` when provided, or to stdout when `--wav` is omitted.
 - ASR examples (`asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`) read WAV from `--wav <path>` when provided, or from stdin when `--wav` is omitted.
 - Transcript text stays on stdout for ASR; diagnostics move to stderr in pipeline mode.
+- `--quiet` suppresses whole-process stderr for the active example, including
+  backend-native logs and panic diagnostics.
 
 That means simple pipelines like this are part of the intended example UX:
 
@@ -384,7 +386,7 @@ playback over SSH when Homebrew `sox` is installed on the remote host:
 printf '%s\n' "Hello from Piper over SSH." \
 | ./target/release/examples/tts_piper \
     --quiet \
-    --artifact-root /home/dchung/sessions/cdx-dgx-e2e/motlie/artifacts/models/hf-cache \
+    --artifact-root "$PIPER_ARTIFACT_ROOT" \
 | ssh motliehost '/opt/homebrew/bin/play -t wav -'
 ```
 
@@ -392,7 +394,7 @@ printf '%s\n' "Hello from Piper over SSH." \
 printf '%s\n' "This is a medium-length qwen3-tts.cpp synthesis sample streamed over SSH to a macOS host for immediate playback through Homebrew sox." \
 | ./target/release/examples/tts_qwen3_tts_cpp \
     --quiet \
-    --artifact-root /tmp/qwen3-tts-models \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
 | ssh motliehost '/opt/homebrew/bin/play -t wav -'
 ```
 
@@ -400,7 +402,7 @@ printf '%s\n' "This is a medium-length qwen3-tts.cpp synthesis sample streamed o
 printf '%s\n' "Piper and qwen3-tts.cpp can both handle longer shell-composed utterances where text arrives on standard input, the example writes a WAV container to standard output, SSH forwards that byte stream to the remote macOS host, and Homebrew sox plays it without any intermediate file staging." \
 | ./target/release/examples/tts_qwen3_tts_cpp \
     --quiet \
-    --artifact-root /tmp/qwen3-tts-models \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
 | ssh motliehost '/opt/homebrew/bin/play -t wav -'
 ```
 
