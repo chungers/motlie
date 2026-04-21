@@ -2,6 +2,9 @@
 
 Whisper `.wav` transcription through the typed batch contract.
 
+Canonical build prerequisites live in
+[`libs/models/docs/BUILD_MODELS.md`](../../docs/BUILD_MODELS.md).
+
 ## Preconditions
 
 1. Download the curated `ggml-base.en.bin` model:
