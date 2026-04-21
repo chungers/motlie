@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-20 | @codex-tts: Added a concrete 2x3 TTS-to-ASR validation report covering the two shipped TTS examples against all three shipped ASR examples, with per-run input/output/WER tables and pipeline-level summary findings. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Added shell-ready SSH streaming examples for the two shipped TTS binaries (`tts_piper`, `tts_qwen3_tts_cpp`) using Homebrew `sox` via `/opt/homebrew/bin/play` on a remote macOS host, with short/medium/long stdin inputs. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The documented shell-composition contract now covers only `tts_piper` and `tts_qwen3_tts_cpp` on the TTS side. | Example Program, Notes |
 | 2026-04-21 | @codex-tts: Updated the speech example shell contract so `--quiet` suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. | Example Program, Notes |
@@ -402,6 +403,9 @@ printf '%s\n' "Piper and qwen3-tts.cpp can both handle longer shell-composed utt
     --artifact-root /tmp/qwen3-tts-models \
 | ssh motliehost '/opt/homebrew/bin/play -t wav -'
 ```
+
+The concrete 2x3 TTS-to-ASR validation results for this shipped shell contract
+live in [VALIDATION_TTS_ASR_PIPELINES.md](./VALIDATION_TTS_ASR_PIPELINES.md).
 
 Embedding example (`embeddings`):
 
