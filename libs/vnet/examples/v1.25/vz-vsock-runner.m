@@ -2,16 +2,27 @@
 #import <Virtualization/Virtualization.h>
 
 #include <dispatch/dispatch.h>
+#include <errno.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+static char g_net_socket_local_path[sizeof(((struct sockaddr_un *)0)->sun_path)] = {0};
+
+static void cleanup_net_socket_local_path(void) {
+    if (g_net_socket_local_path[0] != '\0') {
+        unlink(g_net_socket_local_path);
+        g_net_socket_local_path[0] = '\0';
+    }
+}
+
 static void print_usage(FILE *stream) {
     fprintf(stream,
             "usage: vz-vsock-runner --disk <path> --unix-socket <path> "
             "[--seed-disk <path>] [--nvram <path>] [--machine-id <path>] "
-            "[--serial-log <path> | --stdio-console] [--nat-mac <mac>] "
+            "[--serial-log <path> | --stdio-console] [--nat-mac <mac>] [--net-mac <mac>] "
+            "[--net-backend-socket <path>] "
             "[--vsock-port <port>] [--memory-mib <mib>] [--cpu-count <count>] "
             "[--enable-nat]\n");
 }
@@ -38,6 +49,121 @@ static int connect_unix_socket(NSString *path) {
         return -1;
     }
     return fd;
+}
+
+static int bind_unix_datagram_socket(void) {
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        perror("socket(AF_UNIX, SOCK_DGRAM)");
+        return -1;
+    }
+
+    int sndbuf = 256 * 1024;
+    int rcvbuf = 1024 * 1024;
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) != 0) {
+        perror("setsockopt(SO_SNDBUF)");
+        close(fd);
+        return -1;
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) != 0) {
+        perror("setsockopt(SO_RCVBUF)");
+        close(fd);
+        return -1;
+    }
+
+    NSString *localPath = [NSString stringWithFormat:@"/tmp/motlie-vz-net-%d.sock", getpid()];
+    unlink(localPath.fileSystemRepresentation);
+    struct sockaddr_un localAddr = {0};
+    localAddr.sun_family = AF_UNIX;
+    const char *clocal = [localPath fileSystemRepresentation];
+    if (strlen(clocal) >= sizeof(localAddr.sun_path)) {
+        fprintf(stderr, "local unix datagram path too long: %s\n", clocal);
+        close(fd);
+        return -1;
+    }
+    strncpy(localAddr.sun_path, clocal, sizeof(localAddr.sun_path) - 1);
+    if (bind(fd, (struct sockaddr *)&localAddr, sizeof(localAddr)) != 0) {
+        perror("bind(AF_UNIX, SOCK_DGRAM)");
+        close(fd);
+        return -1;
+    }
+    strlcpy(g_net_socket_local_path, clocal, sizeof(g_net_socket_local_path));
+    atexit(cleanup_net_socket_local_path);
+    return fd;
+}
+
+static void start_datagram_bridge(const char *label, int srcFD, int dstFD) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        uint8_t buffer[65536];
+        uint64_t count = 0;
+        while (1) {
+            ssize_t n = recv(srcFD, buffer, sizeof(buffer), 0);
+            if (n == 0) {
+                break;
+            }
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            count += 1;
+            if (count <= 10 || count % 100 == 0) {
+                fprintf(stderr, "net bridge %s frame %llu (%zd bytes)\n", label, count, n);
+            }
+            ssize_t sent = send(dstFD, buffer, (size_t)n, 0);
+            if (sent < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+        }
+        shutdown(srcFD, SHUT_RDWR);
+        shutdown(dstFD, SHUT_RDWR);
+    });
+}
+
+static void start_datagram_sendto_bridge(const char *label, int srcFD, int dstFD, NSString *dstPath) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        uint8_t buffer[65536];
+        uint64_t count = 0;
+        struct sockaddr_un dstAddr = {0};
+        dstAddr.sun_family = AF_UNIX;
+        const char *cdst = [dstPath fileSystemRepresentation];
+        if (strlen(cdst) >= sizeof(dstAddr.sun_path)) {
+            fprintf(stderr, "unix datagram backend path too long: %s\n", cdst);
+            return;
+        }
+        strncpy(dstAddr.sun_path, cdst, sizeof(dstAddr.sun_path) - 1);
+
+        while (1) {
+            ssize_t n = recv(srcFD, buffer, sizeof(buffer), 0);
+            if (n == 0) {
+                break;
+            }
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            count += 1;
+            if (count <= 10 || count % 100 == 0) {
+                fprintf(stderr, "net bridge %s frame %llu (%zd bytes)\n", label, count, n);
+            }
+            ssize_t sent = sendto(dstFD, buffer, (size_t)n, 0, (struct sockaddr *)&dstAddr, sizeof(dstAddr));
+            if (sent < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                perror("sendto(AF_UNIX, SOCK_DGRAM)");
+                break;
+            }
+        }
+        shutdown(srcFD, SHUT_RDWR);
+        shutdown(dstFD, SHUT_RDWR);
+    });
 }
 
 @class VzVsockRunner;
@@ -70,6 +196,7 @@ static int connect_unix_socket(NSString *path) {
 @property(nonatomic, copy) NSString *unixSocketPath;
 @property(nonatomic, assign) uint32_t vsockPort;
 @property(nonatomic, strong) dispatch_queue_t vmQueue;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *networkBridgeFDs;
 - (instancetype)initWithUnixSocketPath:(NSString *)unixSocketPath vsockPort:(uint32_t)vsockPort;
 - (BOOL)startWithDiskPath:(NSString *)diskPath
                seedDiskPath:(nullable NSString *)seedDiskPath
@@ -80,6 +207,8 @@ static int connect_unix_socket(NSString *path) {
                memoryMiB:(NSUInteger)memoryMiB
                 cpuCount:(NSUInteger)cpuCount
                   natMAC:(nullable NSString *)natMAC
+                  netMAC:(nullable NSString *)netMAC
+        netBackendSocketPath:(nullable NSString *)netBackendSocketPath
                enableNAT:(BOOL)enableNAT
                    error:(NSError **)error;
 - (void)addSession:(BridgeSession *)session;
@@ -213,6 +342,7 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         _vsockPort = vsockPort;
         _sessions = [NSMutableSet set];
         _vmQueue = dispatch_queue_create("motlie.vfs.v1_15.vz_runner", DISPATCH_QUEUE_SERIAL);
+        _networkBridgeFDs = [NSMutableArray array];
     }
     return self;
 }
@@ -238,6 +368,8 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
                memoryMiB:(NSUInteger)memoryMiB
                 cpuCount:(NSUInteger)cpuCount
                   natMAC:(nullable NSString *)natMAC
+                  netMAC:(nullable NSString *)netMAC
+        netBackendSocketPath:(nullable NSString *)netBackendSocketPath
                enableNAT:(BOOL)enableNAT
                    error:(NSError **)error {
     NSURL *diskURL = [NSURL fileURLWithPath:diskPath];
@@ -255,6 +387,7 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
     VZVirtioSocketDeviceConfiguration *socketConfig = [[VZVirtioSocketDeviceConfiguration alloc] init];
     NSMutableArray<VZStorageDeviceConfiguration *> *storageDevices = [NSMutableArray arrayWithObject:block];
     NSString *loggedNatMAC = @"(disabled)";
+    NSString *loggedNetMAC = @"(disabled)";
 
     NSMutableArray<VZUSBControllerConfiguration *> *usbControllers = [NSMutableArray array];
     if (seedDiskPath.length > 0) {
@@ -337,6 +470,8 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         config.serialPorts = @[ serial ];
     }
 
+    NSMutableArray<VZNetworkDeviceConfiguration *> *networkDevices = [NSMutableArray array];
+
     if (enableNAT) {
         VZVirtioNetworkDeviceConfiguration *net = [[VZVirtioNetworkDeviceConfiguration alloc] init];
         net.attachment = [[VZNATNetworkDeviceAttachment alloc] init];
@@ -357,7 +492,64 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         }
         net.MACAddress = macAddress;
         loggedNatMAC = macAddress.string;
-        config.networkDevices = @[ net ];
+        [networkDevices addObject:net];
+    }
+
+    if (netBackendSocketPath.length > 0) {
+        int netBackendFD = bind_unix_datagram_socket();
+        if (netBackendFD < 0) {
+            if (error) {
+                NSString *message = [NSString stringWithFormat:@"failed to bind unix datagram network backend socket for %@", netBackendSocketPath];
+                *error = [NSError errorWithDomain:@"motlie.vnet.v1_25.vz"
+                                             code:4
+                                         userInfo:@{NSLocalizedDescriptionKey: message}];
+            }
+            return NO;
+        }
+
+        int netPair[2] = {-1, -1};
+        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, netPair) != 0) {
+            perror("socketpair(AF_UNIX, SOCK_DGRAM)");
+            close(netBackendFD);
+            if (error) {
+                *error = [NSError errorWithDomain:@"motlie.vnet.v1_25.vz"
+                                             code:4
+                                         userInfo:@{NSLocalizedDescriptionKey: @"failed to create guest network socketpair"}];
+            }
+            return NO;
+        }
+
+        start_datagram_sendto_bridge("guest->backend", netPair[1], netBackendFD, netBackendSocketPath);
+        start_datagram_bridge("backend->guest", netBackendFD, netPair[1]);
+        [self.networkBridgeFDs addObject:@(netPair[1])];
+        [self.networkBridgeFDs addObject:@(netBackendFD)];
+
+        NSFileHandle *netFile = [[NSFileHandle alloc] initWithFileDescriptor:netPair[0] closeOnDealloc:YES];
+        VZFileHandleNetworkDeviceAttachment *attachment = [[VZFileHandleNetworkDeviceAttachment alloc] initWithFileHandle:netFile];
+        VZVirtioNetworkDeviceConfiguration *net = [[VZVirtioNetworkDeviceConfiguration alloc] init];
+        net.attachment = attachment;
+        VZMACAddress *macAddress = nil;
+        if (netMAC.length > 0) {
+            macAddress = [[VZMACAddress alloc] initWithString:netMAC];
+            if (!macAddress) {
+                if (error) {
+                    NSString *message = [NSString stringWithFormat:@"invalid network MAC address: %@", netMAC];
+                    *error = [NSError errorWithDomain:@"motlie.vnet.v1_25.vz"
+                                                 code:5
+                                             userInfo:@{NSLocalizedDescriptionKey: message}];
+                }
+                return NO;
+            }
+        } else {
+            macAddress = [VZMACAddress randomLocallyAdministeredAddress];
+        }
+        net.MACAddress = macAddress;
+        loggedNetMAC = macAddress.string;
+        [networkDevices addObject:net];
+    }
+
+    if (networkDevices.count > 0) {
+        config.networkDevices = networkDevices;
     }
 
     if (![config validateWithError:error]) {
@@ -393,12 +585,13 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         return NO;
     }
 
-    fprintf(stderr, "vz-vsock-runner started: disk=%s seed=%s port=%u socket=%s nat-mac=%s\n",
+    fprintf(stderr, "vz-vsock-runner started: disk=%s seed=%s port=%u socket=%s nat-mac=%s net-mac=%s\n",
             diskPath.UTF8String,
             seedDiskPath.length > 0 ? seedDiskPath.UTF8String : "(none)",
             self.vsockPort,
             self.unixSocketPath.UTF8String,
-            loggedNatMAC.UTF8String);
+            loggedNatMAC.UTF8String,
+            loggedNetMAC.UTF8String);
     return YES;
 }
 
@@ -420,6 +613,8 @@ int main(int argc, const char * argv[]) {
         NSString *serialPath = nil;
         NSString *unixSocketPath = nil;
         NSString *natMAC = nil;
+        NSString *netMAC = nil;
+        NSString *netBackendSocketPath = nil;
         BOOL useStdioConsole = NO;
         NSUInteger memoryMiB = 4096;
         NSUInteger cpuCount = 4;
@@ -448,6 +643,10 @@ int main(int argc, const char * argv[]) {
                 unixSocketPath = [NSString stringWithUTF8String:argv[++i]];
             } else if ([arg isEqualToString:@"--nat-mac"] && i + 1 < argc) {
                 natMAC = [NSString stringWithUTF8String:argv[++i]];
+            } else if ([arg isEqualToString:@"--net-mac"] && i + 1 < argc) {
+                netMAC = [NSString stringWithUTF8String:argv[++i]];
+            } else if ([arg isEqualToString:@"--net-backend-socket"] && i + 1 < argc) {
+                netBackendSocketPath = [NSString stringWithUTF8String:argv[++i]];
             } else if ([arg isEqualToString:@"--vsock-port"] && i + 1 < argc) {
                 vsockPort = (uint32_t)strtoul(argv[++i], NULL, 10);
             } else if ([arg isEqualToString:@"--memory-mib"] && i + 1 < argc) {
@@ -474,6 +673,14 @@ int main(int argc, const char * argv[]) {
             fprintf(stderr, "--nat-mac requires --enable-nat\n");
             return 2;
         }
+        if (enableNAT && netBackendSocketPath.length > 0) {
+            fprintf(stderr, "--enable-nat and --net-backend-socket are mutually exclusive\n");
+            return 2;
+        }
+        if (netMAC.length > 0 && netBackendSocketPath.length == 0) {
+            fprintf(stderr, "--net-mac requires --net-backend-socket\n");
+            return 2;
+        }
         if (vsockPort == 0) {
             fprintf(stderr, "--vsock-port must be greater than zero\n");
             return 2;
@@ -491,11 +698,13 @@ int main(int argc, const char * argv[]) {
                          machineIDPath:machineIDPath
                             serialPath:serialPath
                       useStdioConsole:useStdioConsole
-                            memoryMiB:memoryMiB
-                             cpuCount:cpuCount
-                               natMAC:natMAC
-                            enableNAT:enableNAT
-                                error:&error]) {
+                               memoryMiB:memoryMiB
+                                cpuCount:cpuCount
+                                  natMAC:natMAC
+                                  netMAC:netMAC
+                        netBackendSocketPath:netBackendSocketPath
+                               enableNAT:enableNAT
+                                   error:&error]) {
             fprintf(stderr, "failed to start Vz VM: %s\n", error.localizedDescription.UTF8String);
             return 1;
         }

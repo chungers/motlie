@@ -14,12 +14,20 @@ AGENT_STATE_UNIT_FILE="$SCRIPT_DIR/motlie-agent-state.service"
 RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
+EGRESS_HELPER_BIN_OVERRIDE="${MOTLIE_VZ_EGRESS_HELPER_BIN:-}"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
 KEEP_RUNNING="${MOTLIE_VZ_KEEP_RUNNING:-0}"
 REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
 NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$ARTIFACTS_DIR/source-base.vm}"
 BASE_SOURCE_DIR=""
 RUN_VM_DIR=""
+EGRESS_HELPER_PID_FILE=""
+EGRESS_SOCKET_PATH=""
+EGRESS_LOG=""
+NET_MAC=""
+CONTROL_HOST="127.0.0.1"
+CONTROL_PORT=""
+GUEST_IPV4="10.0.2.15"
 
 zmodload zsh/datetime
 
@@ -36,8 +44,7 @@ require_cmd tar
 require_cmd expect
 require_cmd scp
 require_cmd ssh
-require_cmd nc
-require_cmd arp
+require_cmd cargo
 
 if [[ -n "$BASE_VM_DIR_OVERRIDE" ]]; then
   BASE_SOURCE_DIR="$BASE_VM_DIR_OVERRIDE"
@@ -58,14 +65,11 @@ fi
 
 GUEST_NAME="alice"
 RUN_VM_NAME=""
-ENABLE_NAT=1
 REUSED_VM=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --guest) GUEST_NAME="$2"; shift 2 ;;
     --vm-name) RUN_VM_NAME="$2"; shift 2 ;;
-    --enable-nat) ENABLE_NAT=1; shift ;;
-    --no-nat) ENABLE_NAT=0; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -85,7 +89,8 @@ case "$GUEST_NAME" in
     EXPECTED_AGENT_STATE_README="Dedicated read-write agent-state layer for Codex and Claude lives here."
     EXPECTED_ENV_LINE="ALICE_API_KEY=demo-alice"
     GUEST_HOSTNAME="motlie-alice"
-    NAT_MAC="02:4d:6f:74:61:11"
+    NET_MAC="02:4d:6f:74:61:11"
+    CONTROL_PORT="${MOTLIE_VZ_ALICE_SSH_PORT:-2226}"
     ;;
   bob)
     RUN_VM_NAME="${RUN_VM_NAME:-motlie-v1-25-bob-iter}"
@@ -101,7 +106,8 @@ case "$GUEST_NAME" in
     EXPECTED_AGENT_STATE_README="Dedicated read-write agent-state layer for Codex and Claude lives here."
     EXPECTED_ENV_LINE="BOB_API_KEY=demo-bob"
     GUEST_HOSTNAME="motlie-bob"
-    NAT_MAC="02:4d:6f:74:62:15"
+    NET_MAC="02:4d:6f:74:62:15"
+    CONTROL_PORT="${MOTLIE_VZ_BOB_SSH_PORT:-2227}"
     ;;
   *)
     echo "guest must be alice or bob" >&2
@@ -118,6 +124,9 @@ SERIAL_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-serial.log"
 VALIDATION_TOKEN="$RUN_VM_NAME"
 RUNNER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid"
 GUEST_IP_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-ip.txt"
+EGRESS_HELPER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-egress-helper.pid"
+EGRESS_SOCKET_PATH="/tmp/motlie-vnet-${GUEST_NAME}.egress.sock"
+EGRESS_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-egress.log"
 
 require_host_socket_ready() {
   python3 - "$SOCKET_PATH" <<'PY'
@@ -162,6 +171,11 @@ cleanup() {
       kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
       rm -f "$RUNNER_PID_FILE"
     fi
+    if [[ -f "$EGRESS_HELPER_PID_FILE" ]]; then
+      kill "$(cat "$EGRESS_HELPER_PID_FILE")" >/dev/null 2>&1 || true
+      rm -f "$EGRESS_HELPER_PID_FILE"
+    fi
+    rm -f "$EGRESS_SOCKET_PATH"
     if [[ "$REUSED_VM" -eq 0 ]] && [[ -n "$RUN_VM_DIR" && -d "$RUN_VM_DIR" ]]; then
       rm -rf "$RUN_VM_DIR"
     fi
@@ -176,7 +190,7 @@ kill_stale_runners() {
   while read -r stale_pid; do
     [[ -n "$stale_pid" ]] || continue
     stale_pids+=("$stale_pid")
-  done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+  done < <(ps -Ao pid=,command= -ww | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
     /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
   ')
 
@@ -193,7 +207,7 @@ kill_stale_runners() {
     while read -r stale_pid; do
       [[ -n "$stale_pid" ]] || continue
       survivors+=("$stale_pid")
-    done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+    done < <(ps -Ao pid=,command= -ww | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
       /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
     ')
     if [[ "${#survivors[@]}" -eq 0 ]]; then
@@ -207,9 +221,102 @@ kill_stale_runners() {
   done
 
   echo "failed to terminate stale Vz runners for $GUEST_NAME" >&2
-  ps -Ao pid,etime,command | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+  ps -Ao pid,etime,command | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
     /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print }
   ' >&2 || true
+  exit 1
+}
+
+kill_stale_egress_helpers() {
+  local stale_pids=()
+  local stale_pid=""
+
+  if [[ -f "$EGRESS_HELPER_PID_FILE" ]]; then
+    stale_pid="$(cat "$EGRESS_HELPER_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$stale_pid" ]]; then
+      stale_pids+=("$stale_pid")
+    fi
+  fi
+
+  while read -r stale_pid; do
+    [[ -n "$stale_pid" ]] || continue
+    stale_pids+=("$stale_pid")
+  done < <(lsof -tiTCP:"$CONTROL_PORT" -sTCP:LISTEN 2>/dev/null || true)
+
+  if [[ "${#stale_pids[@]}" -eq 0 ]]; then
+    rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
+    return 0
+  fi
+
+  local unique_pids=()
+  local seen=""
+  for stale_pid in "${stale_pids[@]}"; do
+    [[ -n "$stale_pid" ]] || continue
+    if [[ " $seen " == *" $stale_pid "* ]]; then
+      continue
+    fi
+    seen+=" $stale_pid"
+    unique_pids+=("$stale_pid")
+  done
+
+  printf '%s\n' "--- terminating stale egress helpers for $GUEST_NAME on tcp:${CONTROL_PORT} ---"
+  kill "${unique_pids[@]}" >/dev/null 2>&1 || true
+
+  local attempts=0
+  while [[ $attempts -lt 20 ]]; do
+    local survivors=()
+    while read -r stale_pid; do
+      [[ -n "$stale_pid" ]] || continue
+      survivors+=("$stale_pid")
+    done < <(lsof -tiTCP:"$CONTROL_PORT" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ "${#survivors[@]}" -eq 0 ]]; then
+      rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
+      return 0
+    fi
+    sleep 0.5
+    attempts=$(( attempts + 1 ))
+    if [[ $attempts -eq 10 ]]; then
+      kill -9 "${survivors[@]}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  echo "failed to terminate stale egress helper on tcp:${CONTROL_PORT}" >&2
+  lsof -iTCP:"$CONTROL_PORT" -n -P >&2 || true
+  exit 1
+}
+
+start_egress_helper() {
+  local helper_bin=""
+  if [[ -n "$EGRESS_HELPER_BIN_OVERRIDE" ]]; then
+    helper_bin="$EGRESS_HELPER_BIN_OVERRIDE"
+  else
+    cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
+    helper_bin="$REPO_ROOT/target/debug/examples/vz_egress_helper_v1_25"
+  fi
+  kill_stale_egress_helpers
+  rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
+  : > "$EGRESS_LOG"
+  "$helper_bin" \
+    --socket-path "$EGRESS_SOCKET_PATH" \
+    --host-forward-tcp "127.0.0.1:${CONTROL_PORT}:22" \
+    >"$EGRESS_LOG" 2>&1 &
+  EGRESS_HELPER_PID="$!"
+  echo "$EGRESS_HELPER_PID" > "$EGRESS_HELPER_PID_FILE"
+  local attempts=0
+  while [[ $attempts -lt 40 ]]; do
+    if [[ -S "$EGRESS_SOCKET_PATH" ]]; then
+      return 0
+    fi
+    if ! kill -0 "$EGRESS_HELPER_PID" >/dev/null 2>&1; then
+      echo "egress helper exited early" >&2
+      cat "$EGRESS_LOG" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+    attempts=$(( attempts + 1 ))
+  done
+  echo "timed out waiting for egress helper socket" >&2
+  cat "$EGRESS_LOG" >&2 || true
   exit 1
 }
 
@@ -218,6 +325,7 @@ if [[ -f "$RUNNER_PID_FILE" ]]; then
   rm -f "$RUNNER_PID_FILE"
 fi
 kill_stale_runners
+kill_stale_egress_helpers
 
 if [[ ! -f "$BASE_SOURCE_DIR/disk.img" || ! -f "$BASE_SOURCE_DIR/nvram.bin" ]]; then
   echo "base VM artifacts not found at '$BASE_SOURCE_DIR'; run ./build-guest.sh first" >&2
@@ -238,15 +346,14 @@ fi
 
 mkdir -p "$ARTIFACTS_DIR"
 rm -f "$RUN_LOG" "$SERIAL_LOG" "$RUNNER_PID_FILE" "$GUEST_IP_FILE" "$RESULT_JSON" \
-  "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json"
+  "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$EGRESS_SOCKET_PATH" "$EGRESS_LOG" "$EGRESS_HELPER_PID_FILE"
 
 guest_copy() {
   local src="$1"
   local dst="$2"
-  local ip_addr="$3"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" ${CONTROL_USER}@${ip_addr}:$dst
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" ${CONTROL_USER}@${CONTROL_HOST}:$dst
 expect {
   "password:" {
     send "${CONTROL_PASSWORD}\r"
@@ -269,10 +376,9 @@ EOF
 guest_fetch() {
   local src="$1"
   local dst="$2"
-  local ip_addr="$3"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr}:$src "$dst"
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST}:$src "$dst"
 expect {
   "password:" {
     send "${CONTROL_PASSWORD}\r"
@@ -299,13 +405,12 @@ require_host_fixture_dirs() {
 require_host_fixture_dirs
 
 guest_bash() {
-  local ip_addr="$1"
   local remote_script
   remote_script="$(mktemp)"
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${ip_addr}:/tmp/motlie-vfs-remote.sh
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${CONTROL_HOST}:/tmp/motlie-vfs-remote.sh
 expect {
   "password:" {
     send "${CONTROL_PASSWORD}\r"
@@ -328,7 +433,7 @@ EOF
 set timeout -1
 log_user 0
 set output ""
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
+spawn ssh -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} "bash -euo pipefail /tmp/motlie-vfs-remote.sh </dev/null"
 expect {
   "password:" {
     send "${CONTROL_PASSWORD}\r"
@@ -356,111 +461,11 @@ if {\$exit_code != 0} {
 EOF
 }
 
-probe_guest_ip() {
-  arp -an | python3 -c '
-import re
-import sys
-
-target = sys.argv[1].strip().lower()
-
-def normalize(mac: str) -> str:
-    parts = [part for part in mac.split(":") if part]
-    return ":".join(f"{int(part, 16):x}" for part in parts)
-
-target = normalize(target)
-
-for line in sys.stdin:
-    match = re.search(r"\(([^)]+)\)\s+at\s+([0-9a-fA-F:]+)", line)
-    if not match:
-        continue
-    ip_addr, mac = match.groups()
-    if normalize(mac.lower()) == target:
-        print(ip_addr)
-        break
-' "$NAT_MAC"
-}
-
-probe_guest_ip_via_ssh() {
-  python3 - "$NAT_MAC" <<'PY'
-import sys
-
-target = sys.argv[1].strip().lower()
-
-def normalize(mac: str) -> str:
-    parts = [part for part in mac.split(":") if part]
-    return ":".join(f"{int(part, 16):x}" for part in parts)
-
-print(normalize(target))
-PY
-}
-
-guest_mac_for_ip() {
-  local ip_addr="$1"
-  expect <<EOF
-set timeout 10
-log_user 0
-set output ""
-spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr} "ip -o link show enp0s1 | grep link/ether"
-expect {
-  "password:" {
-    send "${CONTROL_PASSWORD}\r"
-    exp_continue
-  }
-  -re ".+" {
-    append output \$expect_out(0,string)
-    exp_continue
-  }
-  eof {
-    if {\$output ne ""} {
-      puts \$output
-    }
-  }
-  timeout {
-    exit 124
-  }
-}
-catch wait result
-set exit_code [lindex \$result 3]
-if {\$exit_code != 0} {
-  exit \$exit_code
-}
-EOF
-}
-
-probe_guest_ip_by_ssh() {
-  local target_mac=""
-  target_mac="$(probe_guest_ip_via_ssh)"
-  local candidate=""
-  local candidate_mac=""
-  for candidate in 192.168.64.{2..40}; do
-    ssh_ready_for_password_prompt "$candidate" || continue
-    candidate_mac="$(guest_mac_for_ip "$candidate" 2>/dev/null | python3 -c '
-import re
-import sys
-
-def normalize(mac: str) -> str:
-    parts = [part for part in mac.split(":") if part]
-    return ":".join(f"{int(part, 16):x}" for part in parts)
-
-text = sys.stdin.read()
-match = re.search(r"link/ether\s+([0-9a-fA-F:]+)", text)
-if match:
-    print(normalize(match.group(1).lower()))
-' 2>/dev/null || true)"
-    if [[ -n "$candidate_mac" && "$candidate_mac" == "$target_mac" ]]; then
-      echo "$candidate"
-      return 0
-    fi
-  done
-  return 1
-}
-
 ssh_ready_for_password_prompt() {
-  local ip_addr="$1"
   expect <<EOF
 set timeout 5
 log_user 0
-spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 ${CONTROL_USER}@${ip_addr} true
+spawn ssh -p ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 ${CONTROL_USER}@${CONTROL_HOST} true
 expect {
   "password:" {
     exit 0
@@ -480,44 +485,17 @@ expect {
 EOF
 }
 
-wait_for_guest_ip() {
+wait_for_guest_ssh() {
   local attempts=0
   local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
-  local ip_addr=""
   while [[ $attempts -lt $max_attempts ]]; do
+    if ssh_ready_for_password_prompt >/dev/null 2>&1; then
+      return 0
+    fi
     if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
       echo "vz-vsock-runner exited early; log follows:" >&2
       print_failure_context
       exit 1
-    fi
-    ip_addr="$(probe_guest_ip || true)"
-    if [[ -n "$ip_addr" ]]; then
-      echo "$ip_addr"
-      return 0
-    fi
-    if (( attempts % 10 == 0 )); then
-      for candidate in 192.168.64.{2..40}; do
-        ssh_ready_for_password_prompt "$candidate" >/dev/null 2>&1 || true
-      done
-      ip_addr="$(probe_guest_ip_by_ssh || true)"
-      if [[ -n "$ip_addr" ]]; then
-        echo "$ip_addr"
-        return 0
-      fi
-    fi
-    sleep 0.5
-    attempts=$(( attempts + 1 ))
-  done
-  return 1
-}
-
-wait_for_guest_ssh() {
-  local ip_addr="$1"
-  local attempts=0
-  local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
-  while [[ $attempts -lt $max_attempts ]]; do
-    if ssh_ready_for_password_prompt "$ip_addr" >/dev/null 2>&1; then
-      return 0
     fi
     sleep 0.5
     attempts=$(( attempts + 1 ))
@@ -526,13 +504,12 @@ wait_for_guest_ssh() {
 }
 
 guest_capture() {
-  local ip_addr="$1"
   local remote_script
   remote_script="$(mktemp)"
   cat >"$remote_script"
   expect <<EOF
 set timeout -1
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${ip_addr}:/tmp/motlie-vfs-capture.sh
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${CONTROL_HOST}:/tmp/motlie-vfs-capture.sh
 expect {
   "password:" {
     send "${CONTROL_PASSWORD}\r"
@@ -555,7 +532,7 @@ EOF
 set timeout -1
 log_user 0
 set output ""
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${ip_addr} "bash -euo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
+spawn ssh -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} "bash -euo pipefail /tmp/motlie-vfs-capture.sh </dev/null"
 expect {
   "password:" {
     send "${CONTROL_PASSWORD}\r"
@@ -634,6 +611,7 @@ else
   RUNNER_BIN="$($RUNNER_BUILD_SCRIPT)"
 fi
 chmod +x "$RUNNER_BIN"
+start_egress_helper
 
 VM_DIR="$RUN_VM_DIR"
 DISK_PATH="$VM_DIR/disk.img"
@@ -649,42 +627,49 @@ RUNNER_ARGS=(
   --machine-id "$MACHINE_ID_PATH"
   --serial-log "$SERIAL_LOG"
   --unix-socket "$SOCKET_PATH"
+  --net-backend-socket "$EGRESS_SOCKET_PATH"
+  --net-mac "$NET_MAC"
   --vsock-port 5000
   --memory-mib 4096
   --cpu-count 4
 )
-if [[ "$ENABLE_NAT" -eq 1 ]]; then
-  RUNNER_ARGS+=(--enable-nat --nat-mac "$NAT_MAC")
-fi
 "$RUNNER_BIN" \
   "${RUNNER_ARGS[@]}" \
   >"$RUN_LOG" 2>&1 &
 RUNNER_PID="$!"
 echo "$RUNNER_PID" > "$RUNNER_PID_FILE"
 
-echo "--- resolving native guest IP ---"
-IP_ADDR="$(wait_for_guest_ip)" || {
-  echo "timed out waiting for native guest IP" >&2
-  print_failure_context
-  exit 1
-}
+IP_ADDR="$GUEST_IPV4"
 echo "$IP_ADDR" > "$GUEST_IP_FILE"
 
 echo "--- waiting for guest SSH ---"
-wait_for_guest_ssh "$IP_ADDR" || {
-  echo "timed out waiting for guest SSH at $IP_ADDR" >&2
+wait_for_guest_ssh || {
+  echo "timed out waiting for guest SSH at ${CONTROL_HOST}:${CONTROL_PORT}" >&2
   print_failure_context
   exit 1
 }
 
-echo "--- provisioning guest over native Vz NAT ---"
-guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz "$IP_ADDR"
-guest_copy "$MOUNTS_FILE" "/tmp/mounts.${GUEST_NAME}.yaml" "$IP_ADDR"
-guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service "$IP_ADDR"
-guest_copy "$AGENT_STATE_SETUP_FILE" /tmp/motlie-agent-state-setup "$IP_ADDR"
-guest_copy "$AGENT_STATE_UNIT_FILE" /tmp/motlie-agent-state.service "$IP_ADDR"
+echo "--- provisioning guest over native Vz userspace egress ---"
+NEED_SOURCE_UPLOAD=1
+if guest_bash <<'EOF'
+if [[ -x /usr/local/bin/motlie-vfs-guest ]]; then
+  exit 0
+fi
+exit 1
+EOF
+then
+  NEED_SOURCE_UPLOAD=0
+fi
 
-guest_bash "$IP_ADDR" <<EOF
+if [[ "$NEED_SOURCE_UPLOAD" -eq 1 ]]; then
+  guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz
+fi
+guest_copy "$MOUNTS_FILE" "/tmp/mounts.${GUEST_NAME}.yaml"
+guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service
+guest_copy "$AGENT_STATE_SETUP_FILE" /tmp/motlie-agent-state-setup
+guest_copy "$AGENT_STATE_UNIT_FILE" /tmp/motlie-agent-state.service
+
+guest_bash <<EOF
 printf '${CONTROL_PASSWORD}\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /workspace >/dev/null 2>&1 || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /agent-state >/dev/null 2>&1 || true
@@ -807,7 +792,7 @@ Path("$POST_PROVISION_REMOTE_JSON").write_text(json.dumps(payload, sort_keys=Tru
 PY2
 EOF
   POST_PROVISION_LOCAL_JSON="$(mktemp)"
-  guest_fetch "$POST_PROVISION_REMOTE_JSON" "$POST_PROVISION_LOCAL_JSON" "$IP_ADDR"
+  guest_fetch "$POST_PROVISION_REMOTE_JSON" "$POST_PROVISION_LOCAL_JSON"
   POST_PROVISION_CHECK="$(cat "$POST_PROVISION_LOCAL_JSON")"
   rm -f "$POST_PROVISION_LOCAL_JSON"
   if [[ -n "$POST_PROVISION_CHECK" ]]; then
@@ -833,7 +818,7 @@ for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
     print_failure_context
     exit 1
   fi
-  guest_bash "$IP_ADDR" <<EOF
+  guest_bash <<EOF
 python3 - <<'PY2'
 import json
 import os
@@ -953,7 +938,7 @@ Path('$VALIDATION_REMOTE_JSON').write_text(json.dumps(result, sort_keys=True) + 
 PY2
 EOF
   VALIDATION_LOCAL_JSON="$(mktemp)"
-  guest_fetch "$VALIDATION_REMOTE_JSON" "$VALIDATION_LOCAL_JSON" "$IP_ADDR"
+  guest_fetch "$VALIDATION_REMOTE_JSON" "$VALIDATION_LOCAL_JSON"
   VALIDATION_JSON="$(cat "$VALIDATION_LOCAL_JSON")"
   rm -f "$VALIDATION_LOCAL_JSON"
   if [[ -n "${VALIDATION_JSON//[[:space:]]/}" ]]; then

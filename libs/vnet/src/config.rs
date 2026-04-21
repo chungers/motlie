@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 
 use crate::VnetError;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn default_dns_ipv4() -> Ipv4Addr {
     crate::slirp::parse_host_dns()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn default_dns_ipv4() -> Ipv4Addr {
     Ipv4Addr::new(10, 0, 2, 3)
 }

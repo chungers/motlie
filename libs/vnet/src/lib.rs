@@ -14,7 +14,7 @@
 //!
 //! This design avoids unsafe Send impls on libslirp's C state.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod slirp;
 #[cfg(target_os = "linux")]
 mod backend;

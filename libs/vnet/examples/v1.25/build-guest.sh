@@ -23,10 +23,17 @@ AGENT_STATE_UNIT_FILE="$SCRIPT_DIR/motlie-agent-state.service"
 RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
+EGRESS_HELPER_BIN_OVERRIDE="${MOTLIE_VZ_EGRESS_HELPER_BIN:-}"
 RUNNER_PID_FILE="$ARTIFACTS_DIR/build-runner.pid"
+EGRESS_HELPER_PID_FILE="$ARTIFACTS_DIR/build-egress-helper.pid"
 SERIAL_LOG="$ARTIFACTS_DIR/build-serial.log"
 SOCKET_PATH="/tmp/motlie-vnet-build.vsock_5000"
-NAT_MAC="${MOTLIE_VZ_BUILD_NAT_MAC:-02:4d:6f:74:62:25}"
+EGRESS_SOCKET_PATH="/tmp/motlie-vnet-build.egress.sock"
+EGRESS_LOG="$ARTIFACTS_DIR/build-egress.log"
+NET_MAC="${MOTLIE_VZ_BUILD_NET_MAC:-02:4d:6f:74:62:25}"
+CONTROL_HOST="127.0.0.1"
+CONTROL_PORT="${MOTLIE_VZ_BUILD_SSH_PORT:-2225}"
+GUEST_IPV4="10.0.2.15"
 SEED_DIR="$ARTIFACTS_DIR/build-seed"
 SEED_IMAGE="$ARTIFACTS_DIR/build-seed.dmg"
 WORK_VM_DIR="$ARTIFACTS_DIR/${BASE_VM_NAME}.vm"
@@ -49,9 +56,8 @@ require_cmd python3
 require_cmd expect
 require_cmd scp
 require_cmd ssh
-require_cmd nc
-require_cmd arp
 require_cmd hdiutil
+require_cmd cargo
 
 if [[ -n "$SOURCE_DISK_PATH" || -n "$SOURCE_NVRAM_PATH" || -n "$SOURCE_MACHINE_ID_PATH" ]]; then
   if [[ -z "$SOURCE_DISK_PATH" || -z "$SOURCE_NVRAM_PATH" ]]; then
@@ -89,6 +95,11 @@ cleanup() {
     kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
     rm -f "$RUNNER_PID_FILE"
   fi
+  if [[ -f "$EGRESS_HELPER_PID_FILE" ]]; then
+    kill "$(cat "$EGRESS_HELPER_PID_FILE")" >/dev/null 2>&1 || true
+    rm -f "$EGRESS_HELPER_PID_FILE"
+  fi
+  rm -f "$EGRESS_SOCKET_PATH"
   rm -f "$SEED_IMAGE"
   rm -rf "$SEED_DIR"
 }
@@ -152,7 +163,7 @@ kill_stale_runners() {
   while read -r stale_pid; do
     [[ -n "$stale_pid" ]] || continue
     stale_pids+=("$stale_pid")
-  done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+  done < <(ps -Ao pid=,command= -ww | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
     /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
   ')
 
@@ -168,7 +179,7 @@ kill_stale_runners() {
     while read -r stale_pid; do
       [[ -n "$stale_pid" ]] || continue
       survivors+=("$stale_pid")
-    done < <(ps -Ao pid=,command= -ww | awk -v mac="$NAT_MAC" -v sock="$SOCKET_PATH" '
+    done < <(ps -Ao pid=,command= -ww | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
       /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
     ')
     if [[ "${#survivors[@]}" -eq 0 ]]; then
@@ -185,111 +196,45 @@ kill_stale_runners() {
   exit 1
 }
 
-probe_guest_ip() {
-  arp -an | python3 -c '
-import re
-import sys
-
-target = sys.argv[1].strip().lower()
-
-def normalize(mac: str) -> str:
-    parts = [part for part in mac.split(":") if part]
-    return ":".join(f"{int(part, 16):x}" for part in parts)
-
-target = normalize(target)
-
-for line in sys.stdin:
-    match = re.search(r"\(([^)]+)\)\s+at\s+([0-9a-fA-F:]+)", line)
-    if not match:
-        continue
-    ip_addr, mac = match.groups()
-    if normalize(mac.lower()) == target:
-        print(ip_addr)
-        break
-' "$NAT_MAC"
-}
-
-probe_guest_ip_via_ssh() {
-  python3 - "$NAT_MAC" <<'PY'
-import sys
-
-target = sys.argv[1].strip().lower()
-
-def normalize(mac: str) -> str:
-    parts = [part for part in mac.split(":") if part]
-    return ":".join(f"{int(part, 16):x}" for part in parts)
-
-print(normalize(target))
-PY
-}
-
-guest_mac_for_ip() {
-  local ip_addr="$1"
-  expect <<EOF
-set timeout 10
-log_user 0
-set output ""
-spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${ip_addr} "ip -o link show enp0s1 | grep link/ether"
-expect {
-  "password:" {
-    send "${BOOTSTRAP_PASS}\r"
-    exp_continue
-  }
-  -re ".+" {
-    append output \$expect_out(0,string)
-    exp_continue
-  }
-  eof {
-    if {\$output ne ""} {
-      puts \$output
-    }
-  }
-  timeout {
-    exit 124
-  }
-}
-catch wait result
-set exit_code [lindex \$result 3]
-if {\$exit_code != 0} {
-  exit \$exit_code
-}
-EOF
-}
-
-probe_guest_ip_by_ssh() {
-  local target_mac=""
-  target_mac="$(probe_guest_ip_via_ssh)"
-  local candidate=""
-  local candidate_mac=""
-  for candidate in 192.168.64.{2..40}; do
-    ssh_ready_for_password_prompt "$candidate" || continue
-    candidate_mac="$(guest_mac_for_ip "$candidate" 2>/dev/null | python3 -c '
-import re
-import sys
-
-def normalize(mac: str) -> str:
-    parts = [part for part in mac.split(":") if part]
-    return ":".join(f"{int(part, 16):x}" for part in parts)
-
-text = sys.stdin.read()
-match = re.search(r"link/ether\s+([0-9a-fA-F:]+)", text)
-if match:
-    print(normalize(match.group(1).lower()))
-' 2>/dev/null || true)"
-    if [[ -n "$candidate_mac" && "$candidate_mac" == "$target_mac" ]]; then
-      echo "$candidate"
+start_egress_helper() {
+  local helper_bin=""
+  if [[ -n "$EGRESS_HELPER_BIN_OVERRIDE" ]]; then
+    helper_bin="$EGRESS_HELPER_BIN_OVERRIDE"
+  else
+    cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
+    helper_bin="$REPO_ROOT/target/debug/examples/vz_egress_helper_v1_25"
+  fi
+  rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
+  : > "$EGRESS_LOG"
+  "$helper_bin" \
+    --socket-path "$EGRESS_SOCKET_PATH" \
+    --host-forward-tcp "127.0.0.1:${CONTROL_PORT}:22" \
+    >"$EGRESS_LOG" 2>&1 &
+  EGRESS_HELPER_PID="$!"
+  echo "$EGRESS_HELPER_PID" > "$EGRESS_HELPER_PID_FILE"
+  local attempts=0
+  while [[ $attempts -lt 40 ]]; do
+    if [[ -S "$EGRESS_SOCKET_PATH" ]]; then
       return 0
     fi
+    if ! kill -0 "$EGRESS_HELPER_PID" >/dev/null 2>&1; then
+      echo "egress helper exited early" >&2
+      cat "$EGRESS_LOG" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+    attempts=$(( attempts + 1 ))
   done
-  return 1
+  echo "timed out waiting for egress helper socket" >&2
+  cat "$EGRESS_LOG" >&2 || true
+  exit 1
 }
 
 ssh_ready_for_password_prompt() {
-  local ip_addr="$1"
   expect <<EOF
 set timeout 5
 log_user 0
-spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 ${BOOTSTRAP_USER}@${ip_addr} true
+spawn ssh -p ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 ${BOOTSTRAP_USER}@${CONTROL_HOST} true
 expect {
   "password:" {
     exit 0
@@ -309,42 +254,19 @@ expect {
 EOF
 }
 
-wait_for_guest_ip() {
+wait_for_guest_ssh() {
   local attempts=0
   local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
-  local ip_addr=""
   while [[ $attempts -lt $max_attempts ]]; do
+    if ssh_ready_for_password_prompt >/dev/null 2>&1; then
+      return 0
+    fi
     if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
       echo "vz-vsock-runner exited early; log follows:" >&2
       cat "$RUN_LOG" >&2 || true
       [[ -f "$SERIAL_LOG" ]] && tail -n 80 "$SERIAL_LOG" >&2 || true
+      [[ -f "$EGRESS_LOG" ]] && tail -n 80 "$EGRESS_LOG" >&2 || true
       exit 1
-    fi
-    ip_addr="$(probe_guest_ip || true)"
-    if [[ -n "$ip_addr" ]]; then
-      echo "$ip_addr"
-      return 0
-    fi
-    if (( attempts % 10 == 0 )); then
-      ip_addr="$(probe_guest_ip_by_ssh || true)"
-      if [[ -n "$ip_addr" ]]; then
-        echo "$ip_addr"
-        return 0
-      fi
-    fi
-    sleep 0.5
-    attempts=$(( attempts + 1 ))
-  done
-  return 1
-}
-
-wait_for_guest_ssh() {
-  local ip_addr="$1"
-  local attempts=0
-  local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
-  while [[ $attempts -lt $max_attempts ]]; do
-    if ssh_ready_for_password_prompt "$ip_addr" >/dev/null 2>&1; then
-      return 0
     fi
     sleep 0.5
     attempts=$(( attempts + 1 ))
@@ -353,7 +275,7 @@ wait_for_guest_ssh() {
 }
 
 kill_stale_runners
-rm -f "$RUNNER_PID_FILE" "$SERIAL_LOG" "$SEED_IMAGE"
+rm -f "$RUNNER_PID_FILE" "$SERIAL_LOG" "$SEED_IMAGE" "$EGRESS_HELPER_PID_FILE" "$EGRESS_SOCKET_PATH" "$EGRESS_LOG"
 rm -rf "$SEED_DIR"
 
 echo "--- rendering native NoCloud seed disk ---"
@@ -379,6 +301,13 @@ chpasswd:
   expire: false
 runcmd:
   - [ systemctl, enable, --now, ssh ]
+  - [ sh, -lc, "echo '=== motlie-v1.25 bootdiag begin ===' >/dev/hvc0" ]
+  - [ sh, -lc, "ip -o link show >/dev/hvc0 2>&1 || true" ]
+  - [ sh, -lc, "ip -o addr show >/dev/hvc0 2>&1 || true" ]
+  - [ sh, -lc, "ip route show >/dev/hvc0 2>&1 || true" ]
+  - [ sh, -lc, "ss -ltnp >/dev/hvc0 2>&1 || true" ]
+  - [ sh, -lc, "systemctl status ssh --no-pager >/dev/hvc0 2>&1 || true" ]
+  - [ sh, -lc, "echo '=== motlie-v1.25 bootdiag end ===' >/dev/hvc0" ]
 EOF
 hdiutil create -quiet -fs FAT32 -volname CIDATA -srcfolder "$SEED_DIR" -ov -format UDRW "$SEED_IMAGE"
 
@@ -391,6 +320,7 @@ else
   RUNNER_BIN="$($RUNNER_BUILD_SCRIPT)"
 fi
 chmod +x "$RUNNER_BIN"
+start_egress_helper
 
 VM_DIR="$WORK_VM_DIR"
 DISK_PATH="$VM_DIR/disk.img"
@@ -407,27 +337,23 @@ START_EPOCH="$EPOCHREALTIME"
   --serial-log "$SERIAL_LOG" \
   --seed-disk "$SEED_IMAGE" \
   --unix-socket "$SOCKET_PATH" \
+  --net-backend-socket "$EGRESS_SOCKET_PATH" \
+  --net-mac "$NET_MAC" \
   --vsock-port 5000 \
   --memory-mib 4096 \
   --cpu-count 4 \
-  --enable-nat \
-  --nat-mac "$NAT_MAC" \
   >"$RUN_LOG" 2>&1 &
 RUNNER_PID="$!"
 echo "$RUNNER_PID" > "$RUNNER_PID_FILE"
 
-IP_ADDR="$(wait_for_guest_ip)" || {
-  echo "timed out waiting for guest IP after ${TIMEOUT_SECONDS}s" >&2
-  cat "$RUN_LOG" >&2 || true
-  [[ -f "$SERIAL_LOG" ]] && tail -n 80 "$SERIAL_LOG" >&2 || true
-  exit 1
-}
+IP_ADDR="$GUEST_IPV4"
 
 echo "--- waiting for guest SSH ---"
-wait_for_guest_ssh "$IP_ADDR" || {
+wait_for_guest_ssh || {
   echo "timed out waiting for guest SSH after ${TIMEOUT_SECONDS}s" >&2
   cat "$RUN_LOG" >&2 || true
   [[ -f "$SERIAL_LOG" ]] && tail -n 80 "$SERIAL_LOG" >&2 || true
+  [[ -f "$EGRESS_LOG" ]] && tail -n 80 "$EGRESS_LOG" >&2 || true
   exit 1
 }
 
@@ -453,19 +379,19 @@ guest_bash_as() {
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:${remote_path}
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${CONTROL_HOST}:${remote_path}
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "scp auth failed for ${run_user}@${IP_ADDR}"
+      puts stderr "scp auth failed for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
       exit 97
     }
     send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "scp permission denied for ${run_user}@${IP_ADDR}"
+    puts stderr "scp permission denied for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
     exit 98
   }
   eof {
@@ -481,19 +407,19 @@ EOF
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "${remote_exec}"
+spawn ssh -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${CONTROL_HOST} "${remote_exec}"
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "ssh auth failed for ${run_user}@${IP_ADDR}"
+      puts stderr "ssh auth failed for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
       exit 97
     }
     send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "ssh permission denied for ${run_user}@${IP_ADDR}"
+    puts stderr "ssh permission denied for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
     exit 98
   }
   eof {
@@ -522,19 +448,19 @@ guest_bash_as_capture() {
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:${remote_path}
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${CONTROL_HOST}:${remote_path}
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "scp auth failed for ${run_user}@${IP_ADDR}"
+      puts stderr "scp auth failed for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
       exit 97
     }
     send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "scp permission denied for ${run_user}@${IP_ADDR}"
+    puts stderr "scp permission denied for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
     exit 98
   }
   eof {
@@ -549,7 +475,7 @@ EOF
   rm -f "$remote_script"
   expect <<EOF
 set timeout -1
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "${remote_exec}"
+spawn ssh -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${CONTROL_HOST} "${remote_exec}"
 expect {
   "password:" {
     send_user "password-prompt\\n"
@@ -571,19 +497,19 @@ guest_copy() {
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" ${BOOTSTRAP_USER}@${IP_ADDR}:$dst
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" ${BOOTSTRAP_USER}@${CONTROL_HOST}:$dst
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${CONTROL_HOST}:${CONTROL_PORT}"
       exit 97
     }
     send "${BOOTSTRAP_PASS}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${CONTROL_HOST}:${CONTROL_PORT}"
     exit 98
   }
   eof {
@@ -603,19 +529,19 @@ guest_fetch() {
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${IP_ADDR}:$src "$dst"
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BOOTSTRAP_USER}@${CONTROL_HOST}:$src "$dst"
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${IP_ADDR}"
+      puts stderr "scp auth failed for ${BOOTSTRAP_USER}@${CONTROL_HOST}:${CONTROL_PORT}"
       exit 97
     }
     send "${BOOTSTRAP_PASS}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${IP_ADDR}"
+    puts stderr "scp permission denied for ${BOOTSTRAP_USER}@${CONTROL_HOST}:${CONTROL_PORT}"
     exit 98
   }
   eof {
@@ -648,19 +574,19 @@ guest_capture_as() {
   expect <<EOF
 set timeout -1
 set password_tries 0
-spawn scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${IP_ADDR}:${remote_path}
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${run_user}@${CONTROL_HOST}:${remote_path}
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "scp auth failed for ${run_user}@${IP_ADDR}"
+      puts stderr "scp auth failed for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
       exit 97
     }
     send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "scp permission denied for ${run_user}@${IP_ADDR}"
+    puts stderr "scp permission denied for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
     exit 98
   }
   eof {
@@ -678,19 +604,19 @@ set timeout -1
 log_user 0
 set output ""
 set password_tries 0
-spawn ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${IP_ADDR} "${remote_exec}"
+spawn ssh -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${run_user}@${CONTROL_HOST} "${remote_exec}"
 expect {
   "password:" {
     incr password_tries
     if {\$password_tries > 3} {
-      puts stderr "ssh auth failed for ${run_user}@${IP_ADDR}"
+      puts stderr "ssh auth failed for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
       exit 97
     }
     send "${run_pass}\r"
     exp_continue
   }
   "Permission denied" {
-    puts stderr "ssh permission denied for ${run_user}@${IP_ADDR}"
+    puts stderr "ssh permission denied for ${run_user}@${CONTROL_HOST}:${CONTROL_PORT}"
     exit 98
   }
   -re ".+" {
