@@ -341,7 +341,7 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         _unixSocketPath = [unixSocketPath copy];
         _vsockPort = vsockPort;
         _sessions = [NSMutableSet set];
-        _vmQueue = dispatch_queue_create("motlie.vfs.v1_15.vz_runner", DISPATCH_QUEUE_SERIAL);
+        _vmQueue = dispatch_queue_create("motlie.vnet.v1_25.vz_runner", DISPATCH_QUEUE_SERIAL);
         _networkBridgeFDs = [NSMutableArray array];
     }
     return self;
@@ -481,7 +481,7 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
             if (!macAddress) {
                 if (error) {
                     NSString *message = [NSString stringWithFormat:@"invalid NAT MAC address: %@", natMAC];
-                    *error = [NSError errorWithDomain:@"motlie.vfs.v1_15.vz"
+                    *error = [NSError errorWithDomain:@"motlie.vnet.v1_25.vz"
                                                  code:3
                                              userInfo:@{NSLocalizedDescriptionKey: message}];
                 }

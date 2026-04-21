@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use motlie_vnet::slirp::{SlirpConfig, SlirpInstance};
+use tracing::debug;
 
 struct HostForward {
     host_addr: Ipv4Addr,
@@ -66,7 +67,7 @@ fn sockaddr_path(addr: &SocketAddr) -> Option<PathBuf> {
 
 fn print_usage() {
     eprintln!(
-        "usage: vz_egress_helper_v1_25 --socket-path <path> [--guest-ip <ipv4>] [--host-ip <ipv4>] [--netmask <ipv4>] [--dns-ip <ipv4>] [--host-forward-tcp <host_ip:host_port:guest_port>]..."
+        "usage: vz_egress_helper_v1_25 --socket-path <path> [--guest-ip <ipv4>] [--host-ip <ipv4>] [--netmask <ipv4>] [--dns-ip <ipv4>] [--host-forward-tcp <host_ip:host_port:guest_port>] [--log-frames]"
     );
 }
 
@@ -77,6 +78,7 @@ fn main() -> Result<()> {
     let mut netmask = Ipv4Addr::new(255, 255, 255, 0);
     let mut dns_ip = Ipv4Addr::new(10, 0, 2, 3);
     let mut forwards: Vec<HostForward> = Vec::new();
+    let mut log_frames = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1usize;
@@ -106,6 +108,10 @@ fn main() -> Result<()> {
                 forwards.push(parse_host_forward(&args[i + 1])?);
                 i += 2;
             }
+            "--log-frames" => {
+                log_frames = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -114,6 +120,17 @@ fn main() -> Result<()> {
                 anyhow::bail!("unknown argument: {other}");
             }
         }
+    }
+
+    if log_frames {
+        let _ = tracing_subscriber::fmt()
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
+            )
+            .try_init();
     }
 
     let socket_path = socket_path.context("--socket-path is required")?;
@@ -166,12 +183,13 @@ fn main() -> Result<()> {
                         peer = Some(path);
                     }
                     guest_to_host_frames += 1;
-                    if guest_to_host_frames <= 10 || guest_to_host_frames % 100 == 0 {
-                        eprintln!(
-                            "vz_egress_helper_v1_25 rx frame {} ({} bytes) [{}]",
-                            guest_to_host_frames,
-                            n,
-                            hex_prefix(&buf[..n], 32)
+                    if log_frames && (guest_to_host_frames <= 10 || guest_to_host_frames % 100 == 0)
+                    {
+                        debug!(
+                            frame = guest_to_host_frames,
+                            bytes = n,
+                            prefix = %hex_prefix(&buf[..n], 32),
+                            "vz_egress_helper_v1_25 rx"
                         );
                     }
                     slirp.input(&buf[..n]);
@@ -186,12 +204,12 @@ fn main() -> Result<()> {
         if let Some(peer_path) = peer.as_ref() {
             for frame in frames {
                 host_to_guest_frames += 1;
-                if host_to_guest_frames <= 10 || host_to_guest_frames % 100 == 0 {
-                    eprintln!(
-                        "vz_egress_helper_v1_25 tx frame {} ({} bytes) [{}]",
-                        host_to_guest_frames,
-                        frame.len(),
-                        hex_prefix(&frame, 32)
+                if log_frames && (host_to_guest_frames <= 10 || host_to_guest_frames % 100 == 0) {
+                    debug!(
+                        frame = host_to_guest_frames,
+                        bytes = frame.len(),
+                        prefix = %hex_prefix(&frame, 32),
+                        "vz_egress_helper_v1_25 tx"
                     );
                 }
                 if let Err(err) = sock.send_to(&frame, peer_path) {

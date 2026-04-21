@@ -132,6 +132,9 @@ This tree is now scaffolded for Apple Vz work:
 - `build-guest.sh` now builds the base image through the same native Vz
   runtime path and caches a native source-artifact set under
   `artifacts/source-base.vm`
+- `launch-vz.sh` is the authoritative Vz launcher for this slice; REPL launch
+  generation still reflects the inherited CH `launch-ch.sh` helper shape and is
+  tracked as follow-up work
 - the inherited `v1.2` guest mount YAML and REPL data remain the source of
   truth for the intended guest-visible contract
 

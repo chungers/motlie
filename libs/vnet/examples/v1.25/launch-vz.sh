@@ -28,6 +28,7 @@ NET_MAC=""
 CONTROL_HOST="127.0.0.1"
 CONTROL_PORT=""
 GUEST_IPV4="10.0.2.15"
+EGRESS_HELPER_LOG_FRAMES="${MOTLIE_VZ_LOG_FRAMES:-0}"
 
 zmodload zsh/datetime
 
@@ -299,6 +300,7 @@ start_egress_helper() {
   "$helper_bin" \
     --socket-path "$EGRESS_SOCKET_PATH" \
     --host-forward-tcp "127.0.0.1:${CONTROL_PORT}:22" \
+    $( [[ "$EGRESS_HELPER_LOG_FRAMES" == "1" ]] && print -- "--log-frames" ) \
     >"$EGRESS_LOG" 2>&1 &
   EGRESS_HELPER_PID="$!"
   echo "$EGRESS_HELPER_PID" > "$EGRESS_HELPER_PID_FILE"

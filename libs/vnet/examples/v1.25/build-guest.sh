@@ -30,6 +30,7 @@ SERIAL_LOG="$ARTIFACTS_DIR/build-serial.log"
 SOCKET_PATH="/tmp/motlie-vnet-build.vsock_5000"
 EGRESS_SOCKET_PATH="/tmp/motlie-vnet-build.egress.sock"
 EGRESS_LOG="$ARTIFACTS_DIR/build-egress.log"
+EGRESS_HELPER_LOG_FRAMES="${MOTLIE_VZ_LOG_FRAMES:-0}"
 NET_MAC="${MOTLIE_VZ_BUILD_NET_MAC:-02:4d:6f:74:62:25}"
 CONTROL_HOST="127.0.0.1"
 CONTROL_PORT="${MOTLIE_VZ_BUILD_SSH_PORT:-2225}"
@@ -209,6 +210,7 @@ start_egress_helper() {
   "$helper_bin" \
     --socket-path "$EGRESS_SOCKET_PATH" \
     --host-forward-tcp "127.0.0.1:${CONTROL_PORT}:22" \
+    $( [[ "$EGRESS_HELPER_LOG_FRAMES" == "1" ]] && print -- "--log-frames" ) \
     >"$EGRESS_LOG" 2>&1 &
   EGRESS_HELPER_PID="$!"
   echo "$EGRESS_HELPER_PID" > "$EGRESS_HELPER_PID_FILE"

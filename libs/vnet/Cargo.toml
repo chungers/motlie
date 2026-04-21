@@ -15,10 +15,10 @@ debug-trace = []
 libc = "0.2"
 anyhow.workspace = true
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 motlie-vfs = { path = "../vfs", features = ["vsock"] }
 bytes = "1"

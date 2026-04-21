@@ -165,7 +165,7 @@ enum EgressNet {
     None,
     Tap,
     VhostUser,
-    VzNat,
+    VzUserspace,
 }
 
 impl AdminNet {
@@ -191,8 +191,8 @@ impl EgressNet {
             "none" => Ok(Self::None),
             "tap" => Ok(Self::Tap),
             "vhost-user" => Ok(Self::VhostUser),
-            "vz-nat" => Ok(Self::VzNat),
-            _ => anyhow::bail!("egress-net must be one of: none, tap, vhost-user"),
+            "vz-userspace" => Ok(Self::VzUserspace),
+            _ => anyhow::bail!("egress-net must be one of: none, tap, vhost-user, vz-userspace"),
         }
     }
 
@@ -201,7 +201,7 @@ impl EgressNet {
             Self::None => "none",
             Self::Tap => "tap",
             Self::VhostUser => "vhost-user",
-            Self::VzNat => "vz-nat",
+            Self::VzUserspace => "vz-userspace",
         }
     }
 }
@@ -211,9 +211,9 @@ fn validate_network_modes(admin_net: AdminNet, egress_net: EgressNet) -> Result<
         (AdminNet::None, EgressNet::None)
         | (AdminNet::Tap, EgressNet::Tap)
         | (AdminNet::Tap, EgressNet::VhostUser)
-        | (AdminNet::None, EgressNet::VzNat) => Ok(()),
+        | (AdminNet::None, EgressNet::VzUserspace) => Ok(()),
         _ => anyhow::bail!(
-            "supported launch modes are --admin-net=none --egress-net=none, --admin-net=tap --egress-net=tap, --admin-net=tap --egress-net=vhost-user, and --admin-net=none --egress-net=vz-nat"
+            "supported launch modes are --admin-net=none --egress-net=none, --admin-net=tap --egress-net=tap, --admin-net=tap --egress-net=vhost-user, and --admin-net=none --egress-net=vz-userspace"
         ),
     }
 }
@@ -263,7 +263,7 @@ async fn main() -> Result<()> {
         AdminNet::Tap
     };
     let mut egress_net = if cfg!(target_os = "macos") {
-        EgressNet::VzNat
+        EgressNet::VzUserspace
     } else {
         EgressNet::VhostUser
     };
@@ -1263,10 +1263,12 @@ fn shutdown_guest(guest_name: &str, pid: Option<u32>) -> Result<ShutdownOutcome>
 }
 
 fn ensure_vnet_backend(admin: &mut AdminState, guest_name: &str) -> Result<Option<PathBuf>> {
-    if admin.egress_net == EgressNet::VzNat {
+    if admin.egress_net == EgressNet::VzUserspace {
         emit_status(
             admin,
-            format!("ok: vnet {guest_name} mode=vz-nat (Apple Vz NAT egress)"),
+            format!(
+                "ok: vnet {guest_name} mode=vz-userspace (Apple Vz userspace libslirp egress)"
+            ),
         );
         return Ok(None);
     }
@@ -1373,7 +1375,9 @@ fn print_help(topic: Option<&str>, multi_guest: bool, comment_stdout: bool) {
             out("  Generate a guest helper script and execute it asynchronously via /bin/bash.");
             out("  The helper writes guest-specific cloud-init user-data and meta-data");
             out("  generated from the provisioned uid/gid and mount topology.");
-            out("  launch-ch.sh then seeds those files into /var/lib/cloud/seed/nocloud/.");
+            out("  Today this helper still emits CH-oriented launch-ch.sh semantics.");
+            out("  The validated Vz userspace path uses libs/vnet/examples/v1.25/launch-vz.sh.");
+            out("  REPL-driven Vz launch parity remains follow-up work.");
             out("  In --egress-net=vhost-user mode, repl_host_v1_2 starts one motlie-vnet");
             out("  backend per guest before launching and reuses it across later launches.");
             out("  Logs land under /tmp/motlie-vnet-launch/<guest>/.");
