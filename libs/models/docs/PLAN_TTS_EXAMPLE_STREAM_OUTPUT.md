@@ -90,7 +90,6 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
 
 ### 4.2 - Behavior checks
 
-- [ ] Verify `.wav` output still works for each binary.
 - [x] Verify `.wav` output still works for each binary.
   DESIGN reference: `Validation`
 - [x] Verify stdin text works for each binary when `--text` is omitted.
