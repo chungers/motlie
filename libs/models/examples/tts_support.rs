@@ -1,7 +1,8 @@
 use std::io::Read;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use motlie_voice::wav::{StreamingWavWriter, WavSample};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,11 +56,12 @@ pub fn log_status(quiet: bool, message: &str) {
 pub enum WavSink<S: WavSample> {
     File {
         writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+        _sample: PhantomData<S>,
     },
     Stdout {
-        writer: StreamingWavWriter<std::io::StdoutLock<'static>, S>,
+        writer: StreamingWavWriter<std::io::Stdout, S>,
+        _sample: PhantomData<S>,
     },
-    _Marker(std::marker::PhantomData<S>),
 }
 
 impl<S: WavSample> WavSink<S> {
@@ -76,41 +78,44 @@ impl<S: WavSample> WavSink<S> {
                     },
                 )
                 .with_context(|| format!("failed to create wav file `{}`", path.display()))?;
-                Ok(Self::File { writer })
+                Ok(Self::File {
+                    writer,
+                    _sample: PhantomData,
+                })
             }
             TtsOutput::Stdout => {
-                let stdout = Box::leak(Box::new(std::io::stdout()));
-                let writer = StreamingWavWriter::new(stdout.lock(), sample_rate_hz, 1)
+                let writer = StreamingWavWriter::new(std::io::stdout(), sample_rate_hz, 1)
                     .context("failed to start stdout wav stream")?;
-                Ok(Self::Stdout { writer })
+                Ok(Self::Stdout {
+                    writer,
+                    _sample: PhantomData,
+                })
             }
         }
     }
 
     pub fn write_chunk(&mut self, samples: &[S]) -> Result<()> {
         match self {
-            Self::File { writer } => {
+            Self::File { writer, .. } => {
                 for &sample in samples {
                     S::write_to_hound(writer, sample)?;
                 }
             }
-            Self::Stdout { writer } => {
+            Self::Stdout { writer, .. } => {
                 writer
                     .write_chunk(samples)
                     .context("failed to write stdout wav chunk")?;
             }
-            Self::_Marker(_) => unreachable!(),
         }
         Ok(())
     }
 
     pub fn finalize(self) -> Result<()> {
         match self {
-            Self::File { writer } => writer.finalize().context("failed to finalize wav file"),
-            Self::Stdout { writer } => writer
+            Self::File { writer, .. } => writer.finalize().context("failed to finalize wav file"),
+            Self::Stdout { writer, .. } => writer
                 .finalize()
                 .context("failed to finalize stdout wav stream"),
-            Self::_Marker(_) => unreachable!(),
         }
     }
 }

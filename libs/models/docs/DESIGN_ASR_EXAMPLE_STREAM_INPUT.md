@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Clarified that both file and stdin example paths currently normalize the same WAV sample formats (`Int16` and `Float32`) and that the generic example path keeps runtime-rate resampling because stdin/file WAV headers do not provide a compile-time input rate. |
 | 2026-04-21 | @codex-tts | Moved the generic WAV decode/downmix/resample primitives out of `examples/` into a minimal shared `libs/voice` crate, and collapsed the two streaming ASR mains onto a shared streaming runner helper. |
 | 2026-04-21 | @codex-tts | Replaced the earlier “plain `hound` on stdin” assumption with a tolerant example-layer stdin WAV parser so the ASR examples can consume the aligned indefinite-length WAV headers emitted by the TTS stdout pipeline. |
 | 2026-04-21 | @codex-tts | Tightened `--quiet` so it suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. |
@@ -163,6 +164,15 @@ Important implementation details:
 
 File-path mode still uses `hound` normally. Stdin mode uses the tolerant parser
 only so the example binaries can compose directly with the TTS stdout contract.
+
+The current example helpers normalize the same sample encodings in both modes:
+
+- PCM `Int16`
+- `Float32`
+
+That matches the current shipped TTS stdout contract. The resample step remains
+runtime-driven in the generic example path because stdin/file WAV headers carry
+their sample rate as runtime metadata rather than a const-generic invariant.
 
 ## Backend-Specific Notes
 
