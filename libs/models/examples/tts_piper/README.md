@@ -14,6 +14,14 @@ cargo run -p motlie-models --example tts_piper \
   -- --text "Hello from Motlie." --wav /tmp/motlie-tts.wav
 ```
 
+If `--wav` is omitted, the example writes WAV bytes to stdout instead:
+
+```bash
+echo "Hello from Motlie." | cargo run -p motlie-models --example tts_piper \
+  --no-default-features --features model-piper-en-us-ljspeech-medium \
+  -- > /tmp/motlie-tts.wav
+```
+
 ## Preconditions
 
 - The curated Piper artifacts must already be downloaded under the default
@@ -37,7 +45,52 @@ cargo run -p motlie-models --example tts_piper \
 
 - The example opens the curated `Piper en_US ljspeech medium` bundle.
 - Text is synthesized through the typed `SpeechSynthesizer` / `SpeechStream`
-  contract and collected into a `.wav` file.
+  contract and collected into a `.wav` file or stdout WAV stream.
 - In Phase 1, Piper performs whole-utterance synthesis in `synthesize()` and
   then emits buffered typed audio chunks through `next_chunk()`.
 - The resulting file uses Piper's fixed `22050 Hz` mono `i16` output format.
+- If `--text` is omitted, the example reads synthesis text from stdin.
+- Diagnostics are written to stderr so stdout stays clean when it is carrying
+  WAV bytes.
+- `--quiet` suppresses example-layer and backend-native stderr diagnostics.
+
+## Stream To macOS `play` Over SSH
+
+If Homebrew `sox` is installed on the remote Mac host, the stdout WAV stream can
+be piped directly over SSH into `/opt/homebrew/bin/play -t wav -`.
+
+Recommended artifact env var:
+
+```bash
+export PIPER_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+```
+
+### Short input
+
+```bash
+printf '%s\n' "Hello from Piper over SSH." \
+| ./target/release/examples/tts_piper \
+    --quiet \
+    --artifact-root "$PIPER_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Medium input
+
+```bash
+printf '%s\n' "This is a medium-length Piper synthesis sample streamed over SSH to a macOS host for immediate playback through Homebrew sox." \
+| ./target/release/examples/tts_piper \
+    --quiet \
+    --artifact-root "$PIPER_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Long input
+
+```bash
+printf '%s\n' "Piper can also handle longer shell-composed utterances where text arrives on standard input, the example writes a WAV container to standard output, SSH forwards that byte stream to the remote macOS host, and Homebrew sox plays it without any intermediate file staging." \
+| ./target/release/examples/tts_piper \
+    --quiet \
+    --artifact-root "$PIPER_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```

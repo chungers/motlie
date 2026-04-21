@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="320" viewBox="0 0 960 320" role="img" aria-labelledby="title desc">
+  <title id="title">Average WER by TTS to ASR pipeline</title>
+  <desc id="desc">Horizontal bar chart comparing average word error rate across six TTS to ASR example pipelines.</desc>
+  <rect width="960" height="320" fill="#fbfaf6"/>
+  <text x="32" y="36" font-family="Georgia, serif" font-size="24" fill="#1f2933">Average WER by pipeline</text>
+  <text x="32" y="58" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#52606d">Lower is better. Values from the 60-run validation matrix.</text>
+  <line x1="290" y1="82" x2="290" y2="278" stroke="#cbd2d9" stroke-width="1"/>
+  <line x1="510" y1="82" x2="510" y2="278" stroke="#e4e7eb" stroke-width="1"/>
+  <line x1="730" y1="82" x2="730" y2="278" stroke="#e4e7eb" stroke-width="1"/>
+  <text x="290" y="298" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#52606d">0.0</text>
+  <text x="510" y="298" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#52606d">0.15</text>
+  <text x="730" y="298" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#52606d">0.30</text>
+  <g font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1f2933">
+    <text x="32" y="98">tts_piper → asr_whisper</text>
+    <rect x="290" y="84" width="62" height="18" rx="4" fill="#0b7285"/>
+    <text x="360" y="98" font-size="12" fill="#0b7285">0.042</text>
+
+    <text x="32" y="130">tts_qwen3_tts_cpp → asr_moonshine</text>
+    <rect x="290" y="116" width="73" height="18" rx="4" fill="#127a6b"/>
+    <text x="371" y="130" font-size="12" fill="#127a6b">0.050</text>
+
+    <text x="32" y="162">tts_qwen3_tts_cpp → asr_whisper</text>
+    <rect x="290" y="148" width="81" height="18" rx="4" fill="#2f9e44"/>
+    <text x="379" y="162" font-size="12" fill="#2f9e44">0.055</text>
+
+    <text x="32" y="194">tts_piper → asr_moonshine</text>
+    <rect x="290" y="180" width="381" height="18" rx="4" fill="#d9480f"/>
+    <text x="679" y="194" font-size="12" fill="#d9480f">0.260</text>
+
+    <text x="32" y="226">tts_piper → asr_sherpa_onnx</text>
+    <rect x="290" y="212" width="399" height="18" rx="4" fill="#e67700"/>
+    <text x="697" y="226" font-size="12" fill="#e67700">0.272</text>
+
+    <text x="32" y="258">tts_qwen3_tts_cpp → asr_sherpa_onnx</text>
+    <rect x="290" y="244" width="440" height="18" rx="4" fill="#c92a2a"/>
+    <text x="738" y="258" font-size="12" fill="#c92a2a">0.300</text>
+  </g>
+</svg>
