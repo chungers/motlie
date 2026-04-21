@@ -112,6 +112,31 @@ Preconditions:
 - These commands are run from the Motlie Linux host where the example binaries
   and artifacts live.
 
+### Streaming modes and current limitations
+
+- `asr_whisper` is batch only.
+  - It reads the complete WAV, normalizes it to mono 16 kHz, and prints one
+    final transcript line.
+  - It does not expose chunked ingest or partial-output mode in the example.
+- `asr_sherpa_onnx` uses the typed streaming ASR contract.
+  - It supports internal chunked ingest and `--partials` event output.
+  - In the current example layer, stdin/file WAV input is still decoded fully
+    before chunking starts, so this is a chunk-simulated streaming example, not
+    a raw live PCM protocol.
+- `asr_moonshine` follows the same current example behavior as Sherpa.
+  - It uses a typed streaming session internally.
+  - `--partials` enables event-style output.
+  - The current CLI still buffers the completed WAV before chunking it through
+    the session.
+
+Practical takeaway:
+
+- For a completed WAV piped over SSH, all three examples work.
+- For event-style stdout while processing a completed WAV, use
+  `asr_sherpa_onnx --partials` or `asr_moonshine --partials`.
+- For true low-latency live microphone transcription without waiting for a WAV
+  EOF boundary, the current examples are not the final protocol surface yet.
+
 ### Whisper CPU
 
 ```bash
@@ -151,6 +176,27 @@ ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -
     --artifact-root /home/dchung/cld-mistral/motlie/artifacts/models/hf-cache
 ```
 
+### Streaming-style partial events
+
+Sherpa and Moonshine can preserve event-style stdout with `--partials` once the
+completed WAV is decoded and fed into their chunked session:
+
+```bash
+ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav - trim 0 8' \
+| ./target/release/examples/asr_sherpa_onnx \
+    --quiet \
+    --partials \
+    --artifact-root /home/dchung/.cache/huggingface/hub
+```
+
+```bash
+ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav - trim 0 8' \
+| ./target/release/examples/asr_moonshine \
+    --quiet \
+    --partials \
+    --artifact-root /home/dchung/cld-mistral/motlie/artifacts/models/hf-cache
+```
+
 ### Longer capture window
 
 To record for longer than 8 seconds, adjust the final `trim 0 <seconds>` value
@@ -162,6 +208,21 @@ ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -
     --quiet \
     --artifact-root /home/dchung/sessions/cdx-tts/motlie/artifacts/models/hf-cache
 ```
+
+### Stopping `rec` without a fixed duration
+
+Besides `trim 0 <seconds>`, the practical stop options are:
+
+- `Ctrl-C` in the terminal running the SSH pipeline
+  - this sends an interrupt through the pipeline, stops `rec`, closes the WAV
+    stream, and lets the ASR example finish on EOF
+- stopping the remote recorder explicitly from another terminal
+  - example: `ssh motliehost 'pkill -INT rec'`
+- ending the SSH session
+  - this also closes the WAV stream and terminates capture
+
+For the current example layer, the ASR side does not emit a final transcript
+until the WAV stream is closed and EOF is reached.
 
 ## Practical Defaults
 
