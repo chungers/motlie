@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use motlie_model::typed::{SpeechStream, SpeechSynthesizer, SynthesisRequest};
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::piper_en_us_ljspeech_medium;

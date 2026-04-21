@@ -27,6 +27,16 @@ Quiet-mode note:
   backend-native logs and panic diagnostics. Use it only when stdout must stay
   completely machine-readable.
 
+Suggested artifact env vars for the commands below:
+
+```bash
+export PIPER_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+export QWEN3_TTS_CPP_ARTIFACT_ROOT="/tmp/qwen3-tts-models"
+export WHISPER_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+export SHERPA_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+export MOONSHINE_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+```
+
 ## Release Builds
 
 ### CPU release build used for the published stats
@@ -143,26 +153,18 @@ Practical takeaway:
 - For true low-latency live microphone transcription without waiting for a WAV
   EOF boundary, the current examples are not the final protocol surface yet.
 
-### Whisper CPU
+### Whisper
 
 ```bash
 ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav - trim 0 8' \
 | ./target/release/examples/asr_whisper \
     --quiet \
-    --artifact-root /home/dchung/sessions/cdx-tts/motlie/artifacts/models/hf-cache
+    --artifact-root "$WHISPER_ARTIFACT_ROOT"
 ```
 
-### Whisper CUDA-capable build
-
-Use this only if the `whisper-cpp-cuda` release build succeeded on the current
-host:
-
-```bash
-ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav - trim 0 8' \
-| ./target/release/examples/asr_whisper \
-    --quiet \
-    --artifact-root /home/dchung/sessions/cdx-tts/motlie/artifacts/models/hf-cache
-```
+The same command line applies whether the release binary was built CPU-only or
+with `whisper-cpp-cuda`; the difference is in the build configuration, not the
+CLI surface.
 
 ### Sherpa ONNX
 
@@ -170,7 +172,7 @@ ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -
 ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav - trim 0 8' \
 | ./target/release/examples/asr_sherpa_onnx \
     --quiet \
-    --artifact-root /home/dchung/.cache/huggingface/hub
+    --artifact-root "$SHERPA_ARTIFACT_ROOT"
 ```
 
 ### Moonshine
@@ -179,7 +181,7 @@ ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -
 ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav - trim 0 8' \
 | ./target/release/examples/asr_moonshine \
     --quiet \
-    --artifact-root /home/dchung/cld-mistral/motlie/artifacts/models/hf-cache
+    --artifact-root "$MOONSHINE_ARTIFACT_ROOT"
 ```
 
 ### Streaming-style partial events
@@ -192,7 +194,7 @@ ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -
 | ./target/release/examples/asr_sherpa_onnx \
     --quiet \
     --partials \
-    --artifact-root /home/dchung/.cache/huggingface/hub
+    --artifact-root "$SHERPA_ARTIFACT_ROOT"
 ```
 
 ```bash
@@ -200,7 +202,7 @@ ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -
 | ./target/release/examples/asr_moonshine \
     --quiet \
     --partials \
-    --artifact-root /home/dchung/cld-mistral/motlie/artifacts/models/hf-cache
+    --artifact-root "$MOONSHINE_ARTIFACT_ROOT"
 ```
 
 ### Longer capture window
@@ -212,7 +214,7 @@ on the Mac side:
 ssh motliehost '/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav - trim 0 20' \
 | ./target/release/examples/asr_whisper \
     --quiet \
-    --artifact-root /home/dchung/sessions/cdx-tts/motlie/artifacts/models/hf-cache
+    --artifact-root "$WHISPER_ARTIFACT_ROOT"
 ```
 
 ### Stopping `rec` without a fixed duration
