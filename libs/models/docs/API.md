@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-20 | @codex-tts: Added shell-ready SSH streaming examples for the two shipped TTS binaries (`tts_piper`, `tts_qwen3_tts_cpp`) using Homebrew `sox` via `/opt/homebrew/bin/play` on a remote macOS host, with short/medium/long stdin inputs. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The documented shell-composition contract now covers only `tts_piper` and `tts_qwen3_tts_cpp` on the TTS side. | Example Program, Notes |
 | 2026-04-21 | @codex-tts: Updated the speech example shell contract so `--quiet` suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Tightened the shipped speech example shell contract after live pipe validation. ASR examples now default to one final plain-text transcript on stdout, with `--partials` reserved for streaming event output on the streaming backends, and all shipped TTS/ASR examples now accept `--quiet` to suppress example-layer stderr diagnostics. | Example Program, Notes |
@@ -373,6 +374,33 @@ That means simple pipelines like this are part of the intended example UX:
 ```sh
 echo "hello world" | tts_piper > out.wav
 echo "hello world" | tts_piper | asr_whisper
+```
+
+The two shipped TTS examples are also documented to support remote macOS
+playback over SSH when Homebrew `sox` is installed on the remote host:
+
+```sh
+printf '%s\n' "Hello from Piper over SSH." \
+| ./target/release/examples/tts_piper \
+    --quiet \
+    --artifact-root /home/dchung/sessions/cdx-dgx-e2e/motlie/artifacts/models/hf-cache \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+```sh
+printf '%s\n' "This is a medium-length qwen3-tts.cpp synthesis sample streamed over SSH to a macOS host for immediate playback through Homebrew sox." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root /tmp/qwen3-tts-models \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+```sh
+printf '%s\n' "Piper and qwen3-tts.cpp can both handle longer shell-composed utterances where text arrives on standard input, the example writes a WAV container to standard output, SSH forwards that byte stream to the remote macOS host, and Homebrew sox plays it without any intermediate file staging." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root /tmp/qwen3-tts-models \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
 ```
 
 Embedding example (`embeddings`):

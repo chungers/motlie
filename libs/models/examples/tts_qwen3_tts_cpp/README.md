@@ -80,3 +80,38 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 - Diagnostics are written to stderr so stdout stays clean when it is carrying
   WAV bytes.
 - `--quiet` suppresses example-layer and backend-native stderr diagnostics.
+
+## Stream To macOS `play` Over SSH
+
+If Homebrew `sox` is installed on the remote Mac host, the stdout WAV stream can
+be piped directly over SSH into `/opt/homebrew/bin/play -t wav -`.
+
+### Short input
+
+```bash
+printf '%s\n' "Hello from qwen3-tts.cpp over SSH." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root /tmp/qwen3-tts-models \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Medium input
+
+```bash
+printf '%s\n' "This is a medium-length qwen3-tts.cpp synthesis sample streamed over SSH to a macOS host for immediate playback through Homebrew sox." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root /tmp/qwen3-tts-models \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Long input
+
+```bash
+printf '%s\n' "qwen3-tts.cpp can also handle longer shell-composed utterances where text arrives on standard input, the example writes a WAV container to standard output, SSH forwards that byte stream to the remote macOS host, and Homebrew sox plays it without any intermediate file staging." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root /tmp/qwen3-tts-models \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
