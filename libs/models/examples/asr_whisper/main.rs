@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use motlie_model::typed::{AudioBuf, BatchTranscriber, Mono};
+use anyhow::{bail, Context, Result};
+use motlie_model::typed::BatchTranscriber;
 use motlie_model::{ArtifactPolicy, StartOptions, TranscriptionParams};
 use motlie_models::asr::whisper_base_en;
 
@@ -20,8 +20,6 @@ mod audio_support;
 mod bundle_support;
 #[path = "../quiet_support.rs"]
 mod quiet_support;
-
-const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
 fn main() -> Result<()> {
     let args = parse_args()?;
@@ -96,7 +94,7 @@ async fn run(args: Args) -> Result<()> {
         ),
     );
 
-    let audio = decode_f32_to_whisper_input(wav_spec, input.samples);
+    let audio = asr_support::decode_f32_to_f32_mono16k(wav_spec, input.samples)?;
 
     let artifact_root = args
         .artifact_root
@@ -136,14 +134,4 @@ async fn run(args: Args) -> Result<()> {
     asr_support::print_plain_transcript(&update.segments);
 
     Ok(())
-}
-
-fn decode_f32_to_whisper_input(
-    spec: hound::WavSpec,
-    samples: Vec<f32>,
-) -> AudioBuf<f32, TARGET_SAMPLE_RATE_HZ, Mono> {
-    let mono = audio_support::downmix_to_mono(&samples, spec.channels);
-    let resampled =
-        audio_support::resample_linear_f32(&mono, spec.sample_rate, TARGET_SAMPLE_RATE_HZ);
-    AudioBuf::new(resampled)
 }

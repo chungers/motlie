@@ -5374,6 +5374,7 @@ dependencies = [
  "motlie-model-qwen3-tts-cpp",
  "motlie-model-sherpa-onnx",
  "motlie-model-whisper-cpp",
+ "motlie-voice",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
@@ -5413,6 +5414,15 @@ dependencies = [
  "reedline",
  "shlex",
  "tokio",
+]
+
+[[package]]
+name = "motlie-voice"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "motlie-model",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

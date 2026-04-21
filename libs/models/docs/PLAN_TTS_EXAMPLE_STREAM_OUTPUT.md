@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Moved the generic stdout WAV and sample-conversion primitives into the new `libs/voice` crate, leaving only CLI/output-selection code in the example helpers. |
 | 2026-04-21 | @codex-tts | Reworked the stdout WAV sink to write incrementally with an aligned indefinite-length header, added shutdown-safe handle cleanup, and paired it with a tolerant stdin-side ASR parser so `tts | asr` works without temp files. |
 | 2026-04-20 | @codex-tts | Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The implementation/validation scope now covers Piper and `qwen3-tts.cpp` only. |
 | 2026-04-21 | @codex-tts | Implemented quiet-mode stderr redirection so backend-native logs are suppressed as well as example-layer diagnostics in pipe-heavy workflows. |
@@ -36,6 +37,9 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
   DESIGN reference: `Required Behavior`
 - [x] Add a stdout-safe WAV writer for non-seekable output streams.
   DESIGN reference: `Stdout WAV Contract`
+- [x] Move the reusable WAV/signal helpers into `libs/voice` so `examples/`
+  keep only CLI/source-selection logic.
+  DESIGN reference: `Layering`
 - [x] Make the stdout sink incremental rather than buffering the whole
   utterance before the first byte is written.
   DESIGN reference: `Stdout WAV Contract`
@@ -87,16 +91,17 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
 ### 4.2 - Behavior checks
 
 - [ ] Verify `.wav` output still works for each binary.
+- [x] Verify `.wav` output still works for each binary.
   DESIGN reference: `Validation`
-- [ ] Verify stdin text works for each binary when `--text` is omitted.
+- [x] Verify stdin text works for each binary when `--text` is omitted.
   DESIGN reference: `Validation`
-- [ ] Verify stdout emits a valid WAV stream for each binary.
+- [x] Verify stdout emits a valid WAV stream for each binary.
   DESIGN reference: `Validation`
-- [ ] Verify standard CLI consumers can read stdout WAV, for example `ffmpeg`
+- [x] Verify standard CLI consumers can read stdout WAV, for example `ffmpeg`
   or another stdin-based WAV consumer.
   DESIGN reference: `Validation`, `TTS to ASR Composition`
 
 ### 4.3 - Error-path checks
 
-- [ ] Verify diagnostics stay off stdout in pipeline mode.
+- [x] Verify diagnostics stay off stdout in pipeline mode.
   DESIGN reference: `Error Handling`

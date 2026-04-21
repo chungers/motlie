@@ -7,13 +7,15 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use motlie_model::typed::{
     AudioBuf, CloneReference, Mono, SpeechStream, SpeechSynthesizer, SynthesisRequest,
     VoiceCloneSynthesizer,
 };
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::qwen3_tts_cpp;
+use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono};
+use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
 
 #[path = "../audio_support.rs"]
 mod audio_support;
@@ -186,9 +188,12 @@ async fn run(args: Args) -> Result<()> {
 fn decode_wav_to_reference<R: std::io::Read>(
     reader: hound::WavReader<R>,
 ) -> Result<AudioBuf<f32, REFERENCE_SAMPLE_RATE_HZ, Mono>> {
-    let (spec, samples) = audio_support::decode_wav_to_f32(reader)?;
-    let mono = audio_support::downmix_to_mono(&samples, spec.channels);
-    let resampled =
-        audio_support::resample_linear_f32(&mono, spec.sample_rate, REFERENCE_SAMPLE_RATE_HZ);
+    let (spec, samples) =
+        decode_samples_to_f32(reader).context("failed to decode reference wav samples")?;
+    let mono =
+        downmix_to_mono(&samples, spec.channels).context("failed to downmix reference wav")?;
+    let resampled = LinearInterpolator
+        .resample_f32(&mono, spec.sample_rate, REFERENCE_SAMPLE_RATE_HZ)
+        .context("failed to resample reference wav to 16 kHz")?;
     Ok(AudioBuf::new(resampled))
 }

@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Moved the reusable WAV decode/downmix/resample primitives into `libs/voice` and factored sherpa/moonshine through one shared streaming runner helper so the example layer no longer duplicates the same audio pipeline. |
 | 2026-04-21 | @codex-tts | Replaced the plain stdin `hound` path with a tolerant example-layer WAV parser so the ASR examples accept the aligned indefinite-length headers emitted by the TTS stdout sink, and added regression tests for that contract. |
 | 2026-04-21 | @codex-tts | Implemented quiet-mode stderr redirection so backend-native logs are suppressed as well as example-layer diagnostics. |
 | 2026-04-20 | @codex-tts | Tightened the shipped stdout contract after live pipe validation. Streaming examples now default to one final plain-text transcript, add `--partials` for event-style output, and add `--quiet` for example-layer stderr suppression. |
@@ -29,6 +30,9 @@ Derived from [DESIGN_ASR_EXAMPLE_STREAM_INPUT.md](./DESIGN_ASR_EXAMPLE_STREAM_IN
   DESIGN reference: `Feasibility`
 - [x] Add shared plain-transcript rendering for shell-safe stdout.
   DESIGN reference: `Stdout Transcript Contract`
+- [x] Move reusable audio decode/downmix/resample primitives into `libs/voice`
+  and keep only source-selection/CLI logic in `examples/`.
+  DESIGN reference: `Layering`
 
 ### 1.2 - Add pipeline-safe logging behavior
 
@@ -64,6 +68,9 @@ Derived from [DESIGN_ASR_EXAMPLE_STREAM_INPUT.md](./DESIGN_ASR_EXAMPLE_STREAM_IN
   DESIGN reference: `Stdout Transcript Contract`
 - [x] Add `--partials` so streaming event output is opt-in instead of default.
   DESIGN reference: `Proposed Shared CLI`, `Stdout Transcript Contract`
+- [x] Share the generic streaming runner with `asr_moonshine` instead of
+  maintaining a second near-identical ingest loop.
+  DESIGN reference: `Layering`
 
 ### 2.3 - Update `asr_moonshine`
 
@@ -75,6 +82,9 @@ Derived from [DESIGN_ASR_EXAMPLE_STREAM_INPUT.md](./DESIGN_ASR_EXAMPLE_STREAM_IN
   DESIGN reference: `Stdout Transcript Contract`
 - [x] Add `--partials` so streaming event output is opt-in instead of default.
   DESIGN reference: `Proposed Shared CLI`, `Stdout Transcript Contract`
+- [x] Share the generic streaming runner with `asr_sherpa_onnx` instead of
+  maintaining a second near-identical ingest loop.
+  DESIGN reference: `Layering`
 
 ## Phase 3: Documentation
 
@@ -102,13 +112,13 @@ Derived from [DESIGN_ASR_EXAMPLE_STREAM_INPUT.md](./DESIGN_ASR_EXAMPLE_STREAM_IN
 
 ### 4.2 - Behavior checks
 
-- [ ] Verify `--wav <path>` still works for each binary.
+- [x] Verify `--wav <path>` still works for each binary.
   DESIGN reference: `Validation`
-- [ ] Verify stdin WAV works for each binary when `--wav` is omitted.
+- [x] Verify stdin WAV works for each binary when `--wav` is omitted.
   DESIGN reference: `Validation`
-- [ ] Verify transcript text stays on stdout.
+- [x] Verify transcript text stays on stdout.
   DESIGN reference: `Validation`
-- [ ] Verify diagnostics move to stderr in pipeline mode.
+- [x] Verify diagnostics move to stderr in pipeline mode.
   DESIGN reference: `Validation`
 - [x] Verify at least one end-to-end `tts_example | asr_example` pipeline.
   DESIGN reference: `Validation`

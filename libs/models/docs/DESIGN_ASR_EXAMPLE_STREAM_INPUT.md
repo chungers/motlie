@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Moved the generic WAV decode/downmix/resample primitives out of `examples/` into a minimal shared `libs/voice` crate, and collapsed the two streaming ASR mains onto a shared streaming runner helper. |
 | 2026-04-21 | @codex-tts | Replaced the earlier “plain `hound` on stdin” assumption with a tolerant example-layer stdin WAV parser so the ASR examples can consume the aligned indefinite-length WAV headers emitted by the TTS stdout pipeline. |
 | 2026-04-21 | @codex-tts | Tightened `--quiet` so it suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. |
 | 2026-04-20 | @codex-tts | Refined the stdout contract after live TTS→ASR pipe validation. ASR examples now default to one final plain-text transcript line on stdout, add `--partials` for streaming event output, and add `--quiet` to suppress example-layer stderr diagnostics. |
@@ -208,6 +209,15 @@ That implies adding shared example-layer support for:
 - common ASR argument parsing
 - stdin/file WAV source selection
 - stderr-safe logging decisions
+
+The generic audio work now lives below the example layer in `libs/voice`:
+
+- `motlie_voice::pipeline::convert`
+- `motlie_voice::pipeline::resample`
+- `motlie_voice::wav`
+
+The sherpa and Moonshine mains then share one example-layer streaming runner on
+top of those primitives instead of maintaining near-identical ingest loops.
 
 ## Error Handling
 

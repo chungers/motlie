@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Moved the generic WAV streaming and sample-conversion primitives out of `examples/` into a minimal shared `libs/voice` crate so the example layer now keeps only CLI/source-selection concerns. |
 | 2026-04-21 | @codex-tts | Reworked stdout WAV emission so the examples no longer buffer the full utterance before writing. Stdout now uses an aligned indefinite-length RIFF/data header and writes chunks incrementally as they arrive from `SpeechStream`. |
 | 2026-04-20 | @codex-tts | Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The stream-output work now targets only the functional TTS examples: Piper and `qwen3-tts.cpp`. |
 | 2026-04-21 | @codex-tts | Tightened `--quiet` so it suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. |
@@ -218,8 +219,15 @@ for:
 
 - common TTS argument parsing
 - stdin text loading
-- `.wav` sink writing
-- stdout WAV writing
+- example-layer file/stdout sink selection
+
+The reusable audio mechanics themselves now live in `libs/voice`:
+
+- `motlie_voice::wav::StreamingWavWriter`
+- `motlie_voice::wav::WavSample`
+
+That keeps the example layer focused on CLI behavior instead of duplicating
+generic audio code.
 
 ## Error Handling
 
