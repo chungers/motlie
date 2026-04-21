@@ -21,6 +21,12 @@ Current example groups:
 The detailed 2x3 TTS-to-ASR validation matrix lives in
 [`../docs/VALIDATION_TTS_ASR_PIPELINES.md`](../docs/VALIDATION_TTS_ASR_PIPELINES.md).
 
+Quiet-mode note:
+
+- `--quiet` suppresses whole-process stderr for the active example, including
+  backend-native logs and panic diagnostics. Use it only when stdout must stay
+  completely machine-readable.
+
 ## Release Builds
 
 ### CPU release build used for the published stats

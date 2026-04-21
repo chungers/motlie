@@ -16,6 +16,8 @@ use motlie_models::asr::whisper_base_en;
 mod asr_support;
 #[path = "../audio_support.rs"]
 mod audio_support;
+#[path = "../bundle_support.rs"]
+mod bundle_support;
 #[path = "../quiet_support.rs"]
 mod quiet_support;
 
@@ -82,7 +84,7 @@ async fn run(args: Args) -> Result<()> {
         &format!("wav:   {}", asr_support::describe_input(&input.source)),
     );
 
-    let wav_spec = input.reader.spec();
+    let wav_spec = input.spec;
     asr_support::log_status(
         args.quiet,
         &format!(
@@ -94,7 +96,7 @@ async fn run(args: Args) -> Result<()> {
         ),
     );
 
-    let audio = decode_wav_to_whisper_input(input.reader)?;
+    let audio = decode_f32_to_whisper_input(wav_spec, input.samples);
 
     let artifact_root = args
         .artifact_root
@@ -115,30 +117,33 @@ async fn run(args: Args) -> Result<()> {
     .await
     .context("failed to start typed whisper bundle")?;
 
-    let update = handle
-        .transcribe(
-            audio,
-            TranscriptionParams {
-                language: args.language,
-                emit_partials: false,
-            },
-        )
-        .await
-        .context("typed whisper transcription failed")?;
+    let update = bundle_support::run_with_shutdown(handle, |handle| {
+        Box::pin(async move {
+            handle
+                .transcribe(
+                    audio,
+                    TranscriptionParams {
+                        language: args.language,
+                        emit_partials: false,
+                    },
+                )
+                .await
+                .context("typed whisper transcription failed")
+        })
+    })
+    .await?;
 
     asr_support::print_plain_transcript(&update.segments);
-
-    handle.shutdown().await.context("shutdown failed")?;
 
     Ok(())
 }
 
-fn decode_wav_to_whisper_input<R: std::io::Read>(
-    reader: hound::WavReader<R>,
-) -> Result<AudioBuf<f32, TARGET_SAMPLE_RATE_HZ, Mono>> {
-    let (spec, samples) = audio_support::decode_wav_to_f32(reader)?;
+fn decode_f32_to_whisper_input(
+    spec: hound::WavSpec,
+    samples: Vec<f32>,
+) -> AudioBuf<f32, TARGET_SAMPLE_RATE_HZ, Mono> {
     let mono = audio_support::downmix_to_mono(&samples, spec.channels);
     let resampled =
         audio_support::resample_linear_f32(&mono, spec.sample_rate, TARGET_SAMPLE_RATE_HZ);
-    Ok(AudioBuf::new(resampled))
+    AudioBuf::new(resampled)
 }

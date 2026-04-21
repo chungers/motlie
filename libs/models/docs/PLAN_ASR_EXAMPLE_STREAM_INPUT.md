@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Replaced the plain stdin `hound` path with a tolerant example-layer WAV parser so the ASR examples accept the aligned indefinite-length headers emitted by the TTS stdout sink, and added regression tests for that contract. |
 | 2026-04-21 | @codex-tts | Implemented quiet-mode stderr redirection so backend-native logs are suppressed as well as example-layer diagnostics. |
 | 2026-04-20 | @codex-tts | Tightened the shipped stdout contract after live pipe validation. Streaming examples now default to one final plain-text transcript, add `--partials` for event-style output, and add `--quiet` for example-layer stderr suppression. |
 | 2026-04-20 | @codex-tts | Implemented the shared ASR helper modules, migrated all shipped ASR examples to file-or-stdin WAV input with transcript stdout and diagnostics stderr, updated the READMEs, and validated compile/clippy plus stdin WAV and TTS→ASR pipeline behavior. |
@@ -23,6 +24,9 @@ Derived from [DESIGN_ASR_EXAMPLE_STREAM_INPUT.md](./DESIGN_ASR_EXAMPLE_STREAM_IN
   DESIGN reference: `Proposed Shared CLI`
 - [x] Add WAV source selection logic: file path or stdin.
   DESIGN reference: `Required Behavior`
+- [x] Use a tolerant stdin-side WAV parser so the examples accept the aligned
+  indefinite-length headers emitted by the TTS stdout contract.
+  DESIGN reference: `Feasibility`
 - [x] Add shared plain-transcript rendering for shell-safe stdout.
   DESIGN reference: `Stdout Transcript Contract`
 

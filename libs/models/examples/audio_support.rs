@@ -1,10 +1,24 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub type DynWavReader = hound::WavReader<BufReader<Box<dyn Read>>>;
+pub type DynWavReader = hound::WavReader<BufReader<WavReaderInput>>;
+
+pub enum WavReaderInput {
+    File(File),
+    Stdin(std::io::Stdin),
+}
+
+impl Read for WavReaderInput {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::File(file) => file.read(buf),
+            Self::Stdin(stdin) => stdin.read(buf),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WavInput {
@@ -18,14 +32,14 @@ pub fn open_wav_reader(path: Option<&Path>) -> Result<(WavInput, DynWavReader)> 
             let file = File::open(path)
                 .with_context(|| format!("failed to open wav file `{}`", path.display()))?;
             let input = WavInput::File(path.to_path_buf());
-            let reader = hound::WavReader::new(BufReader::new(Box::new(file) as Box<dyn Read>))
+            let reader = hound::WavReader::new(BufReader::new(WavReaderInput::File(file)))
                 .with_context(|| format!("failed to parse wav file `{}`", path.display()))?;
             Ok((input, reader))
         }
         None => {
-            let stdin = std::io::stdin();
-            let reader = hound::WavReader::new(BufReader::new(Box::new(stdin) as Box<dyn Read>))
-                .context("failed to parse wav stream from stdin")?;
+            let reader =
+                hound::WavReader::new(BufReader::new(WavReaderInput::Stdin(std::io::stdin())))
+                    .context("failed to parse wav stream from stdin")?;
             Ok((WavInput::Stdin, reader))
         }
     }
@@ -58,6 +72,11 @@ pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
     }
 
     let channels = channels as usize;
+    debug_assert_eq!(
+        samples.len() % channels,
+        0,
+        "well-formed interleaved wav input should contain complete frames"
+    );
     samples
         .chunks_exact(channels)
         .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
@@ -70,8 +89,9 @@ pub fn resample_linear_f32(samples: &[f32], input_rate_hz: u32, output_rate_hz: 
     }
 
     let ratio = input_rate_hz as f64 / output_rate_hz as f64;
-    let out_len =
-        ((samples.len() as f64) * output_rate_hz as f64 / input_rate_hz as f64).ceil() as usize;
+    let out_len = ((samples.len() as f64) * output_rate_hz as f64 / input_rate_hz as f64)
+        .ceil()
+        .clamp(0.0, usize::MAX as f64) as usize;
     let max_index = samples.len().saturating_sub(1);
     let mut output = Vec::with_capacity(out_len.max(1));
 

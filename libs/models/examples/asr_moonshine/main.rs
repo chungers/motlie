@@ -16,6 +16,8 @@ use motlie_models::asr::moonshine_streaming_en;
 mod asr_support;
 #[path = "../audio_support.rs"]
 mod audio_support;
+#[path = "../bundle_support.rs"]
+mod bundle_support;
 #[path = "../quiet_support.rs"]
 mod quiet_support;
 
@@ -80,7 +82,7 @@ async fn run(args: Args) -> Result<()> {
         &format!("wav: {}", asr_support::describe_input(&input.source)),
     );
 
-    let audio = decode_wav_to_i16_mono16k(input.reader)?;
+    let audio = decode_f32_to_i16_mono16k(input.spec, input.samples);
     let _quiet_stderr = quiet_support::QuietStderrGuard::maybe_enable(args.quiet)
         .context("failed to enable quiet stderr mode")?;
 
@@ -95,61 +97,68 @@ async fn run(args: Args) -> Result<()> {
     .await
     .context("failed to start typed Moonshine bundle")?;
 
-    let mut session = handle
-        .open_session(TranscriptionParams {
-            language: Some("en".into()),
-            emit_partials: args.partials,
-        })
-        .await
-        .context("failed to open typed Moonshine session")?;
+    let final_segments = bundle_support::run_with_shutdown(handle, |handle| {
+        Box::pin(async move {
+            let mut session = handle
+                .open_session(TranscriptionParams {
+                    language: Some("en".into()),
+                    emit_partials: args.partials,
+                })
+                .await
+                .context("failed to open typed Moonshine session")?;
 
-    let mut final_segments = Vec::new();
-    for chunk in audio.into_samples().chunks(DEMO_CHUNK_SAMPLES) {
-        if let Some(update) = session
-            .ingest(AudioBuf::<i16, TARGET_SAMPLE_RATE_HZ, Mono>::new(
-                chunk.to_vec(),
-            ))
-            .await
-            .context("typed Moonshine ingest failed")?
-        {
-            if args.partials {
-                print_segment_events(&update.segments);
-            } else {
-                final_segments.extend(
-                    update
-                        .segments
-                        .into_iter()
-                        .filter(|segment| segment.final_segment),
-                );
+            let mut final_segments = Vec::new();
+            for chunk in audio.into_samples().chunks(DEMO_CHUNK_SAMPLES) {
+                if let Some(update) = session
+                    .ingest(AudioBuf::<i16, TARGET_SAMPLE_RATE_HZ, Mono>::new(
+                        chunk.to_vec(),
+                    ))
+                    .await
+                    .context("typed Moonshine ingest failed")?
+                {
+                    if args.partials {
+                        print_segment_events(&update.segments);
+                    } else {
+                        final_segments.extend(
+                            update
+                                .segments
+                                .into_iter()
+                                .filter(|segment| segment.final_segment),
+                        );
+                    }
+                }
             }
-        }
-    }
 
-    let final_update = session.finish().await.context("finish failed")?;
-    if args.partials {
-        print_segment_events(&final_update.segments);
-    } else {
-        final_segments.extend(final_update.segments);
+            let final_update = session.finish().await.context("finish failed")?;
+            if args.partials {
+                print_segment_events(&final_update.segments);
+            } else {
+                final_segments.extend(final_update.segments);
+            }
+
+            Ok(final_segments)
+        })
+    })
+    .await?;
+    if !args.partials {
         asr_support::print_plain_transcript(&final_segments);
     }
-
-    handle.shutdown().await.context("shutdown failed")?;
     Ok(())
 }
 
-fn decode_wav_to_i16_mono16k<R: std::io::Read>(
-    reader: hound::WavReader<R>,
-) -> Result<AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>> {
-    let (spec, samples) = audio_support::decode_wav_to_f32(reader)?;
+fn decode_f32_to_i16_mono16k(
+    spec: hound::WavSpec,
+    samples: Vec<f32>,
+) -> AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono> {
     let mono = audio_support::downmix_to_mono(&samples, spec.channels);
     let resampled =
         audio_support::resample_linear_f32(&mono, spec.sample_rate, TARGET_SAMPLE_RATE_HZ);
-    Ok(AudioBuf::new(
+    AudioBuf::new(
         resampled
             .into_iter()
             .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16)
             .collect(),
-    ))
+    )
 }
 
 fn print_segment_events(segments: &[motlie_model::TranscriptSegment]) {

@@ -6,6 +6,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Reworked stdout WAV emission so the examples no longer buffer the full utterance before writing. Stdout now uses an aligned indefinite-length RIFF/data header and writes chunks incrementally as they arrive from `SpeechStream`. |
 | 2026-04-20 | @codex-tts | Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The stream-output work now targets only the functional TTS examples: Piper and `qwen3-tts.cpp`. |
 | 2026-04-21 | @codex-tts | Tightened `--quiet` so it suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. |
 | 2026-04-20 | @codex-tts | Added a shared `--quiet` flag for all shipped TTS examples so example-layer stderr diagnostics can be suppressed when stdout is carrying WAV bytes through a shell pipeline. |
@@ -34,7 +35,7 @@ The current TTS examples only support one sink:
 That leaves two gaps:
 
 1. the examples do not demonstrate streaming output through Unix pipes
-2. the three binaries are already drifting in their argument surface
+2. the shipped binaries are already drifting in their argument surface
 
 Because the examples are the public runnable UX for curated TTS bundles, they
 need one shared contract rather than three backend-shaped CLIs.
@@ -96,7 +97,9 @@ If `--wav` is not present, the binary:
 Human-readable logging must go to stderr in pipeline mode so stdout remains a
 clean machine-readable WAV stream. `--quiet` suppresses both example-layer
 diagnostics and backend-native stderr logging by redirecting process stderr to
-`/dev/null` for the quiet execution window.
+`/dev/null` for the quiet execution window. This is intentionally
+whole-process and best-effort: panic diagnostics may be silent while `--quiet`
+is active.
 
 This is the command-line composition target for this feature. The intended UX is
 simple shell piping, for example:
@@ -110,13 +113,13 @@ echo "hello world" | cargo run -p motlie-models --example tts_piper \
 and remote/local playback, for example:
 
 ```bash
-echo "hello world" | program | ssh mac-host 'afplay -'
+echo "hello world" | program | ssh mac-host '/opt/homebrew/bin/play -t wav -'
 ```
 
 or:
 
 ```bash
-echo "hello world" | program | ffmpeg -i pipe:0 -f null -
+echo "hello world" | program | ssh mac-host '/opt/homebrew/bin/play -t wav -'
 ```
 
 ## Proposed Shared CLI
@@ -158,18 +161,23 @@ Why:
 
 This means the example layer needs a stdout-safe WAV writer.
 
-Important implementation constraint:
+Important implementation constraints:
 
 - `hound::WavWriter` requires `Write + Seek`
 - stdout pipes are not seekable
-- so the examples need a small dedicated writer for stdout mode that emits a
-  streaming-safe WAV header and then writes audio bytes as they arrive
+- many stdin-side WAV readers, including `hound`, reject an indefinite data
+  chunk length unless it is block-aligned
+- so the examples need a small dedicated writer for stdout mode that emits an
+  aligned indefinite-length WAV header and then writes audio bytes as they
+  arrive
 
 The file-path mode may keep using `hound` because a regular file is seekable.
 
 The stdout-mode writer must:
 
 - emit a correct WAV header for the backend output format
+- use an aligned indefinite-length `RIFF`/`data` size so forward-only readers
+  can consume until EOF without waiting for a full utterance buffer
 - write samples incrementally as chunks arrive
 - terminate cleanly at EOF without writing diagnostics to stdout
 
@@ -188,9 +196,9 @@ That composition works if the ASR binary:
 - reads WAV from stdin instead of requiring a filesystem path
 - is willing to consume a forward-only stream until EOF
 
-This TTS work does not automatically make the existing ASR examples support
-stdin WAV input, but it removes the TTS-side blocker by making stdout a normal
-WAV stream instead of a custom protocol.
+The matching ASR example work in issue #208 adds a tolerant stdin-side WAV
+parser so the shipped ASR examples can consume the aligned indefinite-length
+header emitted here.
 
 ## Layering
 

@@ -34,12 +34,12 @@ already documented as non-functional for real speech output.
 - WER metric: token-level Levenshtein distance divided by reference token count
   after lowercasing and stripping non-alphanumeric separators, while preserving
   apostrophes.
-- Artifact roots used during evaluation: Piper HF cache under
-  `/home/dchung/sessions/cdx-dgx-e2e/motlie/artifacts/models/hf-cache`,
-  qwen3-tts.cpp GGUF root under `/tmp/qwen3-tts-models`, Whisper HF cache under
-  `/home/dchung/sessions/cdx-tts/motlie/artifacts/models/hf-cache`, Sherpa HF
-  cache under `/home/dchung/.cache/huggingface/hub`, and Moonshine HF cache
-  under `/home/dchung/cld-mistral/motlie/artifacts/models/hf-cache`.
+- Artifact roots used during evaluation:
+  - `$PIPER_ARTIFACT_ROOT`
+  - `$QWEN3_TTS_CPP_ARTIFACT_ROOT`
+  - `$WHISPER_ARTIFACT_ROOT`
+  - `$SHERPA_ARTIFACT_ROOT`
+  - `$MOONSHINE_ARTIFACT_ROOT`
 
 ## Summary
 

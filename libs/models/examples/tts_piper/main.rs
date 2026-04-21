@@ -12,12 +12,12 @@ use motlie_model::typed::{SpeechStream, SpeechSynthesizer, SynthesisRequest};
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::piper_en_us_ljspeech_medium;
 
+#[path = "../bundle_support.rs"]
+mod bundle_support;
 #[path = "../quiet_support.rs"]
 mod quiet_support;
 #[path = "../tts_support.rs"]
 mod tts_support;
-
-const TARGET_SAMPLE_RATE_HZ: u32 = 22_050;
 
 fn main() -> Result<()> {
     let args = parse_args()?;
@@ -96,33 +96,51 @@ async fn run(args: Args) -> Result<()> {
     .await
     .context("failed to start typed Piper bundle")?;
 
-    let mut stream = handle
-        .synthesize(SynthesisRequest {
-            text: io.text,
-            params: SpeechParams::default(),
+    let output_label = match &io.output {
+        tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
+        tts_support::TtsOutput::Stdout => "<stdout>".into(),
+    };
+    let (sample_count, sample_rate_hz) = bundle_support::run_with_shutdown(handle, |handle| {
+        Box::pin(async move {
+            let mut stream = handle
+                .synthesize(SynthesisRequest {
+                    text: io.text,
+                    params: SpeechParams::default(),
+                })
+                .await
+                .context("failed to open typed speech stream")?;
+
+            let first_chunk = stream
+                .next_chunk()
+                .await
+                .context("next_chunk failed")?
+                .context("typed Piper stream produced no audio chunks")?;
+            let sample_rate_hz = first_chunk.sample_rate_hz();
+            let mut sample_count = 0usize;
+            let mut sink = tts_support::WavSink::<i16>::new(&io.output, sample_rate_hz)?;
+
+            let first_samples = first_chunk.into_samples();
+            sample_count += first_samples.len();
+            sink.write_chunk(&first_samples)?;
+
+            while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
+                let samples = chunk.into_samples();
+                sample_count += samples.len();
+                sink.write_chunk(&samples)?;
+            }
+
+            stream.finish().await.context("finish failed")?;
+            sink.finalize()?;
+            Ok((sample_count, sample_rate_hz))
         })
-        .await
-        .context("failed to open typed speech stream")?;
-
-    let mut samples = Vec::new();
-    while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
-        samples.extend(chunk.into_samples());
-    }
-
-    tts_support::write_wav(&io.output, TARGET_SAMPLE_RATE_HZ, &samples)?;
-    stream.finish().await.context("finish failed")?;
-    handle.shutdown().await.context("shutdown failed")?;
+    })
+    .await?;
 
     tts_support::log_status(
         args.quiet,
         &format!(
             "wrote {} mono i16 samples at {} Hz to {}",
-            samples.len(),
-            TARGET_SAMPLE_RATE_HZ,
-            match &io.output {
-                tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
-                tts_support::TtsOutput::Stdout => "<stdout>".into(),
-            }
+            sample_count, sample_rate_hz, output_label
         ),
     );
     Ok(())

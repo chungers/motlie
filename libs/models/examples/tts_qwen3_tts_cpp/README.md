@@ -31,6 +31,13 @@ git submodule update --init --recursive \
   libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
 ```
 
+Linux linker note:
+
+- Motlie's `build.rs` for `qwen3-tts.cpp` adds `-Wl,-Bsymbolic` so the shared
+  `libqwen3tts` keeps its bundled `ggml` symbols local when it is co-linked
+  with other `ggml` users such as `whisper.cpp`. Without that, `tts_qwen3_tts_cpp`
+  pipelines into ASR examples can fail due to symbol interposition.
+
 ### Basic synthesis
 
 ```bash
@@ -77,9 +84,17 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   and Qwen ONNX TTS stream contract.
 - The resulting `.wav` output uses the backend's fixed 24 kHz mono float output,
   whether written to a file or stdout.
+- When stdout is used, the example writes an aligned indefinite-length WAV
+  header and then flushes chunks incrementally so downstream consumers can read
+  until EOF without waiting for the full utterance buffer.
 - Diagnostics are written to stderr so stdout stays clean when it is carrying
   WAV bytes.
 - `--quiet` suppresses example-layer and backend-native stderr diagnostics.
+  Because that is a whole-process stderr redirect, panic output may also be
+  silent while `--quiet` is active.
+- `--reference-audio` currently uses simple linear resampling to 16 kHz mono
+  with no anti-alias filter. That is acceptable for an example-layer cloning
+  path but is still a known quality limitation for high-rate reference audio.
 
 ## Stream To macOS `play` Over SSH
 

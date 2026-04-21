@@ -54,7 +54,6 @@ pub fn log_status(quiet: bool, message: &str) {
 pub trait WavSample: Copy {
     const SAMPLE_FORMAT: hound::SampleFormat;
     const BITS_PER_SAMPLE: u16;
-    const BYTES_PER_SAMPLE: u32;
 
     fn write_to_hound<W: Write + std::io::Seek>(
         writer: &mut hound::WavWriter<W>,
@@ -66,7 +65,6 @@ pub trait WavSample: Copy {
 impl WavSample for i16 {
     const SAMPLE_FORMAT: hound::SampleFormat = hound::SampleFormat::Int;
     const BITS_PER_SAMPLE: u16 = 16;
-    const BYTES_PER_SAMPLE: u32 = 2;
 
     fn write_to_hound<W: Write + std::io::Seek>(
         writer: &mut hound::WavWriter<W>,
@@ -87,7 +85,6 @@ impl WavSample for i16 {
 impl WavSample for f32 {
     const SAMPLE_FORMAT: hound::SampleFormat = hound::SampleFormat::Float;
     const BITS_PER_SAMPLE: u16 = 32;
-    const BYTES_PER_SAMPLE: u32 = 4;
 
     fn write_to_hound<W: Write + std::io::Seek>(
         writer: &mut hound::WavWriter<W>,
@@ -105,73 +102,76 @@ impl WavSample for f32 {
     }
 }
 
-pub fn write_wav<S: WavSample>(
-    output: &TtsOutput,
-    sample_rate_hz: u32,
-    samples: &[S],
-) -> Result<()> {
-    match output {
-        TtsOutput::WavFile(path) => {
-            let mut writer = hound::WavWriter::create(
-                path,
-                hound::WavSpec {
-                    channels: 1,
-                    sample_rate: sample_rate_hz,
-                    bits_per_sample: S::BITS_PER_SAMPLE,
-                    sample_format: S::SAMPLE_FORMAT,
-                },
-            )
-            .with_context(|| format!("failed to create wav file `{}`", path.display()))?;
+pub enum WavSink<S: WavSample> {
+    File {
+        writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+    },
+    Stdout {
+        writer: BufWriter<std::io::StdoutLock<'static>>,
+    },
+    _Marker(std::marker::PhantomData<S>),
+}
 
-            for &sample in samples {
-                S::write_to_hound(&mut writer, sample)?;
+impl<S: WavSample> WavSink<S> {
+    pub fn new(output: &TtsOutput, sample_rate_hz: u32) -> Result<Self> {
+        match output {
+            TtsOutput::WavFile(path) => {
+                let writer = hound::WavWriter::create(
+                    path,
+                    hound::WavSpec {
+                        channels: 1,
+                        sample_rate: sample_rate_hz,
+                        bits_per_sample: S::BITS_PER_SAMPLE,
+                        sample_format: S::SAMPLE_FORMAT,
+                    },
+                )
+                .with_context(|| format!("failed to create wav file `{}`", path.display()))?;
+                Ok(Self::File { writer })
             }
-
-            writer.finalize().context("failed to finalize wav file")?;
-        }
-        TtsOutput::Stdout => {
-            write_stdout_wav(
-                sample_rate_hz,
-                S::SAMPLE_FORMAT,
-                S::BITS_PER_SAMPLE,
-                samples.len() as u32 * S::BYTES_PER_SAMPLE,
-                |stdout| {
-                    for sample in samples {
-                        S::write_to_stream(stdout, *sample)?;
-                    }
-                    Ok(())
-                },
-            )?;
+            TtsOutput::Stdout => {
+                let stdout = Box::leak(Box::new(std::io::stdout()));
+                let mut writer = BufWriter::new(stdout.lock());
+                write_wav_header(
+                    &mut writer,
+                    sample_rate_hz,
+                    1,
+                    S::SAMPLE_FORMAT,
+                    S::BITS_PER_SAMPLE,
+                )?;
+                Ok(Self::Stdout { writer })
+            }
         }
     }
 
-    Ok(())
-}
+    pub fn write_chunk(&mut self, samples: &[S]) -> Result<()> {
+        match self {
+            Self::File { writer } => {
+                for &sample in samples {
+                    S::write_to_hound(writer, sample)?;
+                }
+            }
+            Self::Stdout { writer } => {
+                for &sample in samples {
+                    S::write_to_stream(writer, sample)?;
+                }
+                writer
+                    .flush()
+                    .context("failed to flush wav stream to stdout")?;
+            }
+            Self::_Marker(_) => unreachable!(),
+        }
+        Ok(())
+    }
 
-fn write_stdout_wav<F>(
-    sample_rate_hz: u32,
-    sample_format: hound::SampleFormat,
-    bits_per_sample: u16,
-    data_bytes_len: u32,
-    write_samples: F,
-) -> Result<()>
-where
-    F: FnOnce(&mut BufWriter<std::io::StdoutLock<'_>>) -> Result<()>,
-{
-    let mut stdout = BufWriter::new(std::io::stdout().lock());
-    write_wav_header(
-        &mut stdout,
-        sample_rate_hz,
-        1,
-        sample_format,
-        bits_per_sample,
-        data_bytes_len,
-    )?;
-    write_samples(&mut stdout)?;
-    stdout
-        .flush()
-        .context("failed to flush wav stream to stdout")?;
-    Ok(())
+    pub fn finalize(self) -> Result<()> {
+        match self {
+            Self::File { writer } => writer.finalize().context("failed to finalize wav file"),
+            Self::Stdout { mut writer } => writer
+                .flush()
+                .context("failed to flush wav stream to stdout"),
+            Self::_Marker(_) => unreachable!(),
+        }
+    }
 }
 
 fn write_wav_header<W: Write>(
@@ -180,21 +180,24 @@ fn write_wav_header<W: Write>(
     channels: u16,
     sample_format: hound::SampleFormat,
     bits_per_sample: u16,
-    data_bytes_len: u32,
 ) -> Result<()> {
     let format_code: u16 = match sample_format {
         hound::SampleFormat::Int => 1,
         hound::SampleFormat::Float => 3,
     };
-    let block_align = channels
-        .checked_mul(bits_per_sample / 8)
-        .context("wav block align overflow")?;
+    let block_align = channels.checked_mul(bits_per_sample / 8).with_context(|| {
+        format!("wav block align overflow: channels={channels} bits_per_sample={bits_per_sample}")
+    })?;
     let byte_rate = sample_rate_hz
         .checked_mul(block_align as u32)
-        .context("wav byte rate overflow")?;
-    let riff_size = 36u32
-        .checked_add(data_bytes_len)
-        .context("wav riff size overflow")?;
+        .with_context(|| {
+            format!(
+                "wav byte rate overflow: sample_rate_hz={sample_rate_hz} block_align={block_align}"
+            )
+        })?;
+    let streaming_data_bytes_len = u32::MAX - (u32::MAX % u32::from(block_align.max(1)));
+    let riff_size = streaming_data_bytes_len;
+    let data_bytes_len = streaming_data_bytes_len;
 
     writer
         .write_all(b"RIFF")
@@ -251,12 +254,23 @@ mod tests {
     }
 
     #[test]
-    fn write_wav_header_for_i16_looks_like_wave() {
+    fn streaming_wav_header_for_i16_looks_like_wave() {
         let mut bytes = Vec::new();
-        write_wav_header(&mut bytes, 22_050, 1, hound::SampleFormat::Int, 16, 4)
+        write_wav_header(&mut bytes, 22_050, 1, hound::SampleFormat::Int, 16)
             .expect("header should write");
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(&bytes[4..8], &(u32::MAX - 1).to_le_bytes());
+        assert_eq!(&bytes[40..44], &(u32::MAX - 1).to_le_bytes());
+    }
+
+    #[test]
+    fn streaming_wav_header_uses_indefinite_sizes() {
+        let mut bytes = Vec::new();
+        write_wav_header(&mut bytes, 24_000, 1, hound::SampleFormat::Float, 32)
+            .expect("header should write");
+        assert_eq!(&bytes[4..8], &(u32::MAX - 3).to_le_bytes());
+        assert_eq!(&bytes[40..44], &(u32::MAX - 3).to_le_bytes());
     }
 }
