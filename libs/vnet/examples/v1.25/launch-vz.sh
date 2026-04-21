@@ -5,15 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-25-base-iter}"
+BASE_VM_DIR_OVERRIDE="${MOTLIE_VZ_BASE_VM_DIR:-}"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-900}"
 SERVICE_FILE="$SCRIPT_DIR/motlie-vfs-guest.service"
 VALIDATE_UNIT_FILE="$SCRIPT_DIR/motlie-vfs-validate.service"
+AGENT_STATE_SETUP_FILE="$SCRIPT_DIR/motlie-agent-state-setup.sh"
+AGENT_STATE_UNIT_FILE="$SCRIPT_DIR/motlie-agent-state.service"
 RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
 KEEP_RUNNING="${MOTLIE_VZ_KEEP_RUNNING:-0}"
 REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
+NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$ARTIFACTS_DIR/source-base.vm}"
+BASE_SOURCE_DIR=""
+RUN_VM_DIR=""
 
 zmodload zsh/datetime
 
@@ -24,7 +30,6 @@ require_cmd() {
   fi
 }
 
-require_cmd tart
 require_cmd python3
 require_cmd git
 require_cmd tar
@@ -33,6 +38,23 @@ require_cmd scp
 require_cmd ssh
 require_cmd nc
 require_cmd arp
+
+if [[ -n "$BASE_VM_DIR_OVERRIDE" ]]; then
+  BASE_SOURCE_DIR="$BASE_VM_DIR_OVERRIDE"
+elif [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin" ]]; then
+  BASE_SOURCE_DIR="$NATIVE_SOURCE_VM_DIR"
+else
+  cat >&2 <<EOF
+native base artifacts are required for v1.25 guest launches
+
+Set:
+  MOTLIE_VZ_BASE_VM_DIR
+
+Or build/populate the default native cache first:
+  $NATIVE_SOURCE_VM_DIR
+EOF
+  exit 1
+fi
 
 GUEST_NAME="alice"
 RUN_VM_NAME=""
@@ -97,10 +119,6 @@ VALIDATION_TOKEN="$RUN_VM_NAME"
 RUNNER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid"
 GUEST_IP_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-ip.txt"
 
-local_vm_exists() {
-  tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
-}
-
 require_host_socket_ready() {
   python3 - "$SOCKET_PATH" <<'PY'
 import socket
@@ -144,9 +162,8 @@ cleanup() {
       kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
       rm -f "$RUNNER_PID_FILE"
     fi
-    if [[ "$REUSED_VM" -eq 0 ]] && [[ -n "$RUN_VM_NAME" ]] && local_vm_exists "$RUN_VM_NAME"; then
-      tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
-      tart delete "$RUN_VM_NAME" >/dev/null 2>&1 || true
+    if [[ "$REUSED_VM" -eq 0 ]] && [[ -n "$RUN_VM_DIR" && -d "$RUN_VM_DIR" ]]; then
+      rm -rf "$RUN_VM_DIR"
     fi
   fi
 }
@@ -202,21 +219,20 @@ if [[ -f "$RUNNER_PID_FILE" ]]; then
 fi
 kill_stale_runners
 
-if ! local_vm_exists "$BASE_VM_NAME"; then
-  echo "base VM '$BASE_VM_NAME' not found; run ./build-guest.sh first" >&2
+if [[ ! -f "$BASE_SOURCE_DIR/disk.img" || ! -f "$BASE_SOURCE_DIR/nvram.bin" ]]; then
+  echo "base VM artifacts not found at '$BASE_SOURCE_DIR'; run ./build-guest.sh first" >&2
   exit 1
 fi
 require_host_socket_ready
 
-if local_vm_exists "$RUN_VM_NAME"; then
+RUN_VM_DIR="$ARTIFACTS_DIR/${RUN_VM_NAME}.vm"
+if [[ -d "$RUN_VM_DIR" ]]; then
   if [[ "$REUSE_VM" == "1" ]]; then
     echo "--- reusing existing guest VM '$RUN_VM_NAME' ---"
-    tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
     REUSED_VM=1
   else
     echo "--- removing existing guest VM '$RUN_VM_NAME' for rerun ---"
-    tart stop "$RUN_VM_NAME" >/dev/null 2>&1 || true
-    tart delete "$RUN_VM_NAME" >/dev/null
+    rm -rf "$RUN_VM_DIR"
   fi
 fi
 
@@ -417,7 +433,7 @@ probe_guest_ip_by_ssh() {
   local candidate=""
   local candidate_mac=""
   for candidate in 192.168.64.{2..40}; do
-    nc -z -w 1 "$candidate" 22 >/dev/null 2>&1 || continue
+    ssh_ready_for_password_prompt "$candidate" || continue
     candidate_mac="$(guest_mac_for_ip "$candidate" 2>/dev/null | python3 -c '
 import re
 import sys
@@ -439,6 +455,31 @@ if match:
   return 1
 }
 
+ssh_ready_for_password_prompt() {
+  local ip_addr="$1"
+  expect <<EOF
+set timeout 5
+log_user 0
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=1 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 ${CONTROL_USER}@${ip_addr} true
+expect {
+  "password:" {
+    exit 0
+  }
+  "Permission denied" {
+    exit 0
+  }
+  eof {
+    catch wait result
+    set exit_code [lindex \$result 3]
+    exit \$exit_code
+  }
+  timeout {
+    exit 124
+  }
+}
+EOF
+}
+
 wait_for_guest_ip() {
   local attempts=0
   local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
@@ -455,9 +496,8 @@ wait_for_guest_ip() {
       return 0
     fi
     if (( attempts % 10 == 0 )); then
-      local candidate
       for candidate in 192.168.64.{2..40}; do
-        nc -z -w 1 "$candidate" 22 >/dev/null 2>&1 || true
+        ssh_ready_for_password_prompt "$candidate" >/dev/null 2>&1 || true
       done
       ip_addr="$(probe_guest_ip_by_ssh || true)"
       if [[ -n "$ip_addr" ]]; then
@@ -476,7 +516,7 @@ wait_for_guest_ssh() {
   local attempts=0
   local max_attempts=$(( TIMEOUT_SECONDS * 2 ))
   while [[ $attempts -lt $max_attempts ]]; do
-    if nc -z "$ip_addr" 22 >/dev/null 2>&1; then
+    if ssh_ready_for_password_prompt "$ip_addr" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -543,30 +583,43 @@ if {\$exit_code != 0} {
 EOF
 }
 
-BASE_VM_DIR="$HOME/.tart/vms/$BASE_VM_NAME"
-RUN_VM_DIR="$HOME/.tart/vms/$RUN_VM_NAME"
 if [[ "$REUSED_VM" -eq 0 ]]; then
-  echo "--- cloning guest VM disk ---"
-  tart clone "$BASE_VM_NAME" "$RUN_VM_NAME" >/dev/null
-
-  BASE_DISK_PATH="$BASE_VM_DIR/disk.img"
-  RUN_DISK_PATH="$RUN_VM_DIR/disk.img"
-  if [[ -f "$BASE_DISK_PATH" && -f "$RUN_DISK_PATH" ]]; then
-    echo "--- materializing writable guest disk copy ---"
-    python3 - "$BASE_DISK_PATH" "$RUN_DISK_PATH" <<'PY'
+  echo "--- materializing guest VM from base artifacts ---"
+  mkdir -p "$RUN_VM_DIR"
+  BASE_DISK_PATH="$BASE_SOURCE_DIR/disk.img"
+  BASE_NVRAM_PATH="$BASE_SOURCE_DIR/nvram.bin"
+  BASE_MACHINE_ID_PATH="$BASE_SOURCE_DIR/machine-id.bin"
+  python3 - "$BASE_DISK_PATH" "$BASE_NVRAM_PATH" "$BASE_MACHINE_ID_PATH" "$RUN_VM_DIR" <<'PY'
 import os
 import shutil
 import sys
 
-src, dst = sys.argv[1:]
-tmp = dst + ".tmp-copy"
-if os.path.exists(tmp):
-    os.remove(tmp)
-with open(src, "rb") as rf, open(tmp, "wb") as wf:
-    shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
-os.replace(tmp, dst)
+src_disk, src_nvram, src_machine_id, out_dir = sys.argv[1:]
+os.makedirs(out_dir, exist_ok=True)
+for src, name in (
+    (src_disk, "disk.img"),
+    (src_nvram, "nvram.bin"),
+):
+    dst = os.path.join(out_dir, name)
+    tmp = dst + ".tmp-copy"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    with open(src, "rb") as rf, open(tmp, "wb") as wf:
+        shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
+    os.replace(tmp, dst)
+
+machine_id_dst = os.path.join(out_dir, "machine-id.bin")
+if src_machine_id and os.path.exists(src_machine_id):
+    tmp = machine_id_dst + ".tmp-copy"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    with open(src_machine_id, "rb") as rf, open(tmp, "wb") as wf:
+        shutil.copyfileobj(rf, wf, length=1024 * 1024)
+    os.replace(tmp, machine_id_dst)
+else:
+    with open(machine_id_dst, "wb"):
+        pass
 PY
-  fi
 fi
 
 echo "--- packing Motlie source tree ---"
@@ -628,6 +681,8 @@ echo "--- provisioning guest over native Vz NAT ---"
 guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz "$IP_ADDR"
 guest_copy "$MOUNTS_FILE" "/tmp/mounts.${GUEST_NAME}.yaml" "$IP_ADDR"
 guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service "$IP_ADDR"
+guest_copy "$AGENT_STATE_SETUP_FILE" /tmp/motlie-agent-state-setup "$IP_ADDR"
+guest_copy "$AGENT_STATE_UNIT_FILE" /tmp/motlie-agent-state.service "$IP_ADDR"
 
 guest_bash "$IP_ADDR" <<EOF
 printf '${CONTROL_PASSWORD}\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
@@ -721,10 +776,16 @@ CLAUDEWRAP
 fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
+printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-state-setup
+printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-agent-state.service /etc/systemd/system/motlie-agent-state.service
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl daemon-reload
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl unmask motlie-vfs-guest.service || true
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl unmask motlie-agent-state.service || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl enable motlie-vfs-guest.service
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl enable motlie-agent-state.service || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-agent-state.service || true
+printf '${CONTROL_PASSWORD}\n' | sudo -S /usr/local/bin/motlie-agent-state-setup || true
 EOF
 
 POST_PROVISION_REMOTE_JSON="/tmp/motlie-vfs-post-provision.json"

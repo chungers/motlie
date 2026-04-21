@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-25-base-iter}"
-SOURCE_IMAGE="${MOTLIE_VZ_SOURCE_IMAGE:-ghcr.io/cirruslabs/ubuntu@sha256:1e23e6fe5a6d3fb2089652229a09d71742617758b15aa311cecf1c05985d3021}"
 SOURCE_DISK_PATH="${MOTLIE_VZ_SOURCE_DISK:-}"
 SOURCE_NVRAM_PATH="${MOTLIE_VZ_SOURCE_NVRAM:-}"
 SOURCE_MACHINE_ID_PATH="${MOTLIE_VZ_SOURCE_MACHINE_ID:-}"
@@ -19,6 +18,8 @@ BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
 BOOTSTRAP_PASS="${MOTLIE_VZ_BOOTSTRAP_PASS:-admin}"
 SERVICE_FILE="$SCRIPT_DIR/motlie-vfs-guest.service"
 DATASOURCE_CFG_FILE="$SCRIPT_DIR/99_motlie_vz.cfg"
+AGENT_STATE_SETUP_FILE="$SCRIPT_DIR/motlie-agent-state-setup.sh"
+AGENT_STATE_UNIT_FILE="$SCRIPT_DIR/motlie-agent-state.service"
 RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
@@ -52,13 +53,11 @@ require_cmd nc
 require_cmd arp
 require_cmd hdiutil
 
-USE_TART_SOURCE=1
 if [[ -n "$SOURCE_DISK_PATH" || -n "$SOURCE_NVRAM_PATH" || -n "$SOURCE_MACHINE_ID_PATH" ]]; then
   if [[ -z "$SOURCE_DISK_PATH" || -z "$SOURCE_NVRAM_PATH" ]]; then
     echo "MOTLIE_VZ_SOURCE_DISK and MOTLIE_VZ_SOURCE_NVRAM must be set together" >&2
     exit 1
   fi
-  USE_TART_SOURCE=0
 else
   if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin" ]]; then
     SOURCE_DISK_PATH="$NATIVE_SOURCE_VM_DIR/disk.img"
@@ -68,9 +67,20 @@ else
     else
       SOURCE_MACHINE_ID_PATH=""
     fi
-    USE_TART_SOURCE=0
   else
-    require_cmd tart
+    cat >&2 <<EOF
+native source artifacts are required for v1.25 guest builds
+
+Set:
+  MOTLIE_VZ_SOURCE_DISK
+  MOTLIE_VZ_SOURCE_NVRAM
+optionally:
+  MOTLIE_VZ_SOURCE_MACHINE_ID
+
+Or populate the native source cache first:
+  $NATIVE_SOURCE_VM_DIR
+EOF
+    exit 1
   fi
 fi
 
@@ -87,11 +97,7 @@ trap cleanup EXIT
 
 echo "=== Vz v1.25 base guest build ==="
 echo "Base VM:      $BASE_VM_NAME"
-if [[ "$USE_TART_SOURCE" -eq 1 ]]; then
-  echo "Source image: $SOURCE_IMAGE"
-else
-  echo "Source disk:  $SOURCE_DISK_PATH"
-fi
+echo "Source disk:  $SOURCE_DISK_PATH"
 echo "Native cache: $NATIVE_SOURCE_VM_DIR"
 
 rm -rf "$WORK_VM_DIR"
@@ -134,28 +140,8 @@ else:
 PY
 }
 
-if [[ "$USE_TART_SOURCE" -eq 1 ]]; then
-  local_vm_exists() {
-    tart list --source local -q 2>/dev/null | grep -Fx "$1" >/dev/null 2>&1
-  }
-
-  if local_vm_exists "$BASE_VM_NAME"; then
-    echo "--- deleting stale base VM clone ---"
-    tart delete "$BASE_VM_NAME" >/dev/null || true
-  fi
-
-  echo "--- cloning base image ---"
-  tart clone "$SOURCE_IMAGE" "$BASE_VM_NAME" >/dev/null
-  local tart_machine_id="$HOME/.tart/vms/$BASE_VM_NAME/machine-id.bin"
-  if [[ ! -f "$tart_machine_id" ]]; then
-    tart_machine_id=""
-  fi
-  materialize_work_vm "$HOME/.tart/vms/$BASE_VM_NAME/disk.img" "$HOME/.tart/vms/$BASE_VM_NAME/nvram.bin" "$tart_machine_id"
-  tart delete "$BASE_VM_NAME" >/dev/null || true
-else
-  echo "--- materializing native build VM from source artifacts ---"
-  materialize_work_vm "$SOURCE_DISK_PATH" "$SOURCE_NVRAM_PATH" "$SOURCE_MACHINE_ID_PATH"
-fi
+echo "--- materializing native build VM from source artifacts ---"
+materialize_work_vm "$SOURCE_DISK_PATH" "$SOURCE_NVRAM_PATH" "$SOURCE_MACHINE_ID_PATH"
 
 echo "--- packing Motlie source tree ---"
 COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git -C "$REPO_ROOT" ls-files -z | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --disable-copyfile --no-mac-metadata --no-xattrs --null -czf "$SOURCE_TARBALL" -C "$REPO_ROOT" --files-from -
@@ -762,6 +748,8 @@ echo "--- uploading Motlie source tree into guest ---"
 guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz
 guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service
 guest_copy "$DATASOURCE_CFG_FILE" /tmp/99_motlie_vz.cfg
+guest_copy "$AGENT_STATE_SETUP_FILE" /tmp/motlie-agent-state-setup
+guest_copy "$AGENT_STATE_UNIT_FILE" /tmp/motlie-agent-state.service
 guest_bash <<EOF
 rm -rf '$GUEST_SRC_DIR'
 mkdir -p '$GUEST_SRC_DIR'
@@ -946,42 +934,6 @@ if [ -d "$agent_state_root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ "${US
     export CODEX_SQLITE_HOME="$codex_sqlite_root"
 fi
 AGENTEOF
-cat <<'AGENTSVCEOF' > /usr/local/bin/motlie-agent-state-setup
-#!/bin/sh
-set -eu
-
-setup_user() {
-    user_name="$1"
-    home_dir="/home/$user_name"
-
-    [ -d "$home_dir" ] || return 0
-
-    install -d -m 0755 "$home_dir/.config"
-    install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
-
-    chown -R "$user_name:$user_name" \
-        "$home_dir/.config" \
-        /agent-state/codex \
-        /agent-state/codex/sqlite \
-        /agent-state/claude \
-        /agent-state/claude-code || true
-
-    rm -rf "$home_dir/.codex" "$home_dir/.claude" "$home_dir/.config/claude-code"
-    ln -sfn /agent-state/codex "$home_dir/.codex"
-    ln -sfn /agent-state/claude "$home_dir/.claude"
-    ln -sfn /agent-state/claude-code "$home_dir/.config/claude-code"
-    chown -h "$user_name:$user_name" \
-        "$home_dir/.codex" \
-        "$home_dir/.claude" \
-        "$home_dir/.config/claude-code" || true
-}
-
-for user_name in alice bob; do
-    if id -u "$user_name" >/dev/null 2>&1; then
-        setup_user "$user_name"
-    fi
-done
-AGENTSVCEOF
 cat <<'MOTDEOF' > /etc/motd
                     _   _ _
   _ __ ___   ___ | |_| (_) ___
@@ -995,23 +947,10 @@ if ! grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
   printf 'user_allow_other\n' >> /etc/fuse.conf
 fi
 chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh
-chmod 0755 /usr/local/bin/motlie-agent-state-setup
-cat <<'AGENTUNITEOF' > /etc/systemd/system/motlie-agent-state.service
-[Unit]
-Description=Link agent state into mounted guest home
-After=motlie-vfs-guest.service
-Requires=motlie-vfs-guest.service
-ConditionPathIsDirectory=/agent-state
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/motlie-agent-state-setup
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-AGENTUNITEOF
+install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-state-setup
+install -D -m 0644 /tmp/motlie-agent-state.service /etc/systemd/system/motlie-agent-state.service
 systemctl unmask motlie-vfs-guest.service || true
+systemctl unmask motlie-agent-state.service || true
 systemctl daemon-reload
 systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true
 systemctl enable motlie-agent-state.service >/dev/null 2>&1 || true
@@ -1099,6 +1038,25 @@ PY
 echo "--- result written ---"
 cat "$RESULT_JSON"
 
+echo "--- shutting down base guest gracefully ---"
+guest_bash_as admin admin <<'EOF'
+sudo shutdown -h now || true
+EOF
+for _ in {1..40}; do
+  if [[ ! -f "$RUNNER_PID_FILE" ]]; then
+    break
+  fi
+  if ! kill -0 "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1; then
+    rm -f "$RUNNER_PID_FILE"
+    break
+  fi
+  sleep 0.5
+done
+if [[ -f "$RUNNER_PID_FILE" ]]; then
+  kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
+  rm -f "$RUNNER_PID_FILE"
+fi
+
 echo "--- caching native source artifacts ---"
 rm -rf "$NATIVE_SOURCE_VM_DIR"
 mkdir -p "$NATIVE_SOURCE_VM_DIR"
@@ -1120,24 +1078,5 @@ for name in ("disk.img", "nvram.bin", "machine-id.bin"):
         shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
     os.replace(tmp, dst)
 PY
-
-echo "--- shutting down base guest gracefully ---"
-guest_bash_as admin admin <<'EOF'
-sudo shutdown -h now || true
-EOF
-for _ in {1..40}; do
-  if [[ ! -f "$RUNNER_PID_FILE" ]]; then
-    break
-  fi
-  if ! kill -0 "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1; then
-    rm -f "$RUNNER_PID_FILE"
-    break
-  fi
-  sleep 0.5
-done
-if [[ -f "$RUNNER_PID_FILE" ]]; then
-  kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
-  rm -f "$RUNNER_PID_FILE"
-fi
 
 echo "=== success ==="

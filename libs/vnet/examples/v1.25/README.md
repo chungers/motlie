@@ -137,11 +137,13 @@ This tree is now scaffolded for Apple Vz work:
 
 The practical Tart status is now:
 
-- Tart is no longer used for guest runtime boot, provisioning, validation, or
-  image-build boot/provision/shutdown loops
-- the default builder path prefers cached native source artifacts
-- Tart remains only as a fallback source-image materialization path when that
-  native cache does not yet exist
+- Tart is no longer used by the `v1.25` runtime path
+- Tart is no longer used by the `v1.25` image-build path
+- `build-guest.sh` and `launch-vz.sh` require native source/base artifacts:
+  either the cached `artifacts/source-base.vm` tree or explicit
+  `MOTLIE_VZ_SOURCE_*` / `MOTLIE_VZ_BASE_VM_DIR` inputs
+- any remaining Tart usage is outside the `v1.25` scripts, as an optional
+  operator-side way to obtain initial raw source artifacts
 
 For local iteration, the default VM names are intentionally stable:
 
@@ -160,4 +162,4 @@ Each rerun replaces those VMs in place instead of creating new suffixed names.
 | `build-vz-runner.sh` | Build the example-local signed Apple Vz helper |
 | `launch-vz.sh` | Native Apple Vz launcher scaffold for the `v1.25` slice |
 | `vz-vsock-runner.m` | Current example-local Apple Vz helper |
-| `build-guest.sh` | Native Apple Vz guest-image builder with cached source-artifact fallback away from Tart |
+| `build-guest.sh` | Native Apple Vz guest-image builder driven by raw/native source artifacts only |
