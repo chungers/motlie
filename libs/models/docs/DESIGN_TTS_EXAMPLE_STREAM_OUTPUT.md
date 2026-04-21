@@ -6,6 +6,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-20 | @codex-tts | Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The stream-output work now targets only the functional TTS examples: Piper and `qwen3-tts.cpp`. |
+| 2026-04-21 | @codex-tts | Tightened `--quiet` so it suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. |
+| 2026-04-20 | @codex-tts | Added a shared `--quiet` flag for all shipped TTS examples so example-layer stderr diagnostics can be suppressed when stdout is carrying WAV bytes through a shell pipeline. |
 | 2026-04-19 | @codex-tts | Revised the stdout design around simple shell composition. TTS examples now target streamed WAV on stdout instead of a custom framed PCM protocol so they can pipe directly into `ssh`, `afplay`, `ffmpeg`, or any ASR tool that accepts WAV from stdin. |
 | 2026-04-19 | @codex-tts | Initial brownfield design for issue #208. Defines a uniform stdin/stdout pipeline mode for all shipped TTS example binaries while preserving `--wav` file output. |
 
@@ -15,7 +18,6 @@ shipped TTS binaries under `libs/models/examples/`.
 Scope is intentionally narrow:
 
 - `tts_piper`
-- `tts_qwen3_onnx`
 - `tts_qwen3_tts_cpp`
 
 The goal is to make those binaries behave the same at the CLI boundary without
@@ -61,8 +63,7 @@ need one shared contract rather than three backend-shaped CLIs.
 The same feature applies to all current shipped TTS binaries:
 
 1. `libs/models/examples/tts_piper/main.rs`
-2. `libs/models/examples/tts_qwen3_onnx/main.rs`
-3. `libs/models/examples/tts_qwen3_tts_cpp/main.rs`
+2. `libs/models/examples/tts_qwen3_tts_cpp/main.rs`
 
 The implementation should also add shared example-layer code so future TTS
 examples inherit the same behavior automatically instead of reimplementing CLI
@@ -93,7 +94,9 @@ If `--wav` is not present, the binary:
 - emits no human-readable progress lines on stdout
 
 Human-readable logging must go to stderr in pipeline mode so stdout remains a
-clean machine-readable WAV stream.
+clean machine-readable WAV stream. `--quiet` suppresses both example-layer
+diagnostics and backend-native stderr logging by redirecting process stderr to
+`/dev/null` for the quiet execution window.
 
 This is the command-line composition target for this feature. The intended UX is
 simple shell piping, for example:
@@ -123,6 +126,7 @@ Common flags for every TTS example:
 - `--text <value>`: optional direct text input
 - `--artifact-root <path>`: optional curated artifact root override
 - `--wav <path>`: write a `.wav` file
+- `--quiet`: suppress example-layer and backend-native stderr diagnostics
 
 Common input rules:
 
@@ -135,7 +139,6 @@ Common input rules:
 
 Backend-specific flags remain allowed:
 
-- `tts_qwen3_onnx`: `--reference-audio`, `--reference-text`
 - `tts_qwen3_tts_cpp`: `--reference-audio`
 - `tts_piper`: no backend-specific flags in the current slice
 
@@ -173,7 +176,6 @@ The stdout-mode writer must:
 The initial implementation should target the current backend output shapes:
 
 - Piper: mono `i16` at `22050 Hz`
-- Qwen3 ONNX: mono `f32` at backend-reported `24000 Hz`
 - qwen3-tts.cpp: mono `f32` at backend-reported `24000 Hz`
 
 ## TTS to ASR Composition

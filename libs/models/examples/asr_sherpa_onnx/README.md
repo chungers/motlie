@@ -21,6 +21,14 @@ cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
   --no-default-features --features model-sherpa-onnx-streaming --
 ```
 
+To preserve event-style streaming output on stdout, add `--partials`:
+
+```bash
+cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
+  --no-default-features --features model-sherpa-onnx-streaming \
+  -- --partials
+```
+
 ## Preconditions
 
 - The curated sherpa-onnx artifacts must already be downloaded under the
@@ -39,7 +47,8 @@ cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
 
 - The example opens the curated `Sherpa ONNX Streaming Zipformer EN` bundle.
 - Audio is streamed through the shared PCM transcription contract.
-- Incremental transcript updates are printed as `[partial]` and `[final]`
-  segments while the file is processed.
+- By default stdout prints one final plain-text transcript line.
+- `--partials` switches stdout to `[partial]` / `[final]` event lines.
 - If `--wav` is omitted, the example reads binary WAV input from stdin.
 - Transcript text stays on stdout; diagnostics move to stderr in pipeline mode.
+- `--quiet` suppresses example-layer and backend-native stderr diagnostics.

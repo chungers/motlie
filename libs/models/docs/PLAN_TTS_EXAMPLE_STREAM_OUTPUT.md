@@ -6,6 +6,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-20 | @codex-tts | Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The implementation/validation scope now covers Piper and `qwen3-tts.cpp` only. |
+| 2026-04-21 | @codex-tts | Implemented quiet-mode stderr redirection so backend-native logs are suppressed as well as example-layer diagnostics in pipe-heavy workflows. |
+| 2026-04-20 | @codex-tts | Added the shared `--quiet` flag to the shipped TTS example contract so example-layer stderr logging can be suppressed in pipe-heavy workflows. |
 | 2026-04-20 | @codex-tts | Implemented the shared TTS helper modules, migrated all shipped TTS examples to file-or-stdout WAV behavior with stdin text fallback, updated the READMEs/API docs, and validated compile/clippy plus direct stdout WAV and TTS→ASR pipeline behavior. |
 | 2026-04-19 | @codex-tts | Revised the plan to emit WAV on stdout by default when `--wav` is absent. Replaced the custom framing work with a dedicated non-seekable stdout WAV writer and validation against normal CLI consumers. |
 | 2026-04-19 | @codex-tts | Initial plan for issue #208. Covers a shared CLI/sink helper and consistent stream-output behavior for all shipped TTS examples. |
@@ -22,6 +25,8 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
   DESIGN reference: `Proposed Shared CLI`
 - [x] Add stdin text loading for cases where `--text` is omitted.
   DESIGN reference: `Required Behavior`
+- [x] Add `--quiet` for whole-process stderr suppression during quiet example execution.
+  DESIGN reference: `Proposed Shared CLI`
 
 ### 1.2 - Add sink helpers
 
@@ -44,15 +49,7 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
 - [x] Support stdout WAV output when `--wav` is omitted.
   DESIGN reference: `Required Behavior`, `Stdout WAV Contract`
 
-### 2.2 - Update `tts_qwen3_onnx`
-
-- [x] Replace ad hoc CLI parsing with the shared helper while preserving
-  `--reference-audio` and `--reference-text`.
-  DESIGN reference: `Affected Binaries`, `Proposed Shared CLI`
-- [x] Support stdin text input and stdout WAV output.
-  DESIGN reference: `Required Behavior`
-
-### 2.3 - Update `tts_qwen3_tts_cpp`
+### 2.2 - Update `tts_qwen3_tts_cpp`
 
 - [x] Replace ad hoc CLI parsing with the shared helper while preserving
   `--reference-audio`.
@@ -81,7 +78,6 @@ Derived from [DESIGN_TTS_EXAMPLE_STREAM_OUTPUT.md](./DESIGN_TTS_EXAMPLE_STREAM_O
 ### 4.1 - Build checks
 
 - [x] `cargo check -p motlie-models --example tts_piper --no-default-features --features model-piper-en-us-ljspeech-medium`
-- [x] `cargo check -p motlie-models --example tts_qwen3_onnx --no-default-features --features model-qwen3-tts-0_6b`
 - [x] `cargo check -p motlie-models --example tts_qwen3_tts_cpp --no-default-features --features model-qwen3-tts-cpp`
 
 ### 4.2 - Behavior checks

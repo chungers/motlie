@@ -17,6 +17,8 @@ use motlie_models::tts::qwen3_tts_cpp;
 
 #[path = "../audio_support.rs"]
 mod audio_support;
+#[path = "../quiet_support.rs"]
+mod quiet_support;
 #[path = "../tts_support.rs"]
 mod tts_support;
 
@@ -34,6 +36,7 @@ struct Args {
     wav_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
     reference_audio: Option<PathBuf>,
+    quiet: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -41,6 +44,7 @@ fn parse_args() -> Result<Args> {
     let mut wav_path = None;
     let mut artifact_root = None;
     let mut reference_audio = None;
+    let mut quiet = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -65,6 +69,7 @@ fn parse_args() -> Result<Args> {
                         .context("--reference-audio requires a path argument")?,
                 ));
             }
+            "--quiet" => quiet = true,
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -74,20 +79,26 @@ fn parse_args() -> Result<Args> {
         wav_path,
         artifact_root,
         reference_audio,
+        quiet,
     })
 }
 
 async fn run(args: Args) -> Result<()> {
     let io = tts_support::resolve_text_and_output(args.text, args.wav_path)?;
-    tts_support::log_status("=== motlie tts_qwen3_tts_cpp — typed qwen3-tts.cpp synthesis ===");
+    tts_support::log_status(
+        args.quiet,
+        "=== motlie tts_qwen3_tts_cpp — typed qwen3-tts.cpp synthesis ===",
+    );
     match &io.output {
         tts_support::TtsOutput::WavFile(path) => {
-            tts_support::log_status(&format!("wav: {}", path.display()));
+            tts_support::log_status(args.quiet, &format!("wav: {}", path.display()));
         }
         tts_support::TtsOutput::Stdout => {
-            tts_support::log_status("wav: <stdout>");
+            tts_support::log_status(args.quiet, "wav: <stdout>");
         }
     }
+    let _quiet_stderr = quiet_support::QuietStderrGuard::maybe_enable(args.quiet)
+        .context("failed to enable quiet stderr mode")?;
 
     let handle = qwen3_tts_cpp::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -106,7 +117,10 @@ async fn run(args: Args) -> Result<()> {
     };
 
     let mut stream = if let Some(reference_audio) = &args.reference_audio {
-        tts_support::log_status(&format!("reference: {}", reference_audio.display()));
+        tts_support::log_status(
+            args.quiet,
+            &format!("reference: {}", reference_audio.display()),
+        );
         let (_, reader) = audio_support::open_wav_reader(Some(reference_audio.as_path()))?;
         let reference = decode_wav_to_reference(reader)?;
         handle
@@ -135,15 +149,18 @@ async fn run(args: Args) -> Result<()> {
     stream.finish().await.context("finish failed")?;
     handle.shutdown().await.context("shutdown failed")?;
 
-    tts_support::log_status(&format!(
-        "wrote {} mono f32 samples at {} Hz to {}",
-        samples.len(),
-        TARGET_SAMPLE_RATE_HZ,
-        match &io.output {
-            tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
-            tts_support::TtsOutput::Stdout => "<stdout>".into(),
-        }
-    ));
+    tts_support::log_status(
+        args.quiet,
+        &format!(
+            "wrote {} mono f32 samples at {} Hz to {}",
+            samples.len(),
+            TARGET_SAMPLE_RATE_HZ,
+            match &io.output {
+                tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
+                tts_support::TtsOutput::Stdout => "<stdout>".into(),
+            }
+        ),
+    );
     Ok(())
 }
 

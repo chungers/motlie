@@ -6,6 +6,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Tightened `--quiet` so it suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. |
+| 2026-04-20 | @codex-tts | Refined the stdout contract after live TTS→ASR pipe validation. ASR examples now default to one final plain-text transcript line on stdout, add `--partials` for streaming event output, and add `--quiet` to suppress example-layer stderr diagnostics. |
 | 2026-04-19 | @codex-tts | Initial brownfield design for stdin WAV support in all shipped ASR examples so they compose directly with the TTS example stdout WAV contract from issue #208. |
 
 This document defines the example-layer behavior for streamed WAV input in the
@@ -96,12 +98,13 @@ Common flags for every ASR example:
 
 - `--wav <path>`: optional file input override
 - `--artifact-root <path>`: optional curated artifact root override
+- `--quiet`: suppress example-layer and backend-native stderr diagnostics
 
 Backend-specific flags remain additive:
 
 - `asr_whisper`: `--language <code>`
-- `asr_sherpa_onnx`: no extra common-input changes in this slice
-- `asr_moonshine`: no extra common-input changes in this slice
+- `asr_sherpa_onnx`: `--partials`
+- `asr_moonshine`: `--partials`
 
 Common input rules:
 
@@ -118,11 +121,25 @@ The examples may continue to print their current text lines such as `[final]`
 or `[partial]`, but machine-readable transcript output must not be mixed with
 diagnostics on stdout in pipeline mode.
 
+The default stdout behavior is one final transcript line with no markers or
+timestamps. That keeps shell composition simple:
+
+```bash
+echo "hello world" | tts_program | asr_program
+```
+
+Streaming event output remains opt-in through `--partials` for the streaming
+backends. In that mode the examples may print `[partial]` / `[final]` event
+lines to stdout, but that is no longer the default CLI behavior.
+
 That means:
 
-- transcript lines stay on stdout
+- final transcript text stays on stdout
 - progress, format, and artifact-path logging move to stderr when using stdin
   or stdout in a pipeline
+- `--quiet` suppresses both example-layer diagnostics and backend-native stderr
+  logging by redirecting process stderr to `/dev/null` for the quiet execution
+  window
 
 This keeps shell composition easy while avoiding a new protocol decision.
 

@@ -45,8 +45,10 @@ fn normalize_text(text: String) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
-pub fn log_status(message: &str) {
-    eprintln!("{message}");
+pub fn log_status(quiet: bool, message: &str) {
+    if !quiet {
+        eprintln!("{message}");
+    }
 }
 
 pub trait WavSample: Copy {
@@ -54,8 +56,10 @@ pub trait WavSample: Copy {
     const BITS_PER_SAMPLE: u16;
     const BYTES_PER_SAMPLE: u32;
 
-    fn write_to_hound<W: Write + std::io::Seek>(writer: &mut hound::WavWriter<W>, sample: Self)
-        -> Result<()>;
+    fn write_to_hound<W: Write + std::io::Seek>(
+        writer: &mut hound::WavWriter<W>,
+        sample: Self,
+    ) -> Result<()>;
     fn write_to_stream<W: Write>(writer: &mut W, sample: Self) -> Result<()>;
 }
 
@@ -101,7 +105,11 @@ impl WavSample for f32 {
     }
 }
 
-pub fn write_wav<S: WavSample>(output: &TtsOutput, sample_rate_hz: u32, samples: &[S]) -> Result<()> {
+pub fn write_wav<S: WavSample>(
+    output: &TtsOutput,
+    sample_rate_hz: u32,
+    samples: &[S],
+) -> Result<()> {
     match output {
         TtsOutput::WavFile(path) => {
             let mut writer = hound::WavWriter::create(
@@ -128,11 +136,11 @@ pub fn write_wav<S: WavSample>(output: &TtsOutput, sample_rate_hz: u32, samples:
                 S::BITS_PER_SAMPLE,
                 samples.len() as u32 * S::BYTES_PER_SAMPLE,
                 |stdout| {
-                for sample in samples {
-                    S::write_to_stream(stdout, *sample)?;
-                }
-                Ok(())
-            },
+                    for sample in samples {
+                        S::write_to_stream(stdout, *sample)?;
+                    }
+                    Ok(())
+                },
             )?;
         }
     }
@@ -160,7 +168,9 @@ where
         data_bytes_len,
     )?;
     write_samples(&mut stdout)?;
-    stdout.flush().context("failed to flush wav stream to stdout")?;
+    stdout
+        .flush()
+        .context("failed to flush wav stream to stdout")?;
     Ok(())
 }
 
@@ -186,12 +196,18 @@ fn write_wav_header<W: Write>(
         .checked_add(data_bytes_len)
         .context("wav riff size overflow")?;
 
-    writer.write_all(b"RIFF").context("failed to write wav RIFF tag")?;
+    writer
+        .write_all(b"RIFF")
+        .context("failed to write wav RIFF tag")?;
     writer
         .write_all(&riff_size.to_le_bytes())
         .context("failed to write wav RIFF size")?;
-    writer.write_all(b"WAVE").context("failed to write wav WAVE tag")?;
-    writer.write_all(b"fmt ").context("failed to write wav fmt tag")?;
+    writer
+        .write_all(b"WAVE")
+        .context("failed to write wav WAVE tag")?;
+    writer
+        .write_all(b"fmt ")
+        .context("failed to write wav fmt tag")?;
     writer
         .write_all(&16u32.to_le_bytes())
         .context("failed to write wav fmt size")?;
@@ -213,7 +229,9 @@ fn write_wav_header<W: Write>(
     writer
         .write_all(&bits_per_sample.to_le_bytes())
         .context("failed to write wav bits per sample")?;
-    writer.write_all(b"data").context("failed to write wav data tag")?;
+    writer
+        .write_all(b"data")
+        .context("failed to write wav data tag")?;
     writer
         .write_all(&data_bytes_len.to_le_bytes())
         .context("failed to write wav data size")?;
@@ -235,15 +253,8 @@ mod tests {
     #[test]
     fn write_wav_header_for_i16_looks_like_wave() {
         let mut bytes = Vec::new();
-        write_wav_header(
-            &mut bytes,
-            22_050,
-            1,
-            hound::SampleFormat::Int,
-            16,
-            4,
-        )
-        .expect("header should write");
+        write_wav_header(&mut bytes, 22_050, 1, hound::SampleFormat::Int, 16, 4)
+            .expect("header should write");
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(&bytes[36..40], b"data");

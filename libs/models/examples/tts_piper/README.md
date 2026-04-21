@@ -52,3 +52,4 @@ echo "Hello from Motlie." | cargo run -p motlie-models --example tts_piper \
 - If `--text` is omitted, the example reads synthesis text from stdin.
 - Diagnostics are written to stderr so stdout stays clean when it is carrying
   WAV bytes.
+- `--quiet` suppresses example-layer and backend-native stderr diagnostics.
