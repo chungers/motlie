@@ -59,10 +59,10 @@ echo "Hello from Motlie." | cargo run -p motlie-models --example tts_qwen3_tts_c
 A short sample reference is checked in under `assets/`:
 
 - `assets/jarvis-original.wav` — full-bandwidth source recording.
-- `assets/jarvis-ref-16k.wav` / `assets/jarvis-ref2-16k.wav` — the same recording
-  pre-resampled to 16 kHz with `sox` (proper anti-alias filter). Prefer these
-  for best clone quality; see the note under *Expected Behavior* about the
-  example's own naive linear downsampler.
+- `assets/jarvis-ref-16k.wav` — the same recording pre-resampled to 16 kHz
+  with `sox` (proper anti-alias filter). Prefer this for best clone quality;
+  see the note under *Expected Behavior* about the example's own naive linear
+  downsampler.
 
 ```bash
 cargo run -p motlie-models --example tts_qwen3_tts_cpp \
@@ -105,8 +105,8 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   path but is a known quality limitation for high-rate reference audio: aliased
   content in the 16 kHz intermediate degrades speaker-encoder output. Pre-filter
   high-rate sources with `sox` (`sox in.wav -r 16000 -c 1 -b 16 out.wav`) before
-  passing to `--reference-audio`, or use one of the checked-in `assets/jarvis-ref*-16k.wav`
-  samples which are already pre-filtered.
+  passing to `--reference-audio`, or use the checked-in
+  `assets/jarvis-ref-16k.wav` sample which is already pre-filtered.
 
 ## Stream To macOS `play` Over SSH
 
