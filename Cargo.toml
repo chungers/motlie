@@ -12,7 +12,6 @@ members = [
     "libs/model/backends/ort",
     "libs/model/backends/piper",
     "libs/model/backends/qwen3_tts_cpp",
-    "libs/model/backends/qwen3_tts",
     "libs/model/backends/sherpa_onnx",
     "libs/model/backends/whisper_cpp",
     "libs/model-eval",

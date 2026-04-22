@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
-    feature = "model-qwen3-tts-0_6b",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -46,8 +45,6 @@ use motlie_model_mistral::MistralTextHandle;
 use motlie_model_moonshine::MoonshineHandle;
 #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
 use motlie_model_piper::PiperHandle;
-#[cfg(feature = "model-qwen3-tts-0_6b")]
-use motlie_model_qwen3_tts::Qwen3TtsHandle;
 #[cfg(feature = "model-qwen3-tts-cpp")]
 use motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle;
 #[cfg(feature = "model-sherpa-onnx-streaming")]
@@ -251,7 +248,6 @@ pub fn resolve_hf_gguf_snapshot(
     feature = "model-sherpa-onnx-streaming",
     feature = "model-moonshine-streaming",
     feature = "model-piper-en-us-ljspeech-medium",
-    feature = "model-qwen3-tts-0_6b",
     feature = "model-qwen3-tts-cpp",
 ))]
 pub(crate) fn resolve_typed_artifact_policy(
@@ -304,8 +300,6 @@ pub enum CuratedBundle {
     MoonshineStreamingEn,
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium,
-    #[cfg(feature = "model-qwen3-tts-0_6b")]
-    Qwen3Tts12Hz0_6B,
     #[cfg(feature = "model-qwen3-tts-cpp")]
     Qwen3TtsCpp0_6B,
 }
@@ -337,8 +331,6 @@ impl CuratedBundle {
             Self::MoonshineStreamingEn => asr::moonshine_streaming_en::descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::descriptor(),
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B => tts::qwen3_tts_12hz_0_6b::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::descriptor(),
         }
@@ -389,10 +381,6 @@ impl CuratedBundle {
             Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::start_typed(options)
                 .await
                 .map(CuratedHandle::PiperEnUsLjspeechMedium),
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B => tts::qwen3_tts_12hz_0_6b::start_typed(options)
-                .await
-                .map(CuratedHandle::Qwen3Tts12Hz0_6B),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::start_typed(options)
                 .await
@@ -423,8 +411,6 @@ pub enum CuratedHandle {
     MoonshineStreamingEn(MoonshineHandle),
     #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
     PiperEnUsLjspeechMedium(PiperHandle),
-    #[cfg(feature = "model-qwen3-tts-0_6b")]
-    Qwen3Tts12Hz0_6B(Qwen3TtsHandle),
     #[cfg(feature = "model-qwen3-tts-cpp")]
     Qwen3TtsCpp0_6B(Qwen3TtsCppHandle),
 }
@@ -457,8 +443,6 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.descriptor(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.descriptor(),
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.descriptor(),
         }
@@ -486,8 +470,6 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.capabilities(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.capabilities(),
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.capabilities(),
         }
@@ -515,8 +497,6 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.metric_snapshot(),
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.metric_snapshot(),
         }
@@ -584,8 +564,6 @@ impl BundleHandle for CuratedHandle {
             Self::MoonshineStreamingEn(handle) => handle.shutdown().await,
             #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
             Self::PiperEnUsLjspeechMedium(handle) => handle.shutdown().await,
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B(handle) => handle.shutdown().await,
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.shutdown().await,
         }
@@ -854,7 +832,6 @@ pub enum ModelSelector {
     #[cfg(any(
         feature = "model-piper-en-us-ljspeech-medium",
         feature = "model-qwen3-tts-cpp",
-        feature = "model-qwen3-tts-0_6b",
     ))]
     Tts(TtsModels),
     #[cfg(any(
@@ -886,7 +863,6 @@ pub enum ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
-    feature = "model-qwen3-tts-0_6b",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -897,7 +873,6 @@ impl ModelSelector {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
                 feature = "model-qwen3-tts-cpp",
-                feature = "model-qwen3-tts-0_6b"
             ))]
             Self::Tts(model) => format!("tts:{}", model.as_str()),
             #[cfg(any(
@@ -926,7 +901,6 @@ impl ModelSelector {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
                 feature = "model-qwen3-tts-cpp",
-                feature = "model-qwen3-tts-0_6b"
             ))]
             Self::Tts(model) => model.bundle_id(),
             #[cfg(any(
@@ -955,7 +929,6 @@ impl ModelSelector {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
                 feature = "model-qwen3-tts-cpp",
-                feature = "model-qwen3-tts-0_6b"
             ))]
             Self::Tts(model) => model.descriptor(),
             #[cfg(any(
@@ -984,7 +957,6 @@ impl ModelSelector {
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
                 feature = "model-qwen3-tts-cpp",
-                feature = "model-qwen3-tts-0_6b"
             ))]
             Self::Tts(model) => Ok(model.bundle()),
             #[cfg(any(
@@ -1018,7 +990,6 @@ impl ModelSelector {
     feature = "model-gemma4-e2b-gguf",
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
-    feature = "model-qwen3-tts-0_6b",
     feature = "model-moonshine-streaming",
     feature = "model-sherpa-onnx-streaming",
     feature = "model-whisper-base-en",
@@ -1046,22 +1017,14 @@ impl FromStr for ModelSelector {
                     selector: value.to_owned(),
                 });
             }
-            #[cfg(not(feature = "model-qwen3-tts-0_6b"))]
-            if raw == tts::QWEN3_TTS_12HZ_0_6B_SELECTOR {
-                return Err(ModelsError::ModelUnavailable {
-                    selector: value.to_owned(),
-                });
-            }
             #[cfg(any(
                 feature = "model-piper-en-us-ljspeech-medium",
                 feature = "model-qwen3-tts-cpp",
-                feature = "model-qwen3-tts-0_6b"
             ))]
             return Ok(Self::Tts(raw.parse()?));
             #[cfg(not(any(
                 feature = "model-piper-en-us-ljspeech-medium",
                 feature = "model-qwen3-tts-cpp",
-                feature = "model-qwen3-tts-0_6b"
             )))]
             return Err(ModelsError::UnknownModelSelector {
                 selector: value.to_owned(),
@@ -1201,8 +1164,6 @@ fn bundle_from_id(id: &BundleId) -> Option<CuratedBundle> {
         "moonshine_streaming_en" => Some(CuratedBundle::MoonshineStreamingEn),
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         "piper_en_us_ljspeech_medium" => Some(CuratedBundle::PiperEnUsLjspeechMedium),
-        #[cfg(feature = "model-qwen3-tts-0_6b")]
-        "qwen3_tts_12hz_0_6b" => Some(CuratedBundle::Qwen3Tts12Hz0_6B),
         #[cfg(feature = "model-qwen3-tts-cpp")]
         "qwen3_tts_cpp_0_6b" => Some(CuratedBundle::Qwen3TtsCpp0_6B),
         _ => None,
@@ -1255,10 +1216,6 @@ fn bundle_from_resolved(resolved: &ResolvedModelDescriptor) -> Option<CuratedBun
         ("piper_en_us_ljspeech_medium", BackendKind::Ort, CheckpointFormat::Onnx) => {
             Some(CuratedBundle::PiperEnUsLjspeechMedium)
         }
-        #[cfg(feature = "model-qwen3-tts-0_6b")]
-        ("qwen3_tts_12hz_0_6b", BackendKind::Ort, CheckpointFormat::Onnx) => {
-            Some(CuratedBundle::Qwen3Tts12Hz0_6B)
-        }
         #[cfg(feature = "model-qwen3-tts-cpp")]
         ("qwen3_tts_cpp_0_6b", BackendKind::Qwen3TtsCpp, CheckpointFormat::Gguf) => {
             Some(CuratedBundle::Qwen3TtsCpp0_6B)
@@ -1303,8 +1260,6 @@ impl Catalog {
         tts::piper_en_us_ljspeech_medium::register(&mut catalog);
         #[cfg(feature = "model-qwen3-tts-cpp")]
         tts::qwen3_tts_cpp::register(&mut catalog);
-        #[cfg(feature = "model-qwen3-tts-0_6b")]
-        tts::qwen3_tts_12hz_0_6b::register(&mut catalog);
         #[cfg(feature = "model-moonshine-streaming")]
         asr::moonshine_streaming_en::register(&mut catalog);
         #[cfg(feature = "model-sherpa-onnx-streaming")]
@@ -1450,7 +1405,6 @@ mod tests {
         feature = "model-sherpa-onnx-streaming",
         feature = "model-moonshine-streaming",
         feature = "model-piper-en-us-ljspeech-medium",
-        feature = "model-qwen3-tts-0_6b",
         feature = "model-qwen3-tts-cpp",
     ))]
     #[test]
@@ -1487,7 +1441,6 @@ mod tests {
         feature = "model-sherpa-onnx-streaming",
         feature = "model-moonshine-streaming",
         feature = "model-piper-en-us-ljspeech-medium",
-        feature = "model-qwen3-tts-0_6b",
         feature = "model-qwen3-tts-cpp",
     ))]
     #[test]
@@ -1637,11 +1590,9 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1660,11 +1611,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)

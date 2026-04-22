@@ -8,5 +8,5 @@ release/profile-facing bundle composition.
 
 Notable support artifacts:
 
-- `docs/EXPORT_QWEN3_TTS_ONNX.md`: exact runbook for regenerating the curated Qwen3-TTS ONNX artifacts from upstream Hugging Face safetensors.
-- `scripts/export_qwen3_tts_onnx.py`: exporter used by that runbook.
+- `docs/BUILD_MODELS.md`: canonical host-prerequisite and build guide for the shipped curated model backends.
+- `docs/DESIGN_TTS.md`: current TTS backend decision record, including the removal rationale for the non-functional Qwen3-TTS ONNX path.
