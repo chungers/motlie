@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Removed the non-functional Qwen3-TTS ONNX curated backend per issue `#210`. The ONNX Runtime prerequisite list now covers only the surviving ORT-backed bundles: Piper, sherpa-onnx, and Moonshine. |
 | 2026-04-18 | @codex-asr | Added the canonical build-prerequisite guide for curated model backends, including the Piper `libespeak-ng` system dependency, ONNX Runtime provisioning, qwen3-tts.cpp submodule setup, and the script/CI entry points that enforce these requirements. |
 
 ## Why This Exists
@@ -24,7 +25,7 @@ The main principles are:
 |--------|-------------|--------------------|
 | Piper | System `libespeak-ng` shared library | `motlie-model-espeak-ng/build.rs` fails explicitly if the library cannot be found. |
 | Piper | `espeak-ng-data` runtime assets | Runtime prerequisite. Set `PIPER_ESPEAKNG_DATA_DIRECTORY` if the data is not installed in a standard system location. |
-| sherpa-onnx / Moonshine / Qwen3-TTS ONNX / Piper | ONNX Runtime shared library | Provide `ORT_LIB_PATH`, `pkg-config` metadata, or another explicit system installation path. |
+| sherpa-onnx / Moonshine / Piper | ONNX Runtime shared library | Provide `ORT_LIB_PATH`, `pkg-config` metadata, or another explicit system installation path. |
 | qwen3-tts.cpp | Vendored submodule checkout | `git submodule update --init --recursive libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` |
 
 ## Canonical Environment Variables

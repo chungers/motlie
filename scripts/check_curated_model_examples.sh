@@ -20,7 +20,7 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-features="model-whisper-base-en,model-sherpa-onnx-streaming,model-moonshine-streaming,model-piper-en-us-ljspeech-medium,model-qwen3-tts-0_6b,model-qwen3-tts-cpp"
+features="model-whisper-base-en,model-sherpa-onnx-streaming,model-moonshine-streaming,model-piper-en-us-ljspeech-medium,model-qwen3-tts-cpp"
 
 run_with_optional_ort() {
   if [[ -n "${ORT_LIB_PATH:-}" ]]; then
@@ -40,7 +40,6 @@ case "${mode}" in
     ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule --require-ort
     ORT_LIB_PATH="${ORT_LIB_PATH}" cargo build -p motlie-models \
       --example tts_piper \
-      --example tts_qwen3_onnx \
       --example tts_qwen3_tts_cpp \
       --example asr_whisper \
       --example asr_sherpa_onnx \

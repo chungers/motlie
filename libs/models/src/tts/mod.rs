@@ -1,7 +1,6 @@
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
-    feature = "model-qwen3-tts-0_6b",
 ))]
 use std::fmt;
 use std::str::FromStr;
@@ -9,18 +8,14 @@ use std::str::FromStr;
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
-    feature = "model-qwen3-tts-0_6b",
 ))]
 use motlie_model::BundleId;
 
 pub const PIPER_EN_US_LJSPEECH_MEDIUM_SELECTOR: &str = "piper/en_us_ljspeech_medium";
 pub const QWEN3_TTS_CPP_0_6B_SELECTOR: &str = "qwen/qwen3_tts_cpp_0_6b";
-pub const QWEN3_TTS_12HZ_0_6B_SELECTOR: &str = "qwen/qwen3_tts_12hz_0_6b";
 
 #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
 pub mod piper_en_us_ljspeech_medium;
-#[cfg(feature = "model-qwen3-tts-0_6b")]
-pub mod qwen3_tts_12hz_0_6b;
 #[cfg(feature = "model-qwen3-tts-cpp")]
 pub mod qwen3_tts_cpp;
 
@@ -32,14 +27,11 @@ pub enum TtsModels {
     PiperEnUsLjspeechMedium,
     #[cfg(feature = "model-qwen3-tts-cpp")]
     Qwen3TtsCpp0_6B,
-    #[cfg(feature = "model-qwen3-tts-0_6b")]
-    Qwen3Tts12Hz0_6B,
 }
 
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
-    feature = "model-qwen3-tts-0_6b",
 ))]
 impl TtsModels {
     pub fn as_str(&self) -> &'static str {
@@ -48,8 +40,6 @@ impl TtsModels {
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::SELECTOR,
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp::SELECTOR,
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::SELECTOR,
         }
     }
 
@@ -59,8 +49,6 @@ impl TtsModels {
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::descriptor().id,
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp::descriptor().id,
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::descriptor().id,
         }
     }
 
@@ -70,8 +58,6 @@ impl TtsModels {
             Self::PiperEnUsLjspeechMedium => piper_en_us_ljspeech_medium::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => qwen3_tts_cpp::descriptor(),
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B => qwen3_tts_12hz_0_6b::descriptor(),
         }
     }
 
@@ -81,8 +67,6 @@ impl TtsModels {
             Self::PiperEnUsLjspeechMedium => crate::CuratedBundle::PiperEnUsLjspeechMedium,
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => crate::CuratedBundle::Qwen3TtsCpp0_6B,
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            Self::Qwen3Tts12Hz0_6B => crate::CuratedBundle::Qwen3Tts12Hz0_6B,
         }
     }
 }
@@ -90,7 +74,6 @@ impl TtsModels {
 #[cfg(any(
     feature = "model-piper-en-us-ljspeech-medium",
     feature = "model-qwen3-tts-cpp",
-    feature = "model-qwen3-tts-0_6b",
 ))]
 impl fmt::Display for TtsModels {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -113,12 +96,6 @@ impl FromStr for TtsModels {
             qwen3_tts_cpp::SELECTOR => Ok(Self::Qwen3TtsCpp0_6B),
             #[cfg(not(feature = "model-qwen3-tts-cpp"))]
             QWEN3_TTS_CPP_0_6B_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
-                selector: value.to_owned(),
-            }),
-            #[cfg(feature = "model-qwen3-tts-0_6b")]
-            qwen3_tts_12hz_0_6b::SELECTOR => Ok(Self::Qwen3Tts12Hz0_6B),
-            #[cfg(not(feature = "model-qwen3-tts-0_6b"))]
-            QWEN3_TTS_12HZ_0_6B_SELECTOR => Err(crate::ModelsError::ModelUnavailable {
                 selector: value.to_owned(),
             }),
             other => Err(crate::ModelsError::UnknownTtsModel {
