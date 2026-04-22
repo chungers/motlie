@@ -21,6 +21,14 @@ Current example groups:
 The detailed 2x3 TTS-to-ASR validation matrix lives in
 [`../docs/VALIDATION_TTS_ASR_PIPELINES.md`](../docs/VALIDATION_TTS_ASR_PIPELINES.md).
 
+Regression-smoke note:
+
+- `./scripts/check_curated_model_examples.sh --mode smoke-qwen3-whisper` is the
+  dedicated co-link smoke for issue `#211`.
+- It specifically exercises `tts_qwen3_tts_cpp | asr_whisper` with both
+  backends built into the same feature set, so Linux `ggml` symbol
+  interposition regressions around `-Wl,-Bsymbolic` fail early.
+
 Quiet-mode note:
 
 - `--quiet` suppresses whole-process stderr for the active example, including
@@ -35,6 +43,12 @@ export QWEN3_TTS_CPP_ARTIFACT_ROOT="/tmp/qwen3-tts-models"
 export WHISPER_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
 export SHERPA_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
 export MOONSHINE_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+```
+
+Dedicated qwen3-tts.cpp / Whisper smoke:
+
+```bash
+./scripts/check_curated_model_examples.sh --mode smoke-qwen3-whisper
 ```
 
 ## Release Builds
