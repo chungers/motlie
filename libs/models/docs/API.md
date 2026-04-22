@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-21 | @codex-tts: Removed the non-functional Qwen3-TTS ONNX curated backend from `libs/models` per issue `#210`, including the `model-qwen3-tts-0_6b` / `qwen3-tts-cuda` feature flags, the curated bundle wiring, and the historical export runbook. The supported TTS catalog now contains only Piper and `qwen3-tts.cpp`. | Overview, Notes |
 | 2026-04-20 | @codex-tts: Added a concrete 2x3 TTS-to-ASR validation report covering the two shipped TTS examples against all three shipped ASR examples, with per-run input/output/WER tables and pipeline-level summary findings. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Added shell-ready SSH streaming examples for the two shipped TTS binaries (`tts_piper`, `tts_qwen3_tts_cpp`) using Homebrew `sox` via `/opt/homebrew/bin/play` on a remote macOS host, with short/medium/long stdin inputs. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The documented shell-composition contract now covers only `tts_piper` and `tts_qwen3_tts_cpp` on the TTS side. | Example Program, Notes |
