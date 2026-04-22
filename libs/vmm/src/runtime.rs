@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::backend::ch::shell::ChShellBackend;
 use crate::backend::motlie::ssh_proxy::{MotlieSshProxyBacking, MotlieSshProxyHandle};
 use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
+#[cfg(target_os = "linux")]
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
 use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome};
 use crate::guestfs::GuestFsError;
@@ -15,6 +16,7 @@ use crate::orchestrator::PreparedGuest;
 use crate::spec::GuestRuntimePaths;
 use crate::spec::GuestSpec;
 use crate::ssh::{ExecOutput, GuestPtySession, PtyRequest, SshProxyError};
+#[cfg(target_os = "linux")]
 use motlie_vnet::VnetError;
 
 #[derive(Debug, Clone)]
@@ -54,7 +56,9 @@ pub enum FilesystemBacking {
 pub enum NetworkBacking {
     None,
     HypervisorManaged,
+    #[cfg(target_os = "linux")]
     MotlieVnet(MotlieVnetBacking),
+    #[cfg(target_os = "linux")]
     HypervisorManagedPlusMotlieVnet(MotlieVnetBacking),
 }
 
@@ -71,6 +75,7 @@ pub enum FilesystemHandle {
 
 #[derive(Debug)]
 pub enum NetworkHandle {
+    #[cfg(target_os = "linux")]
     MotlieVnet(MotlieVnetHandle),
 }
 
@@ -87,8 +92,10 @@ pub enum RuntimeError {
     GuestFs(#[from] GuestFsError),
     #[error(transparent)]
     Ssh(#[from] SshProxyError),
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Vnet(#[from] MotlieVnetProvisionError),
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     VnetShutdown(#[from] VnetError),
     #[error("hypervisor backing is not implemented yet")]
@@ -173,12 +180,13 @@ impl FilesystemHandle {
 impl NetworkBacking {
     pub fn provision(
         &self,
-        prepared: &PreparedGuest,
+        _prepared: &PreparedGuest,
     ) -> Result<Option<NetworkHandle>, RuntimeError> {
         match self {
             Self::None | Self::HypervisorManaged => Ok(None),
+            #[cfg(target_os = "linux")]
             Self::MotlieVnet(backing) | Self::HypervisorManagedPlusMotlieVnet(backing) => {
-                Ok(backing.provision(prepared)?.map(NetworkHandle::MotlieVnet))
+                Ok(backing.provision(_prepared)?.map(NetworkHandle::MotlieVnet))
             }
         }
     }
@@ -187,13 +195,19 @@ impl NetworkBacking {
 impl NetworkHandle {
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
         match self {
+            #[cfg(target_os = "linux")]
             Self::MotlieVnet(handle) => Ok(handle.shutdown()?),
+            #[cfg(not(target_os = "linux"))]
+            _ => unreachable!("NetworkHandle is only constructed on Linux"),
         }
     }
 
     pub fn backing_name(&self) -> &'static str {
         match self {
+            #[cfg(target_os = "linux")]
             Self::MotlieVnet(_) => "motlie-vnet",
+            #[cfg(not(target_os = "linux"))]
+            _ => unreachable!("NetworkHandle is only constructed on Linux"),
         }
     }
 

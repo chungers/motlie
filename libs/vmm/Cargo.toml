@@ -51,5 +51,9 @@ name = "repl_host_v1_4"
 path = "examples/v1.4/repl_host.rs"
 
 [[example]]
+name = "repl_host_v1_35"
+path = "examples/v1.35/repl_host.rs"
+
+[[example]]
 name = "harness_v1_4"
 path = "examples/v1.4/harness/main.rs"

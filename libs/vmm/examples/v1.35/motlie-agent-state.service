@@ -1,0 +1,13 @@
+[Unit]
+Description=Link agent state into mounted guest home
+After=motlie-vfs-guest.service
+Requires=motlie-vfs-guest.service
+ConditionPathIsDirectory=/agent-state
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motlie-agent-state-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
