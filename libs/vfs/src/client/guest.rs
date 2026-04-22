@@ -12,7 +12,7 @@
 //! should call into this module rather than reimplementing mount loops.
 
 use std::thread::{self, JoinHandle};
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", feature = "vsock"))]
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -88,7 +88,7 @@ impl GuestMountRunner {
     /// thread's Tokio runtime handle. The connector must use this runtime for
     /// any async work (e.g. vsock connect) so that IO resources are registered
     /// with the same reactor that will later drive the FUSE request loop.
-    #[cfg(feature = "client")]
+    #[cfg(all(feature = "client", feature = "vsock"))]
     pub fn mount_all<S, F>(self, connector: F) -> Result<MountHandles>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,

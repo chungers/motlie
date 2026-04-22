@@ -8,6 +8,7 @@ members = [
     "libs/model/backends/llama_cpp",
     "libs/model-eval",
     "libs/models",
+    "libs/vfs",
     "libs/tmux",
     "libs/vfs",
     "libs/vnet",
