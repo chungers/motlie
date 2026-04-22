@@ -12,18 +12,10 @@ default = []
 debug-trace = []
 
 [dependencies]
-libslirp = "4"
-libslirp-sys = "4"
 libc = "0.2"
 anyhow.workspace = true
 tracing = "0.1"
 thiserror.workspace = true
-vhost = { version = "0.16", features = ["vhost-user-backend"] }
-vhost-user-backend = "0.22"
-virtio-queue = { version = "0.17", features = ["test-utils"] }
-virtio-bindings = "0.2"
-vm-memory = { version = "0.17", features = ["backend-mmap"] }
-vmm-sys-util = "0.15"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -37,6 +29,26 @@ ctrlc = "3"
 serde_yaml = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libslirp = { version = "4", default-features = false }
+libslirp-sys = "4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vhost = { version = "0.16", features = ["vhost-user-backend"] }
+vhost-user-backend = "0.22"
+virtio-queue = { version = "0.17", features = ["test-utils"] }
+virtio-bindings = "0.2"
+vm-memory = { version = "0.17", features = ["backend-mmap"] }
+vmm-sys-util = "0.15"
+
 [[example]]
 name = "repl_host_v1_2"
 path = "examples/v1.2/repl_host.rs"
+
+[[example]]
+name = "repl_host_v1_25"
+path = "examples/v1.25/repl_host.rs"
+
+[[example]]
+name = "vz_egress_helper_v1_25"
+path = "examples/v1.25/vz_egress_helper.rs"
