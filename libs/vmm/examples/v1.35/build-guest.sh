@@ -5,9 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-35-base-iter}"
-SOURCE_DISK_PATH="${MOTLIE_VZ_SOURCE_DISK:-}"
-SOURCE_NVRAM_PATH="${MOTLIE_VZ_SOURCE_NVRAM:-}"
-SOURCE_MACHINE_ID_PATH="${MOTLIE_VZ_SOURCE_MACHINE_ID:-}"
 RUN_LOG="$ARTIFACTS_DIR/build-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/build-result.json"
 IDENTITY_PROBE_JSON="$ARTIFACTS_DIR/identity-probe.json"
@@ -62,35 +59,22 @@ require_cmd ssh
 require_cmd hdiutil
 require_cmd cargo
 
-if [[ -n "$SOURCE_DISK_PATH" || -n "$SOURCE_NVRAM_PATH" || -n "$SOURCE_MACHINE_ID_PATH" ]]; then
-  if [[ -z "$SOURCE_DISK_PATH" || -z "$SOURCE_NVRAM_PATH" ]]; then
-    echo "MOTLIE_VZ_SOURCE_DISK and MOTLIE_VZ_SOURCE_NVRAM must be set together" >&2
-    exit 1
+if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin" ]]; then
+  SOURCE_DISK_PATH="$NATIVE_SOURCE_VM_DIR/disk.img"
+  SOURCE_NVRAM_PATH="$NATIVE_SOURCE_VM_DIR/nvram.bin"
+  if [[ -f "$NATIVE_SOURCE_VM_DIR/machine-id.bin" ]]; then
+    SOURCE_MACHINE_ID_PATH="$NATIVE_SOURCE_VM_DIR/machine-id.bin"
+  else
+    SOURCE_MACHINE_ID_PATH=""
   fi
 else
-  if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin" ]]; then
-    SOURCE_DISK_PATH="$NATIVE_SOURCE_VM_DIR/disk.img"
-    SOURCE_NVRAM_PATH="$NATIVE_SOURCE_VM_DIR/nvram.bin"
-    if [[ -f "$NATIVE_SOURCE_VM_DIR/machine-id.bin" ]]; then
-      SOURCE_MACHINE_ID_PATH="$NATIVE_SOURCE_VM_DIR/machine-id.bin"
-    else
-      SOURCE_MACHINE_ID_PATH=""
-    fi
-  else
-    cat >&2 <<EOF
+  cat >&2 <<EOF
 native source artifacts are required for v1.35 guest builds
 
-Set:
-  MOTLIE_VZ_SOURCE_DISK
-  MOTLIE_VZ_SOURCE_NVRAM
-optionally:
-  MOTLIE_VZ_SOURCE_MACHINE_ID
-
-Or populate the native source cache first:
+Populate the native source cache first:
   $NATIVE_SOURCE_VM_DIR
 EOF
-    exit 1
-  fi
+  exit 1
 fi
 
 cleanup() {
@@ -109,7 +93,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-echo "=== Vz v1.25 base guest build ==="
+echo "=== Vz v1.35 base guest build ==="
 echo "Base VM:      $BASE_VM_NAME"
 echo "Source disk:  $SOURCE_DISK_PATH"
 echo "Native cache: $NATIVE_SOURCE_VM_DIR"
@@ -342,9 +326,16 @@ rm -rf "$SEED_DIR"
 
 echo "--- rendering native NoCloud seed disk ---"
 mkdir -p "$SEED_DIR"
+cp "$SOURCE_TARBALL" "$SEED_DIR/motlie-src.tar.gz"
+cp "$SERVICE_FILE" "$SEED_DIR/motlie-vfs-guest.service"
+cp "$DATASOURCE_CFG_FILE" "$SEED_DIR/99_motlie_vz.cfg"
+cp "$AGENT_STATE_SETUP_FILE" "$SEED_DIR/motlie-agent-state-setup"
+cp "$AGENT_STATE_UNIT_FILE" "$SEED_DIR/motlie-agent-state.service"
+cp "$SSH_BRIDGE_LOOP_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh-loop"
+cp "$SSH_BRIDGE_UNIT_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh.service"
 cat >"$SEED_DIR/meta-data" <<EOF
 instance-id: ${BASE_VM_NAME}
-local-hostname: motlie-v1-25-build
+local-hostname: motlie-v1-35-build
 EOF
 cat >"$SEED_DIR/user-data" <<'EOF'
 #cloud-config
@@ -363,13 +354,13 @@ chpasswd:
   expire: false
 runcmd:
   - [ systemctl, enable, --now, ssh ]
-  - [ sh, -lc, "echo '=== motlie-v1.25 bootdiag begin ===' >/dev/hvc0" ]
+  - [ sh, -lc, "echo '=== motlie-v1.35 bootdiag begin ===' >/dev/hvc0" ]
   - [ sh, -lc, "ip -o link show >/dev/hvc0 2>&1 || true" ]
   - [ sh, -lc, "ip -o addr show >/dev/hvc0 2>&1 || true" ]
   - [ sh, -lc, "ip route show >/dev/hvc0 2>&1 || true" ]
   - [ sh, -lc, "ss -ltnp >/dev/hvc0 2>&1 || true" ]
   - [ sh, -lc, "systemctl status ssh --no-pager >/dev/hvc0 2>&1 || true" ]
-  - [ sh, -lc, "echo '=== motlie-v1.25 bootdiag end ===' >/dev/hvc0" ]
+  - [ sh, -lc, "echo '=== motlie-v1.35 bootdiag end ===' >/dev/hvc0" ]
 EOF
 hdiutil create -quiet -fs FAT32 -volname CIDATA -srcfolder "$SEED_DIR" -ov -format UDRW "$SEED_IMAGE"
 
@@ -703,10 +694,15 @@ echo "--- installing guest prerequisites ---"
 guest_bash <<'EOF'
 sudo systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
 sudo systemctl kill apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
-sudo sed -i '/^en_US.UTF-8 UTF-8$/d' /etc/locale.gen
-printf 'en_US.UTF-8 UTF-8\n' | sudo tee -a /etc/locale.gen >/dev/null
-sudo locale-gen en_US.UTF-8
-sudo update-locale LANG=en_US.UTF-8
+if ! locale -a 2>/dev/null | grep -Eqi '^en_US\.utf-?8$'; then
+  sudo sed -i '/^en_US.UTF-8 UTF-8$/d' /etc/locale.gen
+  printf 'en_US.UTF-8 UTF-8\n' | sudo tee -a /etc/locale.gen >/dev/null
+  sudo locale-gen en_US.UTF-8
+fi
+current_lang="$(. /etc/default/locale 2>/dev/null; printf '%s' "${LANG:-}")"
+if [[ "$current_lang" != "en_US.UTF-8" ]]; then
+  sudo update-locale LANG=en_US.UTF-8
+fi
 typeset -a missing_pkgs=()
 for cmd_pkg in \
   "cargo:cargo" \
@@ -742,24 +738,45 @@ if (( ${#missing_pkgs[@]} > 0 )); then
 fi
 EOF
 
-echo "--- uploading Motlie source tree into guest ---"
-guest_copy "$SOURCE_TARBALL" /tmp/motlie-src.tar.gz
-guest_copy "$SERVICE_FILE" /tmp/motlie-vfs-guest.service
-guest_copy "$DATASOURCE_CFG_FILE" /tmp/99_motlie_vz.cfg
-guest_copy "$AGENT_STATE_SETUP_FILE" /tmp/motlie-agent-state-setup
-guest_copy "$AGENT_STATE_UNIT_FILE" /tmp/motlie-agent-state.service
-guest_copy "$SSH_BRIDGE_LOOP_FILE" /tmp/motlie-vmm-vsock-ssh-loop
-guest_copy "$SSH_BRIDGE_UNIT_FILE" /tmp/motlie-vmm-vsock-ssh.service
+echo "--- staging Motlie source tree from seed disk into guest ---"
 guest_bash <<EOF
+set -x
+echo "[v1.35 build] locating seed disk"
+SEED_MOUNT="/mnt/motlie-seed"
+seed_dev="\$(blkid -L CIDATA 2>/dev/null || true)"
+if [[ -z "\$seed_dev" && -e /dev/disk/by-label/CIDATA ]]; then
+  seed_dev=/dev/disk/by-label/CIDATA
+fi
+if [[ -z "\$seed_dev" ]]; then
+  echo "failed to locate CIDATA seed disk in guest" >&2
+  exit 1
+fi
+echo "[v1.35 build] mounting seed disk \$seed_dev"
+sudo mkdir -p "\$SEED_MOUNT"
+sudo umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
+sudo mount -o ro "\$seed_dev" "\$SEED_MOUNT"
+echo "[v1.35 build] copying staged assets from seed"
+sudo cp "\$SEED_MOUNT/motlie-src.tar.gz" /tmp/motlie-src.tar.gz
+sudo cp "\$SEED_MOUNT/motlie-vfs-guest.service" /tmp/motlie-vfs-guest.service
+sudo cp "\$SEED_MOUNT/99_motlie_vz.cfg" /tmp/99_motlie_vz.cfg
+sudo cp "\$SEED_MOUNT/motlie-agent-state-setup" /tmp/motlie-agent-state-setup
+sudo cp "\$SEED_MOUNT/motlie-agent-state.service" /tmp/motlie-agent-state.service
+sudo cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh-loop" /tmp/motlie-vmm-vsock-ssh-loop
+sudo cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh.service" /tmp/motlie-vmm-vsock-ssh.service
+sudo umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
+echo "[v1.35 build] unpacking source tarball"
 rm -rf '$GUEST_SRC_DIR'
 mkdir -p '$GUEST_SRC_DIR'
 tar -xzf /tmp/motlie-src.tar.gz -C '$GUEST_SRC_DIR'
+echo "[v1.35 build] source staging complete"
 EOF
 
 echo "--- building guest binaries and CLIs in guest ---"
 guest_bash <<EOF
+set -x
 export PATH="\$HOME/.cargo/bin:\$PATH"
 export CARGO_TARGET_DIR="\$HOME/motlie-target"
+echo "[v1.35 build] patching workspace manifest"
 python3 - <<'PY'
 from pathlib import Path
 
@@ -770,23 +787,37 @@ if '"libs/vfs",' not in text:
     root.write_text(text, encoding="utf-8")
 PY
 if [[ ! -s /usr/local/bin/motlie-vfs-guest || ! -x /usr/local/bin/motlie-vfs-guest ]]; then
-  if ! cargo metadata --manifest-path '$GUEST_SRC_DIR/libs/vfs/Cargo.toml' --format-version 1 >/dev/null 2>&1; then
-    if command -v rustup >/dev/null 2>&1; then
-      rustup toolchain install stable --profile minimal
-      rustup default stable
-    else
-      curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
-    fi
-    export PATH="\$HOME/.cargo/bin:\$PATH"
+  echo "[v1.35 build] guest binary missing; ensuring rustup stable toolchain"
+  if command -v rustup >/dev/null 2>&1; then
+    rustup toolchain install stable --profile minimal
+    rustup default stable
+  else
+    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
   fi
+  export PATH="\$HOME/.cargo/bin:\$PATH"
+  rm -rf "\$CARGO_TARGET_DIR"
+  echo "[v1.35 build] compiling motlie-vfs-guest-v1_1"
   cargo build --manifest-path '$GUEST_SRC_DIR/libs/vfs/Cargo.toml' --release --features vsock,client --bin motlie-vfs-guest-v1_1
 fi
 if ! command -v codex >/dev/null 2>&1; then
-  sudo npm install -g @openai/codex
+  echo "[v1.35 build] installing codex wrapper"
+  cat <<'CODEXWRAP' >/tmp/codex
+#!/bin/sh
+exec npm exec --yes @openai/codex -- "$@"
+CODEXWRAP
+  chmod 0755 /tmp/codex
+  sudo install -D -m 0755 /tmp/codex /usr/local/bin/codex
 fi
 if ! command -v claude >/dev/null 2>&1; then
-  sudo npm install -g @anthropic-ai/claude-code
+  echo "[v1.35 build] installing claude wrapper"
+  cat <<'CLAUDEWRAP' >/tmp/claude
+#!/bin/sh
+exec npm exec --yes @anthropic-ai/claude-code -- "$@"
+CLAUDEWRAP
+  chmod 0755 /tmp/claude
+  sudo install -D -m 0755 /tmp/claude /usr/local/bin/claude
 fi
+echo "[v1.35 build] guest build block complete"
 EOF
 
 echo "--- installing converged v1.35 guest contract ---"
@@ -1066,9 +1097,13 @@ echo "--- result written ---"
 cat "$RESULT_JSON"
 
 echo "--- shutting down base guest gracefully ---"
-guest_bash_as admin admin <<'EOF'
+shutdown_status=0
+guest_bash_as admin admin <<'EOF' || shutdown_status=$?
 sudo shutdown -h now || true
 EOF
+if [[ $shutdown_status -ne 0 && $shutdown_status -ne 255 ]]; then
+  exit $shutdown_status
+fi
 for _ in {1..40}; do
   if [[ ! -f "$RUNNER_PID_FILE" ]]; then
     break

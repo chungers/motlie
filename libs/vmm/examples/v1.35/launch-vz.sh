@@ -745,22 +745,6 @@ wait_for_guest_ssh || {
 }
 
 echo "--- provisioning guest over native Vz userspace egress ---"
-guest_bash <<'EOF'
-set -x
-if ! id -u motlie-build >/dev/null 2>&1; then
-  printf 'admin\n' | sudo -S groupadd -f -g 2002 motlie-build
-  printf 'admin\n' | sudo -S useradd -m -u 2002 -g 2002 -s /bin/bash motlie-build
-fi
-printf 'admin\n' | sudo -S bash -c "printf '%s:%s\n' 'motlie-build' 'admin' | chpasswd"
-printf 'admin\n' | sudo -S usermod -U motlie-build || true
-printf 'admin\n' | sudo -S usermod -aG sudo motlie-build || true
-printf 'admin\n' | sudo -S sh -c "printf '%s\n' 'motlie-build ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-motlie-build"
-printf 'admin\n' | sudo -S chown root:root /etc/sudoers.d/90-motlie-build
-printf 'admin\n' | sudo -S chmod 0440 /etc/sudoers.d/90-motlie-build
-EOF
-CONTROL_USER="motlie-build"
-CONTROL_PASSWORD="admin"
-
 NEED_SOURCE_UPLOAD=1
 if guest_bash <<'EOF'
 set -x
@@ -810,6 +794,7 @@ remap_conflicting_identity() {
 remap_conflicting_identity admin $UID_NUM $GID_NUM 2000 2000
 remap_conflicting_identity ubuntu $UID_NUM $GID_NUM 2001 2001
 
+set -x
 SEED_MOUNT="/mnt/motlie-seed"
 seed_dev="\$(blkid -L MOTLIESEED 2>/dev/null || true)"
 if [[ -z "\$seed_dev" && -e /dev/disk/by-label/MOTLIESEED ]]; then
@@ -904,28 +889,25 @@ if (( \${#missing_pkgs[@]} > 0 )); then
   printf '${CONTROL_PASSWORD}\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y "\${unique_pkgs[@]}"
 fi
 if [[ ! -s /usr/local/bin/motlie-vfs-guest || ! -x /usr/local/bin/motlie-vfs-guest ]]; then
-  export PATH="/home/$LOGIN_USER/.cargo/bin:\$PATH"
+  echo "[v1.35 launch] guest binary missing; rebuilding from staged source"
+  build_user_name="\$(id -un)"
+  build_user_group="\$(id -gn)"
+  export PATH="\$HOME/.cargo/bin:\$PATH"
   printf '${CONTROL_PASSWORD}\n' | sudo -S rm -rf /var/lib/motlie/src /var/lib/motlie/target
   printf '${CONTROL_PASSWORD}\n' | sudo -S mkdir -p /var/lib/motlie/src
   printf '${CONTROL_PASSWORD}\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
-  printf '${CONTROL_PASSWORD}\n' | sudo -S chown -R $LOGIN_USER:$LOGIN_USER /var/lib/motlie
-  if ! cargo metadata --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --format-version 1 >/dev/null 2>&1; then
-    if command -v rustup >/dev/null 2>&1; then
-      rustup toolchain install stable --profile minimal
-      rustup default stable
-    else
-      curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
-    fi
-    export PATH="/home/$LOGIN_USER/.cargo/bin:\$PATH"
+  printf '${CONTROL_PASSWORD}\n' | sudo -S chown -R "\$build_user_name:\$build_user_group" /var/lib/motlie
+  echo "[v1.35 launch] ensuring rustup stable toolchain"
+  if command -v rustup >/dev/null 2>&1; then
+    rustup toolchain install stable --profile minimal
+    rustup default stable
+  else
+    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
   fi
+  export PATH="\$HOME/.cargo/bin:\$PATH"
+  echo "[v1.35 launch] compiling motlie-vfs-guest-v1_1"
   cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_1 --target-dir /var/lib/motlie/src/target
   printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_1 /usr/local/bin/motlie-vfs-guest
-fi
-if ! command -v codex >/dev/null 2>&1; then
-  printf '${CONTROL_PASSWORD}\n' | sudo -S npm install -g @openai/codex
-fi
-if ! command -v claude >/dev/null 2>&1; then
-  printf '${CONTROL_PASSWORD}\n' | sudo -S npm install -g @anthropic-ai/claude-code
 fi
 NPM_GLOBAL_PREFIX="\$(npm prefix -g 2>/dev/null || true)"
 if [[ -n "\$NPM_GLOBAL_PREFIX" ]]; then
@@ -937,6 +919,7 @@ if [[ -n "\$NPM_GLOBAL_PREFIX" ]]; then
   fi
 fi
 if ! command -v codex >/dev/null 2>&1; then
+  echo "[v1.35 launch] installing codex wrapper"
   cat <<'CODEXWRAP' >/tmp/codex
 #!/bin/sh
 exec npm exec --yes @openai/codex -- "$@"
@@ -945,6 +928,7 @@ CODEXWRAP
   printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/codex /usr/local/bin/codex
 fi
 if ! command -v claude >/dev/null 2>&1; then
+  echo "[v1.35 launch] installing claude wrapper"
   cat <<'CLAUDEWRAP' >/tmp/claude
 #!/bin/sh
 exec npm exec --yes @anthropic-ai/claude-code -- "$@"
@@ -952,6 +936,7 @@ CLAUDEWRAP
   chmod 0755 /tmp/claude
   printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/claude /usr/local/bin/claude
 fi
+echo "[v1.35 launch] provisioning block complete"
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-state-setup
@@ -975,13 +960,6 @@ EOFSSHCFG
 fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0644 /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl daemon-reload
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl unmask motlie-vfs-guest.service || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl unmask motlie-agent-state.service || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl unmask motlie-vmm-vsock-ssh.service || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl enable motlie-vfs-guest.service
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl enable motlie-agent-state.service || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl enable motlie-vmm-vsock-ssh.service || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh.service || printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-agent-state.service || true
