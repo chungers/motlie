@@ -37,6 +37,8 @@ Linux linker note:
   `libqwen3tts` keeps its bundled `ggml` symbols local when it is co-linked
   with other `ggml` users such as `whisper.cpp`. Without that, `tts_qwen3_tts_cpp`
   pipelines into ASR examples can fail due to symbol interposition.
+- The dedicated scripted regression check for this lives in
+  `./scripts/check_curated_model_examples.sh --mode smoke-qwen3-whisper`.
 
 ### Basic synthesis
 
@@ -45,6 +47,24 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   --no-default-features --features model-qwen3-tts-cpp \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts-cpp.wav
 ```
+
+### Dedicated qwen3-tts.cpp -> Whisper smoke
+
+This smoke is the issue `#211` regression check for Linux-side `ggml`
+symbol interposition:
+
+```bash
+export QWEN3_TTS_CPP_ARTIFACT_ROOT="/tmp/qwen3-tts-models"
+export WHISPER_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+
+./scripts/check_curated_model_examples.sh --mode smoke-qwen3-whisper
+```
+
+Expected behavior:
+
+- the pipeline completes without a native `GGML_ASSERT`
+- Whisper receives a valid WAV stream on stdin
+- the final transcript is non-empty and still contains `hello`
 
 If `--wav` is omitted, the example writes WAV bytes to stdout:
 
