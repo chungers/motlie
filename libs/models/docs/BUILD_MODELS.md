@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-22 | @codex-tts | Added a dedicated `smoke-qwen3-whisper` mode to `scripts/check_curated_model_examples.sh` for issue `#211`. This exercises `tts_qwen3_tts_cpp | asr_whisper` under the same feature set to catch Linux `ggml` symbol-interposition regressions around `-Wl,-Bsymbolic`. |
 | 2026-04-21 | @codex-tts | Removed the non-functional Qwen3-TTS ONNX curated backend per issue `#210`. The ONNX Runtime prerequisite list now covers only the surviving ORT-backed bundles: Piper, sherpa-onnx, and Moonshine. |
 | 2026-04-18 | @codex-asr | Added the canonical build-prerequisite guide for curated model backends, including the Piper `libespeak-ng` system dependency, ONNX Runtime provisioning, qwen3-tts.cpp submodule setup, and the script/CI entry points that enforce these requirements. |
 
@@ -63,6 +64,19 @@ Full local build path when ONNX Runtime is available:
 ```bash
 ./scripts/check_curated_model_examples.sh --mode build
 ```
+
+Dedicated qwen3-tts.cpp / whisper co-link smoke for Linux symbol-interposition regressions:
+
+```bash
+export QWEN3_TTS_CPP_ARTIFACT_ROOT=/path/to/qwen3-tts-models
+export WHISPER_ARTIFACT_ROOT=/path/to/whisper-cache-or-snapshot
+
+./scripts/check_curated_model_examples.sh --mode smoke-qwen3-whisper
+```
+
+This smoke exists specifically to catch the failure mode from issue `#211`,
+where `libqwen3tts.so` and `whisper.cpp` can bind the wrong `ggml` symbols if
+the qwen3-tts.cpp shared library is linked without Linux-side symbol isolation.
 
 ## Design Rule: No Hidden Bootstrap
 
