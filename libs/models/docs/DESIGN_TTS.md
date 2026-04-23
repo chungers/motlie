@@ -1,11 +1,13 @@
 # TTS Model Support Design
 
-## Status: Implemented (Piper + Qwen3-TTS ONNX + qwen3-tts.cpp Backup Slice)
+## Status: Implemented (Piper + qwen3-tts.cpp Backup Slice)
 
 ## Change Log
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Removed the non-functional Qwen3-TTS ONNX curated backend per issue `#210`, including `motlie-model-qwen3-tts`, the `qwen3_tts_12hz_0_6b` bundle wiring, the ONNX export runbook, and the associated Cargo features. The supported TTS tracks are now Piper as primary and `qwen3-tts.cpp` as the secondary/cloning-capable path. |
+| 2026-04-20 | @codex-tts | Removed the non-functional `tts_qwen3_onnx` binary from the shipped example set in the example-stream-output PR. The ONNX backend remains documented historically, but Piper and `qwen3-tts.cpp` are now the only shipped TTS examples. |
 | 2026-04-17 | @codex-asr | Renamed the shipped TTS example paths to `tts_piper`, `tts_qwen3_onnx`, and `tts_qwen3_tts_cpp` and updated the design references accordingly. |
 | 2026-04-16 | @codex-tts | Replaced the large vendored `qwen3-tts.cpp` source tree with a pinned git submodule at `libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` (`predict-woo/qwen3-tts.cpp` @ `7a762e2ad4bacc6fdda81d81bf10a09ffb546f29`). Tightened the build/docs contract so fresh checkouts explicitly require `git submodule update --init --recursive` before building the backup TTS backend. |
 | 2026-04-16 | @codex-tts | Implemented the official backup TTS track with a submodule-backed `qwen3-tts.cpp` backend (`motlie-model-qwen3-tts-cpp`), curated GGUF bundle wiring, and the `tts_v0.4` example. Recorded the project-level decision rationale: Piper remains primary for real-time CPU, `qwen3-tts.cpp` is the secondary cloning-capable backend, and `qwen3_tts_rs`, F5-TTS ONNX, and Fish Speech are now explicitly dropped. Local validation produced real intelligible speech on CPU; the optional CUDA build compiled and clippy-checked on GB10, but local runtime still fell back to CPU with `ggml_cuda_init: no CUDA-capable device is detected`. |
@@ -22,12 +24,10 @@ Assumption for this draft: this is brownfield product work. Motlie already has s
 
 The design is intentionally narrow. It focuses on one end-to-end vertical slice from curated artifact download to streamed PCM output, with adapters above the model layer for `.wav`, local playback, and telephony/websocket transports.
 
-The roadmap beyond that first slice is also explicit: Piper remains the primary path, `qwen3-tts.cpp` is the official backup path for cloning-capable native inference, and the ONNX-exported Qwen3-TTS slice remains documented as a separate higher-complexity runtime family rather than an implicit follow-on.
-
-The exact re-export flow for the current Qwen3-TTS ONNX artifacts lives in
-`docs/EXPORT_QWEN3_TTS_ONNX.md`. That runbook is the source of truth for the
-Python environment, Hugging Face download path, emitted artifact sizes, and the
-current adapter-graph workaround used to satisfy the Rust backend contract.
+The roadmap beyond that first slice is also explicit: Piper remains the primary
+path, `qwen3-tts.cpp` is the official backup path for cloning-capable native
+inference, and the previous ONNX-exported Qwen3-TTS experiment has now been
+removed because it never produced intelligible speech.
 
 ## Table of Contents
 
@@ -652,13 +652,6 @@ profile-voice-local = ["model-piper-en-us-ljspeech-medium"]
 profile-voice-dgx = ["model-piper-en-us-ljspeech-medium", "piper-cuda"]
 ```
 
-For the Qwen3-TTS phase-2 slice, use separate feature gates rather than overloading the Piper ones:
-
-```toml
-model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]
-qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]
-```
-
 For the official backup backend, use separate GGUF/C++ feature gates:
 
 ```toml
@@ -768,30 +761,28 @@ That gap matters for:
 - prefer exact include rules over suffix rules
 - document the artifact root and local snapshot expectations in the example README
 
-### Phase-2 Qwen3-TTS Vertical Slice
+### Removed Qwen3-TTS ONNX Slice
 
-If Motlie adds a second TTS family after Piper, the explicit next vertical slice should be Qwen3-TTS.
+The previous Phase-2 Qwen3-TTS ONNX slice has been removed from `libs/models`
+per issue `#210`.
 
-Recommended phase-2 shape:
+Reason for removal:
 
-- contract surface: reuse the same `SpeechRequest` / `SpeechStream` API
-- runtime/backend boundary: a new `motlie-model-qwen3-tts` backend crate using in-process ONNX Runtime via the shared `motlie-model-ort` helper. The upstream model (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`) ships as safetensors; an offline ONNX export step produces the required `encoder.onnx`, `decoder.onnx`, `vocoder.onnx`, `config.json`, and `vocab.json` components. The curated bundle descriptor references these ONNX artifacts, not the original safetensors.
-- curated bundle: start with `Qwen3-TTS-12Hz-0.6B-Base`
-- selector shape: `tts:qwen/qwen3_tts_12hz_0_6b`
-- feature flags:
-  `model-qwen3-tts-0_6b`,
-  `qwen3-tts-cuda`
-- validation target:
-  artifact resolution,
-  streamed synthesis,
-  voice-cloning request path via `VoiceConditioning::ReferenceAudio`,
-  `.wav` output parity with the Piper example,
-  and one CUDA-oriented runtime smoke test on GB10-class hardware when available
+- the exported `decoder.onnx` and `vocoder.onnx` were synthetic adapter graphs,
+  not the real upstream speech-generation path
+- live playback and ASR round-trip validation produced silence, music/noise, or
+  unintelligible audio rather than usable speech
+- keeping the curated bundle and feature flags in-tree created the appearance of
+  supported functionality without meeting the product requirement that matters:
+  produce intelligible speech
 
-The purpose of that phase-2 slice is different from Piper:
+Current project decision:
 
-- Piper proves the small CPU-first local path
-- Qwen3-TTS proves the higher-quality cloning-oriented path without changing the public TTS contract
+- Piper remains the primary CPU-first TTS backend
+- `qwen3-tts.cpp` remains the secondary cloning-capable backend
+- if Qwen returns in the future, it must come back only with a true runtime or
+  export path that passes intelligible-audio validation, not only ONNX
+  load/shape checks
 
 ### Phase-3 `qwen3-tts.cpp` Backup Vertical Slice
 
@@ -799,7 +790,7 @@ The official backup backend after Piper is now `qwen3-tts.cpp`, not another ONNX
 
 Recommended phase-3 shape:
 
-- contract surface: reuse the same `SpeechRequest` / `SpeechStream` API already exercised by Piper and the ONNX-backed Qwen slice
+- contract surface: reuse the same `SpeechRequest` / `SpeechStream` API already exercised by Piper
 - runtime/backend boundary: `motlie-model-qwen3-tts-cpp`, a submodule-backed C/C++ backend crate that wraps the narrow `qwen3tts_c_api.h` surface via Rust FFI
 - checkpoint/artifact format: GGUF, with a curated bundle rooted at `koboldcpp/tts`
 - required artifacts:
@@ -821,39 +812,6 @@ Current implementation note:
 - the backend performs whole-utterance synthesis in `open_stream()` and then emits buffered `F32Le` PCM chunks through `next_chunk()`
 - local CPU validation on 2026-04-16 produced real intelligible speech from the curated GGUF artifacts
 - the optional CUDA build compiled and clippy-checked on a GB10 host, but local runtime still logged `ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected` and fell back to CPU; this is documented as an implementation note, not hidden as a success claim
-
-### Qwen3-TTS ONNX Export Procedure
-
-The curated bundle expects pre-exported ONNX model components. The upstream
-`Qwen/Qwen3-TTS-12Hz-0.6B-Base` model ships as safetensors; the following
-offline export step produces the required artifacts:
-
-1. Install the official `qwen-tts` Python package and `torch`, `onnx`, `onnxruntime`.
-2. Load the model from the Hugging Face repo.
-3. Export the three components separately:
-   - `encoder.onnx` — the text/phoneme encoder (input: `[batch, seq_len]` int64 token IDs; output: `[batch, seq_len, hidden_dim]` float32)
-   - `decoder.onnx` — the flow-matching mel decoder (input: encoder hidden states + optional reference mel; output: `[batch, mel_channels, mel_frames]` float32)
-   - `vocoder.onnx` — the BigVGAN-derived vocoder (input: `[batch, mel_channels, mel_frames]` float32; output: `[batch, 1, audio_samples]` float32)
-4. Export `config.json` with `sample_rate`, `hop_length`, `mel_channels`, and `fft_size`.
-5. Flatten the BPE tokenizer into `vocab.json`:
-   The upstream repo ships `vocab.json`, `merges.txt`, and `tokenizer_config.json`
-   as separate BPE tokenizer components. The export step must merge these into a
-   single flat `{ token: id }` JSON mapping that contains all subword tokens
-   (including multi-character entries from BPE merges) plus the special tokens
-   `<bos>`, `<eos>`, `<unk>`. The `motlie-model-qwen3-tts` backend uses greedy
-   longest-match tokenization against this flattened vocabulary — it does NOT
-   apply BPE merge rules at runtime. The flattened vocab must therefore contain
-   every token the encoder expects, at the correct ID.
-6. Place all five files in a directory that the artifact resolver can discover.
-
-**Important:** The curated `vocab.json` is a custom export artifact, not the
-upstream `vocab.json` from the HuggingFace model tree. The upstream file contains
-only the base vocabulary without merged subword entries. The export step must
-produce a flattened vocabulary that includes all BPE-merged tokens.
-
-Note: the tensor shapes listed above are the expected ONNX input/output signatures.
-The `motlie-model-qwen3-tts` backend preserves ORT-reported tensor shapes between
-stages rather than assuming fixed dimensions.
 
 ## Migration and Compatibility Strategy
 

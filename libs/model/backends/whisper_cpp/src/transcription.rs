@@ -338,38 +338,19 @@ fn decode_samples(
             message: err.to_string(),
         })?;
 
-    let num_segments = state
-        .full_n_segments()
-        .map_err(|err| ModelError::BackendExecution {
-            backend: "whisper-cpp",
-            operation: "full_n_segments",
-            message: err.to_string(),
-        })? as usize;
-
+    let num_segments = state.full_n_segments() as usize;
     let mut segments = Vec::with_capacity(num_segments);
-    for i in 0..num_segments as i32 {
-        let text = state
-            .full_get_segment_text(i)
+    for segment in state.as_iter() {
+        let text = segment
+            .to_str_lossy()
             .map_err(|err| ModelError::BackendExecution {
                 backend: "whisper-cpp",
-                operation: "full_get_segment_text",
+                operation: "segment.to_str_lossy",
                 message: err.to_string(),
-            })?;
-        let t0 = state
-            .full_get_segment_t0(i)
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "whisper-cpp",
-                operation: "full_get_segment_t0",
-                message: err.to_string(),
-            })?;
-        let t1 = state
-            .full_get_segment_t1(i)
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "whisper-cpp",
-                operation: "full_get_segment_t1",
-                message: err.to_string(),
-            })?;
-
+            })?
+            .into_owned();
+        let t0 = segment.start_timestamp();
+        let t1 = segment.end_timestamp();
         segments.push(TranscriptSegment {
             start_ms: (t0 * 10) as u64,
             end_ms: (t1 * 10) as u64,
