@@ -13,14 +13,19 @@ without changing `libs/driver`'s core engine or the tmux adapter.
 ## Changelog
 
 - `(2026-04-17, @claude-opus-47, initial proposal for a models CommandSet that exposes load/unload/chat/session/transcribe/synthesize/pipeline/info across the full libs/models surface)`
+- `(2026-04-22, @claude-opus-47, rewritten against post-typed-contracts libs/model(s): BundleHandle is now Sized with associated types so Box<dyn BundleHandle> is no longer possible; TranscriptionModel/SpeechModel::open_stream replaced by BatchTranscriber/StreamingTranscriber/SpeechSynthesizer/VoiceCloneSynthesizer from libs/model/src/typed.rs; load dispatch retargeted at namespaced start_typed per curated bundle; SpeechRequest→SynthesisRequest; VoiceConditioning replaced by CloneReference<RATE_HZ, Mono>; AudioSpec is gone — sample rate + layout are carried by AudioBuf type parameters; pipeline tts-asr delegates to the existing stream_speech_into_asr helper)`
 
 ## Problem
 
-`libs/models` now owns a Catalog of curated ASR, TTS, chat, and embedding
-bundles (`libs/models/src/lib.rs:910-1145`). Today each capability is
-exercised by a hand-rolled example binary in `libs/models/examples/v0.*` and
-`tts_v0.*` — one `main.rs` per slice, each argv-parsed separately, with no
-shared surface for interactive experimentation.
+`libs/models` owns a `Catalog` of curated ASR, TTS, chat, and embedding
+bundles. Each bundle is instantiated through a namespaced `start_typed`
+entry point (`motlie_models::{tts,asr,chat,embeddings}::{bundle}::start_typed`)
+which returns a concrete `Sized` typed handle implementing the capability
+traits from `libs/model/src/typed.rs`. Today each capability is exercised by a
+dedicated example binary under `libs/models/examples/` (for example
+`tts_qwen3_tts_cpp/`, `asr_whisper_base_en/`) — one `main.rs` per slice,
+each argv-parsed separately, with no shared surface for interactive
+experimentation.
 
 We want the same interactive experience for models that we already have for
 tmux: a single REPL/TUI driver that loads any subset of enabled bundles
@@ -45,8 +50,7 @@ one adapter, models becomes another. The work is entirely in designing the
   `connect <uri> as <alias>` pattern from `tmux_app.rs:38-50`.
 - Multi-turn chat via driver-owned conversation history (`session new`,
   `session say`, `session show`, `session clear`) — `motlie_model::ChatModel`
-  is stateless (`libs/model/src/lib.rs:598-601`), so history lives in the
-  driver.
+  is stateless, so history lives in the driver.
 - Discoverable completion: loaded aliases, available selectors, session ids,
   capability-typed argument validation.
 - Drop-in binary `bins/models/driver` that reuses `run_repl` / `run_tui` the
@@ -54,8 +58,13 @@ one adapter, models becomes another. The work is entirely in designing the
 
 ## Non-goals
 
-- No changes to `libs/models` public API (no new factory functions, no
-  reshaping of `BundleHandle`). The driver consumes what's there.
+- No changes to `libs/models` / `libs/model` public APIs. The driver
+  consumes the post-refactor surface as-is: namespaced `start_typed` entry
+  points per curated bundle, the `Sized` `BundleHandle` trait, and the
+  typed `BatchTranscriber` / `StreamingTranscriber` / `SpeechSynthesizer` /
+  `VoiceCloneSynthesizer` / `SpeechStream` traits from
+  `libs/model/src/typed.rs`. Any dyn/Sized impedance is absorbed by a
+  driver-local adapter layer.
 - No artifact-download orchestration beyond forwarding the existing
   `ArtifactPolicy` / `--allow-fetch` switch. Acquisition remains the catalog's
   job.
@@ -96,10 +105,21 @@ one adapter, models becomes another. The work is entirely in designing the
              |
              v
 +---------------------------+
-| motlie_models             |   ModelSelector::from_str → Bundle → start →
-|   (libs/models)           |   BundleHandle → {chat,speech,transcription,...}
+| motlie_models             |   ModelSelector → namespaced start_typed →
+|   (libs/models)           |   typed handle implementing
+|                           |   {ChatModel, BatchTranscriber,
+|                           |    StreamingTranscriber, SpeechSynthesizer,
+|                           |    VoiceCloneSynthesizer, EmbeddingModel}
 +---------------------------+
 ```
+
+`BundleHandle` is `Sized` with associated types (`type Chat`, `type Completion`,
+`type Embeddings`) in the post-refactor `libs/model/src/lib.rs`, so the driver
+cannot store a uniform `Box<dyn BundleHandle>`. ASR and TTS capabilities live
+in `libs/model/src/typed.rs` as independent traits, not as methods on the
+handle. The driver therefore captures per-capability typed trait objects
+during `load` and attaches them to the `LoadedModel`; the original
+`BundleHandle` is retained only for lifecycle + descriptor + metrics access.
 
 Data flow for a one-shot chat:
 
@@ -116,14 +136,16 @@ Data flow for a one-shot chat:
 Data flow for TTS→ASR pipeline:
 
 1. `pipeline tts-asr "the quick brown fox" --tts-alias voice --asr-alias ears`
-2. Open `SpeechStream` via the TTS alias, drain all chunks into an in-memory
-   PCM buffer tagged with the stream's `AudioSpec`.
-3. Open `TranscriptionStream` via the ASR alias with that same `AudioSpec`,
-   push the buffer in ~6400-byte chunks (matching `v0.7/main.rs:95`), finish,
-   collect transcript.
-4. Print: input text, input hash/length, output transcript, a simple
+2. Delegate to `motlie_model::typed::stream_speech_into_asr(tts, asr,
+   SynthesisRequest { text, .. }, TranscriptionParams::default())` — it already
+   owns the streaming bridge, including any TTS→ASR rate/layout adaptation via
+   an `AudioTransform`.
+3. Collect the final `TranscriptionUpdate`.
+4. Print: input text, input length, output transcript, a simple
    case-insensitive word-overlap ratio, and optionally save the intermediate
-   wav to `--keep-wav <path>`.
+   wav to `--keep-wav <path>` (captured by tapping `SpeechStream::next_chunk`
+   before handing the stream to the helper — or by using a thin local clone of
+   the helper when `--keep-wav` is set).
 
 ## CommandSet
 
@@ -134,10 +156,14 @@ use motlie_models::{
     Catalog, ModelSelector, BundleDescriptor, BackendKind, CapabilityKind,
 };
 use motlie_model::{
-    BundleHandle, ChatMessage, ChatRequest, ChatRole, ChatResponse,
+    ChatMessage, ChatRequest, ChatRole, ChatResponse,
     LoadedBundleDescriptor, QuantizationBits, StartOptions, ArtifactPolicy,
-    AudioSpec, SpeechRequest, SpeechParams, VoiceConditioning,
-    TranscriptionParams,
+    SpeechParams, TranscriptionParams, TranscriptionUpdate,
+};
+use motlie_model::typed::{
+    AudioBuf, BatchTranscriber, CloneReference, Mono,
+    SpeechStream, SpeechSynthesizer, StreamingTranscriber, SynthesisRequest,
+    TranscriptionSession, VoiceCloneSynthesizer,
 };
 
 pub struct ModelsState {
@@ -147,14 +173,55 @@ pub struct ModelsState {
     pub(crate) current: Option<String>,
 }
 
+/// Capability-erased view the driver keeps per loaded alias.
+///
+/// The post-refactor typed traits in `libs/model/src/typed.rs` use
+/// `-> impl Future<Output = …>` return types, which are **not** trait-object
+/// safe. `BundleHandle` is additionally `Sized` with associated types. Neither
+/// `Box<dyn BundleHandle>` nor `Box<dyn SpeechSynthesizer>` compiles today.
+///
+/// The driver therefore introduces a thin local adapter layer with
+/// `BoxFuture`-returning methods and implements it for each concrete typed
+/// handle at `load` time. The original bundle handle is consumed into these
+/// adapters; shutdown is captured as a `FnOnce` closure to preserve the
+/// `shutdown(self)` contract without exposing the concrete handle type.
 pub(crate) struct LoadedModel {
     pub alias: String,
     pub selector: ModelSelector,
     pub descriptor: LoadedBundleDescriptor,
     pub backend: BackendKind,
-    pub handle: Box<dyn BundleHandle>,
+    pub capabilities: LoadedCapabilities,
+    pub shutdown: ShutdownFn,
     pub sessions: BTreeMap<String, ChatSession>,
     pub current_session: Option<String>,
+}
+
+type ShutdownFn =
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Result<(), ModelError>> + Send>;
+
+/// Dyn-safe capability shims owned by the driver. Each field is `None` when
+/// the bundle does not expose the capability (compile-time feature-gated
+/// absence is normalized to `None` at load time).
+#[derive(Default)]
+pub(crate) struct LoadedCapabilities {
+    pub chat: Option<Box<dyn DynChat>>,
+    pub embedding: Option<Box<dyn DynEmbedding>>,
+    pub batch_asr: Option<Box<dyn DynBatchAsr>>,
+    pub streaming_asr: Option<Box<dyn DynStreamingAsr>>,
+    pub tts: Option<Box<dyn DynTts>>,
+    /// Voice cloning's reference contract (`CloneReference<RATE_HZ, C>`) is
+    /// fixed per bundle. `DynVoiceClone16Mono` hard-codes the 16 kHz mono
+    /// contract used by today's only cloning-capable bundle
+    /// (`qwen3-tts.cpp`); additional arms go here when new contracts ship.
+    pub voice_clone_16k_mono: Option<Box<dyn DynVoiceClone16Mono>>,
+}
+
+// Representative adapter trait (others follow the same pattern):
+pub(crate) trait DynTts: Send + Sync {
+    fn synthesize<'a>(
+        &'a self,
+        request: SynthesisRequest,
+    ) -> futures::future::BoxFuture<'a, Result<Box<dyn DynSpeechStream>, ModelError>>;
 }
 
 pub(crate) struct ChatSession {
@@ -233,12 +300,16 @@ pub struct LoadCommand {
 }
 ```
 
-Maps directly to:
+Maps to a `match` over the parsed `ModelSelector`. There is no uniform
+`selector.bundle()?.start()` path post-refactor: each curated bundle has its
+own namespaced `start_typed` entry point under `motlie_models::{cap}::{bundle}`,
+returning a concrete `Sized` typed handle. The driver's `load` dispatch fans
+out once per feature-gated variant and wraps the handle into the
+`LoadedCapabilities` adapter shims:
 
 ```rust
 let selector: ModelSelector = cmd.selector.parse()?;
-let bundle = selector.bundle();
-let handle = bundle.start(StartOptions {
+let options = StartOptions {
     artifact_policy: Some(match cmd.allow_fetch {
         true  => ArtifactPolicy::AllowFetch { root: cmd.artifact_root },
         false => ArtifactPolicy::LocalOnly   {
@@ -247,15 +318,36 @@ let handle = bundle.start(StartOptions {
     }),
     quantization: cmd.quantization.map(Into::into),
     ..Default::default()
-}).await?;
+};
+let loaded = match selector {
+    #[cfg(feature = "model-qwen3-tts-cpp")]
+    ModelSelector::Tts(Tts::Qwen3TtsCpp0_6B) => {
+        let handle = motlie_models::tts::qwen3_tts_cpp::start_typed(options).await?;
+        LoadedModel::from_qwen3_tts_cpp(alias, selector, handle)
+    }
+    #[cfg(feature = "model-piper")]
+    ModelSelector::Tts(Tts::PiperEnUsLjspeechMedium) => {
+        let handle = motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(options).await?;
+        LoadedModel::from_piper(alias, selector, handle)
+    }
+    // … asr, chat, embedding branches mirror this shape …
+};
+state.loaded.insert(loaded.alias.clone(), loaded);
 ```
+
+Because `ModelSelector` is `#[non_exhaustive]` with feature-gated variants,
+the match must either be exhaustive over the compile-time enabled set or end
+in `_ => Err(DriverError::unknown_scope("selector not compiled in"))`.
+Completion follows the same visibility: `available_selectors` in the
+completion context is whatever the current binary was built with.
 
 Output: `loaded '<alias>' = <selector>  backend=<BackendKind>  q=<resolved_quantization>`.
 
 #### `unload <alias>`
 
-Calls `handle.shutdown().await`. Removes from `state.loaded`. Clears
-`state.current` if it matched.
+Invokes the captured `LoadedModel::shutdown` closure (which owns and consumes
+the original `BundleHandle::shutdown(self)` call). Removes from
+`state.loaded`. Clears `state.current` if it matched.
 
 #### `list [--loaded] [--available] [--capability chat|asr|tts|embedding]`
 
@@ -283,11 +375,13 @@ Dump on the chosen loaded model:
   `BackendMode` (CPU vs CUDA vs Metal) when the models layer introduces one.
 - `resolved_quantization` (from `LoadedBundleDescriptor.resolved_quantization`)
 - capability list + `InteractionStyle` per capability
-- `audio_spec` for TTS models (opened lazily: `synthesize --probe` is an
-  alternative, but `info` is clearer — we start a zero-length `SpeechStream`
-  once, read `audio_spec()`, drop it, and cache the spec on `LoadedModel`).
-  For ASR models there is no intrinsic audio_spec; it is set per-stream. The
-  `info` block for ASR reports "audio_spec: caller-supplied per stream".
+- Sample rate + channel layout for TTS models, reported as
+  `output: {sample_rate_hz} Hz / {layout}` where layout is `Mono`/`Stereo`.
+  The values come from the first `SpeechStream` chunk (`chunk.sample_rate_hz()`)
+  and are cached on `LoadedModel` at `load` time via a one-shot probe
+  synthesis. ASR models have no intrinsic rate: each `transcribe` call supplies
+  its own `AudioBuf<S, RATE_HZ, C>`, so `info` for ASR reports
+  `input: typed AudioBuf per call`.
 - `metric_snapshot()` summary if any
 
 ### Chat — one-shot
@@ -339,35 +433,90 @@ CommandOutput::text(response.content)
 
 ### ASR
 
-#### `transcribe <wav-path> [--alias NAME] [--language LANG] [--emit-partials] [--chunk-bytes N]`
+#### `transcribe <wav-path> [--alias NAME] [--language LANG] [--emit-partials] [--batch] [--chunk-frames N]`
 
-Opens `TranscriptionModel::open_stream`, pushes chunks (default 6400 bytes,
-same as `v0.7/main.rs:95`), collects final segments, prints timestamped
-transcript. `--emit-partials` plus the stream returning non-empty
-`TranscriptionUpdate` during `push_chunk` triggers `[partial]` prefixed log
-lines; final segments are always printed.
+The post-refactor ASR surface has two independent traits, and the driver
+exposes both:
 
-Maps to (paraphrased from `v0.7/main.rs:77-127`):
+- `--batch` (default when the loaded bundle's `BatchTranscriber` is present):
+  decode the wav into an `AudioBuf<i16, RATE_HZ, Mono>` sized to the bundle's
+  required input rate (resample with a proper anti-alias filter if needed),
+  then call `BatchTranscriber::transcribe(audio, TranscriptionParams { language })`.
+- Streaming (default when only `StreamingTranscriber` is available, or when
+  `--emit-partials` is set): open a session, chunk the buffer by frame count
+  (default 3200 frames ≈ 200 ms at 16 kHz), `session.ingest(chunk)` and
+  surface any non-empty `TranscriptionUpdate` as `[partial]` lines, then
+  `session.finish()` for the final transcript.
 
 ```rust
-let (pcm_bytes, encoding) = decode_wav(wav_path)?;
-let stream = asr.transcription()?.open_stream(
-    AudioSpec { sample_rate_hz, channels, encoding },
-    TranscriptionParams { language, emit_partials },
-).await?;
-push_chunks(&mut stream, pcm_bytes, chunk_bytes).await?;
-let final_update = stream.finish().await?;
+// --batch branch
+let audio = decode_wav_to_typed_audio::<16_000, Mono>(wav_path)?;
+let transcript = asr.capabilities.batch_asr.as_ref()
+    .ok_or_else(|| DriverError::invalid_argument("alias", "no BatchTranscriber"))?
+    .transcribe(audio, TranscriptionParams { language, emit_partials: false })
+    .await?;
+
+// streaming branch
+let mut session = asr.capabilities.streaming_asr.as_ref()
+    .ok_or_else(|| DriverError::invalid_argument("alias", "no StreamingTranscriber"))?
+    .open_session(TranscriptionParams { language, emit_partials })
+    .await?;
+for chunk in chunks_of(&audio, chunk_frames) {
+    if let Some(update) = session.ingest(chunk).await? {
+        if emit_partials { print_partial(&update); }
+    }
+}
+let final_update = session.finish().await?;
 ```
+
+Note: `AudioSpec { sample_rate_hz, channels, encoding }` is gone. Sample
+rate and channel layout are carried as type parameters on `AudioBuf`, and
+encoding is always `f32` or `i16` in the buffer itself. The driver's wav
+decoder is responsible for converting to the bundle's required shape at
+`transcribe` time.
 
 ### TTS
 
 #### `synthesize <text...> --out <wav-path> [--alias NAME] [--speaking-rate F] [--reference-audio PATH] [--reference-text TXT] [--seed N]`
 
-Opens `SpeechModel::open_stream`, pulls chunks, writes a `.wav` file using
-`hound` exactly like `tts_v0.4/main.rs:77-152`. `VoiceConditioning` is built
-from `--reference-audio` + `--reference-text` if provided, else `None`.
+Calls either `SpeechSynthesizer::synthesize(SynthesisRequest { text, params })`
+or — when `--reference-audio` is set and the bundle's `voice_clone_16k_mono`
+capability is present —
+`VoiceCloneSynthesizer::<16_000, Mono>::synthesize_with_reference(request,
+CloneReference { audio, transcript })`. The returned `SpeechStream` is drained
+via `next_chunk()`; sample rate comes from the first chunk
+(`chunk.sample_rate_hz()`). A `hound::WavWriter` sized for that rate receives
+every chunk and `finish()` is called on the stream.
 
-Returns `CommandOutput` with bytes written, sample rate, encoding, output
+The 16 kHz mono `CloneReference` contract is load-bearing for
+`qwen3-tts.cpp` — see the in-repo memory at
+`libs/models/examples/tts_qwen3_tts_cpp/README.md` about the speaker encoder
+being trained on 16-kHz-bandlimited content. The driver must preserve that
+contract when decoding the `--reference-audio` file (downmix to mono + proper
+anti-alias downsample to 16 kHz; do not pass raw 24 kHz or 44.1 kHz through).
+
+```rust
+let request = SynthesisRequest { text: text.join(" "), params: SpeechParams { speaking_rate, seed, .. } };
+let mut stream: Box<dyn DynSpeechStream> = if let Some(ref_path) = reference_audio {
+    let reference = decode_wav_to_reference::<16_000, Mono>(ref_path)?;
+    tts.capabilities.voice_clone_16k_mono.as_ref()
+        .ok_or_else(|| DriverError::invalid_argument("alias", "no VoiceCloneSynthesizer"))?
+        .synthesize_with_reference(request, CloneReference { audio: reference, transcript: reference_text })
+        .await?
+} else {
+    tts.capabilities.tts.as_ref()
+        .ok_or_else(|| DriverError::invalid_argument("alias", "no SpeechSynthesizer"))?
+        .synthesize(request).await?
+};
+let first = stream.next_chunk().await?.ok_or(empty_stream)?;
+let mut writer = hound::WavWriter::create(out_path, wav_spec(first.sample_rate_hz()))?;
+write_chunk(&mut writer, first)?;
+while let Some(chunk) = stream.next_chunk().await? { write_chunk(&mut writer, chunk)?; }
+stream.finish().await?;
+writer.finalize()?;
+```
+
+Returns `CommandOutput` with sample count, sample rate, layout, and output
 path.
 
 ### Embeddings
@@ -384,39 +533,48 @@ preview=[v0, v1, v2, …]`. `--json` dumps full vectors to stdout (or
 
 #### `pipeline tts-asr <text...> --tts-alias NAME --asr-alias NAME [--keep-wav PATH]`
 
-Sketch:
+Delegates to the existing helper `motlie_model::typed::stream_speech_into_asr`
+in `libs/model/src/typed.rs`, which already bridges a `SpeechSynthesizer` to a
+`StreamingTranscriber` with an optional `AudioTransform` for rate/layout
+adaptation (e.g. `I16MonoResampler`). The driver's role is only to thread
+loaded-state lookups and to tee the intermediate wav out when `--keep-wav`
+is set.
 
 ```rust
-let tts = state.loaded_mut(&cmd.tts_alias)?;
+let tts = state.loaded_ref(&cmd.tts_alias)?;
 let asr = state.loaded_ref(&cmd.asr_alias)?;
 
-let speech = tts.handle.speech()?;
-let mut sstream = speech.open_stream(SpeechRequest {
-    text: cmd.text.join(" "), .. Default::default()
-}).await?;
-let audio_spec = sstream.audio_spec().clone();
-let mut pcm = Vec::new();
-while let Some(chunk) = sstream.next_chunk().await? {
-    pcm.extend_from_slice(&chunk.data);
-    if chunk.end_of_stream { break; }
-}
-sstream.finish().await?;
-if let Some(path) = cmd.keep_wav { write_wav(path, &audio_spec, &pcm)?; }
-
-let mut tstream = asr.handle.transcription()?
-    .open_stream(audio_spec, TranscriptionParams::default()).await?;
-push_chunks(&mut tstream, pcm, 6400).await?;
-let final_update = tstream.finish().await?;
+let transcript = if let Some(path) = cmd.keep_wav {
+    // Local fork of stream_speech_into_asr that also writes to a WavWriter
+    // sized from the first chunk. Same semantics otherwise.
+    bridge_with_wav_tap(tts, asr, SynthesisRequest { text: cmd.text.join(" "), .. Default::default() }, &path).await?
+} else {
+    stream_speech_into_asr(
+        tts.tts_handle()?,                // &impl SpeechSynthesizer
+        identity_transform_or_i16_mono_resampler(tts, asr),
+        asr.streaming_asr_handle()?,      // &impl StreamingTranscriber
+        SynthesisRequest { text: cmd.text.join(" "), .. Default::default() },
+        TranscriptionParams::default(),
+    ).await?
+};
 
 CommandOutput {
     lines: vec![
         format!("input:  {input}"),
-        format!("output: {}", final_update.segments.iter().map(|s| &s.text).join(" ")),
+        format!("output: {}", transcript.segments.iter().map(|s| &s.text).join(" ")),
         format!("overlap: {:.1}%", word_overlap(&input, &output) * 100.0),
     ],
     effects: vec![],
 }
 ```
+
+The helper assumes mono throughout; cross-layout pipelines are deferred.
+`stream_speech_into_asr` is a free function taking borrowed typed handles,
+which means the driver needs a narrow accessor (`tts_handle()`, etc.) that
+yields the concrete `impl` type. In practice that means each `load`-dispatch
+arm either stores a concrete bundle handle alongside the dyn-adapters **or**
+the pipeline is implemented per-bundle-pair in a small match. The concrete
+arm is cleaner; dyn adapters cover single-capability commands only.
 
 Other pipelines (`pipeline chat-tts-asr`, `pipeline asr-tts`) follow the same
 shape; v1 ships only `tts-asr` to validate the engine, the rest track as
@@ -497,18 +655,18 @@ text output is sufficient and keeps the slice small.
 
 ## Mapping summary
 
-| Command             | libs/models entry                                | libs/model capability trait               |
-|---------------------|--------------------------------------------------|-------------------------------------------|
-| `load`              | `ModelSelector::from_str` → `bundle()` → `start` | —                                         |
-| `unload`            | `BundleHandle::shutdown`                         | —                                         |
-| `list --available`  | `Catalog::bundles`                               | —                                         |
-| `list --loaded`     | `LoadedBundleDescriptor` on each `BundleHandle`  | —                                         |
-| `info`              | `BundleHandle::descriptor` + `metric_snapshot`   | —                                         |
-| `chat`, `session …` | `handle.chat()`                                  | `ChatModel::generate`                     |
-| `transcribe`        | `handle.transcription()`                         | `TranscriptionModel::open_stream`, stream |
-| `synthesize`        | `handle.speech()`                                | `SpeechModel::open_stream`, stream        |
-| `embed`             | `handle.embeddings()`                            | `EmbeddingModel::embed`                   |
-| `pipeline tts-asr`  | both `speech` + `transcription`                  | both                                      |
+| Command             | libs/models entry                                                  | libs/model capability                                       |
+|---------------------|--------------------------------------------------------------------|-------------------------------------------------------------|
+| `load`              | namespaced `motlie_models::{tts,asr,chat,embeddings}::{bundle}::start_typed` | —                                                           |
+| `unload`            | `BundleHandle::shutdown` (captured in `ShutdownFn`)                | —                                                           |
+| `list --available`  | `Catalog::bundles`                                                 | —                                                           |
+| `list --loaded`     | cached `LoadedBundleDescriptor`                                    | —                                                           |
+| `info`              | cached `LoadedBundleDescriptor` + `metric_snapshot`                | —                                                           |
+| `chat`, `session …` | typed chat handle from `start_typed`                               | `ChatModel::generate`                                       |
+| `transcribe`        | typed ASR handle from `start_typed`                                | `BatchTranscriber::transcribe` / `StreamingTranscriber::open_session` |
+| `synthesize`        | typed TTS handle from `start_typed`                                | `SpeechSynthesizer::synthesize` (+ `VoiceCloneSynthesizer::synthesize_with_reference` when `--reference-audio`) |
+| `embed`             | typed embedding handle from `start_typed`                          | `EmbeddingModel::embed`                                     |
+| `pipeline tts-asr`  | both TTS + streaming ASR handles                                   | `motlie_model::typed::stream_speech_into_asr`               |
 
 ## Alternatives Considered
 
@@ -559,13 +717,30 @@ this DESIGN is accepted):
 - P1: scaffold `libs/driver/src/commands/models.rs` behind
       `commands-models` feature; wire empty `ModelsCommand`/`ModelsState`
       stubs + `CommandSet` impl that returns `CommandOutput::line("todo")`.
-- P2: implement `load`/`unload`/`list`/`use`/`info` over
-      `Catalog::with_defaults()` + `ModelSelector::from_str`.
+      Define the `DynChat`/`DynTts`/`DynBatchAsr`/`DynStreamingAsr`/
+      `DynEmbedding`/`DynVoiceClone16Mono` adapter traits with blanket impls
+      forwarding to the concrete typed handles (boxing the `impl Future`
+      returns into `BoxFuture`). This is the only place the driver pays for
+      the dyn/Sized mismatch.
+- P2: implement `load`/`unload`/`list`/`use`/`info` as a `match`
+      dispatch over feature-gated `ModelSelector` variants, each arm
+      calling the matching `motlie_models::<cap>::<bundle>::start_typed` and
+      constructing a `LoadedModel` via a per-bundle `from_*` helper that
+      populates `LoadedCapabilities` and the `ShutdownFn`.
 - P3: implement `chat` one-shot + `session` multi-turn.
-- P4: implement `transcribe`.
-- P5: implement `synthesize`.
-- P6: implement `embed`.
-- P7: implement `pipeline tts-asr`.
+- P4: implement `transcribe` over both `BatchTranscriber` and
+      `StreamingTranscriber` (flag-selectable); wav decoder resamples to the
+      bundle's required rate via an anti-alias-filtered resampler (not
+      `LinearInterpolator`) before constructing the typed `AudioBuf`.
+- P5: implement `synthesize` over `SpeechSynthesizer` and the 16 kHz mono
+      `VoiceCloneSynthesizer` branch; `--reference-audio` path reuses the
+      example-layer `decode_wav_to_reference` shape but pre-filters downsamples
+      so the 16 kHz contract receives bandlimited content.
+- P6: implement `embed` over the typed embedding handle returned by
+      `start_typed`.
+- P7: implement `pipeline tts-asr` on top of
+      `motlie_model::typed::stream_speech_into_asr`, with a small
+      `--keep-wav` fork that tees first-chunk-sized WAV bytes to disk.
 - P8: `bins/models/driver` with REPL frontend + asciicast recording option.
 - P9: tests (analog of `tmux.rs` tests — completion, help, error arms).
       Integration harness uses already-cached artifacts under
