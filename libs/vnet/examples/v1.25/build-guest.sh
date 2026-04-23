@@ -823,7 +823,7 @@ ensure_guest_identity alice 1000 1000 testpass
 ensure_guest_identity bob 1001 1001 testpass
 
 cat <<'TMUXEOF' > /etc/profile.d/tmux-auto.sh
-if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && [ -t 0 ] && [ -t 1 ] && command -v tmux >/dev/null 2>&1; then
     if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
         sleep 1
