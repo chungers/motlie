@@ -6,6 +6,8 @@
 |------|-----|---------|
 | 2026-04-22 | @codex-tts | Initial design for repo-local voice agent skills built on the existing TTS/ASR examples. |
 | 2026-04-22 | @codex-tts | Renamed the skill surface to `voice-speak`, `voice-listen`, and `voice-turn` and implemented the shared shell runtime under `.agents/voice/`. |
+| 2026-04-22 | @codex-tts | Added first-run interactive endpoint bootstrap and qwen3 reference-voice support via `--voice` / `--reference-audio`. |
+| 2026-04-23 | @codex-tts | Switched the primary orchestration path to a typed `bins/voice-agent` CLI, kept thin shell wrappers for skill entrypoints, installed platform-scoped binaries under `.agents/skills/bin/`, and extended the shared WAV decode path to accept the macOS/SoX 32-bit PCM capture format seen on `motliehost`. |
 
 ## Problem
 
@@ -50,10 +52,15 @@ We need repo-local skills and helper scripts that let an agent:
    the current host supports it.
 6. Skills can be used by both Codex and Claude from a shared repo-local
    directory layout.
+7. `voice-speak` and `voice-turn` support qwen3 voice cloning through either:
+   - a named alias such as `--voice jarvis`
+   - a direct file path via `--reference-audio /path/to/file.wav`
+8. If endpoint config is missing and the shell is interactive, the runtime
+   prompts once and persists the answers into `.agents/voice/voice.env`.
 
 ### Non-Functional
 
-1. Shared shell logic should live in one place.
+1. Shared orchestration logic should live in one place.
 2. Skills should stay thin and declarative.
 3. Failure modes should be explicit:
    - missing artifact roots
@@ -72,50 +79,59 @@ We need repo-local skills and helper scripts that let an agent:
 ├── skills/
 │   ├── voice-speak/
 │   ├── voice-listen/
-│   └── voice-turn/
-└── voice/
-    ├── voice.env.example
-    └── scripts/
+│   ├── voice-turn/
+│   └── bin/
+├── voice/
+│   ├── voice.env.example
+│   └── scripts/
+└── ...
+bins/
+└── voice-agent/
 ```
 
-The shared runtime lives under `.agents/voice/`. Each skill only contains:
+The typed orchestration lives under `bins/voice-agent/`. Each skill only contains:
 
 - `SKILL.md`
 - a tiny `scripts/run.sh` wrapper
 - optional references
 
-### Shared Runtime
+### Typed Runtime
 
-`.agents/voice/scripts/common.sh` owns:
+`bins/voice-agent` owns the typed contracts for:
 
-- repo-root discovery
-- endpoint config loading
+- backend selection
+- endpoint resolution
+- config loading and persistence
 - artifact-root defaults
 - optimized build selection
-- backend-to-example mapping
+- qwen reference-voice resolution
 
-`.agents/voice/scripts/ensure_examples.sh` owns:
+The thin shell wrappers call:
+
+```text
+.agents/voice/scripts/run_voice_agent.sh
+```
+
+That helper:
+
+- prefers an installed platform binary under `.agents/skills/bin/`
+- installs `voice-agent` into `.agents/skills/bin/voice-agent-<os>-<arch>-<profile>` when missing
+- builds `voice-agent` in `release` mode by default when installation is needed
+- respects `MOTLIE_VOICE_BUILD_PROFILE=debug`
+- executes the installed binary directly rather than using `cargo run`
+
+Within the typed runtime:
+
+- `speak` owns text input, playback, and `.wav` output
+- `listen` owns microphone capture or `.wav` input and transcript emission
+- `turn` composes the two into one request/response action
+- `setup` handles first-run interactive config bootstrap
+
+The typed runtime also owns:
 
 - build-or-reuse of `motlie-models` example binaries
-- `release` by default
-- CUDA feature selection when available on the current host
+- CUDA feature selection when available
 - qwen3-tts.cpp submodule initialization when needed
-
-`.agents/voice/scripts/voice_speak.sh` owns:
-
-- text input from `--text` or stdin
-- local playback, remote SSH playback, or direct `.wav` file output
-
-`.agents/voice/scripts/voice_listen.sh` owns:
-
-- microphone capture from a local or remote endpoint
-- optional fixed-duration capture window
-- optional `--wav` input bypass for testing
-
-`.agents/voice/scripts/voice_turn.sh` composes:
-
-- TTS prompt to the playback endpoint
-- ASR capture from the capture endpoint
 
 ### Endpoint Model
 
@@ -139,6 +155,28 @@ MOTLIE_ENDPOINT_MOTLIEHOST_RECORD_CMD=/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 
 ```
 
 This keeps the endpoint contract simple and editable in a terminal.
+
+When `voice.env` is missing or an endpoint field is not yet defined, the typed
+runtime can ask for the missing values interactively and append them to
+`.agents/voice/voice.env`. That gives the agent a one-time bootstrap path
+without relying on external memory.
+
+### Reference Voices
+
+The first slice keeps reference voices under:
+
+```text
+artifacts/voice-references/
+```
+
+Alias resolution is intentionally simple:
+
+- `--voice jarvis` -> `artifacts/voice-references/jarvis.wav`
+- `--voice "voice of jarvis"` normalizes to the same alias
+- `--reference-audio /path/to/file.wav` bypasses alias lookup
+
+Only `qwen3cpp` supports reference voices. Piper rejects `--voice` and
+`--reference-audio` explicitly.
 
 ### Build Policy
 
@@ -174,23 +212,14 @@ Cons:
 Pros:
 
 - stronger typing
+- explicit backend/endpoint contracts
+- easier validation than stringly-typed shell dispatch
 
 Cons:
 
-- larger implementation surface
-- duplicates the purpose of the existing example binaries
-- slower path for initial testing
+- still requires thin shell wrappers for skill entrypoints
+- larger implementation surface than shell-only bootstrap
 
-### 3. Shared shell runtime plus thin skills
-
-Pros:
-
-- reuses the existing example binaries directly
-- easy to inspect and test
-- keeps skills concise
-
-Cons:
-
-- shell scripts are less structured than a dedicated Rust tool
-
-This third option is the chosen design for the first slice.
+This second option is now the chosen design. The example binaries remain the
+speech engines, while `voice-agent` is the typed orchestration layer above
+them.

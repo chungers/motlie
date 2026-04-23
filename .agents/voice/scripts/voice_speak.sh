@@ -12,6 +12,8 @@ tts_backend='piper'
 endpoint_name="${MOTLIE_VOICE_PLAYBACK_ENDPOINT}"
 text_value=''
 wav_path=''
+voice_alias=''
+reference_audio_path=''
 quiet=1
 
 while [[ "$#" -gt 0 ]]; do
@@ -26,6 +28,14 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --text)
       text_value="$2"
+      shift 2
+      ;;
+    --voice)
+      voice_alias="$2"
+      shift 2
+      ;;
+    --reference-audio)
+      reference_audio_path="$2"
       shift 2
       ;;
     --wav)
@@ -55,6 +65,11 @@ example_binary="$(voice_example_binary "${example_name}")"
 [[ -d "${artifact_root}" || -f "${artifact_root}" ]] || voice_die "artifact root '${artifact_root}' does not exist"
 
 example_cmd=("${example_binary}" --artifact-root "${artifact_root}")
+if [[ -n "${voice_alias}" || -n "${reference_audio_path}" ]]; then
+  [[ "${tts_backend}" == 'qwen3cpp' ]] || voice_die "--voice/--reference-audio is only supported with backend 'qwen3cpp'"
+  resolved_reference_audio="$(voice_resolve_reference_audio "${voice_alias}" "${reference_audio_path}")"
+  example_cmd+=(--reference-audio "${resolved_reference_audio}")
+fi
 if [[ "${quiet}" -eq 1 ]]; then
   example_cmd+=(--quiet)
 fi
@@ -90,4 +105,3 @@ case "${endpoint_kind}" in
     voice_die "unsupported playback endpoint kind '${endpoint_kind}' for endpoint '${endpoint_name}'"
     ;;
 esac
-

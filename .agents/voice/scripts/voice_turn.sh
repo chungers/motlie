@@ -14,6 +14,8 @@ playback_endpoint="${MOTLIE_VOICE_PLAYBACK_ENDPOINT}"
 capture_endpoint="${MOTLIE_VOICE_CAPTURE_ENDPOINT}"
 prompt_text=''
 capture_seconds='8'
+voice_alias=''
+reference_audio_path=''
 quiet=1
 
 while [[ "$#" -gt 0 ]]; do
@@ -38,6 +40,14 @@ while [[ "$#" -gt 0 ]]; do
       prompt_text="$2"
       shift 2
       ;;
+    --voice)
+      voice_alias="$2"
+      shift 2
+      ;;
+    --reference-audio)
+      reference_audio_path="$2"
+      shift 2
+      ;;
     --seconds)
       capture_seconds="$2"
       shift 2
@@ -60,6 +70,13 @@ done
 
 speak_cmd=("${SCRIPT_DIR}/voice_speak.sh" --backend "${tts_backend}" --endpoint "${playback_endpoint}" --text "${prompt_text}")
 listen_cmd=("${SCRIPT_DIR}/voice_listen.sh" --backend "${asr_backend}" --endpoint "${capture_endpoint}" --seconds "${capture_seconds}")
+
+if [[ -n "${voice_alias}" ]]; then
+  speak_cmd+=(--voice "${voice_alias}")
+fi
+if [[ -n "${reference_audio_path}" ]]; then
+  speak_cmd+=(--reference-audio "${reference_audio_path}")
+fi
 
 if [[ "${quiet}" -eq 1 ]]; then
   speak_cmd+=(--quiet)

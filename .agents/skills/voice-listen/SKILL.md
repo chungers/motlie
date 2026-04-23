@@ -9,7 +9,9 @@ Use this skill when the agent needs spoken input from a person.
 
 Default behavior:
 
-- builds or reuses the optimized release ASR example binary
+- prefers an installed platform binary from `.agents/skills/bin/`
+- builds and installs the typed `voice-agent` binary in `release` mode when missing
+- `voice-agent` then builds or reuses the optimized release ASR example binary
 - prefers CUDA on the current host when available
 - captures audio from the configured endpoint using `rec -t wav -`
 - writes the transcript to stdout
@@ -19,9 +21,13 @@ Shared config lives in:
 - `.agents/voice/voice.env.example`
 - `.agents/voice/voice.env`
 
-Main entrypoint:
+If endpoint config is missing and the script is running interactively, the voice
+runtime prompts once for the missing values and stores them in
+`.agents/voice/voice.env`.
 
-- `.agents/voice/scripts/voice_listen.sh`
+Typed orchestrator:
+
+- `bins/voice-agent`
 
 Thin wrapper:
 
