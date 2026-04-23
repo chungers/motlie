@@ -6,8 +6,14 @@
 - [Plan: Voice Agent Skills](./PLAN_VOICE_AGENT_SKILLS.md)
 
 These docs cover the repo-local voice skill runtime under `.agents/voice/` and
-the thin skill wrappers under `.agents/skills/voice-speak`,
-`.agents/skills/voice-listen`, and `.agents/skills/voice-turn`.
+the typed `bins/voice-agent` runtime plus the thin skill wrappers under
+`.agents/skills/voice-speak`, `.agents/skills/voice-listen`, and
+`.agents/skills/voice-turn`.
+
+The conversational playbook with example human prompts and example agent
+responses lives at:
+
+- [.agents/skills/README.md](../.agents/skills/README.md)
 
 ## Product Notes
 

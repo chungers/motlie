@@ -1,12 +1,19 @@
-Use `.agents/voice/voice.env` to choose:
+Default:
 
-- playback endpoint
-- artifact roots
-- build profile
-- acceleration policy (`auto`, `cpu`, `cuda`)
+- local playback device
 
-For remote macOS playback:
+If the human says the speaker is remote, use:
 
-- `KIND=ssh`
-- `SSH_TARGET=motliehost`
-- `PLAY_CMD=/opt/homebrew/bin/play -t wav -`
+- `--endpoint ssh:<host>`
+
+Examples:
+
+- `--endpoint ssh:motliehost`
+- `--endpoint ssh:macmini`
+
+macOS remote playback setup:
+
+- install `sox`:
+  - `brew install sox`
+- expected remote playback command:
+  - `/opt/homebrew/bin/play -t wav -`

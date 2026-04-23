@@ -1,6 +1,6 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -19,7 +19,6 @@ enum Commands {
     Speak(SpeakArgs),
     Listen(ListenArgs),
     Turn(TurnArgs),
-    Setup,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, ValueEnum)]
@@ -39,19 +38,6 @@ enum AsrBackend {
 enum EndpointKind {
     Local,
     Ssh,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BuildProfile {
-    Debug,
-    Release,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Acceleration {
-    Auto,
-    Cpu,
-    Cuda,
 }
 
 #[derive(Debug, Args)]
@@ -121,8 +107,6 @@ struct EndpointConfig {
 #[derive(Debug)]
 struct VoiceConfig {
     repo_root: PathBuf,
-    env_path: PathBuf,
-    file_vars: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -141,17 +125,16 @@ enum BackendKind {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let repo_root = repo_root()?;
-    let mut config = VoiceConfig::load(repo_root)?;
+    let config = VoiceConfig::new(repo_root);
 
     match cli.command {
-        Commands::Speak(args) => run_speak(&mut config, &args),
-        Commands::Listen(args) => run_listen(&mut config, &args).map(|transcript| {
+        Commands::Speak(args) => run_speak(&config, &args),
+        Commands::Listen(args) => run_listen(&config, &args).map(|transcript| {
             if !transcript.is_empty() {
                 println!("{transcript}");
             }
         }),
-        Commands::Turn(args) => run_turn(&mut config, &args),
-        Commands::Setup => run_setup(&mut config),
+        Commands::Turn(args) => run_turn(&config, &args),
     }
 }
 
@@ -164,218 +147,115 @@ fn repo_root() -> Result<PathBuf> {
 }
 
 impl VoiceConfig {
-    fn load(repo_root: PathBuf) -> Result<Self> {
-        let env_path = repo_root.join(".agents/voice/voice.env");
-        let file_vars = if env_path.is_file() {
-            load_shell_env_file(&env_path, &repo_root)?
-        } else {
-            HashMap::new()
-        };
-
-        Ok(Self {
-            repo_root,
-            env_path,
-            file_vars,
-        })
-    }
-
-    fn var(&self, key: &str) -> Option<String> {
-        std::env::var(key)
-            .ok()
-            .or_else(|| self.file_vars.get(key).cloned())
-    }
-
-    fn build_profile(&self) -> Result<BuildProfile> {
-        match self
-            .var("MOTLIE_VOICE_BUILD_PROFILE")
-            .unwrap_or_else(|| "release".to_string())
-            .as_str()
-        {
-            "release" => Ok(BuildProfile::Release),
-            "debug" => Ok(BuildProfile::Debug),
-            other => bail!("unsupported MOTLIE_VOICE_BUILD_PROFILE='{other}'"),
-        }
-    }
-
-    fn acceleration(&self) -> Result<Acceleration> {
-        match self
-            .var("MOTLIE_VOICE_ACCELERATION")
-            .unwrap_or_else(|| "auto".to_string())
-            .as_str()
-        {
-            "auto" => Ok(Acceleration::Auto),
-            "cpu" => Ok(Acceleration::Cpu),
-            "cuda" => Ok(Acceleration::Cuda),
-            other => bail!("unsupported MOTLIE_VOICE_ACCELERATION='{other}'"),
-        }
+    fn new(repo_root: PathBuf) -> Self {
+        Self { repo_root }
     }
 
     fn piper_artifact_root(&self) -> PathBuf {
-        self.var("PIPER_ARTIFACT_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_home_cache_root)
+        self.preferred_existing_root(&[
+            self.default_repo_artifact_root(),
+            self.sibling_motlie_artifact_root(),
+            default_home_cache_root(),
+        ])
     }
 
     fn qwen_artifact_root(&self) -> PathBuf {
-        self.var("QWEN3_TTS_CPP_ARTIFACT_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp/qwen3-tts-models"))
+        self.preferred_existing_root(&[
+            PathBuf::from("/tmp/qwen3-tts-models"),
+            self.repo_root.join("artifacts/models/qwen3-tts-models"),
+            self.repo_root
+                .parent()
+                .unwrap_or(&self.repo_root)
+                .join("motlie")
+                .join("artifacts/models/qwen3-tts-models"),
+        ])
     }
 
     fn whisper_artifact_root(&self) -> PathBuf {
-        self.var("WHISPER_ARTIFACT_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_home_cache_root)
+        self.preferred_existing_root(&[
+            self.default_repo_artifact_root(),
+            self.sibling_motlie_artifact_root(),
+            default_home_cache_root(),
+        ])
     }
 
     fn sherpa_artifact_root(&self) -> PathBuf {
-        self.var("SHERPA_ARTIFACT_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_home_cache_root)
+        self.preferred_existing_root(&[
+            self.default_repo_artifact_root(),
+            self.sibling_motlie_artifact_root(),
+            default_home_cache_root(),
+        ])
     }
 
     fn moonshine_artifact_root(&self) -> PathBuf {
-        self.var("MOONSHINE_ARTIFACT_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_home_cache_root)
+        self.preferred_existing_root(&[
+            self.default_repo_artifact_root(),
+            self.sibling_motlie_artifact_root(),
+            default_home_cache_root(),
+        ])
     }
 
     fn reference_root(&self) -> PathBuf {
-        self.var("MOTLIE_VOICE_REFERENCE_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.repo_root.join("artifacts/voice-references"))
+        self.repo_root.join("artifacts/voice-references")
     }
 
-    fn playback_endpoint_name(&self) -> String {
-        self.var("MOTLIE_VOICE_PLAYBACK_ENDPOINT")
-            .unwrap_or_else(|| "motliehost".to_string())
+    fn default_repo_artifact_root(&self) -> PathBuf {
+        self.repo_root.join("artifacts/models/hf-cache")
     }
 
-    fn capture_endpoint_name(&self) -> String {
-        self.var("MOTLIE_VOICE_CAPTURE_ENDPOINT")
-            .unwrap_or_else(|| "motliehost".to_string())
+    fn sibling_motlie_artifact_root(&self) -> PathBuf {
+        self.repo_root
+            .parent()
+            .unwrap_or(&self.repo_root)
+            .join("motlie")
+            .join("artifacts/models/hf-cache")
     }
 
-    fn endpoint(&mut self, endpoint_name: &str) -> Result<EndpointConfig> {
-        let kind = match self.ensure_endpoint_field(endpoint_name, "KIND", None)?.as_str() {
-            "local" => EndpointKind::Local,
-            "ssh" => EndpointKind::Ssh,
-            other => bail!("unsupported endpoint kind '{other}' for endpoint '{endpoint_name}'"),
-        };
+    fn preferred_existing_root(&self, candidates: &[PathBuf]) -> PathBuf {
+        candidates
+            .iter()
+            .find(|path| path.exists())
+            .cloned()
+            .unwrap_or_else(|| candidates[0].clone())
+    }
 
-        let play_cmd = self.ensure_endpoint_field(endpoint_name, "PLAY_CMD", Some(kind))?;
-        let record_cmd = self.ensure_endpoint_field(endpoint_name, "RECORD_CMD", Some(kind))?;
-        let ssh_target = if kind == EndpointKind::Ssh {
-            Some(self.ensure_endpoint_field(endpoint_name, "SSH_TARGET", Some(kind))?)
-        } else {
-            None
-        };
+    fn endpoint(&self, endpoint_name: Option<&str>) -> Result<EndpointConfig> {
+        match endpoint_name {
+            None | Some("local") => self.local_endpoint(),
+            Some(endpoint) => self.remote_endpoint(endpoint),
+        }
+    }
 
+    fn local_endpoint(&self) -> Result<EndpointConfig> {
         Ok(EndpointConfig {
-            kind,
-            ssh_target,
-            play_cmd,
-            record_cmd,
+            kind: EndpointKind::Local,
+            ssh_target: None,
+            play_cmd: local_play_command()?,
+            record_cmd: local_record_command()?,
         })
     }
 
-    fn ensure_endpoint_field(
-        &mut self,
-        endpoint_name: &str,
-        field_name: &str,
-        known_kind: Option<EndpointKind>,
-    ) -> Result<String> {
-        let key = format!("MOTLIE_ENDPOINT_{}_{}", endpoint_key(endpoint_name), field_name);
-        if let Some(value) = self.var(&key) {
-            return Ok(value);
+    fn remote_endpoint(&self, endpoint_name: &str) -> Result<EndpointConfig> {
+        let ssh_target = endpoint_name
+            .strip_prefix("ssh:")
+            .unwrap_or(endpoint_name)
+            .trim();
+        if ssh_target.is_empty() {
+            bail!("remote endpoint must be provided as ssh:<host> or <host>");
         }
-        if !interactive_tty() {
-            bail!(
-                "missing endpoint field {field_name} for endpoint '{endpoint_name}'; set it in {} or run `cargo run -p voice-agent -- setup`",
-                self.env_path.display()
-            );
-        }
-
-        let default_value = endpoint_field_default(endpoint_name, field_name, known_kind);
-        let prompt = format!("Missing {field_name} for endpoint '{endpoint_name}'");
-        let value = prompt_with_default(&prompt, default_value.as_deref())?;
-        if value.trim().is_empty() {
-            bail!("empty value provided for endpoint field {field_name}");
-        }
-        self.upsert_env_var(&key, &value)?;
-        self.file_vars.insert(key, value.clone());
-        eprintln!("[voice-agent] stored {field_name} for endpoint '{endpoint_name}' in {}", self.env_path.display());
-        Ok(value)
-    }
-
-    fn upsert_env_var(&self, key: &str, value: &str) -> Result<()> {
-        if let Some(parent) = self.env_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let mut lines = if self.env_path.is_file() {
-            fs::read_to_string(&self.env_path)?
-                .lines()
-                .map(|line| line.to_string())
-                .collect::<Vec<_>>()
-        } else {
-            vec!["# @codex-tts 2026-04-23 -- Generated by voice-agent.".to_string()]
-        };
-
-        let replacement = format!("{key}={}", shell_quote(value));
-        let mut replaced = false;
-        for line in &mut lines {
-            if line.starts_with(&format!("{key}=")) {
-                *line = replacement.clone();
-                replaced = true;
-                break;
-            }
-        }
-        if !replaced {
-            lines.push(replacement);
-        }
-
-        fs::write(&self.env_path, format!("{}\n", lines.join("\n")))?;
-        Ok(())
+        Ok(EndpointConfig {
+            kind: EndpointKind::Ssh,
+            ssh_target: Some(ssh_target.to_string()),
+            play_cmd: remote_play_command(),
+            record_cmd: remote_record_command(),
+        })
     }
 }
 
-fn run_setup(config: &mut VoiceConfig) -> Result<()> {
-    if !interactive_tty() {
-        bail!("voice-agent setup requires an interactive terminal");
-    }
-
-    let playback_default = config.playback_endpoint_name();
-    let capture_default = config.capture_endpoint_name();
-    let playback = prompt_with_default("Default playback endpoint name", Some(&playback_default))?;
-    let capture = prompt_with_default("Default capture endpoint name", Some(&capture_default))?;
-    config.upsert_env_var("MOTLIE_VOICE_PLAYBACK_ENDPOINT", &playback)?;
-    config.file_vars.insert("MOTLIE_VOICE_PLAYBACK_ENDPOINT".into(), playback.clone());
-    config.upsert_env_var("MOTLIE_VOICE_CAPTURE_ENDPOINT", &capture)?;
-    config.file_vars.insert("MOTLIE_VOICE_CAPTURE_ENDPOINT".into(), capture.clone());
-
-    let _ = config.endpoint(&playback)?;
-    if capture != playback {
-        let _ = config.endpoint(&capture)?;
-    }
-
-    let reference_root = config.reference_root();
-    config.upsert_env_var(
-        "MOTLIE_VOICE_REFERENCE_ROOT",
-        reference_root.to_string_lossy().as_ref(),
-    )?;
-    eprintln!("[voice-agent] wrote configuration to {}", config.env_path.display());
-    Ok(())
-}
-
-fn run_speak(config: &mut VoiceConfig, args: &SpeakArgs) -> Result<()> {
+fn run_speak(config: &VoiceConfig, args: &SpeakArgs) -> Result<()> {
     ensure_examples(config, &[BackendKind::Tts(args.backend)])?;
 
-    let endpoint_name = args
-        .endpoint
-        .clone()
-        .unwrap_or_else(|| config.playback_endpoint_name());
-    let endpoint = config.endpoint(&endpoint_name)?;
+    let endpoint = config.endpoint(args.endpoint.as_deref())?;
     let example = tts_spec(args.backend);
     let example_binary = example_binary_path(config, example.example_name);
     let artifact_root = tts_artifact_root(config, args.backend);
@@ -419,7 +299,7 @@ fn run_speak(config: &mut VoiceConfig, args: &SpeakArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_listen(config: &mut VoiceConfig, args: &ListenArgs) -> Result<String> {
+fn run_listen(config: &VoiceConfig, args: &ListenArgs) -> Result<String> {
     ensure_examples(config, &[BackendKind::Asr(args.backend)])?;
 
     let example = asr_spec(args.backend);
@@ -443,16 +323,12 @@ fn run_listen(config: &mut VoiceConfig, args: &ListenArgs) -> Result<String> {
         return run_asr_with_bytes(asr, &bytes);
     }
 
-    let endpoint_name = args
-        .endpoint
-        .clone()
-        .unwrap_or_else(|| config.capture_endpoint_name());
-    let endpoint = config.endpoint(&endpoint_name)?;
+    let endpoint = config.endpoint(args.endpoint.as_deref())?;
     let capture_bytes = capture_wav_bytes(&endpoint, args.seconds)?;
     run_asr_with_bytes(asr, &capture_bytes)
 }
 
-fn run_turn(config: &mut VoiceConfig, args: &TurnArgs) -> Result<()> {
+fn run_turn(config: &VoiceConfig, args: &TurnArgs) -> Result<()> {
     let speak_args = SpeakArgs {
         backend: args.tts_backend,
         endpoint: args.playback_endpoint.clone(),
@@ -534,10 +410,59 @@ fn playback_command(endpoint: &EndpointConfig) -> Result<Command> {
     Ok(cmd)
 }
 
+fn local_play_command() -> Result<String> {
+    if Path::new("/opt/homebrew/bin/play").is_file() {
+        return Ok("/opt/homebrew/bin/play -t wav -".to_string());
+    }
+    if command_in_path("play") {
+        return Ok("play -t wav -".to_string());
+    }
+    if command_in_path("ffplay") {
+        return Ok("ffplay -autoexit -nodisp -i pipe:0".to_string());
+    }
+    bail!(
+        "no local playback command found; install sox (`play`) or ffplay, or use --endpoint ssh:<host>"
+    )
+}
+
+fn local_record_command() -> Result<String> {
+    if Path::new("/opt/homebrew/bin/rec").is_file() {
+        return Ok("/opt/homebrew/bin/rec -q -t wav -".to_string());
+    }
+    if command_in_path("rec") {
+        return Ok("rec -q -t wav -".to_string());
+    }
+    bail!(
+        "no local recording command found; install sox (`rec`) or use --endpoint ssh:<host>"
+    )
+}
+
+fn remote_play_command() -> String {
+    "if [ -x /opt/homebrew/bin/play ]; then exec /opt/homebrew/bin/play -t wav -; elif command -v play >/dev/null 2>&1; then exec play -t wav -; elif command -v ffplay >/dev/null 2>&1; then exec ffplay -autoexit -nodisp -i pipe:0; else echo 'no remote playback command found (expected play or ffplay)' >&2; exit 127; fi".to_string()
+}
+
+fn remote_record_command() -> String {
+    "if [ -x /opt/homebrew/bin/rec ]; then exec /opt/homebrew/bin/rec -q -t wav -__MOTLIE_TRIM__; elif command -v rec >/dev/null 2>&1; then exec rec -q -t wav -__MOTLIE_TRIM__; else echo 'no remote recording command found (expected rec)' >&2; exit 127; fi".to_string()
+}
+
+fn command_in_path(command: &str) -> bool {
+    Command::new("bash")
+        .arg("-lc")
+        .arg(format!("command -v {command} >/dev/null 2>&1"))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn with_trim(record_cmd: &str, seconds: Option<u32>) -> String {
-    match seconds {
-        Some(value) => format!("{record_cmd} trim 0 {value}"),
-        None => record_cmd.to_string(),
+    let suffix = match seconds {
+        Some(value) => format!(" trim 0 {value}"),
+        None => String::new(),
+    };
+    if record_cmd.contains("__MOTLIE_TRIM__") {
+        record_cmd.replace("__MOTLIE_TRIM__", &suffix)
+    } else {
+        format!("{record_cmd}{suffix}")
     }
 }
 
@@ -573,9 +498,7 @@ fn ensure_examples(config: &VoiceConfig, backends: &[BackendKind]) -> Result<()>
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&config.repo_root);
     cmd.arg("build").arg("-p").arg("motlie-models");
-    if matches!(config.build_profile()?, BuildProfile::Release) {
-        cmd.arg("--release");
-    }
+    cmd.arg("--release");
     for example in examples {
         cmd.arg("--example").arg(example);
     }
@@ -595,32 +518,14 @@ fn ensure_examples(config: &VoiceConfig, backends: &[BackendKind]) -> Result<()>
     Ok(())
 }
 
-fn wants_cuda(config: &VoiceConfig) -> Result<bool> {
-    match config.acceleration()? {
-        Acceleration::Cpu => Ok(false),
-        Acceleration::Auto => Ok(
-            Command::new("nvidia-smi")
-                .arg("-L")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false),
-        ),
-        Acceleration::Cuda => {
-            let ok = Command::new("nvidia-smi")
-                .arg("-L")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false);
-            if !ok {
-                bail!("MOTLIE_VOICE_ACCELERATION=cuda but no usable NVIDIA device is visible");
-            }
-            Ok(true)
-        }
-    }
+fn wants_cuda(_config: &VoiceConfig) -> Result<bool> {
+    Ok(Command::new("nvidia-smi")
+        .arg("-L")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false))
 }
 
 fn initialize_qwen_submodule(repo_root: &Path) -> Result<()> {
@@ -678,14 +583,10 @@ fn asr_spec(backend: AsrBackend) -> ExampleSpec {
 }
 
 fn example_binary_path(config: &VoiceConfig, example_name: &str) -> PathBuf {
-    let profile = match config.build_profile().unwrap_or(BuildProfile::Release) {
-        BuildProfile::Release => "release",
-        BuildProfile::Debug => "debug",
-    };
     config
         .repo_root
         .join("target")
-        .join(profile)
+        .join("release")
         .join("examples")
         .join(example_name)
 }
@@ -775,91 +676,6 @@ fn ensure_success(status: std::process::ExitStatus, label: &str) -> Result<()> {
     } else {
         bail!("{label} failed with status {status}")
     }
-}
-
-fn load_shell_env_file(path: &Path, repo_root: &Path) -> Result<HashMap<String, String>> {
-    let output = Command::new("bash")
-        .arg("-lc")
-        .arg("set -a; source \"$1\"; env -0")
-        .arg("_")
-        .arg(path)
-        .env("REPO_ROOT", repo_root)
-        .output()
-        .with_context(|| format!("source {}", path.display()))?;
-    ensure_success(output.status, "source voice.env")?;
-
-    let mut vars = HashMap::new();
-    for entry in output.stdout.split(|byte| *byte == 0) {
-        if entry.is_empty() {
-            continue;
-        }
-        if let Some(position) = entry.iter().position(|byte| *byte == b'=') {
-            let key = &entry[..position];
-            let value = &entry[position + 1..];
-            vars.insert(
-                String::from_utf8_lossy(key).to_string(),
-                String::from_utf8_lossy(value).to_string(),
-            );
-        }
-    }
-    Ok(vars)
-}
-
-fn interactive_tty() -> bool {
-    io::stdin().is_terminal() && io::stdout().is_terminal()
-}
-
-fn prompt_with_default(prompt: &str, default: Option<&str>) -> Result<String> {
-    let mut stdout = io::stdout();
-    match default {
-        Some(default) => write!(stdout, "{prompt} [{default}]: ")?,
-        None => write!(stdout, "{prompt}: ")?,
-    }
-    stdout.flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let input = input.trim().to_string();
-    Ok(if input.is_empty() {
-        default.unwrap_or_default().to_string()
-    } else {
-        input
-    })
-}
-
-fn endpoint_key(name: &str) -> String {
-    name.to_ascii_uppercase().replace('-', "_")
-}
-
-fn endpoint_field_default(endpoint_name: &str, field_name: &str, known_kind: Option<EndpointKind>) -> Option<String> {
-    let kind = known_kind.unwrap_or_else(|| {
-        if endpoint_name == "local-linux" {
-            EndpointKind::Local
-        } else {
-            EndpointKind::Ssh
-        }
-    });
-
-    match field_name {
-        "KIND" => Some(match kind {
-            EndpointKind::Local => "local".to_string(),
-            EndpointKind::Ssh => "ssh".to_string(),
-        }),
-        "SSH_TARGET" => Some(endpoint_name.to_string()),
-        "PLAY_CMD" => Some(match kind {
-            EndpointKind::Local => "play -t wav -".to_string(),
-            EndpointKind::Ssh => "/opt/homebrew/bin/play -t wav -".to_string(),
-        }),
-        "RECORD_CMD" => Some(match kind {
-            EndpointKind::Local => "rec -q -t wav -".to_string(),
-            EndpointKind::Ssh => "/opt/homebrew/bin/rec -q -t wav -".to_string(),
-        }),
-        _ => None,
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn default_home_cache_root() -> PathBuf {

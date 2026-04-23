@@ -14,17 +14,9 @@ Use this skill for a single spoken turn:
 Default behavior:
 
 - prefers an installed platform binary from `.agents/skills/bin/`
-- builds and installs the typed `voice-agent` binary in `release` mode when missing
+- builds and installs the most optimized host binary in `release` mode when missing
 - `voice-agent` then builds or reuses the optimized speech example binaries
-
-Shared config lives in:
-
-- `.agents/voice/voice.env.example`
-- `.agents/voice/voice.env`
-
-If endpoint config is missing and the script is running interactively, the voice
-runtime prompts once for the missing values and stores them in
-`.agents/voice/voice.env`.
+- prefers CUDA automatically on the current host when available
 
 Typed orchestrator:
 
@@ -33,6 +25,28 @@ Typed orchestrator:
 Thin wrapper:
 
 - `scripts/run.sh`
+
+Agent decision rule:
+
+- discover runtime details progressively through the conversation with the human
+- if the user says `say with qwen3`, use `--tts-backend qwen3cpp`; otherwise default to `piper`
+- if the user says `listen with sherpa` or `listen with moonshine`, use that ASR backend; otherwise default to `whisper`
+- if local playback/capture commands exist, try local first
+- ask the human whether speak/listen actually worked locally
+- if local playback or capture did not work, ask the human whether to use a remote SSH host
+- when remote is requested, pass `--playback-endpoint ssh:<host>` and/or `--capture-endpoint ssh:<host>`
+- if the wrapper says it is building the optimized binary, tell the human to wait
+
+If the human asks operational questions during the turn:
+
+- "how do I hear you?" means explain the `voice-speak` path:
+  - local speaker by default
+  - remote playback over SSH with `ssh:<host>` if needed
+  - Homebrew `sox` on macOS provides `play`
+- "how do you hear me?" means explain the `voice-listen` path:
+  - local mic by default
+  - remote mic over SSH with `ssh:<host>` if needed
+  - Homebrew `sox` on macOS provides `rec`
 
 Example:
 
