@@ -1,15 +1,15 @@
-# v1.3 Guest Image Notes
+# v1.35 Guest Image Notes
 
-`v1.3` uses one generic guest image plus per-launch overlay mutation.
+`v1.35` uses one generic guest image plus per-launch mutation, matching the CH
+`v1.3` guest contract as closely as possible.
 
-The authoritative end-to-end design/status document for this example is
-[README.md](./README.md). This file records the image/runtime constraints that
-turned out to be easy to regress while bringing up the SSH proxy flow.
+The authoritative semantic source of truth is the CH
+[`../v1.3`](../v1.3) image/runtime contract. This file records the parts of
+that contract that `v1.35` must preserve while using native Apple Vz.
 
 ## Current Contract
 
-- `artifacts/base/Image` and `artifacts/base/rootfs.squashfs` are shared across
-  guests
+- `artifacts/source-base.vm` is the shared generic guest base across guests
 - guest identity, CA trust material, cloud-init seed data, hostnames, and
   writable root state are launch-time inputs
 - the guest image bakes:
@@ -17,6 +17,7 @@ turned out to be easy to regress while bringing up the SSH proxy flow.
   - `AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u`
   - `motlie-agent-state.service`
   - `motlie-vmm-vsock-ssh.service`
+  - real `codex` / `claude` CLI installs, matching CH `v1.3`
   - the generic `alice` / `bob` accounts and validation tooling
 
 ## Non-Regression Notes

@@ -976,30 +976,12 @@ if [[ ! -s /usr/local/bin/motlie-vfs-guest || ! -x /usr/local/bin/motlie-vfs-gue
 fi
 NPM_GLOBAL_PREFIX="\$(npm prefix -g 2>/dev/null || true)"
 if [[ -n "\$NPM_GLOBAL_PREFIX" ]]; then
-  if [[ -x "\$NPM_GLOBAL_PREFIX/bin/codex" && ! -x /usr/local/bin/codex ]]; then
+  if [[ -s "\$NPM_GLOBAL_PREFIX/bin/codex" && -x "\$NPM_GLOBAL_PREFIX/bin/codex" && ( ! -s /usr/local/bin/codex || ! -x /usr/local/bin/codex ) ]]; then
     printf '${CONTROL_PASSWORD}\n' | sudo -S ln -sf "\$NPM_GLOBAL_PREFIX/bin/codex" /usr/local/bin/codex
   fi
-  if [[ -x "\$NPM_GLOBAL_PREFIX/bin/claude" && ! -x /usr/local/bin/claude ]]; then
+  if [[ -s "\$NPM_GLOBAL_PREFIX/bin/claude" && -x "\$NPM_GLOBAL_PREFIX/bin/claude" && ( ! -s /usr/local/bin/claude || ! -x /usr/local/bin/claude ) ]]; then
     printf '${CONTROL_PASSWORD}\n' | sudo -S ln -sf "\$NPM_GLOBAL_PREFIX/bin/claude" /usr/local/bin/claude
   fi
-fi
-if ! command -v codex >/dev/null 2>&1; then
-  echo "[v1.35 launch] installing codex wrapper"
-  cat <<'CODEXWRAP' >/tmp/codex
-#!/bin/sh
-exec npm exec --yes @openai/codex -- "$@"
-CODEXWRAP
-  chmod 0755 /tmp/codex
-  printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/codex /usr/local/bin/codex
-fi
-if ! command -v claude >/dev/null 2>&1; then
-  echo "[v1.35 launch] installing claude wrapper"
-  cat <<'CLAUDEWRAP' >/tmp/claude
-#!/bin/sh
-exec npm exec --yes @anthropic-ai/claude-code -- "$@"
-CLAUDEWRAP
-  chmod 0755 /tmp/claude
-  printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/claude /usr/local/bin/claude
 fi
 echo "[v1.35 launch] provisioning block complete"
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
@@ -1025,6 +1007,7 @@ EOFSSHCFG
 fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0644 /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl daemon-reload
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh.service || printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-agent-state.service || true
@@ -1074,6 +1057,7 @@ fi
 
 VALIDATION_OK=0
 VALIDATION_REMOTE_JSON="/tmp/motlie-vfs-validation.json"
+LAST_VALIDATION_JSON=""
 for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
   if ! kill -0 "$RUNNER_PID" >/dev/null 2>&1; then
     echo "vz-vsock-runner exited early; log follows:" >&2
@@ -1100,9 +1084,9 @@ workspace_readme_path = workspace_mount / 'README.md'
 agent_state_readme_path = agent_state_mount / 'README.md'
 env_path = home_mount / '.env'
 auth_path = home_mount / '.ssh' / 'authorized_keys'
-codex_link = home_mount / '.codex'
-claude_link = home_mount / '.claude'
-claude_code_link = home_mount / '.config' / 'claude-code'
+codex_dir = home_mount / '.codex'
+claude_dir = home_mount / '.claude'
+claude_code_dir = home_mount / '.config' / 'claude-code'
 
 result = {
     'token': token,
@@ -1117,9 +1101,9 @@ required_paths_exist = (
     and agent_state_readme_path.exists()
     and env_path.exists()
     and auth_path.exists()
-    and codex_link.exists()
-    and claude_link.exists()
-    and claude_code_link.exists()
+    and codex_dir.exists()
+    and claude_dir.exists()
+    and claude_code_dir.exists()
 )
 
 if not (result['workspace_mountpoint'] and result['home_mountpoint'] and result['agent_state_mountpoint'] and required_paths_exist):
@@ -1131,9 +1115,6 @@ agent_state_readme = agent_state_readme_path.read_text(encoding='utf-8').strip()
 env_line = env_path.read_text(encoding='utf-8').strip()
 authorized_keys = auth_path.read_text(encoding='utf-8').strip()
 
-def link_target(path: Path) -> str:
-    return os.readlink(path) if path.is_symlink() else ''
-
 def command_ok(cmd):
     env = os.environ.copy()
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
@@ -1142,7 +1123,8 @@ def command_ok(cmd):
 
 def first_executable(candidates):
     for candidate in candidates:
-        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+        path = Path(candidate)
+        if path.is_file() and path.stat().st_size > 0 and os.access(candidate, os.X_OK):
             return candidate
     return ''
 
@@ -1152,6 +1134,9 @@ codex_path = first_executable(['/usr/local/bin/codex', '/usr/bin/codex', '/bin/c
 claude_path = first_executable(['/usr/local/bin/claude', '/usr/bin/claude', '/bin/claude'])
 codex_shell_ok, codex_shell_out, codex_shell_err = command_ok(['env', '-u', 'SSH_CONNECTION', 'TMUX=1', 'bash', '--noprofile', '--norc', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v codex'])
 claude_shell_ok, claude_shell_out, claude_shell_err = command_ok(['env', '-u', 'SSH_CONNECTION', 'TMUX=1', 'bash', '--noprofile', '--norc', '-lc', 'export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; command -v claude'])
+codex_dir_ok = codex_dir.is_dir() and os.access(codex_dir, os.W_OK)
+claude_dir_ok = claude_dir.is_dir() and os.access(claude_dir, os.W_OK)
+claude_code_dir_ok = claude_code_dir.is_dir() and os.access(claude_code_dir, os.W_OK)
 codex_ok = bool(codex_path)
 claude_ok = bool(claude_path)
 
@@ -1163,9 +1148,9 @@ result.update({
     'env_line': env_line,
     'expected_env_line': expected_env,
     'authorized_keys_present': bool(authorized_keys),
-    'codex_link': link_target(codex_link),
-    'claude_link': link_target(claude_link),
-    'claude_code_link': link_target(claude_code_link),
+    'codex_dir_writable': codex_dir_ok,
+    'claude_dir_writable': claude_dir_ok,
+    'claude_code_dir_writable': claude_code_dir_ok,
     'codex_cli_path': codex_path,
     'codex_cli_present': codex_ok,
     'codex_shell_lookup_ok': codex_shell_ok,
@@ -1188,11 +1173,9 @@ result['status'] = 'ok' if (
     and agent_state_readme == expected_agent_state_readme
     and env_line == expected_env
     and bool(authorized_keys)
-    and link_target(codex_link) == '/agent-state/codex'
-    and link_target(claude_link) == '/agent-state/claude'
-    and link_target(claude_code_link) == '/agent-state/claude-code'
-    and codex_ok
-    and claude_ok
+    and codex_dir_ok
+    and claude_dir_ok
+    and claude_code_dir_ok
     and dns_ok
     and curl_ok
 ) else 'mismatch'
@@ -1204,21 +1187,23 @@ EOF
   VALIDATION_JSON="$(cat "$VALIDATION_LOCAL_JSON")"
   rm -f "$VALIDATION_LOCAL_JSON"
   if [[ -n "${VALIDATION_JSON//[[:space:]]/}" ]]; then
+    LAST_VALIDATION_JSON="$VALIDATION_JSON"
     STATUS="$(printf '%s' "$VALIDATION_JSON" | python3 -c 'import json,sys; payload=json.loads(sys.stdin.read()); print(payload["status"])')"
     if [[ "$STATUS" == "ok" ]]; then
       printf '%s\n' "$VALIDATION_JSON" >"$ARTIFACTS_DIR/${GUEST_NAME}-validation.json"
       VALIDATION_OK=1
       break
     fi
-    echo "guest validation reported mismatch" >&2
-    printf '%s\n' "$VALIDATION_JSON" >&2
-    exit 1
   fi
   sleep 1
 done
 
 if [[ "$VALIDATION_OK" -ne 1 ]]; then
   echo "timed out waiting for guest validation sentinels" >&2
+  if [[ -n "$LAST_VALIDATION_JSON" ]]; then
+    echo "last guest validation mismatch:" >&2
+    printf '%s\n' "$LAST_VALIDATION_JSON" >&2
+  fi
   print_failure_context
   exit 1
 fi

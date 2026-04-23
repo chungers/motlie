@@ -799,23 +799,15 @@ if [[ ! -s /usr/local/bin/motlie-vfs-guest || ! -x /usr/local/bin/motlie-vfs-gue
   echo "[v1.35 build] compiling motlie-vfs-guest-v1_1"
   cargo build --manifest-path '$GUEST_SRC_DIR/libs/vfs/Cargo.toml' --release --features vsock,client --bin motlie-vfs-guest-v1_1
 fi
-if ! command -v codex >/dev/null 2>&1; then
-  echo "[v1.35 build] installing codex wrapper"
-  cat <<'CODEXWRAP' >/tmp/codex
-#!/bin/sh
-exec npm exec --yes @openai/codex -- "$@"
-CODEXWRAP
-  chmod 0755 /tmp/codex
-  sudo install -D -m 0755 /tmp/codex /usr/local/bin/codex
+codex_path="\$(command -v codex 2>/dev/null || true)"
+if [[ -z "\$codex_path" || ! -s "\$codex_path" || ! -x "\$codex_path" ]]; then
+  echo "[v1.35 build] installing codex package"
+  sudo npm install -g @openai/codex
 fi
-if ! command -v claude >/dev/null 2>&1; then
-  echo "[v1.35 build] installing claude wrapper"
-  cat <<'CLAUDEWRAP' >/tmp/claude
-#!/bin/sh
-exec npm exec --yes @anthropic-ai/claude-code -- "$@"
-CLAUDEWRAP
-  chmod 0755 /tmp/claude
-  sudo install -D -m 0755 /tmp/claude /usr/local/bin/claude
+claude_path="\$(command -v claude 2>/dev/null || true)"
+if [[ -z "\$claude_path" || ! -s "\$claude_path" || ! -x "\$claude_path" ]]; then
+  echo "[v1.35 build] installing claude-code package"
+  sudo npm install -g @anthropic-ai/claude-code
 fi
 echo "[v1.35 build] guest build block complete"
 EOF
