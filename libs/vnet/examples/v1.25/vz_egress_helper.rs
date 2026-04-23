@@ -1,6 +1,7 @@
 use std::fs;
 use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,6 +70,51 @@ fn print_usage() {
     eprintln!(
         "usage: vz_egress_helper_v1_25 --socket-path <path> [--guest-ip <ipv4>] [--host-ip <ipv4>] [--netmask <ipv4>] [--dns-ip <ipv4>] [--host-forward-tcp <host_ip:host_port:guest_port>] [--log-frames]"
     );
+}
+
+fn tune_unix_datagram_socket(sock: &UnixDatagram) -> Result<()> {
+    let fd = sock.as_raw_fd();
+    let sndbuf: libc::c_int = 256 * 1024;
+    let rcvbuf: libc::c_int = 1024 * 1024;
+
+    let set_opt = |optname, value: &libc::c_int| unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            optname,
+            value as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if set_opt(libc::SO_SNDBUF, &sndbuf) != 0 {
+        return Err(std::io::Error::last_os_error()).context("setsockopt SO_SNDBUF");
+    }
+    if set_opt(libc::SO_RCVBUF, &rcvbuf) != 0 {
+        return Err(std::io::Error::last_os_error()).context("setsockopt SO_RCVBUF");
+    }
+    Ok(())
+}
+
+fn send_with_retry(sock: &UnixDatagram, frame: &[u8], peer_path: &PathBuf) -> Result<()> {
+    loop {
+        match sock.send_to(frame, peer_path) {
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.raw_os_error(),
+                    Some(libc::ENOBUFS) | Some(libc::EAGAIN)
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("send_to {}", peer_path.display()));
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -141,6 +187,7 @@ fn main() -> Result<()> {
 
     let sock = UnixDatagram::bind(&socket_path)
         .with_context(|| format!("bind unix datagram {}", socket_path.display()))?;
+    tune_unix_datagram_socket(&sock)?;
     sock.set_nonblocking(true)?;
 
     let config = SlirpConfig {
@@ -212,12 +259,8 @@ fn main() -> Result<()> {
                         "vz_egress_helper_v1_25 tx"
                     );
                 }
-                if let Err(err) = sock.send_to(&frame, peer_path) {
-                    eprintln!(
-                        "vz_egress_helper_v1_25 send_to {} failed: {}",
-                        peer_path.display(),
-                        err
-                    );
+                if let Err(err) = send_with_retry(&sock, &frame, peer_path) {
+                    eprintln!("vz_egress_helper_v1_25 {err:#}");
                 }
             }
         } else if frames.is_empty() {
