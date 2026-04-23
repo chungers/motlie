@@ -31,6 +31,15 @@ git submodule update --init --recursive \
   libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp
 ```
 
+Linux linker note:
+
+- Motlie's `build.rs` for `qwen3-tts.cpp` adds `-Wl,-Bsymbolic` so the shared
+  `libqwen3tts` keeps its bundled `ggml` symbols local when it is co-linked
+  with other `ggml` users such as `whisper.cpp`. Without that, `tts_qwen3_tts_cpp`
+  pipelines into ASR examples can fail due to symbol interposition.
+- The dedicated scripted regression check for this lives in
+  `./scripts/check_curated_model_examples.sh --mode smoke-qwen3-whisper`.
+
 ### Basic synthesis
 
 ```bash
@@ -39,23 +48,58 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts-cpp.wav
 ```
 
+### Dedicated qwen3-tts.cpp -> Whisper smoke
+
+This smoke is the issue `#211` regression check for Linux-side `ggml`
+symbol interposition:
+
+```bash
+export QWEN3_TTS_CPP_ARTIFACT_ROOT="/tmp/qwen3-tts-models"
+export WHISPER_ARTIFACT_ROOT="$HOME/.cache/huggingface/hub"
+
+./scripts/check_curated_model_examples.sh --mode smoke-qwen3-whisper
+```
+
+Expected behavior:
+
+- the pipeline completes without a native `GGML_ASSERT`
+- Whisper receives a valid WAV stream on stdin
+- the final transcript is non-empty and still contains `hello`
+
+If `--wav` is omitted, the example writes WAV bytes to stdout:
+
+```bash
+echo "Hello from Motlie." | cargo run -p motlie-models --example tts_qwen3_tts_cpp \
+  --no-default-features --features model-qwen3-tts-cpp \
+  -- > /tmp/motlie-qwen3-tts-cpp.wav
+```
+
 ### With voice cloning
+
+A short sample reference is checked in under `assets/`:
+
+- `assets/jarvis-original.wav` — full-bandwidth source recording.
+- `assets/jarvis-ref-16k.wav` — the same recording pre-resampled to 16 kHz
+  with `sox` (proper anti-alias filter). Prefer this for best clone quality;
+  see the note under *Expected Behavior* about the example's own naive linear
+  downsampler.
 
 ```bash
 cargo run -p motlie-models --example tts_qwen3_tts_cpp \
   --no-default-features --features model-qwen3-tts-cpp \
   -- --text "Hello from Motlie." --wav /tmp/motlie-qwen3-tts-cpp.wav \
-     --reference-audio /path/to/reference.wav
+     --reference-audio libs/models/examples/tts_qwen3_tts_cpp/assets/jarvis-ref-16k.wav
 ```
 
 ## Options
 
 | Flag | Description |
 |------|-------------|
-| `--text <value>` | Text to synthesize (required) |
-| `--wav <path>` | Output `.wav` file path (required) |
+| `--text <value>` | Text to synthesize (optional; stdin is used when omitted) |
+| `--wav <path>` | Output `.wav` file path (optional; stdout WAV is used when omitted) |
 | `--artifact-root <path>` | Override the default HF cache root for GGUF artifacts |
 | `--reference-audio <path>` | Optional `.wav` file used for voice cloning |
+| `--quiet` | Suppress example-layer and backend-native stderr diagnostics |
 
 ## Expected Behavior
 
@@ -66,4 +110,61 @@ cargo run -p motlie-models --example tts_qwen3_tts_cpp \
 - The backend performs whole-utterance synthesis in `synthesize()` and then
   emits buffered typed audio chunks through `next_chunk()`, matching the Piper
   and Qwen ONNX TTS stream contract.
-- The resulting `.wav` file uses the backend's fixed 24 kHz mono float output.
+- The resulting `.wav` output uses the backend's fixed 24 kHz mono float output,
+  whether written to a file or stdout.
+- When stdout is used, the example writes an aligned indefinite-length WAV
+  header and then flushes chunks incrementally so downstream consumers can read
+  until EOF without waiting for the full utterance buffer.
+- Diagnostics are written to stderr so stdout stays clean when it is carrying
+  WAV bytes.
+- `--quiet` suppresses example-layer and backend-native stderr diagnostics.
+  Because that is a whole-process stderr redirect, panic output may also be
+  silent while `--quiet` is active.
+- `--reference-audio` currently uses simple linear resampling to 16 kHz mono
+  with no anti-alias filter. That is acceptable for an example-layer cloning
+  path but is a known quality limitation for high-rate reference audio: aliased
+  content in the 16 kHz intermediate degrades speaker-encoder output. Pre-filter
+  high-rate sources with `sox` (`sox in.wav -r 16000 -c 1 -b 16 out.wav`) before
+  passing to `--reference-audio`, or use the checked-in
+  `assets/jarvis-ref-16k.wav` sample which is already pre-filtered.
+
+## Stream To macOS `play` Over SSH
+
+If Homebrew `sox` is installed on the remote Mac host, the stdout WAV stream can
+be piped directly over SSH into `/opt/homebrew/bin/play -t wav -`.
+
+Recommended artifact env var:
+
+```bash
+export QWEN3_TTS_CPP_ARTIFACT_ROOT="/tmp/qwen3-tts-models"
+```
+
+### Short input
+
+```bash
+printf '%s\n' "Hello from qwen3-tts.cpp over SSH." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Medium input
+
+```bash
+printf '%s\n' "This is a medium-length qwen3-tts.cpp synthesis sample streamed over SSH to a macOS host for immediate playback through Homebrew sox." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+### Long input
+
+```bash
+printf '%s\n' "qwen3-tts.cpp can also handle longer shell-composed utterances where text arrives on standard input, the example writes a WAV container to standard output, SSH forwards that byte stream to the remote macOS host, and Homebrew sox plays it without any intermediate file staging." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```

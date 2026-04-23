@@ -23,14 +23,12 @@ model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
 model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
 model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]
-model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]
 model-moonshine-streaming = ["dep:motlie-model-moonshine"]
 model-sherpa-onnx-streaming = ["dep:motlie-model-sherpa-onnx"]
 model-whisper-base-en = ["dep:motlie-model-whisper-cpp"]
 llama-cpp-cuda = ["dep:motlie-model-llama-cpp", "motlie-model-llama-cpp/cuda"]
 piper-cuda = ["dep:motlie-model-piper", "motlie-model-piper/cuda"]
 qwen3-tts-cpp-cuda = ["dep:motlie-model-qwen3-tts-cpp", "motlie-model-qwen3-tts-cpp/cuda"]
-qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]
 sherpa-onnx-cuda = ["dep:motlie-model-sherpa-onnx", "motlie-model-sherpa-onnx/cuda"]
 whisper-cpp-cuda = ["dep:motlie-model-whisper-cpp", "motlie-model-whisper-cpp/cuda"]
 cuda = ["dep:motlie-model-mistral", "motlie-model-mistral/cuda"]
@@ -43,11 +41,11 @@ accelerate = ["dep:motlie-model-mistral", "motlie-model-mistral/accelerate"]
 async-trait = "0.1.89"
 hf-hub = "0.5.0"
 motlie-model = { path = "../model" }
+motlie-voice = { path = "../voice" }
 motlie-model-mistral = { path = "../model/backends/mistral", optional = true }
 motlie-model-llama-cpp = { path = "../model/backends/llama_cpp", optional = true }
 motlie-model-piper = { path = "../model/backends/piper", optional = true }
 motlie-model-qwen3-tts-cpp = { path = "../model/backends/qwen3_tts_cpp", optional = true }
-motlie-model-qwen3-tts = { path = "../model/backends/qwen3_tts", optional = true }
 motlie-model-moonshine = { path = "../model/backends/moonshine", optional = true }
 motlie-model-sherpa-onnx = { path = "../model/backends/sherpa_onnx", optional = true }
 motlie-model-whisper-cpp = { path = "../model/backends/whisper_cpp", optional = true }
@@ -56,6 +54,7 @@ thiserror.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 hound = "3.5"
+libc = "0.2"
 sysinfo = "0.36.1"
 tokio.workspace = true
 
@@ -97,11 +96,6 @@ required-features = ["model-sherpa-onnx-streaming"]
 name = "asr_moonshine"
 path = "examples/asr_moonshine/main.rs"
 required-features = ["model-moonshine-streaming"]
-
-[[example]]
-name = "tts_qwen3_onnx"
-path = "examples/tts_qwen3_onnx/main.rs"
-required-features = ["model-qwen3-tts-0_6b"]
 
 [[example]]
 name = "tts_qwen3_tts_cpp"

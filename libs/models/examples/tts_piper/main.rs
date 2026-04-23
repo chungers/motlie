@@ -7,12 +7,17 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use motlie_model::typed::{SpeechStream, SpeechSynthesizer, SynthesisRequest};
 use motlie_model::{ArtifactPolicy, SpeechParams, StartOptions};
 use motlie_models::tts::piper_en_us_ljspeech_medium;
 
-const TARGET_SAMPLE_RATE_HZ: u32 = 22_050;
+#[path = "../bundle_support.rs"]
+mod bundle_support;
+#[path = "../quiet_support.rs"]
+mod quiet_support;
+#[path = "../tts_support.rs"]
+mod tts_support;
 
 fn main() -> Result<()> {
     let args = parse_args()?;
@@ -21,15 +26,17 @@ fn main() -> Result<()> {
 }
 
 struct Args {
-    text: String,
-    wav_path: PathBuf,
+    text: Option<String>,
+    wav_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
+    quiet: bool,
 }
 
 fn parse_args() -> Result<Args> {
     let mut text = None;
     let mut wav_path = None;
     let mut artifact_root = None;
+    let mut quiet = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -48,20 +55,35 @@ fn parse_args() -> Result<Args> {
                         .context("--artifact-root requires a path argument")?,
                 ));
             }
+            "--quiet" => quiet = true,
             other => bail!("unknown argument: {other}"),
         }
     }
 
     Ok(Args {
-        text: text.context("--text <value> is required")?,
-        wav_path: wav_path.context("--wav <path> is required")?,
+        text,
+        wav_path,
         artifact_root,
+        quiet,
     })
 }
 
 async fn run(args: Args) -> Result<()> {
-    println!("=== motlie tts_piper — typed Piper speech synthesis ===");
-    println!("wav:  {}", args.wav_path.display());
+    let io = tts_support::resolve_text_and_output(args.text, args.wav_path)?;
+    tts_support::log_status(
+        args.quiet,
+        "=== motlie tts_piper — typed Piper speech synthesis ===",
+    );
+    match &io.output {
+        tts_support::TtsOutput::WavFile(path) => {
+            tts_support::log_status(args.quiet, &format!("wav:  {}", path.display()));
+        }
+        tts_support::TtsOutput::Stdout => {
+            tts_support::log_status(args.quiet, "wav:  <stdout>");
+        }
+    }
+    let _quiet_stderr = quiet_support::QuietStderrGuard::maybe_enable(args.quiet)
+        .context("failed to enable quiet stderr mode")?;
 
     let handle = piper_en_us_ljspeech_medium::start_typed(StartOptions {
         artifact_policy: Some(ArtifactPolicy::LocalOnly {
@@ -74,44 +96,52 @@ async fn run(args: Args) -> Result<()> {
     .await
     .context("failed to start typed Piper bundle")?;
 
-    let mut stream = handle
-        .synthesize(SynthesisRequest {
-            text: args.text,
-            params: SpeechParams::default(),
+    let output_label = match &io.output {
+        tts_support::TtsOutput::WavFile(path) => path.display().to_string(),
+        tts_support::TtsOutput::Stdout => "<stdout>".into(),
+    };
+    let (sample_count, sample_rate_hz) = bundle_support::run_with_shutdown(handle, |handle| {
+        Box::pin(async move {
+            let mut stream = handle
+                .synthesize(SynthesisRequest {
+                    text: io.text,
+                    params: SpeechParams::default(),
+                })
+                .await
+                .context("failed to open typed speech stream")?;
+
+            let first_chunk = stream
+                .next_chunk()
+                .await
+                .context("next_chunk failed")?
+                .context("typed Piper stream produced no audio chunks")?;
+            let sample_rate_hz = first_chunk.sample_rate_hz();
+            let mut sample_count = 0usize;
+            let mut sink = tts_support::WavSink::<i16>::new(&io.output, sample_rate_hz)?;
+
+            let first_samples = first_chunk.into_samples();
+            sample_count += first_samples.len();
+            sink.write_chunk(&first_samples)?;
+
+            while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
+                let samples = chunk.into_samples();
+                sample_count += samples.len();
+                sink.write_chunk(&samples)?;
+            }
+
+            stream.finish().await.context("finish failed")?;
+            sink.finalize()?;
+            Ok((sample_count, sample_rate_hz))
         })
-        .await
-        .context("failed to open typed speech stream")?;
+    })
+    .await?;
 
-    let mut writer = hound::WavWriter::create(
-        &args.wav_path,
-        hound::WavSpec {
-            channels: 1,
-            sample_rate: TARGET_SAMPLE_RATE_HZ,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        },
-    )
-    .with_context(|| format!("failed to create wav file `{}`", args.wav_path.display()))?;
-
-    let mut total_samples = 0usize;
-    while let Some(chunk) = stream.next_chunk().await.context("next_chunk failed")? {
-        total_samples += chunk.samples().len();
-        for sample in chunk.into_samples() {
-            writer
-                .write_sample(sample)
-                .context("failed to write wav sample")?;
-        }
-    }
-
-    writer.finalize().context("failed to finalize wav file")?;
-    stream.finish().await.context("finish failed")?;
-    handle.shutdown().await.context("shutdown failed")?;
-
-    println!(
-        "wrote {} mono i16 samples at {} Hz to {}",
-        total_samples,
-        TARGET_SAMPLE_RATE_HZ,
-        args.wav_path.display()
+    tts_support::log_status(
+        args.quiet,
+        &format!(
+            "wrote {} mono i16 samples at {} Hz to {}",
+            sample_count, sample_rate_hz, output_label
+        ),
     );
     Ok(())
 }
