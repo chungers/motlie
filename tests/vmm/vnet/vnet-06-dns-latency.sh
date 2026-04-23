@@ -3,7 +3,7 @@
 # (e.g. a misconfigured upstream that retries 5s before falling through).
 set -u
 TEST_NAME=vnet-06-dns-latency
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 threshold_ms=${DNS_LATENCY_MS:-2000}
 host="cdn.example.com"  # rarely-cached hostname; resolves at NXDOMAIN level still exercises path

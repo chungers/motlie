@@ -65,9 +65,12 @@ skip_count=0
 run_one() {
   local guest="$1" script="$2"
   local cmd="${EXEC_CMD//GUEST/$guest}"
-  # Pipe the script body through stdin to the exec-cmd's bash -s
+  # Bundle the shared helper in front of the test body and pipe the bundle
+  # through stdin to the exec-cmd's bash -s. This guarantees pass/fail/skip
+  # are defined before the test body runs, regardless of $0 (which is "bash"
+  # under stdin execution and would break a $(dirname "$0")/.. source path).
   local out rc
-  if out=$(cat "$script" | eval "$cmd" 2>&1); then rc=0; else rc=$?; fi
+  if out=$(cat "$SUITE_DIR/shared/result.sh" "$script" | eval "$cmd" 2>&1); then rc=0; else rc=$?; fi
   # Each script is expected to print exactly one TEST=... line on stdout
   local line
   line=$(echo "$out" | grep -E '^TEST=' | tail -n 1 || true)

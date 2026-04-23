@@ -2,9 +2,12 @@
 # Both /workspace and /home/<current-user> are mounted and writable.
 set -u
 TEST_NAME=vfs-01-mounts-present
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
-mounts=(/workspace "/home/$USER")
+# Resolve the current user via id(1) rather than $USER so the test does not
+# leak the exec-environment shape (env-var inheritance) into its surface.
+me=$(id -un)
+mounts=(/workspace "/home/$me")
 for mp in "${mounts[@]}"; do
   if ! findmnt -n "$mp" >/dev/null 2>&1; then
     fail "not-mounted mp=$mp"

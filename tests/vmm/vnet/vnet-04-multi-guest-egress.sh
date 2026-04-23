@@ -3,7 +3,7 @@
 # multi-guest verification is the absence of fail across all dispatches.
 set -u
 TEST_NAME=vnet-04-multi-guest-egress
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 if ! command -v curl >/dev/null 2>&1; then
   skip "curl-missing"

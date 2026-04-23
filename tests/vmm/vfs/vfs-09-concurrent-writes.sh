@@ -4,7 +4,7 @@
 # after both writers finish.
 set -u
 TEST_NAME=vfs-09-concurrent-writes
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 f=/workspace/.vmm-concurrent-$$
 : > "$f"

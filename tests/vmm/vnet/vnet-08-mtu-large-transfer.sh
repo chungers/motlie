@@ -3,7 +3,7 @@
 # resets, and userspace egress packet-reassembly bugs.
 set -u
 TEST_NAME=vnet-08-mtu-large-transfer
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 if ! command -v curl >/dev/null 2>&1 || ! command -v sha256sum >/dev/null 2>&1; then
   skip "missing-tool"

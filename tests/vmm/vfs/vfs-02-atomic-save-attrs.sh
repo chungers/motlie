@@ -3,7 +3,7 @@
 # the original uid/gid/mode (the vi/atomic-save pattern).
 set -u
 TEST_NAME=vfs-02-atomic-save-attrs
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 f=/workspace/.vmm-atomic-$$
 echo "alpha" > "$f"

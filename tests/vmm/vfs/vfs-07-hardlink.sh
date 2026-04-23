@@ -3,7 +3,7 @@
 # increments correctly.
 set -u
 TEST_NAME=vfs-07-hardlink
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 src=/workspace/.vmm-link-src-$$
 dst=/workspace/.vmm-link-dst-$$

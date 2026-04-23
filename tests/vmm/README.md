@@ -149,7 +149,7 @@ contains `"result":"fail"` zero times.
 | 02 | https-egress | TLS egress reaches a known sentinel and gets the expected body |
 | 03 | apt-update-timing | `apt-get update` completes in `< 60s` (catches egress slowness) |
 | 04 | multi-guest-egress | the running guest can hit a public IP-echo endpoint |
-| 05 | egress-backpressure | sustained UDP send doesn't silently drop on `ENOBUFS` |
+| 05 | egress-backpressure | sustained UDP queries: response rate ≥ 90% (positive evidence; catches silent helper drops) |
 | 06 | dns-latency | first-resolution round-trip `< 2s` (catches DNS forwarder hangs) |
 | 07 | cloud-endpoints | `github.com`, `registry.npmjs.org`, `pypi.org` all reachable |
 | 08 | mtu-large-transfer | curl 5 MB blob, sha256 matches a control hash |
@@ -163,8 +163,8 @@ contains `"result":"fail"` zero times.
 | 01 | mounts-present | `/workspace` + `/home/<user>` mounted and writable |
 | 02 | atomic-save-attrs | `sed -i` (write-tmp + rename) preserves uid/gid/mode |
 | 03 | open-handle-survives-rename | open fd stays valid across rename of the underlying file |
-| 04 | xattr-contract | `setfattr` returns the documented expected behavior |
-| 05 | per-guest-isolation | this guest can't see another guest's `/home` (sentinel test) |
+| 04 | xattr-contract | capability-aware: passes if xattrs work end-to-end **OR** are cleanly unsupported (`EOPNOTSUPP`/`EPERM`) |
+| 05 | per-guest-isolation | peer guest's `/home/<peer>` is absent or unlistable from this guest (uses `id -un`, no `$USER` dependency) |
 | 06 | sparse-file | `truncate`+offset write keeps holes; size != allocated |
 | 07 | hardlink | hardlink yields shared inode; both paths resolve to same data |
 | 08 | symlink | symlink resolves correctly; readlink returns expected target |

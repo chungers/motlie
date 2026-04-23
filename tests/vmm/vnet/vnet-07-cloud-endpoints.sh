@@ -4,7 +4,7 @@
 # confusing ways.
 set -u
 TEST_NAME=vnet-07-cloud-endpoints
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 if ! command -v curl >/dev/null 2>&1; then
   skip "curl-missing"

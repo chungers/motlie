@@ -5,7 +5,7 @@
 # pins on the Rust side; this script asserts the same from the guest's POV.
 set -u
 TEST_NAME=vfs-03-open-handle-survives-rename
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 src=/workspace/.vmm-rename-src-$$
 dst=/workspace/.vmm-rename-dst-$$

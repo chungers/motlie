@@ -4,7 +4,7 @@
 # this; if mtime is silently rounded or clobbered, incremental builds break.
 set -u
 TEST_NAME=vfs-10-mtime-preserved
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 f=/workspace/.vmm-mtime-$$
 : > "$f"

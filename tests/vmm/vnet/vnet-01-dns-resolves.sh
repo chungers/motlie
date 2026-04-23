@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 TEST_NAME=vnet-01-dns-resolves
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 ip=$(getent ahostsv4 deb.debian.org 2>/dev/null | awk '{print $1; exit}')
 if [[ -z "$ip" ]]; then

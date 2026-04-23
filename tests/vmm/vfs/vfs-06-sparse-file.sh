@@ -4,7 +4,7 @@
 # block count is far smaller (i.e. holes are preserved).
 set -u
 TEST_NAME=vfs-06-sparse-file
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 f=/workspace/.vmm-sparse-$$
 target_bytes=$((1024 * 1024))   # 1 MiB apparent

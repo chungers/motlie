@@ -4,7 +4,7 @@
 # limits that only show up under concurrency.
 set -u
 TEST_NAME=vnet-09-concurrent-egress
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 if ! command -v curl >/dev/null 2>&1; then
   skip "curl-missing"

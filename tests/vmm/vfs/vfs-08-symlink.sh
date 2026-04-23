@@ -3,7 +3,7 @@
 # string verbatim.
 set -u
 TEST_NAME=vfs-08-symlink
-. "$(dirname "$0")/../shared/result.sh"
+declare -F pass >/dev/null 2>&1 || . "$(dirname "$0")/../shared/result.sh"
 
 target=/workspace/.vmm-symtarget-$$
 link=/workspace/.vmm-symlink-$$
