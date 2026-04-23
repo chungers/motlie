@@ -123,8 +123,8 @@ mod tests {
             FsOp::Getxattr { inode: 42, name: "user.test".into(), size: 0 },
             FsOp::Listxattr { inode: 42, size: 0 },
             FsOp::Removexattr { inode: 42, name: "user.test".into() },
-            FsOp::Getlk { inode: 42, fh: 1, lock_owner: 7, start: 0, end: 9, typ: libc::F_WRLCK, pid: 1234 },
-            FsOp::Setlk { inode: 42, fh: 1, lock_owner: 7, start: 0, end: 9, typ: libc::F_WRLCK, pid: 1234, sleep: false },
+            FsOp::Getlk { inode: 42, fh: 1, lock_owner: 7, start: 0, end: 9, typ: libc::F_WRLCK as i32, pid: 1234 },
+            FsOp::Setlk { inode: 42, fh: 1, lock_owner: 7, start: 0, end: 9, typ: libc::F_WRLCK as i32, pid: 1234, sleep: false },
             FsOp::Setattr {
                 inode: 42,
                 attrs: SetAttrFields {
@@ -212,7 +212,7 @@ mod tests {
             },
             FsResult::Symlink { target: "/foo/bar".into() },
             FsResult::XattrSize { size: 5 },
-            FsResult::Lock { start: 0, end: 9, typ: libc::F_UNLCK, pid: 0 },
+            FsResult::Lock { start: 0, end: 9, typ: libc::F_UNLCK as i32, pid: 0 },
             FsResult::Opened { fh: 42 },
             FsResult::Ok,
             FsResult::Error { errno: 2 },

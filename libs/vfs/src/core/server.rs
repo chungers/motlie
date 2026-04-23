@@ -1340,7 +1340,8 @@ impl FsServer {
 
         // Check overlay first
         if let Some(overlay) = &self.overlay {
-            if let Some((layer, OverlayEntryKind::Content(existing))) = overlay.resolve(&tag, &path)
+            if let Some((layer, OverlayEntryKind::Content(existing), attrs)) =
+                overlay.resolve_attrs(&tag, &path)
             {
                 let mut buf = existing.to_vec();
                 let start = offset as usize;
@@ -1352,7 +1353,13 @@ impl FsServer {
                     buf.resize(end, 0);
                 }
                 buf[start..end].copy_from_slice(data);
-                let _ = overlay.put(&layer, &tag, &path, bytes::Bytes::from(buf));
+                let _ = overlay.put_with_attrs(
+                    &layer,
+                    &tag,
+                    &path,
+                    attrs,
+                    bytes::Bytes::from(buf),
+                );
                 return FsResult::Written {
                     size: data.len() as u32,
                 };
@@ -1783,11 +1790,19 @@ impl FsServer {
         match (src_overlay.is_some(), dst_is_overlay) {
             // Overlay → overlay (same layer check done implicitly)
             (true, true) => {
-                if let Some((src_layer, OverlayEntryKind::Content(content))) =
-                    self.resolve_overlay(&mount.tag, &src_path)
+                if let Some((src_layer, OverlayEntryKind::Content(content), attrs)) =
+                    self.overlay
+                        .as_ref()
+                        .and_then(|o| o.resolve_attrs(&mount.tag, &src_path))
                 {
                     if let Some(overlay) = &self.overlay {
-                        let _ = overlay.put(&src_layer, &mount.tag, &dst_path, content);
+                        let _ = overlay.put_with_attrs(
+                            &src_layer,
+                            &mount.tag,
+                            &dst_path,
+                            attrs,
+                            content,
+                        );
                         let _ = overlay.remove(&src_layer, &mount.tag, &src_path);
                         let mut table = mount.inode_table.lock();
                         if let Some(inode) = table.rename_path(&src_path, &dst_path) {
@@ -1806,14 +1821,31 @@ impl FsServer {
             // Disk → overlay (editor atomic-save path)
             (false, true) => {
                 let host_src = mount.backing.resolve(&src_path);
-                match fs::read(&host_src) {
-                    Ok(content) => {
+                match (fs::read(&host_src), fs::symlink_metadata(&host_src)) {
+                    (Ok(content), Ok(meta)) => {
                         if let Some(layer) = self.writable_layer(&mount.tag, &dst_path) {
                             if let Some(overlay) = &self.overlay {
-                                let _ = overlay.put(
+                                #[cfg(unix)]
+                                let (uid, gid) = {
+                                    use std::os::unix::fs::MetadataExt;
+                                    (meta.uid(), meta.gid())
+                                };
+                                #[cfg(not(unix))]
+                                let (uid, gid) = (0, 0);
+                                let mut attrs = super::overlay::OverlayAttrs {
+                                    mode: file_mode_from_metadata(&meta),
+                                    uid,
+                                    gid,
+                                };
+                                if let Some((owner_uid, owner_gid)) = mount.owner_override {
+                                    attrs.uid = owner_uid;
+                                    attrs.gid = owner_gid;
+                                }
+                                let _ = overlay.put_with_attrs(
                                     &layer,
                                     &mount.tag,
                                     &dst_path,
+                                    attrs,
                                     bytes::Bytes::from(content),
                                 );
                                 let _ = fs::remove_file(&host_src);
@@ -1833,7 +1865,7 @@ impl FsServer {
                         }
                         FsResult::Error { errno: libc::EXDEV }
                     }
-                    Err(e) => FsResult::Error {
+                    (Err(e), _) | (_, Err(e)) => FsResult::Error {
                         errno: io_errno(&e),
                     },
                 }
@@ -2446,6 +2478,17 @@ fn logical_blocks(kind: FileType, size: u64) -> u64 {
         }
         FileType::Symlink => 0,
     }
+}
+
+#[cfg(unix)]
+fn file_mode_from_metadata(meta: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    meta.mode()
+}
+
+#[cfg(not(unix))]
+fn file_mode_from_metadata(_meta: &fs::Metadata) -> u32 {
+    0o644
 }
 
 #[cfg(unix)]
@@ -3496,7 +3539,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3511,11 +3554,11 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
             FsResult::Lock { start, end, typ, pid }
-                if start == 0 && end == 9 && typ == libc::F_WRLCK && pid == 1234
+                if start == 0 && end == 9 && typ == libc::F_WRLCK as i32 && pid == 1234
         ));
     }
 
@@ -3546,7 +3589,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3562,7 +3605,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_UNLCK,
+                    typ: libc::F_UNLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3578,7 +3621,7 @@ mod tests {
                     lock_owner: 8,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 5678,
                     sleep: false,
                 }
@@ -3614,7 +3657,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_RDLCK,
+                    typ: libc::F_RDLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3630,7 +3673,7 @@ mod tests {
                     lock_owner: 8,
                     start: 0,
                     end: 9,
-                    typ: libc::F_RDLCK,
+                    typ: libc::F_RDLCK as i32,
                     pid: 5678,
                     sleep: false,
                 }
@@ -3676,7 +3719,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3694,10 +3737,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, .. } if typ == libc::F_UNLCK
+            FsResult::Lock { typ, .. } if typ == libc::F_UNLCK as i32
         ));
     }
 
@@ -3728,7 +3771,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3750,7 +3793,7 @@ mod tests {
                         lock_owner: 8,
                         start: 0,
                         end: 9,
-                        typ: libc::F_WRLCK,
+                        typ: libc::F_WRLCK as i32,
                         pid: 5678,
                         sleep: true,
                     },
@@ -3775,7 +3818,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_UNLCK,
+                    typ: libc::F_UNLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4362,6 +4405,134 @@ mod tests {
     }
 
     #[test]
+    fn overlay_write_preserves_existing_uid_gid_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put_with_attrs(
+            "l",
+            "test",
+            "/foo",
+            crate::core::overlay::OverlayAttrs {
+                mode: 0o600,
+                uid: 1000,
+                gid: 1000,
+            },
+            bytes::Bytes::from_static(b"hello"),
+        )
+        .unwrap();
+
+        let inode = match server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "foo".into(),
+            },
+        ) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let fh = match server.handle_op(
+            "test",
+            FsOp::Open {
+                inode,
+                flags: libc::O_RDWR as u32,
+            },
+        ) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Write {
+                    inode,
+                    fh,
+                    offset: 0,
+                    data: bytes::Bytes::from_static(b"H"),
+                }
+            ),
+            FsResult::Written { .. }
+        ));
+
+        match server.handle_op("test", FsOp::Getattr { inode }) {
+            FsResult::Attr { attrs, .. } => {
+                assert_eq!(attrs.uid, 1000);
+                assert_eq!(attrs.gid, 1000);
+                assert_eq!(attrs.mode, 0o600);
+            }
+            other => panic!("expected Attr, got {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_rename_disk_to_overlay_preserves_source_uid_gid_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("tmp.txt");
+        fs::write(&src_path, b"new content").unwrap();
+        fs::set_permissions(&src_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let src_meta = fs::symlink_metadata(&src_path).unwrap();
+
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put_with_attrs(
+            "l",
+            "test",
+            "/target.txt",
+            crate::core::overlay::OverlayAttrs {
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+            },
+            bytes::Bytes::from_static(b"old"),
+        )
+        .unwrap();
+
+        server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "tmp.txt".into(),
+            },
+        );
+        let result = server.handle_op(
+            "test",
+            FsOp::Rename {
+                parent: 1,
+                name: "tmp.txt".into(),
+                new_parent: 1,
+                new_name: "target.txt".into(),
+            },
+        );
+        assert!(matches!(result, FsResult::Ok));
+
+        let target_inode = match server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "target.txt".into(),
+            },
+        ) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        match server.handle_op("test", FsOp::Getattr { inode: target_inode }) {
+            FsResult::Attr { attrs, .. } => {
+                assert_eq!(attrs.uid, src_meta.uid());
+                assert_eq!(attrs.gid, src_meta.gid());
+                assert_eq!(attrs.mode, src_meta.mode());
+            }
+            other => panic!("expected Attr, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn overlay_rename_disk_to_overlay_keeps_source_open_handle_working() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("tmp.txt"), b"new content").unwrap();
@@ -4484,7 +4655,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4511,10 +4682,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK as i32 && pid == 1234
         ));
 
         let new_dst_inode = match server.handle_op(
@@ -4581,7 +4752,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4608,10 +4779,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK as i32 && pid == 1234
         ));
 
         let new_dst_inode = match server.handle_op(
