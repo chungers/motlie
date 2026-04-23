@@ -14,6 +14,7 @@ without changing `libs/driver`'s core engine or the tmux adapter.
 
 - `(2026-04-17, @claude-opus-47, initial proposal for a models CommandSet that exposes load/unload/chat/session/transcribe/synthesize/pipeline/info across the full libs/models surface)`
 - `(2026-04-22, @claude-opus-47, rewritten against post-typed-contracts libs/model(s): BundleHandle is now Sized with associated types so Box<dyn BundleHandle> is no longer possible; TranscriptionModel/SpeechModel::open_stream replaced by BatchTranscriber/StreamingTranscriber/SpeechSynthesizer/VoiceCloneSynthesizer from libs/model/src/typed.rs; load dispatch retargeted at namespaced start_typed per curated bundle; SpeechRequest→SynthesisRequest; VoiceConditioning replaced by CloneReference<RATE_HZ, Mono>; AudioSpec is gone — sample rate + layout are carried by AudioBuf type parameters; pipeline tts-asr delegates to the existing stream_speech_into_asr helper)`
+- `(2026-04-22, @claude-opus-47, switched LoadedModel from a driver-local Box<dyn ...> adapter layer to enum static dispatch per CLAUDE.md Rust guideline "prefer static dispatch over dynamic": LoadedBundle is a feature-gated enum with one concrete typed handle per curated bundle; every command is a match on LoadedBundle that calls the typed trait methods on the concrete handle; no dyn adapters, no BoxFuture shims)`
 
 ## Problem
 
@@ -63,8 +64,13 @@ one adapter, models becomes another. The work is entirely in designing the
   points per curated bundle, the `Sized` `BundleHandle` trait, and the
   typed `BatchTranscriber` / `StreamingTranscriber` / `SpeechSynthesizer` /
   `VoiceCloneSynthesizer` / `SpeechStream` traits from
-  `libs/model/src/typed.rs`. Any dyn/Sized impedance is absorbed by a
-  driver-local adapter layer.
+  `libs/model/src/typed.rs`.
+- No dynamic dispatch over the bundle set. The catalog of curated bundles
+  is compile-time known, feature-gated, and finite; an enum with one
+  variant per bundle gives static dispatch everywhere and matches the
+  CLAUDE.md Rust guideline ("Prefer static dispatch over dynamic — must
+  justify `Box<dyn …>`"). There is no plugin surface that would motivate
+  a trait-object layer.
 - No artifact-download orchestration beyond forwarding the existing
   `ArtifactPolicy` / `--allow-fetch` switch. Acquisition remains the catalog's
   job.
@@ -114,12 +120,16 @@ one adapter, models becomes another. The work is entirely in designing the
 ```
 
 `BundleHandle` is `Sized` with associated types (`type Chat`, `type Completion`,
-`type Embeddings`) in the post-refactor `libs/model/src/lib.rs`, so the driver
-cannot store a uniform `Box<dyn BundleHandle>`. ASR and TTS capabilities live
-in `libs/model/src/typed.rs` as independent traits, not as methods on the
-handle. The driver therefore captures per-capability typed trait objects
-during `load` and attaches them to the `LoadedModel`; the original
-`BundleHandle` is retained only for lifecycle + descriptor + metrics access.
+`type Embeddings`) in the post-refactor `libs/model/src/lib.rs`, and the ASR /
+TTS capabilities in `libs/model/src/typed.rs` return `impl Future` from their
+trait methods. Neither is trait-object-safe, and dynamic dispatch has no
+product-level justification here (the catalog is compile-time known).
+
+The driver instead uses enum static dispatch: a `LoadedBundle` enum carries
+one variant per curated bundle, each holding the concrete typed handle
+returned by that bundle's `start_typed`. Every command is a `match` on
+`LoadedBundle` that calls the typed trait methods on the concrete handle.
+Feature gates are applied per variant so the enum shrinks with the build.
 
 Data flow for a one-shot chat:
 
@@ -173,55 +183,89 @@ pub struct ModelsState {
     pub(crate) current: Option<String>,
 }
 
-/// Capability-erased view the driver keeps per loaded alias.
-///
-/// The post-refactor typed traits in `libs/model/src/typed.rs` use
-/// `-> impl Future<Output = …>` return types, which are **not** trait-object
-/// safe. `BundleHandle` is additionally `Sized` with associated types. Neither
-/// `Box<dyn BundleHandle>` nor `Box<dyn SpeechSynthesizer>` compiles today.
-///
-/// The driver therefore introduces a thin local adapter layer with
-/// `BoxFuture`-returning methods and implements it for each concrete typed
-/// handle at `load` time. The original bundle handle is consumed into these
-/// adapters; shutdown is captured as a `FnOnce` closure to preserve the
-/// `shutdown(self)` contract without exposing the concrete handle type.
+/// Driver-owned record per loaded alias. Metadata is shared; the concrete
+/// typed handle lives in `LoadedBundle`.
 pub(crate) struct LoadedModel {
     pub alias: String,
     pub selector: ModelSelector,
     pub descriptor: LoadedBundleDescriptor,
     pub backend: BackendKind,
-    pub capabilities: LoadedCapabilities,
-    pub shutdown: ShutdownFn,
+    pub bundle: LoadedBundle,
     pub sessions: BTreeMap<String, ChatSession>,
     pub current_session: Option<String>,
 }
 
-type ShutdownFn =
-    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Result<(), ModelError>> + Send>;
+/// One variant per curated bundle, feature-gated to match `ModelSelector`.
+/// Each variant owns the concrete `Sized` typed handle returned by that
+/// bundle's `motlie_models::<cap>::<bundle>::start_typed(...)`.
+///
+/// Commands that need a capability `match` on `LoadedBundle` and call the
+/// concrete typed method on the concrete handle — no trait objects, no
+/// `BoxFuture`, no adapter layer. When a capability is absent for a variant
+/// (e.g. an ASR bundle cannot `synthesize`), the match arm returns
+/// `DriverError::invalid_argument("alias", "loaded model does not expose <cap>")`.
+pub(crate) enum LoadedBundle {
+    #[cfg(feature = "model-qwen3-tts-cpp")]
+    Qwen3TtsCpp(motlie_models::tts::qwen3_tts_cpp::Qwen3TtsCppHandle),
 
-/// Dyn-safe capability shims owned by the driver. Each field is `None` when
-/// the bundle does not expose the capability (compile-time feature-gated
-/// absence is normalized to `None` at load time).
-#[derive(Default)]
-pub(crate) struct LoadedCapabilities {
-    pub chat: Option<Box<dyn DynChat>>,
-    pub embedding: Option<Box<dyn DynEmbedding>>,
-    pub batch_asr: Option<Box<dyn DynBatchAsr>>,
-    pub streaming_asr: Option<Box<dyn DynStreamingAsr>>,
-    pub tts: Option<Box<dyn DynTts>>,
-    /// Voice cloning's reference contract (`CloneReference<RATE_HZ, C>`) is
-    /// fixed per bundle. `DynVoiceClone16Mono` hard-codes the 16 kHz mono
-    /// contract used by today's only cloning-capable bundle
-    /// (`qwen3-tts.cpp`); additional arms go here when new contracts ship.
-    pub voice_clone_16k_mono: Option<Box<dyn DynVoiceClone16Mono>>,
+    #[cfg(feature = "model-piper")]
+    PiperEnUsLjspeechMedium(motlie_models::tts::piper_en_us_ljspeech_medium::PiperHandle),
+
+    #[cfg(feature = "model-whisper-cpp")]
+    WhisperBaseEn(motlie_models::asr::whisper_base_en::WhisperCppHandle),
+
+    #[cfg(feature = "model-sherpa-onnx")]
+    SherpaOnnxStreamingEn(motlie_models::asr::sherpa_onnx_streaming_en::SherpaOnnxHandle),
+
+    #[cfg(feature = "model-moonshine")]
+    MoonshineStreamingEn(motlie_models::asr::moonshine_streaming_en::MoonshineHandle),
+
+    #[cfg(feature = "model-qwen3-4b")]
+    Qwen3_4B(motlie_models::chat::qwen3_4b::Qwen3ChatHandle),
+
+    #[cfg(feature = "model-qwen3-4b-gguf")]
+    Qwen3_4BGguf(motlie_models::chat::qwen3_4b_gguf::Qwen3GgufChatHandle),
+
+    #[cfg(feature = "model-gemma4-e2b")]
+    Gemma4E2B(motlie_models::chat::gemma4_e2b::GemmaChatHandle),
+
+    #[cfg(feature = "model-gemma4-e2b-gguf")]
+    Gemma4E2BGguf(motlie_models::chat::gemma4_e2b_gguf::GemmaGgufChatHandle),
+
+    #[cfg(feature = "model-qwen3-embedding-06b")]
+    Qwen3Embedding06B(motlie_models::embeddings::qwen3_embedding_06b::Qwen3EmbeddingHandle),
+
+    #[cfg(feature = "model-google-gemma-300m")]
+    GoogleGemma300M(motlie_models::embeddings::google_gemma_300m::GemmaEmbeddingHandle),
 }
 
-// Representative adapter trait (others follow the same pattern):
-pub(crate) trait DynTts: Send + Sync {
-    fn synthesize<'a>(
-        &'a self,
-        request: SynthesisRequest,
-    ) -> futures::future::BoxFuture<'a, Result<Box<dyn DynSpeechStream>, ModelError>>;
+impl LoadedBundle {
+    pub async fn shutdown(self) -> Result<(), ModelError> {
+        match self {
+            #[cfg(feature = "model-qwen3-tts-cpp")]
+            Self::Qwen3TtsCpp(h) => h.shutdown().await,
+            #[cfg(feature = "model-piper")]
+            Self::PiperEnUsLjspeechMedium(h) => h.shutdown().await,
+            #[cfg(feature = "model-whisper-cpp")]
+            Self::WhisperBaseEn(h) => h.shutdown().await,
+            #[cfg(feature = "model-sherpa-onnx")]
+            Self::SherpaOnnxStreamingEn(h) => h.shutdown().await,
+            #[cfg(feature = "model-moonshine")]
+            Self::MoonshineStreamingEn(h) => h.shutdown().await,
+            #[cfg(feature = "model-qwen3-4b")]
+            Self::Qwen3_4B(h) => h.shutdown().await,
+            #[cfg(feature = "model-qwen3-4b-gguf")]
+            Self::Qwen3_4BGguf(h) => h.shutdown().await,
+            #[cfg(feature = "model-gemma4-e2b")]
+            Self::Gemma4E2B(h) => h.shutdown().await,
+            #[cfg(feature = "model-gemma4-e2b-gguf")]
+            Self::Gemma4E2BGguf(h) => h.shutdown().await,
+            #[cfg(feature = "model-qwen3-embedding-06b")]
+            Self::Qwen3Embedding06B(h) => h.shutdown().await,
+            #[cfg(feature = "model-google-gemma-300m")]
+            Self::GoogleGemma300M(h) => h.shutdown().await,
+        }
+    }
 }
 
 pub(crate) struct ChatSession {
@@ -304,8 +348,8 @@ Maps to a `match` over the parsed `ModelSelector`. There is no uniform
 `selector.bundle()?.start()` path post-refactor: each curated bundle has its
 own namespaced `start_typed` entry point under `motlie_models::{cap}::{bundle}`,
 returning a concrete `Sized` typed handle. The driver's `load` dispatch fans
-out once per feature-gated variant and wraps the handle into the
-`LoadedCapabilities` adapter shims:
+out once per feature-gated variant and wraps the handle into the matching
+`LoadedBundle` arm:
 
 ```rust
 let selector: ModelSelector = cmd.selector.parse()?;
@@ -319,20 +363,30 @@ let options = StartOptions {
     quantization: cmd.quantization.map(Into::into),
     ..Default::default()
 };
-let loaded = match selector {
+let bundle = match selector {
     #[cfg(feature = "model-qwen3-tts-cpp")]
-    ModelSelector::Tts(Tts::Qwen3TtsCpp0_6B) => {
-        let handle = motlie_models::tts::qwen3_tts_cpp::start_typed(options).await?;
-        LoadedModel::from_qwen3_tts_cpp(alias, selector, handle)
-    }
+    ModelSelector::Tts(Tts::Qwen3TtsCpp0_6B) =>
+        LoadedBundle::Qwen3TtsCpp(
+            motlie_models::tts::qwen3_tts_cpp::start_typed(options).await?,
+        ),
     #[cfg(feature = "model-piper")]
-    ModelSelector::Tts(Tts::PiperEnUsLjspeechMedium) => {
-        let handle = motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(options).await?;
-        LoadedModel::from_piper(alias, selector, handle)
-    }
-    // … asr, chat, embedding branches mirror this shape …
+    ModelSelector::Tts(Tts::PiperEnUsLjspeechMedium) =>
+        LoadedBundle::PiperEnUsLjspeechMedium(
+            motlie_models::tts::piper_en_us_ljspeech_medium::start_typed(options).await?,
+        ),
+    #[cfg(feature = "model-whisper-cpp")]
+    ModelSelector::Asr(Asr::WhisperBaseEn) =>
+        LoadedBundle::WhisperBaseEn(
+            motlie_models::asr::whisper_base_en::start_typed(options).await?,
+        ),
+    // … other asr, chat, embedding branches mirror this shape …
 };
-state.loaded.insert(loaded.alias.clone(), loaded);
+let descriptor = descriptor_of(&bundle);   // &impl BundleHandle → clone LoadedBundleDescriptor
+let backend    = descriptor.backend;
+state.loaded.insert(alias.clone(), LoadedModel {
+    alias, selector, descriptor, backend, bundle,
+    sessions: BTreeMap::new(), current_session: None,
+});
 ```
 
 Because `ModelSelector` is `#[non_exhaustive]` with feature-gated variants,
@@ -345,9 +399,10 @@ Output: `loaded '<alias>' = <selector>  backend=<BackendKind>  q=<resolved_quant
 
 #### `unload <alias>`
 
-Invokes the captured `LoadedModel::shutdown` closure (which owns and consumes
-the original `BundleHandle::shutdown(self)` call). Removes from
-`state.loaded`. Clears `state.current` if it matched.
+Removes the `LoadedModel` from `state.loaded`, then calls
+`LoadedBundle::shutdown(self).await`, which matches on the enum and invokes
+`BundleHandle::shutdown(self)` on the concrete handle. Clears `state.current`
+if it matched.
 
 #### `list [--loaded] [--available] [--capability chat|asr|tts|embedding]`
 
@@ -449,25 +504,46 @@ exposes both:
   `session.finish()` for the final transcript.
 
 ```rust
-// --batch branch
 let audio = decode_wav_to_typed_audio::<16_000, Mono>(wav_path)?;
-let transcript = asr.capabilities.batch_asr.as_ref()
-    .ok_or_else(|| DriverError::invalid_argument("alias", "no BatchTranscriber"))?
-    .transcribe(audio, TranscriptionParams { language, emit_partials: false })
-    .await?;
+let params = TranscriptionParams { language, emit_partials };
 
-// streaming branch
-let mut session = asr.capabilities.streaming_asr.as_ref()
-    .ok_or_else(|| DriverError::invalid_argument("alias", "no StreamingTranscriber"))?
-    .open_session(TranscriptionParams { language, emit_partials })
-    .await?;
-for chunk in chunks_of(&audio, chunk_frames) {
-    if let Some(update) = session.ingest(chunk).await? {
-        if emit_partials { print_partial(&update); }
+let transcript = match &asr.bundle {
+    #[cfg(feature = "model-whisper-cpp")]
+    LoadedBundle::WhisperBaseEn(h) if batch_mode =>
+        h.transcribe(audio, params.clone()).await?,
+
+    #[cfg(feature = "model-whisper-cpp")]
+    LoadedBundle::WhisperBaseEn(h) => {
+        let mut session = h.open_session(params.clone()).await?;
+        for chunk in chunks_of(&audio, chunk_frames) {
+            if let Some(update) = session.ingest(chunk).await? {
+                if params.emit_partials { print_partial(&update); }
+            }
+        }
+        session.finish().await?
     }
-}
-let final_update = session.finish().await?;
+
+    #[cfg(feature = "model-sherpa-onnx")]
+    LoadedBundle::SherpaOnnxStreamingEn(h) => {
+        // sherpa-onnx is streaming-only; --batch is rejected at parse time.
+        let mut session = h.open_session(params.clone()).await?;
+        /* … same ingest loop … */
+        session.finish().await?
+    }
+
+    #[cfg(feature = "model-moonshine")]
+    LoadedBundle::MoonshineStreamingEn(h) => { /* … */ }
+
+    other => return Err(DriverError::invalid_argument(
+        "alias", format!("loaded model does not expose ASR: {other:?}"),
+    )),
+};
 ```
+
+Each `match` arm calls the concrete typed method on the concrete handle —
+`BatchTranscriber::transcribe` and `StreamingTranscriber::open_session` live
+on the handle as inherent or blanket impls, so static dispatch works without
+any adapter layer.
 
 Note: `AudioSpec { sample_rate_hz, channels, encoding }` is gone. Sample
 rate and channel layout are carried as type parameters on `AudioBuf`, and
@@ -496,25 +572,46 @@ contract when decoding the `--reference-audio` file (downmix to mono + proper
 anti-alias downsample to 16 kHz; do not pass raw 24 kHz or 44.1 kHz through).
 
 ```rust
-let request = SynthesisRequest { text: text.join(" "), params: SpeechParams { speaking_rate, seed, .. } };
-let mut stream: Box<dyn DynSpeechStream> = if let Some(ref_path) = reference_audio {
-    let reference = decode_wav_to_reference::<16_000, Mono>(ref_path)?;
-    tts.capabilities.voice_clone_16k_mono.as_ref()
-        .ok_or_else(|| DriverError::invalid_argument("alias", "no VoiceCloneSynthesizer"))?
-        .synthesize_with_reference(request, CloneReference { audio: reference, transcript: reference_text })
-        .await?
-} else {
-    tts.capabilities.tts.as_ref()
-        .ok_or_else(|| DriverError::invalid_argument("alias", "no SpeechSynthesizer"))?
-        .synthesize(request).await?
+let request = SynthesisRequest {
+    text: text.join(" "),
+    params: SpeechParams { speaking_rate, seed, .. },
 };
-let first = stream.next_chunk().await?.ok_or(empty_stream)?;
-let mut writer = hound::WavWriter::create(out_path, wav_spec(first.sample_rate_hz()))?;
-write_chunk(&mut writer, first)?;
-while let Some(chunk) = stream.next_chunk().await? { write_chunk(&mut writer, chunk)?; }
-stream.finish().await?;
-writer.finalize()?;
+
+match &tts.bundle {
+    #[cfg(feature = "model-qwen3-tts-cpp")]
+    LoadedBundle::Qwen3TtsCpp(h) => {
+        let stream = if let Some(ref_path) = &reference_audio {
+            let reference = decode_wav_to_reference::<16_000, Mono>(ref_path)?;
+            h.synthesize_with_reference(
+                request,
+                CloneReference { audio: reference, transcript: reference_text },
+            ).await?
+        } else {
+            h.synthesize(request).await?
+        };
+        drain_to_wav(stream, out_path).await?;
+    }
+    #[cfg(feature = "model-piper")]
+    LoadedBundle::PiperEnUsLjspeechMedium(h) => {
+        if reference_audio.is_some() {
+            return Err(DriverError::invalid_argument(
+                "reference-audio", "piper does not support voice cloning"));
+        }
+        let stream = h.synthesize(request).await?;
+        drain_to_wav(stream, out_path).await?;
+    }
+    other => return Err(DriverError::invalid_argument(
+        "alias", format!("loaded model does not expose TTS: {other:?}"),
+    )),
+}
 ```
+
+`drain_to_wav` is a small generic helper `async fn<S: SpeechStream>(stream: S,
+path: &Path)` that reads the first chunk to learn the sample rate, creates a
+`hound::WavWriter` with the matching spec, writes every subsequent chunk,
+and calls `stream.finish().await` + `writer.finalize()`. Because `S` is a
+generic type parameter the compiler monomorphises one copy per bundle — still
+static dispatch.
 
 Returns `CommandOutput` with sample count, sample rate, layout, and output
 path.
@@ -543,38 +640,37 @@ is set.
 ```rust
 let tts = state.loaded_ref(&cmd.tts_alias)?;
 let asr = state.loaded_ref(&cmd.asr_alias)?;
+let request = SynthesisRequest { text: cmd.text.join(" "), ..Default::default() };
+let asr_params = TranscriptionParams::default();
 
-let transcript = if let Some(path) = cmd.keep_wav {
-    // Local fork of stream_speech_into_asr that also writes to a WavWriter
-    // sized from the first chunk. Same semantics otherwise.
-    bridge_with_wav_tap(tts, asr, SynthesisRequest { text: cmd.text.join(" "), .. Default::default() }, &path).await?
-} else {
-    stream_speech_into_asr(
-        tts.tts_handle()?,                // &impl SpeechSynthesizer
-        identity_transform_or_i16_mono_resampler(tts, asr),
-        asr.streaming_asr_handle()?,      // &impl StreamingTranscriber
-        SynthesisRequest { text: cmd.text.join(" "), .. Default::default() },
-        TranscriptionParams::default(),
-    ).await?
+let transcript = match (&tts.bundle, &asr.bundle) {
+    #[cfg(all(feature = "model-qwen3-tts-cpp", feature = "model-whisper-cpp"))]
+    (LoadedBundle::Qwen3TtsCpp(tts_h), LoadedBundle::WhisperBaseEn(asr_h)) =>
+        stream_speech_into_asr(tts_h, I16MonoResampler::new(24_000, 16_000), asr_h, request, asr_params).await?,
+
+    #[cfg(all(feature = "model-piper", feature = "model-whisper-cpp"))]
+    (LoadedBundle::PiperEnUsLjspeechMedium(tts_h), LoadedBundle::WhisperBaseEn(asr_h)) =>
+        stream_speech_into_asr(tts_h, IdentityTransform, asr_h, request, asr_params).await?,
+
+    // … additional (tts, asr) pairs as features land …
+
+    (tts_other, asr_other) => return Err(DriverError::invalid_argument(
+        "alias", format!("pipeline tts-asr not wired for ({tts_other:?}, {asr_other:?})"))),
 };
 
-CommandOutput {
-    lines: vec![
-        format!("input:  {input}"),
-        format!("output: {}", transcript.segments.iter().map(|s| &s.text).join(" ")),
-        format!("overlap: {:.1}%", word_overlap(&input, &output) * 100.0),
-    ],
-    effects: vec![],
-}
+CommandOutput::lines(vec![
+    format!("input:  {input}"),
+    format!("output: {}", transcript.segments.iter().map(|s| &s.text).join(" ")),
+    format!("overlap: {:.1}%", word_overlap(&input, &output) * 100.0),
+])
 ```
 
-The helper assumes mono throughout; cross-layout pipelines are deferred.
-`stream_speech_into_asr` is a free function taking borrowed typed handles,
-which means the driver needs a narrow accessor (`tts_handle()`, etc.) that
-yields the concrete `impl` type. In practice that means each `load`-dispatch
-arm either stores a concrete bundle handle alongside the dyn-adapters **or**
-the pipeline is implemented per-bundle-pair in a small match. The concrete
-arm is cleaner; dyn adapters cover single-capability commands only.
+`stream_speech_into_asr` is generic over the TTS handle, the transform, and
+the ASR handle; each match arm monomorphises one copy — fully static. The
+number of match arms is bounded by the enabled `(tts, asr)` feature crossings,
+and missing combinations are a single explicit compile-time entry, not a
+runtime surprise. `--keep-wav` is a local fork of the helper in the same
+arm that also feeds each chunk through a `hound::WavWriter`.
 
 Other pipelines (`pipeline chat-tts-asr`, `pipeline asr-tts`) follow the same
 shape; v1 ships only `tts-asr` to validate the engine, the rest track as
@@ -658,7 +754,7 @@ text output is sufficient and keeps the slice small.
 | Command             | libs/models entry                                                  | libs/model capability                                       |
 |---------------------|--------------------------------------------------------------------|-------------------------------------------------------------|
 | `load`              | namespaced `motlie_models::{tts,asr,chat,embeddings}::{bundle}::start_typed` | —                                                           |
-| `unload`            | `BundleHandle::shutdown` (captured in `ShutdownFn`)                | —                                                           |
+| `unload`            | `LoadedBundle::shutdown` (match → `BundleHandle::shutdown`)        | —                                                           |
 | `list --available`  | `Catalog::bundles`                                                 | —                                                           |
 | `list --loaded`     | cached `LoadedBundleDescriptor`                                    | —                                                           |
 | `info`              | cached `LoadedBundleDescriptor` + `metric_snapshot`                | —                                                           |
@@ -717,16 +813,13 @@ this DESIGN is accepted):
 - P1: scaffold `libs/driver/src/commands/models.rs` behind
       `commands-models` feature; wire empty `ModelsCommand`/`ModelsState`
       stubs + `CommandSet` impl that returns `CommandOutput::line("todo")`.
-      Define the `DynChat`/`DynTts`/`DynBatchAsr`/`DynStreamingAsr`/
-      `DynEmbedding`/`DynVoiceClone16Mono` adapter traits with blanket impls
-      forwarding to the concrete typed handles (boxing the `impl Future`
-      returns into `BoxFuture`). This is the only place the driver pays for
-      the dyn/Sized mismatch.
+      Define the `LoadedBundle` enum with one feature-gated variant per
+      curated bundle (matching the feature gating of `ModelSelector`) plus
+      the `shutdown(self)` match.
 - P2: implement `load`/`unload`/`list`/`use`/`info` as a `match`
       dispatch over feature-gated `ModelSelector` variants, each arm
       calling the matching `motlie_models::<cap>::<bundle>::start_typed` and
-      constructing a `LoadedModel` via a per-bundle `from_*` helper that
-      populates `LoadedCapabilities` and the `ShutdownFn`.
+      wrapping the result in the corresponding `LoadedBundle` variant.
 - P3: implement `chat` one-shot + `session` multi-turn.
 - P4: implement `transcribe` over both `BatchTranscriber` and
       `StreamingTranscriber` (flag-selectable); wav decoder resamples to the
