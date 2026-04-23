@@ -1,15 +1,22 @@
-Use `.agents/voice/voice.env` to choose:
+Default:
 
-- capture endpoint
-- artifact roots
-- build profile
-- acceleration policy (`auto`, `cpu`, `cuda`)
+- local microphone
 
-For remote macOS capture:
+If the human says the microphone is remote, use:
 
-- `KIND=ssh`
-- `SSH_TARGET=motliehost`
-- `RECORD_CMD=/opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t wav -`
+- `--endpoint ssh:<host>`
+
+Examples:
+
+- `--endpoint ssh:motliehost`
+- `--endpoint ssh:macmini`
+
+macOS remote capture setup:
+
+- install `sox`:
+  - `brew install sox`
+- expected remote capture command:
+  - `/opt/homebrew/bin/rec -q -t wav -`
 
 If `--seconds` is omitted, stop capture with:
 

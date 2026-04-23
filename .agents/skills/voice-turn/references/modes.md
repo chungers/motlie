@@ -2,8 +2,8 @@ Recommended first-turn defaults:
 
 - TTS: `piper`
 - ASR: `whisper`
-- playback endpoint: `motliehost`
-- capture endpoint: `motliehost`
+- playback endpoint: local
+- capture endpoint: local
 
 For lower-latency or event-style ASR testing:
 

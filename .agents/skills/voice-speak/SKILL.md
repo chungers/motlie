@@ -10,20 +10,11 @@ Use this skill when spoken output is the goal.
 Default behavior:
 
 - prefers an installed platform binary from `.agents/skills/bin/`
-- builds and installs the typed `voice-agent` binary in `release` mode when missing
+- builds and installs the most optimized host binary in `release` mode when missing
 - `voice-agent` then builds or reuses the optimized release example binary
-- prefers CUDA on the current host when available
-- sends WAV output to the configured playback endpoint
+- prefers CUDA automatically on the current host when available
+- sends WAV output to the local playback device by default
 - supports qwen3 voice cloning via `--voice <alias>` or `--reference-audio <path>`
-
-Shared config lives in:
-
-- `.agents/voice/voice.env.example`
-- `.agents/voice/voice.env`
-
-If endpoint config is missing and the script is running interactively, the voice
-runtime prompts once for the missing values and stores them in
-`.agents/voice/voice.env`.
 
 Typed orchestrator:
 
@@ -33,10 +24,40 @@ Thin wrapper:
 
 - `scripts/run.sh`
 
+Agent decision rule:
+
+- discover runtime details progressively through the conversation with the human
+- if the user says "say with qwen3", use `--backend qwen3cpp`
+- otherwise default to `--backend piper`
+- if a local playback command exists, try local first
+- after local playback, ask the human whether they heard it
+- if local playback did not work, ask:
+  - `Should I send audio to a remote host over SSH? If so, what host should I use?`
+- when the user says remote, pass `--endpoint ssh:<host>`
+- if the wrapper says it is building the optimized binary, tell the human to wait
+
+If the human asks "how do I hear you?" answer in this shape:
+
+- by default I try the local playback device on the machine running the skill
+- if local playback is not what they want, I can send WAV audio over SSH with `--endpoint ssh:<host>`
+- on macOS the simplest remote playback path is Homebrew `sox`, which provides `play`
+- install command on macOS:
+  - `brew install sox`
+- the remote playback command the runtime expects is effectively:
+  - `/opt/homebrew/bin/play -t wav -`
+- if local playback did not work, ask whether they want remote playback and what SSH host to use
+
 Examples:
 
 ```bash
 .agents/skills/voice-speak/scripts/run.sh --backend piper --text "Hello from Motlie."
+```
+
+```bash
+.agents/skills/voice-speak/scripts/run.sh \
+  --backend piper \
+  --endpoint ssh:motliehost \
+  --text "Hello from Motlie."
 ```
 
 ```bash
