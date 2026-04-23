@@ -30,6 +30,11 @@ CONTROL_HOST="127.0.0.1"
 CONTROL_PORT=""
 GUEST_IPV4="10.0.2.15"
 EGRESS_HELPER_LOG_FRAMES="${MOTLIE_VZ_LOG_FRAMES:-0}"
+BENCHMARK_APT="${MOTLIE_VZ_BENCHMARK_APT:-0}"
+BENCHMARK_HTTP="${MOTLIE_VZ_BENCHMARK_HTTP:-0}"
+BENCHMARK_HTTP_URL="${MOTLIE_VZ_BENCHMARK_HTTP_URL:-http://ports.ubuntu.com/ubuntu-ports/dists/noble-updates/main/binary-arm64/Packages.gz}"
+BENCHMARK_TIMEOUT_SECONDS="${MOTLIE_VZ_BENCHMARK_TIMEOUT_SECONDS:-90}"
+BENCHMARK_MTU="${MOTLIE_VZ_BENCHMARK_MTU:-0}"
 
 zmodload zsh/datetime
 
@@ -314,11 +319,11 @@ start_egress_helper() {
   kill_stale_egress_helpers
   rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
   : > "$EGRESS_LOG"
-  "$helper_bin" \
+  nohup "$helper_bin" \
     --socket-path "$EGRESS_SOCKET_PATH" \
     --host-forward-tcp "127.0.0.1:${CONTROL_PORT}:22" \
     $( [[ "$EGRESS_HELPER_LOG_FRAMES" == "1" ]] && print -- "--log-frames" ) \
-    >"$EGRESS_LOG" 2>&1 &
+    >"$EGRESS_LOG" 2>&1 </dev/null &
   EGRESS_HELPER_PID="$!"
   echo "$EGRESS_HELPER_PID" > "$EGRESS_HELPER_PID_FILE"
   local attempts=0
@@ -487,6 +492,7 @@ require_host_fixture_dirs() {
 require_host_fixture_dirs
 
 guest_bash() {
+  local remote_timeout="${MOTLIE_VZ_GUEST_BASH_TIMEOUT:--1}"
   local remote_script
   remote_script="$(mktemp)"
   local remote_path="/home/${CONTROL_USER}/.motlie-vfs-remote.sh"
@@ -532,6 +538,65 @@ expect {
   }
   timeout {
     puts stderr "ssh timed out: remote guest bash script"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
+}
+EOF
+}
+
+guest_exec() {
+  local remote_timeout="${MOTLIE_VZ_GUEST_EXEC_TIMEOUT:--1}"
+  local remote_script
+  remote_script="$(mktemp)"
+  local remote_path="/home/${CONTROL_USER}/.motlie-vfs-exec.sh"
+  cat >"$remote_script"
+  expect <<EOF
+set timeout ${remote_timeout}
+spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${CONTROL_HOST}:${remote_path}
+expect {
+  "password:" {
+    send "${CONTROL_PASSWORD}\r"
+    exp_continue
+  }
+  eof {}
+  timeout {
+    puts stderr "scp timed out: remote guest exec script"
+    exit 124
+  }
+}
+catch wait result
+set exit_code [lindex \$result 3]
+if {\$exit_code != 0} {
+  exit \$exit_code
+}
+EOF
+  rm -f "$remote_script"
+  expect <<EOF
+set timeout ${remote_timeout}
+log_user 0
+set output ""
+spawn ssh -T -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} "chmod 0700 ${remote_path} && bash -euo pipefail ${remote_path} </dev/null"
+expect {
+  "password:" {
+    send "${CONTROL_PASSWORD}\r"
+    exp_continue
+  }
+  -re ".+" {
+    append output \$expect_out(0,string)
+    exp_continue
+  }
+  eof {
+    if {\$output ne ""} {
+      puts \$output
+    }
+  }
+  timeout {
+    puts stderr "ssh timed out: remote guest exec script"
     exit 124
   }
 }
@@ -612,7 +677,7 @@ if {\$exit_code != 0} {
 EOF
   rm -f "$remote_script"
   expect <<EOF
-set timeout -1
+set timeout ${remote_timeout}
 log_user 0
 set output ""
 spawn ssh -tt -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} "chmod 0700 ${remote_path} && bash -euo pipefail ${remote_path} </dev/null"
@@ -728,9 +793,9 @@ RUNNER_ARGS=(
   --memory-mib 4096
   --cpu-count 4
 )
-"$RUNNER_BIN" \
+nohup "$RUNNER_BIN" \
   "${RUNNER_ARGS[@]}" \
-  >"$RUN_LOG" 2>&1 &
+  >"$RUN_LOG" 2>&1 </dev/null &
 RUNNER_PID="$!"
 echo "$RUNNER_PID" > "$RUNNER_PID_FILE"
 
@@ -1161,14 +1226,122 @@ fi
 READY_EPOCH="$EPOCHREALTIME"
 BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
 
-python3 - "$RESULT_JSON" "$RUN_VM_NAME" "$BOOT_SECONDS" "$SOCKET_PATH" "$RUNNER_PID" "$IP_ADDR" "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$KEEP_RUNNING" <<'PY'
+BENCHMARK_REMOTE_JSON="/tmp/motlie-vmm-benchmark.json"
+BENCHMARK_LOCAL_JSON=""
+if [[ "$BENCHMARK_APT" == "1" || "$BENCHMARK_HTTP" == "1" ]]; then
+  echo "--- running in-guest benchmark phase ---"
+  MOTLIE_VZ_GUEST_EXEC_TIMEOUT="$(( BENCHMARK_TIMEOUT_SECONDS + 30 ))" guest_exec <<EOF
+export MOTLIE_BENCHMARK_TIMEOUT_SECONDS='${BENCHMARK_TIMEOUT_SECONDS}'
+export MOTLIE_BENCHMARK_MTU='${BENCHMARK_MTU}'
+export MOTLIE_BENCHMARK_APT='${BENCHMARK_APT}'
+export MOTLIE_BENCHMARK_HTTP='${BENCHMARK_HTTP}'
+export MOTLIE_BENCHMARK_HTTP_URL='${BENCHMARK_HTTP_URL}'
+export MOTLIE_BENCHMARK_REMOTE_JSON='${BENCHMARK_REMOTE_JSON}'
+python3 - <<'PY2'
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+
+result = {}
+benchmark_timeout = int(os.environ["MOTLIE_BENCHMARK_TIMEOUT_SECONDS"])
+benchmark_mtu = int(os.environ["MOTLIE_BENCHMARK_MTU"])
+benchmark_apt = os.environ["MOTLIE_BENCHMARK_APT"] == "1"
+benchmark_http = os.environ["MOTLIE_BENCHMARK_HTTP"] == "1"
+benchmark_http_url = os.environ["MOTLIE_BENCHMARK_HTTP_URL"]
+benchmark_remote_json = os.environ["MOTLIE_BENCHMARK_REMOTE_JSON"]
+
+if benchmark_mtu > 0:
+    iface_proc = subprocess.run(
+        ["bash", "-lc", "ip route show default | awk '{print \$5; exit}'"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    iface = iface_proc.stdout.strip()
+    result["mtu_clamp"] = {
+        "requested_mtu": benchmark_mtu,
+        "iface": iface,
+        "detect_exit_code": iface_proc.returncode,
+    }
+    if iface:
+        mtu_proc = subprocess.run(
+            [
+                "bash",
+                "-lc",
+                f"printf 'testpass\\n' | sudo -S ip link set dev {iface} mtu {benchmark_mtu}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        result["mtu_clamp"]["set_exit_code"] = mtu_proc.returncode
+        result["mtu_clamp"]["set_output"] = "\n".join(mtu_proc.stdout.splitlines()[-20:])
+
+if benchmark_apt:
+    start = time.time()
+    proc = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            f"timeout --signal=TERM --kill-after=10 {benchmark_timeout}s bash -lc \"printf 'testpass\\\\n' | sudo -S apt-get update -o Acquire::Retries=0\"",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    apt_payload = {
+        "elapsed_seconds": round(time.time() - start, 3),
+        "exit_code": proc.returncode,
+        "timed_out": proc.returncode == 124,
+        "tail": "\n".join(proc.stdout.splitlines()[-40:]),
+    }
+    result["apt_update"] = apt_payload
+
+if benchmark_http:
+    proc = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            f"timeout --signal=TERM --kill-after=10 {benchmark_timeout}s curl -4 -o /dev/null -sS -w 'time_total=%{{time_total}}\\nspeed_download=%{{speed_download}}\\nsize_download=%{{size_download}}\\nhttp_code=%{{http_code}}\\n' {benchmark_http_url!r}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = proc.stdout
+    payload = {
+        "exit_code": proc.returncode,
+        "url": benchmark_http_url,
+        "timed_out": proc.returncode == 124,
+    }
+    for line in output.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            payload[key] = value
+    result["http_fetch"] = payload
+
+Path(benchmark_remote_json).write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
+PY2
+EOF
+  BENCHMARK_LOCAL_JSON="$(mktemp)"
+  guest_fetch "$BENCHMARK_REMOTE_JSON" "$BENCHMARK_LOCAL_JSON"
+  cp "$BENCHMARK_LOCAL_JSON" "$ARTIFACTS_DIR/${GUEST_NAME}-benchmark.json"
+fi
+
+python3 - "$RESULT_JSON" "$RUN_VM_NAME" "$BOOT_SECONDS" "$SOCKET_PATH" "$RUNNER_PID" "$IP_ADDR" "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$KEEP_RUNNING" "${BENCHMARK_LOCAL_JSON:-}" <<'PY'
 import json
 import sys
 
-path, vm_name, boot_seconds, socket_path, runner_pid, ip_addr, validation_json_path, keep_running = sys.argv[1:]
+path, vm_name, boot_seconds, socket_path, runner_pid, ip_addr, validation_json_path, keep_running, benchmark_json_path = sys.argv[1:]
 with open(validation_json_path, "r", encoding="utf-8") as fh:
     validation_payload = json.load(fh)
 keep_running_bool = keep_running == "1"
+benchmark_payload = None
+if benchmark_json_path:
+    with open(benchmark_json_path, "r", encoding="utf-8") as fh:
+        benchmark_payload = json.load(fh)
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(
         {
@@ -1184,6 +1357,7 @@ with open(path, "w", encoding="utf-8") as fh:
                 "mounts_ready": True,
                 "guest": validation_payload,
             },
+            "benchmark": benchmark_payload,
         },
         fh,
         indent=2,
@@ -1191,6 +1365,10 @@ with open(path, "w", encoding="utf-8") as fh:
     )
     fh.write("\n")
 PY
+
+if [[ -n "$BENCHMARK_LOCAL_JSON" ]]; then
+  rm -f "$BENCHMARK_LOCAL_JSON"
+fi
 
 echo "--- result written ---"
 cat "$RESULT_JSON"

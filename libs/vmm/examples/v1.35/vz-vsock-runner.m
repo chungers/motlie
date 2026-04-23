@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 static char g_net_socket_local_path[sizeof(((struct sockaddr_un *)0)->sun_path)] = {0};
+static const NSUInteger kMotlieVzNetworkMTU = 1500;
 
 static void cleanup_net_socket_local_path(void) {
     if (g_net_socket_local_path[0] != '\0') {
@@ -93,6 +94,20 @@ static int bind_unix_datagram_socket(void) {
     return fd;
 }
 
+static int tune_datagram_fd(int fd) {
+    int sndbuf = 256 * 1024;
+    int rcvbuf = 1024 * 1024;
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) != 0) {
+        perror("setsockopt(SO_SNDBUF)");
+        return -1;
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) != 0) {
+        perror("setsockopt(SO_RCVBUF)");
+        return -1;
+    }
+    return 0;
+}
+
 static void start_datagram_bridge(const char *label, int srcFD, int dstFD) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         uint8_t buffer[65536];
@@ -112,14 +127,23 @@ static void start_datagram_bridge(const char *label, int srcFD, int dstFD) {
             if (count <= 10 || count % 100 == 0) {
                 fprintf(stderr, "net bridge %s frame %llu (%zd bytes)\n", label, count, n);
             }
-            ssize_t sent = send(dstFD, buffer, (size_t)n, 0);
-            if (sent < 0) {
+            while (1) {
+                ssize_t sent = send(dstFD, buffer, (size_t)n, 0);
+                if (sent >= 0) {
+                    break;
+                }
                 if (errno == EINTR) {
                     continue;
                 }
-                break;
+                if (errno == ENOBUFS || errno == EAGAIN) {
+                    usleep(1000);
+                    continue;
+                }
+                perror("send(AF_UNIX, SOCK_DGRAM)");
+                goto bridge_done;
             }
         }
+bridge_done:
         shutdown(srcFD, SHUT_RDWR);
         shutdown(dstFD, SHUT_RDWR);
     });
@@ -539,6 +563,17 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
             }
             return NO;
         }
+        if (tune_datagram_fd(netPair[0]) != 0 || tune_datagram_fd(netPair[1]) != 0) {
+            close(netPair[0]);
+            close(netPair[1]);
+            close(netBackendFD);
+            if (error) {
+                *error = [NSError errorWithDomain:@"motlie.vnet.v1_25.vz"
+                                             code:4
+                                         userInfo:@{NSLocalizedDescriptionKey: @"failed to tune guest network socketpair"}];
+            }
+            return NO;
+        }
 
         start_datagram_sendto_bridge("guest->backend", netPair[1], netBackendFD, netBackendSocketPath);
         start_datagram_bridge("backend->guest", netBackendFD, netPair[1]);
@@ -547,6 +582,7 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
 
         NSFileHandle *netFile = [[NSFileHandle alloc] initWithFileDescriptor:netPair[0] closeOnDealloc:YES];
         VZFileHandleNetworkDeviceAttachment *attachment = [[VZFileHandleNetworkDeviceAttachment alloc] initWithFileHandle:netFile];
+        attachment.maximumTransmissionUnit = kMotlieVzNetworkMTU;
         VZVirtioNetworkDeviceConfiguration *net = [[VZVirtioNetworkDeviceConfiguration alloc] init];
         net.attachment = attachment;
         VZMACAddress *macAddress = nil;

@@ -976,6 +976,11 @@ if [ -f "$HOME/.env" ]; then
     set +a
 fi
 DOTENVEOF
+
+mkdir -p /etc/apt/apt.conf.d
+cat <<'APTEOF' > /etc/apt/apt.conf.d/99motlie-force-ipv4
+Acquire::ForceIPv4 "true";
+APTEOF
 cat <<'AGENTEOF' > /etc/profile.d/agent-state.sh
 agent_state_root=/agent-state
 codex_root="$agent_state_root/codex"
@@ -1000,7 +1005,7 @@ MOTDEOF
 if ! grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
   printf 'user_allow_other\n' >> /etc/fuse.conf
 fi
-chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh
+chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh /etc/apt/apt.conf.d/99motlie-force-ipv4
 install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-state-setup
 install -D -m 0644 /tmp/motlie-agent-state.service /etc/systemd/system/motlie-agent-state.service
 install -D -m 0755 /tmp/motlie-vmm-vsock-ssh-loop /usr/local/bin/motlie-vmm-vsock-ssh-loop
