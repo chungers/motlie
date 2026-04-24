@@ -5,12 +5,12 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-04-22 | @codex-tts | Initial design for repo-local voice agent skills built on the existing TTS/ASR examples. |
-| 2026-04-22 | @codex-tts | Renamed the skill surface to `voice-speak`, `voice-listen`, and `voice-turn` and implemented the shared shell runtime under `.agents/voice/`. |
+| 2026-04-22 | @codex-tts | Renamed the skill surface to the `voice/` namespace with `speak`, `listen`, and `turn` subskills. |
 | 2026-04-22 | @codex-tts | Added first-run interactive endpoint bootstrap and qwen3 reference-voice support via `--voice` / `--reference-audio`. |
-| 2026-04-23 | @codex-tts | Switched the primary orchestration path to a typed `bins/voice-agent` CLI, kept thin shell wrappers for skill entrypoints, installed platform-scoped binaries under `.agents/skills/bin/`, made the runtime heuristic-first (`release`, CUDA auto-preference, heuristic artifact lookup), and extended the shared WAV decode path to accept the macOS/SoX 32-bit PCM capture format seen on `motliehost`. |
+| 2026-04-23 | @codex-tts | Switched the primary orchestration path to a typed `bins/voice-agent` CLI, kept thin shell wrappers for skill entrypoints, installed platform-scoped binaries under each namespaced voice skill `bin/` directory, made the runtime heuristic-first (`release`, CUDA auto-preference, heuristic artifact lookup), and extended the shared WAV decode path to accept the macOS/SoX 32-bit PCM capture format seen on `motliehost`. |
 | 2026-04-23 | @codex-tts | Simplified the contract further: local audio by default, explicit `ssh:<host>` for remote endpoints, no setup/config path for normal use, and agent-facing docs that require asking the human when local vs remote is ambiguous. |
 | 2026-04-23 | @codex-tts | Clarified that the skill discovers runtime details progressively through the conversation with the human rather than loading a predeclared config upfront. |
-| 2026-04-23 | @codex-tts | Added a conversational playbook with example human prompts, example agent responses, and operational answer patterns for `voice-speak`, `voice-listen`, and `voice-turn`. |
+| 2026-04-23 | @codex-tts | Added a conversational playbook with example human prompts, example agent responses, and operational answer patterns for `voice/speak`, `voice/listen`, and `voice/turn`. |
 
 ## Problem
 
@@ -23,7 +23,7 @@ We need repo-local skills and helper scripts that let an agent:
 
 - synthesize speech to a human with the supported TTS backends
 - capture human speech from a local or remote endpoint into the supported ASR backends
-- compose those pieces into a single voice-turn interaction
+- compose those pieces into a single `voice/turn` interaction
 - build or reuse optimized release binaries for the platform the agent is
   running on, including CUDA when supported
 
@@ -56,7 +56,7 @@ We need repo-local skills and helper scripts that let an agent:
    acceleration env vars.
 6. Skills can be used by both Codex and Claude from a shared repo-local
    directory layout.
-7. `voice-speak` and `voice-turn` support qwen3 voice cloning through either:
+7. `voice/speak` and `voice/turn` support qwen3 voice cloning through either:
    - a named alias such as `--voice jarvis`
    - a direct file path via `--reference-audio /path/to/file.wav`
 8. The agent skill should ask the human when it is unclear whether playback or
@@ -84,18 +84,19 @@ We need repo-local skills and helper scripts that let an agent:
 ```text
 .agents/
 ├── skills/
-│   ├── voice-speak/
-│   ├── voice-listen/
-│   ├── voice-turn/
-│   └── bin/
-├── voice/
-│   └── scripts/
+│   └── voice/
+│       ├── README.md
+│       ├── common/
+│       ├── speak/
+│       ├── listen/
+│       └── turn/
 └── ...
 bins/
 └── voice-agent/
 ```
 
-The typed orchestration lives under `bins/voice-agent/`. Each skill only contains:
+The typed orchestration lives under `bins/voice-agent/`. Each namespaced
+subskill only contains:
 
 - `SKILL.md`
 - a tiny `scripts/run.sh` wrapper
@@ -114,13 +115,13 @@ The typed orchestration lives under `bins/voice-agent/`. Each skill only contain
 The thin shell wrappers call:
 
 ```text
-.agents/voice/scripts/run_voice_agent.sh
+.agents/skills/voice/common/run_voice_agent.sh
 ```
 
 That helper:
 
-- prefers an installed platform binary under `.agents/skills/bin/`
-- installs `voice-agent` into `.agents/skills/bin/voice-agent-<os>-<arch>-<profile>-<flavor>` when missing
+- prefers an installed platform binary under the subskill-local `bin/`
+- installs `voice-agent` into `.agents/skills/voice/<skill>/bin/voice-agent-<os>-<arch>-<profile>-<flavor>` when missing
 - builds `voice-agent` in `release` mode by default when installation is needed
 - executes the installed binary directly rather than using `cargo run`
 - chooses the most optimized installed flavor available at runtime:
@@ -178,12 +179,12 @@ Agent-facing rule:
 The first slice keeps reference voices under:
 
 ```text
-artifacts/voice-references/
+.agents/skills/voice/speak/references/voices/
 ```
 
 Alias resolution is intentionally simple:
 
-- `--voice jarvis` -> `artifacts/voice-references/jarvis.wav`
+- `--voice jarvis` -> `.agents/skills/voice/speak/references/voices/jarvis.wav`
 - `--voice "voice of jarvis"` normalizes to the same alias
 - `--reference-audio /path/to/file.wav` bypasses alias lookup
 

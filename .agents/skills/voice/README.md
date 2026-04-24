@@ -2,19 +2,35 @@
 
 This README is the conversational playbook for the repo-local voice skills:
 
-- `voice-speak`
-- `voice-listen`
-- `voice-turn`
+- `voice/speak`
+- `voice/listen`
+- `voice/turn`
 
 ## Runtime Rules
 
-- prefer shipped platform binaries under `.agents/skills/bin/`
+- prefer shipped platform binaries under each namespaced skill directory:
+  - `.agents/skills/voice/speak/bin/`
+  - `.agents/skills/voice/listen/bin/`
+  - `.agents/skills/voice/turn/bin/`
 - if no binary is available for this host, build the most optimized one for the host
+- if the selected backend weights are missing, download them into the shared skill cache:
+  - `.agents/skills/voice/artifacts/hf-cache/`
 - always use `release`
 - prefer CUDA when the host supports it
 - use local audio devices first when they are available
 - if local audio does not work, ask the human whether they are remote and what SSH host to use
 - discover runtime details progressively through the conversation with the human
+
+## Bootstrapping Rules
+
+- treat build and model download as normal first-run bootstrap work
+- if the host binary is missing, tell the human you need to build it and ask them to wait
+- if the selected model weights are missing, tell the human you need to download them and ask them to wait
+- if both are missing, tell the human both steps are part of bootstrap:
+  - build the optimized binary for this host
+  - download the selected backend weights into `.agents/skills/voice/artifacts/hf-cache/`
+- if neither a shipped binary nor repo source is present, tell the human exactly that
+- after bootstrap, continue with the original speak/listen/turn request instead of stopping
 
 ## Backend Defaults
 
@@ -39,7 +55,7 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-speak`
+- use `voice/speak`
 - backend: `piper`
 - endpoint: local
 
@@ -53,7 +69,7 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-speak`
+- use `voice/speak`
 - backend: `qwen3cpp`
 - endpoint: local
 
@@ -67,12 +83,22 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-speak`
+- use `voice/speak`
 - endpoint: `ssh:motliehost`
 
 Example agent response:
 
 `I’ll send the audio to motliehost over SSH.`
+
+Bootstrap example:
+
+Human prompt:
+
+`Say hello to me.`
+
+Good agent response when the binary and/or models are missing:
+
+`I need to bootstrap the voice skill on this host first by building the optimized binary and downloading the Piper weights into the shared voice artifacts cache. Please wait a moment.`
 
 ### Listen
 
@@ -82,7 +108,7 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-listen`
+- use `voice/listen`
 - backend: `whisper`
 - endpoint: local
 
@@ -96,7 +122,7 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-listen`
+- use `voice/listen`
 - backend: `sherpa`
 - endpoint: local
 
@@ -110,12 +136,22 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-listen`
+- use `voice/listen`
 - endpoint: `ssh:motliehost`
 
 Example agent response:
 
 `I’ll listen from motliehost over SSH.`
+
+Bootstrap example:
+
+Human prompt:
+
+`Listen to me.`
+
+Good agent response when Whisper is not cached yet:
+
+`I need to bootstrap listening on this host first by downloading the Whisper weights into the shared voice artifacts cache. Please wait a moment.`
 
 ### Turn
 
@@ -125,7 +161,7 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-turn`
+- use `voice/turn`
 - TTS backend: `piper`
 - ASR backend: `whisper`
 - playback: local
@@ -141,7 +177,7 @@ Human prompt:
 
 Agent interpretation:
 
-- use `voice-turn`
+- use `voice/turn`
 - TTS backend: `qwen3cpp`
 - ASR backend: `moonshine`
 
@@ -159,7 +195,7 @@ Human prompt:
 
 Good agent follow-up:
 
-`I can try the local speaker first. If you want remote playback instead, tell me the SSH host.`
+`I detected a local playback command on this host. I can try the local speaker first, or send audio to a remote host over SSH. Which do you want?`
 
 If local did not work:
 
@@ -173,7 +209,7 @@ Human prompt:
 
 Good agent follow-up:
 
-`I’ll try the local microphone first. Tell me if it doesn’t hear you, and I can switch to a remote SSH host.`
+`I detected a local recording command on this host. I can try the local microphone first, or listen from a remote host over SSH. Which should I use?`
 
 If local did not work:
 
@@ -201,10 +237,14 @@ Good agent response:
 
 `I need to build the optimized voice binary for this host first. Please wait a moment.`
 
+If weights are also likely missing:
+
+`I need to bootstrap the voice skill on this host first. That usually means building the optimized binary and downloading the selected model weights into .agents/skills/voice/artifacts/hf-cache/. Please wait a moment.`
+
 ## Source-Missing Response
 
 If no shipped binary exists and the repo source is not present on this host, tell the human exactly that.
 
 Good agent response:
 
-`There isn’t a shipped voice binary for this host, and the source tree is not available here to build one. I need either the prebuilt platform binary in .agents/skills/bin/ or the repo source on this machine.`
+`There isn’t a shipped voice binary for this host under the namespaced skill bin directory, and the source tree is not available here to build one. I need either the prebuilt platform binary in .agents/skills/voice/<skill>/bin/ or the repo source on this machine.`

@@ -1,5 +1,5 @@
 ---
-name: voice-listen
+name: voice/listen
 description: Capture human speech into Motlie ASR using the repo-local voice runtime. Use when the agent should record audio from a local or remote microphone endpoint and transcribe it with Whisper, sherpa-onnx, or Moonshine.
 ---
 
@@ -9,7 +9,7 @@ Use this skill when the agent needs spoken input from a person.
 
 Default behavior:
 
-- prefers an installed platform binary from `.agents/skills/bin/`
+- prefers an installed platform binary from `.agents/skills/voice/listen/bin/`
 - builds and installs the most optimized host binary in `release` mode when missing
 - `voice-agent` then builds or reuses the optimized release ASR example binary
 - prefers CUDA automatically on the current host when available
@@ -50,22 +50,22 @@ If the human asks "how do you hear me?" answer in this shape:
 Examples:
 
 ```bash
-.agents/skills/voice-listen/scripts/run.sh --backend whisper --seconds 8
+.agents/skills/voice/listen/scripts/run.sh --backend whisper --seconds 8
 ```
 
 ```bash
-.agents/skills/voice-listen/scripts/run.sh \
+.agents/skills/voice/listen/scripts/run.sh \
   --backend whisper \
   --endpoint ssh:motliehost \
   --seconds 8
 ```
 
 ```bash
-.agents/skills/voice-listen/scripts/run.sh --backend sherpa --seconds 8 --partials
+.agents/skills/voice/listen/scripts/run.sh --backend sherpa --seconds 8 --partials
 ```
 
 For testing from an existing WAV instead of a microphone:
 
 ```bash
-.agents/skills/voice-listen/scripts/run.sh --backend whisper --wav /tmp/motlie-voice.wav
+.agents/skills/voice/listen/scripts/run.sh --backend whisper --wav /tmp/motlie-voice.wav
 ```

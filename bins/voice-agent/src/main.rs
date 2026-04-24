@@ -196,7 +196,8 @@ impl VoiceConfig {
     }
 
     fn reference_root(&self) -> PathBuf {
-        self.repo_root.join("artifacts/voice-references")
+        self.repo_root
+            .join(".agents/skills/voice/speak/references/voices")
     }
 
     fn default_repo_artifact_root(&self) -> PathBuf {

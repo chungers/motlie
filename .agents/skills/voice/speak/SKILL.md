@@ -1,5 +1,5 @@
 ---
-name: voice-speak
+name: voice/speak
 description: Speak text aloud to a human with Motlie TTS using the repo-local voice runtime. Use when the agent should convert text into audible speech through Piper or qwen3-tts.cpp, either on the local host or over SSH to a named playback endpoint.
 ---
 
@@ -9,7 +9,7 @@ Use this skill when spoken output is the goal.
 
 Default behavior:
 
-- prefers an installed platform binary from `.agents/skills/bin/`
+- prefers an installed platform binary from `.agents/skills/voice/speak/bin/`
 - builds and installs the most optimized host binary in `release` mode when missing
 - `voice-agent` then builds or reuses the optimized release example binary
 - prefers CUDA automatically on the current host when available
@@ -50,11 +50,11 @@ If the human asks "how do I hear you?" answer in this shape:
 Examples:
 
 ```bash
-.agents/skills/voice-speak/scripts/run.sh --backend piper --text "Hello from Motlie."
+.agents/skills/voice/speak/scripts/run.sh --backend piper --text "Hello from Motlie."
 ```
 
 ```bash
-.agents/skills/voice-speak/scripts/run.sh \
+.agents/skills/voice/speak/scripts/run.sh \
   --backend piper \
   --endpoint ssh:motliehost \
   --text "Hello from Motlie."
@@ -62,11 +62,11 @@ Examples:
 
 ```bash
 printf '%s\n' "Hello from qwen3-tts.cpp." \
-| .agents/skills/voice-speak/scripts/run.sh --backend qwen3cpp
+| .agents/skills/voice/speak/scripts/run.sh --backend qwen3cpp
 ```
 
 ```bash
-.agents/skills/voice-speak/scripts/run.sh \
+.agents/skills/voice/speak/scripts/run.sh \
   --backend qwen3cpp \
   --voice jarvis \
   --text "Nothing new shipping."
@@ -75,7 +75,7 @@ printf '%s\n' "Hello from qwen3-tts.cpp." \
 If you need a file instead of live playback:
 
 ```bash
-.agents/skills/voice-speak/scripts/run.sh \
+.agents/skills/voice/speak/scripts/run.sh \
   --backend piper \
   --text "Hello from Motlie." \
   --wav /tmp/motlie-voice.wav

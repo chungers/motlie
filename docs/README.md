@@ -2,18 +2,14 @@
 
 ## Voice Agent Skills
 
-- [Design: Voice Agent Skills](./DESIGN_VOICE_AGENT_SKILLS.md)
-- [Plan: Voice Agent Skills](./PLAN_VOICE_AGENT_SKILLS.md)
+The voice-agent design and plan now live with the binary source at:
 
-These docs cover the repo-local voice skill runtime under `.agents/voice/` and
-the typed `bins/voice-agent` runtime plus the thin skill wrappers under
-`.agents/skills/voice-speak`, `.agents/skills/voice-listen`, and
-`.agents/skills/voice-turn`.
+- [bins/voice-agent/README.md](../bins/voice-agent/README.md)
 
 The conversational playbook with example human prompts and example agent
 responses lives at:
 
-- [.agents/skills/README.md](../.agents/skills/README.md)
+- [.agents/skills/voice/README.md](../.agents/skills/voice/README.md)
 
 ## Product Notes
 
