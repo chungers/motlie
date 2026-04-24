@@ -34,6 +34,7 @@ pub enum EgressNetMode {
     None,
     Tap,
     VhostUser,
+    VzUserspace,
 }
 
 impl EgressNetMode {
@@ -42,6 +43,7 @@ impl EgressNetMode {
             Self::None => "none",
             Self::Tap => "tap",
             Self::VhostUser => "vhost-user",
+            Self::VzUserspace => "vz-userspace",
         }
     }
 }
@@ -54,6 +56,7 @@ impl FromStr for EgressNetMode {
             "none" => Ok(Self::None),
             "tap" => Ok(Self::Tap),
             "vhost-user" => Ok(Self::VhostUser),
+            "vz-userspace" => Ok(Self::VzUserspace),
             _ => Err(NetworkModeParseError::InvalidEgressMode(value.to_string())),
         }
     }
@@ -69,14 +72,14 @@ pub struct NetworkModes {
 pub enum NetworkModeParseError {
     #[error("admin-net must be one of: none, tap (got {0})")]
     InvalidAdminMode(String),
-    #[error("egress-net must be one of: none, tap, vhost-user (got {0})")]
+    #[error("egress-net must be one of: none, tap, vhost-user, vz-userspace (got {0})")]
     InvalidEgressMode(String),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum NetworkModeError {
     #[error(
-        "supported launch modes are --admin-net=none --egress-net=none, --admin-net=none --egress-net=vhost-user, --admin-net=tap --egress-net=tap, and --admin-net=tap --egress-net=vhost-user"
+        "supported launch modes are --admin-net=none --egress-net=none, --admin-net=none --egress-net=vhost-user, --admin-net=none --egress-net=vz-userspace, --admin-net=tap --egress-net=tap, and --admin-net=tap --egress-net=vhost-user"
     )]
     UnsupportedCombination {
         admin: AdminNetMode,
@@ -88,6 +91,7 @@ pub fn validate_network_modes(modes: &NetworkModes) -> Result<(), NetworkModeErr
     match (modes.admin, modes.egress) {
         (AdminNetMode::None, EgressNetMode::None)
         | (AdminNetMode::None, EgressNetMode::VhostUser)
+        | (AdminNetMode::None, EgressNetMode::VzUserspace)
         | (AdminNetMode::Tap, EgressNetMode::Tap)
         | (AdminNetMode::Tap, EgressNetMode::VhostUser) => Ok(()),
         _ => Err(NetworkModeError::UnsupportedCombination {
@@ -110,6 +114,10 @@ mod tests {
         assert_eq!(
             "vhost-user".parse::<EgressNetMode>().unwrap(),
             EgressNetMode::VhostUser
+        );
+        assert_eq!(
+            "vz-userspace".parse::<EgressNetMode>().unwrap(),
+            EgressNetMode::VzUserspace
         );
     }
 
@@ -135,6 +143,11 @@ mod tests {
         assert!(validate_network_modes(&NetworkModes {
             admin: AdminNetMode::None,
             egress: EgressNetMode::VhostUser,
+        })
+        .is_ok());
+        assert!(validate_network_modes(&NetworkModes {
+            admin: AdminNetMode::None,
+            egress: EgressNetMode::VzUserspace,
         })
         .is_ok());
         assert!(validate_network_modes(&NetworkModes {

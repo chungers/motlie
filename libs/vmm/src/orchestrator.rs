@@ -10,7 +10,7 @@ use crate::artifacts::{
     ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
     render_launch_script,
 };
-use crate::backend::BackendHandle;
+use crate::backend::{BackendHandle, BackendKind};
 use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
 use crate::observability::{
@@ -351,7 +351,7 @@ impl VmHandle {
                 label: "api_socket".to_string(),
                 path: self.runtime_paths.api_socket.clone(),
                 guest_path: None,
-                required: true,
+                required: matches!(self.backend_handle.kind(), BackendKind::ChShell),
                 exists: self.runtime_paths.api_socket.exists(),
             },
             VmRunArtifact {
@@ -429,20 +429,44 @@ impl VmHandle {
     }
 
     pub async fn ready(&self, policy: &ReadinessPolicy) -> Result<(), OrchestratorError> {
-        self.wait_for_path(
-            &self.runtime_paths.api_socket,
-            ReadinessStage::ApiSocketReady,
-            policy.api_socket_timeout,
-        )
-        .await?;
+        match self.backend_handle.kind() {
+            BackendKind::ChShell => {
+                self.wait_for_path(
+                    &self.runtime_paths.api_socket,
+                    ReadinessStage::ApiSocketReady,
+                    policy.api_socket_timeout,
+                )
+                .await?;
 
-        if let Some(filesystem) = self.filesystem.as_ref() {
-            filesystem.wait_ready(policy.guestfs_timeout).await?;
-        }
+                if let Some(filesystem) = self.filesystem.as_ref() {
+                    filesystem.wait_ready(policy.guestfs_timeout).await?;
+                }
 
-        if let Some(control_plane) = self.control_plane.as_ref() {
-            control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
-            self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                if let Some(control_plane) = self.control_plane.as_ref() {
+                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
+                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                }
+            }
+            BackendKind::Vz => {
+                if let Some(control_plane) = self.control_plane.as_ref() {
+                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
+                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                }
+
+                if let Some(filesystem) = self.filesystem.as_ref() {
+                    filesystem.wait_ready(policy.guestfs_timeout).await?;
+                }
+            }
+            _ => {
+                if let Some(filesystem) = self.filesystem.as_ref() {
+                    filesystem.wait_ready(policy.guestfs_timeout).await?;
+                }
+
+                if let Some(control_plane) = self.control_plane.as_ref() {
+                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
+                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                }
+            }
         }
 
         Ok(())

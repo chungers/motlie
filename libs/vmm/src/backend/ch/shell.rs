@@ -312,6 +312,12 @@ impl ChShellBackend {
     pub fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, BackendError> {
         let shell_handle = match handle {
             BackendHandle::ChShell(shell_handle) => shell_handle,
+            other => {
+                return Err(BackendError::HandleKindMismatch {
+                    expected: BackendKind::ChShell,
+                    actual: other.kind(),
+                });
+            }
         };
 
         let Some(pid) = shell_handle.pid else {

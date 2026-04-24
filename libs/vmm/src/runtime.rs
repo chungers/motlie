@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::ch::shell::ChShellBackend;
+use crate::backend::vz::shell::VzShellBackend;
 use crate::backend::motlie::ssh_proxy::{MotlieSshProxyBacking, MotlieSshProxyHandle};
 use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
 #[cfg(target_os = "linux")]
@@ -43,6 +44,7 @@ pub enum HypervisorBacking {
     CloudHypervisorShell(ChShellBackend),
     CloudHypervisorForkExec,
     CloudHypervisorVmmThread,
+    AppleVirtualizationShell(VzShellBackend),
     AppleVirtualization,
 }
 
@@ -106,6 +108,7 @@ impl HypervisorBacking {
     pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, RuntimeError> {
         match self {
             Self::CloudHypervisorShell(backend) => Ok(backend.boot(prepared)?),
+            Self::AppleVirtualizationShell(backend) => Ok(backend.boot(prepared)?),
             Self::CloudHypervisorForkExec
             | Self::CloudHypervisorVmmThread
             | Self::AppleVirtualization => Err(RuntimeError::UnsupportedHypervisor),
@@ -115,6 +118,7 @@ impl HypervisorBacking {
     pub fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, RuntimeError> {
         match self {
             Self::CloudHypervisorShell(backend) => Ok(backend.shutdown(handle)?),
+            Self::AppleVirtualizationShell(backend) => Ok(backend.shutdown(handle)?),
             Self::CloudHypervisorForkExec
             | Self::CloudHypervisorVmmThread
             | Self::AppleVirtualization => Err(RuntimeError::UnsupportedHypervisor),

@@ -178,6 +178,12 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
     ) {
         out.push_str("echo \"Using motlie-vmm egress socket ${VNET_SOCKET}\"\n");
     }
+    if matches!(
+        cfg.network_modes.egress,
+        crate::network::EgressNetMode::VzUserspace
+    ) {
+        out.push_str("echo \"Using Apple Vz userspace egress\"\n");
+    }
 
     writeln!(&mut out, "GUEST_CID={}", cfg.net_assignment.cid)
         .expect("writing to String cannot fail");
@@ -271,25 +277,75 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         )
         .expect("writing to String cannot fail");
     }
-    out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
-    out.push_str(
-        "LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n",
-    );
-    out.push_str("LAUNCH_ARGS+=(--admin-mac \"$ADMIN_MAC\" --egress-mac \"$EGRESS_MAC\")\n");
-    out.push_str(
-        "LAUNCH_ARGS+=(--egress-host-ip \"$EGRESS_HOST_IP\" --egress-guest-ip \"$EGRESS_GUEST_IP\" --egress-dns-ip \"$EGRESS_DNS_IP\")\n",
-    );
-    out.push_str(
-        "LAUNCH_ARGS+=(--ssh-user \"$SSH_LOGIN_USER\" --ssh-principal \"$SSH_PRINCIPAL\")\n",
-    );
-    out.push_str("LAUNCH_ARGS+=(--hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
-    out.push_str("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")\n");
-    out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");
-    if cfg.ssh_ca_pubkey.is_some() {
-        out.push_str("LAUNCH_ARGS+=(--ssh-ca-pubkey \"$SSH_CA_PUBKEY\")\n");
+    if matches!(
+        cfg.network_modes.egress,
+        crate::network::EgressNetMode::VzUserspace
+    ) {
+        if cfg.ssh_ca_pubkey.is_some() {
+            out.push_str("export MOTLIE_VZ_SSH_CA_PUBKEY=\"$SSH_CA_PUBKEY\"\n");
+        }
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_CONTROL_READY_FILE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("control-plane-ready")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_CONTROL_PORT_FILE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("control-port")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_VFS_VSOCK_SOCKET={}",
+            shell_single_quote(cfg.guest.socket_path.to_string_lossy().as_ref())
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_SSH_VSOCK_SOCKET={}",
+            shell_single_quote(&format!(
+                "{}_2222",
+                cfg.runtime_paths.vsock_socket.to_string_lossy()
+            ))
+        )
+        .expect("writing to String cannot fail");
+        out.push_str("export MOTLIE_VZ_KEEP_RUNNING=1\n");
+        out.push_str("\"$BASE_DIR/launch-vz.sh\" --guest \"$GUEST_ID\" --vm-name \"motlie-v1-45-${GUEST_ID}-iter\" \"$@\"\n");
+    } else {
+        out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
+        out.push_str(
+            "LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n",
+        );
+        out.push_str("LAUNCH_ARGS+=(--admin-mac \"$ADMIN_MAC\" --egress-mac \"$EGRESS_MAC\")\n");
+        out.push_str(
+            "LAUNCH_ARGS+=(--egress-host-ip \"$EGRESS_HOST_IP\" --egress-guest-ip \"$EGRESS_GUEST_IP\" --egress-dns-ip \"$EGRESS_DNS_IP\")\n",
+        );
+        out.push_str(
+            "LAUNCH_ARGS+=(--ssh-user \"$SSH_LOGIN_USER\" --ssh-principal \"$SSH_PRINCIPAL\")\n",
+        );
+        out.push_str("LAUNCH_ARGS+=(--hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
+        out.push_str("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")\n");
+        out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");
+        if cfg.ssh_ca_pubkey.is_some() {
+            out.push_str("LAUNCH_ARGS+=(--ssh-ca-pubkey \"$SSH_CA_PUBKEY\")\n");
+        }
+        out.push_str("# Boot artifact variables are rendered here for backend consumption.\n");
+        out.push_str("\"$BASE_DIR/launch-ch.sh\" \"${LAUNCH_ARGS[@]}\" \"$@\"\n");
     }
-    out.push_str("# Boot artifact variables are rendered here for backend consumption.\n");
-    out.push_str("\"$BASE_DIR/launch-ch.sh\" \"${LAUNCH_ARGS[@]}\" \"$@\"\n");
 
     Ok(out)
 }
@@ -444,5 +500,33 @@ mod tests {
         assert!(script.contains("BOOT_CMDLINE_APPEND='console=ttyS0'"));
         assert!(script.contains("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")"));
         assert!(script.contains("launch-ch.sh"));
+    }
+
+    #[test]
+    fn launch_script_uses_vz_launcher_for_vz_userspace() {
+        let guest = sample_guest();
+        let paths = sample_paths();
+        let net = sample_net();
+        let script = render_launch_script(&LaunchArtifactRenderConfig {
+            guest: &guest,
+            runtime_paths: &paths,
+            network_modes: NetworkModes {
+                admin: AdminNetMode::None,
+                egress: EgressNetMode::VzUserspace,
+            },
+            net_assignment: &net,
+            base_dir: Path::new("/tmp/vmm-v1.45/libs/vmm/examples/v1.45"),
+            ssh_ca_pubkey: Some("ssh-ed25519 AAAA-test"),
+        })
+        .unwrap();
+
+        assert!(script.contains("ADMIN_NET='none'"));
+        assert!(script.contains("EGRESS_NET='vz-userspace'"));
+        assert!(script.contains("export MOTLIE_VZ_SSH_CA_PUBKEY=\"$SSH_CA_PUBKEY\""));
+        assert!(script.contains("export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"));
+        assert!(script.contains("export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"));
+        assert!(script.contains("launch-vz.sh"));
+        assert!(script.contains("motlie-v1-45-${GUEST_ID}-iter"));
+        assert!(!script.contains("launch-ch.sh"));
     }
 }

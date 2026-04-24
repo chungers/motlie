@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::backend::ch::shell::{ChShellError, ChShellHandle};
+use crate::backend::vz::shell::{VzShellError, VzShellHandle};
 
 pub mod ch;
 pub mod motlie;
@@ -27,6 +28,7 @@ pub struct VmBackendCapabilities {
 #[derive(Debug)]
 pub enum BackendHandle {
     ChShell(ChShellHandle),
+    VzShell(VzShellHandle),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,18 +41,21 @@ impl BackendHandle {
     pub fn pid(&self) -> Option<u32> {
         match self {
             Self::ChShell(handle) => handle.pid,
+            Self::VzShell(handle) => handle.pid,
         }
     }
 
     pub fn kind(&self) -> BackendKind {
         match self {
             Self::ChShell(_) => BackendKind::ChShell,
+            Self::VzShell(_) => BackendKind::Vz,
         }
     }
 
     pub fn has_exited(&self) -> Result<bool, BackendError> {
         match self {
             Self::ChShell(handle) => Ok(handle.has_exited()?),
+            Self::VzShell(handle) => Ok(handle.has_exited()?),
         }
     }
 }
@@ -65,6 +70,8 @@ pub enum BackendError {
     },
     #[error(transparent)]
     ChShell(#[from] ChShellError),
+    #[error(transparent)]
+    VzShell(#[from] VzShellError),
     #[error("backend {0:?} is not implemented yet")]
     UnsupportedBackend(BackendKind),
     #[error("backend handle {actual:?} does not match expected backend {expected:?}")]

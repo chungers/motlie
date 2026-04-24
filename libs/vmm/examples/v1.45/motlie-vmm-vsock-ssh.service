@@ -1,0 +1,14 @@
+[Unit]
+Description=motlie-vmm vsock-to-SSH bridge (socat, guest to host)
+After=ssh.service
+Requires=ssh.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/motlie-vmm-vsock-ssh-loop
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
