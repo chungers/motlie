@@ -15,7 +15,9 @@ Default behavior:
 
 - prefers an installed platform binary from `.agents/skills/voice/turn/bin/`
 - builds and installs the most optimized host binary in `release` mode when missing
-- `voice-agent` then builds or reuses the optimized speech example binaries
+- `voice-agent` runs the typed Motlie TTS and ASR backends directly
+- bootstraps missing model weights into `.agents/skills/voice/artifacts/hf-cache/`
+- repopulates shared ORT runtime sidecars into `.agents/skills/voice/lib/<os>-<arch>/` when the full repo is present and ONNX Runtime is already installed on the host
 - prefers CUDA automatically on the current host when available
 
 Typed orchestrator:
@@ -26,16 +28,31 @@ Thin wrapper:
 
 - `scripts/run.sh`
 
+Prerequisites:
+
+- macOS playback or capture host:
+  - `brew install sox`
+- build/run host for ONNX-backed `voice-agent`:
+  - macOS: `brew install onnxruntime`
+  - Linux: provide ONNX Runtime shared libraries, or build ONNX Runtime from source with `--build_shared_lib`
+
 Agent decision rule:
 
 - discover runtime details progressively through the conversation with the human
 - if the user says `say with qwen3`, use `--tts-backend qwen3cpp`; otherwise default to `piper`
 - if the user says `listen with sherpa` or `listen with moonshine`, use that ASR backend; otherwise default to `whisper`
+- for remote Mac push capture, keep ASR behavior consistent across `whisper`, `sherpa`, and `moonshine`: wait for EOF from Ctrl-C on the Mac and then print one final transcript for the listen half of the turn
 - if local playback/capture commands exist, try local first
 - ask the human whether speak/listen actually worked locally
 - if local playback or capture did not work, ask the human whether to use a remote SSH host
 - when remote is requested, pass `--playback-endpoint ssh:<host>` and/or `--capture-endpoint ssh:<host>`
+- if the reply microphone is remote on a Mac, prompt for the local Mac Terminal/iTerm2 push flow for the listen half of the turn
+- infer the SSH destination for that push flow from the current host name first and only ask the human if it is unclear or likely unreachable from the Mac
+- if the listen side reports silent capture, tell the human the capture host likely has the wrong input device selected or is missing microphone permission
+- on macOS, explain that SSH/non-interactive capture may not share Terminal/iTerm2 microphone permission, so reverse tunnels alone do not solve it
+- if that happens, switch to a human-run local Mac `rec` command that streams WAV over SSH into a stable waiting FIFO for the listen half of the turn; the agent should run the waiting listen side itself and only show the human the short Mac command
 - if the wrapper says it is building the optimized binary, tell the human to wait
+- if the wrapper reports missing dependencies like ONNX Runtime or `sox`, tell the human exactly what to install and then retry
 
 If the human asks operational questions during the turn:
 
@@ -43,10 +60,12 @@ If the human asks operational questions during the turn:
   - local speaker by default
   - remote playback over SSH with `ssh:<host>` if needed
   - Homebrew `sox` on macOS provides `play`
+  - if I need to build or run the ONNX-backed voice runtime on a Mac host, I also need `brew install onnxruntime`
 - "how do you hear me?" means explain the `voice/listen` path:
   - local mic by default
   - remote mic over SSH with `ssh:<host>` if needed
   - Homebrew `sox` on macOS provides `rec`
+  - if I need to build or run the ONNX-backed voice runtime on a Mac host, I also need `brew install onnxruntime`
 
 Example:
 

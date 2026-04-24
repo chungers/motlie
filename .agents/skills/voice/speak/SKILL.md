@@ -11,7 +11,9 @@ Default behavior:
 
 - prefers an installed platform binary from `.agents/skills/voice/speak/bin/`
 - builds and installs the most optimized host binary in `release` mode when missing
-- `voice-agent` then builds or reuses the optimized release example binary
+- `voice-agent` runs the typed Motlie TTS backends directly
+- bootstraps missing model weights into `.agents/skills/voice/artifacts/hf-cache/`
+- repopulates shared ORT runtime sidecars into `.agents/skills/voice/lib/<os>-<arch>/` when the full repo is present and ONNX Runtime is already installed on the host
 - prefers CUDA automatically on the current host when available
 - sends WAV output to the local playback device by default
 - supports qwen3 voice cloning via `--voice <alias>` or `--reference-audio <path>`
@@ -24,6 +26,14 @@ Thin wrapper:
 
 - `scripts/run.sh`
 
+Prerequisites:
+
+- macOS playback host:
+  - `brew install sox`
+- build/run host for ONNX-backed `voice-agent`:
+  - macOS: `brew install onnxruntime`
+  - Linux: provide ONNX Runtime shared libraries, or build ONNX Runtime from source with `--build_shared_lib`
+
 Agent decision rule:
 
 - discover runtime details progressively through the conversation with the human
@@ -35,6 +45,8 @@ Agent decision rule:
   - `Should I send audio to a remote host over SSH? If so, what host should I use?`
 - when the user says remote, pass `--endpoint ssh:<host>`
 - if the wrapper says it is building the optimized binary, tell the human to wait
+- if the wrapper reports missing ONNX Runtime, tell the human to install it on the build/run host and then retry
+- if the wrapper reports missing `play` on the Mac, tell the human to install `sox` there and then retry
 
 If the human asks "how do I hear you?" answer in this shape:
 
@@ -43,6 +55,8 @@ If the human asks "how do I hear you?" answer in this shape:
 - on macOS the simplest remote playback path is Homebrew `sox`, which provides `play`
 - install command on macOS:
   - `brew install sox`
+- if I need to build or run the ONNX-backed voice runtime on a Mac host, I also need:
+  - `brew install onnxruntime`
 - the remote playback command the runtime expects is effectively:
   - `/opt/homebrew/bin/play -t wav -`
 - if local playback did not work, ask whether they want remote playback and what SSH host to use

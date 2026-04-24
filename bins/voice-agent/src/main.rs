@@ -1,14 +1,44 @@
-use std::collections::BTreeSet;
-use std::fs;
-use std::io::{self, Read, Write};
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::future::Future;
+use std::io::{self, Cursor, Read};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::pin::Pin;
+use std::process::{Child, ChildStdin, Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use motlie_model::typed::{
+    AudioBuf, BatchTranscriber, CloneReference, Mono, SpeechStream, SpeechSynthesizer,
+    StreamingTranscriber, SynthesisRequest, TranscriptionSession, VoiceCloneSynthesizer,
+};
+use motlie_model::{
+    ArtifactPolicy, BundleHandle, ModelError, SpeechParams, StartOptions, TranscriptSegment,
+    TranscriptionParams,
+};
+use motlie_model_moonshine::MoonshineHandle;
+use motlie_model_piper::PiperHandle;
+use motlie_model_qwen3_tts_cpp::Qwen3TtsCppHandle;
+use motlie_model_sherpa_onnx::SherpaOnnxHandle;
+use motlie_model_whisper_cpp::WhisperCppHandle;
+use motlie_models::asr::{moonshine_streaming_en, sherpa_onnx_streaming_en, whisper_base_en};
+use motlie_models::tts::{piper_en_us_ljspeech_medium, qwen3_tts_cpp};
+use motlie_models::{download_bundle_artifacts, AsrModels, Catalog, TtsModels};
+use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono, f32_to_i16_clamped};
+use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
+use motlie_voice::wav::{decode_streaming_wav_to_f32, StreamingWavWriter, WavSample};
+
+const ASR_TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
+const STREAMING_ASR_CHUNK_SAMPLES: usize = 3_200;
+const QWEN_REFERENCE_SAMPLE_RATE_HZ: u32 = 16_000;
 
 #[derive(Debug, Parser)]
-#[command(author = "@codex-tts", version, about = "Typed voice-agent orchestration for Motlie speech examples")]
+#[command(
+    author = "@codex-tts",
+    version,
+    about = "Typed voice-agent orchestration for Motlie voice skills"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -32,6 +62,12 @@ enum AsrBackend {
     Whisper,
     Sherpa,
     Moonshine,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, ValueEnum)]
+enum ListenInputFormat {
+    Wav,
+    RawS16le,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +104,8 @@ struct ListenArgs {
     seconds: Option<u32>,
     #[arg(long)]
     wav: Option<PathBuf>,
+    #[arg(long, value_enum, default_value = "wav")]
+    input_format: ListenInputFormat,
     #[arg(long)]
     partials: bool,
     #[arg(long)]
@@ -106,118 +144,106 @@ struct EndpointConfig {
 
 #[derive(Debug)]
 struct VoiceConfig {
-    repo_root: PathBuf,
+    skill_root: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ExampleSpec {
-    example_name: &'static str,
-    feature_name: &'static str,
-    cuda_feature: Option<&'static str>,
+enum OutputTarget {
+    WavFile(PathBuf),
+    Playback(EndpointConfig),
 }
 
-#[derive(Clone, Copy, Debug)]
-enum BackendKind {
-    Tts(TtsBackend),
-    Asr(AsrBackend),
+enum OutputSink<S: WavSample> {
+    File {
+        writer: hound::WavWriter<std::io::BufWriter<File>>,
+        _sample: std::marker::PhantomData<S>,
+    },
+    Playback {
+        writer: StreamingWavWriter<ChildStdin, S>,
+        child: Child,
+    },
 }
 
-fn main() -> Result<()> {
+struct QuietStderrGuard {
+    saved_stderr_fd: i32,
+    _devnull: File,
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let repo_root = repo_root()?;
-    let config = VoiceConfig::new(repo_root);
+    let config = VoiceConfig::new(resolve_skill_root()?);
 
     match cli.command {
-        Commands::Speak(args) => run_speak(&config, &args),
-        Commands::Listen(args) => run_listen(&config, &args).map(|transcript| {
+        Commands::Speak(args) => run_speak(&config, &args).await,
+        Commands::Listen(args) => run_listen(&config, &args).await.map(|transcript| {
             if !transcript.is_empty() {
                 println!("{transcript}");
             }
         }),
-        Commands::Turn(args) => run_turn(&config, &args),
+        Commands::Turn(args) => run_turn(&config, &args).await,
     }
 }
 
-fn repo_root() -> Result<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn resolve_skill_root() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("MOTLIE_VOICE_SKILL_ROOT") {
+        let root = PathBuf::from(path);
+        if root.is_dir() {
+            return Ok(root);
+        }
+        bail!(
+            "MOTLIE_VOICE_SKILL_ROOT points to missing directory '{}'",
+            root.display()
+        );
+    }
+
+    let exe = std::env::current_exe().context("resolve current voice-agent executable path")?;
+    if let Some(root) = skill_root_from_path(&exe) {
+        return Ok(root);
+    }
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .context("resolve repo root from bins/voice-agent")?;
-    Ok(root)
+    let candidate = repo_root.join(".agents/skills/voice");
+    if candidate.is_dir() {
+        return Ok(candidate);
+    }
+
+    bail!(
+        "failed to resolve .agents/skills/voice from current executable '{}' and no MOTLIE_VOICE_SKILL_ROOT override was set",
+        exe.display()
+    );
+}
+
+fn skill_root_from_path(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|ancestor| {
+        let is_voice = ancestor.file_name() == Some(OsStr::new("voice"));
+        let is_skills = ancestor.parent().and_then(Path::file_name) == Some(OsStr::new("skills"));
+        let is_agents = ancestor
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            == Some(OsStr::new(".agents"));
+        if is_voice && is_skills && is_agents {
+            Some(ancestor.to_path_buf())
+        } else {
+            None
+        }
+    })
 }
 
 impl VoiceConfig {
-    fn new(repo_root: PathBuf) -> Self {
-        Self { repo_root }
+    fn new(skill_root: PathBuf) -> Self {
+        Self { skill_root }
     }
 
-    fn piper_artifact_root(&self) -> PathBuf {
-        self.preferred_existing_root(&[
-            self.default_repo_artifact_root(),
-            self.sibling_motlie_artifact_root(),
-            default_home_cache_root(),
-        ])
-    }
-
-    fn qwen_artifact_root(&self) -> PathBuf {
-        self.preferred_existing_root(&[
-            PathBuf::from("/tmp/qwen3-tts-models"),
-            self.repo_root.join("artifacts/models/qwen3-tts-models"),
-            self.repo_root
-                .parent()
-                .unwrap_or(&self.repo_root)
-                .join("motlie")
-                .join("artifacts/models/qwen3-tts-models"),
-        ])
-    }
-
-    fn whisper_artifact_root(&self) -> PathBuf {
-        self.preferred_existing_root(&[
-            self.default_repo_artifact_root(),
-            self.sibling_motlie_artifact_root(),
-            default_home_cache_root(),
-        ])
-    }
-
-    fn sherpa_artifact_root(&self) -> PathBuf {
-        self.preferred_existing_root(&[
-            self.default_repo_artifact_root(),
-            self.sibling_motlie_artifact_root(),
-            default_home_cache_root(),
-        ])
-    }
-
-    fn moonshine_artifact_root(&self) -> PathBuf {
-        self.preferred_existing_root(&[
-            self.default_repo_artifact_root(),
-            self.sibling_motlie_artifact_root(),
-            default_home_cache_root(),
-        ])
+    fn artifact_root(&self) -> PathBuf {
+        self.skill_root.join("artifacts/hf-cache")
     }
 
     fn reference_root(&self) -> PathBuf {
-        self.repo_root
-            .join(".agents/skills/voice/speak/references/voices")
-    }
-
-    fn default_repo_artifact_root(&self) -> PathBuf {
-        self.repo_root.join("artifacts/models/hf-cache")
-    }
-
-    fn sibling_motlie_artifact_root(&self) -> PathBuf {
-        self.repo_root
-            .parent()
-            .unwrap_or(&self.repo_root)
-            .join("motlie")
-            .join("artifacts/models/hf-cache")
-    }
-
-    fn preferred_existing_root(&self, candidates: &[PathBuf]) -> PathBuf {
-        candidates
-            .iter()
-            .find(|path| path.exists())
-            .cloned()
-            .unwrap_or_else(|| candidates[0].clone())
+        self.skill_root.join("speak/references/voices")
     }
 
     fn endpoint(&self, endpoint_name: Option<&str>) -> Result<EndpointConfig> {
@@ -253,83 +279,262 @@ impl VoiceConfig {
     }
 }
 
-fn run_speak(config: &VoiceConfig, args: &SpeakArgs) -> Result<()> {
-    ensure_examples(config, &[BackendKind::Tts(args.backend)])?;
-
-    let endpoint = config.endpoint(args.endpoint.as_deref())?;
-    let example = tts_spec(args.backend);
-    let example_binary = example_binary_path(config, example.example_name);
-    let artifact_root = tts_artifact_root(config, args.backend);
-    if !artifact_root.exists() {
-        bail!("artifact root '{}' does not exist", artifact_root.display());
+impl<S: WavSample> OutputSink<S> {
+    fn new(target: OutputTarget, sample_rate_hz: u32) -> Result<Self> {
+        match target {
+            OutputTarget::WavFile(path) => {
+                let writer = hound::WavWriter::create(
+                    &path,
+                    hound::WavSpec {
+                        channels: 1,
+                        sample_rate: sample_rate_hz,
+                        bits_per_sample: S::BITS_PER_SAMPLE,
+                        sample_format: S::SAMPLE_FORMAT,
+                    },
+                )
+                .with_context(|| format!("failed to create wav file '{}'", path.display()))?;
+                Ok(Self::File {
+                    writer,
+                    _sample: std::marker::PhantomData,
+                })
+            }
+            OutputTarget::Playback(endpoint) => {
+                let mut child = playback_command(&endpoint)?
+                    .spawn()
+                    .context("spawn playback command")?;
+                let stdin = child.stdin.take().context("take playback stdin")?;
+                let writer = StreamingWavWriter::new(stdin, sample_rate_hz, 1)
+                    .context("start playback wav stream")?;
+                Ok(Self::Playback { writer, child })
+            }
+        }
     }
 
-    let mut cmd = Command::new(example_binary);
-    cmd.arg("--artifact-root").arg(&artifact_root);
-    if args.quiet {
-        cmd.arg("--quiet");
-    }
-    if let Some(wav) = &args.wav {
-        cmd.arg("--wav").arg(wav);
-    }
-    if let Some(reference_audio) = resolve_reference_audio(config, args.backend, args.voice.as_deref(), args.reference_audio.as_deref())? {
-        cmd.arg("--reference-audio").arg(reference_audio);
-    }
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-
-    let mut child = cmd.spawn().context("spawn TTS example")?;
-    write_text_input(child.stdin.take(), args.text.as_deref())?;
-
-    if args.wav.is_some() {
-        let status = child.wait()?;
-        ensure_success(status, "tts example")?;
-        return Ok(());
+    fn write_samples(&mut self, samples: &[S]) -> Result<()> {
+        match self {
+            Self::File { writer, .. } => {
+                for &sample in samples {
+                    S::write_to_hound(writer, sample).context("write wav file sample")?;
+                }
+            }
+            Self::Playback { writer, .. } => {
+                writer
+                    .write_chunk(samples)
+                    .context("write playback wav chunk")?;
+            }
+        }
+        Ok(())
     }
 
-    let tts_stdout = child.stdout.take().context("take TTS stdout")?;
-    let mut sink = playback_command(&endpoint)?.spawn().context("spawn playback command")?;
-    sink.stdin
-        .take()
-        .context("take playback stdin")?
-        .write_all(&read_all(tts_stdout)?)?;
-    let playback_status = sink.wait()?;
-    ensure_success(playback_status, "playback command")?;
-    let tts_status = child.wait()?;
-    ensure_success(tts_status, "tts example")?;
-    Ok(())
+    fn finalize(self) -> Result<()> {
+        match self {
+            Self::File { writer, .. } => writer.finalize().context("finalize wav file"),
+            Self::Playback { writer, mut child } => {
+                writer.finalize().context("finalize playback wav stream")?;
+                let status = child.wait().context("wait for playback command")?;
+                ensure_success(status, "playback command")
+            }
+        }
+    }
 }
 
-fn run_listen(config: &VoiceConfig, args: &ListenArgs) -> Result<String> {
-    ensure_examples(config, &[BackendKind::Asr(args.backend)])?;
-
-    let example = asr_spec(args.backend);
-    let example_binary = example_binary_path(config, example.example_name);
-    let artifact_root = asr_artifact_root(config, args.backend);
-    if !artifact_root.exists() {
-        bail!("artifact root '{}' does not exist", artifact_root.display());
+impl QuietStderrGuard {
+    fn maybe_enable(quiet: bool) -> io::Result<Option<Self>> {
+        if quiet {
+            Self::enable().map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
-    let mut asr = Command::new(example_binary);
-    asr.arg("--artifact-root").arg(&artifact_root);
-    if args.quiet {
-      asr.arg("--quiet");
-    }
-    if args.partials && args.backend != AsrBackend::Whisper {
-      asr.arg("--partials");
-    }
+    fn enable() -> io::Result<Self> {
+        let devnull = File::options().write(true).open("/dev/null")?;
+        let stderr_fd = std::io::stderr().as_raw_fd();
 
-    if let Some(wav) = &args.wav {
-        let bytes = fs::read(wav).with_context(|| format!("read wav {}", wav.display()))?;
-        return run_asr_with_bytes(asr, &bytes);
-    }
+        let saved_stderr_fd = unsafe { libc::dup(stderr_fd) };
+        if saved_stderr_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
 
-    let endpoint = config.endpoint(args.endpoint.as_deref())?;
-    let capture_bytes = capture_wav_bytes(&endpoint, args.seconds)?;
-    run_asr_with_bytes(asr, &capture_bytes)
+        if unsafe { libc::dup2(devnull.as_raw_fd(), stderr_fd) } < 0 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::close(saved_stderr_fd);
+            }
+            return Err(error);
+        }
+
+        Ok(Self {
+            saved_stderr_fd,
+            _devnull: devnull,
+        })
+    }
 }
 
-fn run_turn(config: &VoiceConfig, args: &TurnArgs) -> Result<()> {
+impl Drop for QuietStderrGuard {
+    fn drop(&mut self) {
+        let stderr_fd = std::io::stderr().as_raw_fd();
+        unsafe {
+            libc::dup2(self.saved_stderr_fd, stderr_fd);
+            libc::close(self.saved_stderr_fd);
+        }
+    }
+}
+
+async fn run_speak(config: &VoiceConfig, args: &SpeakArgs) -> Result<()> {
+    let target = match &args.wav {
+        Some(path) => OutputTarget::WavFile(path.clone()),
+        None => OutputTarget::Playback(config.endpoint(args.endpoint.as_deref())?),
+    };
+    let text = resolve_text(args.text.clone())?;
+    let _quiet_stderr =
+        QuietStderrGuard::maybe_enable(args.quiet).context("failed to enable quiet stderr mode")?;
+
+    match args.backend {
+        TtsBackend::Piper => speak_with_piper(config, args.quiet, text, target).await,
+        TtsBackend::Qwen3cpp => {
+            let reference = resolve_reference_audio(
+                config,
+                args.voice.as_deref(),
+                args.reference_audio.as_deref(),
+            )?
+            .map(load_clone_reference)
+            .transpose()?;
+            speak_with_qwen(config, args.quiet, text, target, reference).await
+        }
+    }
+}
+
+async fn speak_with_piper(
+    config: &VoiceConfig,
+    quiet: bool,
+    text: String,
+    target: OutputTarget,
+) -> Result<()> {
+    let handle = start_piper(config, quiet).await?;
+    run_with_shutdown(handle, move |handle: &PiperHandle| {
+        Box::pin(async move {
+            let mut stream = handle
+                .synthesize(SynthesisRequest {
+                    text,
+                    params: SpeechParams::default(),
+                })
+                .await
+                .context("start Piper synthesis")?;
+            let mut sink = OutputSink::<i16>::new(target, 22_050)?;
+            while let Some(chunk) = stream
+                .next_chunk()
+                .await
+                .context("read Piper speech chunk")?
+            {
+                sink.write_samples(chunk.samples())?;
+            }
+            stream
+                .finish()
+                .await
+                .context("finish Piper speech stream")?;
+            sink.finalize()
+        })
+    })
+    .await
+}
+
+async fn speak_with_qwen(
+    config: &VoiceConfig,
+    quiet: bool,
+    text: String,
+    target: OutputTarget,
+    reference: Option<CloneReference<QWEN_REFERENCE_SAMPLE_RATE_HZ, Mono>>,
+) -> Result<()> {
+    let handle = start_qwen(config, quiet).await?;
+    run_with_shutdown(handle, move |handle: &Qwen3TtsCppHandle| {
+        Box::pin(async move {
+            let request = SynthesisRequest {
+                text,
+                params: SpeechParams::default(),
+            };
+            let mut stream = match reference {
+                Some(reference) => handle
+                    .synthesize_with_reference(request, reference)
+                    .await
+                    .context("start qwen3-tts.cpp voice-clone synthesis")?,
+                None => handle
+                    .synthesize(request)
+                    .await
+                    .context("start qwen3-tts.cpp synthesis")?,
+            };
+
+            let mut sink = OutputSink::<i16>::new(target, 24_000)?;
+            while let Some(chunk) = stream
+                .next_chunk()
+                .await
+                .context("read qwen3-tts.cpp speech chunk")?
+            {
+                let samples = f32_to_i16_clamped(chunk.samples());
+                sink.write_samples(&samples)?;
+            }
+            stream
+                .finish()
+                .await
+                .context("finish qwen3-tts.cpp speech stream")?;
+            sink.finalize()
+        })
+    })
+    .await
+}
+
+async fn run_listen(config: &VoiceConfig, args: &ListenArgs) -> Result<String> {
+    let _quiet_stderr =
+        QuietStderrGuard::maybe_enable(args.quiet).context("failed to enable quiet stderr mode")?;
+
+    if args.input_format == ListenInputFormat::RawS16le {
+        let path = args
+            .wav
+            .as_ref()
+            .context("--input-format raw-s16le requires --wav <path-or-fifo>")?;
+        return match args.backend {
+            AsrBackend::Whisper => bail!(
+                "--input-format raw-s16le is not supported with Whisper; use wav input or a streaming backend"
+            ),
+            AsrBackend::Sherpa => {
+                let handle = start_sherpa(config, args.quiet).await?;
+                transcribe_streaming_live_raw(handle, path, args.partials).await
+            }
+            AsrBackend::Moonshine => {
+                let handle = start_moonshine(config, args.quiet).await?;
+                transcribe_streaming_live_raw(handle, path, args.partials).await
+            }
+        };
+    }
+
+    let bytes = match &args.wav {
+        Some(path) => fs::read(path).with_context(|| format!("read wav '{}'", path.display()))?,
+        None => {
+            let endpoint = config.endpoint(args.endpoint.as_deref())?;
+            capture_wav_bytes(&endpoint, args.seconds)?
+        }
+    };
+
+    match args.backend {
+        AsrBackend::Whisper => {
+            let audio = decode_wav_bytes_to_f32_mono16k(&bytes)?;
+            let handle = start_whisper(config, args.quiet).await?;
+            transcribe_whisper(handle, audio).await
+        }
+        AsrBackend::Sherpa => {
+            let audio = decode_wav_bytes_to_i16_mono16k(&bytes)?;
+            let handle = start_sherpa(config, args.quiet).await?;
+            transcribe_streaming(handle, audio, args.partials).await
+        }
+        AsrBackend::Moonshine => {
+            let audio = decode_wav_bytes_to_i16_mono16k(&bytes)?;
+            let handle = start_moonshine(config, args.quiet).await?;
+            transcribe_streaming(handle, audio, args.partials).await
+        }
+    }
+}
+
+async fn run_turn(config: &VoiceConfig, args: &TurnArgs) -> Result<()> {
     let speak_args = SpeakArgs {
         backend: args.tts_backend,
         endpoint: args.playback_endpoint.clone(),
@@ -339,33 +544,463 @@ fn run_turn(config: &VoiceConfig, args: &TurnArgs) -> Result<()> {
         reference_audio: args.reference_audio.clone(),
         quiet: args.quiet,
     };
-    run_speak(config, &speak_args)?;
+    run_speak(config, &speak_args).await?;
 
     let listen_args = ListenArgs {
         backend: args.asr_backend,
         endpoint: args.capture_endpoint.clone(),
         seconds: Some(args.seconds),
         wav: None,
+        input_format: ListenInputFormat::Wav,
         partials: false,
         quiet: args.quiet,
     };
-    let transcript = run_listen(config, &listen_args)?;
+    let transcript = run_listen(config, &listen_args).await?;
     if !transcript.is_empty() {
         println!("{transcript}");
     }
     Ok(())
 }
 
-fn run_asr_with_bytes(mut asr: Command, bytes: &[u8]) -> Result<String> {
-    asr.stdin(Stdio::piped());
-    asr.stdout(Stdio::piped());
-    let mut child = asr.spawn().context("spawn ASR example")?;
-    let mut stdin = child.stdin.take().context("take ASR stdin")?;
-    stdin.write_all(bytes)?;
-    drop(stdin);
-    let output = child.wait_with_output()?;
-    ensure_success(output.status, "asr example")?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+async fn transcribe_whisper(
+    handle: WhisperCppHandle,
+    audio: AudioBuf<f32, ASR_TARGET_SAMPLE_RATE_HZ, Mono>,
+) -> Result<String> {
+    run_with_shutdown(handle, move |handle: &WhisperCppHandle| {
+        Box::pin(async move {
+            let update = handle
+                .transcribe(
+                    audio,
+                    TranscriptionParams {
+                        language: Some("en".into()),
+                        emit_partials: false,
+                    },
+                )
+                .await
+                .context("transcribe captured audio with Whisper")?;
+            Ok(render_plain_transcript(&update.segments).unwrap_or_default())
+        })
+    })
+    .await
+}
+
+async fn transcribe_streaming<H>(
+    handle: H,
+    audio: AudioBuf<i16, ASR_TARGET_SAMPLE_RATE_HZ, Mono>,
+    partials: bool,
+) -> Result<String>
+where
+    H: BundleHandle + StreamingTranscriber<Input = AudioBuf<i16, ASR_TARGET_SAMPLE_RATE_HZ, Mono>>,
+{
+    run_with_shutdown(handle, move |handle| {
+        Box::pin(async move {
+            let mut session = handle
+                .open_session(TranscriptionParams {
+                    language: Some("en".into()),
+                    emit_partials: partials,
+                })
+                .await
+                .context("open streaming ASR session")?;
+
+            let mut final_segments = Vec::new();
+            for chunk in audio.into_samples().chunks(STREAMING_ASR_CHUNK_SAMPLES) {
+                if let Some(update) = session
+                    .ingest(AudioBuf::new(chunk.to_vec()))
+                    .await
+                    .context("ingest audio chunk into streaming ASR")?
+                {
+                    if partials {
+                        print_segment_events(&update.segments);
+                    } else {
+                        final_segments.extend(
+                            update
+                                .segments
+                                .into_iter()
+                                .filter(|segment| segment.final_segment),
+                        );
+                    }
+                }
+            }
+
+            let final_update = session
+                .finish()
+                .await
+                .context("finish streaming ASR session")?;
+            if partials {
+                print_segment_events(&final_update.segments);
+            } else {
+                final_segments.extend(final_update.segments);
+            }
+
+            Ok(render_plain_transcript(&final_segments).unwrap_or_default())
+        })
+    })
+    .await
+}
+
+async fn transcribe_streaming_live_raw<H>(handle: H, path: &Path, partials: bool) -> Result<String>
+where
+    H: BundleHandle + StreamingTranscriber<Input = AudioBuf<i16, ASR_TARGET_SAMPLE_RATE_HZ, Mono>>,
+{
+    let path = path.to_path_buf();
+    run_with_shutdown(handle, move |handle| {
+        Box::pin(async move {
+            let mut session = handle
+                .open_session(TranscriptionParams {
+                    language: Some("en".into()),
+                    emit_partials: partials,
+                })
+                .await
+                .context("open streaming ASR session")?;
+
+            let file = File::open(&path)
+                .with_context(|| format!("open raw PCM stream '{}'", path.display()))?;
+            let mut reader = std::io::BufReader::new(file);
+            let mut pending = Vec::new();
+            let mut raw_buf = vec![0_u8; STREAMING_ASR_CHUNK_SAMPLES * 2];
+            let mut final_segments = Vec::new();
+
+            loop {
+                let read = reader
+                    .read(&mut raw_buf)
+                    .with_context(|| format!("read raw PCM stream '{}'", path.display()))?;
+                if read == 0 {
+                    break;
+                }
+                pending.extend_from_slice(&raw_buf[..read]);
+
+                let complete_bytes = pending.len() - (pending.len() % 2);
+                if complete_bytes == 0 {
+                    continue;
+                }
+
+                let samples = pending[..complete_bytes]
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect::<Vec<_>>();
+                pending.drain(..complete_bytes);
+
+                if let Some(update) = session
+                    .ingest(AudioBuf::new(samples))
+                    .await
+                    .context("ingest raw PCM chunk into streaming ASR")?
+                {
+                    if partials {
+                        print_segment_events(&update.segments);
+                    } else {
+                        final_segments.extend(
+                            update
+                                .segments
+                                .into_iter()
+                                .filter(|segment| segment.final_segment),
+                        );
+                    }
+                }
+            }
+
+            if !pending.is_empty() {
+                bail!(
+                    "raw PCM stream '{}' ended with {} trailing byte(s); expected 16-bit samples",
+                    path.display(),
+                    pending.len()
+                );
+            }
+
+            let final_update = session
+                .finish()
+                .await
+                .context("finish streaming ASR session")?;
+            if partials {
+                print_segment_events(&final_update.segments);
+            } else {
+                final_segments.extend(final_update.segments);
+            }
+
+            Ok(render_plain_transcript(&final_segments).unwrap_or_default())
+        })
+    })
+    .await
+}
+
+async fn start_piper(config: &VoiceConfig, quiet: bool) -> Result<PiperHandle> {
+    start_with_bootstrap(
+        config,
+        quiet,
+        TtsModels::PiperEnUsLjspeechMedium.bundle_id(),
+        "Piper",
+        |options| piper_en_us_ljspeech_medium::start_typed(options),
+    )
+    .await
+}
+
+async fn start_qwen(config: &VoiceConfig, quiet: bool) -> Result<Qwen3TtsCppHandle> {
+    start_with_bootstrap(
+        config,
+        quiet,
+        TtsModels::Qwen3TtsCpp0_6B.bundle_id(),
+        "qwen3-tts.cpp",
+        |options| qwen3_tts_cpp::start_typed(options),
+    )
+    .await
+}
+
+async fn start_whisper(config: &VoiceConfig, quiet: bool) -> Result<WhisperCppHandle> {
+    start_with_bootstrap(
+        config,
+        quiet,
+        AsrModels::WhisperBaseEn.bundle_id(),
+        "Whisper",
+        |options| whisper_base_en::start_typed(options),
+    )
+    .await
+}
+
+async fn start_sherpa(config: &VoiceConfig, quiet: bool) -> Result<SherpaOnnxHandle> {
+    start_with_bootstrap(
+        config,
+        quiet,
+        AsrModels::SherpaOnnxStreamingEn.bundle_id(),
+        "Sherpa",
+        |options| sherpa_onnx_streaming_en::start_typed(options),
+    )
+    .await
+}
+
+async fn start_moonshine(config: &VoiceConfig, quiet: bool) -> Result<MoonshineHandle> {
+    start_with_bootstrap(
+        config,
+        quiet,
+        AsrModels::MoonshineStreamingEn.bundle_id(),
+        "Moonshine",
+        |options| moonshine_streaming_en::start_typed(options),
+    )
+    .await
+}
+
+async fn start_with_bootstrap<H, Start, Fut>(
+    config: &VoiceConfig,
+    quiet: bool,
+    bundle_id: motlie_model::BundleId,
+    label: &str,
+    start: Start,
+) -> Result<H>
+where
+    Start: Fn(StartOptions) -> Fut,
+    Fut: Future<Output = std::result::Result<H, ModelError>>,
+{
+    let artifact_root = config.artifact_root();
+    match start(local_only_options(&artifact_root)).await {
+        Ok(handle) => Ok(handle),
+        Err(err) if missing_local_artifacts(&err) => {
+            log_status(
+                quiet,
+                &format!(
+                    "[voice-agent] downloading {label} artifacts into '{}'; please wait...",
+                    artifact_root.display()
+                ),
+            );
+            let catalog = Catalog::with_defaults();
+            download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("download curated artifacts for bundle '{bundle_id}'"))?;
+            start(local_only_options(&artifact_root))
+                .await
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("start {label} after downloading artifacts"))
+        }
+        Err(err) => Err(anyhow::Error::from(err)).with_context(|| format!("start {label}")),
+    }
+}
+
+fn local_only_options(artifact_root: &Path) -> StartOptions {
+    StartOptions {
+        artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            root: artifact_root.to_path_buf(),
+        }),
+        ..Default::default()
+    }
+}
+
+fn missing_local_artifacts(error: &ModelError) -> bool {
+    match error {
+        ModelError::InvalidConfiguration(message) => {
+            message.contains("artifact policy `LocalOnly`")
+        }
+        _ => false,
+    }
+}
+
+fn resolve_text(text: Option<String>) -> Result<String> {
+    match text {
+        Some(text) => normalize_text(text),
+        None => {
+            let mut buffer = String::new();
+            io::stdin()
+                .read_to_string(&mut buffer)
+                .context("failed to read synthesis text from stdin")?;
+            normalize_text(buffer)
+        }
+    }
+}
+
+fn normalize_text(text: String) -> Result<String> {
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    if trimmed.is_empty() {
+        bail!("synthesis text is empty");
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn resolve_reference_audio(
+    config: &VoiceConfig,
+    voice_alias: Option<&str>,
+    reference_audio: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    if voice_alias.is_none() && reference_audio.is_none() {
+        return Ok(None);
+    }
+    if let Some(path) = reference_audio {
+        if !path.is_file() {
+            bail!("reference audio '{}' does not exist", path.display());
+        }
+        return Ok(Some(path.to_path_buf()));
+    }
+
+    let alias = voice_alias.context("missing voice alias")?;
+    let normalized = normalize_voice_alias(alias);
+    let candidate = config.reference_root().join(format!("{normalized}.wav"));
+    let alt = config
+        .reference_root()
+        .join(format!("{}.wav", normalized.replace('-', "_")));
+    if candidate.is_file() {
+        return Ok(Some(candidate));
+    }
+    if alt.is_file() {
+        return Ok(Some(alt));
+    }
+    bail!(
+        "voice alias '{}' resolved to '{}' but no reference WAV exists",
+        alias,
+        candidate.display()
+    )
+}
+
+fn normalize_voice_alias(alias: &str) -> String {
+    let trimmed = alias.trim().to_ascii_lowercase();
+    let without_prefix = trimmed.strip_prefix("voice of ").unwrap_or(&trimmed);
+    without_prefix
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn load_clone_reference(
+    path: PathBuf,
+) -> Result<CloneReference<QWEN_REFERENCE_SAMPLE_RATE_HZ, Mono>> {
+    let reader = hound::WavReader::open(&path)
+        .with_context(|| format!("open reference wav '{}'", path.display()))?;
+    let (spec, samples) =
+        decode_samples_to_f32(reader).context("decode reference wav samples to f32")?;
+    let mono = downmix_to_mono(&samples, spec.channels).context("downmix reference wav to mono")?;
+    let resampled = LinearInterpolator
+        .resample_f32(&mono, spec.sample_rate, QWEN_REFERENCE_SAMPLE_RATE_HZ)
+        .context("resample reference wav to 16 kHz")?;
+    Ok(CloneReference {
+        audio: AudioBuf::new(resampled),
+        transcript: None,
+    })
+}
+
+fn decode_wav_bytes_to_f32_mono16k(
+    bytes: &[u8],
+) -> Result<AudioBuf<f32, ASR_TARGET_SAMPLE_RATE_HZ, Mono>> {
+    let (spec, samples) =
+        decode_streaming_wav_to_f32(Cursor::new(bytes)).context("failed to decode wav samples")?;
+    let mono = downmix_to_mono(&samples, spec.channels).context("failed to downmix wav to mono")?;
+    let resampled = LinearInterpolator
+        .resample_f32(&mono, spec.sample_rate, ASR_TARGET_SAMPLE_RATE_HZ)
+        .context("failed to resample wav to 16 kHz")?;
+    ensure_audio_not_silent(&resampled)?;
+    Ok(AudioBuf::new(resampled))
+}
+
+fn ensure_audio_not_silent(samples: &[f32]) -> Result<()> {
+    if samples.is_empty() {
+        bail!("captured audio was empty");
+    }
+
+    let mean_square = samples
+        .iter()
+        .map(|sample| {
+            let sample = f64::from(*sample);
+            sample * sample
+        })
+        .sum::<f64>()
+        / samples.len() as f64;
+    let rms = mean_square.sqrt();
+
+    if rms <= 1.0e-4 {
+        bail!(
+            "captured audio was silent (RMS={rms:.6e}); likely the wrong input device or missing microphone permission on the capture host"
+        );
+    }
+
+    Ok(())
+}
+
+fn decode_wav_bytes_to_i16_mono16k(
+    bytes: &[u8],
+) -> Result<AudioBuf<i16, ASR_TARGET_SAMPLE_RATE_HZ, Mono>> {
+    let audio = decode_wav_bytes_to_f32_mono16k(bytes)?;
+    Ok(AudioBuf::new(f32_to_i16_clamped(audio.samples())))
+}
+
+fn render_plain_transcript(segments: &[TranscriptSegment]) -> Option<String> {
+    let text = segments
+        .iter()
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn print_segment_events(segments: &[TranscriptSegment]) {
+    for segment in segments {
+        let marker = if segment.final_segment {
+            "[final]"
+        } else {
+            "[partial]"
+        };
+        println!(
+            "{marker} [{:.2}s - {:.2}s] {}",
+            segment.start_ms as f64 / 1000.0,
+            segment.end_ms as f64 / 1000.0,
+            segment.text
+        );
+    }
+}
+
+async fn run_with_shutdown<H, F, T>(handle: H, body: F) -> Result<T>
+where
+    H: BundleHandle,
+    F: for<'a> FnOnce(&'a H) -> Pin<Box<dyn Future<Output = Result<T>> + 'a>>,
+{
+    let body_result = body(&handle).await;
+    let shutdown_result = handle.shutdown().await.context("shutdown failed");
+
+    match (body_result, shutdown_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(body_error), Err(shutdown_error)) => {
+            Err(body_error.context(format!("additionally, {shutdown_error:#}")))
+        }
+    }
 }
 
 fn capture_wav_bytes(endpoint: &EndpointConfig, seconds: Option<u32>) -> Result<Vec<u8>> {
@@ -378,9 +1013,13 @@ fn capture_wav_bytes(endpoint: &EndpointConfig, seconds: Option<u32>) -> Result<
             cmd
         }
         EndpointKind::Ssh => {
-            let ssh_target = endpoint.ssh_target.as_deref().context("missing ssh target for ssh endpoint")?;
+            let ssh_target = endpoint
+                .ssh_target
+                .as_deref()
+                .context("missing ssh target for ssh endpoint")?;
             let mut cmd = Command::new("ssh");
-            cmd.arg(ssh_target).arg(with_trim(&endpoint.record_cmd, seconds));
+            cmd.arg(ssh_target)
+                .arg(with_trim(&endpoint.record_cmd, seconds));
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::inherit());
             cmd
@@ -388,6 +1027,9 @@ fn capture_wav_bytes(endpoint: &EndpointConfig, seconds: Option<u32>) -> Result<
     };
     let output = capture_cmd.output().context("run capture command")?;
     ensure_success(output.status, "capture command")?;
+    if output.stdout.is_empty() {
+        bail!("capture command returned no audio");
+    }
     Ok(output.stdout)
 }
 
@@ -399,7 +1041,10 @@ fn playback_command(endpoint: &EndpointConfig) -> Result<Command> {
             cmd
         }
         EndpointKind::Ssh => {
-            let ssh_target = endpoint.ssh_target.as_deref().context("missing ssh target for ssh endpoint")?;
+            let ssh_target = endpoint
+                .ssh_target
+                .as_deref()
+                .context("missing ssh target for ssh endpoint")?;
             let mut cmd = Command::new("ssh");
             cmd.arg(ssh_target).arg(&endpoint.play_cmd);
             cmd
@@ -433,9 +1078,7 @@ fn local_record_command() -> Result<String> {
     if command_in_path("rec") {
         return Ok("rec -q -t wav -".to_string());
     }
-    bail!(
-        "no local recording command found; install sox (`rec`) or use --endpoint ssh:<host>"
-    )
+    bail!("no local recording command found; install sox (`rec`) or use --endpoint ssh:<host>")
 }
 
 fn remote_play_command() -> String {
@@ -467,210 +1110,6 @@ fn with_trim(record_cmd: &str, seconds: Option<u32>) -> String {
     }
 }
 
-fn ensure_examples(config: &VoiceConfig, backends: &[BackendKind]) -> Result<()> {
-    let mut examples = BTreeSet::new();
-    let mut features = BTreeSet::new();
-    let mut cuda_features = BTreeSet::new();
-    let mut needs_qwen = false;
-
-    for backend in backends {
-        let spec = match backend {
-            BackendKind::Tts(tts) => {
-                if *tts == TtsBackend::Qwen3cpp {
-                    needs_qwen = true;
-                }
-                tts_spec(*tts)
-            }
-            BackendKind::Asr(asr) => asr_spec(*asr),
-        };
-        examples.insert(spec.example_name);
-        features.insert(spec.feature_name);
-        if let Some(cuda_feature) = spec.cuda_feature {
-            if wants_cuda(config)? {
-                cuda_features.insert(cuda_feature);
-            }
-        }
-    }
-
-    if needs_qwen {
-        initialize_qwen_submodule(&config.repo_root)?;
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(&config.repo_root);
-    cmd.arg("build").arg("-p").arg("motlie-models");
-    cmd.arg("--release");
-    for example in examples {
-        cmd.arg("--example").arg(example);
-    }
-    cmd.arg("--no-default-features");
-
-    let feature_list = features
-        .into_iter()
-        .chain(cuda_features)
-        .collect::<Vec<_>>()
-        .join(",");
-    cmd.arg("--features").arg(feature_list);
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
-
-    let status = cmd.status().context("run cargo build for example set")?;
-    ensure_success(status, "cargo build")?;
-    Ok(())
-}
-
-fn wants_cuda(_config: &VoiceConfig) -> Result<bool> {
-    Ok(Command::new("nvidia-smi")
-        .arg("-L")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false))
-}
-
-fn initialize_qwen_submodule(repo_root: &Path) -> Result<()> {
-    let qwen_root = repo_root.join("libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp");
-    if qwen_root.join("CMakeLists.txt").is_file() {
-        return Ok(());
-    }
-    let status = Command::new("git")
-        .current_dir(repo_root)
-        .args([
-            "submodule",
-            "update",
-            "--init",
-            "--recursive",
-            "libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp",
-        ])
-        .status()
-        .context("initialize qwen3-tts.cpp submodule")?;
-    ensure_success(status, "git submodule update")
-}
-
-fn tts_spec(backend: TtsBackend) -> ExampleSpec {
-    match backend {
-        TtsBackend::Piper => ExampleSpec {
-            example_name: "tts_piper",
-            feature_name: "model-piper-en-us-ljspeech-medium",
-            cuda_feature: Some("piper-cuda"),
-        },
-        TtsBackend::Qwen3cpp => ExampleSpec {
-            example_name: "tts_qwen3_tts_cpp",
-            feature_name: "model-qwen3-tts-cpp",
-            cuda_feature: Some("qwen3-tts-cpp-cuda"),
-        },
-    }
-}
-
-fn asr_spec(backend: AsrBackend) -> ExampleSpec {
-    match backend {
-        AsrBackend::Whisper => ExampleSpec {
-            example_name: "asr_whisper",
-            feature_name: "model-whisper-base-en",
-            cuda_feature: Some("whisper-cpp-cuda"),
-        },
-        AsrBackend::Sherpa => ExampleSpec {
-            example_name: "asr_sherpa_onnx",
-            feature_name: "model-sherpa-onnx-streaming",
-            cuda_feature: Some("sherpa-onnx-cuda"),
-        },
-        AsrBackend::Moonshine => ExampleSpec {
-            example_name: "asr_moonshine",
-            feature_name: "model-moonshine-streaming",
-            cuda_feature: None,
-        },
-    }
-}
-
-fn example_binary_path(config: &VoiceConfig, example_name: &str) -> PathBuf {
-    config
-        .repo_root
-        .join("target")
-        .join("release")
-        .join("examples")
-        .join(example_name)
-}
-
-fn tts_artifact_root(config: &VoiceConfig, backend: TtsBackend) -> PathBuf {
-    match backend {
-        TtsBackend::Piper => config.piper_artifact_root(),
-        TtsBackend::Qwen3cpp => config.qwen_artifact_root(),
-    }
-}
-
-fn asr_artifact_root(config: &VoiceConfig, backend: AsrBackend) -> PathBuf {
-    match backend {
-        AsrBackend::Whisper => config.whisper_artifact_root(),
-        AsrBackend::Sherpa => config.sherpa_artifact_root(),
-        AsrBackend::Moonshine => config.moonshine_artifact_root(),
-    }
-}
-
-fn resolve_reference_audio(
-    config: &VoiceConfig,
-    backend: TtsBackend,
-    voice_alias: Option<&str>,
-    reference_audio: Option<&Path>,
-) -> Result<Option<PathBuf>> {
-    if voice_alias.is_none() && reference_audio.is_none() {
-        return Ok(None);
-    }
-    if backend != TtsBackend::Qwen3cpp {
-        bail!("--voice and --reference-audio are only supported with backend 'qwen3cpp'");
-    }
-    if let Some(path) = reference_audio {
-        if !path.is_file() {
-            bail!("reference audio '{}' does not exist", path.display());
-        }
-        return Ok(Some(path.to_path_buf()));
-    }
-
-    let alias = voice_alias.context("missing voice alias")?;
-    let normalized = normalize_voice_alias(alias);
-    let candidate = config.reference_root().join(format!("{normalized}.wav"));
-    let alt = config
-        .reference_root()
-        .join(format!("{}.wav", normalized.replace('-', "_")));
-    if candidate.is_file() {
-        return Ok(Some(candidate));
-    }
-    if alt.is_file() {
-        return Ok(Some(alt));
-    }
-    bail!(
-        "voice alias '{}' resolved to '{}' but no reference WAV exists",
-        alias,
-        candidate.display()
-    )
-}
-
-fn normalize_voice_alias(alias: &str) -> String {
-    let trimmed = alias.trim().to_ascii_lowercase();
-    let without_prefix = trimmed.strip_prefix("voice of ").unwrap_or(&trimmed);
-    without_prefix.split_whitespace().collect::<Vec<_>>().join("-")
-}
-
-fn write_text_input(stdin: Option<std::process::ChildStdin>, text: Option<&str>) -> Result<()> {
-    let mut stdin = stdin.context("take child stdin")?;
-    if let Some(text) = text {
-        stdin.write_all(text.as_bytes())?;
-        stdin.write_all(b"\n")?;
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        stdin.write_all(buffer.as_bytes())?;
-    }
-    drop(stdin);
-    Ok(())
-}
-
-fn read_all<R: Read>(mut reader: R) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
 fn ensure_success(status: std::process::ExitStatus, label: &str) -> Result<()> {
     if status.success() {
         Ok(())
@@ -679,9 +1118,8 @@ fn ensure_success(status: std::process::ExitStatus, label: &str) -> Result<()> {
     }
 }
 
-fn default_home_cache_root() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-        .join(".cache/huggingface/hub")
+fn log_status(quiet: bool, message: &str) {
+    if !quiet {
+        eprintln!("{message}");
+    }
 }

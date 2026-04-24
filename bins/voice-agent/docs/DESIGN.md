@@ -137,13 +137,12 @@ Within the typed runtime:
 
 The typed runtime also owns:
 
-- build-or-reuse of `motlie-models` example binaries
+- direct invocation of the typed Motlie TTS/ASR backends without shelling out to repo example binaries
 - CUDA feature selection when available
-- qwen3-tts.cpp submodule initialization when needed
-- heuristic artifact-root lookup:
-  - worktree `artifacts/models/hf-cache`
-  - sibling `motlie/artifacts/models/hf-cache` when present
-  - `$HOME/.cache/huggingface/hub`
+- qwen3-tts.cpp runtime sidecar handling for installed skill binaries
+- a shared curated artifact cache rooted at `.agents/skills/voice/artifacts/hf-cache/`
+- first-use artifact download when the selected backend is missing from that cache
+- explicit failure when captured audio is effectively silent, so the agent can guide the human toward the right microphone device or permission fix
 
 ### Endpoint Model
 
