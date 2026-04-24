@@ -7,6 +7,9 @@ The authoritative semantic source of truth is the CH
 [`../v1.3`](../v1.3) image/runtime contract. This file records the parts of
 that contract that `v1.35` must preserve while using native Apple Vz.
 
+The follow-on common builder direction is documented in
+[DESIGN_IMAGE_BUILDER.md](./DESIGN_IMAGE_BUILDER.md).
+
 ## Current Contract
 
 - `artifacts/source-base.vm` is the shared generic guest base across guests
