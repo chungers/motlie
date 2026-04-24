@@ -1,5 +1,5 @@
 ---
-name: voice-turn
+name: voice/turn
 description: Run a single spoken interaction turn with Motlie voice tooling. Use when the agent should speak a prompt to the human and then capture a spoken reply through the configured playback and capture endpoints.
 ---
 
@@ -13,7 +13,7 @@ Use this skill for a single spoken turn:
 
 Default behavior:
 
-- prefers an installed platform binary from `.agents/skills/bin/`
+- prefers an installed platform binary from `.agents/skills/voice/turn/bin/`
 - builds and installs the most optimized host binary in `release` mode when missing
 - `voice-agent` then builds or reuses the optimized speech example binaries
 - prefers CUDA automatically on the current host when available
@@ -39,11 +39,11 @@ Agent decision rule:
 
 If the human asks operational questions during the turn:
 
-- "how do I hear you?" means explain the `voice-speak` path:
+- "how do I hear you?" means explain the `voice/speak` path:
   - local speaker by default
   - remote playback over SSH with `ssh:<host>` if needed
   - Homebrew `sox` on macOS provides `play`
-- "how do you hear me?" means explain the `voice-listen` path:
+- "how do you hear me?" means explain the `voice/listen` path:
   - local mic by default
   - remote mic over SSH with `ssh:<host>` if needed
   - Homebrew `sox` on macOS provides `rec`
@@ -51,7 +51,7 @@ If the human asks operational questions during the turn:
 Example:
 
 ```bash
-.agents/skills/voice-turn/scripts/run.sh \
+.agents/skills/voice/turn/scripts/run.sh \
   --tts-backend piper \
   --asr-backend whisper \
   --prompt "Please say your status update after the tone." \
@@ -59,7 +59,7 @@ Example:
 ```
 
 ```bash
-.agents/skills/voice-turn/scripts/run.sh \
+.agents/skills/voice/turn/scripts/run.sh \
   --tts-backend qwen3cpp \
   --asr-backend whisper \
   --voice jarvis \
