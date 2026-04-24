@@ -18,6 +18,8 @@ pub enum InodeKind {
     Disk,
     /// In-memory file content injected via overlay `put()`.
     Content,
+    /// Symlink that exists only in the overlay layer.
+    Symlink,
     /// Directory that exists only in memory (created implicitly by `put()` for missing parents).
     SyntheticDir,
     /// Tombstone that hides a lower-layer entry.

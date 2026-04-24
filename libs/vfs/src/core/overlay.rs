@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug)]
 pub enum OverlayEntryKind {
     Content(Bytes),
+    Symlink(String),
     Whiteout,
     SyntheticDir,
 }
@@ -31,6 +32,7 @@ pub enum OverlayEntryKind {
 #[derive(Clone, Debug)]
 pub enum OverlayEntryViewKind {
     Content { size: usize },
+    Symlink { target: String },
     Whiteout,
     SyntheticDir,
 }
@@ -112,6 +114,7 @@ impl OverlayNode {
     fn size(&self) -> usize {
         match &self.kind {
             OverlayEntryKind::Content(b) => b.len(),
+            OverlayEntryKind::Symlink(target) => target.len(),
             _ => 0,
         }
     }
@@ -119,6 +122,9 @@ impl OverlayNode {
     fn view_kind(&self) -> OverlayEntryViewKind {
         match &self.kind {
             OverlayEntryKind::Content(b) => OverlayEntryViewKind::Content { size: b.len() },
+            OverlayEntryKind::Symlink(target) => OverlayEntryViewKind::Symlink {
+                target: target.clone(),
+            },
             OverlayEntryKind::Whiteout => OverlayEntryViewKind::Whiteout,
             OverlayEntryKind::SyntheticDir => OverlayEntryViewKind::SyntheticDir,
         }
@@ -265,6 +271,37 @@ impl MemOverlay {
             injected_at: now,
             child_count: 0,
         });
+        self.republish_tag(&layers, tag);
+        Ok(())
+    }
+
+    /// Create an explicit Symlink entry in the overlay.
+    pub fn create_symlink(
+        &self,
+        layer: &str,
+        tag: &str,
+        path: &str,
+        target: &str,
+        attrs: OverlayAttrs,
+    ) -> Result<()> {
+        validate_path(path)?;
+        let mut layers = self.layers.lock();
+        let l = get_layer_mut(&mut layers, layer)?;
+        let now = SystemTime::now();
+        materialize_parents(l, tag, path, attrs.uid, attrs.gid, now);
+        let key = (tag.to_string(), path.to_string());
+        l.entries.insert(
+            key,
+            OverlayNode {
+                kind: OverlayEntryKind::Symlink(target.to_string()),
+                mode: attrs.mode,
+                uid: attrs.uid,
+                gid: attrs.gid,
+                xattrs: HashMap::new(),
+                injected_at: now,
+                child_count: 0,
+            },
+        );
         self.republish_tag(&layers, tag);
         Ok(())
     }
@@ -444,6 +481,18 @@ impl MemOverlay {
             OverlayEntryKind::Content(b) => Some(b.clone()),
             _ => None,
         }
+    }
+
+    pub fn symlink_target(&self, tag: &str, path: &str) -> Option<String> {
+        let snap = self.load_snapshot(tag);
+        let key = (tag.to_string(), path.to_string());
+        snap.layers.iter().find_map(|layer| match layer.entries.get(&key) {
+            Some(OverlayNode {
+                kind: OverlayEntryKind::Symlink(target),
+                ..
+            }) => Some(target.clone()),
+            _ => None,
+        })
     }
 
     pub fn list_layer(&self, layer: &str, tag: &str) -> Vec<OverlayEntry> {

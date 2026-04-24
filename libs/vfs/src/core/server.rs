@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 use super::event::{FsEvent, FsOpKind};
 use super::inode::{default_root_attrs, InodeKind, InodeTable};
 use super::op::*;
-use super::overlay::{MemOverlay, OverlayEntryKind};
+use super::overlay::{MemOverlay, OverlayAttrs, OverlayEntryKind};
 use super::policy::{AllowAll, PolicyFn};
 
 #[derive(Clone, Debug)]
@@ -886,6 +886,9 @@ impl FsServer {
                 OverlayEntryKind::Content(b) => {
                     (FileType::RegularFile, b.len() as u64, InodeKind::Content)
                 }
+                OverlayEntryKind::Symlink(target) => {
+                    (FileType::Symlink, target.len() as u64, InodeKind::Symlink)
+                }
                 OverlayEntryKind::Whiteout => {
                     return FsResult::Error {
                         errno: libc::ENOENT,
@@ -975,6 +978,7 @@ impl FsServer {
             if let Some((_layer, kind, ov_attrs)) = overlay.resolve_attrs(&mount.tag, &path) {
                 let (file_kind, size) = match &kind {
                     OverlayEntryKind::Content(bytes) => (FileType::RegularFile, bytes.len() as u64),
+                    OverlayEntryKind::Symlink(target) => (FileType::Symlink, target.len() as u64),
                     OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64),
                     OverlayEntryKind::Whiteout => {
                         return FsResult::Error {
@@ -1151,6 +1155,10 @@ impl FsServer {
                 match kind {
                     OverlayEntryKind::Content(_) => {
                         merged.insert(name, (FileType::RegularFile, InodeKind::Content, None));
+                    }
+                    OverlayEntryKind::Symlink(target) => {
+                        let _ = target;
+                        merged.insert(name, (FileType::Symlink, InodeKind::Symlink, None));
                     }
                     OverlayEntryKind::SyntheticDir => {
                         merged.insert(name, (FileType::Directory, InodeKind::SyntheticDir, None));
@@ -1653,7 +1661,7 @@ impl FsServer {
         if let Some((layer, kind)) = self.resolve_overlay(&mount.tag, &rel_path) {
             if let Some(overlay) = &self.overlay {
                 match kind {
-                    OverlayEntryKind::Content(_) => {
+                    OverlayEntryKind::Content(_) | OverlayEntryKind::Symlink(_) => {
                         // Check if there's a base-layer file underneath
                         let host_path = mount.backing.resolve(&rel_path);
                         if host_path.exists() {
@@ -1909,14 +1917,33 @@ impl FsServer {
             }
         };
 
-        // Symlinks under overlay-managed parents → ENOTSUP in v1
+        let rel_path = child_path(&parent_path, name);
         if self.is_overlay_managed(&mount.tag, &parent_path) {
-            return FsResult::Error {
-                errno: libc::ENOTSUP,
+            let Some(overlay) = &self.overlay else {
+                return FsResult::Error {
+                    errno: libc::ENOTSUP,
+                };
             };
+            let attrs = OverlayAttrs {
+                mode: 0o777,
+                uid: mount.owner_override.map(|(uid, _)| uid).unwrap_or(0),
+                gid: mount.owner_override.map(|(_, gid)| gid).unwrap_or(0),
+            };
+            let Some(layer) = self.writable_layer(&mount.tag, &parent_path) else {
+                return FsResult::Error {
+                    errno: libc::ENOTSUP,
+                };
+            };
+            match overlay.create_symlink(&layer, &mount.tag, &rel_path, target, attrs) {
+                Ok(()) => {
+                    return self.do_lookup(mount, parent, name);
+                }
+                Err(_) => {
+                    return FsResult::Error { errno: libc::EIO };
+                }
+            }
         }
 
-        let rel_path = child_path(&parent_path, name);
         let host_path = mount.backing.resolve(&rel_path);
         #[cfg(unix)]
         match std::os::unix::fs::symlink(target, &host_path) {
@@ -1966,15 +1993,17 @@ impl FsServer {
                 }
             }
         };
-        // Overlay-managed inodes → ENOTSUP in v1
-        let hp = match &entry.host_path {
-            Some(hp) => hp.clone(),
-            None => {
-                return FsResult::Error {
-                    errno: libc::ENOTSUP,
+        if entry.host_path.is_none() {
+            if let Some(overlay) = &self.overlay {
+                if let Some(target) = overlay.symlink_target(&mount.tag, &entry.path) {
+                    return FsResult::Symlink { target };
                 }
             }
-        };
+            return FsResult::Error {
+                errno: libc::ENOTSUP,
+            };
+        }
+        let hp = entry.host_path.clone().unwrap();
         drop(table);
         match fs::read_link(&hp) {
             Ok(target) => FsResult::Symlink {
@@ -4290,10 +4319,10 @@ mod tests {
         }
     }
 
-    // 2.2.9a: Symlink under overlay parent → ENOTSUP
+    // 2.2.9a: Symlink under overlay parent
     #[cfg(unix)]
     #[test]
-    fn overlay_symlink_under_synthetic_parent_enotsup() {
+    fn overlay_symlink_under_synthetic_parent() {
         let dir = tempfile::tempdir().unwrap();
         let server = build_overlay_server(dir.path());
         let o = server.overlay().unwrap();
@@ -4318,7 +4347,17 @@ mod tests {
                 target: "target".into(),
             },
         );
-        assert!(matches!(result, FsResult::Error { errno } if errno == libc::ENOTSUP));
+        let inode = match result {
+            FsResult::Entry { inode, attrs, .. } => {
+                assert_eq!(attrs.kind, FileType::Symlink);
+                inode
+            }
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        match server.handle_op("test", FsOp::Readlink { inode }) {
+            FsResult::Symlink { target } => assert_eq!(target, "target"),
+            other => panic!("expected Symlink, got {:?}", other),
+        }
     }
 
     // 2.2.10: Cross-layer rename — overlay→overlay
