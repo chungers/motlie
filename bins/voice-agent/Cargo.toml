@@ -7,6 +7,32 @@ license.workspace = true
 repository.workspace = true
 description = "Typed voice-agent orchestration for Motlie speech examples"
 
+[features]
+default = []
+cuda = [
+    "motlie-models/piper-cuda",
+    "motlie-models/qwen3-tts-cpp-cuda",
+    "motlie-models/sherpa-onnx-cuda",
+    "motlie-models/whisper-cpp-cuda",
+]
+
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4.5.58", features = ["derive"] }
+hound = "3.5"
+libc = "0.2"
+motlie-model = { path = "../../libs/model" }
+motlie-model-moonshine = { path = "../../libs/model/backends/moonshine" }
+motlie-model-piper = { path = "../../libs/model/backends/piper" }
+motlie-model-qwen3-tts-cpp = { path = "../../libs/model/backends/qwen3_tts_cpp" }
+motlie-model-sherpa-onnx = { path = "../../libs/model/backends/sherpa_onnx" }
+motlie-model-whisper-cpp = { path = "../../libs/model/backends/whisper_cpp" }
+motlie-models = { path = "../../libs/models", default-features = false, features = [
+    "model-piper-en-us-ljspeech-medium",
+    "model-qwen3-tts-cpp",
+    "model-whisper-base-en",
+    "model-sherpa-onnx-streaming",
+    "model-moonshine-streaming",
+] }
+motlie-voice = { path = "../../libs/voice" }
+tokio.workspace = true
