@@ -348,7 +348,7 @@ The first planned large GGUF bundle is Qwen3.6 27B for issue `#224`:
 The detailed design lives in
 [`DESIGN_QWEN3_6_27B_GGUF.md`](./DESIGN_QWEN3_6_27B_GGUF.md). That design is
 intentionally separate because it introduces native GGUF quant labels beyond
-the current `QuantizationBits::Four` / `QuantizationBits::Eight` abstraction
+the original `QuantizationBits::Four` / `QuantizationBits::Eight` abstraction
 and because multimodal execution depends on llama.cpp mmproj/image APIs. It
 does not require a new core chat interface; the existing `ChatModel` contract
 already accepts `ContentPart::Image` and `ContentPart::ImageUrl`.
