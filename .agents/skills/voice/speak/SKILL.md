@@ -14,7 +14,7 @@ Default behavior:
 - `voice-agent` runs the typed Motlie TTS backends directly
 - bootstraps missing model weights into `.agents/skills/voice/artifacts/hf-cache/`
 - repopulates shared ORT runtime sidecars into `.agents/skills/voice/lib/<os>-<arch>/` when the full repo is present and ONNX Runtime is already installed on the host
-- prefers CUDA automatically on the current host when available
+- prefers CUDA automatically on the current host when available, except Piper which stays on CPU for shutdown stability
 - sends WAV output to the local playback device by default
 - supports qwen3 voice cloning via `--voice <alias>` or `--reference-audio <path>`
 

@@ -15,6 +15,7 @@ This README is the conversational playbook for the repo-local voice skills:
 - if no binary is available for this host, build the most optimized one for the host
 - the build always uses `release`
 - prefer CUDA when the host supports it
+- keep Piper on CPU even in CUDA builds for now; the ONNX Runtime CUDA path is unstable on shutdown in the current validation environment
 - if the selected backend weights are missing, download them into the shared skill cache:
   - `.agents/skills/voice/artifacts/hf-cache/`
 - if the full `motlie` repo is present, repo-based builds should repopulate the skill runtime sidecars:
