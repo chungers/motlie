@@ -63,6 +63,11 @@ Fast `cargo check` path used by CI:
 ./scripts/check_curated_model_examples.sh --mode check
 ```
 
+The scripted curated-example check intentionally targets the lightweight
+speech-model matrix. Large chat bundles such as Qwen3.6 27B GGUF should use the
+manual feature-gated checks below so CI does not pull heavyweight llama.cpp
+model builds into the default path.
+
 Full local build path when ONNX Runtime is available:
 
 ```bash
@@ -116,6 +121,15 @@ The curated Qwen3.6 GGUF slice currently advertises Q4_K_M, Q5_K_M, and Q8_0.
 The requested CUDA FP8 default remains blocked until a real FP8 GGUF artifact is
 available; the official FP8 release is safetensors/Transformers format rather
 than GGUF.
+
+Current validation status:
+
+- The Qwen3.6 example, bundle metadata, selector/catalog wiring, and llama.cpp
+  backend unit tests have build/unit coverage.
+- Live generation from real Qwen3.6 27B GGUF artifacts is still a hardware- and
+  artifact-gated manual smoke.
+- Image input is intentionally fail-closed until llama.cpp `mtmd`/mmproj support
+  is wired; the bundle does not advertise `Vision`.
 
 ## Design Rule: No Hidden Bootstrap
 
