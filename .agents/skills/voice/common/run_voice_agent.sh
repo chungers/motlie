@@ -41,6 +41,25 @@ source_available() {
   [[ -f "${REPO_ROOT}/Cargo.toml" ]] && [[ -f "${REPO_ROOT}/bins/voice-agent/Cargo.toml" ]]
 }
 
+linux_ort_candidate_dirs() {
+  local candidate
+  shopt -s nullglob
+  for candidate in \
+    /usr/local/lib \
+    /usr/lib \
+    /usr/lib/aarch64-linux-gnu \
+    /lib/aarch64-linux-gnu \
+    /usr/lib/x86_64-linux-gnu \
+    /lib/x86_64-linux-gnu \
+    /opt/onnxruntime/lib \
+    /opt/onnxruntime/lib64 \
+    /tmp/onnxruntime*/build/*/Release \
+    /tmp/onnxruntime*/build/*/*/Release; do
+    [[ -d "${candidate}" ]] || continue
+    printf '%s\n' "${candidate}"
+  done
+}
+
 ort_sidecar_dir() {
   local candidate
 
@@ -55,16 +74,12 @@ ort_sidecar_dir() {
   fi
 
   if [[ "${PLATFORM_OS}" == "linux" ]]; then
-    for candidate in \
-      /tmp/onnxruntime-cuda/build/Linux-sm121/Release \
-      /tmp/onnxruntime/build/Linux/Release \
-      /usr/local/lib \
-      /usr/lib; do
+    while IFS= read -r candidate; do
       if [[ -e "${candidate}/libonnxruntime.so" || -e "${candidate}/libonnxruntime.so.1" ]]; then
         printf '%s\n' "${candidate}"
         return 0
       fi
-    done
+    done < <(linux_ort_candidate_dirs)
   elif [[ "${PLATFORM_OS}" == "darwin" ]]; then
     for candidate in \
       /opt/homebrew/lib \
