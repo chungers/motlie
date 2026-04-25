@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-24 | @codex | Clarified Phase 9 after reviewing `libs/model/src/chat.rs`: the core chat contract already accepts image content, so Qwen3.6 needs llama.cpp mmproj/image backend support before advertising vision, not a new core interface. |
+| 2026-04-24 | @codex | Added Phase 9 for issue `#224`, covering Qwen3.6 27B GGUF via the existing llama.cpp backend, platform-aware GGUF quant defaults, optional multimodal support, feature-gated catalog wiring, and the dedicated example. |
 | 2026-04-18 | @codex-asr | Added Phase 8 for the reusable strict audio-ingress follow-through required by issue `#198` and Telnyx PR `#186`. This phase keeps provider-agnostic decode/resample/chunking invariants out of the Telnyx adapter crate while making the first telephony vertical slice consume the typed model boundary explicitly. |
 | 2026-04-17 | @codex-asr | Renamed the curated example targets from versioned names to capability/model names and updated the plan references accordingly (`embeddings`, `chat_mistral_qwen3`, `chat_multimodal_gemma4`, `chat_gguf_gwen3_gemma4`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`). |
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/models` vertical slice work. Covers the curated catalog, constructor registration, and the first `embeddinggemma_300m` bundle wired through the Mistral backend. |
@@ -214,3 +216,83 @@ provider-specific Telnyx adapter. This phase is derived from `DESIGN.md`:
   adaptation chain without any provider-specific network transport in the loop.
 - [ ] Add the corresponding script/CI hook once that path exists so the
   telephony-ingress contract does not regress back to byte-oriented plumbing.
+
+## Phase 9: Qwen3.6 27B GGUF via llama.cpp
+
+Add the large Qwen3.6 27B GGUF curated bundle for issue `#224`. The detailed
+design is in [`DESIGN_QWEN3_6_27B_GGUF.md`](./DESIGN_QWEN3_6_27B_GGUF.md).
+
+### 9.1 — Design, artifact validation, and interface boundary
+
+- [x] Add a dedicated design document under `libs/models/docs/` covering the
+  model identity, backend reuse, feature gates, quant policy, interfaces, and
+  planned files.
+- [ ] Validate the selected GGUF artifact source and record exact filenames for
+  Q4-class, Q5-class, Q8, FP8, and optional mmproj artifacts.
+- [ ] Confirm whether the current `llama-cpp-2` binding can support mmproj/image
+  input for Qwen3.6 through the existing `ChatRequest` / `ContentPart` contract.
+  If not, keep the first runtime slice text-only and do not advertise vision
+  capability.
+- [ ] Confirm the Qwen3.6 chat template and add a Qwen35-specific formatter if
+  the existing Qwen3 formatter is not sufficient.
+
+### 9.2 — llama.cpp backend support
+
+- [ ] Extend `motlie-model-llama-cpp` with a Qwen3.6/Qwen35 spec that reuses the
+  existing GGUF load path and generation metrics.
+- [ ] Add native GGUF quant selection support for Q4-class, Q5-class, Q8, FP8,
+  and F16 where applicable. Do not overload `QuantizationBits::Eight` to mean
+  both Q8 and FP8.
+- [ ] Add platform-aware default quant resolution:
+  macOS defaults to Q5-class; CUDA-enabled hosts default to FP8 with GPU offload;
+  CPU-only Linux fallback is explicit and documented.
+- [ ] Reuse the existing CUDA gate `llama-cpp-cuda` and GPU-layer policy,
+  including `MOTLIE_MODEL_FORCE_CPU` and `MOTLIE_MODEL_GPU_LAYERS`.
+- [ ] If llama.cpp multimodal support is feasible through the Rust binding, add
+  backend runtime support that consumes the existing `ContentPart::Image` /
+  `ContentPart::ImageUrl` inputs rather than extending the text-only prompt
+  formatter with image stubs.
+
+### 9.3 — Curated catalog wiring
+
+- [ ] Add `libs/models/src/chat/qwen3_6_27b_gguf.rs` with `descriptor()`,
+  `variant_descriptor()`, `bundle()`, and local GGUF snapshot resolution.
+- [ ] Add selector `qwen/qwen3_6_27b_gguf` and bundle id
+  `qwen3_6_27b_gguf`.
+- [ ] Wire `ChatModels`, `ModelSelector`, `CuratedBundle`, `Catalog::with_defaults`,
+  `bundle_from_id`, and `bundle_from_resolved` using the existing feature-gated
+  chat bundle pattern.
+- [ ] Add `model-qwen3-6-27b-gguf = ["dep:motlie-model-llama-cpp"]` to
+  `libs/models/Cargo.toml`.
+- [ ] Keep the bundle opt-in only unless catalog policy later approves a 27B
+  model in the default build.
+
+### 9.4 — Example and docs
+
+- [ ] Add `libs/models/examples/chat_multimodal_qwen3_6_27b/main.rs`.
+- [ ] Add `libs/models/examples/chat_multimodal_qwen3_6_27b/README.md`.
+- [ ] Add the example target to `libs/models/Cargo.toml` with
+  `required-features = ["model-qwen3-6-27b-gguf"]`.
+- [ ] Follow the shared example conventions: `--download-artifacts`, local-only
+  startup, shared `support.rs`, descriptor/capability printing, model metrics,
+  and single-bundle feature expectations.
+- [ ] Expose `--precision=q4|q5|fp8|q8` or the final repo-standard equivalent,
+  documenting macOS and CUDA defaults clearly.
+- [ ] Demonstrate image+text chat only if the loaded bundle advertises real
+  multimodal vision capability.
+- [ ] Update `libs/models/examples/README.md` and
+  `libs/models/docs/BUILD_MODELS.md` with the new example and CUDA invocation.
+
+### 9.5 — Verification
+
+- [ ] Add backend unit tests for Qwen3.6 spec metadata, quant label mapping,
+  platform default resolution, and text-only image rejection or multimodal image
+  acceptance.
+- [ ] Add `motlie-models` catalog tests for descriptor contents, selector
+  parsing, disabled-feature `ModelUnavailable`, and local artifact validation.
+- [ ] Run `cargo test -p motlie-model-llama-cpp --lib`.
+- [ ] Run `cargo test -p motlie-models --lib`.
+- [ ] Run `cargo check -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf --example chat_multimodal_qwen3_6_27b`.
+- [ ] Run `cargo check -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf,llama-cpp-cuda --example chat_multimodal_qwen3_6_27b`.
+- [ ] Add an env-gated smoke path for pre-downloaded Qwen3.6 GGUF artifacts once
+  artifact names and hardware requirements are validated.
