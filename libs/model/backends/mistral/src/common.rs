@@ -64,6 +64,9 @@ pub(crate) fn map_quantization_bits(bits: QuantizationBits) -> IsqBits {
     match bits {
         QuantizationBits::Four => IsqBits::Four,
         QuantizationBits::Eight => IsqBits::Eight,
+        QuantizationBits::Five | QuantizationBits::FloatEight => {
+            unreachable!("mistral.rs specs must reject unsupported quantization before mapping")
+        }
     }
 }
 

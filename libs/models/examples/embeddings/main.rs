@@ -87,6 +87,9 @@ async fn main() -> Result<()> {
         match quantization {
             Some(QuantizationBits::Four) => "ISQ Q4",
             Some(QuantizationBits::Eight) => "ISQ Q8",
+            Some(QuantizationBits::Five) | Some(QuantizationBits::FloatEight) => {
+                "unsupported by this example"
+            }
             None => "F32 (none)",
         }
     );

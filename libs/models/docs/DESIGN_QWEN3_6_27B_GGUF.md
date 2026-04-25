@@ -1,13 +1,14 @@
 # Qwen3.6 27B GGUF Bundle Design
 
-## Status: Draft
+## Status: Implementation in progress
 
 ## Change Log
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-24 | @codex | Clarified the interface decision: `libs/model::ChatModel` already supports image content through `ContentPart`, so Qwen3.6 does not need a new core chat interface. Any additional work is limited to llama.cpp backend support for mmproj/image execution and capability advertisement. |
-| 2026-04-24 | @codex | Initial design for issue `#224`: Qwen3.6 27B GGUF through the existing llama.cpp backend, with platform-aware quant defaults, feature-gated catalog wiring, CUDA reuse, and a multimodal example path. |
+| 2026-04-24 | @codex-gpt55 | Started implementation: added the text-only llama.cpp/GGUF bundle shape, Q4/Q5/Q8 curated quant policy, and the dedicated `chat_multimodal_qwen3_6_27b` example. FP8 remains blocked because no curated FP8 GGUF artifact is available. |
+| 2026-04-24 | @codex-gpt55 | Clarified the interface decision: `libs/model::ChatModel` already supports image content through `ContentPart`, so Qwen3.6 does not need a new core chat interface. Any additional work is limited to llama.cpp backend support for mmproj/image execution and capability advertisement. |
+| 2026-04-24 | @codex-gpt55 | Initial design for issue `#224`: Qwen3.6 27B GGUF through the existing llama.cpp backend, with platform-aware quant defaults, feature-gated catalog wiring, CUDA reuse, and a multimodal example path. |
 
 ## Scope
 
@@ -27,10 +28,11 @@ Planned public identity:
 | Cargo feature | `model-qwen3-6-27b-gguf` |
 | Optional CUDA feature | `llama-cpp-cuda` |
 
-Candidate artifact sources must be validated before implementation hardcodes
-filenames. The current design assumes a GGUF repository that provides at least
-Q4-class, Q5-class, Q8, and FP8 artifacts, plus any tokenizer/config sidecars
-needed by the curated downloader.
+The current curated source is `unsloth/Qwen3.6-27B-GGUF`, which provides
+Q4_K_M, Q5_K_M, Q8_0, and mmproj artifacts. It does not provide an FP8 GGUF.
+The official `Qwen/Qwen3.6-27B-FP8` repository is Transformers/safetensors
+format, so it is not compatible with this llama.cpp/GGUF bundle without a
+separate GGUF conversion artifact.
 
 ## Goals
 
@@ -41,9 +43,10 @@ needed by the curated downloader.
   runtime execution.
 - Gate the model with `model-qwen3-6-27b-gguf`.
 - Reuse `llama-cpp-cuda` for CUDA builds and GPU offload.
-- Support platform-aware GGUF quant defaults:
-  macOS defaults to Q5-class, CUDA hosts default to FP8, explicit overrides
-  can select lower or higher precision artifacts.
+- Support the currently available curated GGUF quants: Q5-class default, with
+  Q4 and Q8 explicit overrides.
+- Keep the CUDA FP8 default as a design target, but do not advertise FP8 until a
+  real curated FP8 GGUF artifact exists.
 - Expose only the interfaces that the backend actually implements.
 
 ## Non-Goals
@@ -138,41 +141,36 @@ If the binding does not expose the required mmproj/image APIs, the text path
 may land as an intermediate slice, but the bundle must remain text-only in its
 descriptor until multimodal execution is real.
 
-## Platform-Aware GGUF Quantization
+## GGUF Quantization
 
-The existing `QuantizationBits` API only represents `Four` and `Eight`.
-Qwen3.6 requires native GGUF quant labels that are not expressible with that
-enum alone.
+The implementation extends `QuantizationBits` with `Five` and `FloatEight` so
+callers do not overload `Eight` for both Q8 and FP8.
 
-Required runtime policy:
+Current curated runtime policy:
 
 | Host profile | Default when unspecified | Required explicit overrides |
 |--------------|--------------------------|-----------------------------|
-| macOS / Apple Silicon | Q5-class GGUF, around 24 GB | Q4-class GGUF, around 20 GB |
-| CUDA-enabled Linux/DGX | FP8 GGUF with CUDA offload on by default | Q8 GGUF and Q4-class GGUF |
-| CPU-only Linux | Explicit documented fallback after validation | Q4/Q5 as validated |
+| macOS / Apple Silicon | Q5_K_M GGUF | Q4_K_M and Q8_0 |
+| CUDA-enabled Linux/DGX | Q5_K_M GGUF until FP8 GGUF exists | Q8_0 and Q4_K_M |
+| CPU-only Linux | Q5_K_M GGUF | Q4_K_M and Q8_0 |
 
-Implementation must not overload `QuantizationBits::Eight` to mean both
-`Q8_0` and FP8. These are different deployment choices.
+The requested CUDA policy remains: CUDA on by default through `llama-cpp-cuda`,
+FP8 by default, with Q8 and Q4 switchable. The implementation intentionally
+does not advertise FP8 yet because the validated GGUF repo does not contain an
+FP8 GGUF artifact.
 
-The design direction is to add a llama.cpp/GGUF-native quant selection layer,
-for example:
+If an FP8 GGUF artifact becomes available, the next step is to add it to the
+Qwen3.6 `QuantizationSupport`, artifact include rules, example parser, and
+CUDA-default resolver without changing the core chat API.
 
 ```rust
-pub enum LlamaCppGgufQuant {
-    Q4Class,
-    Q5Class,
-    Q8,
-    Fp8,
-    F16,
-}
+QuantizationBits::Four       // Q4_K_M
+QuantizationBits::Five       // Q5_K_M
+QuantizationBits::Eight      // Q8_0
+QuantizationBits::FloatEight // reserved for FP8 GGUF
 ```
 
-This may live inside the llama.cpp backend initially, but loaded metadata and
-example output must report the resolved native GGUF label so operators can see
-which artifact was loaded.
-
-Default selection should be resolved from:
+Default selection can later be resolved from:
 
 1. explicit caller request from the example or future public option
 2. compiled CUDA feature plus runtime GPU policy
@@ -192,13 +190,14 @@ backend should receive resolved local GGUF paths and optional projector paths.
 
 Artifact validation must cover:
 
-- selected GGUF repo
-- exact artifact filenames for Q4-class, Q5-class, Q8, and FP8
+- selected GGUF repo: `unsloth/Qwen3.6-27B-GGUF`
+- exact artifact filenames for Q4_K_M, Q5_K_M, and Q8_0
+- absence of FP8 GGUF in the curated repo
 - expected tokenizer/config sidecars used by the repo
 - optional mmproj file if multimodal support is implemented
 - local-only startup failure messages for missing selected quant artifacts
 
-Do not hardcode filename assumptions until the artifact source is validated.
+The implementation hardcodes only the validated Q4/Q5/Q8 GGUF filenames.
 
 ## Planned Files and Directories
 
@@ -274,7 +273,7 @@ cargo run -p motlie-models \
   --no-default-features \
   --features model-qwen3-6-27b-gguf \
   --example chat_multimodal_qwen3_6_27b -- \
-  [--download-artifacts] [--precision=q4|q5|fp8|q8] [--image=/path/to/image] <prompt>
+  [--download-artifacts] [--precision=q4|q5|q8|fp8] [--image=/path/to/image] <prompt>
 ```
 
 CUDA command style:
@@ -284,7 +283,7 @@ cargo run -p motlie-models \
   --no-default-features \
   --features model-qwen3-6-27b-gguf,llama-cpp-cuda \
   --example chat_multimodal_qwen3_6_27b -- \
-  [--download-artifacts] [--precision=fp8|q8|q4] [--image=/path/to/image] <prompt>
+  [--download-artifacts] [--precision=q5|q8|q4|fp8] [--image=/path/to/image] <prompt>
 ```
 
 The example must:
@@ -306,7 +305,8 @@ Backend tests:
 
 - Qwen3.6 spec identity and capabilities
 - native GGUF quant label mapping
-- platform-aware default quant resolution
+- Q5 default and Q4/Q8 override support
+- FP8 rejection until a curated FP8 GGUF artifact exists
 - CUDA default offload policy remains overrideable by env vars
 - text prompt formatting for Qwen3.6/Qwen35
 - image content rejection for text-only path
@@ -330,11 +330,9 @@ Example/build tests:
 
 ## Open Decisions
 
-- Which GGUF repo is the curated source of truth.
-- Exact filenames and labels for Q4-class, Q5-class, Q8, FP8, and optional
-  mmproj artifacts.
-- Whether to extend the public quantization API now or keep GGUF-native quant
-  selection scoped to the llama.cpp backend and Qwen3.6 example initially.
+- Whether to switch from `unsloth/Qwen3.6-27B-GGUF` if an official repo later
+  provides the complete Q4/Q5/Q8/FP8 set.
+- Exact FP8 GGUF filename and source, once one exists.
 - Whether the current `llama-cpp-2` binding exposes enough multimodal APIs for
   mmproj image input.
 - Whether the 27B bundle should stay out of the default feature set. The

@@ -85,6 +85,9 @@ async fn main() -> Result<()> {
         match quantization {
             Some(QuantizationBits::Four) => "GGUF Q4_K_M",
             Some(QuantizationBits::Eight) => "GGUF Q8_0",
+            Some(QuantizationBits::Five) | Some(QuantizationBits::FloatEight) => {
+                "unsupported by this example"
+            }
             None => "GGUF F16 (no quantization)",
         }
     );
