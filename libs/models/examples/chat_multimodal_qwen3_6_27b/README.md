@@ -19,9 +19,17 @@ therefore reports the blocked path instead of sending image stubs to the model.
 7. Startup/request latency, process snapshots, and handle metrics
 8. Explicit image-path gating based on advertised `Vision` capability
 
-## Run
+## Step 1: Download GGUF Artifacts
 
-Download curated artifacts and run the default Q5_K_M path:
+You can pre-download artifacts out of band with the standalone downloader:
+
+```sh
+cargo run -p motlie-models --no-default-features \
+  --features model-qwen3-6-27b-gguf \
+  --bin motlie-models-download -- qwen3_6_27b_gguf
+```
+
+Or let the example perform the curated download first:
 
 ```sh
 cargo run -p motlie-models --no-default-features \
@@ -30,7 +38,9 @@ cargo run -p motlie-models --no-default-features \
   --download-artifacts "Summarize Rust ownership in one paragraph"
 ```
 
-Use existing local artifacts:
+## Step 2: Run The Example
+
+Default path (Q5_K_M, using existing local artifacts):
 
 ```sh
 cargo run -p motlie-models --no-default-features \
@@ -38,6 +48,20 @@ cargo run -p motlie-models --no-default-features \
   --example chat_multimodal_qwen3_6_27b -- \
   "Summarize Rust ownership in one paragraph"
 ```
+
+Image argument behavior:
+
+```sh
+cargo run -p motlie-models --no-default-features \
+  --features model-qwen3-6-27b-gguf \
+  --example chat_multimodal_qwen3_6_27b -- \
+  --image=photo.jpg "Describe this image"
+```
+
+This currently reports that the image path is skipped because the loaded bundle
+does not advertise `Vision`. Once llama.cpp `mtmd`/mmproj execution is wired and
+validated, this command should become the parity path with
+`chat_multimodal_gemma4`.
 
 Select an alternate curated GGUF quant:
 
@@ -80,6 +104,31 @@ Current curated GGUF artifacts:
 The official Qwen FP8 release is currently a Transformers/safetensors artifact,
 not a GGUF artifact. The example accepts the documented `fp8` spelling but
 fails closed until a real curated FP8 GGUF is available.
+
+## Validation Status
+
+Build and unit validation completed for this slice:
+
+```sh
+cargo check -p motlie-models --no-default-features \
+  --features model-qwen3-6-27b-gguf \
+  --example chat_multimodal_qwen3_6_27b
+
+cargo check -p motlie-models --no-default-features \
+  --features model-qwen3-6-27b-gguf,llama-cpp-cuda \
+  --example chat_multimodal_qwen3_6_27b
+
+cargo test -p motlie-model-llama-cpp --lib
+
+cargo test -p motlie-models --no-default-features \
+  --features model-qwen3-6-27b-gguf --lib
+```
+
+Live generation validation with real Qwen3.6 27B GGUF artifacts is still
+pending. The current validated behavior for image input is fail-closed: the
+example skips image execution because `Vision` is not advertised, and the
+backend returns `UnsupportedCapability(Vision)` if image content reaches the
+text-only llama.cpp prompt formatter directly.
 
 ## Preconditions
 
