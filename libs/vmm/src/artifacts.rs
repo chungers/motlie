@@ -30,6 +30,20 @@ pub enum ArtifactError {
     MissingGuestPath { tag: String },
 }
 
+pub fn vz_artifacts_dir(runtime_paths: &GuestRuntimePaths) -> std::path::PathBuf {
+    runtime_paths.runtime_dir.join("vz-artifacts")
+}
+
+pub fn vz_vm_name(runtime_paths: &GuestRuntimePaths, guest_id: &str) -> String {
+    let runtime_stem = runtime_paths
+        .runtime_dir
+        .parent()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "runtime".into());
+    sanitize_vz_name(&format!("motlie-v1-45-{runtime_stem}-{guest_id}"))
+}
+
 pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError> {
     let mut out = String::from("mounts:\n");
     for mount in &guest.mounts {
@@ -241,6 +255,8 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
     .expect("writing to String cannot fail");
     writeln!(&mut out, "LOGIN_HOME={}", shell_single_quote(&login_home))
         .expect("writing to String cannot fail");
+    writeln!(&mut out, "LOGIN_UID={}", cfg.guest.user.uid).expect("writing to String cannot fail");
+    writeln!(&mut out, "LOGIN_GID={}", cfg.guest.user.gid).expect("writing to String cannot fail");
     writeln!(
         &mut out,
         "OVERLAY_SIZE={}",
@@ -281,9 +297,126 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         cfg.network_modes.egress,
         crate::network::EgressNetMode::VzUserspace
     ) {
+        let vz_artifacts_dir = vz_artifacts_dir(cfg.runtime_paths);
+        let vz_vm_name = vz_vm_name(cfg.runtime_paths, &cfg.guest.guest_id);
         if cfg.ssh_ca_pubkey.is_some() {
             out.push_str("export MOTLIE_VZ_SSH_CA_PUBKEY=\"$SSH_CA_PUBKEY\"\n");
         }
+        out.push_str(
+            "# Vz convergence contract: first-contact SSH waits for interactive-ready only.\n",
+        );
+        out.push_str(
+            "# Full VFS/VNET/egress certification stays in harness validate/scenario steps.\n",
+        );
+        out.push_str("export MOTLIE_VZ_INLINE_VALIDATION=0\n");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_ARTIFACTS_DIR={}",
+            shell_single_quote(vz_artifacts_dir.to_string_lossy().as_ref())
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_EGRESS_SOCKET_PATH={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("egress.sock")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_RUNNER_PID_FILE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("vz-runner.pid")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_EGRESS_HELPER_PID_FILE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("vz-egress-helper.pid")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_RESULT_JSON={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("vz-launch-result.json")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_SERIAL_LOG={}",
+            shell_single_quote(cfg.runtime_paths.serial_log.to_string_lossy().as_ref())
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_GUEST_IP_FILE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("guest-ip.txt")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_EGRESS_LOG={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("egress.log")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_SEED_DIR={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("seed")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_SEED_IMAGE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("seed.dmg")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
         writeln!(
             &mut out,
             "export MOTLIE_VZ_CONTROL_READY_FILE={}",
@@ -291,6 +424,42 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
                 cfg.runtime_paths
                     .runtime_dir
                     .join("control-plane-ready")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_INTERACTIVE_READY_FILE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("interactive-ready")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_VALIDATION_COMPLETE_FILE={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("validation-complete")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_PHASES_LOG={}",
+            shell_single_quote(
+                cfg.runtime_paths
+                    .runtime_dir
+                    .join("vz-phases.log")
                     .to_string_lossy()
                     .as_ref()
             )
@@ -323,8 +492,66 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
             ))
         )
         .expect("writing to String cannot fail");
+        if let Some(home_mount) = cfg
+            .guest
+            .mounts
+            .iter()
+            .find(|mount| mount.guest_path.as_deref() == Some(cfg.guest.user.home.as_path()))
+        {
+            writeln!(
+                &mut out,
+                "export MOTLIE_VZ_HOST_HOME_DIR={}",
+                shell_single_quote(home_mount.host_path.to_string_lossy().as_ref())
+            )
+            .expect("writing to String cannot fail");
+        }
+        if let Some(workspace_mount) = cfg
+            .guest
+            .mounts
+            .iter()
+            .find(|mount| mount.guest_path.as_deref() == Some(Path::new("/workspace")))
+        {
+            writeln!(
+                &mut out,
+                "export MOTLIE_VZ_HOST_WORKSPACE_DIR={}",
+                shell_single_quote(workspace_mount.host_path.to_string_lossy().as_ref())
+            )
+            .expect("writing to String cannot fail");
+        }
+        if let Some(agent_state_mount) = cfg
+            .guest
+            .mounts
+            .iter()
+            .find(|mount| mount.guest_path.as_deref() == Some(Path::new("/agent-state")))
+        {
+            writeln!(
+                &mut out,
+                "export MOTLIE_VZ_HOST_AGENT_STATE_DIR={}",
+                shell_single_quote(agent_state_mount.host_path.to_string_lossy().as_ref())
+            )
+            .expect("writing to String cannot fail");
+        }
+        out.push_str("export MOTLIE_VZ_LOGIN_USER=\"$SSH_LOGIN_USER\"\n");
+        out.push_str("export MOTLIE_VZ_UID_NUM=\"$LOGIN_UID\"\n");
+        out.push_str("export MOTLIE_VZ_GID_NUM=\"$LOGIN_GID\"\n");
+        out.push_str("export MOTLIE_VZ_GUEST_HOSTNAME=\"$GUEST_HOSTNAME\"\n");
+        out.push_str("export MOTLIE_VZ_MOUNTS_FILE=\"$SEED_DIR/mounts.yaml\"\n");
+        out.push_str("export MOTLIE_VZ_NET_MAC=\"$EGRESS_MAC\"\n");
+        out.push_str("export MOTLIE_VZ_EGRESS_GUEST_IP=\"$EGRESS_GUEST_IP\"\n");
+        out.push_str("export MOTLIE_VZ_EGRESS_HOST_IP=\"$EGRESS_HOST_IP\"\n");
+        out.push_str("export MOTLIE_VZ_EGRESS_DNS_IP=\"$EGRESS_DNS_IP\"\n");
+        writeln!(
+            &mut out,
+            "export MOTLIE_VZ_EGRESS_NETMASK={}",
+            cfg.net_assignment.egress_ipv4.netmask
+        )
+        .expect("writing to String cannot fail");
+        writeln!(&mut out, "VZ_VM_NAME={}", shell_single_quote(&vz_vm_name))
+            .expect("writing to String cannot fail");
         out.push_str("export MOTLIE_VZ_KEEP_RUNNING=1\n");
-        out.push_str("\"$BASE_DIR/launch-vz.sh\" --guest \"$GUEST_ID\" --vm-name \"motlie-v1-45-${GUEST_ID}-iter\" \"$@\"\n");
+        out.push_str(
+            "\"$BASE_DIR/launch-vz.sh\" --guest \"$GUEST_ID\" --vm-name \"$VZ_VM_NAME\" \"$@\"\n",
+        );
     } else {
         out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
         out.push_str(
@@ -337,7 +564,9 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         out.push_str(
             "LAUNCH_ARGS+=(--ssh-user \"$SSH_LOGIN_USER\" --ssh-principal \"$SSH_PRINCIPAL\")\n",
         );
-        out.push_str("LAUNCH_ARGS+=(--hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n");
+        out.push_str(
+            "LAUNCH_ARGS+=(--hostname \"$GUEST_HOSTNAME\" --login-home \"$LOGIN_HOME\")\n",
+        );
         out.push_str("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")\n");
         out.push_str("LAUNCH_ARGS+=(--vnet-socket \"$VNET_SOCKET\")\n");
         if cfg.ssh_ca_pubkey.is_some() {
@@ -352,6 +581,17 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
 
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+fn sanitize_vz_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(byte as char),
+            _ => out.push('-'),
+        }
+    }
+    out
 }
 
 fn mac_fmt(m: &[u8; 6]) -> String {
@@ -487,7 +727,9 @@ mod tests {
         assert!(script.contains("GUEST_ID='alice'"));
         assert!(script.contains("SEED_DIR=\"${SEED_DIR:-/tmp/motlie-vmm-v14-cloud-init-alice}\""));
         assert!(script.contains("RUNTIME_ROOT=\"${RUNTIME_ROOT:-/tmp/motlie-vmm-v14-runtime}\""));
-        assert!(script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\""));
+        assert!(
+            script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\"")
+        );
         assert!(
             script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\"")
         );
@@ -523,10 +765,45 @@ mod tests {
         assert!(script.contains("ADMIN_NET='none'"));
         assert!(script.contains("EGRESS_NET='vz-userspace'"));
         assert!(script.contains("export MOTLIE_VZ_SSH_CA_PUBKEY=\"$SSH_CA_PUBKEY\""));
-        assert!(script.contains("export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"));
-        assert!(script.contains("export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"));
+        assert!(script.contains("export MOTLIE_VZ_INLINE_VALIDATION=0"));
+        assert!(script.contains(
+            "export MOTLIE_VZ_ARTIFACTS_DIR='/tmp/motlie-vmm-v14-runtime/alice/vz-artifacts'"
+        ));
+        assert!(script.contains(
+            "export MOTLIE_VZ_EGRESS_SOCKET_PATH='/tmp/motlie-vmm-v14-runtime/alice/egress.sock'"
+        ));
+        assert!(script.contains(
+            "export MOTLIE_VZ_RUNNER_PID_FILE='/tmp/motlie-vmm-v14-runtime/alice/vz-runner.pid'"
+        ));
+        assert!(script.contains(
+            "export MOTLIE_VZ_RESULT_JSON='/tmp/motlie-vmm-v14-runtime/alice/vz-launch-result.json'"
+        ));
+        assert!(script.contains(
+            "export MOTLIE_VZ_INTERACTIVE_READY_FILE='/tmp/motlie-vmm-v14-runtime/alice/interactive-ready'"
+        ));
+        assert!(script.contains(
+            "export MOTLIE_VZ_VALIDATION_COMPLETE_FILE='/tmp/motlie-vmm-v14-runtime/alice/validation-complete'"
+        ));
+        assert!(script.contains(
+            "export MOTLIE_VZ_PHASES_LOG='/tmp/motlie-vmm-v14-runtime/alice/vz-phases.log'"
+        ));
+        assert!(
+            script.contains(
+                "export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"
+            )
+        );
+        assert!(
+            script.contains(
+                "export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"
+            )
+        );
+        assert!(script.contains("export MOTLIE_VZ_EGRESS_GUEST_IP=\"$EGRESS_GUEST_IP\""));
+        assert!(script.contains("export MOTLIE_VZ_EGRESS_HOST_IP=\"$EGRESS_HOST_IP\""));
+        assert!(script.contains("export MOTLIE_VZ_EGRESS_DNS_IP=\"$EGRESS_DNS_IP\""));
+        assert!(script.contains("export MOTLIE_VZ_EGRESS_NETMASK=255.255.255.0"));
+        assert!(script.contains("VZ_VM_NAME='motlie-v1-45-motlie-vmm-v14-runtime-alice'"));
         assert!(script.contains("launch-vz.sh"));
-        assert!(script.contains("motlie-v1-45-${GUEST_ID}-iter"));
+        assert!(script.contains("--vm-name \"$VZ_VM_NAME\""));
         assert!(!script.contains("launch-ch.sh"));
     }
 }

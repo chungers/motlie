@@ -2,11 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-V14_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$V14_DIR/../../../.." && pwd)"
+V145_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$V145_DIR/../../../.." && pwd)"
 
-REPL_BIN="$REPO_ROOT/target/debug/examples/repl_host_v1_4"
-CONTROL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/motlie-vmm-v14-repl-auto-provision.XXXXXX")"
+REPL_BIN="$REPO_ROOT/target/debug/examples/repl_host_v1_45"
+CONTROL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/motlie-vmm-v145-repl-auto-provision.XXXXXX")"
 RUN_ROOT="$CONTROL_ROOT/runroot"
 REPL_FIFO="$CONTROL_ROOT/repl.fifo"
 REPL_LOG="$CONTROL_ROOT/repl.log"
@@ -16,7 +16,8 @@ AUTO_GUEST="joe"
 MANUAL_GUEST_OFF="alice"
 MANUAL_GUEST_ON="bob"
 DISABLED_GUEST="zoe"
-SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-180}"
+SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-900}"
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V145_DIR/../v1.35/artifacts/source-base.vm}"
 
 cleanup() {
     if [ -n "$REPL_PID" ]; then
@@ -108,16 +109,17 @@ trap cleanup EXIT
 
 cd "$REPO_ROOT"
 
-test -f "$V14_DIR/artifacts/base/rootfs.squashfs" || {
-    echo "missing $V14_DIR/artifacts/base/rootfs.squashfs; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/disk.img" || {
+    echo "missing $BASE_VM_DIR/disk.img; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
-test -f "$V14_DIR/artifacts/base/Image" || {
-    echo "missing $V14_DIR/artifacts/base/Image; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/nvram.bin" || {
+    echo "missing $BASE_VM_DIR/nvram.bin; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
 
-cargo build -p motlie-vmm --example repl_host_v1_4 >/dev/null
+cargo build -p motlie-vmm --example repl_host_v1_45 >/dev/null
+cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
 
 mkfifo "$REPL_FIFO"
 mkdir -p "$RUN_ROOT"
@@ -126,14 +128,14 @@ REPL_PID="$!"
 exec 3>"$REPL_FIFO"
 
 wait_for_pattern "SSH proxy: listening on 127.0.0.1:" 20
-wait_for_pattern "v14>" 20
+wait_for_pattern "v145>" 20
 extract_proxy_port
 
 send_repl "auto-provision status"
 wait_for_pattern "auto-provision=off" 10
 
 send_repl "boot ${MANUAL_GUEST_OFF}"
-wait_for_pattern "ok: booted ${MANUAL_GUEST_OFF}" 60
+wait_for_pattern "ok: booted ${MANUAL_GUEST_OFF}" 900
 
 MANUAL_OFF_OUTPUT="$CONTROL_ROOT/${MANUAL_GUEST_OFF}.out"
 MANUAL_OFF_ERROR="$CONTROL_ROOT/${MANUAL_GUEST_OFF}.err"
@@ -146,7 +148,7 @@ send_repl "auto-provision status"
 wait_for_pattern "auto-provision=on" 10
 
 send_repl "boot ${MANUAL_GUEST_ON}"
-wait_for_pattern "ok: booted ${MANUAL_GUEST_ON}" 60
+wait_for_pattern "ok: booted ${MANUAL_GUEST_ON}" 900
 
 MANUAL_ON_OUTPUT="$CONTROL_ROOT/${MANUAL_GUEST_ON}.out"
 MANUAL_ON_ERROR="$CONTROL_ROOT/${MANUAL_GUEST_ON}.err"
@@ -211,4 +213,4 @@ fi
 send_repl "quit"
 sleep 1
 
-echo "v1.4 repl auto-provision smoke passed (manual_off=${MANUAL_GUEST_OFF} manual_on=${MANUAL_GUEST_ON} auto_guest=${AUTO_GUEST} pid=${FIRST_PID} proxy_port=${PROXY_PORT})"
+echo "v1.45 repl auto-provision smoke passed (manual_off=${MANUAL_GUEST_OFF} manual_on=${MANUAL_GUEST_ON} auto_guest=${AUTO_GUEST} pid=${FIRST_PID} proxy_port=${PROXY_PORT})"

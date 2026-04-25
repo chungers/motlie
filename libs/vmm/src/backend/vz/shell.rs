@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use thiserror::Error;
 
+use crate::artifacts::{vz_artifacts_dir, vz_vm_name};
 use crate::backend::{
     BackendError, BackendHandle, BackendKind, BackendShutdownOutcome, VmBackendCapabilities,
 };
@@ -18,6 +19,11 @@ pub struct VzShellHandle {
     pub guest_id: String,
     pub base_dir: PathBuf,
     pub launch_script_path: PathBuf,
+    pub artifacts_dir: PathBuf,
+    pub vm_name: String,
+    pub runner_pid_file: PathBuf,
+    pub egress_helper_pid_file: PathBuf,
+    pub egress_socket_path: PathBuf,
     pub(crate) child: Mutex<Option<Child>>,
 }
 
@@ -164,17 +170,38 @@ impl VzShellBackend {
     ) -> Result<std::sync::MutexGuard<'a, Option<Child>>, VzShellError> {
         child.lock().map_err(|_| VzShellError::ChildStatePoisoned)
     }
+
+    fn pid_file_process_alive(path: &Path) -> bool {
+        let Ok(pid) = fs::read_to_string(path) else {
+            return false;
+        };
+        let pid = pid.trim();
+        if pid.is_empty() {
+            return false;
+        }
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 }
 
 impl VzShellHandle {
     pub fn has_exited(&self) -> Result<bool, VzShellError> {
         let mut child = VzShellBackend::child_lock(&self.child)?;
         let Some(running_child) = child.as_mut() else {
-            return Ok(self.pid.is_some());
+            return Ok(!VzShellBackend::pid_file_process_alive(
+                &self.runner_pid_file,
+            ));
         };
         match running_child.try_wait() {
-            Ok(Some(_)) => {
+            Ok(Some(status)) => {
                 let _ = child.take();
+                if status.success() && VzShellBackend::pid_file_process_alive(&self.runner_pid_file)
+                {
+                    return Ok(false);
+                }
                 Ok(true)
             }
             Ok(None) => Ok(false),
@@ -234,6 +261,14 @@ impl VzShellBackend {
             guest_id: prepared.guest.guest_id.clone(),
             base_dir: prepared.base_dir.clone(),
             launch_script_path,
+            artifacts_dir: vz_artifacts_dir(&prepared.runtime_paths),
+            vm_name: vz_vm_name(&prepared.runtime_paths, &prepared.guest.guest_id),
+            runner_pid_file: prepared.runtime_paths.runtime_dir.join("vz-runner.pid"),
+            egress_helper_pid_file: prepared
+                .runtime_paths
+                .runtime_dir
+                .join("vz-egress-helper.pid"),
+            egress_socket_path: prepared.runtime_paths.runtime_dir.join("egress.sock"),
             child: Mutex::new(Some(child)),
         }))
     }
@@ -252,8 +287,20 @@ impl VzShellBackend {
         let shutdown_script =
             Self::shutdown_script_path(&shell_handle.base_dir, &shell_handle.launch_script_path);
         let output = Command::new(&shutdown_script)
+            .env("MOTLIE_VZ_ARTIFACTS_DIR", &shell_handle.artifacts_dir)
+            .env("MOTLIE_VZ_RUNNER_PID_FILE", &shell_handle.runner_pid_file)
+            .env(
+                "MOTLIE_VZ_EGRESS_HELPER_PID_FILE",
+                &shell_handle.egress_helper_pid_file,
+            )
+            .env(
+                "MOTLIE_VZ_EGRESS_SOCKET_PATH",
+                &shell_handle.egress_socket_path,
+            )
             .arg("--guest")
             .arg(&shell_handle.guest_id)
+            .arg("--vm-name")
+            .arg(&shell_handle.vm_name)
             .output()
             .map_err(|source| VzShellError::ShutdownHelper {
                 guest_id: shell_handle.guest_id.clone(),

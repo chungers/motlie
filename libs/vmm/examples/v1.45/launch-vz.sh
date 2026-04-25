@@ -1,23 +1,26 @@
 #!/bin/zsh
 set -euo pipefail
 
+# v1.45 Vz convergence contract:
+# - base-image/seed content owns long-pole immutable setup (packages, toolchains,
+#   guest binaries, baseline agent tooling)
+# - first-contact SSH auto-provisioning may only wait for interactive readiness:
+#   CA login plus required VFS/agent-state mounts
+# - full VFS/VNET/egress/package validation is a separate harness step
+# Keep this sequence aligned with libs/vmm/docs/CONVERGENCE.md.
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
+ARTIFACTS_DIR="${MOTLIE_VZ_ARTIFACTS_DIR:-$SCRIPT_DIR/artifacts}"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-45-base-iter}"
 BASE_VM_DIR_OVERRIDE="${MOTLIE_VZ_BASE_VM_DIR:-}"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-900}"
-SERVICE_FILE="$SCRIPT_DIR/motlie-vfs-guest.service"
-AGENT_STATE_SETUP_FILE="$SCRIPT_DIR/motlie-agent-state-setup.sh"
-AGENT_STATE_UNIT_FILE="$SCRIPT_DIR/motlie-agent-state.service"
-SSH_BRIDGE_LOOP_FILE="$SCRIPT_DIR/motlie-vmm-vsock-ssh-loop.sh"
-SSH_BRIDGE_UNIT_FILE="$SCRIPT_DIR/motlie-vmm-vsock-ssh.service"
 RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-1}"
 ENABLE_GUEST_SSH_VSOCK="${MOTLIE_VZ_ENABLE_GUEST_SSH_VSOCK:-0}"
 EGRESS_HELPER_BIN_OVERRIDE="${MOTLIE_VZ_EGRESS_HELPER_BIN:-}"
-SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
+SKIP_EGRESS_HELPER_BUILD="${MOTLIE_VZ_SKIP_EGRESS_HELPER_BUILD:-1}"
 KEEP_RUNNING="${MOTLIE_VZ_KEEP_RUNNING:-0}"
 REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
 NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/../v1.35/artifacts/source-base.vm}"
@@ -30,7 +33,11 @@ NET_MAC=""
 CONTROL_HOST="127.0.0.1"
 CONTROL_PORT=""
 CONTROL_PORT_FILE="${MOTLIE_VZ_CONTROL_PORT_FILE:-}"
-GUEST_IPV4="10.0.2.15"
+EGRESS_GUEST_IP="${MOTLIE_VZ_EGRESS_GUEST_IP:-10.0.2.15}"
+EGRESS_HOST_IP="${MOTLIE_VZ_EGRESS_HOST_IP:-10.0.2.2}"
+EGRESS_DNS_IP="${MOTLIE_VZ_EGRESS_DNS_IP:-10.0.2.3}"
+EGRESS_NETMASK="${MOTLIE_VZ_EGRESS_NETMASK:-255.255.255.0}"
+GUEST_IPV4="$EGRESS_GUEST_IP"
 EGRESS_HELPER_LOG_FRAMES="${MOTLIE_VZ_LOG_FRAMES:-0}"
 BENCHMARK_APT="${MOTLIE_VZ_BENCHMARK_APT:-0}"
 BENCHMARK_HTTP="${MOTLIE_VZ_BENCHMARK_HTTP:-0}"
@@ -38,8 +45,35 @@ BENCHMARK_HTTP_URL="${MOTLIE_VZ_BENCHMARK_HTTP_URL:-http://ports.ubuntu.com/ubun
 BENCHMARK_TIMEOUT_SECONDS="${MOTLIE_VZ_BENCHMARK_TIMEOUT_SECONDS:-90}"
 BENCHMARK_MTU="${MOTLIE_VZ_BENCHMARK_MTU:-0}"
 CONTROL_READY_FILE="${MOTLIE_VZ_CONTROL_READY_FILE:-}"
+INTERACTIVE_READY_FILE="${MOTLIE_VZ_INTERACTIVE_READY_FILE:-}"
+VALIDATION_COMPLETE_FILE="${MOTLIE_VZ_VALIDATION_COMPLETE_FILE:-}"
+PHASES_LOG="${MOTLIE_VZ_PHASES_LOG:-}"
+INLINE_VALIDATION="${MOTLIE_VZ_INLINE_VALIDATION:-}"
+MOUNTS_FILE_OVERRIDE="${MOTLIE_VZ_MOUNTS_FILE:-}"
+LOGIN_USER_OVERRIDE="${MOTLIE_VZ_LOGIN_USER:-}"
+UID_NUM_OVERRIDE="${MOTLIE_VZ_UID_NUM:-}"
+GID_NUM_OVERRIDE="${MOTLIE_VZ_GID_NUM:-}"
+HOST_HOME_DIR_OVERRIDE="${MOTLIE_VZ_HOST_HOME_DIR:-}"
+HOST_AGENT_STATE_DIR_OVERRIDE="${MOTLIE_VZ_HOST_AGENT_STATE_DIR:-}"
+HOST_WORKSPACE_DIR_OVERRIDE="${MOTLIE_VZ_HOST_WORKSPACE_DIR:-}"
+GUEST_HOSTNAME_OVERRIDE="${MOTLIE_VZ_GUEST_HOSTNAME:-}"
+NET_MAC_OVERRIDE="${MOTLIE_VZ_NET_MAC:-}"
+RUN_LOG_OVERRIDE="${MOTLIE_VZ_RUN_LOG:-}"
+RESULT_JSON_OVERRIDE="${MOTLIE_VZ_RESULT_JSON:-}"
+SERIAL_LOG_OVERRIDE="${MOTLIE_VZ_SERIAL_LOG:-}"
+SEED_DIR_OVERRIDE="${MOTLIE_VZ_SEED_DIR:-}"
+SEED_IMAGE_OVERRIDE="${MOTLIE_VZ_SEED_IMAGE:-}"
+USE_SEED_DISK="${MOTLIE_VZ_USE_SEED_DISK:-0}"
+RUNNER_PID_FILE_OVERRIDE="${MOTLIE_VZ_RUNNER_PID_FILE:-}"
+GUEST_IP_FILE_OVERRIDE="${MOTLIE_VZ_GUEST_IP_FILE:-}"
+EGRESS_HELPER_PID_FILE_OVERRIDE="${MOTLIE_VZ_EGRESS_HELPER_PID_FILE:-}"
+EGRESS_SOCKET_PATH_OVERRIDE="${MOTLIE_VZ_EGRESS_SOCKET_PATH:-}"
+EGRESS_LOG_OVERRIDE="${MOTLIE_VZ_EGRESS_LOG:-}"
+INTERACTIVE_SECONDS=""
+VALIDATION_SECONDS=""
 
 zmodload zsh/datetime
+SCRIPT_START_EPOCH="$EPOCHREALTIME"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -48,14 +82,22 @@ require_cmd() {
   fi
 }
 
+ensure_parent_dir() {
+  local target_path="$1"
+  mkdir -p "${target_path:h}"
+}
+
 require_cmd python3
-require_cmd git
-require_cmd tar
+require_cmd base64
 require_cmd expect
 require_cmd scp
 require_cmd ssh
-require_cmd cargo
-require_cmd hdiutil
+if [[ "$SKIP_RUNNER_BUILD" != "1" || "$SKIP_EGRESS_HELPER_BUILD" != "1" ]]; then
+  require_cmd cargo
+fi
+if [[ "$USE_SEED_DISK" == "1" ]]; then
+  require_cmd hdiutil
+fi
 
 if [[ -n "$BASE_VM_DIR_OVERRIDE" ]]; then
   BASE_SOURCE_DIR="$BASE_VM_DIR_OVERRIDE"
@@ -84,6 +126,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+
+SEED_DIR="${SEED_DIR_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-seed}"
 
 case "$GUEST_NAME" in
   alice)
@@ -123,10 +167,48 @@ case "$GUEST_NAME" in
     CONTROL_PORT="${MOTLIE_VZ_BOB_SSH_PORT:-2227}"
     ;;
   *)
-    echo "guest must be alice or bob" >&2
-    exit 1
+    LOGIN_USER="${LOGIN_USER_OVERRIDE:-$GUEST_NAME}"
+    UID_NUM="${UID_NUM_OVERRIDE:-}"
+    GID_NUM="${GID_NUM_OVERRIDE:-}"
+    if [[ -z "$UID_NUM" || -z "$GID_NUM" ]]; then
+      echo "MOTLIE_VZ_UID_NUM and MOTLIE_VZ_GID_NUM must be set for guest '$GUEST_NAME'" >&2
+      exit 1
+    fi
+    MOUNTS_FILE="${MOUNTS_FILE_OVERRIDE:-$SEED_DIR/mounts.yaml}"
+    SOCKET_PATH="${MOTLIE_VZ_VFS_VSOCK_SOCKET:-/tmp/motlie-vmm-${GUEST_NAME}.vsock_5000}"
+    SSH_VSOCK_SOCKET="${MOTLIE_VZ_SSH_VSOCK_SOCKET:-/tmp/motlie-vmm-${GUEST_NAME}.vsock_2222}"
+    HOST_HOME_DIR="${HOST_HOME_DIR_OVERRIDE:-/tmp/motlie-vmm-demo/${GUEST_NAME}-home}"
+    HOST_AGENT_STATE_DIR="${HOST_AGENT_STATE_DIR_OVERRIDE:-/tmp/motlie-vmm-demo/${GUEST_NAME}-agent-state}"
+    HOST_WORKSPACE_DIR="${HOST_WORKSPACE_DIR_OVERRIDE:-/tmp/motlie-vmm-demo/${GUEST_NAME}-workspace}"
+    EXPECTED_WORKSPACE_README="${(C)GUEST_NAME} workspace mounted from the host."
+    EXPECTED_AGENT_STATE_README="Dedicated read-write agent-state layer for Codex and Claude lives here."
+    EXPECTED_ENV_LINE="${(U)GUEST_NAME}_API_KEY=demo-${GUEST_NAME}"
+    GUEST_HOSTNAME="${GUEST_HOSTNAME_OVERRIDE:-motlie-${GUEST_NAME}}"
+    NET_MAC="${NET_MAC_OVERRIDE:-02:4d:6f:74:00:01}"
+    CONTROL_PORT="${MOTLIE_VZ_SSH_PORT:-2226}"
     ;;
 esac
+
+MOUNTS_FILE="${MOUNTS_FILE_OVERRIDE:-$MOUNTS_FILE}"
+LOGIN_USER="${LOGIN_USER_OVERRIDE:-$LOGIN_USER}"
+UID_NUM="${UID_NUM_OVERRIDE:-$UID_NUM}"
+GID_NUM="${GID_NUM_OVERRIDE:-$GID_NUM}"
+SOCKET_PATH="${MOTLIE_VZ_VFS_VSOCK_SOCKET:-$SOCKET_PATH}"
+SSH_VSOCK_SOCKET="${MOTLIE_VZ_SSH_VSOCK_SOCKET:-$SSH_VSOCK_SOCKET}"
+HOST_HOME_DIR="${HOST_HOME_DIR_OVERRIDE:-$HOST_HOME_DIR}"
+HOST_AGENT_STATE_DIR="${HOST_AGENT_STATE_DIR_OVERRIDE:-$HOST_AGENT_STATE_DIR}"
+HOST_WORKSPACE_DIR="${HOST_WORKSPACE_DIR_OVERRIDE:-$HOST_WORKSPACE_DIR}"
+GUEST_HOSTNAME="${GUEST_HOSTNAME_OVERRIDE:-$GUEST_HOSTNAME}"
+NET_MAC="${NET_MAC_OVERRIDE:-$NET_MAC}"
+CONTROL_PORT="${MOTLIE_VZ_SSH_PORT:-$CONTROL_PORT}"
+
+if [[ -z "$INLINE_VALIDATION" ]]; then
+  if [[ "$KEEP_RUNNING" == "1" ]]; then
+    INLINE_VALIDATION=0
+  else
+    INLINE_VALIDATION=1
+  fi
+fi
 
 BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
 BOOTSTRAP_PASSWORD="${MOTLIE_VZ_BOOTSTRAP_PASS:-admin}"
@@ -140,17 +222,41 @@ if [[ -z "$SSH_CA_PUBKEY" ]]; then
   exit 1
 fi
 
-RUN_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-run.log"
-RESULT_JSON="$ARTIFACTS_DIR/${GUEST_NAME}-launch-result.json"
-SERIAL_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-serial.log"
-SEED_DIR="$ARTIFACTS_DIR/${GUEST_NAME}-seed"
-SEED_IMAGE="$ARTIFACTS_DIR/${GUEST_NAME}-seed.dmg"
+RUN_LOG="${RUN_LOG_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-run.log}"
+RESULT_JSON="${RESULT_JSON_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-launch-result.json}"
+SERIAL_LOG="${SERIAL_LOG_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-serial.log}"
+SEED_IMAGE="${SEED_IMAGE_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-seed.dmg}"
 VALIDATION_TOKEN="$RUN_VM_NAME"
-RUNNER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid"
-GUEST_IP_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-ip.txt"
-EGRESS_HELPER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-egress-helper.pid"
-EGRESS_SOCKET_PATH="/tmp/motlie-vmm-${GUEST_NAME}.egress.sock"
-EGRESS_LOG="$ARTIFACTS_DIR/${GUEST_NAME}-egress.log"
+RUNNER_PID_FILE="${RUNNER_PID_FILE_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid}"
+GUEST_IP_FILE="${GUEST_IP_FILE_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-ip.txt}"
+EGRESS_HELPER_PID_FILE="${EGRESS_HELPER_PID_FILE_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-egress-helper.pid}"
+EGRESS_SOCKET_PATH="${EGRESS_SOCKET_PATH_OVERRIDE:-/tmp/motlie-vmm-${GUEST_NAME}.egress.sock}"
+EGRESS_LOG="${EGRESS_LOG_OVERRIDE:-$ARTIFACTS_DIR/${GUEST_NAME}-egress.log}"
+
+mkdir -p "$ARTIFACTS_DIR"
+for artifact_path in \
+  "$RUN_LOG" \
+  "$RESULT_JSON" \
+  "$SERIAL_LOG" \
+  "$SEED_IMAGE" \
+  "$RUNNER_PID_FILE" \
+  "$GUEST_IP_FILE" \
+  "$EGRESS_HELPER_PID_FILE" \
+  "$EGRESS_SOCKET_PATH" \
+  "$EGRESS_LOG"
+do
+  ensure_parent_dir "$artifact_path"
+done
+for optional_artifact_path in \
+  "$INTERACTIVE_READY_FILE" \
+  "$VALIDATION_COMPLETE_FILE" \
+  "$PHASES_LOG"
+do
+  if [[ -n "$optional_artifact_path" ]]; then
+    ensure_parent_dir "$optional_artifact_path"
+    rm -f "$optional_artifact_path"
+  fi
+done
 
 if [[ -n "$CONTROL_READY_FILE" ]]; then
   mkdir -p "$(dirname "$CONTROL_READY_FILE")"
@@ -209,6 +315,141 @@ print_failure_context() {
     echo "--- guest ip ---" >&2
     cat "$GUEST_IP_FILE" >&2 || true
   fi
+}
+
+elapsed_since_start() {
+  awk -v start="$SCRIPT_START_EPOCH" -v now="$EPOCHREALTIME" 'BEGIN { printf "%.3f", now - start }'
+}
+
+mark_phase() {
+  local phase_name="$1"
+  if [[ -n "$PHASES_LOG" ]]; then
+    printf '%s\t%s\n' "$phase_name" "$(elapsed_since_start)" >>"$PHASES_LOG"
+  fi
+}
+
+mark_interactive_ready() {
+  INTERACTIVE_SECONDS="$(elapsed_since_start)"
+  mark_phase "interactive-ready"
+  if [[ -n "$CONTROL_READY_FILE" ]]; then
+    : >"$CONTROL_READY_FILE"
+  fi
+  if [[ -n "$INTERACTIVE_READY_FILE" ]]; then
+    : >"$INTERACTIVE_READY_FILE"
+  fi
+}
+
+mark_validation_complete() {
+  VALIDATION_SECONDS="$(elapsed_since_start)"
+  mark_phase "validation-complete"
+  if [[ -n "$VALIDATION_COMPLETE_FILE" ]]; then
+    : >"$VALIDATION_COMPLETE_FILE"
+  fi
+}
+
+write_skipped_validation_json() {
+  local validation_json_path="$1"
+  python3 - "$validation_json_path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "status": "skipped",
+            "reason": "inline validation disabled; run harness validate <guest> or a saved scenario for full certification",
+        },
+        fh,
+        sort_keys=True,
+    )
+    fh.write("\n")
+PY
+}
+
+write_result_json() {
+  local validation_json_path="$1"
+  local benchmark_json_path="${2:-}"
+  local result_phase="${3:-interactive-ready}"
+  python3 - "$RESULT_JSON" "$RUN_VM_NAME" "${INTERACTIVE_SECONDS:-}" "${VALIDATION_SECONDS:-}" "$SOCKET_PATH" "$RUNNER_PID" "$IP_ADDR" "$validation_json_path" "$KEEP_RUNNING" "$benchmark_json_path" "$INLINE_VALIDATION" "$result_phase" "$PHASES_LOG" <<'PY'
+import json
+import os
+import sys
+
+(
+    path,
+    vm_name,
+    interactive_seconds,
+    validation_seconds,
+    socket_path,
+    runner_pid,
+    ip_addr,
+    validation_json_path,
+    keep_running,
+    benchmark_json_path,
+    inline_validation,
+    result_phase,
+    phase_log_path,
+) = sys.argv[1:]
+
+
+def maybe_float(value):
+    return float(value) if value else None
+
+
+validation_payload = None
+if validation_json_path and os.path.exists(validation_json_path):
+    with open(validation_json_path, "r", encoding="utf-8") as fh:
+        validation_payload = json.load(fh)
+
+benchmark_payload = None
+if benchmark_json_path:
+    with open(benchmark_json_path, "r", encoding="utf-8") as fh:
+        benchmark_payload = json.load(fh)
+
+phases = []
+if phase_log_path and os.path.exists(phase_log_path):
+    with open(phase_log_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            name, _, seconds = line.rstrip("\n").partition("\t")
+            if name:
+                phases.append({"phase": name, "seconds": maybe_float(seconds)})
+
+validation_skipped = bool(
+    isinstance(validation_payload, dict) and validation_payload.get("status") == "skipped"
+)
+keep_running_bool = keep_running == "1"
+validation_complete_seconds = maybe_float(validation_seconds)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(
+        {
+            "backend": "vz-vsock-runner",
+            "vm_name": vm_name,
+            "ready_phase": result_phase,
+            "interactive_ready_seconds": maybe_float(interactive_seconds),
+            "validation_complete_seconds": validation_complete_seconds,
+            "boot_to_validation_seconds": validation_complete_seconds,
+            "inline_validation": inline_validation == "1",
+            "unix_socket_path": socket_path,
+            "runner_pid": int(runner_pid) if keep_running_bool else None,
+            "kept_running": keep_running_bool,
+            "guest_ip": ip_addr,
+            "phase_log": phase_log_path or None,
+            "phases": phases,
+            "validation": {
+                "guest_validation_json": validation_json_path or None,
+                "mounts_ready": True,
+                "skipped": validation_skipped,
+                "guest": validation_payload,
+            },
+            "benchmark": benchmark_payload,
+        },
+        fh,
+        indent=2,
+        sort_keys=True,
+    )
+    fh.write("\n")
+PY
 }
 
 cleanup() {
@@ -338,14 +579,32 @@ start_egress_helper() {
   if [[ -n "$EGRESS_HELPER_BIN_OVERRIDE" ]]; then
     helper_bin="$EGRESS_HELPER_BIN_OVERRIDE"
   else
-    cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
     helper_bin="$REPO_ROOT/target/debug/examples/vz_egress_helper_v1_25"
+    if [[ ! -x "$helper_bin" && "$SKIP_EGRESS_HELPER_BUILD" != "1" ]]; then
+      cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
+    fi
+  fi
+  if [[ ! -x "$helper_bin" ]]; then
+    cat >&2 <<EOF
+missing prebuilt v1.45 Vz egress helper: $helper_bin
+
+Build host artifacts before launch:
+  cargo build -p motlie-vnet --example vz_egress_helper_v1_25
+
+Set MOTLIE_VZ_SKIP_EGRESS_HELPER_BUILD=0 only for explicit developer rebuilds;
+first-contact guest startup must not hide host tool builds.
+EOF
+    exit 1
   fi
   kill_stale_egress_helpers
   rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
   : > "$EGRESS_LOG"
   nohup "$helper_bin" \
     --socket-path "$EGRESS_SOCKET_PATH" \
+    --guest-ip "$EGRESS_GUEST_IP" \
+    --host-ip "$EGRESS_HOST_IP" \
+    --dns-ip "$EGRESS_DNS_IP" \
+    --netmask "$EGRESS_NETMASK" \
     --host-forward-tcp "127.0.0.1:${CONTROL_PORT}:22" \
     $( [[ "$EGRESS_HELPER_LOG_FRAMES" == "1" ]] && print -- "--log-frames" ) \
     >"$EGRESS_LOG" 2>&1 </dev/null &
@@ -398,93 +657,6 @@ rm -f "$RUN_LOG" "$SERIAL_LOG" "$RUNNER_PID_FILE" "$GUEST_IP_FILE" "$RESULT_JSON
   "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$EGRESS_SOCKET_PATH" "$EGRESS_LOG" "$EGRESS_HELPER_PID_FILE" "$SEED_IMAGE"
 rm -rf "$SEED_DIR"
 
-guest_copy() {
-  local src="$1"
-  local dst="$2"
-  local size_bytes
-  size_bytes="$(wc -c < "$src" | tr -d '[:space:]')"
-  if [[ "${size_bytes:-0}" -gt 262144 ]]; then
-    local chunk_dir
-    local dst_dir
-    chunk_dir="$(mktemp -d)"
-    dst_dir="${dst:h}"
-    split -b 256k -a 4 "$src" "$chunk_dir/chunk."
-    expect <<EOF
-set timeout -1
-spawn ssh -p ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} "mkdir -p \"$dst_dir\" && : > \"$dst\""
-expect {
-  "password:" {
-    send "${CONTROL_PASSWORD}\r"
-    exp_continue
-  }
-  eof {}
-  timeout {
-    puts stderr "ssh timed out: prepare remote file $dst"
-    exit 124
-  }
-}
-catch wait result
-set exit_code [lindex \$result 3]
-if {\$exit_code != 0} {
-  exit \$exit_code
-}
-EOF
-    local chunk=""
-    for chunk in "$chunk_dir"/chunk.*; do
-      local pump_script
-      pump_script="$(mktemp)"
-      cat >"$pump_script" <<EOF2
-#!/bin/sh
-cat "$chunk" | ssh -p ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} "cat >> \"$dst\""
-EOF2
-      chmod +x "$pump_script"
-      expect <<EOF
-set timeout -1
-spawn "$pump_script"
-expect {
-  "password:" {
-    send "${CONTROL_PASSWORD}\r"
-    exp_continue
-  }
-  eof {}
-  timeout {
-    puts stderr "ssh stream timed out: $chunk -> $dst"
-    exit 124
-  }
-}
-catch wait result
-set exit_code [lindex \$result 3]
-if {\$exit_code != 0} {
-  exit \$exit_code
-}
-EOF
-      rm -f "$pump_script"
-    done
-    rm -rf "$chunk_dir"
-    return 0
-  fi
-  expect <<EOF
-set timeout -1
-spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$src" ${CONTROL_USER}@${CONTROL_HOST}:$dst
-expect {
-  "password:" {
-    send "${CONTROL_PASSWORD}\r"
-    exp_continue
-  }
-  eof {}
-  timeout {
-    puts stderr "scp timed out: $src -> $dst"
-    exit 124
-  }
-}
-catch wait result
-set exit_code [lindex \$result 3]
-if {\$exit_code != 0} {
-  exit \$exit_code
-}
-EOF
-}
-
 guest_fetch() {
   local src="$1"
   local dst="$2"
@@ -515,6 +687,8 @@ require_host_fixture_dirs() {
 }
 
 require_host_fixture_dirs
+
+mark_phase "host-fixtures-ready"
 
 guest_bash() {
   local remote_timeout="${MOTLIE_VZ_GUEST_BASH_TIMEOUT:--1}"
@@ -740,51 +914,88 @@ if [[ "$REUSED_VM" -eq 0 ]]; then
   BASE_NVRAM_PATH="$BASE_SOURCE_DIR/nvram.bin"
   BASE_MACHINE_ID_PATH="$BASE_SOURCE_DIR/machine-id.bin"
   python3 - "$BASE_DISK_PATH" "$BASE_NVRAM_PATH" "$BASE_MACHINE_ID_PATH" "$RUN_VM_DIR" <<'PY'
+import ctypes
+import errno
 import os
 import shutil
 import sys
 
 src_disk, src_nvram, src_machine_id, out_dir = sys.argv[1:]
 os.makedirs(out_dir, exist_ok=True)
+
+
+def clonefile(src, dst):
+    if sys.platform != "darwin":
+        return False
+    try:
+        libc = ctypes.CDLL("libc.dylib", use_errno=True)
+        call = libc.clonefile
+    except AttributeError:
+        return False
+    call.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    call.restype = ctypes.c_int
+    if call(os.fsencode(src), os.fsencode(dst), 0) == 0:
+        return True
+    err = ctypes.get_errno()
+    if err in (
+        errno.ENOTSUP,
+        errno.EXDEV,
+        errno.EINVAL,
+        errno.ENOSYS,
+        getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+    ):
+        return False
+    raise OSError(err, os.strerror(err), dst)
+
+
+def materialize_file(src, dst, chunk_size):
+    tmp = dst + ".tmp-copy"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    try:
+        if not clonefile(src, tmp):
+            with open(src, "rb") as rf, open(tmp, "wb") as wf:
+                shutil.copyfileobj(rf, wf, length=chunk_size)
+        os.replace(tmp, dst)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
 for src, name in (
     (src_disk, "disk.img"),
     (src_nvram, "nvram.bin"),
 ):
-    dst = os.path.join(out_dir, name)
-    tmp = dst + ".tmp-copy"
-    if os.path.exists(tmp):
-        os.remove(tmp)
-    with open(src, "rb") as rf, open(tmp, "wb") as wf:
-        shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
-    os.replace(tmp, dst)
+    materialize_file(src, os.path.join(out_dir, name), 16 * 1024 * 1024)
 
 machine_id_dst = os.path.join(out_dir, "machine-id.bin")
 if src_machine_id and os.path.exists(src_machine_id):
-    tmp = machine_id_dst + ".tmp-copy"
-    if os.path.exists(tmp):
-        os.remove(tmp)
-    with open(src_machine_id, "rb") as rf, open(tmp, "wb") as wf:
-        shutil.copyfileobj(rf, wf, length=1024 * 1024)
-    os.replace(tmp, machine_id_dst)
+    materialize_file(src_machine_id, machine_id_dst, 1024 * 1024)
 else:
     with open(machine_id_dst, "wb"):
         pass
 PY
+  mark_phase "disk-materialized"
+else
+  mark_phase "disk-reused"
 fi
 
-echo "--- packing Motlie source tree ---"
-COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git -C "$REPO_ROOT" ls-files -z | COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --disable-copyfile --no-mac-metadata --no-xattrs --null -czf "$SOURCE_TARBALL" -C "$REPO_ROOT" --files-from -
-
-echo "--- rendering guest seed disk ---"
-mkdir -p "$SEED_DIR"
-cp "$SOURCE_TARBALL" "$SEED_DIR/motlie-src.tar.gz"
-cp "$MOUNTS_FILE" "$SEED_DIR/mounts.${GUEST_NAME}.yaml"
-cp "$SERVICE_FILE" "$SEED_DIR/motlie-vfs-guest.service"
-cp "$AGENT_STATE_SETUP_FILE" "$SEED_DIR/motlie-agent-state-setup"
-cp "$AGENT_STATE_UNIT_FILE" "$SEED_DIR/motlie-agent-state.service"
-cp "$SSH_BRIDGE_LOOP_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh-loop"
-cp "$SSH_BRIDGE_UNIT_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh.service"
-hdiutil create -quiet -fs FAT32 -volname MOTLIESEED -srcfolder "$SEED_DIR" -ov -format UDRW "$SEED_IMAGE"
+# CONVERGENCE CONTRACT:
+# Vz cannot yet inject the same CH overlay before boot, so the transitional
+# path sends only the dynamic mount declaration over first-contact SSH. Service
+# units, agent-state setup scripts, package state, and SSH CA config belong to
+# the base image and must fail fast below if missing.
+echo "--- rendering guest runtime config ---"
+MOUNTS_B64="$(base64 < "$MOUNTS_FILE" | tr -d '\n')"
+mark_phase "runtime-config-rendered"
+if [[ "$USE_SEED_DISK" == "1" ]]; then
+  echo "--- rendering diagnostic guest seed disk ---"
+  mkdir -p "$SEED_DIR"
+  cp "$MOUNTS_FILE" "$SEED_DIR/mounts.${GUEST_NAME}.yaml"
+  hdiutil create -quiet -fs FAT32 -volname MOTLIESEED -srcfolder "$SEED_DIR" -ov -format UDRW "$SEED_IMAGE"
+  mark_phase "seed-rendered"
+fi
 
 if [[ -n "$RUNNER_BIN_OVERRIDE" ]]; then
   RUNNER_BIN="$RUNNER_BIN_OVERRIDE"
@@ -794,8 +1005,22 @@ else
   echo "--- building Vz virtio-socket helper ---"
   RUNNER_BIN="$($RUNNER_BUILD_SCRIPT)"
 fi
+if [[ ! -x "$RUNNER_BIN" ]]; then
+  cat >&2 <<EOF
+missing prebuilt v1.45 Vz runner: $RUNNER_BIN
+
+Build and sign host artifacts before launch:
+  $RUNNER_BUILD_SCRIPT
+  $SCRIPT_DIR/sign-vz-runner.sh
+
+Set MOTLIE_VZ_SKIP_RUNNER_BUILD=0 only for explicit developer rebuilds;
+first-contact guest startup must not hide host tool builds.
+EOF
+  exit 1
+fi
 chmod +x "$RUNNER_BIN"
 start_egress_helper
+mark_phase "egress-helper-ready"
 
 VM_DIR="$RUN_VM_DIR"
 DISK_PATH="$VM_DIR/disk.img"
@@ -804,19 +1029,20 @@ MACHINE_ID_PATH="$VM_DIR/machine-id.bin"
 
 echo "--- launching Apple Vz helper ---"
 : > "$RUN_LOG"
-START_EPOCH="$EPOCHREALTIME"
 RUNNER_ARGS=(
   --disk "$DISK_PATH"
   --nvram "$NVRAM_PATH"
   --machine-id "$MACHINE_ID_PATH"
   --serial-log "$SERIAL_LOG"
-  --seed-disk "$SEED_IMAGE"
   --vsock-forward "5000:$SOCKET_PATH"
   --net-backend-socket "$EGRESS_SOCKET_PATH"
   --net-mac "$NET_MAC"
   --memory-mib 4096
   --cpu-count 4
 )
+if [[ "$USE_SEED_DISK" == "1" ]]; then
+  RUNNER_ARGS+=(--seed-disk "$SEED_IMAGE")
+fi
 if [[ "$ENABLE_GUEST_SSH_VSOCK" == "1" ]]; then
   RUNNER_ARGS+=(--vsock-forward "2222:$SSH_VSOCK_SOCKET")
 fi
@@ -825,8 +1051,9 @@ nohup "$RUNNER_BIN" \
   >"$RUN_LOG" 2>&1 </dev/null &
 RUNNER_PID="$!"
 echo "$RUNNER_PID" > "$RUNNER_PID_FILE"
+mark_phase "runner-started"
 
-IP_ADDR="$GUEST_IPV4"
+IP_ADDR="$EGRESS_GUEST_IP"
 echo "$IP_ADDR" > "$GUEST_IP_FILE"
 
 echo "--- waiting for guest SSH ---"
@@ -835,26 +1062,16 @@ wait_for_guest_ssh || {
   print_failure_context
   exit 1
 }
+mark_phase "guest-ssh-password-ready"
 
 echo "--- provisioning guest over native Vz userspace egress ---"
-NEED_SOURCE_UPLOAD=1
-if guest_bash <<'EOF'
-set -x
-if [[ -s /usr/local/bin/motlie-vfs-guest && -x /usr/local/bin/motlie-vfs-guest ]]; then
-  exit 0
-fi
-exit 1
-EOF
-then
-  NEED_SOURCE_UPLOAD=0
-fi
-
-if [[ "$NEED_SOURCE_UPLOAD" -eq 1 ]]; then
-  :
-fi
-
+mark_phase "provision-start"
 guest_bash <<EOF
 set -x
+motlie_guest_phase() {
+  printf '[motlie-guest-phase] %s %s\n' "\$(date +%s.%N)" "\$1" >&2 || true
+}
+motlie_guest_phase provision-remote-start
 remap_conflicting_identity() {
   user_name="\$1"
   target_uid="\$2"
@@ -885,30 +1102,32 @@ remap_conflicting_identity() {
 
 remap_conflicting_identity admin $UID_NUM $GID_NUM 2000 2000
 remap_conflicting_identity ubuntu $UID_NUM $GID_NUM 2001 2001
+motlie_guest_phase identity-remapped
 
 set -x
 SEED_MOUNT="/mnt/motlie-seed"
-seed_dev="\$(blkid -L MOTLIESEED 2>/dev/null || true)"
-if [[ -z "\$seed_dev" && -e /dev/disk/by-label/MOTLIESEED ]]; then
-  seed_dev="/dev/disk/by-label/MOTLIESEED"
+if [[ "$USE_SEED_DISK" == "1" ]]; then
+  seed_dev="\$(blkid -L MOTLIESEED 2>/dev/null || true)"
+  if [[ -z "\$seed_dev" && -e /dev/disk/by-label/MOTLIESEED ]]; then
+    seed_dev="/dev/disk/by-label/MOTLIESEED"
+  fi
+  if [[ -z "\$seed_dev" ]]; then
+    echo "failed to locate MOTLIESEED device" >&2
+    exit 1
+  fi
+  printf '${CONTROL_PASSWORD}\n' | sudo -S mkdir -p "\$SEED_MOUNT"
+  printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
+  printf '${CONTROL_PASSWORD}\n' | sudo -S mount -o ro "\$seed_dev" "\$SEED_MOUNT"
+  printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/mounts.${GUEST_NAME}.yaml" /tmp/mounts.${GUEST_NAME}.yaml
+  printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
+else
+  cat <<'MOTLIE_MOUNTS_B64' >/tmp/mounts.${GUEST_NAME}.yaml.b64
+${MOUNTS_B64}
+MOTLIE_MOUNTS_B64
+  base64 -d /tmp/mounts.${GUEST_NAME}.yaml.b64 >/tmp/mounts.${GUEST_NAME}.yaml
+  rm -f /tmp/mounts.${GUEST_NAME}.yaml.b64
 fi
-if [[ -z "\$seed_dev" ]]; then
-  echo "failed to locate MOTLIESEED device" >&2
-  exit 1
-fi
-printf '${CONTROL_PASSWORD}\n' | sudo -S mkdir -p "\$SEED_MOUNT"
-printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S mount -o ro "\$seed_dev" "\$SEED_MOUNT"
-if [[ "$NEED_SOURCE_UPLOAD" -eq 1 ]]; then
-  printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/motlie-src.tar.gz" /tmp/motlie-src.tar.gz
-fi
-printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/mounts.${GUEST_NAME}.yaml" /tmp/mounts.${GUEST_NAME}.yaml
-printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/motlie-vfs-guest.service" /tmp/motlie-vfs-guest.service
-printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/motlie-agent-state-setup" /tmp/motlie-agent-state-setup
-printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/motlie-agent-state.service" /tmp/motlie-agent-state.service
-printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh-loop" /tmp/motlie-vmm-vsock-ssh-loop
-printf '${CONTROL_PASSWORD}\n' | sudo -S cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh.service" /tmp/motlie-vmm-vsock-ssh.service
-printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
+motlie_guest_phase mounts-config-staged
 printf '${CONTROL_PASSWORD}\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /workspace >/dev/null 2>&1 || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /agent-state >/dev/null 2>&1 || true
@@ -941,22 +1160,24 @@ elif [[ "\$existing_uid" != "$UID_NUM" ]]; then
 fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
 printf '${CONTROL_PASSWORD}\n' | sudo -S usermod -aG sudo '$LOGIN_USER' || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S bash -c "cat > /etc/sudoers.d/90-motlie-demo <<'SUDOERSEOF'
+printf '%s\n' '${CONTROL_PASSWORD}' | sudo -S tee /etc/sudoers.d/90-motlie-demo >/dev/null <<SUDOERSEOF
 alice ALL=(ALL) NOPASSWD:ALL
 bob ALL=(ALL) NOPASSWD:ALL
+$LOGIN_USER ALL=(ALL) NOPASSWD:ALL
 SUDOERSEOF
-chown root:root /etc/sudoers.d/90-motlie-demo
-chmod 0440 /etc/sudoers.d/90-motlie-demo"
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl disable apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl mask apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl stop apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl kill apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
+printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/sudoers.d/90-motlie-demo
+printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0440 /etc/sudoers.d/90-motlie-demo
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /workspace
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0755 /workspace
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /agent-state
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0755 /agent-state
-typeset -a missing_pkgs=()
+motlie_guest_phase user-and-base-dirs-ready
+# CONVERGENCE CONTRACT:
+# Do not install packages, fetch Rust toolchains, or compile guest binaries in
+# the first SSH/proxy path. Those are image-ready responsibilities. If this
+# fails, rebuild the v1.45 base image instead of hiding the long pole here.
+typeset -a contract_missing=()
 for cmd_pkg in \
   "cargo:cargo" \
   "rustc:rustc" \
@@ -965,69 +1186,69 @@ for cmd_pkg in \
   "curl:curl" \
   "tar:tar" \
   "gzip:gzip" \
-  "npm:npm"
+  "npm:npm" \
+  "codex:@openai/codex" \
+  "claude:@anthropic-ai/claude-code"
 do
   required_cmd="\${cmd_pkg%%:*}"
   required_pkg="\${cmd_pkg#*:}"
   if ! command -v "\$required_cmd" >/dev/null 2>&1; then
-    missing_pkgs+=("\$required_pkg")
+    contract_missing+=("command '\$required_cmd' from base package '\$required_pkg'")
   fi
 done
 if ! pkg-config --exists fuse3 >/dev/null 2>&1; then
-  missing_pkgs+=("libfuse3-dev")
-fi
-if (( \${#missing_pkgs[@]} > 0 )); then
-  unique_pkgs=()
-  seen_pkgs=""
-  for required_pkg in "\${missing_pkgs[@]}"; do
-    if [[ " \$seen_pkgs " == *" \$required_pkg "* ]]; then
-      continue
-    fi
-    seen_pkgs+=" \$required_pkg"
-    unique_pkgs+=("\$required_pkg")
-  done
-  printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
-  printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl kill apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
-  printf '${CONTROL_PASSWORD}\n' | sudo -S apt-get update
-  printf '${CONTROL_PASSWORD}\n' | sudo -S DEBIAN_FRONTEND=noninteractive apt-get install -y "\${unique_pkgs[@]}"
+  contract_missing+=("pkg-config fuse3 metadata from base package 'libfuse3-dev'")
 fi
 if [[ ! -s /usr/local/bin/motlie-vfs-guest || ! -x /usr/local/bin/motlie-vfs-guest ]]; then
-  echo "[v1.45 launch] guest binary missing; rebuilding from staged source"
-  build_user_name="\$(id -un)"
-  build_user_group="\$(id -gn)"
-  export PATH="\$HOME/.cargo/bin:\$PATH"
-  printf '${CONTROL_PASSWORD}\n' | sudo -S rm -rf /var/lib/motlie/src /var/lib/motlie/target
-  printf '${CONTROL_PASSWORD}\n' | sudo -S mkdir -p /var/lib/motlie/src
-  printf '${CONTROL_PASSWORD}\n' | sudo -S tar -xzf /tmp/motlie-src.tar.gz -C /var/lib/motlie/src
-  printf '${CONTROL_PASSWORD}\n' | sudo -S chown -R "\$build_user_name:\$build_user_group" /var/lib/motlie
-  echo "[v1.45 launch] ensuring rustup stable toolchain"
-  if command -v rustup >/dev/null 2>&1; then
-    rustup toolchain install stable --profile minimal
-    rustup default stable
-  else
-    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
-  fi
-  export PATH="\$HOME/.cargo/bin:\$PATH"
-  echo "[v1.45 launch] compiling motlie-vfs-guest-v1_1"
-  cargo build --manifest-path /var/lib/motlie/src/libs/vfs/Cargo.toml --release --features vsock,client --bin motlie-vfs-guest-v1_1 --target-dir /var/lib/motlie/src/target
-  printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /var/lib/motlie/src/target/release/motlie-vfs-guest-v1_1 /usr/local/bin/motlie-vfs-guest
+  contract_missing+=("/usr/local/bin/motlie-vfs-guest executable from the base image")
 fi
-NPM_GLOBAL_PREFIX="\$(npm prefix -g 2>/dev/null || true)"
-if [[ -n "\$NPM_GLOBAL_PREFIX" ]]; then
-  if [[ -s "\$NPM_GLOBAL_PREFIX/bin/codex" && -x "\$NPM_GLOBAL_PREFIX/bin/codex" && ( ! -s /usr/local/bin/codex || ! -x /usr/local/bin/codex ) ]]; then
-    printf '${CONTROL_PASSWORD}\n' | sudo -S ln -sf "\$NPM_GLOBAL_PREFIX/bin/codex" /usr/local/bin/codex
-  fi
-  if [[ -s "\$NPM_GLOBAL_PREFIX/bin/claude" && -x "\$NPM_GLOBAL_PREFIX/bin/claude" && ( ! -s /usr/local/bin/claude || ! -x /usr/local/bin/claude ) ]]; then
-    printf '${CONTROL_PASSWORD}\n' | sudo -S ln -sf "\$NPM_GLOBAL_PREFIX/bin/claude" /usr/local/bin/claude
-  fi
+if [[ ! -s /usr/local/bin/motlie-agent-state-setup || ! -x /usr/local/bin/motlie-agent-state-setup ]]; then
+  contract_missing+=("/usr/local/bin/motlie-agent-state-setup executable from the base image")
+elif ! grep -q 'MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3' /usr/local/bin/motlie-agent-state-setup; then
+  contract_missing+=("/usr/local/bin/motlie-agent-state-setup is stale; rebuild the base image with the converged VFS-backed agent-state setup")
 fi
+if [[ ! -s /usr/local/bin/motlie-vmm-vsock-ssh-loop || ! -x /usr/local/bin/motlie-vmm-vsock-ssh-loop ]]; then
+  contract_missing+=("/usr/local/bin/motlie-vmm-vsock-ssh-loop executable from the base image")
+fi
+if [[ ! -s /etc/systemd/system/motlie-vfs-guest.service ]]; then
+  contract_missing+=("/etc/systemd/system/motlie-vfs-guest.service from the base image")
+fi
+if [[ ! -s /etc/systemd/system/motlie-agent-state.service ]]; then
+  contract_missing+=("/etc/systemd/system/motlie-agent-state.service from the base image")
+fi
+if [[ ! -s /etc/systemd/system/motlie-vmm-vsock-ssh.service ]]; then
+  contract_missing+=("/etc/systemd/system/motlie-vmm-vsock-ssh.service from the base image")
+fi
+if [[ ! -s /etc/profile.d/tmux-auto.sh ]]; then
+  contract_missing+=("/etc/profile.d/tmux-auto.sh from the base image")
+fi
+if [[ ! -s /etc/profile.d/agent-state.sh ]]; then
+  contract_missing+=("/etc/profile.d/agent-state.sh from the base image")
+fi
+if ! grep -q '^TrustedUserCAKeys /etc/ssh/ca/user_ca.pub$' /etc/ssh/sshd_config; then
+  contract_missing+=("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub baked into /etc/ssh/sshd_config")
+fi
+if ! grep -q '^AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u$' /etc/ssh/sshd_config; then
+  contract_missing+=("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u baked into /etc/ssh/sshd_config")
+fi
+if [[ ! -s /usr/local/bin/codex || ! -x /usr/local/bin/codex ]]; then
+  contract_missing+=("/usr/local/bin/codex executable from the base image")
+fi
+if [[ ! -s /usr/local/bin/claude || ! -x /usr/local/bin/claude ]]; then
+  contract_missing+=("/usr/local/bin/claude executable from the base image")
+fi
+if (( \${#contract_missing[@]} > 0 )); then
+  echo "v1.45 Vz convergence contract violation: base image is missing required immutable content" >&2
+  printf '  - %s\n' "\${contract_missing[@]}" >&2
+  echo "Rebuild the v1.45 base image/seed path; first-contact SSH must not apt-get, npm, rustup, or cargo build." >&2
+  exit 1
+fi
+motlie_guest_phase base-image-contract-ok
 echo "[v1.45 launch] provisioning block complete"
+# Dynamic first-contact writes are limited to CH-equivalent per-guest overlay
+# inputs. Do not install service units or patch sshd_config here; those are
+# image-ready responsibilities in the convergence contract.
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/mounts.${GUEST_NAME}.yaml /etc/motlie-vfs/mounts.yaml
-printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie-vfs-guest.service
-printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-state-setup
-printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-agent-state.service /etc/systemd/system/motlie-agent-state.service
-printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0755 /tmp/motlie-vmm-vsock-ssh-loop /usr/local/bin/motlie-vmm-vsock-ssh-loop
-printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vmm-vsock-ssh.service /etc/systemd/system/motlie-vmm-vsock-ssh.service
 cat <<'EOFCA' >/tmp/motlie-vmm-user-ca.pub
 ${SSH_CA_PUBKEY}
 EOFCA
@@ -1036,20 +1257,11 @@ ${SSH_PRINCIPAL}
 EOFPRINCIPAL
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vmm-user-ca.pub /etc/ssh/ca/user_ca.pub
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vmm-principal /etc/ssh/auth_principals/${LOGIN_USER}
-if ! printf '${CONTROL_PASSWORD}\n' | sudo -S grep -q '^TrustedUserCAKeys /etc/ssh/ca/user_ca.pub$' /etc/ssh/sshd_config; then
-  cat <<'EOFSSHCFG' >/tmp/motlie-vmm-sshd-ca.conf
-TrustedUserCAKeys /etc/ssh/ca/user_ca.pub
-AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
-EOFSSHCFG
-  printf '${CONTROL_PASSWORD}\n' | sudo -S sh -c 'cat /tmp/motlie-vmm-sshd-ca.conf >> /etc/ssh/sshd_config'
-fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0644 /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl daemon-reload
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh.service || printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh || true
+motlie_guest_phase guest-runtime-files-installed
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-agent-state.service || true
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vmm-vsock-ssh.service || true
+motlie_guest_phase vfs-service-restarted
 mounts_ready=0
 for _ in \$(seq 1 60); do
   if test -d /agent-state \
@@ -1066,11 +1278,30 @@ if [[ "\$mounts_ready" -ne 1 ]]; then
   systemctl status motlie-vfs-guest.service --no-pager || true
   exit 1
 fi
+motlie_guest_phase mounts-readable
 printf '${CONTROL_PASSWORD}\n' | sudo -S /usr/local/bin/motlie-agent-state-setup || true
+motlie_guest_phase agent-state-setup-complete
 EOF
+mark_phase "provision-complete"
 
 CONTROL_USER="$LOGIN_USER"
 CONTROL_PASSWORD="testpass"
+
+# This is the first-contact SSH gate used by auto-provisioning. It is
+# intentionally earlier than full validation: the guest can now accept the
+# requested principal and required VFS/agent-state mounts have become readable.
+echo "--- v1.45 Vz interactive-ready ---"
+mark_interactive_ready
+echo "interactive_ready_seconds=${INTERACTIVE_SECONDS}"
+
+if [[ "$INLINE_VALIDATION" != "1" ]]; then
+  VALIDATION_JSON_PATH="$ARTIFACTS_DIR/${GUEST_NAME}-validation.json"
+  write_skipped_validation_json "$VALIDATION_JSON_PATH"
+  write_result_json "$VALIDATION_JSON_PATH" "" "interactive-ready"
+  echo "--- result written ---"
+  cat "$RESULT_JSON"
+  exit 0
+fi
 
 POST_PROVISION_REMOTE_JSON="/tmp/motlie-vfs-post-provision.json"
 POST_PROVISION_OK=0
@@ -1107,10 +1338,6 @@ if [[ "$POST_PROVISION_OK" -ne 1 ]]; then
   echo "guest post-provision verification failed" >&2
   printf '%s\n' "$POST_PROVISION_CHECK" >&2
   exit 1
-fi
-
-if [[ -n "$CONTROL_READY_FILE" ]]; then
-  : >"$CONTROL_READY_FILE"
 fi
 
 VALIDATION_OK=0
@@ -1291,8 +1518,8 @@ exit 1
 '
 EOF
 
-READY_EPOCH="$EPOCHREALTIME"
-BOOT_SECONDS="$(awk -v start="$START_EPOCH" -v ready="$READY_EPOCH" 'BEGIN { printf "%.3f", ready - start }')"
+mark_validation_complete
+echo "validation_complete_seconds=${VALIDATION_SECONDS}"
 
 BENCHMARK_REMOTE_JSON="/tmp/motlie-vmm-benchmark.json"
 BENCHMARK_LOCAL_JSON=""
@@ -1398,41 +1625,7 @@ EOF
   cp "$BENCHMARK_LOCAL_JSON" "$ARTIFACTS_DIR/${GUEST_NAME}-benchmark.json"
 fi
 
-python3 - "$RESULT_JSON" "$RUN_VM_NAME" "$BOOT_SECONDS" "$SOCKET_PATH" "$RUNNER_PID" "$IP_ADDR" "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$KEEP_RUNNING" "${BENCHMARK_LOCAL_JSON:-}" <<'PY'
-import json
-import sys
-
-path, vm_name, boot_seconds, socket_path, runner_pid, ip_addr, validation_json_path, keep_running, benchmark_json_path = sys.argv[1:]
-with open(validation_json_path, "r", encoding="utf-8") as fh:
-    validation_payload = json.load(fh)
-keep_running_bool = keep_running == "1"
-benchmark_payload = None
-if benchmark_json_path:
-    with open(benchmark_json_path, "r", encoding="utf-8") as fh:
-        benchmark_payload = json.load(fh)
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(
-        {
-            "backend": "vz-vsock-runner",
-            "vm_name": vm_name,
-            "boot_to_validation_seconds": float(boot_seconds),
-            "unix_socket_path": socket_path,
-            "runner_pid": int(runner_pid) if keep_running_bool else None,
-            "kept_running": keep_running_bool,
-            "guest_ip": ip_addr,
-            "validation": {
-                "guest_validation_json": validation_json_path,
-                "mounts_ready": True,
-                "guest": validation_payload,
-            },
-            "benchmark": benchmark_payload,
-        },
-        fh,
-        indent=2,
-        sort_keys=True,
-    )
-    fh.write("\n")
-PY
+write_result_json "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "${BENCHMARK_LOCAL_JSON:-}" "validation-complete"
 
 if [[ -n "$BENCHMARK_LOCAL_JSON" ]]; then
   rm -f "$BENCHMARK_LOCAL_JSON"

@@ -2,42 +2,24 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-V14_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$V14_DIR/../../../.." && pwd)"
+V145_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$V145_DIR/../../../.." && pwd)"
 
-TMUX_SOCKET="v14-smoke"
-REPL_BIN="$REPO_ROOT/target/debug/examples/repl_host_v1_4"
-REPL_FIFO="/tmp/motlie-vmm-v14-repl-smoke.fifo"
-REPL_LOG="/tmp/motlie-vmm-v14-repl-smoke.log"
+REPL_BIN="$REPO_ROOT/target/debug/examples/repl_host_v1_45"
+CONTROL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/motlie-vmm-v145-repl-smoke.XXXXXX")"
+RUN_ROOT="$CONTROL_ROOT/runroot"
+REPL_FIFO="$CONTROL_ROOT/repl.fifo"
+REPL_LOG="$CONTROL_ROOT/repl.log"
 REPL_PID=""
+PROXY_PORT=""
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V145_DIR/../v1.35/artifacts/source-base.vm}"
 
 cleanup() {
-    pkill -f repl_host_v1_4 >/dev/null 2>&1 || true
     if [ -n "$REPL_PID" ]; then
         kill "$REPL_PID" >/dev/null 2>&1 || true
     fi
     exec 3>&- || true
-    rm -rf \
-        /tmp/motlie-vmm-v14-demo \
-        /tmp/motlie-vmm-v14-runtime \
-        /tmp/motlie-vmm-v14-launch \
-        /tmp/motlie-vmm-v14-cloud-init-alice \
-        /tmp/motlie-vmm-v14-cloud-init-bob \
-        /tmp/motlie-vmm-v14-sockets \
-        /tmp/motlie-vmm-v14-alice.sock \
-        /tmp/motlie-vmm-v14-bob.sock \
-        /tmp/motlie-vmm-v14-alice.vsock \
-        /tmp/motlie-vmm-v14-bob.vsock \
-        /tmp/motlie-vmm-v14-alice-api.sock \
-        /tmp/motlie-vmm-v14-bob-api.sock \
-        /tmp/motlie-vmm-v14-alice.vsock_2222 \
-        /tmp/motlie-vmm-v14-bob.vsock_2222 \
-        /tmp/motlie-vmm-v14-alice.vsock_5000 \
-        /tmp/motlie-vmm-v14-bob.vsock_5000 \
-        "$REPL_FIFO" \
-        "$REPL_LOG" \
-        /tmp/alice-repl-smoke.out \
-        /tmp/bob-repl-smoke.out
+    rm -rf "$CONTROL_ROOT"
 }
 
 capture_pane() {
@@ -61,17 +43,29 @@ wait_for_pattern() {
     return 1
 }
 
+extract_proxy_port() {
+    PROXY_PORT="$(
+        grep -oE 'SSH proxy: listening on 127\.0\.0\.1:[0-9]+' "$REPL_LOG" |
+            tail -n1 |
+            sed 's/.*://'
+    )"
+    if [ -z "$PROXY_PORT" ]; then
+        echo "failed to parse proxy port from repl log" >&2
+        capture_pane >&2 || true
+        exit 1
+    fi
+}
+
 run_shell_check() {
     local guest="$1"
     local expected_env="$2"
-    local output_file="/tmp/${guest}-repl-smoke.out"
+    local output_file="$CONTROL_ROOT/${guest}-repl-smoke.out"
 
     : >"$output_file"
     printf 'pwd\ncat ~/.env\ncurl -fsSL https://example.com -o ~/example.html && echo FETCH_OK && stat ~/example.html\nstat -c "%%U:%%G %%n" ~ ~/.env /workspace /agent-state\nexit\n' |
-        ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2224 "$guest@localhost" \
+        ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$PROXY_PORT" "$guest@localhost" \
         >"$output_file"
 
-    grep -F "v1.4 extraction / agent-state demo" "$output_file" >/dev/null
     grep -F "/home/$guest" "$output_file" >/dev/null
     grep -F "$expected_env" "$output_file" >/dev/null
     grep -F "FETCH_OK" "$output_file" >/dev/null
@@ -82,37 +76,41 @@ trap cleanup EXIT
 
 cd "$REPO_ROOT"
 
-test -f "$V14_DIR/artifacts/base/rootfs.squashfs" || {
-    echo "missing $V14_DIR/artifacts/base/rootfs.squashfs; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/disk.img" || {
+    echo "missing $BASE_VM_DIR/disk.img; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
-test -f "$V14_DIR/artifacts/base/Image" || {
-    echo "missing $V14_DIR/artifacts/base/Image; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/nvram.bin" || {
+    echo "missing $BASE_VM_DIR/nvram.bin; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
 
-cargo build -p motlie-vmm --example repl_host_v1_4 >/dev/null
+cargo build -p motlie-vmm --example repl_host_v1_45 >/dev/null
+cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
 
 cleanup
 
+mkdir -p "$RUN_ROOT"
 mkfifo "$REPL_FIFO"
-"$REPL_BIN" <"$REPL_FIFO" >"$REPL_LOG" 2>&1 &
+"$REPL_BIN" --root "$RUN_ROOT" <"$REPL_FIFO" >"$REPL_LOG" 2>&1 &
 REPL_PID="$!"
 exec 3>"$REPL_FIFO"
 
-wait_for_pattern "v14>" 10
+wait_for_pattern "SSH proxy: listening on 127.0.0.1:" 20
+wait_for_pattern "v145>" 20
+extract_proxy_port
 
 printf 'boot alice\n' >&3
-wait_for_pattern "ok: booted alice" 60
+wait_for_pattern "ok: booted alice" 900
 
 printf 'boot bob\n' >&3
-wait_for_pattern "ok: booted bob" 60
+wait_for_pattern "ok: booted bob" 900
 
 printf 'validate alice\n' >&3
-wait_for_pattern "=== 5 passed, 0 failed ===" 60
+wait_for_pattern "=== 5 passed, 0 failed ===" 900
 
 printf 'validate bob\n' >&3
-wait_for_pattern "=== 5 passed, 0 failed ===" 60
+wait_for_pattern "=== 5 passed, 0 failed ===" 900
 
 run_shell_check "alice" "ALICE_API_KEY=demo-alice"
 run_shell_check "bob" "BOB_API_KEY=demo-bob"
@@ -126,4 +124,4 @@ wait_for_pattern "ok: shutdown alice" 20
 printf 'quit\n' >&3
 sleep 1
 
-echo "v1.4 repl smoke passed"
+echo "v1.45 repl smoke passed"

@@ -10,22 +10,23 @@ use motlie_vmm::provisioning::GuestProvisioner;
 use motlie_vmm::runtime::{
     ControlPlaneBacking, FilesystemBacking, HypervisorBacking, NetworkBacking, Runtime,
 };
-use motlie_vmm::ssh::{new_guest_registry, ExecOutput, PtyRequest, SshProxyConfig};
+use motlie_vmm::ssh::{ExecOutput, PtyRequest, SshProxyConfig, new_guest_registry};
 
 use crate::demo_support::{
-    guest_runtime_paths, install_signal_watchers, prompt, shutdown_active_guests,
-    spawn_host_events, spawn_proxy_task, stdin_line_or_detach, HostEvent, ProxyRestartState,
+    HostEvent, ProxyRestartState, cleanup_development_guest_disks, guest_runtime_paths,
+    install_signal_watchers, prompt, shutdown_active_guests, spawn_host_events, spawn_proxy_task,
+    stdin_line_or_detach,
 };
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
-    build_guest_provisioner, ensure_file_exists, print_instance_details, resolved_native_source_dir,
-    wait_for_egress_ready, DynError, HarnessInstance, APT_UPDATE_COMMAND,
-    PACKAGE_MANAGER_QUIESCENT_COMMAND,
+    APT_UPDATE_COMMAND, DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND,
+    build_guest_provisioner, ensure_file_exists, print_instance_details,
+    resolved_native_source_dir, wait_for_egress_ready,
 };
 
 pub async fn run_shell(
     base_dir: &Path,
-    artifacts_dir: &Path,
+    _artifacts_dir: &Path,
     instance: &HarnessInstance,
     allocator_config: GuestNetAllocatorConfig,
     terminal_backend: TerminalBackendKind,
@@ -237,6 +238,7 @@ pub async fn run_shell(
         let _ = terminal.persist_artifacts();
     }
     shutdown_active_guests(&provisioner, "harness shell").await;
+    cleanup_development_guest_disks(&instance.namespace, "harness shell");
 
     Ok(())
 }

@@ -2,18 +2,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-V14_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$V14_DIR/../../../.." && pwd)"
+V145_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$V145_DIR/../../../.." && pwd)"
 
-REPL_BIN="$REPO_ROOT/target/debug/examples/repl_host_v1_4"
-CONTROL_ROOT="${1:-$(mktemp -d "${TMPDIR:-/tmp}/motlie-v14-headless.XXXXXX")}"
+REPL_BIN="$REPO_ROOT/target/debug/examples/repl_host_v1_45"
+CONTROL_ROOT="${1:-$(mktemp -d "${TMPDIR:-/tmp}/motlie-v145-headless.XXXXXX")}"
 RUN_ROOT="$CONTROL_ROOT/live"
 REPL_FIFO="$CONTROL_ROOT/repl.fifo"
 REPL_LOG="$CONTROL_ROOT/repl.log"
 REPL_PID=""
 PROXY_PORT=""
-SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-180}"
+SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-900}"
 SSH_CONNECT_TIMEOUT_SECS="${SSH_CONNECT_TIMEOUT_SECS:-15}"
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V145_DIR/../v1.35/artifacts/source-base.vm}"
 users=(alice bob jane joe zoe)
 
 declare -A BOOT_IDS
@@ -100,16 +101,17 @@ trap cleanup EXIT
 
 cd "$REPO_ROOT"
 
-test -f "$V14_DIR/artifacts/base/rootfs.squashfs" || {
-    echo "missing $V14_DIR/artifacts/base/rootfs.squashfs; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/disk.img" || {
+    echo "missing $BASE_VM_DIR/disk.img; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
-test -f "$V14_DIR/artifacts/base/Image" || {
-    echo "missing $V14_DIR/artifacts/base/Image; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/nvram.bin" || {
+    echo "missing $BASE_VM_DIR/nvram.bin; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
 
-cargo build -p motlie-vmm --example repl_host_v1_4 >/dev/null
+cargo build -p motlie-vmm --example repl_host_v1_45 >/dev/null
+cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
 
 test -x "$REPL_BIN" || {
     echo "missing repl binary at $REPL_BIN" >&2
@@ -124,7 +126,7 @@ REPL_PID="$!"
 exec 3>"$REPL_FIFO"
 
 wait_for_pattern "SSH proxy: listening on 127.0.0.1:" 20
-wait_for_pattern "v14>" 20
+wait_for_pattern "v145>" 20
 extract_proxy_port
 
 send_repl "auto-provision on"
@@ -134,7 +136,7 @@ exec 3>&-
 wait_for_pattern "notice: stdin closed; continuing headless." 20
 
 if ! kill -0 "$REPL_PID" 2>/dev/null; then
-    echo "FAILED: repl_host_v1_4 exited after stdin closed" >&2
+    echo "FAILED: repl_host_v1_45 exited after stdin closed" >&2
     capture_log >&2 || true
     exit 1
 fi

@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+# MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3
+# This script is immutable base-image content for v1.45 Vz. It must not chown
+# VFS-backed `/agent-state/*` or `/home/*` paths: ownership is presented by the
+# VFS layer for the active guest uid/gid, and chown is not a valid readiness
+# operation for first-contact SSH.
+
 setup_user() {
     user_name="$1"
     home_dir="/home/$user_name"
@@ -17,11 +23,6 @@ setup_user() {
 
     install -d -m 0755 "$config_dir"
     install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
-    chown "$user_name:$user_name" \
-        /agent-state/codex \
-        /agent-state/codex/sqlite \
-        /agent-state/claude \
-        /agent-state/claude-code || true
 
     rm -rf "$codex_dst" "$claude_dst" "$claude_code_dst"
     install -d -m 0700 "$codex_dst" "$claude_dst" "$claude_code_dst"
@@ -31,7 +32,12 @@ setup_user() {
     mount --bind /agent-state/claude-code "$claude_code_dst"
 }
 
-for user_name in alice bob; do
+for home_dir in /home/*; do
+    [ -d "$home_dir" ] || continue
+    user_name="$(basename "$home_dir")"
+    case "$user_name" in
+        admin|ubuntu) continue ;;
+    esac
     if id -u "$user_name" >/dev/null 2>&1; then
         setup_user "$user_name"
     fi

@@ -15,18 +15,19 @@ use motlie_vmm::runtime::{
     RuntimeError,
 };
 use motlie_vmm::ssh::{
-    self, exec_via_proxy, new_guest_registry, ExecOutput, PtyRead, PtyRequest, SshProxyConfig,
-    SshProxyError,
+    self, ExecOutput, PtyRead, PtyRequest, SshProxyConfig, SshProxyError, exec_via_proxy,
+    new_guest_registry,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::demo_support::cleanup_development_guest_disks;
 use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
-    build_guest_provisioner, ensure_file_exists, persist_json, print_instance_details,
-    resolved_native_source_dir, wait_for_egress_ready, DynError, HarnessInstance,
-    PACKAGE_MANAGER_QUIESCENT_COMMAND,
+    DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, build_guest_provisioner,
+    ensure_file_exists, persist_json, print_instance_details, resolved_native_source_dir,
+    wait_for_egress_ready,
 };
 
 #[derive(Debug, Deserialize)]
@@ -295,12 +296,13 @@ struct ScenarioDriver {
     terminals: HashMap<String, HarnessTerminalSession>,
     session_guests: HashMap<String, String>,
     artifact_root: PathBuf,
+    namespace: motlie_vmm::spec::RuntimeNamespace,
 }
 
 impl ScenarioDriver {
     fn new(
         base_dir: &Path,
-        artifacts_dir: &Path,
+        _artifacts_dir: &Path,
         instance: &HarnessInstance,
         allocator_config: GuestNetAllocatorConfig,
         terminal_backend: TerminalBackendKind,
@@ -358,6 +360,7 @@ impl ScenarioDriver {
             terminals: HashMap::new(),
             session_guests: HashMap::new(),
             artifact_root,
+            namespace: instance.namespace.clone(),
         })
     }
 
@@ -896,6 +899,7 @@ impl ScenarioDriver {
         {
             let _ = self.provisioner.shutdown_guest(&guest).await;
         }
+        cleanup_development_guest_disks(&self.namespace, "scenario");
     }
 }
 

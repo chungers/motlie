@@ -1,6 +1,6 @@
 # setup-multiguest.harness
 # Plain one-command-per-line harness-shell input, similar to the older .vfs
-# setup files. This brings up the standard v1.4 Motlie-backed two-guest flow
+# setup files. This brings up the standard v1.45 Vz-backed two-guest flow
 # and leaves the harness running for further validation.
 
 where

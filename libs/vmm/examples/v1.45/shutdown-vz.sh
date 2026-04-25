@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
+ARTIFACTS_DIR="${MOTLIE_VZ_ARTIFACTS_DIR:-$SCRIPT_DIR/artifacts}"
 
 GUEST_NAME="alice"
 RUN_VM_NAME=""
@@ -14,16 +14,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-case "$GUEST_NAME" in
-  alice) RUN_VM_NAME="${RUN_VM_NAME:-motlie-v1-45-alice-iter}" ;;
-  bob) RUN_VM_NAME="${RUN_VM_NAME:-motlie-v1-45-bob-iter}" ;;
-  *) echo "guest must be alice or bob" >&2; exit 1 ;;
-esac
+RUN_VM_NAME="${RUN_VM_NAME:-motlie-v1-45-${GUEST_NAME}-iter}"
 
-RUNNER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid"
-EGRESS_HELPER_PID_FILE="$ARTIFACTS_DIR/${GUEST_NAME}-egress-helper.pid"
+RUNNER_PID_FILE="${MOTLIE_VZ_RUNNER_PID_FILE:-$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid}"
+EGRESS_HELPER_PID_FILE="${MOTLIE_VZ_EGRESS_HELPER_PID_FILE:-$ARTIFACTS_DIR/${GUEST_NAME}-egress-helper.pid}"
 RUN_VM_DIR="$ARTIFACTS_DIR/${RUN_VM_NAME}.vm"
-EGRESS_SOCKET_PATH="/tmp/motlie-vmm-${GUEST_NAME}.egress.sock"
+EGRESS_SOCKET_PATH="${MOTLIE_VZ_EGRESS_SOCKET_PATH:-/tmp/motlie-vmm-${GUEST_NAME}.egress.sock}"
 
 terminate_pid_file() {
   local pid_file="$1"

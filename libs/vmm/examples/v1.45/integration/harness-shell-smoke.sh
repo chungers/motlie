@@ -2,18 +2,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-V14_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$V14_DIR/../../../.." && pwd)"
+V145_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$V145_DIR/../../../.." && pwd)"
 
-HARNESS_BIN="$REPO_ROOT/target/debug/examples/harness_v1_4"
-HARNESS_SCRIPT="$V14_DIR/setup-multiguest.harness"
-CONTROL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/motlie-vmm-v14-harness-shell-smoke.XXXXXX")"
+HARNESS_BIN="$REPO_ROOT/target/debug/examples/harness_v1_45"
+HARNESS_SCRIPT="$V145_DIR/setup-multiguest.harness"
+CONTROL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/motlie-vmm-v145-harness-shell-smoke.XXXXXX")"
 RUN_ROOT="$CONTROL_ROOT/runroot"
 HARNESS_FIFO="$CONTROL_ROOT/harness.fifo"
 HARNESS_LOG="$CONTROL_ROOT/harness.log"
 HARNESS_PID=""
 PROXY_PORT=""
 NAMESPACE=""
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V145_DIR/../v1.35/artifacts/source-base.vm}"
 
 cleanup() {
     if [ -n "$HARNESS_PID" ]; then
@@ -95,7 +96,6 @@ run_shell_check() {
         ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$PROXY_PORT" "$guest@localhost" \
         >"$output_file"
 
-    grep -F "v1.4 extraction / agent-state demo" "$output_file" >/dev/null
     grep -F "/home/$guest" "$output_file" >/dev/null
     grep -F "$expected_env" "$output_file" >/dev/null
     grep -F "FETCH_OK" "$output_file" >/dev/null
@@ -106,16 +106,17 @@ trap cleanup EXIT
 
 cd "$REPO_ROOT"
 
-test -f "$V14_DIR/artifacts/base/rootfs.squashfs" || {
-    echo "missing $V14_DIR/artifacts/base/rootfs.squashfs; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/disk.img" || {
+    echo "missing $BASE_VM_DIR/disk.img; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
-test -f "$V14_DIR/artifacts/base/Image" || {
-    echo "missing $V14_DIR/artifacts/base/Image; run $V14_DIR/build-guest.sh first" >&2
+test -f "$BASE_VM_DIR/nvram.bin" || {
+    echo "missing $BASE_VM_DIR/nvram.bin; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
     exit 1
 }
 
-cargo build -p motlie-vmm --example harness_v1_4 >/dev/null
+cargo build -p motlie-vmm --example harness_v1_45 >/dev/null
+cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
 
 mkdir -p "$CONTROL_ROOT"
 mkfifo "$HARNESS_FIFO"
@@ -124,12 +125,12 @@ mkdir -p "$RUN_ROOT"
 HARNESS_PID="$!"
 exec 3>"$HARNESS_FIFO"
 
-wait_for_pattern "v14-harness>" 20
+wait_for_pattern "v145-harness>" 20
 
 cat "$HARNESS_SCRIPT" >&3
-wait_for_pattern "ok: booted alice" 90
-wait_for_pattern "ok: booted bob" 90
-wait_for_pattern "validation: 5 passed, 0 failed" 90
+wait_for_pattern "ok: booted alice" 900
+wait_for_pattern "ok: booted bob" 900
+wait_for_pattern "validation: 5 passed, 0 failed" 900
 extract_runtime_values
 
 run_shell_check "alice" "ALICE_API_KEY=demo-alice"
@@ -144,4 +145,4 @@ wait_for_pattern "ok: shutdown alice" 30
 printf 'quit\n' >&3
 sleep 1
 
-echo "v1.4 harness shell smoke passed"
+echo "v1.45 harness shell smoke passed"

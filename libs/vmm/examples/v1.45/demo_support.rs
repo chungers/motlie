@@ -1,5 +1,6 @@
+use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -92,7 +93,7 @@ pub fn install_signal_watchers(tx: mpsc::UnboundedSender<HostEvent>) -> io::Resu
 
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         let mut sigterm = signal(SignalKind::terminate())?;
         let sigterm_tx = tx.clone();
@@ -168,6 +169,65 @@ pub async fn shutdown_active_guests(provisioner: &GuestProvisioner, label: &str)
     }
 }
 
+pub fn cleanup_development_guest_disks(namespace: &RuntimeNamespace, label: &str) {
+    if std::env::var_os("MOTLIE_VZ_KEEP_GUEST_DISKS").is_some() {
+        return;
+    }
+
+    let runtime_root = namespace
+        .temp_root
+        .join(format!("{}-runtime", namespace.prefix));
+    match cleanup_development_guest_disks_under(&runtime_root) {
+        Ok(0) => {}
+        Ok(count) => eprintln!("notice: removed {count} {label} VZ development disk artifact(s)"),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => eprintln!(
+            "warning: failed to clean {label} VZ development disks under {}: {err}",
+            runtime_root.display()
+        ),
+    }
+}
+
+fn cleanup_development_guest_disks_under(runtime_root: &Path) -> io::Result<usize> {
+    let mut removed = 0usize;
+    let mut pending = vec![runtime_root.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                if path.extension().and_then(|value| value.to_str()) == Some("vm") {
+                    fs::remove_dir_all(&path)?;
+                    removed += 1;
+                } else {
+                    pending.push(path);
+                }
+                continue;
+            }
+
+            if !file_type.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if file_name == "seed.dmg" || file_name.ends_with(".tmp-copy") {
+                fs::remove_file(&path)?;
+                removed += 1;
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
 pub fn demo_guest_ids(guest_id: &str, slot: u32) -> Result<(u32, u32), String> {
     let builtin_uid = match guest_id {
         "alice" => Some(1000u32),
@@ -175,7 +235,7 @@ pub fn demo_guest_ids(guest_id: &str, slot: u32) -> Result<(u32, u32), String> {
         _ => None,
     };
     let uid = builtin_uid.unwrap_or(
-        2000u32
+        3000u32
             .checked_add(slot)
             .ok_or_else(|| format!("guest slot {slot} exceeds supported uid/gid range"))?,
     );

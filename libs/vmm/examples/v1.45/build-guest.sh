@@ -948,25 +948,41 @@ chown root:root /etc/sudoers.d/90-motlie-demo
 chmod 0440 /etc/sudoers.d/90-motlie-demo
 
 cat <<'TMUXEOF' > /etc/profile.d/tmux-auto.sh
-if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && [ -t 0 ] && [ -t 1 ] && command -v tmux >/dev/null 2>&1; then
-    if tmux has-session -t "$USER" 2>/dev/null; then
-        echo "Attaching to existing tmux session..."
-        sleep 1
-        exec tmux attach-session -t "$USER"
-    else
-        printf "Start tmux session? [Y/n] (auto-yes in 3s) "
-        if read -r -n 1 -t 3 answer; then
-            echo
-        else
-            answer=Y
-            echo
-        fi
-        case "$answer" in
-            n|N) ;;
-            *) exec tmux new-session -s "$USER" ;;
-        esac
-    fi
+# Auto-start tmux only for real interactive Bash SSH logins.
+[ -n "${BASH_VERSION:-}" ] || return 0
+case $- in
+    *i*) ;;
+    *) return 0 ;;
+esac
+[ -n "${SSH_CONNECTION:-}" ] || return 0
+[ -z "${TMUX:-}" ] || return 0
+[ -t 0 ] && [ -t 1 ] || return 0
+command -v tmux >/dev/null 2>&1 || return 0
+case "${TERM:-}" in
+    ""|dumb|unknown) return 0 ;;
+esac
+command -v infocmp >/dev/null 2>&1 || return 0
+infocmp "$TERM" >/dev/null 2>&1 || return 0
+
+if tmux has-session -t "$USER" 2>/dev/null; then
+    echo "Attaching to existing tmux session..."
+    sleep 1
+    tmux attach-session -t "$USER" || echo "tmux attach failed; continuing without tmux"
+    return 0
 fi
+
+printf "Start tmux session? [Y/n] (auto-yes in 3s) "
+if IFS= read -r -n 1 -t 3 answer; then
+    echo
+else
+    answer=Y
+    echo
+fi
+
+case "$answer" in
+    n|N) ;;
+    *) tmux new-session -s "$USER" || echo "tmux start failed; continuing without tmux" ;;
+esac
 TMUXEOF
 cat <<'DOTENVEOF' > /etc/profile.d/dotenv.sh
 if [ -f "$HOME/.env" ]; then

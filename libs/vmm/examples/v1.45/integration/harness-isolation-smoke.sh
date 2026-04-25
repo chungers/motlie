@@ -2,11 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-V14_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$V14_DIR/../../../.." && pwd)"
+V145_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$V145_DIR/../../../.." && pwd)"
 
-HARNESS_BIN="$REPO_ROOT/target/debug/examples/harness_v1_4"
-CONTROL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/motlie-vmm-v14-harness-isolation.XXXXXX")"
+HARNESS_BIN="$REPO_ROOT/target/debug/examples/harness_v1_45"
+CONTROL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/motlie-vmm-v145-harness-isolation.XXXXXX")"
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V145_DIR/../v1.35/artifacts/source-base.vm}"
 
 cleanup_instance() {
     local fifo="$1"
@@ -76,7 +77,16 @@ run_shell_check() {
 trap cleanup EXIT
 
 cd "$REPO_ROOT"
-cargo build -p motlie-vmm --example harness_v1_4 >/dev/null
+test -f "$BASE_VM_DIR/disk.img" || {
+    echo "missing $BASE_VM_DIR/disk.img; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
+    exit 1
+}
+test -f "$BASE_VM_DIR/nvram.bin" || {
+    echo "missing $BASE_VM_DIR/nvram.bin; run $V145_DIR/build-guest.sh first or set MOTLIE_VZ_BASE_VM_DIR" >&2
+    exit 1
+}
+cargo build -p motlie-vmm --example harness_v1_45 >/dev/null
+cargo build -p motlie-vnet --example vz_egress_helper_v1_25 >/dev/null
 
 RUN_ROOT1="$CONTROL_ROOT/runroot-1"
 RUN_ROOT2="$CONTROL_ROOT/runroot-2"
@@ -98,14 +108,14 @@ PID2="$!"
 exec 3>"$FIFO1"
 exec 4>"$FIFO2"
 
-wait_for_pattern "$LOG1" "v14-harness>" 20
-wait_for_pattern "$LOG2" "v14-harness>" 20
+wait_for_pattern "$LOG1" "v145-harness>" 20
+wait_for_pattern "$LOG2" "v145-harness>" 20
 
 printf 'where\nboot alice\nwhere alice\n' >&3
 printf 'where\nboot alice\nwhere alice\n' >&4
 
-wait_for_pattern "$LOG1" "ok: booted alice" 90
-wait_for_pattern "$LOG2" "ok: booted alice" 90
+wait_for_pattern "$LOG1" "ok: booted alice" 900
+wait_for_pattern "$LOG2" "ok: booted alice" 900
 
 PORT1="$(extract_proxy_port "$LOG1")"
 PORT2="$(extract_proxy_port "$LOG2")"
@@ -130,4 +140,4 @@ printf 'shutdown alice\nquit\n' >&4
 wait_for_pattern "$LOG1" "ok: shutdown alice" 30
 wait_for_pattern "$LOG2" "ok: shutdown alice" 30
 
-echo "v1.4 harness isolation smoke passed"
+echo "v1.45 harness isolation smoke passed"

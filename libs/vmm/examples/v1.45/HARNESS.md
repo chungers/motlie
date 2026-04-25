@@ -4,6 +4,10 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-25 | @codex-vz | Require prebuilt Vz runner and egress helper artifacts by default so first-contact startup cannot hide host cargo builds |
+| 2026-04-25 | @codex-vz | Update v1.45 Vz profiling contract after removing the default tar seed upload and adding base-image version checks for VFS-safe agent-state setup |
+| 2026-04-25 | @codex-vz | Record the first-contact profiling result: v1.45 Vz now avoids runtime builds, npm repair, and default per-guest seed DMG creation; remaining first-contact time is mostly Vz/Linux boot plus transitional identity/CA/VFS wiring |
+| 2026-04-25 | @codex-vz | Document that v1.45 Vz first-contact SSH follows the shared convergence contract: `ready` means interactive SSH plus required mounts, and full VFS/VNET/egress certification remains `validate` or a saved scenario |
 | 2026-04-08 | @codex | Add `wait_egress_ready` as a first-class scenario/readiness primitive so manual certification and saved validations stop relying on one opportunistic HTTPS probe; the harness now treats DNS + outbound HTTPS to the certification targets as a distinct gate |
 | 2026-04-08 | @codex | Address PR 140 review drift in the harness contract: make the repo-root working-directory assumption explicit, document that `ready.timeout_ms` is currently applied per readiness sub-phase instead of as one wall-clock budget, and keep the recorded-artifact guidance aligned with the live harness behavior |
 | 2026-04-08 | @codex | Add Rust-native static SVG export from the harness-rendered VTE snapshot, check in a repo-local `pty-agent-validation.svg`, and use that as the GitHub-friendly review surface while keeping asciicast as the replay artifact |
@@ -95,6 +99,32 @@ Use the harness in this order:
 For manual certification handoff, do not stop at `boot` + `ready`. Run
 `validate <guest>` or a saved scenario that includes `wait_egress_ready`
 first, then attach over external SSH.
+
+For v1.45 Vz, `ready` intentionally means the shared
+[`interactive-ready`](../../docs/CONVERGENCE.md) contract: SSH auth through the
+proxy and required mounts are usable. It does not include hidden package
+installation, guest Rust builds, egress certification, package-manager
+quiescence, or optional benchmarks.
+
+Current Vz first-contact profiling writes phase timing to
+`<runtime_dir>/vz-phases.log` and includes those phases in
+`<runtime_dir>/vz-launch-result.json`. The default path does not create a
+per-guest seed DMG and does not upload a tar seed. Until Vz seed/cloud-init
+delivery is converged with CH, it stages only the generated mounts YAML as an
+inline first-contact payload. Set `MOTLIE_VZ_USE_SEED_DISK=1` only for
+diagnostic comparison.
+
+For v1.45 Vz, stale base-image content must fail fast. The launcher checks the
+base image for packages, CLIs, systemd units, baked SSH CA config, profile
+scripts, and `MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3`. If a check fails, run
+`libs/vmm/examples/v1.45/build-guest.sh`; do not add runtime copy or repair
+fallbacks to first-contact SSH.
+
+Host-side Vz artifacts are also launch prerequisites. Build/sign
+`artifacts/build/vz-vsock-runner` and build
+`target/debug/examples/vz_egress_helper_v1_25` before running the harness.
+`MOTLIE_VZ_SKIP_RUNNER_BUILD=0` and `MOTLIE_VZ_SKIP_EGRESS_HELPER_BUILD=0` are
+explicit developer rebuild knobs, not the default startup path.
 
 Choose the mode by purpose:
 

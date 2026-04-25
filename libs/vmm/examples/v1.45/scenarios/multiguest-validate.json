@@ -23,14 +23,14 @@
     {
       "action": "exec",
       "guest": "alice",
-      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.0.2 \" && echo ROUTE_OK'",
+      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.2.2 \" && echo ROUTE_OK'",
       "timeout_ms": 10000,
       "expect": { "exit_code": 0, "stdout_contains": "ROUTE_OK" }
     },
     {
       "action": "exec",
       "guest": "bob",
-      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.1.2 \" && echo ROUTE_OK'",
+      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.3.2 \" && echo ROUTE_OK'",
       "timeout_ms": 10000,
       "expect": { "exit_code": 0, "stdout_contains": "ROUTE_OK" }
     },

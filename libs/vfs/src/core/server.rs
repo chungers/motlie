@@ -560,10 +560,12 @@ impl FsServer {
                 return overlay
                     .set_xattr(&mount.tag, &path, name, value.clone(), flags, position)
                     .map(|_| FsResult::Ok)
-                    .unwrap_or_else(|errno| FsResult::Error { errno });
+                    .unwrap_or_else(|errno| FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    });
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -571,13 +573,15 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
         set_xattr(&host_path, name, value, flags, position)
             .map(|_| FsResult::Ok)
-            .unwrap_or_else(|errno| FsResult::Error { errno })
+            .unwrap_or_else(|errno| FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            })
     }
 
     fn do_getxattr(&self, mount: &MountState, inode: u64, name: &str, size: u32) -> FsResult {
@@ -608,11 +612,13 @@ impl FsServer {
                             FsResult::Data { data }
                         }
                     }
-                    Err(errno) => FsResult::Error { errno },
+                    Err(errno) => FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    },
                 };
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -620,7 +626,7 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
@@ -640,7 +646,9 @@ impl FsServer {
                     }
                 }
             }
-            Err(errno) => FsResult::Error { errno },
+            Err(errno) => FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            },
         }
     }
 
@@ -674,11 +682,13 @@ impl FsServer {
                             }
                         }
                     }
-                    Err(errno) => FsResult::Error { errno },
+                    Err(errno) => FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    },
                 };
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -686,7 +696,7 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
@@ -706,7 +716,9 @@ impl FsServer {
                     }
                 }
             }
-            Err(errno) => FsResult::Error { errno },
+            Err(errno) => FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            },
         }
     }
 
@@ -727,10 +739,12 @@ impl FsServer {
                 return overlay
                     .remove_xattr(&mount.tag, &path, name)
                     .map(|_| FsResult::Ok)
-                    .unwrap_or_else(|errno| FsResult::Error { errno });
+                    .unwrap_or_else(|errno| FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    });
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -738,13 +752,15 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
         remove_xattr(&host_path, name)
             .map(|_| FsResult::Ok)
-            .unwrap_or_else(|errno| FsResult::Error { errno })
+            .unwrap_or_else(|errno| FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            })
     }
 
     fn do_getlk(
@@ -2290,6 +2306,11 @@ fn set_xattr(
 
 #[cfg(unix)]
 fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
+    #[cfg(target_os = "macos")]
+    if should_filter_macos_xattr(name) {
+        return Err(libc::ENODATA);
+    }
+
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
     let name = CString::new(name).map_err(|_| libc::EINVAL)?;
     #[cfg(target_os = "macos")]
@@ -2306,9 +2327,14 @@ fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
     #[cfg(not(target_os = "macos"))]
     let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
-        return Err(std::io::Error::last_os_error()
+        let errno = std::io::Error::last_os_error()
             .raw_os_error()
-            .unwrap_or(libc::EIO));
+            .unwrap_or(libc::EIO);
+        #[cfg(target_os = "macos")]
+        if name.as_bytes() == b"security.selinux" {
+            return Err(libc::ENODATA);
+        }
+        return Err(errno);
     }
     let mut buf = vec![0u8; size as usize];
     #[cfg(target_os = "macos")]
@@ -2332,9 +2358,14 @@ fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
         )
     };
     if rc < 0 {
-        Err(std::io::Error::last_os_error()
+        let errno = std::io::Error::last_os_error()
             .raw_os_error()
-            .unwrap_or(libc::EIO))
+            .unwrap_or(libc::EIO);
+        #[cfg(target_os = "macos")]
+        if name.as_bytes() == b"security.selinux" {
+            return Err(libc::ENODATA);
+        }
+        Err(errno)
     } else {
         buf.truncate(rc as usize);
         Ok(buf)
@@ -2369,6 +2400,10 @@ fn list_xattrs(path: &Path) -> Result<Vec<u8>, i32> {
             .unwrap_or(libc::EIO))
     } else {
         buf.truncate(rc as usize);
+        #[cfg(target_os = "macos")]
+        {
+            buf = filter_macos_xattr_list(buf);
+        }
         Ok(buf)
     }
 }
@@ -2376,6 +2411,55 @@ fn list_xattrs(path: &Path) -> Result<Vec<u8>, i32> {
 #[cfg(not(unix))]
 fn list_xattrs(_path: &Path) -> Result<Vec<u8>, i32> {
     Err(libc::ENOTSUP)
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_guest_xattr_errno(errno: i32) -> i32 {
+    match errno {
+        libc::ENOTSUP => 95, // Linux ENOTSUP/EOPNOTSUPP
+        libc::ENODATA => 61, // Linux ENODATA
+        #[allow(unreachable_patterns)]
+        libc::ENOATTR => 61, // Linux ENODATA
+        _ => errno,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_guest_xattr_errno(errno: i32) -> i32 {
+    errno
+}
+
+#[cfg(target_os = "macos")]
+fn should_filter_macos_xattr(name: &str) -> bool {
+    name.starts_with("com.apple.")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn should_filter_macos_xattr(_name: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn filter_macos_xattr_list(data: Vec<u8>) -> Vec<u8> {
+    let mut filtered = Vec::new();
+    for raw_name in data.split(|byte| *byte == 0) {
+        if raw_name.is_empty() {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(raw_name) {
+            if should_filter_macos_xattr(name) {
+                continue;
+            }
+        }
+        filtered.extend_from_slice(raw_name);
+        filtered.push(0);
+    }
+    filtered
+}
+
+#[cfg(not(target_os = "macos"))]
+fn filter_macos_xattr_list(data: Vec<u8>) -> Vec<u8> {
+    data
 }
 
 #[cfg(unix)]
@@ -3347,7 +3431,7 @@ mod tests {
         ));
         assert!(matches!(
             server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 0 }),
-            FsResult::Error { errno } if errno == libc::ENODATA
+            FsResult::Error { errno } if errno == normalize_guest_xattr_errno(libc::ENODATA)
         ));
     }
 
@@ -3406,7 +3490,7 @@ mod tests {
                     position: 0,
                 }
             ),
-            FsResult::Error { errno } if errno == libc::ENODATA
+            FsResult::Error { errno } if errno == normalize_guest_xattr_errno(libc::ENODATA)
         ));
         assert!(matches!(
             server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 4 }),
@@ -3495,8 +3579,28 @@ mod tests {
         ));
         assert!(matches!(
             server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 0 }),
-            FsResult::Error { errno } if errno == libc::ENODATA
+            FsResult::Error { errno } if errno == normalize_guest_xattr_errno(libc::ENODATA)
         ));
+    }
+
+    #[test]
+    fn filter_macos_xattr_list_drops_com_apple_entries() {
+        let raw = b"com.apple.provenance\0user.note\0".to_vec();
+        let filtered = filter_macos_xattr_list(raw);
+        assert_eq!(filtered, b"user.note\0".to_vec());
+    }
+
+    #[test]
+    fn filter_macos_xattr_list_keeps_non_apple_entries() {
+        let raw = b"user.note\0security.selinux\0".to_vec();
+        let filtered = filter_macos_xattr_list(raw.clone());
+        assert_eq!(filtered, raw);
+    }
+
+    #[test]
+    fn normalize_guest_xattr_errno_uses_linux_values() {
+        assert_eq!(normalize_guest_xattr_errno(libc::ENODATA), 61);
+        assert_eq!(normalize_guest_xattr_errno(libc::ENOTSUP), 95);
     }
 
     #[test]

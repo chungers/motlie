@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-25 | @codex-vz | Link Vz backend readiness to the shared guest convergence contract: `control-plane-ready` is an interactive-readiness gate, while full VFS/VNET/egress certification remains an explicit harness validation step |
 | 2026-04-17 | @vmm-vz-cdx | Record `libs/vfs/examples/v1.05` as the Tart-backed guest-image / guest-contract probe, document Tart as an interim signed launcher ahead of `vz-runner`, and make the `v1.05` -> `v1.15` sequencing explicit |
 | 2026-04-13 | @codex-vz | Address PR 163 review findings: declare the macOS 12 floor, add the helper entitlement/signing and build/discovery story, define the Rust↔Swift config/control contracts, harden readiness, describe vsock/cloud-init delivery, and tighten several factual details |
 | 2026-04-12 | @codex-vz | Initial design for a macOS `backend::vz` that satisfies the current `Runtime` / `VmHandle` contracts with Apple `Virtualization.framework`, recommends a Swift helper process for the first slice, and defines the portability gaps that need small API cleanup in `libs/vmm` |
@@ -21,6 +22,11 @@ the current top-level lifecycle:
 - `VmHandle::open_pty(...)`
 - `VmHandle::shutdown()`
 - `VmHandle::observability()`
+
+The cross-backend boot/provisioning contract is maintained in
+[`CONVERGENCE.md`](./CONVERGENCE.md). Any Vz-specific readiness behavior must
+name which contract phase it implements and must not hide full validation work
+behind first-contact SSH auto-provisioning.
 
 The design target is not feature parity with the Motlie-backed Cloud
 Hypervisor stack on day one. The first Vz slice should support the same

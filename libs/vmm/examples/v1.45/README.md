@@ -71,6 +71,16 @@ Detailed repeatable runbooks live in:
 
 - [`HARNESS.md`](./HARNESS.md)
 
+The CH/Vz boot and provisioning convergence contract lives in:
+
+- [`../../docs/CONVERGENCE.md`](../../docs/CONVERGENCE.md)
+
+For v1.45 Vz, first-contact SSH must not repair stale image content. If the
+launcher reports a missing package, CLI, service unit, SSH CA config, profile
+script, or `MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3`, rebuild the base image
+with [`build-guest.sh`](./build-guest.sh) instead of adding runtime fallback
+copies to [`launch-vz.sh`](./launch-vz.sh).
+
 The direction from here is:
 
 - the harness becomes the primary driver

@@ -448,6 +448,10 @@ impl VmHandle {
                 }
             }
             BackendKind::Vz => {
+                // Vz follows the shared convergence contract:
+                // ready() is the interactive-ready gate used by first-contact
+                // SSH, not full VFS/VNET/egress certification. Full
+                // validation remains explicit in harness validate/scenario.
                 if let Some(control_plane) = self.control_plane.as_ref() {
                     control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
                     self.exec("/bin/true", policy.exec_ready_timeout).await?;

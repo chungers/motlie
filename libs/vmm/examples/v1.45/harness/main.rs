@@ -17,8 +17,8 @@ use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig, Ipv4Subnet};
 use motlie_vmm::observability::VmObservability;
 use motlie_vmm::orchestrator::{
-    boot, prepare, LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy,
-    ShutdownReport, VmHandle,
+    LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy, ShutdownReport,
+    VmHandle, boot, prepare,
 };
 use motlie_vmm::provisioning::{
     GuestProvisioner, GuestProvisionerConfig, ProvisioningGuestRequest,
@@ -32,7 +32,7 @@ use motlie_vmm::spec::{
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    self, new_guest_registry, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError,
+    self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError, new_guest_registry,
 };
 use pty::{PtyScenarioError, PtyScenarioResult};
 use scenario::{ScenarioRunResult, ScenarioRunStatus};
@@ -41,7 +41,7 @@ use terminal::TerminalBackendKind;
 use thiserror::Error;
 use tokio::time::sleep;
 
-use demo_support::{demo_guest_ids, demo_guest_socket_path};
+use demo_support::{cleanup_development_guest_disks, demo_guest_ids, demo_guest_socket_path};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -51,6 +51,11 @@ pub(crate) const APT_UPDATE_COMMAND: &str =
     "/bin/sh -lc 'sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK'";
 
 pub(crate) fn resolved_native_source_dir(base_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("MOTLIE_VZ_BASE_VM_DIR").map(PathBuf::from) {
+        if path.join("disk.img").exists() && path.join("nvram.bin").exists() {
+            return path;
+        }
+    }
     let local = base_dir.join("artifacts/source-base.vm");
     if local.join("disk.img").exists() && local.join("nvram.bin").exists() {
         local
@@ -562,6 +567,7 @@ async fn main() -> Result<(), DynError> {
             }
         }
     }
+    cleanup_development_guest_disks(&instance.namespace, mode_name(&mode));
 
     let result = ScenarioResult {
         status: if error.is_none() {
@@ -1110,9 +1116,7 @@ pub(crate) fn demo_guest(
                 host_path: demo_root.join(format!("{guest_id}-agent-state")),
             },
         ],
-        software: SoftwareProfile {
-            packages: vec![],
-        },
+        software: SoftwareProfile { packages: vec![] },
         resources: GuestResources::default(),
         storage: GuestStorage::default(),
         boot: BootArtifacts {

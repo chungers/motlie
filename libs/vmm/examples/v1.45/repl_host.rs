@@ -3,8 +3,8 @@ mod demo_support;
 use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
@@ -22,13 +22,13 @@ use motlie_vmm::spec::{
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    new_guest_registry, ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError,
+    ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError, new_guest_registry,
 };
 
 use demo_support::{
-    demo_guest_ids, demo_guest_socket_path, guest_runtime_paths, install_signal_watchers, prompt,
-    shutdown_active_guests, spawn_host_events, spawn_proxy_task, stdin_line_or_detach, HostEvent,
-    ProxyRestartState,
+    HostEvent, ProxyRestartState, cleanup_development_guest_disks, demo_guest_ids,
+    demo_guest_socket_path, guest_runtime_paths, install_signal_watchers, prompt,
+    shutdown_active_guests, spawn_host_events, spawn_proxy_task, stdin_line_or_detach,
 };
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -36,6 +36,11 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 const REPL_PROXY_BASE_PORT: u16 = 42_000;
 
 fn resolved_native_source_dir(base_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("MOTLIE_VZ_BASE_VM_DIR").map(PathBuf::from) {
+        if path.join("disk.img").exists() && path.join("nvram.bin").exists() {
+            return path;
+        }
+    }
     let local = base_dir.join("artifacts/source-base.vm");
     if local.join("disk.img").exists() && local.join("nvram.bin").exists() {
         local
@@ -353,6 +358,7 @@ async fn main() -> Result<(), DynError> {
 
     proxy_task.abort();
     shutdown_active_guests(&provisioner, "repl host").await;
+    cleanup_development_guest_disks(&instance.namespace, "repl host");
 
     Ok(())
 }
@@ -370,11 +376,7 @@ fn print_help() {
 }
 
 fn auto_provision_status(enabled: bool) -> &'static str {
-    if enabled {
-        "on"
-    } else {
-        "off"
-    }
+    if enabled { "on" } else { "off" }
 }
 
 fn print_status(provisioner: &GuestProvisioner, auto_provision_enabled: bool) {
@@ -702,9 +704,7 @@ fn demo_guest(
                 host_path: demo_root.join(format!("{guest_id}-agent-state")),
             },
         ],
-        software: SoftwareProfile {
-            packages: vec![],
-        },
+        software: SoftwareProfile { packages: vec![] },
         resources: GuestResources::default(),
         storage: GuestStorage::default(),
         boot: BootArtifacts {
