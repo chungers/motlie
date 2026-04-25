@@ -693,34 +693,19 @@ mark_phase "host-fixtures-ready"
 guest_bash() {
   local remote_timeout="${MOTLIE_VZ_GUEST_BASH_TIMEOUT:--1}"
   local remote_script
+  local pump_script
   remote_script="$(mktemp)"
-  local remote_path="/home/${CONTROL_USER}/.motlie-vfs-remote.sh"
   cat >"$remote_script"
-  expect <<EOF
-set timeout -1
-spawn scp -P ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$remote_script" ${CONTROL_USER}@${CONTROL_HOST}:${remote_path}
-expect {
-  "password:" {
-    send "${CONTROL_PASSWORD}\r"
-    exp_continue
-  }
-  eof {}
-  timeout {
-    puts stderr "scp timed out: remote guest bash script"
-    exit 124
-  }
-}
-catch wait result
-set exit_code [lindex \$result 3]
-if {\$exit_code != 0} {
-  exit \$exit_code
-}
+  pump_script="$(mktemp)"
+  cat >"$pump_script" <<EOF
+#!/bin/sh
+exec ssh -T -p ${CONTROL_PORT} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} 'bash -euo pipefail -s' < "$remote_script"
 EOF
-  rm -f "$remote_script"
+  chmod +x "$pump_script"
   expect <<EOF
-set timeout -1
+set timeout ${remote_timeout}
 set output ""
-spawn ssh -tt -p ${CONTROL_PORT} -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${CONTROL_USER}@${CONTROL_HOST} "chmod 0700 ${remote_path} && bash -euo pipefail ${remote_path} </dev/null"
+spawn "$pump_script"
 expect {
   "password:" {
     send "${CONTROL_PASSWORD}\r"
@@ -746,6 +731,7 @@ if {\$exit_code != 0} {
   exit \$exit_code
 }
 EOF
+  rm -f "$remote_script" "$pump_script"
 }
 
 guest_exec() {
