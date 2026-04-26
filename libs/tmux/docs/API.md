@@ -18,6 +18,12 @@ All examples assume an async context (`#[tokio::main]` or `#[tokio::test]`).
 **Runnable examples** are in [`examples/`](../examples/) with full instructions
 in [`examples/README.md`](../examples/README.md).
 
+## Changelog
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Document `HostHandle::session_by_id`, `AttachExit`, and `Target::attach_current_pty` added for tmux selector Phase 1.1 / 1.4. |
+
 ---
 
 ## Table of Contents
@@ -34,6 +40,7 @@ in [`examples/README.md`](../examples/README.md).
 6. [Session Lifecycle](#6-session-lifecycle)
 7. [Discovery](#7-discovery)
 8. [Target and Navigation](#8-target-and-navigation)
+   - 8a. [Current PTY Attach](#current-pty-attach)
 9. [Sending Input](#9-sending-input)
 10. [Capturing Output](#10-capturing-output)
 11. [Structured Command Execution](#11-structured-command-execution)
@@ -651,6 +658,22 @@ match host.session("build").await? {
 }
 ```
 
+### Find a session by stable id
+
+```rust
+let sessions = host.list_sessions().await?;
+let selected_id = sessions[0].id.clone();
+
+match host.session_by_id(&selected_id).await? {
+    Some(target) => target.kill().await?,
+    None => eprintln!("session disappeared before dispatch"),
+}
+```
+
+`session_by_id()` is useful when a UI stores `SessionInfo.id` at selection time
+and later needs to dispatch against the same tmux session after a display-name
+rename.
+
 ### Find by TargetSpec
 
 ```rust
@@ -716,6 +739,28 @@ target.address();        // &TargetAddress enum
 
 > See [`examples/target_navigate.rs`](../examples/target_navigate.rs) for a runnable hierarchy walk
 > and [`examples/target_spec.rs`](../examples/target_spec.rs) for TargetSpec resolution.
+
+### Current PTY Attach
+
+```rust
+let target = host
+    .session_by_id(&selected_id)
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("selected session disappeared".into()))?;
+
+let exit = target.attach_current_pty().await?;
+std::process::exit(exit.shell_status());
+```
+
+`attach_current_pty()` is session-target only. Local targets spawn
+`tmux attach-session -t <target>` with inherited stdio. SSH targets spawn an
+interactive `ssh -t ... tmux attach-session -t <target>` command using the
+`SshConfig` already owned by the `HostHandle`. The child runs in its own process
+group; on Unix the current terminal foreground process group is transferred to
+the child and restored after `wait()`.
+
+`AttachExit::shell_status()` maps normal exits to their exit code and Unix
+signal exits to `128 + signal`, which is the value CLI callers should return.
 
 ### Create child windows and panes
 

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::Duration;
 
+use crate::attach::{self, AttachCommand};
 use crate::capture;
 use crate::control;
 use crate::discovery;
@@ -346,6 +347,18 @@ impl HostHandle {
         Ok(sessions
             .into_iter()
             .find(|s| s.name == name)
+            .map(|info| Target {
+                inner: self.inner.clone(),
+                address: TargetAddress::Session(info),
+            }))
+    }
+
+    /// Get a Target for an existing session by stable tmux session id.
+    pub async fn session_by_id(&self, id: &str) -> Result<Option<Target>> {
+        let sessions = self.list_sessions().await?;
+        Ok(sessions
+            .into_iter()
+            .find(|s| s.id == id)
             .map(|info| Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(info),
@@ -1444,6 +1457,47 @@ impl Target {
         }
     }
 
+    /// Attach the current process PTY to this tmux session.
+    pub async fn attach_current_pty(&self) -> Result<crate::AttachExit> {
+        let command = self.attach_command().await?;
+        tokio::task::spawn_blocking(move || attach::run_attach_command(command)).await?
+    }
+
+    async fn attach_command(&self) -> Result<AttachCommand> {
+        let session = match &self.address {
+            TargetAddress::Session(session) => session,
+            TargetAddress::Window(_) | TargetAddress::Pane(_) => {
+                return Err(Error::State(format!(
+                    "attach_current_pty only supports session targets, got '{}'",
+                    self.target_string()
+                )));
+            }
+        };
+        let target = if session.id.is_empty() {
+            session.name.as_str()
+        } else {
+            session.id.as_str()
+        };
+        let tmux_bin = self.inner.resolve_tmux_bin().await;
+
+        match &self.inner.transport {
+            TransportKind::Local(_) => Ok(attach::local_attach_command(
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+            )),
+            TransportKind::Ssh(ssh) => Ok(attach::ssh_attach_command(
+                ssh.config(),
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+            )),
+            TransportKind::Mock(_) => Err(Error::State(
+                "attach_current_pty is not supported for mock transports".to_string(),
+            )),
+        }
+    }
+
     /// Rename this entity and return a new `Target` with the updated address.
     ///
     /// **Session rename** is a correctness concern: the old `Target` holds a
@@ -1995,6 +2049,27 @@ mod tests {
         let t = target.unwrap();
         assert_eq!(t.level(), TargetLevel::Session);
         assert_eq!(t.target_string(), "build");
+    }
+
+    #[tokio::test]
+    async fn session_by_id_found() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "build $7 0 1 2 \nother $8 0 0 1 \n");
+        let host = mock_host(mock);
+        let target = host.session_by_id("$7").await.unwrap();
+        assert!(target.is_some());
+        let t = target.unwrap();
+        assert_eq!(t.level(), TargetLevel::Session);
+        assert_eq!(t.target_string(), "build");
+        assert_eq!(t.session_info().unwrap().id, "$7");
+    }
+
+    #[tokio::test]
+    async fn session_by_id_not_found() {
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2 \n");
+        let host = mock_host(mock);
+        let target = host.session_by_id("$1").await.unwrap();
+        assert!(target.is_none());
     }
 
     #[tokio::test]
