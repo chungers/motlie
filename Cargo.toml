@@ -19,6 +19,7 @@ members = [
     "libs/tmux",
     "libs/driver",
     "bins/tmux/driver",
+    "bins/tmux_select",
 ]
 resolver = "2"
 

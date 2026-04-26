@@ -1,0 +1,21 @@
+[package]
+name = "motlie-tmux-select"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TUI tmux session selector"
+
+[[bin]]
+name = "tmux_select"
+path = "main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+motlie-tmux = { path = "../../libs/tmux" }
+clap = { version = "4.5.58", features = ["derive"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+chrono = "0.4"

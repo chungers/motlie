@@ -242,11 +242,11 @@ fn copy_dir_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> 
     }
 
     // Recursively copy contents
-    copy_dir_contents(src, &effective_dst, opts)
+    copy_dir_contents(src, &effective_dst)
 }
 
 /// Recursively copy directory contents with merge semantics.
-fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
+fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
     for entry in std::fs::read_dir(src)
         .map_err(|e| Error::Transport(format!("failed to read directory {}: {}", src.display(), e)))?
     {
@@ -281,17 +281,14 @@ fn copy_dir_contents(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<(
                     Error::Transport(format!("failed to create directory {}: {}", dst_entry.display(), e))
                 })?;
             }
-            copy_dir_contents(&entry_path, &dst_entry, opts)?;
+            copy_dir_contents(&entry_path, &dst_entry)?;
         } else {
             // Regular file
-            if dst_entry.exists() {
-                if dst_entry.is_dir() {
-                    return Err(Error::Transport(format!(
-                        "type mismatch: source is a file but destination is a directory: {}",
-                        dst_entry.display()
-                    )));
-                }
-                // overwrite=true is implied here since we passed the top-level check
+            if dst_entry.exists() && dst_entry.is_dir() {
+                return Err(Error::Transport(format!(
+                    "type mismatch: source is a file but destination is a directory: {}",
+                    dst_entry.display()
+                )));
             }
             std::fs::copy(&entry_path, &dst_entry).map_err(|e| {
                 Error::Transport(format!(
@@ -376,10 +373,14 @@ async fn sftp_upload_file(
     // Check parent exists
     if let Some(parent) = Path::new(&effective_dst).parent() {
         let parent_str = parent.to_str().unwrap_or("");
-        if !parent_str.is_empty() && parent_str != "/" {
-            if sftp.symlink_metadata(parent_str).await.is_err() {
-                return Err(Error::Transport(format!("parent directory does not exist: {}", parent_str)));
-            }
+        if !parent_str.is_empty()
+            && parent_str != "/"
+            && sftp.symlink_metadata(parent_str).await.is_err()
+        {
+            return Err(Error::Transport(format!(
+                "parent directory does not exist: {}",
+                parent_str
+            )));
         }
     }
 
@@ -432,10 +433,14 @@ async fn sftp_upload_dir(
             // Check parent exists
             if let Some(parent) = Path::new(&effective_dst).parent() {
                 let parent_str = parent.to_str().unwrap_or("");
-                if !parent_str.is_empty() && parent_str != "/" {
-                    if sftp.symlink_metadata(parent_str).await.is_err() {
-                        return Err(Error::Transport(format!("parent directory does not exist: {}", parent_str)));
-                    }
+                if !parent_str.is_empty()
+                    && parent_str != "/"
+                    && sftp.symlink_metadata(parent_str).await.is_err()
+                {
+                    return Err(Error::Transport(format!(
+                        "parent directory does not exist: {}",
+                        parent_str
+                    )));
                 }
             }
             sftp.create_dir(&effective_dst)
@@ -1055,7 +1060,7 @@ impl MockTransport {
         let mut fs = self.fs.lock().unwrap();
         let effective_dst = if fs
             .get(remote_path)
-            .map_or(false, |e| matches!(e, MockFsEntry::Dir))
+            .is_some_and(|e| matches!(e, MockFsEntry::Dir))
         {
             let name = local_path
                 .file_name()
@@ -1106,7 +1111,7 @@ impl MockTransport {
             let fs = self.fs.lock().unwrap();
             if fs
                 .get(remote_path)
-                .map_or(false, |e| matches!(e, MockFsEntry::Dir))
+                .is_some_and(|e| matches!(e, MockFsEntry::Dir))
             {
                 let name = local_path
                     .file_name()
@@ -1149,14 +1154,13 @@ impl MockTransport {
             }
         }
 
-        self.mock_upload_dir_contents(local_path, &effective_dst, opts)
+        self.mock_upload_dir_contents(local_path, &effective_dst)
     }
 
     fn mock_upload_dir_contents(
         &self,
         local_path: &Path,
         remote_path: &Path,
-        opts: &TransferOptions,
     ) -> Result<()> {
         for entry in std::fs::read_dir(local_path)
             .map_err(|e| Error::Transport(format!("failed to read dir {}: {}", local_path.display(), e)))?
@@ -1180,7 +1184,7 @@ impl MockTransport {
                         fs.insert(remote_entry.clone(), MockFsEntry::Dir);
                     }
                 }
-                self.mock_upload_dir_contents(&entry_path, &remote_entry, opts)?;
+                self.mock_upload_dir_contents(&entry_path, &remote_entry)?;
             } else {
                 let data = std::fs::read(&entry_path)
                     .map_err(|e| Error::Transport(format!("failed to read {}: {}", entry_path.display(), e)))?;
@@ -1312,7 +1316,7 @@ impl MockTransport {
                 .map_err(|e| Error::Transport(format!("failed to create dir {}: {}", effective_dst.display(), e)))?;
         }
 
-        self.mock_download_dir_contents(remote_path, &effective_dst, opts)
+        self.mock_download_dir_contents(remote_path, &effective_dst)
     }
 
     /// Download directory contents from mock fs to local fs (no cp-r placement).
@@ -1320,7 +1324,6 @@ impl MockTransport {
         &self,
         remote_path: &Path,
         local_dir: &Path,
-        opts: &TransferOptions,
     ) -> Result<()> {
         let children: Vec<(std::path::PathBuf, MockFsEntry)> = {
             let fs = self.fs.lock().unwrap();
@@ -1346,7 +1349,7 @@ impl MockTransport {
                             Error::Transport(format!("failed to create dir {}: {}", local_child.display(), e))
                         })?;
                     }
-                    self.mock_download_dir_contents(&child_path, &local_child, opts)?;
+                    self.mock_download_dir_contents(&child_path, &local_child)?;
                 }
             }
         }
@@ -2179,7 +2182,7 @@ pub struct SshShellChannel {
 impl SshShellChannel {
     async fn write(&mut self, data: &[u8]) -> Result<()> {
         self.channel
-            .data(&data[..])
+            .data(data)
             .await
             .map_err(|e| Error::Transport(format!("SSH: write to shell failed: {}", e)))
     }

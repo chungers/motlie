@@ -2,21 +2,21 @@
 
 ## Status
 
-Draft CLI contract for the planned `tmux_select` binary. No implementation is
-included in this PR. After implementation, this file must be updated to reflect
-the exact shipped behavior.
+Implemented CLI contract for the initial `tmux_select` binary in
+`bins/tmux_select/main.rs`.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated CLI reference to match implemented binary behavior: `-s`, `--print-session`, `--dashboard`, optional SSH URI, ForceCommand rejection/bypass, stdout/stderr split, and exit semantics. |
 | 2026-04-26 | @gpt55-dgx | Initial CLI contract for issue #226 and PR #227: modes, arguments, keymap, stdout/stderr behavior, ForceCommand usage, and exit semantics. |
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 round-3 keymap feedback by marking `Ctrl-Left`/`Ctrl-Right` resize as normal-mode-only in the table. |
 
 ## Synopsis
 
 ```text
-tmux_select [OPTIONS] [ssh-uri]
+tmux_select [OPTIONS] [SSH_URI]
 ```
 
 Examples:
@@ -148,7 +148,8 @@ Modal keys:
 
 ## ForceCommand
 
-Recommended local deployment:
+Recommended local deployment after installing the built binary to
+`/usr/local/bin/tmux_select`:
 
 ```text
 ForceCommand /usr/local/bin/tmux_select

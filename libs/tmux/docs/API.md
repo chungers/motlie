@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Document `HostHandle::exec_shell`, `HostHandle::watch_host_events`, `HostEventStream`, and `ScrollbackQuery::LinesRange` added for the tmux selector implementation. |
 | 2026-04-26 | @gpt55-dgx | Document `HostHandle::session_by_id`, `AttachExit`, and `Target::attach_current_pty` added for tmux selector Phase 1.1 / 1.4. |
 
 ---
@@ -39,6 +40,7 @@ in [`examples/README.md`](../examples/README.md).
 5. [HostHandle](#5-hosthandle)
 6. [Session Lifecycle](#6-session-lifecycle)
 7. [Discovery](#7-discovery)
+   - 7a. [Host Event Stream](#host-event-stream)
 8. [Target and Navigation](#8-target-and-navigation)
    - 8a. [Current PTY Attach](#current-pty-attach)
 9. [Sending Input](#9-sending-input)
@@ -717,6 +719,43 @@ for c in &clients {
 // Useful for geometry/reflow detection (section 15).
 ```
 
+### Host shell command
+
+```rust
+let motd = host.exec_shell("cat /etc/motd 2>/dev/null").await?;
+```
+
+`exec_shell()` executes a host-scoped shell command through the underlying
+transport and returns stdout. Use it for host metadata that is not a tmux target
+operation, such as reading `/etc/motd` for a selector. Do not use it to spell
+tmux operations in callers; use the typed `HostHandle` and `Target` APIs.
+
+### Host Event Stream
+
+```rust
+use motlie_tmux::{HostEvent, HostHandle};
+
+let mut events = host.watch_host_events().await?;
+while let Some(event) = events.recv().await {
+    match event {
+        HostEvent::SessionsChanged => println!("session list changed"),
+        HostEvent::SessionAdded { id, name } => println!("added {name} ({id})"),
+        HostEvent::SessionClosed { id, name } => println!("closed {name} ({id})"),
+        HostEvent::SessionRenamed { id, old, new } => {
+            println!("renamed {old} -> {new} ({id})");
+        }
+        HostEvent::ClientAttached { session_id } => println!("client attached to {session_id}"),
+        HostEvent::ClientDetached { session_id } => println!("client detached from {session_id}"),
+        HostEvent::Disconnect { reason } => eprintln!("event stream degraded: {reason}"),
+    }
+}
+```
+
+`watch_host_events()` emits typed host-level session events reconciled by
+stable `SessionInfo.id`. The initial implementation polls `list_sessions()` once
+per second and diffs snapshots. This gives selector UIs a stable event API
+without forcing callers to implement their own name-vs-id reconciliation.
+
 ---
 
 ## 8. Target and Navigation
@@ -1160,6 +1199,22 @@ let query = ScrollbackQuery::LastLinesUntil {
 };
 let text = target.sample_text(&query).await?;
 ```
+
+### Windowed older range
+
+```rust
+let older = target
+    .sample_text(&ScrollbackQuery::LinesRange {
+        older_than_lines: 80,
+        count: 40,
+    })
+    .await?;
+```
+
+`LinesRange` captures a bounded scrollback window older than the most recent
+`older_than_lines`. It maps to tmux `capture-pane -S/-E` offsets instead of
+rebuilding the full scrollback buffer, making it suitable for paged TUI
+back-scroll over local and SSH transports.
 
 ### Incremental sampling with overlap dedup
 
@@ -2118,6 +2173,7 @@ assert!(issues.is_empty());
 |------|-------------|-------|
 | `HostHandle` | Entry point — one per tmux host | Yes (Arc) |
 | `Target` | Unified session/window/pane handle | No |
+| `HostEventStream` | Async stream of host-level session events | No |
 
 ### Target addressing
 
@@ -2136,6 +2192,7 @@ assert!(issues.is_empty());
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |
+| `HostEvent` | SessionsChanged, SessionAdded, SessionClosed, SessionRenamed, ClientAttached, ClientDetached, Disconnect |
 
 ### Input
 
@@ -2153,7 +2210,7 @@ assert!(issues.is_empty());
 | `CaptureResult` | text, raw_text (Option), fidelity |
 | `OutputFidelity` | degraded (bool), issues (Option<Vec>) — None on clean hot path |
 | `FidelityIssue` | Enum: ClientResize, PaneResize, HistoryTruncated, OverlapResync |
-| `ScrollbackQuery` | Enum: LastLines(n), Until { pattern, max_lines }, LastLinesUntil { lines, stop_pattern } |
+| `ScrollbackQuery` | Enum: LastLines(n), Until { pattern, max_lines }, LastLinesUntil { lines, stop_pattern }, LinesRange { older_than_lines, count } |
 | `ExecOutput` | stdout, exit_code, success() |
 
 ### Geometry

@@ -5373,6 +5373,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-tmux-select"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm 0.29.0",
+ "motlie-tmux",
+ "ratatui",
+ "tokio",
+]
+
+[[package]]
 name = "motlie-voice"
 version = "0.1.0"
 dependencies = [

@@ -102,6 +102,7 @@ impl TargetOutput {
 
 /// Events delivered to subscribers.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum SinkEvent {
     /// Normal output data.
     Data(TargetOutput),
@@ -285,17 +286,16 @@ impl SinkKind {
 pub struct CallbackSink {
     pub name: String,
     /// Shared state passed to callbacks.
-    pub state: std::sync::Arc<dyn Any + Send + Sync>,
+    pub state: CallbackState,
     /// Synchronous callback for each output event.
-    pub on_output:
-        fn(state: &std::sync::Arc<dyn Any + Send + Sync>, event: SinkEvent) -> Result<()>,
+    pub on_output: fn(state: &CallbackState, event: SinkEvent) -> Result<()>,
     /// Called on bus shutdown. Returns a boxed future.
-    pub on_flush: Option<
-        fn(
-            state: &std::sync::Arc<dyn Any + Send + Sync>,
-        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>,
-    >,
+    pub on_flush: Option<CallbackFlush>,
 }
+
+pub type CallbackState = std::sync::Arc<dyn Any + Send + Sync>;
+pub type CallbackFlush =
+    fn(state: &CallbackState) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
 // ---------------------------------------------------------------------------
 // Subscription — the composable seam (DC24)
@@ -363,10 +363,8 @@ impl Subscription {
                     SinkEvent::Gap { .. } => true,
                     SinkEvent::Discontinuity { .. } => true,
                 };
-                if should_forward {
-                    if tx.send(event).await.is_err() {
-                        break;
-                    }
+                if should_forward && tx.send(event).await.is_err() {
+                    break;
                 }
             }
         });
@@ -546,18 +544,13 @@ impl JoinedStream {
 // ---------------------------------------------------------------------------
 
 /// Rendering mode for history output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Entries in arrival order with source labels on source transitions.
+    #[default]
     Interleaved,
     /// Group entries by source, render each source as a labeled section.
     PerSource,
-}
-
-impl Default for RenderMode {
-    fn default() -> Self {
-        RenderMode::Interleaved
-    }
 }
 
 /// Options for configuring a rolling transcript/history handle.
@@ -831,6 +824,10 @@ impl PollHistory {
         self.entries.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     fn trim(&mut self) {
         while self.entries.len() > self.max_entries {
             if let Some(removed) = self.entries.pop_front() {
@@ -967,7 +964,7 @@ impl HistoryState {
                     self.source_order.push(key.clone());
                 }
                 self.last_written_source = Some(key.clone());
-                let label_format = self.label_format.clone();
+                let label_format = self.label_format;
                 let max_entries = self.max_entries;
                 let max_render_chars = self.max_render_chars;
                 let window = self.per_source.entry(key).or_insert_with(SourceWindow::new);
@@ -1016,7 +1013,7 @@ impl HistoryState {
                 }
                 let max_entries = self.max_entries;
                 let max_render_chars = self.max_render_chars;
-                let label_format = self.label_format.clone();
+                let label_format = self.label_format;
                 window.trim(max_entries, max_render_chars, &label_format);
                 self.trim_global();
                 return true;
