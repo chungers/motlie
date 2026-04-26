@@ -710,6 +710,7 @@ Rules:
 pub struct PrepareRequest {
     pub guest: GuestSpec,
     pub namespace: RuntimeNamespace,
+    pub backend_kind: BackendKind,
     pub network_modes: NetworkModes,
     pub base_dir: std::path::PathBuf,
     pub ssh_ca_pubkey: Option<String>,

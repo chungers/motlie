@@ -168,11 +168,12 @@ cargo test -p motlie-vfs
 cargo clippy -p motlie-vmm --example harness_v1_45 --example repl_host_v1_45 -- -D warnings
 ./target/debug/examples/harness_v1_45 scenario ./libs/vmm/examples/v1.45/scenarios/multiguest-validate.json
 ./target/debug/examples/harness_v1_45 scenario ./libs/vmm/examples/v1.45/scenarios/auto-provision-ssh.json
-tart list
 ```
 
-`tart list` should be empty after harness shutdown unless a developer
-explicitly retained Vz development disks with `MOTLIE_VZ_KEEP_GUEST_DISKS`.
+After harness shutdown, the runtime root printed by the harness should not
+contain leaked Vz disk artifacts unless `MOTLIE_VZ_KEEP_GUEST_DISKS` was set.
+`v1.45` launches Apple Virtualization.framework directly through
+`vz-vsock-runner`; Tart is not part of the runtime verification path.
 
 ## Manual Certification
 
