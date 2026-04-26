@@ -11,6 +11,7 @@
 | 2026-04-23 | @codex-tts | Removed the old setup/config runtime path, made local audio the runtime default with explicit `ssh:<host>` for remote endpoints, and documented that the agent must ask the human when the endpoint location is ambiguous. |
 | 2026-04-23 | @codex-tts | Clarified that the skill discovers backend and endpoint details progressively through the conversation with the human rather than expecting predeclared config. |
 | 2026-04-23 | @codex-tts | Added the consolidated skills README with example human prompts, example agent responses, operational QA patterns, and build/source-missing responses. |
+| 2026-04-24 | @codex-tts | Tightened the repo-present bootstrap path: generic Linux ORT discovery, CPU-only ORT for Piper shutdown stability, and a single repo-present build now seeds all three subskill `bin/` directories for reuse. |
 
 ## Phase 1. Shared Runtime
 
@@ -40,7 +41,9 @@
   [`DESIGN.md`](./DESIGN.md#typed-runtime).
 - [x] 3.5 Install platform-scoped `voice-agent` binaries under each
   `.agents/skills/voice/<skill>/bin/` directory and prefer those installed
-  binaries at runtime. See [`DESIGN.md`](./DESIGN.md#typed-runtime).
+  binaries at runtime. One repo-present build should seed all three
+  subskill `bin/` directories so later invocations reuse the installed binary
+  rather than rebuilding. See [`DESIGN.md`](./DESIGN.md#typed-runtime).
 - [x] 3.6 Prefer the most optimized installed binary flavor at runtime:
   `-cuda` first on CUDA-ready hosts, then `-cpu`, with legacy names as
   fallback. See

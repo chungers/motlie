@@ -4,10 +4,9 @@ use std::future::Future;
 use std::io::{self, Cursor, Read};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use motlie_model::typed::{
     AudioBuf, BatchTranscriber, CloneReference, Mono, SpeechStream, SpeechSynthesizer,
@@ -24,10 +23,13 @@ use motlie_model_sherpa_onnx::SherpaOnnxHandle;
 use motlie_model_whisper_cpp::WhisperCppHandle;
 use motlie_models::asr::{moonshine_streaming_en, sherpa_onnx_streaming_en, whisper_base_en};
 use motlie_models::tts::{piper_en_us_ljspeech_medium, qwen3_tts_cpp};
-use motlie_models::{download_bundle_artifacts, AsrModels, Catalog, TtsModels};
+use motlie_models::{
+    AsrModels, Catalog, LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX, TtsModels,
+    download_bundle_artifacts,
+};
 use motlie_voice::pipeline::convert::{decode_samples_to_f32, downmix_to_mono, f32_to_i16_clamped};
 use motlie_voice::pipeline::resample::{LinearInterpolator, Resampler};
-use motlie_voice::wav::{decode_streaming_wav_to_f32, StreamingWavWriter, WavSample};
+use motlie_voice::wav::{StreamingWavWriter, WavSample, decode_streaming_wav_to_f32};
 
 const ASR_TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 const STREAMING_ASR_CHUNK_SAMPLES: usize = 3_200;
@@ -139,12 +141,30 @@ struct EndpointConfig {
     kind: EndpointKind,
     ssh_target: Option<String>,
     play_cmd: String,
-    record_cmd: String,
+    record_cmd: RecordCommand,
 }
 
 #[derive(Debug)]
 struct VoiceConfig {
     skill_root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+enum RecordCommand {
+    SoxCapture { program: String },
+    RemoteSoxProbe,
+}
+
+impl RecordCommand {
+    fn render(&self, seconds: Option<u32>) -> String {
+        let trim_suffix = seconds
+            .map(|value| format!(" trim 0 {value}"))
+            .unwrap_or_default();
+        match self {
+            Self::SoxCapture { program } => format!("{program} -q -t wav -{trim_suffix}"),
+            Self::RemoteSoxProbe => remote_record_command(&trim_suffix),
+        }
+    }
 }
 
 enum OutputTarget {
@@ -199,15 +219,6 @@ fn resolve_skill_root() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolve current voice-agent executable path")?;
     if let Some(root) = skill_root_from_path(&exe) {
         return Ok(root);
-    }
-
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .context("resolve repo root from bins/voice-agent")?;
-    let candidate = repo_root.join(".agents/skills/voice");
-    if candidate.is_dir() {
-        return Ok(candidate);
     }
 
     bail!(
@@ -274,7 +285,7 @@ impl VoiceConfig {
             kind: EndpointKind::Ssh,
             ssh_target: Some(ssh_target.to_string()),
             play_cmd: remote_play_command(),
-            record_cmd: remote_record_command(),
+            record_cmd: RecordCommand::RemoteSoxProbe,
         })
     }
 }
@@ -412,31 +423,30 @@ async fn speak_with_piper(
     target: OutputTarget,
 ) -> Result<()> {
     let handle = start_piper(config, quiet).await?;
-    run_with_shutdown(handle, move |handle: &PiperHandle| {
-        Box::pin(async move {
-            let mut stream = handle
-                .synthesize(SynthesisRequest {
-                    text,
-                    params: SpeechParams::default(),
-                })
-                .await
-                .context("start Piper synthesis")?;
-            let mut sink = OutputSink::<i16>::new(target, 22_050)?;
-            while let Some(chunk) = stream
-                .next_chunk()
-                .await
-                .context("read Piper speech chunk")?
-            {
-                sink.write_samples(chunk.samples())?;
-            }
-            stream
-                .finish()
-                .await
-                .context("finish Piper speech stream")?;
-            sink.finalize()
-        })
-    })
-    .await
+    let body_result: Result<()> = async {
+        let mut stream = handle
+            .synthesize(SynthesisRequest {
+                text,
+                params: SpeechParams::default(),
+            })
+            .await
+            .context("start Piper synthesis")?;
+        let mut sink = OutputSink::<i16>::new(target, 22_050)?;
+        while let Some(chunk) = stream
+            .next_chunk()
+            .await
+            .context("read Piper speech chunk")?
+        {
+            sink.write_samples(chunk.samples())?;
+        }
+        stream
+            .finish()
+            .await
+            .context("finish Piper speech stream")?;
+        sink.finalize()
+    }
+    .await;
+    finish_with_shutdown(body_result, handle.shutdown().await)
 }
 
 async fn speak_with_qwen(
@@ -447,40 +457,39 @@ async fn speak_with_qwen(
     reference: Option<CloneReference<QWEN_REFERENCE_SAMPLE_RATE_HZ, Mono>>,
 ) -> Result<()> {
     let handle = start_qwen(config, quiet).await?;
-    run_with_shutdown(handle, move |handle: &Qwen3TtsCppHandle| {
-        Box::pin(async move {
-            let request = SynthesisRequest {
-                text,
-                params: SpeechParams::default(),
-            };
-            let mut stream = match reference {
-                Some(reference) => handle
-                    .synthesize_with_reference(request, reference)
-                    .await
-                    .context("start qwen3-tts.cpp voice-clone synthesis")?,
-                None => handle
-                    .synthesize(request)
-                    .await
-                    .context("start qwen3-tts.cpp synthesis")?,
-            };
+    let body_result: Result<()> = async {
+        let request = SynthesisRequest {
+            text,
+            params: SpeechParams::default(),
+        };
+        let mut stream = match reference {
+            Some(reference) => handle
+                .synthesize_with_reference(request, reference)
+                .await
+                .context("start qwen3-tts.cpp voice-clone synthesis")?,
+            None => handle
+                .synthesize(request)
+                .await
+                .context("start qwen3-tts.cpp synthesis")?,
+        };
 
-            let mut sink = OutputSink::<i16>::new(target, 24_000)?;
-            while let Some(chunk) = stream
-                .next_chunk()
-                .await
-                .context("read qwen3-tts.cpp speech chunk")?
-            {
-                let samples = f32_to_i16_clamped(chunk.samples());
-                sink.write_samples(&samples)?;
-            }
-            stream
-                .finish()
-                .await
-                .context("finish qwen3-tts.cpp speech stream")?;
-            sink.finalize()
-        })
-    })
-    .await
+        let mut sink = OutputSink::<i16>::new(target, 24_000)?;
+        while let Some(chunk) = stream
+            .next_chunk()
+            .await
+            .context("read qwen3-tts.cpp speech chunk")?
+        {
+            let samples = f32_to_i16_clamped(chunk.samples());
+            sink.write_samples(&samples)?;
+        }
+        stream
+            .finish()
+            .await
+            .context("finish qwen3-tts.cpp speech stream")?;
+        sink.finalize()
+    }
+    .await;
+    finish_with_shutdown(body_result, handle.shutdown().await)
 }
 
 async fn run_listen(config: &VoiceConfig, args: &ListenArgs) -> Result<String> {
@@ -566,22 +575,21 @@ async fn transcribe_whisper(
     handle: WhisperCppHandle,
     audio: AudioBuf<f32, ASR_TARGET_SAMPLE_RATE_HZ, Mono>,
 ) -> Result<String> {
-    run_with_shutdown(handle, move |handle: &WhisperCppHandle| {
-        Box::pin(async move {
-            let update = handle
-                .transcribe(
-                    audio,
-                    TranscriptionParams {
-                        language: Some("en".into()),
-                        emit_partials: false,
-                    },
-                )
-                .await
-                .context("transcribe captured audio with Whisper")?;
-            Ok(render_plain_transcript(&update.segments).unwrap_or_default())
-        })
-    })
-    .await
+    let body_result: Result<String> = async {
+        let update = handle
+            .transcribe(
+                audio,
+                TranscriptionParams {
+                    language: Some("en".into()),
+                    emit_partials: false,
+                },
+            )
+            .await
+            .context("transcribe captured audio with Whisper")?;
+        Ok(render_plain_transcript(&update.segments).unwrap_or_default())
+    }
+    .await;
+    finish_with_shutdown(body_result, handle.shutdown().await)
 }
 
 async fn transcribe_streaming<H>(
@@ -592,50 +600,49 @@ async fn transcribe_streaming<H>(
 where
     H: BundleHandle + StreamingTranscriber<Input = AudioBuf<i16, ASR_TARGET_SAMPLE_RATE_HZ, Mono>>,
 {
-    run_with_shutdown(handle, move |handle| {
-        Box::pin(async move {
-            let mut session = handle
-                .open_session(TranscriptionParams {
-                    language: Some("en".into()),
-                    emit_partials: partials,
-                })
-                .await
-                .context("open streaming ASR session")?;
+    let body_result: Result<String> = async {
+        let mut session = handle
+            .open_session(TranscriptionParams {
+                language: Some("en".into()),
+                emit_partials: partials,
+            })
+            .await
+            .context("open streaming ASR session")?;
 
-            let mut final_segments = Vec::new();
-            for chunk in audio.into_samples().chunks(STREAMING_ASR_CHUNK_SAMPLES) {
-                if let Some(update) = session
-                    .ingest(AudioBuf::new(chunk.to_vec()))
-                    .await
-                    .context("ingest audio chunk into streaming ASR")?
-                {
-                    if partials {
-                        print_segment_events(&update.segments);
-                    } else {
-                        final_segments.extend(
-                            update
-                                .segments
-                                .into_iter()
-                                .filter(|segment| segment.final_segment),
-                        );
-                    }
+        let mut final_segments = Vec::new();
+        for chunk in audio.into_samples().chunks(STREAMING_ASR_CHUNK_SAMPLES) {
+            if let Some(update) = session
+                .ingest(AudioBuf::new(chunk.to_vec()))
+                .await
+                .context("ingest audio chunk into streaming ASR")?
+            {
+                if partials {
+                    print_segment_events(&update.segments);
+                } else {
+                    final_segments.extend(
+                        update
+                            .segments
+                            .into_iter()
+                            .filter(|segment| segment.final_segment),
+                    );
                 }
             }
+        }
 
-            let final_update = session
-                .finish()
-                .await
-                .context("finish streaming ASR session")?;
-            if partials {
-                print_segment_events(&final_update.segments);
-            } else {
-                final_segments.extend(final_update.segments);
-            }
+        let final_update = session
+            .finish()
+            .await
+            .context("finish streaming ASR session")?;
+        if partials {
+            print_segment_events(&final_update.segments);
+        } else {
+            final_segments.extend(final_update.segments);
+        }
 
-            Ok(render_plain_transcript(&final_segments).unwrap_or_default())
-        })
-    })
-    .await
+        Ok(render_plain_transcript(&final_segments).unwrap_or_default())
+    }
+    .await;
+    finish_with_shutdown(body_result, handle.shutdown().await)
 }
 
 async fn transcribe_streaming_live_raw<H>(handle: H, path: &Path, partials: bool) -> Result<String>
@@ -643,83 +650,82 @@ where
     H: BundleHandle + StreamingTranscriber<Input = AudioBuf<i16, ASR_TARGET_SAMPLE_RATE_HZ, Mono>>,
 {
     let path = path.to_path_buf();
-    run_with_shutdown(handle, move |handle| {
-        Box::pin(async move {
-            let mut session = handle
-                .open_session(TranscriptionParams {
-                    language: Some("en".into()),
-                    emit_partials: partials,
-                })
+    let body_result: Result<String> = async {
+        let mut session = handle
+            .open_session(TranscriptionParams {
+                language: Some("en".into()),
+                emit_partials: partials,
+            })
+            .await
+            .context("open streaming ASR session")?;
+
+        let file = File::open(&path)
+            .with_context(|| format!("open raw PCM stream '{}'", path.display()))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut pending = Vec::new();
+        let mut raw_buf = vec![0_u8; STREAMING_ASR_CHUNK_SAMPLES * 2];
+        let mut final_segments = Vec::new();
+
+        loop {
+            let read = reader
+                .read(&mut raw_buf)
+                .with_context(|| format!("read raw PCM stream '{}'", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            pending.extend_from_slice(&raw_buf[..read]);
+
+            let complete_bytes = pending.len() - (pending.len() % 2);
+            if complete_bytes == 0 {
+                continue;
+            }
+
+            let samples = pending[..complete_bytes]
+                .chunks_exact(2)
+                .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            pending.drain(..complete_bytes);
+
+            if let Some(update) = session
+                .ingest(AudioBuf::new(samples))
                 .await
-                .context("open streaming ASR session")?;
-
-            let file = File::open(&path)
-                .with_context(|| format!("open raw PCM stream '{}'", path.display()))?;
-            let mut reader = std::io::BufReader::new(file);
-            let mut pending = Vec::new();
-            let mut raw_buf = vec![0_u8; STREAMING_ASR_CHUNK_SAMPLES * 2];
-            let mut final_segments = Vec::new();
-
-            loop {
-                let read = reader
-                    .read(&mut raw_buf)
-                    .with_context(|| format!("read raw PCM stream '{}'", path.display()))?;
-                if read == 0 {
-                    break;
-                }
-                pending.extend_from_slice(&raw_buf[..read]);
-
-                let complete_bytes = pending.len() - (pending.len() % 2);
-                if complete_bytes == 0 {
-                    continue;
-                }
-
-                let samples = pending[..complete_bytes]
-                    .chunks_exact(2)
-                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                    .collect::<Vec<_>>();
-                pending.drain(..complete_bytes);
-
-                if let Some(update) = session
-                    .ingest(AudioBuf::new(samples))
-                    .await
-                    .context("ingest raw PCM chunk into streaming ASR")?
-                {
-                    if partials {
-                        print_segment_events(&update.segments);
-                    } else {
-                        final_segments.extend(
-                            update
-                                .segments
-                                .into_iter()
-                                .filter(|segment| segment.final_segment),
-                        );
-                    }
+                .context("ingest raw PCM chunk into streaming ASR")?
+            {
+                if partials {
+                    print_segment_events(&update.segments);
+                } else {
+                    final_segments.extend(
+                        update
+                            .segments
+                            .into_iter()
+                            .filter(|segment| segment.final_segment),
+                    );
                 }
             }
+        }
 
-            if !pending.is_empty() {
-                bail!(
-                    "raw PCM stream '{}' ended with {} trailing byte(s); expected 16-bit samples",
-                    path.display(),
-                    pending.len()
-                );
-            }
+        if !pending.is_empty() {
+            bail!(
+                "raw PCM stream '{}' ended with {} trailing byte(s); expected 16-bit samples",
+                path.display(),
+                pending.len()
+            );
+        }
 
-            let final_update = session
-                .finish()
-                .await
-                .context("finish streaming ASR session")?;
-            if partials {
-                print_segment_events(&final_update.segments);
-            } else {
-                final_segments.extend(final_update.segments);
-            }
+        let final_update = session
+            .finish()
+            .await
+            .context("finish streaming ASR session")?;
+        if partials {
+            print_segment_events(&final_update.segments);
+        } else {
+            final_segments.extend(final_update.segments);
+        }
 
-            Ok(render_plain_transcript(&final_segments).unwrap_or_default())
-        })
-    })
-    .await
+        Ok(render_plain_transcript(&final_segments).unwrap_or_default())
+    }
+    .await;
+    finish_with_shutdown(body_result, handle.shutdown().await)
 }
 
 async fn start_piper(config: &VoiceConfig, quiet: bool) -> Result<PiperHandle> {
@@ -823,8 +829,12 @@ fn local_only_options(artifact_root: &Path) -> StartOptions {
 
 fn missing_local_artifacts(error: &ModelError) -> bool {
     match error {
+        // @codex-tts 2026-04-24 -- Keep this predicate in sync with the curated
+        // LocalOnly error prefix exported by motlie-models. Voice-skill bootstrap
+        // depends on that shared prefix to decide when a missing local artifact
+        // should trigger an explicit download step.
         ModelError::InvalidConfiguration(message) => {
-            message.contains("artifact policy `LocalOnly`")
+            message.contains(LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX)
         }
         _ => false,
     }
@@ -917,6 +927,10 @@ fn decode_wav_bytes_to_f32_mono16k(
     let (spec, samples) =
         decode_streaming_wav_to_f32(Cursor::new(bytes)).context("failed to decode wav samples")?;
     let mono = downmix_to_mono(&samples, spec.channels).context("failed to downmix wav to mono")?;
+    // @codex-tts 2026-04-24 -- This file-input path still uses linear interpolation.
+    // Live remote-push capture already runs at 16 kHz raw PCM and avoids this resampler.
+    // Keep the caveat documented in DESIGN/PLAN until motlie-voice grows an anti-aliased
+    // resampler suitable for the batch file-input path.
     let resampled = LinearInterpolator
         .resample_f32(&mono, spec.sample_rate, ASR_TARGET_SAMPLE_RATE_HZ)
         .context("failed to resample wav to 16 kHz")?;
@@ -962,11 +976,7 @@ fn render_plain_transcript(segments: &[TranscriptSegment]) -> Option<String> {
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn print_segment_events(segments: &[TranscriptSegment]) {
@@ -985,14 +995,11 @@ fn print_segment_events(segments: &[TranscriptSegment]) {
     }
 }
 
-async fn run_with_shutdown<H, F, T>(handle: H, body: F) -> Result<T>
-where
-    H: BundleHandle,
-    F: for<'a> FnOnce(&'a H) -> Pin<Box<dyn Future<Output = Result<T>> + 'a>>,
-{
-    let body_result = body(&handle).await;
-    let shutdown_result = handle.shutdown().await.context("shutdown failed");
-
+fn finish_with_shutdown<T>(
+    body_result: Result<T>,
+    shutdown_result: std::result::Result<(), ModelError>,
+) -> Result<T> {
+    let shutdown_result = shutdown_result.context("shutdown failed");
     match (body_result, shutdown_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(error)) => Err(error),
@@ -1007,7 +1014,7 @@ fn capture_wav_bytes(endpoint: &EndpointConfig, seconds: Option<u32>) -> Result<
     let mut capture_cmd = match endpoint.kind {
         EndpointKind::Local => {
             let mut cmd = Command::new("bash");
-            cmd.arg("-lc").arg(with_trim(&endpoint.record_cmd, seconds));
+            cmd.arg("-lc").arg(endpoint.record_cmd.render(seconds));
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::inherit());
             cmd
@@ -1018,8 +1025,7 @@ fn capture_wav_bytes(endpoint: &EndpointConfig, seconds: Option<u32>) -> Result<
                 .as_deref()
                 .context("missing ssh target for ssh endpoint")?;
             let mut cmd = Command::new("ssh");
-            cmd.arg(ssh_target)
-                .arg(with_trim(&endpoint.record_cmd, seconds));
+            cmd.arg(ssh_target).arg(endpoint.record_cmd.render(seconds));
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::inherit());
             cmd
@@ -1057,57 +1063,135 @@ fn playback_command(endpoint: &EndpointConfig) -> Result<Command> {
 }
 
 fn local_play_command() -> Result<String> {
-    if Path::new("/opt/homebrew/bin/play").is_file() {
-        return Ok("/opt/homebrew/bin/play -t wav -".to_string());
+    if let Some(play) = resolve_preferred_command(
+        "play",
+        &[
+            "/opt/homebrew/bin/play",
+            "/usr/local/bin/play",
+            "/opt/local/bin/play",
+        ],
+    ) {
+        return Ok(format!("{play} -t wav -"));
     }
-    if command_in_path("play") {
-        return Ok("play -t wav -".to_string());
-    }
-    if command_in_path("ffplay") {
-        return Ok("ffplay -autoexit -nodisp -i pipe:0".to_string());
+    if let Some(ffplay) = resolve_preferred_command(
+        "ffplay",
+        &[
+            "/opt/homebrew/bin/ffplay",
+            "/usr/local/bin/ffplay",
+            "/opt/local/bin/ffplay",
+        ],
+    ) {
+        return Ok(format!("{ffplay} -autoexit -nodisp -i pipe:0"));
     }
     bail!(
         "no local playback command found; install sox (`play`) or ffplay, or use --endpoint ssh:<host>"
     )
 }
 
-fn local_record_command() -> Result<String> {
-    if Path::new("/opt/homebrew/bin/rec").is_file() {
-        return Ok("/opt/homebrew/bin/rec -q -t wav -".to_string());
-    }
-    if command_in_path("rec") {
-        return Ok("rec -q -t wav -".to_string());
-    }
-    bail!("no local recording command found; install sox (`rec`) or use --endpoint ssh:<host>")
+fn local_record_command() -> Result<RecordCommand> {
+    let program = resolve_preferred_command(
+        "rec",
+        &[
+            "/opt/homebrew/bin/rec",
+            "/usr/local/bin/rec",
+            "/opt/local/bin/rec",
+        ],
+    )
+    .context(
+        "no local recording command found; install sox (`rec`) or use --endpoint ssh:<host>",
+    )?;
+    Ok(RecordCommand::SoxCapture { program })
 }
 
 fn remote_play_command() -> String {
-    "if [ -x /opt/homebrew/bin/play ]; then exec /opt/homebrew/bin/play -t wav -; elif command -v play >/dev/null 2>&1; then exec play -t wav -; elif command -v ffplay >/dev/null 2>&1; then exec ffplay -autoexit -nodisp -i pipe:0; else echo 'no remote playback command found (expected play or ffplay)' >&2; exit 127; fi".to_string()
+    remote_command_with_fallbacks(
+        &[
+            "/opt/homebrew/bin/play",
+            "/usr/local/bin/play",
+            "/opt/local/bin/play",
+        ],
+        "play",
+        "-t wav -",
+        Some((
+            &[
+                "/opt/homebrew/bin/ffplay",
+                "/usr/local/bin/ffplay",
+                "/opt/local/bin/ffplay",
+            ],
+            "ffplay",
+            "-autoexit -nodisp -i pipe:0",
+        )),
+        "no remote playback command found (expected play or ffplay)",
+    )
 }
 
-fn remote_record_command() -> String {
-    "if [ -x /opt/homebrew/bin/rec ]; then exec /opt/homebrew/bin/rec -q -t wav -__MOTLIE_TRIM__; elif command -v rec >/dev/null 2>&1; then exec rec -q -t wav -__MOTLIE_TRIM__; else echo 'no remote recording command found (expected rec)' >&2; exit 127; fi".to_string()
+fn remote_record_command(trim_suffix: &str) -> String {
+    remote_command_with_fallbacks(
+        &[
+            "/opt/homebrew/bin/rec",
+            "/usr/local/bin/rec",
+            "/opt/local/bin/rec",
+        ],
+        "rec",
+        &format!("-q -t wav -{trim_suffix}"),
+        None,
+        "no remote recording command found (expected rec)",
+    )
 }
 
-fn command_in_path(command: &str) -> bool {
-    Command::new("bash")
+fn resolve_preferred_command(command: &str, known_paths: &[&str]) -> Option<String> {
+    known_paths
+        .iter()
+        .find(|path| Path::new(path).is_file())
+        .map(|path| (*path).to_string())
+        .or_else(|| command_path(command))
+}
+
+fn command_path(command: &str) -> Option<String> {
+    let output = Command::new("bash")
         .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .arg(format!("command -v {command} 2>/dev/null"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if resolved.is_empty() {
+        None
+    } else {
+        Some(resolved)
+    }
 }
 
-fn with_trim(record_cmd: &str, seconds: Option<u32>) -> String {
-    let suffix = match seconds {
-        Some(value) => format!(" trim 0 {value}"),
-        None => String::new(),
-    };
-    if record_cmd.contains("__MOTLIE_TRIM__") {
-        record_cmd.replace("__MOTLIE_TRIM__", &suffix)
-    } else {
-        format!("{record_cmd}{suffix}")
+fn remote_command_with_fallbacks(
+    preferred_paths: &[&str],
+    fallback_name: &str,
+    args: &str,
+    alternate: Option<(&[&str], &str, &str)>,
+    error_message: &str,
+) -> String {
+    let mut command = String::new();
+    for path in preferred_paths {
+        command.push_str(&format!("if [ -x {path} ]; then exec {path} {args}; elif ",));
     }
+    command.push_str(&format!(
+        "command -v {fallback_name} >/dev/null 2>&1; then exec {fallback_name} {args};"
+    ));
+
+    if let Some((alternate_paths, alternate_name, alternate_args)) = alternate {
+        for path in alternate_paths {
+            command.push_str(&format!(
+                " elif [ -x {path} ]; then exec {path} {alternate_args};"
+            ));
+        }
+        command.push_str(&format!(
+            " elif command -v {alternate_name} >/dev/null 2>&1; then exec {alternate_name} {alternate_args};"
+        ));
+    }
+
+    command.push_str(&format!(" else echo '{error_message}' >&2; exit 127; fi"));
+    command
 }
 
 fn ensure_success(status: std::process::ExitStatus, label: &str) -> Result<()> {

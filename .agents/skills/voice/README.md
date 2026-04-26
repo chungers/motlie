@@ -12,6 +12,7 @@ This README is the conversational playbook for the repo-local voice skills:
   - `.agents/skills/voice/speak/bin/`
   - `.agents/skills/voice/listen/bin/`
   - `.agents/skills/voice/turn/bin/`
+- one repo-present build should seed all three subskill `bin/` directories; later skill calls should reuse those installed binaries instead of rebuilding
 - if no binary is available for this host, build the most optimized one for the host
 - the build always uses `release`
 - prefer CUDA when the host supports it
@@ -37,8 +38,8 @@ The current `voice-agent` binary is built with all curated voice backends enable
   - `piper`
   - `moonshine`
   - `sherpa`
-- `qwen3-tts.cpp` runtime sidecars for the qwen backend:
-  - copied into each subskill `bin/` directory after a repo-present build
+- `qwen3-tts.cpp` runtime sidecars for the current all-backends voice-agent binary:
+  - installed into the voice subskill `bin/` directories after a repo-present build
 
 What the human should install:
 

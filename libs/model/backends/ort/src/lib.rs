@@ -21,7 +21,10 @@ pub fn build_session_with_target(
     target: OrtExecutionTarget,
 ) -> Result<Session, ModelError> {
     #[allow(unused_mut)]
-    let mut builder = Session::builder().map_err(|err| ModelError::BackendInitialization {
+    #[cfg(not(feature = "cuda"))]
+    let _ = target;
+
+    let builder = Session::builder().map_err(|err| ModelError::BackendInitialization {
         backend,
         message: format!("failed to create ONNX Runtime session builder: {err}"),
     })?;

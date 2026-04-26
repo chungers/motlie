@@ -11,6 +11,7 @@
 | 2026-04-23 | @codex-tts | Simplified the contract further: local audio by default, explicit `ssh:<host>` for remote endpoints, no setup/config path for normal use, and agent-facing docs that require asking the human when local vs remote is ambiguous. |
 | 2026-04-23 | @codex-tts | Clarified that the skill discovers runtime details progressively through the conversation with the human rather than loading a predeclared config upfront. |
 | 2026-04-23 | @codex-tts | Added a conversational playbook with example human prompts, example agent responses, and operational answer patterns for `voice/speak`, `voice/listen`, and `voice/turn`. |
+| 2026-04-24 | @codex-tts | Hardened the repo-present bootstrap path: generic Linux ORT discovery, no build-host path fallback in the binary, a single repo-present build now seeds all three subskill `bin/` directories, and Piper stays on CPU ORT to avoid the reproducible CUDA shutdown abort seen in live smoke validation. |
 
 ## Problem
 
@@ -122,6 +123,7 @@ That helper:
 
 - prefers an installed platform binary under the subskill-local `bin/`
 - installs `voice-agent` into `.agents/skills/voice/<skill>/bin/voice-agent-<os>-<arch>-<profile>-<flavor>` when missing
+- seeds all three `voice/{speak,listen,turn}/bin/` directories from a single repo-present build so later skill invocations reuse the installed binary instead of rebuilding
 - builds `voice-agent` in `release` mode by default when installation is needed
 - executes the installed binary directly rather than using `cargo run`
 - chooses the most optimized installed flavor available at runtime:
@@ -139,7 +141,7 @@ The typed runtime also owns:
 
 - direct invocation of the typed Motlie TTS/ASR backends without shelling out to repo example binaries
 - CUDA feature selection when available
-- qwen3-tts.cpp runtime sidecar handling for installed skill binaries
+- qwen3-tts.cpp runtime sidecar handling for installed skill binaries; the current all-backends voice-agent binary links those sidecars eagerly at process startup
 - a shared curated artifact cache rooted at `.agents/skills/voice/artifacts/hf-cache/`
 - first-use artifact download when the selected backend is missing from that cache
 - explicit failure when captured audio is effectively silent, so the agent can guide the human toward the right microphone device or permission fix
