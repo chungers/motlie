@@ -4,6 +4,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::backend::vz;
+use crate::backend::BackendKind;
 use crate::network::NetworkModes;
 use crate::network_alloc::GuestNetAssignment;
 use crate::spec::{GuestRuntimePaths, GuestSpec};
@@ -19,6 +20,7 @@ pub struct CloudInitArtifacts {
 pub struct LaunchArtifactRenderConfig<'a> {
     pub guest: &'a GuestSpec,
     pub runtime_paths: &'a GuestRuntimePaths,
+    pub backend_kind: BackendKind,
     pub network_modes: NetworkModes,
     pub net_assignment: &'a GuestNetAssignment,
     pub base_dir: &'a Path,
@@ -280,10 +282,7 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         )
         .expect("writing to String cannot fail");
     }
-    if matches!(
-        cfg.network_modes.egress,
-        crate::network::EgressNetMode::VzUserspace
-    ) {
+    if cfg.backend_kind == BackendKind::Vz {
         let vz_artifacts_dir = vz::artifacts_dir(cfg.runtime_paths);
         let vz_vm_name = vz::vm_name(cfg.runtime_paths, &cfg.guest.guest_id);
         if cfg.ssh_ca_pubkey.is_some() {
@@ -590,6 +589,7 @@ mod tests {
         let script = render_launch_script(&LaunchArtifactRenderConfig {
             guest: &guest,
             runtime_paths: &paths,
+            backend_kind: BackendKind::ChShell,
             network_modes: NetworkModes {
                 admin: AdminNetMode::None,
                 egress: EgressNetMode::VhostUser,
@@ -619,13 +619,14 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_uses_vz_launcher_for_vz_userspace() {
+    fn launch_script_uses_vz_launcher_for_vz_backend() {
         let guest = sample_guest();
         let paths = sample_paths();
         let net = sample_net();
         let script = render_launch_script(&LaunchArtifactRenderConfig {
             guest: &guest,
             runtime_paths: &paths,
+            backend_kind: BackendKind::Vz,
             network_modes: NetworkModes {
                 admin: AdminNetMode::None,
                 egress: EgressNetMode::VzUserspace,
@@ -673,5 +674,28 @@ mod tests {
         assert!(script.contains("launch-vz.sh"));
         assert!(script.contains("--vm-name \"$VZ_VM_NAME\""));
         assert!(!script.contains("launch-ch.sh"));
+    }
+
+    #[test]
+    fn launch_script_backend_not_egress_mode_selects_launcher() {
+        let guest = sample_guest();
+        let paths = sample_paths();
+        let net = sample_net();
+        let script = render_launch_script(&LaunchArtifactRenderConfig {
+            guest: &guest,
+            runtime_paths: &paths,
+            backend_kind: BackendKind::ChShell,
+            network_modes: NetworkModes {
+                admin: AdminNetMode::None,
+                egress: EgressNetMode::VzUserspace,
+            },
+            net_assignment: &net,
+            base_dir: Path::new("/tmp/vmm-v1.45/libs/vmm/examples/v1.45"),
+            ssh_ca_pubkey: Some("ssh-ed25519 AAAA-test"),
+        })
+        .unwrap();
+
+        assert!(script.contains("launch-ch.sh"));
+        assert!(!script.contains("launch-vz.sh"));
     }
 }

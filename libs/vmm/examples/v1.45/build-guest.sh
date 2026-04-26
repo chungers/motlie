@@ -992,6 +992,9 @@ if [ -f "$HOME/.env" ]; then
 fi
 DOTENVEOF
 
+# v1.45 Vz image hardening, not a converged CH/Vz image contract yet.
+# The current Vz userspace egress/helper path is certified with background apt
+# timers disabled and apt forced to IPv4; CH v1.4 does not currently bake this.
 systemctl disable apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
 systemctl mask apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
 

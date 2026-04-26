@@ -8,7 +8,7 @@ use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
 #[cfg(target_os = "linux")]
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
 use crate::backend::vz::shell::VzShellBackend;
-use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome};
+use crate::backend::{BackendError, BackendHandle, BackendKind, BackendShutdownOutcome};
 use crate::guestfs::GuestFsError;
 use crate::observability::{
     ControlPlaneObservability, FilesystemObservability, NetworkObservability,
@@ -105,6 +105,15 @@ pub enum RuntimeError {
 }
 
 impl HypervisorBacking {
+    pub fn kind(&self) -> BackendKind {
+        match self {
+            Self::CloudHypervisorShell(_) => BackendKind::ChShell,
+            Self::CloudHypervisorForkExec => BackendKind::ChForkExec,
+            Self::CloudHypervisorVmmThread => BackendKind::ChVmmThread,
+            Self::AppleVirtualizationShell(_) | Self::AppleVirtualization => BackendKind::Vz,
+        }
+    }
+
     pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, RuntimeError> {
         match self {
             Self::CloudHypervisorShell(backend) => Ok(backend.boot(prepared)?),

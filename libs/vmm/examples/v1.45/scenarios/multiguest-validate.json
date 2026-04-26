@@ -1,6 +1,6 @@
 {
   "name": "multiguest-validate",
-  "description": "Boot alice and bob, verify guest-specific VFS plus Motlie vnet egress, then shut both guests down.",
+  "description": "Boot alice and bob, verify guest-specific VFS plus Vz userspace egress, then shut both guests down.",
   "steps": [
     { "action": "boot", "guest": "alice" },
     { "action": "ready", "guest": "alice" },

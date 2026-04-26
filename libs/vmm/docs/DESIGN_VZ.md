@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @codex-vz | Reconcile the design text with the live v1.45 slice: Motlie VFS is the current filesystem backing, Vz userspace egress is backend-owned, and `vz-userspace` is not a global launcher selector |
 | 2026-04-25 | @codex-vz | Link Vz backend readiness to the shared guest convergence contract: `control-plane-ready` is an interactive-readiness gate, while full VFS/VNET/egress certification remains an explicit harness validation step |
 | 2026-04-17 | @vmm-vz-cdx | Record `libs/vfs/examples/v1.05` as the Tart-backed guest-image / guest-contract probe, document Tart as an interim signed launcher ahead of `vz-runner`, and make the `v1.05` -> `v1.15` sequencing explicit |
 | 2026-04-13 | @codex-vz | Address PR 163 review findings: declare the macOS 12 floor, add the helper entitlement/signing and build/discovery story, define the Rust↔Swift config/control contracts, harden readiness, describe vsock/cloud-init delivery, and tighten several factual details |
@@ -523,33 +524,49 @@ The backend therefore has two separate responsibilities:
 - ensure host shares exist with matching tags before boot
 - ensure the NoCloud datasource is attached as a separate boot-time artifact
 
-This means `FilesystemBacking::HypervisorManaged` is the correct default Vz path
-for shared directories. We do not need `backend::motlie::vfs` for the first Vz
-slice.
+This was the original phase-1 target. The live `v1.45` slice deliberately uses
+`FilesystemBacking::MotlieVfs` instead:
+
+- host directory sharing is validated through the same Motlie VFS server and
+  guest FUSE path used by the CH parity flow
+- Vz bridges the VFS transport over the Vz vsock runner instead of using CH
+  vhost-user/vsock wiring
+- `FilesystemBacking::HypervisorManaged` remains a future simplification
+  candidate, not the current default
+
+Future convergence work can decide whether Vz should move to native VirtioFS,
+whether CH should retain Motlie VFS for the shared product path, or whether
+both should share one backend-neutral VFS core behind platform adapters. Until
+then, docs and scenarios must describe the actual `MotlieVfs` backing.
 
 ### Networking
 
 The current `NetworkModes` model is CH/Motlie-oriented. Vz phase 1 should not
 try to emulate every existing mode.
 
-Recommended Vz mapping:
+Live `v1.45` mapping:
 
-- `AdminNetMode::None + EgressNetMode::None`
-  - boot without a network device
-- `AdminNetMode::None + EgressNetMode::VhostUser`
-  - map to one NAT-backed virtio NIC with `VZNATNetworkDeviceAttachment`
-- all other combinations
+- `AdminNetMode::None + EgressNetMode::VzUserspace`
+  - accepted only for `BackendKind::Vz`
+  - launches the Vz userspace egress helper and configures the guest default
+    route through that helper
+- all other combinations for Vz
   - reject as unsupported for Vz phase 1
 
 Reasoning:
 
 - Vz does not consume the existing userspace `motlie-vnet` vhost-user socket
-- simple NAT is the closest equivalent to “guest has outbound network access”
+- the current helper is the closest equivalent to “guest has outbound network
+  access” for this slice
 - bridged and vmnet custom topologies can come later, but they should be added
   as explicit Vz network modes, not hidden behind CH vocabulary
 
-This implies `validate_network_modes(...)` must eventually become
-backend-sensitive, or Vz must add its own validation during boot.
+The backend boundary is enforced before launch rendering:
+
+- CH/common validation does not accept `EgressNetMode::VzUserspace`
+- Vz validation requires `AdminNetMode::None + EgressNetMode::VzUserspace`
+- `render_launch_script` selects `launch-vz.sh` from `BackendKind::Vz`, not
+  from egress mode alone
 
 ### Vsock
 
@@ -820,7 +837,7 @@ see them as normal orchestrator failures.
 
 ### Phase 4: Harness validation
 
-- add a macOS-only `examples/v1.4` scenario or smoke target
+- add a macOS-only `examples/v1.45` scenario or smoke target
 - verify:
   - boot reaches readiness
   - `VmHandle::exec("/bin/true", ...)` works

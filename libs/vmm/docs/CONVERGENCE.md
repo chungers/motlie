@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @codex-vz | Make the v1.45 Vz image hardening caveat explicit: apt-daily masking and ForceIPv4 are current Vz slice assumptions, not a converged CH/Vz image contract |
 | 2026-04-25 | @codex-vz | Treat prebuilt host Vz runner/egress helper artifacts as launch prerequisites by default; first-contact startup must not hide host cargo builds |
 | 2026-04-25 | @codex-vz | Tighten v1.45 Vz first-contact enforcement: service units, SSH CA config, agent-state scripts, CLIs, and packages are base-image contract; runtime only stages dynamic mounts/CA/principal/identity and restarts VFS |
 | 2026-04-25 | @codex-vz | Remove v1.45 Vz first-contact dead ends inherited from standalone smoke scripts: no runtime guest builds, no runtime npm repair, and no default per-guest seed DMG creation |
@@ -81,6 +82,10 @@ unless the underlying platform forces that difference and the docs explain why.
 
 The v1.45 Vz launcher now enforces the first slice of this contract:
 
+- `build-guest.sh` masks `apt-daily`/`unattended-upgrades` and forces apt IPv4
+  for the current Vz userspace egress helper; these are documented Vz slice
+  assumptions until shared image convergence either applies them to CH too or
+  removes/narrows them with explicit validation
 - first-contact auto-provisioning defaults to `MOTLIE_VZ_INLINE_VALIDATION=0`
   when launched through `libs/vmm`
 - `MOTLIE_VZ_CONTROL_READY_FILE` is the `interactive-ready` gate, not the full

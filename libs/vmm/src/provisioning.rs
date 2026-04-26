@@ -10,8 +10,8 @@ use crate::network::NetworkModes;
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
 use crate::observability::VmObservability;
 use crate::orchestrator::{
-    LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy, ShutdownReport,
-    VmHandle, boot, prepare,
+    boot, prepare, LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy,
+    ShutdownReport, VmHandle,
 };
 use crate::spec::{GuestRuntimePaths, GuestSpec, RuntimeNamespace};
 use crate::ssh::{ExecOutput, GuestPtySession, PrincipalResolver, PtyRequest, SshProxyError};
@@ -237,6 +237,7 @@ impl GuestProvisioner {
                 PrepareRequest {
                     guest: spec.clone(),
                     namespace: self.inner.namespace.clone(),
+                    backend_kind: self.inner.services.runtime.hypervisor.kind(),
                     network_modes: self.inner.network_modes,
                     base_dir: self.inner.base_dir.clone(),
                     ssh_ca_pubkey: Some(self.inner.ssh_ca_pubkey.clone()),

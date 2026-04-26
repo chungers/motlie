@@ -17,8 +17,8 @@ use motlie_vmm::network::{AdminNetMode, EgressNetMode, NetworkModes};
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig, Ipv4Subnet};
 use motlie_vmm::observability::VmObservability;
 use motlie_vmm::orchestrator::{
-    LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy, ShutdownReport,
-    VmHandle, boot, prepare,
+    boot, prepare, LifecycleServices, OrchestratorError, PrepareRequest, ReadinessPolicy,
+    ShutdownReport, VmHandle,
 };
 use motlie_vmm::provisioning::{
     GuestProvisioner, GuestProvisionerConfig, ProvisioningGuestRequest,
@@ -32,7 +32,7 @@ use motlie_vmm::spec::{
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError, new_guest_registry,
+    self, new_guest_registry, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError,
 };
 use pty::{PtyScenarioError, PtyScenarioResult};
 use scenario::{ScenarioRunResult, ScenarioRunStatus};
@@ -454,6 +454,7 @@ async fn main() -> Result<(), DynError> {
         PrepareRequest {
             guest,
             namespace: instance.namespace.clone(),
+            backend_kind: runtime.hypervisor.kind(),
             network_modes: NetworkModes {
                 admin: AdminNetMode::None,
                 egress: EgressNetMode::VzUserspace,
@@ -710,7 +711,7 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
     ensure_contains("route", &route.stdout, "ROUTE_OK")?;
     checks.push(ScenarioCheck {
         name: "route".to_string(),
-        detail: "default route points at Motlie vnet".to_string(),
+        detail: "default route points at the Vz userspace egress gateway".to_string(),
     });
 
     let outbound = wait_for_egress_ready(handle, Duration::from_secs(30))
@@ -757,7 +758,7 @@ async fn run_smoke(handle: &VmHandle) -> Result<Vec<ScenarioCheck>, HarnessError
     ensure_contains("apt-update", &apt_update.stdout, "APT_OK")?;
     checks.push(ScenarioCheck {
         name: "apt-update".to_string(),
-        detail: "Debian package index refresh succeeded over Motlie vnet".to_string(),
+        detail: "Debian package index refresh succeeded over Vz userspace egress".to_string(),
     });
     Ok(checks)
 }

@@ -192,7 +192,7 @@ impl ShadowEngine {
                 scrollback: DEFAULT_SCROLLBACK,
             }),
             "motlie-vmm",
-            "v1.4",
+            "v1.45-vz",
             Box::<Vec<u8>>::default(),
         );
         Self { terminal }
