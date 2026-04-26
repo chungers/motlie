@@ -9,6 +9,7 @@ Draft.
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-04-26 | @gpt55-dgx | Initial DESIGN for GitHub issue #226: local/remote tmux session selector TUI, session detail sources, monitoring mode, modal create/kill flows, accepted current-PTY attach gap, host-wide SSH integration, and SVG mock. |
+| 2026-04-26 | @opus47-macos-tmux | Proposed (pending @gpt55-dgx acceptance): live session-list event stream via tmux control-mode notifications; focus model with `l` / `v` / `Esc` and visual focus borders; both panes scrollable with R-pane resample-backwards; bold-green motlie ASCII placeholder when MOTD absent (LT bypasses 30% cap to fit); PTY handoff non-functional requirement (no VTE-in-middle); spawn-and-wait attach with `setpgid`+`tcsetpgrp` signal hygiene; default-attach polarity with opt-in `--print-session` and opt-in `--dashboard` (re-enter on clean detach, bounded by `child.status.success()` AND list refresh AND user pick); two new accepted library gaps (`HostHandle::watch_host_events()`, `ScrollbackQuery::LinesRange`); alternatives B/C moved to appendix; testing-strategy additions; open-questions resolutions. |
 
 ## Product Scope
 
@@ -60,28 +61,105 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - `LT` displays the target host `/etc/motd`.
 - `LT` height is dynamic: enough lines to show MOTD content, capped at 30% of
   the left-pane height. `LB` receives the remaining height.
+- (@opus47-macos-tmux 2026-04-26 — proposed) When `/etc/motd` is missing,
+  empty, or unreadable, `LT` renders a built-in bold-green motlie ASCII
+  placeholder followed by a `(no /etc/motd)` caption (or
+  `(motd unavailable: <reason>)` on read failure). In this case `LT` height
+  bypasses the 30% cap and expands to exactly fit
+  `ascii_rows + caption_row + chrome` so the user always sees the full art.
+  When `L_width < 48` columns or there is not enough vertical room to expand,
+  fall back to a single-line `motlie · no /etc/motd` (still bold-green). The
+  ASCII asset is baked into the binary as a `&'static str` (no inline ANSI
+  escapes); styling is applied at render time via ratatui
+  `Style { fg: Color::Green, add_modifier: Modifier::BOLD }`. Asset glyphs
+  (use exactly):
+
+  ```text
+  ███╗   ███╗ ██████╗ ████████╗██╗     ██╗███████╗
+  ████╗ ████║██╔═══██╗╚══██╔══╝██║     ██║██╔════╝
+  ██╔████╔██║██║   ██║   ██║   ██║     ██║█████╗
+  ██║╚██╔╝██║██║   ██║   ██║   ██║     ██║██╔══╝
+  ██║ ╚═╝ ██║╚██████╔╝   ██║   ███████╗██║███████╗
+  ╚═╝     ╚═╝ ╚═════╝    ╚═╝   ╚══════╝╚═╝╚══════╝
+  ```
 - `LB` lists tmux sessions on the target host and has default focus.
-- Up and Down move the highlighted session in `LB`.
-- Left and Right resize the `L` / `R` split in the main selector view.
+- (@opus47-macos-tmux 2026-04-26 — proposed) `LB` and `R` are both scrollable.
+  `LB` viewport scrolls automatically to keep the highlighted row visible when
+  `len(sessions) > visible_rows`. A position indicator (e.g., `5/12`) is shown
+  in `LB` chrome or in the status bar.
+- Up and Down move the highlighted session in `LB` *when focus is `Lb`*.
+  (@opus47-macos-tmux 2026-04-26 — proposed) When focus is `R`, Up/Down scroll
+  the `R` content one line; `PgUp`/`PgDn` page through; `Home`/`End` jump to
+  top/bottom of the buffer. When focus is `Lb`, `PgUp`/`PgDn` page through the
+  session list and `Home`/`End` jump to first/last session.
+- Left and Right resize the `L` / `R` split in the main selector view (focus-
+  independent: layout key, not content key).
 - `R` initially shows sampled detail for the highlighted session.
 - `R` detail is supplied through a trait so future view models can summarize or
   otherwise transform session content.
+- (@opus47-macos-tmux 2026-04-26 — proposed) When focus is `R` in sample mode
+  and the user scrolls past the top of the currently sampled buffer, the
+  detail source must resample backwards: fetch additional scrollback for the
+  highlighted session, prepend it to the buffer, and anchor the viewport so
+  the user's scroll position stays on the same line of content (no visual
+  jump). Per-page fetches must be chunked, not full-buffer rebuilds.
+- (@opus47-macos-tmux 2026-04-26 — proposed) When focus is `R` in monitor
+  mode and the user scrolls up, auto-tail pauses; newly received history is
+  appended to the buffer but the viewport stays anchored at the user's
+  position. `End` (or jump-to-bottom key) re-engages auto-tail.
 - Pressing `m` puts `R` into monitoring mode for the highlighted session, using
-  the `motlie-tmux` monitor/history pipeline to show live updates.
+  the `motlie-tmux` monitor/history pipeline to show live updates. (Focus-
+  independent: operates on the highlighted session regardless of which pane
+  has focus.)
 - Pressing `n` opens a centered `New Session` modal with a session-name text
   field and `Cancel` / `Ok` buttons.
 - Pressing `k` opens a centered `Kill session <name>?` confirmation modal with
   `Cancel` / `Ok` buttons.
 - In modal dialogs, Left and Right choose between `Cancel` and `Ok`; Enter
-  exits the modal and applies `Ok` when selected.
+  exits the modal and applies `Ok` when selected. (@opus47-macos-tmux
+  2026-04-26 — proposed) `Esc` in a modal is `Cancel` (closes without
+  applying).
+- (@opus47-macos-tmux 2026-04-26 — proposed) Pressing `v` moves focus from
+  `Lb` to `R` (no-op if already `R`). Pressing `l` moves focus from `R` to
+  `Lb` (no-op if already `Lb`). Outside any modal, `Esc` is equivalent to
+  `l` when focus is `R`, and is a no-op when focus is `Lb` (use `Ctrl-C` to
+  exit). The currently focused pane must be visually distinguished from the
+  unfocused pane via border style — a bright/colored or doubled border for
+  the focused pane, dim/single for the unfocused. The status-bar focus
+  indicator (below) is complementary, not a substitute.
 - Pressing `g` or Enter in the main selector exits the TUI and attaches the
-  current user PTY to the highlighted session.
+  current user PTY to the highlighted session. (Focus-independent: attach
+  always operates on the `Lb` highlight regardless of which pane has focus.)
 - The binary accepts an optional SSH URI / host target. Omitted means local host.
 - For SSH targets, listing, MOTD, sampling, create, kill, monitor, and attach
   all operate against the SSH target.
 - For SSH targets, attach must open an interactive SSH PTY to the target host
   and attach that remote PTY to the selected remote tmux session.
 - A bottom status bar shows target host, current time, and supported keys.
+  (@opus47-macos-tmux 2026-04-26 — proposed) The status bar must additionally
+  show the current focus (`Lb` vs `R`) and a focus-conditional key-hint set:
+  when `Lb`-focused, include `v view detail`; when `R`-focused, include
+  `l list`. Always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
+  `Ctrl-C exit`) appear in both modes.
+- (@opus47-macos-tmux 2026-04-26 — proposed) The selector must keep `LB`
+  consistent with the target host's tmux state without user-driven refresh,
+  by subscribing at startup to a host-level event stream and reconciling on
+  each event by stable session id (not name — `%session-renamed` requires
+  id-based identity; `SessionInfo.id` exists). Polling
+  (`list_sessions()` every N seconds) is acceptable only as a fallback when
+  the control-mode link is unavailable; cadence is specified in §Data Flow →
+  Live Session List below. See §Accepted motlie-tmux Library Gaps → Host
+  Event Stream for the new accepted gap this requires.
+- (@opus47-macos-tmux 2026-04-26 — proposed) Default mode (no flag): on `g`
+  or Enter, leave the TUI cleanly and spawn-and-wait attach (see §Data Flow →
+  Attach). When invoked with `--print-session`, the binary instead leaves the
+  TUI cleanly, prints the selected session name (and only the session name)
+  followed by a newline to stdout, and exits 0; cancellation (`Ctrl-C`, no
+  selection) exits non-zero with no stdout. All UI rendering, status, and
+  errors go to stderr only. When invoked with `--dashboard`, the binary
+  re-enters the TUI on clean child exit (see §Data Flow → Attach for the
+  bounded re-entry rule). `--print-session` and `--dashboard` are mutually
+  exclusive; combining them is a startup error.
 - The binary must use `motlie-tmux` for tmux operations and must not duplicate
   tmux command logic in the binary.
 
@@ -98,6 +176,26 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - The app must be usable as an SSH `ForceCommand` entrypoint.
 - All accepted `motlie-tmux` library gaps must be implemented in the library,
   not worked around by shell command duplication in the binary.
+- (@opus47-macos-tmux 2026-04-26 — proposed) The attach handoff must transfer
+  the user's controlling terminal directly to the attached `tmux` (or
+  `ssh tmux`) process. The selector binary must not run a nested terminal
+  emulator, VTE buffer, or byte-proxy between the user's PTY and the
+  attached process. Concretely: before handoff the selector stops monitor
+  state, leaves the alternate screen, and restores termios; for local
+  targets it spawns `tmux attach-session -t <name>` as a child with
+  inherited stdio (`stdin`/`stdout`/`stderr`); for SSH targets it spawns
+  `ssh -t [...] tmux attach-session -t <name>` with inherited stdio. No
+  `pipe()` wrapping. No re-read into the binary's TUI. See §Data Flow →
+  Attach and §Accepted Library Gaps → Current PTY Attach.
+- (@opus47-macos-tmux 2026-04-26 — proposed) `R`-pane scroll-back fetches
+  must be chunked per page, not full-buffer rebuilds, so SSH-target detail
+  panes remain responsive on long-lived sessions. See §Accepted Library
+  Gaps → ScrollbackQuery::LinesRange.
+- (@opus47-macos-tmux 2026-04-26 — proposed) Monitor-mode rolling history
+  is bounded by line count (recommended: 10 000 lines, configurable in a
+  follow-up; PLAN to confirm). On overflow, oldest lines are dropped. Bound
+  must be documented and enforced to prevent unbounded memory growth on
+  busy sessions.
 
 ## System Design
 
@@ -114,7 +212,9 @@ tmux_select binary
         +-- SessionStore
         |      +-- HostHandle::list_sessions()
         |      +-- HostHandle::create_session()
-        |      +-- HostHandle::session(name)?.kill()
+        |      +-- HostHandle::session(name).await?           // -> Option<Target>
+        |          .ok_or(SessionVanished)?                   // race: see below
+        |          .kill().await?
         |
         +-- MotdSource
         |      +-- local read /etc/motd
@@ -159,6 +259,30 @@ tmux_select 'ssh://user@host?identity-file=/path/to/key'
 The final CLI shape can also accept `--target <ssh-uri>` if PLAN chooses a more
 explicit flag. DESIGN only requires one accepted form and consistent help text.
 
+(@opus47-macos-tmux 2026-04-26 — proposed) Pin one form: **positional SSH URI**
+as drafted (`tmux_select [ssh-uri]`). Reject `--target` for v1 to keep the
+help text and ForceCommand spec unambiguous; revisit in a follow-up if PLAN
+finds positional friction with deployment tools.
+
+(@opus47-macos-tmux 2026-04-26 — proposed) Additional flags:
+
+| Flag | Behavior |
+|------|----------|
+| (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). Selector exits with the child's `ExitStatus`. |
+| `--print-session` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --print-session)"`. |
+| `--dashboard` | TUI → select → spawn-and-wait attach → on clean child exit (`status.success()`), re-enter the TUI; on non-zero child exit, exit with the child's status. `Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). See §Data Flow → Attach for the bounded re-entry rule. |
+| `--print-session` + `--dashboard` | Mutually exclusive — startup error. |
+
+Polarity rationale (default attach): the binary's primary product is a session
+selector that attaches; ForceCommand is the headline deployment story; users
+typing `tmux_select` directly expect to enter tmux. Composable usage is opt-in
+via `--print-session`.
+
+ForceCommand-mode incompatibility: `--print-session` is incompatible with
+ForceCommand mode (the user has no shell to consume the output). ForceCommand
+deployments must omit the flag; the binary should warn (stderr) on a
+best-effort heuristic if both are detected.
+
 ## Layout
 
 The terminal is split into:
@@ -171,21 +295,49 @@ The body area is split horizontally into `L` and `R`.
 `L` is split vertically:
 
 - `LT`: MOTD, height `min(rendered_motd_lines + chrome, 30% of L height)`
-- `LB`: session list, remaining height
+  when MOTD is present. (@opus47-macos-tmux 2026-04-26 — proposed) When MOTD
+  is absent/empty/unreadable, `LT` height = `ascii_rows + caption + chrome`
+  (bypasses the 30% cap so the motlie placeholder fully renders); narrow-
+  terminal fallback collapses `LT` to a single line. See §Functional
+  Requirements for the placeholder rendering rule.
+- `LB`: session list, remaining height. (@opus47-macos-tmux 2026-04-26 —
+  proposed) Viewport scrolls to keep the highlighted row visible. Position
+  indicator shown.
 
-The main selector keymap is:
+(@opus47-macos-tmux 2026-04-26 — proposed) **Focus model.** The main view has
+two focus states: `Lb` (default) and `R`. Focus transitions are explicit:
 
-| Key | Action |
-|-----|--------|
-| Up / Down | Move highlighted session |
-| Left / Right | Resize `L` / `R` split |
-| `m` | Start/switch `R` monitoring mode for highlighted session |
-| `n` | Open `New Session` modal |
-| `k` | Open kill confirmation modal |
-| Enter / `g` | Attach highlighted session |
-| Ctrl-C | Exit selector without attach |
+- `v` → focus `R` (no-op if already `R`)
+- `l` → focus `Lb` (no-op if already `Lb`)
+- `Esc` outside any modal: equivalent to `l` when focus is `R`; no-op when
+  focus is `Lb` (use `Ctrl-C` to exit). `Esc` inside any modal is equivalent
+  to that modal's `Cancel` button.
 
-Modal keymaps override the main keymap.
+The currently focused pane must be visually distinguished from the unfocused
+pane via border style (bright/colored or doubled for focused; dim/single for
+unfocused). The status-bar focus indicator (target host, time, focus, key
+hints) is complementary, not a substitute.
+
+Main-selector keymap (focus-aware):
+
+| Key | `Lb`-focused | `R`-focused |
+|-----|--------------|-------------|
+| Up / Down | Move highlight; LB viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
+| PgUp / PgDn | Page through session list | Page through R buffer |
+| Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
+| `l` | (no-op) | Focus → `Lb` |
+| `v` | Focus → `R` | (no-op) |
+| `Esc` | (no-op outside modal; `Cancel` inside modal) | Focus → `Lb` (outside modal); `Cancel` inside modal |
+| Left / Right | Resize `L`/`R` split | Resize `L`/`R` split (focus-independent) |
+| `m` | Start/switch monitoring on highlight | Same |
+| `n` | Open `New Session` modal | Same |
+| `k` | Open kill-confirmation modal | Same |
+| Enter / `g` | Attach highlight | Attach highlight (focus-independent) |
+| `Ctrl-C` | Exit selector without attach | Exit selector without attach |
+
+Modal keymaps override the main keymap. In modals: Left/Right move between
+`Cancel` and `Ok`; `Enter` exits and applies `Ok` if selected; `Esc` is
+`Cancel`.
 
 ## SVG Mock
 
@@ -195,6 +347,24 @@ The DESIGN mock source is checked in beside this document:
 
 If GitHub issue rendering supports the chosen SVG embedding path, this same SVG
 should be attached or linked from issue #226 after the branch is pushed.
+
+(@opus47-macos-tmux 2026-04-26 — proposed) The SVG mock must include the
+following panels (current revision shows main + `New Session` modal only):
+
+1. Main selector view, `Lb`-focused (current — keep, but update border styles
+   to show focused-`Lb`/unfocused-`R`).
+2. Main selector view, `R`-focused (new — same layout, but with `Lb` border
+   dim/single and `R` border bright/colored or doubled).
+3. `R` in monitor mode (new — show the live `HistoryHandle` styling: pinned
+   viewport indicator, sample-vs-monitor mode label).
+4. `New Session` modal (current — keep).
+5. `Kill session <name>?` confirmation modal (new — same layout, different
+   title and prompt).
+6. MOTD-absent state (new — `LT` rendered with the bold-green motlie ASCII
+   placeholder and `(no /etc/motd)` caption; `fill="#22c55e"` or chosen brand
+   green).
+
+PLAN owns the SVG update.
 
 ## R Pane Detail Source
 
@@ -210,9 +380,34 @@ trait SessionDetailSource {
         session_name: &str,
     ) -> anyhow::Result<()>;
 
-    async fn tick(&mut self) -> anyhow::Result<Option<String>>;
+    // (@opus47-macos-tmux 2026-04-26 — proposed) DetailDelta replaces the
+    // bare Option<String> so monitor mode can express "append" vs "replace"
+    // semantics, and so the UI can know whether to scroll the viewport.
+    // Some(Append(text))  — new content arrived (monitor); append at tail.
+    // Some(Replace(text)) — full re-render (sample re-fetched on highlight).
+    // None                — no change since last tick.
+    async fn tick(&mut self) -> anyhow::Result<Option<DetailDelta>>;
+
+    // (@opus47-macos-tmux 2026-04-26 — proposed) Resample-backwards entry
+    // point. UI calls this when focus is `R` and the user scrolls past the
+    // top of the currently rendered buffer. Returns lines older than
+    // `before_line` (where `before_line` is an index into the source's
+    // current buffer's oldest line); up to `count` lines. Empty Vec means
+    // "no more history available." `SampleDetailSource` implements this via
+    // `Target::sample_text(&ScrollbackQuery::LinesRange { older_than_lines,
+    // count })` — see §Accepted Library Gaps.
+    async fn fetch_older(
+        &mut self,
+        before_line: usize,
+        count: usize,
+    ) -> anyhow::Result<Vec<String>>;
 
     async fn deactivate(&mut self) -> anyhow::Result<()>;
+}
+
+pub enum DetailDelta {
+    Append(String),
+    Replace(String),
 }
 ```
 
@@ -220,8 +415,18 @@ Initial shipped implementations:
 
 - `SampleDetailSource`: resolves `host.session(name)`, captures session content,
   sorts panes by `(window, pane)`, omits empty panes, and renders text sections.
+  (@opus47-macos-tmux 2026-04-26 — proposed) `fetch_older` issues
+  `Target::sample_text(&ScrollbackQuery::LinesRange { older_than_lines, count })`
+  for paginated backwards fetch (see §Accepted Library Gaps →
+  ScrollbackQuery::LinesRange).
 - `MonitorDetailSource`: starts `host.watch_session()` or the equivalent
   monitor/history composition, then renders a rolling history into `R`.
+  (@opus47-macos-tmux 2026-04-26 — proposed) When the user scrolls up in
+  monitor mode, auto-tail pauses; the source continues to receive and append
+  events to its internal buffer, but the UI viewport stays anchored at the
+  user's position. `fetch_older` for monitor mode falls back to a one-shot
+  `Target::sample_text(&LinesRange { ... })` against the same target —
+  monitor history rolls forward, so historical fetch reuses sample.
 
 Implementation should prefer static dispatch for shipped modes:
 
@@ -240,28 +445,101 @@ initial hot path.
 
 ### Startup
 
-1. Parse CLI target.
+1. Parse CLI target and flags (`--print-session`, `--dashboard`; mutually
+   exclusive — error on both).
 2. Connect to local or SSH target with `motlie-tmux`.
-3. Load target host MOTD.
+3. Load target host MOTD (or render the motlie placeholder when absent).
 4. List sessions.
-5. Initialize UI state with `LB` focused and first session highlighted.
-6. Render sample detail for the highlighted session, if any.
+5. (@opus47-macos-tmux 2026-04-26 — proposed) Subscribe to host-level event
+   stream (see §Live Session List). On subscribe failure, fall back to
+   polling; emit a status-bar indicator so the user knows refresh is degraded.
+6. Initialize UI state with `LB` focused and first session highlighted.
+7. Render sample detail for the highlighted session, if any.
+
+### Live Session List (@opus47-macos-tmux 2026-04-26 — proposed)
+
+The `LB` list must stay consistent with the target host's tmux state without
+user-driven refresh. Other clients may create, kill, or rename sessions;
+sessions may exit unexpectedly. The selector must reconcile.
+
+Preferred mechanism: tmux control-mode notifications. The library already
+parses `%`-prefixed control-mode lines as `ControlModeMessage::Notification`
+(`libs/tmux/src/monitor.rs:58–96`) but currently discards them
+(`monitor.rs:337–341`). The proposed accepted library gap (§Accepted Library
+Gaps → Host Event Stream) surfaces these as a host-level
+`HostEventStream` that the selector subscribes to.
+
+Subscribe-and-reconcile loop:
+
+1. On startup (after initial `list_sessions()`), call
+   `host.watch_host_events()` and spawn a tokio task to drain it.
+2. On each event:
+   - `SessionsChanged` / `SessionAdded` / `SessionClosed`: re-issue
+     `list_sessions()` and merge into `LB` model by stable session id (not
+     name — `%session-renamed` requires id-based identity;
+     `SessionInfo.id` exists in `libs/tmux/src/types.rs:66`).
+   - `SessionRenamed { id, old, new }`: update display name in place; preserve
+     highlight.
+   - `WindowAdded` / `WindowClosed`: update `window_count` for the affected
+     session.
+   - `ClientDetached` / `ClientAttached`: update `attached` flag.
+   - `Disconnect { reason }`: control-mode link died. Show status-bar
+     indicator. Begin polling fallback (recommended cadence: 5s) until
+     reconnect succeeds.
+3. Reconciliation must preserve the user's highlight when possible: if the
+   highlighted session id still exists, keep it highlighted; if it
+   disappeared, move highlight to the next valid row (or to the previous if
+   the highlighted row was the last).
+4. Empty-list state (zero sessions): see §Empty Session List below.
+5. Under `--dashboard`, the host-event subscription runs on a separate tokio
+   task that survives the spawn-and-wait attach window. Events arriving
+   during attach are buffered (bounded queue, drop-oldest on overflow); the
+   buffer drains on re-entry before the first redraw.
+
+Polling fallback semantics (when control-mode link is unavailable): re-issue
+`list_sessions()` every 5s. Indicate "polling" mode in the status bar to
+distinguish from event-driven freshness.
+
+### Empty Session List (@opus47-macos-tmux 2026-04-26 — proposed)
+
+When the target host has zero tmux sessions (at startup, or after a kill
+under `--dashboard` re-entry):
+
+1. `LB` renders an inline placeholder row: `(no sessions on <host> — press n
+   to create)`.
+2. `R` renders nothing (or an inline hint mirroring the same `n to create`
+   message).
+3. Highlight is unset; `m`, `k`, `g`, `Enter` are all no-ops in this state.
+4. `n` remains active and opens the New Session modal as usual.
+5. ForceCommand mode treats this as the normal first-run path: the user
+   creates their first session via `n`, which then becomes the highlight,
+   and `Enter` attaches.
 
 ### Highlight Change
 
-1. Up/Down updates selected session index.
-2. If `R` is in sample mode, refresh sample detail for the new session.
+1. Up/Down (when focus is `Lb`) updates selected session index. The `LB`
+   viewport scrolls to keep the highlighted row visible.
+2. If `R` is in sample mode, refresh sample detail for the new session
+   (replace buffer).
 3. If `R` is in monitoring mode, keep monitoring the previous monitored session
    until the user presses `m` again. This avoids implicit monitor teardown when
    the user is only browsing.
+4. (@opus47-macos-tmux 2026-04-26 — proposed) When focus is `R`, Up/Down
+   scroll the `R` content (no LB highlight movement). See §Layout keymap
+   table.
 
 ### Monitoring Mode
 
 1. Pressing `m` stops any existing monitor/detail source.
 2. Start monitoring the highlighted session.
 3. Subscribe to session output and render a bounded rolling history into `R`.
+   (@opus47-macos-tmux 2026-04-26 — proposed) Bound is line-count based;
+   recommended initial value 10 000 lines; oldest dropped on overflow.
 4. Status bar shows the monitored session.
-5. Killing the monitored session or exiting the TUI stops monitor state.
+5. (@opus47-macos-tmux 2026-04-26 — proposed) When focus is `R`, scrolling
+   up pauses auto-tail; new events still append to the source's internal
+   buffer but the viewport stays anchored. `End` re-engages auto-tail.
+6. Killing the monitored session or exiting the TUI stops monitor state.
 
 ### New Session
 
@@ -276,20 +554,87 @@ initial hot path.
 
 1. Pressing `k` opens confirmation for the highlighted session.
 2. User selects `Ok`.
-3. Resolve `host.session(name)`.
-4. Call `Target::kill()`.
+3. (@opus47-macos-tmux 2026-04-26 — proposed) Resolve
+   `host.session(name).await?`. The actual return is `Result<Option<Target>>`
+   (libs/tmux/src/host.rs:344). If `None` (the session was killed by another
+   client between list and resolve), surface a brief inline status message
+   ("session already gone") and let the host-event subscription's
+   reconciliation refresh `LB` — do not error out.
+4. Call `Target::kill()`. On error (connection dropped, permission), show
+   inline error without corrupting terminal state.
 5. Stop monitor state if it was monitoring that session.
-6. Refresh session list.
-7. Move highlight to the next valid row.
+6. (@opus47-macos-tmux 2026-04-26 — proposed) Do not eagerly refresh; the
+   host-event subscription will receive `%sessions-changed` and reconcile
+   `LB` automatically. (If polling fallback is active, re-issue
+   `list_sessions()` here.)
+7. Move highlight to the next valid row. If the killed session was the only
+   one, transition to §Empty Session List state.
 
-### Attach
+### Attach (@opus47-macos-tmux 2026-04-26 — fully respec'd)
 
-1. Pressing Enter or `g` in the main selector records the highlighted session.
-2. Stop monitor/detail state.
-3. Restore raw mode and leave alternate screen.
-4. Resolve the highlighted session to a `Target`.
-5. Call the accepted `motlie-tmux` attach API.
-6. Return the attach exit status as the selector process exit result.
+The attach handoff transfers the user's controlling terminal directly to
+the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
+
+1. Pressing Enter or `g` in the main selector (any focus) records the
+   highlighted session id.
+2. Stop monitor/detail state. Drop any host-event subscription draining task
+   (or under `--dashboard`, leave it running on a separate tokio task with a
+   bounded buffer that survives the attach window).
+3. Restore raw mode and leave the alternate screen. Restore termios to
+   canonical state.
+4. Resolve the highlighted session to a `Target` via
+   `host.session(name).await? .ok_or(SessionVanished)?`. If the session
+   vanished between selection and resolve (race), show stderr message and
+   either re-enter the TUI (under `--dashboard`) or exit non-zero (default).
+5. **Spawn-and-wait** with inherited stdio:
+   - Local target: spawn `tmux attach-session -t <name>` (using socket /
+     resolved tmux binary as needed) as a child with inherited
+     stdin/stdout/stderr. No `pipe()`. No proxy.
+   - SSH target: spawn `ssh -t [opts] <host> tmux attach-session -t <name>`
+     with inherited stdio.
+   - Put the child in its own process group via `setpgid` immediately after
+     fork (or via `Command::process_group(0)`). Set the foreground process
+     group via `tcsetpgrp` so foreground signals (`SIGINT`, `SIGTSTP`,
+     `SIGWINCH`) reach the child, not the parent.
+6. Call `wait()` (parent blocks while child holds the terminal).
+7. On `wait()` return, branch on flag and child exit status:
+
+   ```text
+   wait() returns
+       │
+       ├── --print-session ─→ (unreachable; --print-session bypasses attach)
+       │
+       ├── default mode ────→ exit with child.status as selector exit code.
+       │                      Translate signal-terminated child to
+       │                      `128 + signal` per POSIX shell convention.
+       │
+       └── --dashboard ─────→ if child.status.success():
+                                  re-enter TUI:
+                                    1. re-acquire alt-screen, raw mode
+                                    2. drain buffered host events
+                                    3. re-render LB (state may have changed)
+                                    4. if list_sessions() refresh fails →
+                                         exit with that error (bounded loop:
+                                         no infinite re-entry on broken target)
+                                  else (non-zero child exit):
+                                    exit with child.status.
+                                  Ctrl-C from re-entered TUI exits the
+                                  binary with code 0 (user-initiated).
+   ```
+
+8. Tested assumption (PLAN to verify): in canonical tmux 2.x/3.x, when an
+   attached session is destroyed by another client, the `tmux attach-session`
+   child exits with status 0 — same as user-driven `C-b d` detach. This is
+   why the `--dashboard` re-entry rule (`status.success()`) correctly
+   re-enters on session-killed-elsewhere. PLAN must include a localhost
+   integration test that pins this assumption against the target tmux
+   version.
+
+9. Process count footprint: under default mode, two processes are resident
+   during the attach window (selector + child). Under exec-replace this
+   would be one, but exec-replace forecloses recovery, observability, and
+   testability — rejected. Under `--dashboard`, the same 2× count applies
+   per attach cycle.
 
 ## Accepted motlie-tmux Library Gaps
 
@@ -297,7 +642,7 @@ initial hot path.
 
 Issue #226 accepts adding a foreground attach capability to `motlie-tmux`.
 
-Candidate API:
+API (@opus47-macos-tmux 2026-04-26 — proposed: pinned to spawn-and-wait shape):
 
 ```rust
 pub struct AttachExit {
@@ -320,12 +665,110 @@ Required semantics:
 - SSH targets open an interactive SSH PTY to the remote host and run the correct
   remote tmux attach path there.
 - The API owns tmux and SSH command construction; the binary does not.
+- (@opus47-macos-tmux 2026-04-26 — proposed) Implementation must be
+  spawn-and-wait, not exec-replace: spawn the child with inherited stdio,
+  put it in its own process group via `setpgid` (e.g., via Rust's
+  `std::os::unix::process::CommandExt::process_group(0)` or equivalent),
+  set the foreground process group via `tcsetpgrp`, then `wait()`. Return
+  the child's `ExitStatus` (translate signal-terminated to `128 + signal`).
+  Rationale: spawn-and-wait preserves recovery on post-list/pre-attach
+  failure (race, SSH transient, vanished target), enables per-attach
+  lifecycle logging for ForceCommand fleet ops, and keeps the API
+  testable with standard Rust subprocess patterns. Exec-replace is rejected.
+
+### Host Event Stream (@opus47-macos-tmux 2026-04-26 — proposed, new accepted gap)
+
+The selector requires a host-level event stream to keep `LB` consistent with
+the target's tmux state without polling (see §Functional Requirements and
+§Data Flow → Live Session List).
+
+Today, `motlie-tmux` is per-session-only: `watch_session(name)`,
+`start_monitoring_session(name)`, each opening its own
+`tmux -C attach-session -t <name>` connection
+(`libs/tmux/src/monitor.rs:363–377`). There is no host-scoped event API. The
+control-mode parser already classifies `%`-prefixed notifications as
+`ControlModeMessage::Notification` (`libs/tmux/src/monitor.rs:58–96`) but
+discards them at `monitor.rs:337–341`.
+
+Proposed API:
+
+```rust
+impl HostHandle {
+    pub async fn watch_host_events(&self) -> Result<HostEventStream>;
+}
+
+pub enum HostEvent {
+    SessionsChanged,                                  // %sessions-changed
+    SessionAdded { id: String, name: String },        // derived
+    SessionClosed { id: String, name: String },       // derived
+    SessionRenamed { id: String, old: String, new: String },
+    WindowAdded { session: String, window: u32 },
+    WindowClosed { session: String, window: u32 },
+    ClientAttached { session: String },
+    ClientDetached { session: String },
+    Disconnect { reason: String },                    // control-mode link died
+}
+```
+
+Implementation: open a single shared `tmux -C` connection per host (e.g.,
+`tmux -C new-session -d -s motlie-events` or attach to a long-lived sentinel
+session), surface the already-parsed `Notification` lines as typed
+`HostEvent`s. Reconnect transparently on transient drops; emit
+`Disconnect { reason }` and reconnect events at the boundaries.
+
+Recommended over the alternative (extending `OutputBus` with a host-level
+variant) because the alternative couples host events to per-session monitor
+lifetime — which breaks when there are no sessions (the empty-list state
+must still receive `SessionAdded`).
+
+### ScrollbackQuery::LinesRange (@opus47-macos-tmux 2026-04-26 — proposed, new accepted gap)
+
+The `R` pane's resample-backwards behavior (see §Functional Requirements and
+§R Pane Detail Source) requires a windowed scrollback fetch.
+
+Today, `ScrollbackQuery` (`libs/tmux/src/types.rs:660–668`) supports only:
+
+```rust
+pub enum ScrollbackQuery {
+    LastLines(usize),
+    Until { pattern: Regex, max_lines: usize },
+    LastLinesUntil { lines: usize, stop_pattern: Regex },
+}
+```
+
+None supports a windowed/range fetch ("lines older than offset K, up to N
+lines"). The selector could simulate it by re-issuing
+`LastLines(prev_total + chunk)` and discarding overlap, but this re-fetches
+the entire history each step — O(N²) bandwidth over SSH. Unacceptable for
+long-lived sessions.
+
+Proposed addition:
+
+```rust
+pub enum ScrollbackQuery {
+    LastLines(usize),
+    Until { pattern: Regex, max_lines: usize },
+    LastLinesUntil { lines: usize, stop_pattern: Regex },
+    // new
+    LinesRange { older_than_lines: usize, count: usize },
+}
+```
+
+Semantics: return up to `count` lines older than `older_than_lines` (where
+`older_than_lines` is an offset from the current head/tail, depending on the
+buffer's anchor). Empty result means "no more history available." Used by
+`SampleDetailSource::fetch_older` and `MonitorDetailSource::fetch_older`.
 
 ### Remote MOTD
 
-The binary can use existing `HostHandle::download()` to retrieve `/etc/motd`
-from SSH targets into a temporary local file. If PLAN finds that unsuitable,
-the narrower library addition should be a host-level text-file read helper:
+The binary can use existing `HostHandle::download(remote, local, opts)`
+(`libs/tmux/src/host.rs:522`) to retrieve `/etc/motd` from SSH targets into
+a temporary local file. (@opus47-macos-tmux 2026-04-26 — proposed) The
+fallback rationale below is concrete: `download()` requires temp-file
+lifecycle management (create, write, read-back, cleanup), and `/etc/motd`
+files of unbounded size could waste disk. If those concerns prove
+material in PLAN, the narrower library addition should be a host-level
+text-file read helper:
 
 ```rust
 impl HostHandle {
@@ -371,12 +814,39 @@ Recommended initial deployment policy:
 - `SSH_ORIGINAL_COMMAND` is rejected with a clear message unless an explicit
   admin bypass is configured outside the binary.
 
-## Alternatives
+(@opus47-macos-tmux 2026-04-26 — proposed) Concrete admin-bypass mechanism:
+the binary reads the environment variable `MOTLIE_TMUX_SELECT_BYPASS` at
+startup. If unset or empty, `SSH_ORIGINAL_COMMAND` is rejected with a stderr
+message and the binary exits non-zero. If set to `1` (or any non-empty
+value), the binary exec's `SSH_ORIGINAL_COMMAND` via the user's login shell
+(`/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) and bypasses the TUI entirely.
+Deployments enable this by adding `AcceptEnv MOTLIE_TMUX_SELECT_BYPASS` to
+`sshd_config` for the relevant `Match Group` (or by setting the variable
+via PAM/login.defs for specific users/groups). This keeps the bypass
+configuration external to the binary while giving PLAN a concrete
+mechanism to implement and test.
 
-### A. New Binary Built Directly On motlie-tmux (Recommended)
+(@opus47-macos-tmux 2026-04-26 — proposed) ForceCommand deployments must
+NOT use `--print-session` (the user has no shell to consume stdout).
+Recommended deployments:
 
-Create `tmux_select` as a focused binary that uses `motlie-tmux` APIs for all
-tmux and SSH operations.
+```text
+# Default: TUI selector with attach
+ForceCommand /usr/local/bin/tmux_select
+
+# Dashboard mode: re-enter selector on tmux detach (workspace UX)
+ForceCommand /usr/local/bin/tmux_select --dashboard
+```
+
+## Approach (selected)
+
+(@opus47-macos-tmux 2026-04-26 — proposed: restructured per CLAUDE.md
+greenfield rule "approved alternative becomes the main body of the DESIGN".
+Original Alternatives section, with B and C moved to Appendix A.)
+
+**A. New Binary Built Directly On motlie-tmux** — adopted as the main body
+of this DESIGN. Create `tmux_select` as a focused binary that uses
+`motlie-tmux` APIs for all tmux and SSH operations.
 
 Pros:
 
@@ -389,7 +859,141 @@ Pros:
 Cons:
 
 - needs some TUI state machinery duplicated from existing frontend patterns
-- depends on the accepted attach API being added to `motlie-tmux`
+- depends on three accepted library gaps
+  (`Target::attach_current_pty`, `HostHandle::watch_host_events`,
+  `ScrollbackQuery::LinesRange`)
+
+(@opus47-macos-tmux 2026-04-26 — proposed) Comparison of all three
+alternatives along the four CLAUDE.md greenfield axes:
+
+| Axis | A. New binary on motlie-tmux | B. Extend driver TUI | C. Shell-based selector |
+|------|-------------------------------|-----------------------|--------------------------|
+| Robustness | High — single source of truth in library; bugs caught once | Medium — inherits driver complexity; selector failures may co-fail driver workflows | Low — duplicates tmux/SSH logic; two sources of truth diverge over time |
+| Correctness | High — typed library APIs | Medium — entangled with driver state | Low — string parsing of tmux output; fragile across versions |
+| User experience | Best — minimal, attach-first; ForceCommand-clean | Worse — users see unrelated driver commands | Worst — no preview, no monitor, no live updates |
+| Operability | Good — small binary, single-purpose, testable | Worse — larger binary, broader policy surface | Worst — ad-hoc shell glue, no clean test story |
+
+A wins on all four axes. See Appendix A for B and C considered-but-rejected
+detail.
+
+## Dependency Choices
+
+| Dependency | Use | Decision |
+|------------|-----|----------|
+| `ratatui` | layout/widgets/rendering | Use. Already used by tmux examples and driver frontend. |
+| `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
+| `ansi-to-tui` | optional ANSI rendering for captured/monitored pane content | (@opus47-macos-tmux 2026-04-26 — proposed) Defer to a follow-up. The first pass renders captured content as plain text; styling for captured panes is non-critical UX. The motlie ASCII placeholder is hand-styled via ratatui `Style` with no ANSI parsing required. |
+| `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
+| `tempfile` | remote MOTD download target | Use if remote MOTD is implemented through `HostHandle::download()`. Already a dev dependency in parts of the repo; PLAN should decide package placement. |
+
+## Testing Strategy
+
+DESIGN identifies the test surfaces; PLAN must make these concrete.
+
+- Unit tests for layout calculations:
+  - MOTD height cap (present case)
+  - (@opus47-macos-tmux 2026-04-26 — proposed) MOTD-absent placeholder
+    expansion: `LT` height = `ascii_rows + caption + chrome`, bypasses 30%
+    cap; narrow-terminal fallback collapses to single line
+  - status bar reservation
+  - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
+- Unit tests for state transitions:
+  - highlight movement
+  - sample vs monitor mode
+  - modal button selection
+  - create/kill success and error paths
+  - (@opus47-macos-tmux 2026-04-26 — proposed) focus toggles: `v` `Lb`→`R`,
+    `l` `R`→`Lb`, `Esc` outside modal `R`→`Lb`, no-op when already focused
+  - (@opus47-macos-tmux 2026-04-26 — proposed) `Esc` inside modal = `Cancel`
+- (@opus47-macos-tmux 2026-04-26 — proposed) Style/snapshot tests:
+  - motlie placeholder spans carry `Modifier::BOLD` and `Color::Green`
+  - focused pane border style differs from unfocused pane border style
+- Mock-backed tests through `motlie-tmux`:
+  - session list rendering
+  - detail source rendering
+  - create session refresh and highlight
+  - kill session refresh and highlight
+  - (@opus47-macos-tmux 2026-04-26 — proposed) host-event reconciliation:
+    inject `SessionAdded`/`SessionClosed`/`SessionRenamed`/`Disconnect` events,
+    assert `LB` state matches expected; reconciliation by id (rename keeps
+    highlight on same id even when display name changes)
+  - (@opus47-macos-tmux 2026-04-26 — proposed) scrollback windowing:
+    `SampleDetailSource::fetch_older` issues `LinesRange` and prepends
+    correctly; viewport anchor preserved
+  - (@opus47-macos-tmux 2026-04-26 — proposed) monitor tail-pause: scroll-up
+    pins viewport; `End` re-engages auto-tail
+- Terminal smoke tests:
+  - raw mode and alternate-screen restoration
+  - Ctrl-C behavior
+  - attach path restores terminal before handoff
+  - (@opus47-macos-tmux 2026-04-26 — proposed) panic-path terminal restore:
+    inject a panic during the main loop; assert termios + alt-screen are
+    restored via the panic hook
+  - (@opus47-macos-tmux 2026-04-26 — proposed) signal hygiene: child in own
+    process group via `setpgid` + `tcsetpgrp`; SIGINT/SIGWINCH route to child
+- Localhost integration:
+  - create temporary session
+  - list and sample it
+  - monitor it
+  - kill it
+  - (@opus47-macos-tmux 2026-04-26 — proposed) `--print-session` contract:
+    stdout is exactly `<name>\n` on selection; empty on cancel; exit code 0
+    on selection, non-zero on cancel; stderr can carry diagnostics without
+    polluting stdout (assert via captured stdout in non-TTY harness)
+  - (@opus47-macos-tmux 2026-04-26 — proposed) `--dashboard` re-entry on
+    external kill: attach to a session, kill it via `tmux kill-session -t
+    <name>` from a sibling client, assert child exit status is 0
+    (canonical-tmux assumption), selector re-enters TUI, killed session is
+    absent from refreshed `LB`
+  - (@opus47-macos-tmux 2026-04-26 — proposed) `--dashboard` no-loop on
+    failure: attach, force a non-zero child exit (e.g., target session
+    vanished, or kill-server), assert selector exits with that status (no
+    re-entry)
+  - (@opus47-macos-tmux 2026-04-26 — proposed) `--dashboard` no-loop on
+    refresh failure: attach, detach cleanly, but make `list_sessions()`
+    fail at re-entry; assert selector exits with that error
+- SSH integration:
+  - target an SSH URI
+  - read remote MOTD
+  - list remote sessions
+  - monitor remote session
+  - attach to remote selected session through an interactive PTY
+  - (@opus47-macos-tmux 2026-04-26 — proposed) `SSH_ORIGINAL_COMMAND` is
+    rejected in default mode; bypassed (exec'd via shell) when
+    `MOTLIE_TMUX_SELECT_BYPASS=1` and present
+
+## Open Questions
+
+(@opus47-macos-tmux 2026-04-26 — proposed: previously open questions are
+resolved into decisions below. Truly open items remain at the end.)
+
+### Decided
+
+- **CLI form** — Positional SSH URI only (`tmux_select [ssh-uri]`). No
+  `--target` flag in v1. Revisit if PLAN finds positional friction.
+- **Modal `Esc`** — `Esc` in any modal is equivalent to `Cancel`.
+- **`Esc` outside modal** — Equivalent to `l` when focus is `R`; no-op when
+  focus is `Lb`.
+- **Monitor follow on highlight change** — No automatic follow. Monitor only
+  switches when the user explicitly presses `m` on a different highlight.
+  (Unchanged from initial DESIGN; reaffirmed.)
+- **`New Session` options in v1** — Defaults only (no window size / history
+  flags). Future enhancement.
+- **Remote targets in ForceCommand** — Local-only ForceCommand initially.
+  Operator-invoked CLI mode may pass an SSH URI.
+
+### Still open
+
+- Optional `--exec` flag (exec-replace handoff for ops who want zero
+  residency). DESIGN rejects exec-replace as default; PLAN may evaluate
+  whether to add as opt-in.
+- Detail-source future variants (summarizer / LLM-backed). Trait shape
+  accommodates them; concrete implementations are out of scope here.
+
+## Appendix A: Alternatives Considered (B and C)
+
+(@opus47-macos-tmux 2026-04-26 — proposed: moved here per CLAUDE.md
+greenfield rule. Approved alternative A is the main body above.)
 
 ### B. Extend motlie-tmux-driver TUI
 
@@ -422,58 +1026,3 @@ Cons:
 - duplicates parsing, socket, binary-resolution, SSH, and attach logic
 - creates a second source of truth for tmux behavior
 - weak testability and error consistency
-
-## Dependency Choices
-
-| Dependency | Use | Decision |
-|------------|-----|----------|
-| `ratatui` | layout/widgets/rendering | Use. Already used by tmux examples and driver frontend. |
-| `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
-| `ansi-to-tui` | optional ANSI rendering for captured/monitored pane content | Use only if sample/monitor rendering needs styled output. Plain text is acceptable for the first pass. |
-| `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
-| `tempfile` | remote MOTD download target | Use if remote MOTD is implemented through `HostHandle::download()`. Already a dev dependency in parts of the repo; PLAN should decide package placement. |
-
-## Testing Strategy
-
-DESIGN identifies the test surfaces; PLAN must make these concrete.
-
-- Unit tests for layout calculations:
-  - MOTD height cap
-  - status bar reservation
-  - `L` / `R` resize bounds
-- Unit tests for state transitions:
-  - highlight movement
-  - sample vs monitor mode
-  - modal button selection
-  - create/kill success and error paths
-- Mock-backed tests through `motlie-tmux`:
-  - session list rendering
-  - detail source rendering
-  - create session refresh and highlight
-  - kill session refresh and highlight
-- Terminal smoke tests:
-  - raw mode and alternate-screen restoration
-  - Ctrl-C behavior
-  - attach path restores terminal before handoff
-- Localhost integration:
-  - create temporary session
-  - list and sample it
-  - monitor it
-  - kill it
-- SSH integration:
-  - target an SSH URI
-  - read remote MOTD
-  - list remote sessions
-  - monitor remote session
-  - attach to remote selected session through an interactive PTY
-
-## Open Questions
-
-- Should `tmux_select` use a positional SSH URI, `--target`, or both?
-- Should modal `Esc` cancel, or should only `Cancel` plus Enter close the modal?
-- Should monitor mode follow selection automatically or only switch on `m`? This
-  design chooses only switch on `m` for predictability.
-- Should `New Session` allow window size/history options in the first version?
-  This design says no; use defaults initially.
-- Should remote targets be allowlisted by config for ForceCommand deployments?
-  This design recommends local-only ForceCommand initially.
