@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 use super::event::{FsEvent, FsOpKind};
 use super::inode::{default_root_attrs, InodeKind, InodeTable};
 use super::op::*;
-use super::overlay::{MemOverlay, OverlayEntryKind};
+use super::overlay::{MemOverlay, OverlayAttrs, OverlayEntryKind};
 use super::policy::{AllowAll, PolicyFn};
 
 #[derive(Clone, Debug)]
@@ -140,11 +140,13 @@ pub struct FsServer {
 }
 
 pub struct FsServerBuilder {
-    mounts: Vec<(String, PathBuf, bool, Option<(u32, u32)>)>,
+    mounts: Vec<MountConfig>,
     event_capacity: Option<usize>,
     policy: Option<Box<dyn PolicyFn>>,
     overlay_enabled: bool,
 }
+
+type MountConfig = (String, PathBuf, bool, Option<(u32, u32)>);
 
 impl FsServer {
     pub fn builder() -> FsServerBuilder {
@@ -560,10 +562,12 @@ impl FsServer {
                 return overlay
                     .set_xattr(&mount.tag, &path, name, value.clone(), flags, position)
                     .map(|_| FsResult::Ok)
-                    .unwrap_or_else(|errno| FsResult::Error { errno });
+                    .unwrap_or_else(|errno| FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    });
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -571,13 +575,15 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
         set_xattr(&host_path, name, value, flags, position)
             .map(|_| FsResult::Ok)
-            .unwrap_or_else(|errno| FsResult::Error { errno })
+            .unwrap_or_else(|errno| FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            })
     }
 
     fn do_getxattr(&self, mount: &MountState, inode: u64, name: &str, size: u32) -> FsResult {
@@ -608,11 +614,13 @@ impl FsServer {
                             FsResult::Data { data }
                         }
                     }
-                    Err(errno) => FsResult::Error { errno },
+                    Err(errno) => FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    },
                 };
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -620,7 +628,7 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
@@ -640,7 +648,9 @@ impl FsServer {
                     }
                 }
             }
-            Err(errno) => FsResult::Error { errno },
+            Err(errno) => FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            },
         }
     }
 
@@ -674,11 +684,13 @@ impl FsServer {
                             }
                         }
                     }
-                    Err(errno) => FsResult::Error { errno },
+                    Err(errno) => FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    },
                 };
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -686,7 +698,7 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
@@ -706,7 +718,9 @@ impl FsServer {
                     }
                 }
             }
-            Err(errno) => FsResult::Error { errno },
+            Err(errno) => FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            },
         }
     }
 
@@ -727,10 +741,12 @@ impl FsServer {
                 return overlay
                     .remove_xattr(&mount.tag, &path, name)
                     .map(|_| FsResult::Ok)
-                    .unwrap_or_else(|errno| FsResult::Error { errno });
+                    .unwrap_or_else(|errno| FsResult::Error {
+                        errno: normalize_guest_xattr_errno(errno),
+                    });
             }
             return FsResult::Error {
-                errno: libc::ENOTSUP,
+                errno: normalize_guest_xattr_errno(libc::ENOTSUP),
             };
         }
 
@@ -738,15 +754,18 @@ impl FsServer {
             Some(path) => path,
             None => {
                 return FsResult::Error {
-                    errno: libc::ENOTSUP,
+                    errno: normalize_guest_xattr_errno(libc::ENOTSUP),
                 }
             }
         };
         remove_xattr(&host_path, name)
             .map(|_| FsResult::Ok)
-            .unwrap_or_else(|errno| FsResult::Error { errno })
+            .unwrap_or_else(|errno| FsResult::Error {
+                errno: normalize_guest_xattr_errno(errno),
+            })
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the FUSE lock request fields.
     fn do_getlk(
         &self,
         mount: &MountState,
@@ -784,6 +803,7 @@ impl FsServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the FUSE lock request fields.
     fn do_setlk(
         &self,
         mount: &MountState,
@@ -886,6 +906,9 @@ impl FsServer {
                 OverlayEntryKind::Content(b) => {
                     (FileType::RegularFile, b.len() as u64, InodeKind::Content)
                 }
+                OverlayEntryKind::Symlink(target) => {
+                    (FileType::Symlink, target.len() as u64, InodeKind::Symlink)
+                }
                 OverlayEntryKind::Whiteout => {
                     return FsResult::Error {
                         errno: libc::ENOENT,
@@ -975,6 +998,7 @@ impl FsServer {
             if let Some((_layer, kind, ov_attrs)) = overlay.resolve_attrs(&mount.tag, &path) {
                 let (file_kind, size) = match &kind {
                     OverlayEntryKind::Content(bytes) => (FileType::RegularFile, bytes.len() as u64),
+                    OverlayEntryKind::Symlink(target) => (FileType::Symlink, target.len() as u64),
                     OverlayEntryKind::SyntheticDir => (FileType::Directory, 0u64),
                     OverlayEntryKind::Whiteout => {
                         return FsResult::Error {
@@ -1151,6 +1175,9 @@ impl FsServer {
                 match kind {
                     OverlayEntryKind::Content(_) => {
                         merged.insert(name, (FileType::RegularFile, InodeKind::Content, None));
+                    }
+                    OverlayEntryKind::Symlink(_) => {
+                        merged.insert(name, (FileType::Symlink, InodeKind::Symlink, None));
                     }
                     OverlayEntryKind::SyntheticDir => {
                         merged.insert(name, (FileType::Directory, InodeKind::SyntheticDir, None));
@@ -1340,7 +1367,8 @@ impl FsServer {
 
         // Check overlay first
         if let Some(overlay) = &self.overlay {
-            if let Some((layer, OverlayEntryKind::Content(existing))) = overlay.resolve(&tag, &path)
+            if let Some((layer, OverlayEntryKind::Content(existing), attrs)) =
+                overlay.resolve_attrs(&tag, &path)
             {
                 let mut buf = existing.to_vec();
                 let start = offset as usize;
@@ -1352,7 +1380,13 @@ impl FsServer {
                     buf.resize(end, 0);
                 }
                 buf[start..end].copy_from_slice(data);
-                let _ = overlay.put(&layer, &tag, &path, bytes::Bytes::from(buf));
+                let _ = overlay.put_with_attrs(
+                    &layer,
+                    &tag,
+                    &path,
+                    attrs,
+                    bytes::Bytes::from(buf),
+                );
                 return FsResult::Written {
                     size: data.len() as u32,
                 };
@@ -1369,6 +1403,7 @@ impl FsServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the FUSE create request fields.
     fn do_create(
         &self,
         mount: &MountState,
@@ -1552,7 +1587,7 @@ impl FsServer {
             if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
                 if let Some(overlay) = &self.overlay {
                     let ov_attrs = super::overlay::OverlayAttrs { mode, uid, gid };
-                    if let Err(_) = overlay.create_dir(&layer, &mount.tag, &rel_path, ov_attrs) {
+                    if overlay.create_dir(&layer, &mount.tag, &rel_path, ov_attrs).is_err() {
                         return FsResult::Error { errno: libc::EIO };
                     }
                     let now = SystemTime::now();
@@ -1646,7 +1681,7 @@ impl FsServer {
         if let Some((layer, kind)) = self.resolve_overlay(&mount.tag, &rel_path) {
             if let Some(overlay) = &self.overlay {
                 match kind {
-                    OverlayEntryKind::Content(_) => {
+                    OverlayEntryKind::Content(_) | OverlayEntryKind::Symlink(_) => {
                         // Check if there's a base-layer file underneath
                         let host_path = mount.backing.resolve(&rel_path);
                         if host_path.exists() {
@@ -1783,11 +1818,19 @@ impl FsServer {
         match (src_overlay.is_some(), dst_is_overlay) {
             // Overlay → overlay (same layer check done implicitly)
             (true, true) => {
-                if let Some((src_layer, OverlayEntryKind::Content(content))) =
-                    self.resolve_overlay(&mount.tag, &src_path)
+                if let Some((src_layer, OverlayEntryKind::Content(content), attrs)) =
+                    self.overlay
+                        .as_ref()
+                        .and_then(|o| o.resolve_attrs(&mount.tag, &src_path))
                 {
                     if let Some(overlay) = &self.overlay {
-                        let _ = overlay.put(&src_layer, &mount.tag, &dst_path, content);
+                        let _ = overlay.put_with_attrs(
+                            &src_layer,
+                            &mount.tag,
+                            &dst_path,
+                            attrs,
+                            content,
+                        );
                         let _ = overlay.remove(&src_layer, &mount.tag, &src_path);
                         let mut table = mount.inode_table.lock();
                         if let Some(inode) = table.rename_path(&src_path, &dst_path) {
@@ -1806,14 +1849,33 @@ impl FsServer {
             // Disk → overlay (editor atomic-save path)
             (false, true) => {
                 let host_src = mount.backing.resolve(&src_path);
-                match fs::read(&host_src) {
-                    Ok(content) => {
+                // Preserve disk ownership/mode when an editor moves a backing
+                // file into an overlay-managed parent during atomic save.
+                match (fs::read(&host_src), fs::symlink_metadata(&host_src)) {
+                    (Ok(content), Ok(meta)) => {
                         if let Some(layer) = self.writable_layer(&mount.tag, &dst_path) {
                             if let Some(overlay) = &self.overlay {
-                                let _ = overlay.put(
+                                #[cfg(unix)]
+                                let (uid, gid) = {
+                                    use std::os::unix::fs::MetadataExt;
+                                    (meta.uid(), meta.gid())
+                                };
+                                #[cfg(not(unix))]
+                                let (uid, gid) = (0, 0);
+                                let mut attrs = super::overlay::OverlayAttrs {
+                                    mode: file_mode_from_metadata(&meta),
+                                    uid,
+                                    gid,
+                                };
+                                if let Some((owner_uid, owner_gid)) = mount.owner_override {
+                                    attrs.uid = owner_uid;
+                                    attrs.gid = owner_gid;
+                                }
+                                let _ = overlay.put_with_attrs(
                                     &layer,
                                     &mount.tag,
                                     &dst_path,
+                                    attrs,
                                     bytes::Bytes::from(content),
                                 );
                                 let _ = fs::remove_file(&host_src);
@@ -1833,7 +1895,7 @@ impl FsServer {
                         }
                         FsResult::Error { errno: libc::EXDEV }
                     }
-                    Err(e) => FsResult::Error {
+                    (Err(e), _) | (_, Err(e)) => FsResult::Error {
                         errno: io_errno(&e),
                     },
                 }
@@ -1877,14 +1939,33 @@ impl FsServer {
             }
         };
 
-        // Symlinks under overlay-managed parents → ENOTSUP in v1
+        let rel_path = child_path(&parent_path, name);
         if self.is_overlay_managed(&mount.tag, &parent_path) {
-            return FsResult::Error {
-                errno: libc::ENOTSUP,
+            let Some(overlay) = &self.overlay else {
+                return FsResult::Error {
+                    errno: libc::ENOTSUP,
+                };
             };
+            let attrs = OverlayAttrs {
+                mode: 0o777,
+                uid: mount.owner_override.map(|(uid, _)| uid).unwrap_or(0),
+                gid: mount.owner_override.map(|(_, gid)| gid).unwrap_or(0),
+            };
+            let Some(layer) = self.writable_layer(&mount.tag, &parent_path) else {
+                return FsResult::Error {
+                    errno: libc::ENOTSUP,
+                };
+            };
+            match overlay.create_symlink(&layer, &mount.tag, &rel_path, target, attrs) {
+                Ok(()) => {
+                    return self.do_lookup(mount, parent, name);
+                }
+                Err(_) => {
+                    return FsResult::Error { errno: libc::EIO };
+                }
+            }
         }
 
-        let rel_path = child_path(&parent_path, name);
         let host_path = mount.backing.resolve(&rel_path);
         #[cfg(unix)]
         match std::os::unix::fs::symlink(target, &host_path) {
@@ -1934,14 +2015,15 @@ impl FsServer {
                 }
             }
         };
-        // Overlay-managed inodes → ENOTSUP in v1
-        let hp = match &entry.host_path {
-            Some(hp) => hp.clone(),
-            None => {
-                return FsResult::Error {
-                    errno: libc::ENOTSUP,
+        let Some(hp) = entry.host_path.clone() else {
+            if let Some(overlay) = &self.overlay {
+                if let Some(target) = overlay.symlink_target(&mount.tag, &entry.path) {
+                    return FsResult::Symlink { target };
                 }
             }
+            return FsResult::Error {
+                errno: libc::ENOTSUP,
+            };
         };
         drop(table);
         match fs::read_link(&hp) {
@@ -2138,13 +2220,13 @@ fn write_lock_type() -> i32 {
     libc::F_WRLCK as i32
 }
 
-fn find_conflict<'a>(
-    locks: &'a [FileLock],
+fn find_conflict(
+    locks: &[FileLock],
     lock_owner: u64,
     start: u64,
     end: u64,
     typ: i32,
-) -> Option<&'a FileLock> {
+) -> Option<&FileLock> {
     locks.iter().find(|lock| {
         lock.owner != lock_owner
             && ranges_overlap(lock.start, lock.end, start, end)
@@ -2229,6 +2311,11 @@ fn set_xattr(
 
 #[cfg(unix)]
 fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
+    #[cfg(target_os = "macos")]
+    if should_filter_macos_xattr(name) {
+        return Err(libc::ENODATA);
+    }
+
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
     let name = CString::new(name).map_err(|_| libc::EINVAL)?;
     #[cfg(target_os = "macos")]
@@ -2245,9 +2332,14 @@ fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
     #[cfg(not(target_os = "macos"))]
     let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
-        return Err(std::io::Error::last_os_error()
+        let errno = std::io::Error::last_os_error()
             .raw_os_error()
-            .unwrap_or(libc::EIO));
+            .unwrap_or(libc::EIO);
+        #[cfg(target_os = "macos")]
+        if name.as_bytes() == b"security.selinux" {
+            return Err(libc::ENODATA);
+        }
+        return Err(errno);
     }
     let mut buf = vec![0u8; size as usize];
     #[cfg(target_os = "macos")]
@@ -2271,9 +2363,14 @@ fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
         )
     };
     if rc < 0 {
-        Err(std::io::Error::last_os_error()
+        let errno = std::io::Error::last_os_error()
             .raw_os_error()
-            .unwrap_or(libc::EIO))
+            .unwrap_or(libc::EIO);
+        #[cfg(target_os = "macos")]
+        if name.as_bytes() == b"security.selinux" {
+            return Err(libc::ENODATA);
+        }
+        Err(errno)
     } else {
         buf.truncate(rc as usize);
         Ok(buf)
@@ -2308,6 +2405,10 @@ fn list_xattrs(path: &Path) -> Result<Vec<u8>, i32> {
             .unwrap_or(libc::EIO))
     } else {
         buf.truncate(rc as usize);
+        #[cfg(target_os = "macos")]
+        {
+            buf = filter_macos_xattr_list(buf);
+        }
         Ok(buf)
     }
 }
@@ -2315,6 +2416,62 @@ fn list_xattrs(path: &Path) -> Result<Vec<u8>, i32> {
 #[cfg(not(unix))]
 fn list_xattrs(_path: &Path) -> Result<Vec<u8>, i32> {
     Err(libc::ENOTSUP)
+}
+
+#[cfg(target_os = "macos")]
+const LINUX_ENODATA: i32 = 61;
+#[cfg(target_os = "macos")]
+const LINUX_ENOTSUP: i32 = 95;
+
+#[cfg(target_os = "macos")]
+fn normalize_guest_xattr_errno(errno: i32) -> i32 {
+    // The guest observes Linux errno values even when the host VFS backend is
+    // running on macOS, so normalize host xattr errno values at the boundary.
+    match errno {
+        libc::ENOTSUP => LINUX_ENOTSUP,
+        libc::ENODATA => LINUX_ENODATA,
+        #[allow(unreachable_patterns)]
+        libc::ENOATTR => LINUX_ENODATA,
+        _ => errno,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_guest_xattr_errno(errno: i32) -> i32 {
+    errno
+}
+
+#[cfg(target_os = "macos")]
+fn should_filter_macos_xattr(name: &str) -> bool {
+    name.starts_with("com.apple.")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn should_filter_macos_xattr(_name: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn filter_macos_xattr_list(data: Vec<u8>) -> Vec<u8> {
+    let mut filtered = Vec::new();
+    for raw_name in data.split(|byte| *byte == 0) {
+        if raw_name.is_empty() {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(raw_name) {
+            if should_filter_macos_xattr(name) {
+                continue;
+            }
+        }
+        filtered.extend_from_slice(raw_name);
+        filtered.push(0);
+    }
+    filtered
+}
+
+#[cfg(not(target_os = "macos"))]
+fn filter_macos_xattr_list(data: Vec<u8>) -> Vec<u8> {
+    data
 }
 
 #[cfg(unix)]
@@ -2446,6 +2603,17 @@ fn logical_blocks(kind: FileType, size: u64) -> u64 {
         }
         FileType::Symlink => 0,
     }
+}
+
+#[cfg(unix)]
+fn file_mode_from_metadata(meta: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    meta.mode()
+}
+
+#[cfg(not(unix))]
+fn file_mode_from_metadata(_meta: &fs::Metadata) -> u32 {
+    0o644
 }
 
 #[cfg(unix)]
@@ -2657,7 +2825,7 @@ fn truncate_file(path: &Path, size: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
@@ -3075,6 +3243,11 @@ mod tests {
         let path = dir.path().join("secret.txt");
         fs::write(&path, b"secret").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        let owner_uid = meta.uid();
+        let owner_gid = meta.gid();
+        let other_uid = if owner_uid == u32::MAX { owner_uid - 1 } else { owner_uid + 1 };
+        let other_gid = if owner_gid == u32::MAX { owner_gid - 1 } else { owner_gid + 1 };
 
         let server = build_test_server(dir.path());
         let inode = match server.handle_op(
@@ -3094,8 +3267,8 @@ mod tests {
                 FsOp::Access {
                     inode,
                     mask: libc::R_OK,
-                    uid: 1000,
-                    gid: 1000
+                    uid: owner_uid,
+                    gid: owner_gid
                 }
             ),
             FsResult::Ok
@@ -3106,14 +3279,14 @@ mod tests {
                 FsOp::Access {
                     inode,
                     mask: libc::W_OK,
-                    uid: 1000,
-                    gid: 1000
+                    uid: owner_uid,
+                    gid: owner_gid
                 }
             ),
             FsResult::Ok
         ));
         assert!(matches!(
-            server.handle_op("test", FsOp::Access { inode, mask: libc::R_OK, uid: 2000, gid: 2000 }),
+            server.handle_op("test", FsOp::Access { inode, mask: libc::R_OK, uid: other_uid, gid: other_gid }),
             FsResult::Error { errno } if errno == libc::EACCES
         ));
     }
@@ -3275,7 +3448,7 @@ mod tests {
         ));
         assert!(matches!(
             server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 0 }),
-            FsResult::Error { errno } if errno == libc::ENODATA
+            FsResult::Error { errno } if errno == normalize_guest_xattr_errno(libc::ENODATA)
         ));
     }
 
@@ -3334,7 +3507,7 @@ mod tests {
                     position: 0,
                 }
             ),
-            FsResult::Error { errno } if errno == libc::ENODATA
+            FsResult::Error { errno } if errno == normalize_guest_xattr_errno(libc::ENODATA)
         ));
         assert!(matches!(
             server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 4 }),
@@ -3423,8 +3596,29 @@ mod tests {
         ));
         assert!(matches!(
             server.handle_op("test", FsOp::Getxattr { inode, name: "user.note".into(), size: 0 }),
-            FsResult::Error { errno } if errno == libc::ENODATA
+            FsResult::Error { errno } if errno == normalize_guest_xattr_errno(libc::ENODATA)
         ));
+    }
+
+    #[test]
+    fn filter_macos_xattr_list_drops_com_apple_entries() {
+        let raw = b"com.apple.provenance\0user.note\0".to_vec();
+        let filtered = filter_macos_xattr_list(raw);
+        assert_eq!(filtered, b"user.note\0".to_vec());
+    }
+
+    #[test]
+    fn filter_macos_xattr_list_keeps_non_apple_entries() {
+        let raw = b"user.note\0security.selinux\0".to_vec();
+        let filtered = filter_macos_xattr_list(raw.clone());
+        assert_eq!(filtered, raw);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn normalize_guest_xattr_errno_uses_linux_values() {
+        assert_eq!(normalize_guest_xattr_errno(libc::ENODATA), LINUX_ENODATA);
+        assert_eq!(normalize_guest_xattr_errno(libc::ENOTSUP), LINUX_ENOTSUP);
     }
 
     #[test]
@@ -3496,7 +3690,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3511,11 +3705,11 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
             FsResult::Lock { start, end, typ, pid }
-                if start == 0 && end == 9 && typ == libc::F_WRLCK && pid == 1234
+                if start == 0 && end == 9 && typ == libc::F_WRLCK as i32 && pid == 1234
         ));
     }
 
@@ -3546,7 +3740,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3562,7 +3756,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_UNLCK,
+                    typ: libc::F_UNLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3578,7 +3772,7 @@ mod tests {
                     lock_owner: 8,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 5678,
                     sleep: false,
                 }
@@ -3614,7 +3808,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_RDLCK,
+                    typ: libc::F_RDLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3630,7 +3824,7 @@ mod tests {
                     lock_owner: 8,
                     start: 0,
                     end: 9,
-                    typ: libc::F_RDLCK,
+                    typ: libc::F_RDLCK as i32,
                     pid: 5678,
                     sleep: false,
                 }
@@ -3676,7 +3870,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3694,10 +3888,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, .. } if typ == libc::F_UNLCK
+            FsResult::Lock { typ, .. } if typ == libc::F_UNLCK as i32
         ));
     }
 
@@ -3728,7 +3922,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -3750,7 +3944,7 @@ mod tests {
                         lock_owner: 8,
                         start: 0,
                         end: 9,
-                        typ: libc::F_WRLCK,
+                        typ: libc::F_WRLCK as i32,
                         pid: 5678,
                         sleep: true,
                     },
@@ -3775,7 +3969,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_UNLCK,
+                    typ: libc::F_UNLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4247,10 +4441,10 @@ mod tests {
         }
     }
 
-    // 2.2.9a: Symlink under overlay parent → ENOTSUP
+    // 2.2.9a: Symlink under overlay parent
     #[cfg(unix)]
     #[test]
-    fn overlay_symlink_under_synthetic_parent_enotsup() {
+    fn overlay_symlink_under_synthetic_parent() {
         let dir = tempfile::tempdir().unwrap();
         let server = build_overlay_server(dir.path());
         let o = server.overlay().unwrap();
@@ -4275,7 +4469,17 @@ mod tests {
                 target: "target".into(),
             },
         );
-        assert!(matches!(result, FsResult::Error { errno } if errno == libc::ENOTSUP));
+        let inode = match result {
+            FsResult::Entry { inode, attrs, .. } => {
+                assert_eq!(attrs.kind, FileType::Symlink);
+                inode
+            }
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        match server.handle_op("test", FsOp::Readlink { inode }) {
+            FsResult::Symlink { target } => assert_eq!(target, "target"),
+            other => panic!("expected Symlink, got {:?}", other),
+        }
     }
 
     // 2.2.10: Cross-layer rename — overlay→overlay
@@ -4359,6 +4563,134 @@ mod tests {
         assert!(matches!(result, FsResult::Ok));
         // tmp.txt should be gone from disk
         assert!(!dir.path().join("tmp.txt").exists());
+    }
+
+    #[test]
+    fn overlay_write_preserves_existing_uid_gid_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put_with_attrs(
+            "l",
+            "test",
+            "/foo",
+            crate::core::overlay::OverlayAttrs {
+                mode: 0o600,
+                uid: 1000,
+                gid: 1000,
+            },
+            bytes::Bytes::from_static(b"hello"),
+        )
+        .unwrap();
+
+        let inode = match server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "foo".into(),
+            },
+        ) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        let fh = match server.handle_op(
+            "test",
+            FsOp::Open {
+                inode,
+                flags: libc::O_RDWR as u32,
+            },
+        ) {
+            FsResult::Opened { fh } => fh,
+            other => panic!("expected Opened, got {:?}", other),
+        };
+
+        assert!(matches!(
+            server.handle_op(
+                "test",
+                FsOp::Write {
+                    inode,
+                    fh,
+                    offset: 0,
+                    data: bytes::Bytes::from_static(b"H"),
+                }
+            ),
+            FsResult::Written { .. }
+        ));
+
+        match server.handle_op("test", FsOp::Getattr { inode }) {
+            FsResult::Attr { attrs, .. } => {
+                assert_eq!(attrs.uid, 1000);
+                assert_eq!(attrs.gid, 1000);
+                assert_eq!(attrs.mode, 0o600);
+            }
+            other => panic!("expected Attr, got {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_rename_disk_to_overlay_preserves_source_uid_gid_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("tmp.txt");
+        fs::write(&src_path, b"new content").unwrap();
+        fs::set_permissions(&src_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let src_meta = fs::symlink_metadata(&src_path).unwrap();
+
+        let server = build_overlay_server(dir.path());
+        let o = server.overlay().unwrap();
+        o.put_layer("l", 0).unwrap();
+        o.put_with_attrs(
+            "l",
+            "test",
+            "/target.txt",
+            crate::core::overlay::OverlayAttrs {
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+            },
+            bytes::Bytes::from_static(b"old"),
+        )
+        .unwrap();
+
+        server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "tmp.txt".into(),
+            },
+        );
+        let result = server.handle_op(
+            "test",
+            FsOp::Rename {
+                parent: 1,
+                name: "tmp.txt".into(),
+                new_parent: 1,
+                new_name: "target.txt".into(),
+            },
+        );
+        assert!(matches!(result, FsResult::Ok));
+
+        let target_inode = match server.handle_op(
+            "test",
+            FsOp::Lookup {
+                parent: 1,
+                name: "target.txt".into(),
+            },
+        ) {
+            FsResult::Entry { inode, .. } => inode,
+            other => panic!("expected Entry, got {:?}", other),
+        };
+        match server.handle_op("test", FsOp::Getattr { inode: target_inode }) {
+            FsResult::Attr { attrs, .. } => {
+                assert_eq!(attrs.uid, src_meta.uid());
+                assert_eq!(attrs.gid, src_meta.gid());
+                assert_eq!(attrs.mode, src_meta.mode());
+            }
+            other => panic!("expected Attr, got {:?}", other),
+        }
     }
 
     #[test]
@@ -4484,7 +4816,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4511,10 +4843,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK as i32 && pid == 1234
         ));
 
         let new_dst_inode = match server.handle_op(
@@ -4581,7 +4913,7 @@ mod tests {
                     lock_owner: 7,
                     start: 0,
                     end: 9,
-                    typ: libc::F_WRLCK,
+                    typ: libc::F_WRLCK as i32,
                     pid: 1234,
                     sleep: false,
                 }
@@ -4608,10 +4940,10 @@ mod tests {
                 lock_owner: 8,
                 start: 0,
                 end: 9,
-                typ: libc::F_RDLCK,
+                typ: libc::F_RDLCK as i32,
                 pid: 5678,
             }),
-            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK && pid == 1234
+            FsResult::Lock { typ, pid, .. } if typ == libc::F_WRLCK as i32 && pid == 1234
         ));
 
         let new_dst_inode = match server.handle_op(

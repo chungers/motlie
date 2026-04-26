@@ -5,8 +5,10 @@ use std::time::Duration;
 use crate::backend::ch::shell::ChShellBackend;
 use crate::backend::motlie::ssh_proxy::{MotlieSshProxyBacking, MotlieSshProxyHandle};
 use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
+#[cfg(target_os = "linux")]
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
-use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome};
+use crate::backend::vz::shell::VzShellBackend;
+use crate::backend::{BackendError, BackendHandle, BackendKind, BackendShutdownOutcome};
 use crate::guestfs::GuestFsError;
 use crate::observability::{
     ControlPlaneObservability, FilesystemObservability, NetworkObservability,
@@ -15,6 +17,7 @@ use crate::orchestrator::PreparedGuest;
 use crate::spec::GuestRuntimePaths;
 use crate::spec::GuestSpec;
 use crate::ssh::{ExecOutput, GuestPtySession, PtyRequest, SshProxyError};
+#[cfg(target_os = "linux")]
 use motlie_vnet::VnetError;
 
 #[derive(Debug, Clone)]
@@ -41,6 +44,7 @@ pub enum HypervisorBacking {
     CloudHypervisorShell(ChShellBackend),
     CloudHypervisorForkExec,
     CloudHypervisorVmmThread,
+    AppleVirtualizationShell(VzShellBackend),
     AppleVirtualization,
 }
 
@@ -54,7 +58,9 @@ pub enum FilesystemBacking {
 pub enum NetworkBacking {
     None,
     HypervisorManaged,
+    #[cfg(target_os = "linux")]
     MotlieVnet(MotlieVnetBacking),
+    #[cfg(target_os = "linux")]
     HypervisorManagedPlusMotlieVnet(MotlieVnetBacking),
 }
 
@@ -71,6 +77,7 @@ pub enum FilesystemHandle {
 
 #[derive(Debug)]
 pub enum NetworkHandle {
+    #[cfg(target_os = "linux")]
     MotlieVnet(MotlieVnetHandle),
 }
 
@@ -87,8 +94,10 @@ pub enum RuntimeError {
     GuestFs(#[from] GuestFsError),
     #[error(transparent)]
     Ssh(#[from] SshProxyError),
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Vnet(#[from] MotlieVnetProvisionError),
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     VnetShutdown(#[from] VnetError),
     #[error("hypervisor backing is not implemented yet")]
@@ -96,9 +105,19 @@ pub enum RuntimeError {
 }
 
 impl HypervisorBacking {
+    pub fn kind(&self) -> BackendKind {
+        match self {
+            Self::CloudHypervisorShell(_) => BackendKind::ChShell,
+            Self::CloudHypervisorForkExec => BackendKind::ChForkExec,
+            Self::CloudHypervisorVmmThread => BackendKind::ChVmmThread,
+            Self::AppleVirtualizationShell(_) | Self::AppleVirtualization => BackendKind::Vz,
+        }
+    }
+
     pub fn boot(&self, prepared: &PreparedGuest) -> Result<BackendHandle, RuntimeError> {
         match self {
             Self::CloudHypervisorShell(backend) => Ok(backend.boot(prepared)?),
+            Self::AppleVirtualizationShell(backend) => Ok(backend.boot(prepared)?),
             Self::CloudHypervisorForkExec
             | Self::CloudHypervisorVmmThread
             | Self::AppleVirtualization => Err(RuntimeError::UnsupportedHypervisor),
@@ -108,6 +127,7 @@ impl HypervisorBacking {
     pub fn shutdown(&self, handle: &BackendHandle) -> Result<BackendShutdownOutcome, RuntimeError> {
         match self {
             Self::CloudHypervisorShell(backend) => Ok(backend.shutdown(handle)?),
+            Self::AppleVirtualizationShell(backend) => Ok(backend.shutdown(handle)?),
             Self::CloudHypervisorForkExec
             | Self::CloudHypervisorVmmThread
             | Self::AppleVirtualization => Err(RuntimeError::UnsupportedHypervisor),
@@ -173,17 +193,19 @@ impl FilesystemHandle {
 impl NetworkBacking {
     pub fn provision(
         &self,
-        prepared: &PreparedGuest,
+        _prepared: &PreparedGuest,
     ) -> Result<Option<NetworkHandle>, RuntimeError> {
         match self {
             Self::None | Self::HypervisorManaged => Ok(None),
+            #[cfg(target_os = "linux")]
             Self::MotlieVnet(backing) | Self::HypervisorManagedPlusMotlieVnet(backing) => {
-                Ok(backing.provision(prepared)?.map(NetworkHandle::MotlieVnet))
+                Ok(backing.provision(_prepared)?.map(NetworkHandle::MotlieVnet))
             }
         }
     }
 }
 
+#[cfg(target_os = "linux")]
 impl NetworkHandle {
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
         match self {
@@ -202,6 +224,21 @@ impl NetworkHandle {
             backing: self.backing_name(),
             socket_path: Some(runtime_paths.vnet_socket.clone()),
         }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl NetworkHandle {
+    pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
+        match *self {}
+    }
+
+    pub fn backing_name(&self) -> &'static str {
+        match *self {}
+    }
+
+    pub fn observability(&self, _runtime_paths: &GuestRuntimePaths) -> NetworkObservability {
+        match *self {}
     }
 }
 

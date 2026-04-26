@@ -4,14 +4,16 @@ use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 
 use crate::artifacts::{
-    ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
-    render_launch_script,
+    render_cloud_init_artifacts, render_launch_script, ArtifactError, CloudInitArtifacts,
+    LaunchArtifactRenderConfig,
 };
-use crate::backend::BackendHandle;
-use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
+use crate::backend::{BackendHandle, BackendKind};
+use crate::network::{
+    validate_network_modes, validate_vz_network_modes, NetworkModeError, NetworkModes,
+};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
 use crate::observability::{
     ControlPlaneObservability, FilesystemObservability, NetworkObservability, VmArtifactKind,
@@ -26,6 +28,7 @@ use crate::spec::{GuestMountSpec, GuestRuntimePaths, GuestSpec, RuntimeNamespace
 pub struct PrepareRequest {
     pub guest: GuestSpec,
     pub namespace: RuntimeNamespace,
+    pub backend_kind: BackendKind,
     pub network_modes: NetworkModes,
     pub base_dir: PathBuf,
     pub ssh_ca_pubkey: Option<String>,
@@ -147,7 +150,7 @@ pub fn prepare(
     allocator: &mut GuestNetAllocator,
 ) -> Result<PreparedGuest, OrchestratorError> {
     req.guest.validate()?;
-    validate_network_modes(&req.network_modes)?;
+    validate_network_modes_for_backend(req.backend_kind, &req.network_modes)?;
 
     let runtime_paths = GuestRuntimePaths::for_guest(&req.namespace, &req.guest.guest_id)?;
     let guest_socket_path = req.guest.socket_path.clone();
@@ -156,6 +159,7 @@ pub fn prepare(
     let launch_script = render_launch_script(&LaunchArtifactRenderConfig {
         guest: &req.guest,
         runtime_paths: &runtime_paths,
+        backend_kind: req.backend_kind,
         network_modes: req.network_modes,
         net_assignment: &net_assignment,
         base_dir: &req.base_dir,
@@ -173,6 +177,18 @@ pub fn prepare(
         network_modes: req.network_modes,
         base_dir: req.base_dir,
     })
+}
+
+fn validate_network_modes_for_backend(
+    backend_kind: BackendKind,
+    modes: &NetworkModes,
+) -> Result<(), NetworkModeError> {
+    match backend_kind {
+        BackendKind::Vz => validate_vz_network_modes(modes),
+        BackendKind::ChShell | BackendKind::ChForkExec | BackendKind::ChVmmThread => {
+            validate_network_modes(modes)
+        }
+    }
 }
 
 pub async fn boot(
@@ -351,7 +367,7 @@ impl VmHandle {
                 label: "api_socket".to_string(),
                 path: self.runtime_paths.api_socket.clone(),
                 guest_path: None,
-                required: true,
+                required: matches!(self.backend_handle.kind(), BackendKind::ChShell),
                 exists: self.runtime_paths.api_socket.exists(),
             },
             VmRunArtifact {
@@ -429,20 +445,38 @@ impl VmHandle {
     }
 
     pub async fn ready(&self, policy: &ReadinessPolicy) -> Result<(), OrchestratorError> {
-        self.wait_for_path(
-            &self.runtime_paths.api_socket,
-            ReadinessStage::ApiSocketReady,
-            policy.api_socket_timeout,
-        )
-        .await?;
+        match self.backend_handle.kind() {
+            BackendKind::ChShell | BackendKind::ChForkExec | BackendKind::ChVmmThread => {
+                self.wait_for_path(
+                    &self.runtime_paths.api_socket,
+                    ReadinessStage::ApiSocketReady,
+                    policy.api_socket_timeout,
+                )
+                .await?;
 
-        if let Some(filesystem) = self.filesystem.as_ref() {
-            filesystem.wait_ready(policy.guestfs_timeout).await?;
-        }
+                if let Some(filesystem) = self.filesystem.as_ref() {
+                    filesystem.wait_ready(policy.guestfs_timeout).await?;
+                }
 
-        if let Some(control_plane) = self.control_plane.as_ref() {
-            control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
-            self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                if let Some(control_plane) = self.control_plane.as_ref() {
+                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
+                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                }
+            }
+            BackendKind::Vz => {
+                // Vz follows the shared convergence contract:
+                // ready() is the interactive-ready gate used by first-contact
+                // SSH, not full VFS/VNET/egress certification. Full
+                // validation remains explicit in harness validate/scenario.
+                if let Some(control_plane) = self.control_plane.as_ref() {
+                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
+                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                }
+
+                if let Some(filesystem) = self.filesystem.as_ref() {
+                    filesystem.wait_ready(policy.guestfs_timeout).await?;
+                }
+            }
         }
 
         Ok(())
@@ -603,6 +637,7 @@ mod tests {
             PrepareRequest {
                 guest: sample_guest(),
                 namespace,
+                backend_kind: BackendKind::ChShell,
                 network_modes: NetworkModes {
                     admin: AdminNetMode::None,
                     egress: EgressNetMode::VhostUser,

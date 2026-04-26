@@ -1,8 +1,10 @@
 use std::fs;
 use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -69,6 +71,51 @@ fn print_usage() {
     eprintln!(
         "usage: vz_egress_helper_v1_25 --socket-path <path> [--guest-ip <ipv4>] [--host-ip <ipv4>] [--netmask <ipv4>] [--dns-ip <ipv4>] [--host-forward-tcp <host_ip:host_port:guest_port>] [--log-frames]"
     );
+}
+
+fn tune_unix_datagram_socket(sock: &UnixDatagram) -> Result<()> {
+    let fd = sock.as_raw_fd();
+    let sndbuf: libc::c_int = 256 * 1024;
+    let rcvbuf: libc::c_int = 1024 * 1024;
+
+    let set_opt = |optname, value: &libc::c_int| unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            optname,
+            value as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if set_opt(libc::SO_SNDBUF, &sndbuf) != 0 {
+        return Err(std::io::Error::last_os_error()).context("setsockopt SO_SNDBUF");
+    }
+    if set_opt(libc::SO_RCVBUF, &rcvbuf) != 0 {
+        return Err(std::io::Error::last_os_error()).context("setsockopt SO_RCVBUF");
+    }
+    Ok(())
+}
+
+fn send_with_retry(sock: &UnixDatagram, frame: &[u8], peer_path: &PathBuf) -> Result<()> {
+    loop {
+        match sock.send_to(frame, peer_path) {
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.raw_os_error(),
+                    Some(libc::ENOBUFS) | Some(libc::EAGAIN)
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("send_to {}", peer_path.display()));
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -141,6 +188,7 @@ fn main() -> Result<()> {
 
     let sock = UnixDatagram::bind(&socket_path)
         .with_context(|| format!("bind unix datagram {}", socket_path.display()))?;
+    tune_unix_datagram_socket(&sock)?;
     sock.set_nonblocking(true)?;
 
     let config = SlirpConfig {
@@ -170,7 +218,26 @@ fn main() -> Result<()> {
         shutdown_flag.store(true, Ordering::SeqCst);
     })?;
 
-    let mut peer: Option<PathBuf> = None;
+    let peer = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+    let tx_sock = sock.try_clone().context("clone unix datagram socket")?;
+    let tx_peer = Arc::clone(&peer);
+    let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>();
+    let _tx_thread = thread::spawn(move || {
+        while let Ok(frame) = frame_rx.recv() {
+            loop {
+                let peer_path = tx_peer.lock().ok().and_then(|guard| guard.clone());
+                let Some(peer_path) = peer_path else {
+                    thread::sleep(Duration::from_millis(2));
+                    continue;
+                };
+                if let Err(err) = send_with_retry(&tx_sock, &frame, &peer_path) {
+                    eprintln!("vz_egress_helper_v1_25 {err:#}");
+                }
+                break;
+            }
+        }
+    });
+
     let mut buf = vec![0u8; 65535];
     let mut guest_to_host_frames: u64 = 0;
     let mut host_to_guest_frames: u64 = 0;
@@ -180,7 +247,9 @@ fn main() -> Result<()> {
             match sock.recv_from(&mut buf) {
                 Ok((n, addr)) => {
                     if let Some(path) = sockaddr_path(&addr) {
-                        peer = Some(path);
+                        if let Ok(mut guard) = peer.lock() {
+                            *guard = Some(path);
+                        }
                     }
                     guest_to_host_frames += 1;
                     if log_frames && (guest_to_host_frames <= 10 || guest_to_host_frames % 100 == 0)
@@ -201,7 +270,7 @@ fn main() -> Result<()> {
         }
 
         let frames = slirp.run_once_with_max_timeout(10);
-        if let Some(peer_path) = peer.as_ref() {
+        if !frames.is_empty() {
             for frame in frames {
                 host_to_guest_frames += 1;
                 if log_frames && (host_to_guest_frames <= 10 || host_to_guest_frames % 100 == 0) {
@@ -212,19 +281,16 @@ fn main() -> Result<()> {
                         "vz_egress_helper_v1_25 tx"
                     );
                 }
-                if let Err(err) = sock.send_to(&frame, peer_path) {
-                    eprintln!(
-                        "vz_egress_helper_v1_25 send_to {} failed: {}",
-                        peer_path.display(),
-                        err
-                    );
+                if let Err(err) = frame_tx.send(frame) {
+                    return Err(anyhow::anyhow!("host->guest frame queue closed: {err}"));
                 }
             }
-        } else if frames.is_empty() {
+        } else {
             thread::sleep(Duration::from_millis(2));
         }
     }
 
+    drop(frame_tx);
     let _ = fs::remove_file(&socket_path);
     Ok(())
 }

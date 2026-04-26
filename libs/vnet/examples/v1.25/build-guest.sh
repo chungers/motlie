@@ -823,7 +823,7 @@ ensure_guest_identity alice 1000 1000 testpass
 ensure_guest_identity bob 1001 1001 testpass
 
 cat <<'TMUXEOF' > /etc/profile.d/tmux-auto.sh
-if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && [ -t 0 ] && [ -t 1 ] && command -v tmux >/dev/null 2>&1; then
     if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
         sleep 1
@@ -850,6 +850,11 @@ if [ -f "$HOME/.env" ]; then
     set +a
 fi
 DOTENVEOF
+
+mkdir -p /etc/apt/apt.conf.d
+cat <<'APTEOF' > /etc/apt/apt.conf.d/99motlie-force-ipv4
+Acquire::ForceIPv4 "true";
+APTEOF
 cat <<'AGENTEOF' > /etc/profile.d/agent-state.sh
 agent_state_root=/agent-state
 codex_root="$agent_state_root/codex"
@@ -874,7 +879,7 @@ MOTDEOF
 if ! grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
   printf 'user_allow_other\n' >> /etc/fuse.conf
 fi
-chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh
+chmod 0644 /etc/profile.d/tmux-auto.sh /etc/profile.d/dotenv.sh /etc/profile.d/agent-state.sh /etc/apt/apt.conf.d/99motlie-force-ipv4
 install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-state-setup
 install -D -m 0644 /tmp/motlie-agent-state.service /etc/systemd/system/motlie-agent-state.service
 systemctl unmask motlie-vfs-guest.service || true

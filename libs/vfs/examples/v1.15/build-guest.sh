@@ -205,7 +205,7 @@ sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_v
 sudo mkdir -p /etc/motlie-vfs
 sudo mkdir -p /etc/profile.d
 cat <<'TMUXEOF' | sudo tee /etc/profile.d/tmux-auto.sh >/dev/null
-if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && [ -t 0 ] && [ -t 1 ] && command -v tmux >/dev/null 2>&1; then
     if tmux has-session -t "$USER" 2>/dev/null; then
         echo "Attaching to existing tmux session..."
         sleep 1

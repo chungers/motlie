@@ -37,7 +37,7 @@ impl VsockConnectionHandler {
                 Err(e) => {
                     // EOF or connection closed — normal shutdown
                     if e.downcast_ref::<std::io::Error>()
-                        .map_or(false, |io| io.kind() == std::io::ErrorKind::UnexpectedEof)
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::UnexpectedEof)
                     {
                         return Ok(());
                     }

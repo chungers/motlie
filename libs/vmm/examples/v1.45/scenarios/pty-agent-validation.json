@@ -1,0 +1,88 @@
+{
+  "name": "pty-agent-validation",
+  "description": "Boot alice, drive the interactive shell over PTY, validate apt refresh in-band, and capture the Codex TUI startup in the recorded terminal session.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    { "action": "wait_egress_ready", "guest": "alice", "timeout_ms": 30000 },
+    {
+      "action": "pty_open",
+      "guest": "alice",
+      "session": "alice-shell",
+      "term": "xterm-256color",
+      "cols": 100,
+      "rows": 30,
+      "timeout_ms": 10000
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "Start tmux session?",
+      "timeout_ms": 20000
+    },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "Start tmux session?",
+      "timeout_ms": 2000
+    },
+    { "action": "pty_send_line", "session": "alice-shell", "text": "n" },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "alice@motlie-alice",
+      "timeout_ms": 10000
+    },
+    {
+      "action": "wait_package_manager_quiescent",
+      "guest": "alice",
+      "timeout_ms": 65000
+    },
+    {
+      "action": "pty_send_line",
+      "session": "alice-shell",
+      "text": "sudo -n apt-get update && echo APT_STATUS:0 || echo APT_STATUS:1"
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "APT_STATUS:0",
+      "timeout_ms": 120000
+    },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "APT_STATUS:0",
+      "timeout_ms": 2000
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "alice@motlie-alice:~$ ",
+      "timeout_ms": 5000
+    },
+    {
+      "action": "pty_snapshot",
+      "session": "alice-shell",
+      "name": "after-apt-update"
+    },
+    { "action": "pty_send_line", "session": "alice-shell", "text": "codex" },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "1. Sign in with ChatGPT",
+      "timeout_ms": 20000
+    },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "Press Enter to continue",
+      "timeout_ms": 20000
+    },
+    {
+      "action": "pty_snapshot",
+      "session": "alice-shell",
+      "name": "codex-welcome"
+    }
+  ]
+}

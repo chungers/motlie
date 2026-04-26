@@ -3,10 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ca::SshCa;
+use crate::network::EgressNetMode;
 use crate::orchestrator::PreparedGuest;
 use crate::ssh::{
-    spawn_guest_ssh_bridge, ExecOutput, GuestBridgeHandle, GuestPtySession, GuestRegistry,
-    PtyRequest, SshProxyError,
+    spawn_guest_ssh_bridge, spawn_guest_tcp_ssh_bridge, ExecOutput, GuestBridgeHandle,
+    GuestPtySession, GuestRegistry, PtyRequest, SshProxyError,
 };
 
 #[derive(Clone)]
@@ -31,19 +32,39 @@ impl MotlieSshProxyBacking {
         &self,
         prepared: &PreparedGuest,
     ) -> Result<Option<MotlieSshProxyHandle>, SshProxyError> {
-        Ok(Some(MotlieSshProxyHandle {
-            inner: spawn_guest_ssh_bridge(
-                prepared
-                    .runtime_paths
-                    .vsock_socket
-                    .to_string_lossy()
-                    .as_ref(),
+        let inner = match prepared.network_modes.egress {
+            EgressNetMode::VzUserspace => spawn_guest_tcp_ssh_bridge(
+                None,
+                Some(prepared.runtime_paths.runtime_dir.join("control-port")),
+                // For Vz this file is the shared interactive-ready marker:
+                // the launcher has completed CA login setup and required
+                // mount/agent-state readiness, but has not run full validation.
+                Some(
+                    prepared
+                        .runtime_paths
+                        .runtime_dir
+                        .join("control-plane-ready"),
+                ),
                 Arc::clone(&self.ca),
                 prepared.guest.guest_id.clone(),
                 prepared.guest.ssh.clone(),
                 Arc::clone(&self.registry),
             )?,
-        }))
+            EgressNetMode::None | EgressNetMode::Tap | EgressNetMode::VhostUser => {
+                spawn_guest_ssh_bridge(
+                    prepared
+                        .runtime_paths
+                        .vsock_socket
+                        .to_string_lossy()
+                        .as_ref(),
+                    Arc::clone(&self.ca),
+                    prepared.guest.guest_id.clone(),
+                    prepared.guest.ssh.clone(),
+                    Arc::clone(&self.registry),
+                )?
+            }
+        };
+        Ok(Some(MotlieSshProxyHandle { inner }))
     }
 }
 

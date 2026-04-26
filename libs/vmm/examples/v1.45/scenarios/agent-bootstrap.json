@@ -1,0 +1,46 @@
+{
+  "name": "agent-bootstrap",
+  "description": "Boot alice and verify baseline agent guest prerequisites: VFS mounts, passwordless sudo, preinstalled git, Codex CLI, outbound internet, and apt package-index refresh.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'test -f /workspace/README.md && echo WORKSPACE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "WORKSPACE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'sudo -n true && echo SUDO_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "SUDO_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'git --version | grep -q \"^git version \" && echo GIT_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "GIT_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'codex --version | grep -q \"^codex-cli \" && echo CODEX_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "CODEX_OK" }
+    },
+    { "action": "wait_egress_ready", "guest": "alice", "timeout_ms": 30000 },
+    { "action": "wait_package_manager_quiescent", "guest": "alice", "timeout_ms": 65000 },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'sudo -n apt-get update >/tmp/motlie-vmm-apt-update.log 2>&1 && echo APT_OK'",
+      "timeout_ms": 60000,
+      "expect": { "exit_code": 0, "stdout_contains": "APT_OK" }
+    },
+    { "action": "shutdown", "guest": "alice" }
+  ]
+}

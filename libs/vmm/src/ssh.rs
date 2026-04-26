@@ -26,7 +26,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -462,6 +462,13 @@ pub fn bind_vsock_ssh_listener(
     vsock_socket: &str,
 ) -> Result<(UnixListener, PathBuf), SshProxyError> {
     let uds_path = vsock_ssh_uds_path(vsock_socket);
+    bind_guest_ssh_listener_at_path(&uds_path)
+}
+
+pub fn bind_guest_ssh_listener_at_path(
+    uds_path: &Path,
+) -> Result<(UnixListener, PathBuf), SshProxyError> {
+    let uds_path = uds_path.to_path_buf();
     if let Err(e) = std::fs::remove_file(&uds_path) {
         if e.kind() != ErrorKind::NotFound {
             tracing::debug!(
@@ -575,6 +582,42 @@ pub fn spawn_guest_ssh_bridge(
     registry: GuestRegistry,
 ) -> Result<GuestBridgeHandle, SshProxyError> {
     let (listener, uds_path) = bind_vsock_ssh_listener(vsock_socket)?;
+    spawn_guest_ssh_bridge_from_listener(
+        listener,
+        uds_path,
+        ca,
+        guest_name,
+        ssh_access,
+        registry,
+    )
+}
+
+pub fn spawn_guest_ssh_bridge_at_path(
+    uds_path: &Path,
+    ca: Arc<SshCa>,
+    guest_name: String,
+    ssh_access: GuestSshAccess,
+    registry: GuestRegistry,
+) -> Result<GuestBridgeHandle, SshProxyError> {
+    let (listener, uds_path) = bind_guest_ssh_listener_at_path(uds_path)?;
+    spawn_guest_ssh_bridge_from_listener(
+        listener,
+        uds_path,
+        ca,
+        guest_name,
+        ssh_access,
+        registry,
+    )
+}
+
+fn spawn_guest_ssh_bridge_from_listener(
+    listener: UnixListener,
+    uds_path: PathBuf,
+    ca: Arc<SshCa>,
+    guest_name: String,
+    ssh_access: GuestSshAccess,
+    registry: GuestRegistry,
+) -> Result<GuestBridgeHandle, SshProxyError> {
     let task = tokio::spawn(run_guest_ssh_bridge(
         listener,
         uds_path.clone(),
@@ -586,6 +629,148 @@ pub fn spawn_guest_ssh_bridge(
     Ok(GuestBridgeHandle {
         guest_name,
         uds_path,
+        registry,
+        task: std::sync::Mutex::new(Some(task)),
+    })
+}
+
+async fn connect_guest_ssh_tcp_once(
+    listen: SocketAddr,
+    ca: &SshCa,
+    guest_name: &str,
+    ssh_access: &GuestSshAccess,
+) -> Result<russh::client::Handle<GuestClientHandler>, SshProxyError> {
+    tracing::info!("Connecting to guest '{}' SSH on {}", guest_name, listen);
+
+    let eph = ca.sign_ephemeral(&ssh_access.principal)?;
+    let config = Arc::new(russh::client::Config::default());
+
+    let mut handle = russh::client::connect(config, listen, GuestClientHandler)
+        .await
+        .map_err(|e| SshProxyError::GuestConnection {
+            guest: guest_name.into(),
+            reason: format!("SSH TCP connect failed: {e}"),
+        })?;
+
+    let result = handle
+        .authenticate_openssh_cert(&ssh_access.login_user, Arc::new(eph.key), eph.cert)
+        .await
+        .map_err(|e| SshProxyError::CertAuth {
+            guest: guest_name.into(),
+            reason: e.to_string(),
+        })?;
+
+    if !result.success() {
+        return Err(SshProxyError::GuestConnection {
+            guest: guest_name.into(),
+            reason: "guest sshd rejected CA-based auth".into(),
+        });
+    }
+
+    tracing::info!("Guest '{}' TCP SSH authenticated via CA cert", guest_name);
+    Ok(handle)
+}
+
+pub async fn run_guest_tcp_ssh_bridge(
+    default_listen: Option<SocketAddr>,
+    control_port_file: Option<PathBuf>,
+    ready_file: Option<PathBuf>,
+    ca: Arc<SshCa>,
+    guest_name: String,
+    ssh_access: GuestSshAccess,
+    registry: GuestRegistry,
+) {
+    let error_file = ready_file
+        .as_ref()
+        .and_then(|path| path.parent().map(|parent| parent.join("control-plane-error")));
+    loop {
+        match current_guest_handle(&registry, &guest_name) {
+            Ok(Some(_)) => {
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("SSH bridge registry read failed for guest '{guest_name}': {e}");
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        }
+
+        if let Some(ready_file) = ready_file.as_ref() {
+            if !ready_file.exists() {
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        }
+
+        let listen = if let Some(listen) = default_listen {
+            listen
+        } else if let Some(control_port_file) = control_port_file.as_ref() {
+            let Ok(port_text) = std::fs::read_to_string(control_port_file) else {
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            };
+            let Ok(port) = port_text.trim().parse::<u16>() else {
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            };
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
+        } else {
+            sleep(Duration::from_millis(250)).await;
+            continue;
+        };
+
+        match connect_guest_ssh_tcp_once(listen, &ca, &guest_name, &ssh_access).await {
+            Ok(handle) => {
+                if let Some(error_file) = error_file.as_ref() {
+                    let _ = std::fs::remove_file(error_file);
+                }
+                let handle = Arc::new(tokio::sync::Mutex::new(handle));
+                match update_guest_handle(&registry, &guest_name, handle) {
+                    Ok(()) => tracing::info!("TCP SSH bridge ready for guest '{guest_name}'"),
+                    Err(e) => tracing::warn!(
+                        "TCP SSH bridge registry update failed for guest '{guest_name}': {e}"
+                    ),
+                }
+            }
+            Err(e) => {
+                if let Some(error_file) = error_file.as_ref() {
+                    let _ = std::fs::write(error_file, format!("{e}\n"));
+                }
+                tracing::warn!("TCP SSH bridge failed for guest '{guest_name}': {e}");
+            }
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+pub fn spawn_guest_tcp_ssh_bridge(
+    default_listen: Option<SocketAddr>,
+    control_port_file: Option<PathBuf>,
+    ready_file: Option<PathBuf>,
+    ca: Arc<SshCa>,
+    guest_name: String,
+    ssh_access: GuestSshAccess,
+    registry: GuestRegistry,
+) -> Result<GuestBridgeHandle, SshProxyError> {
+    let task = tokio::spawn(run_guest_tcp_ssh_bridge(
+        default_listen,
+        control_port_file.clone(),
+        ready_file,
+        ca,
+        guest_name.clone(),
+        ssh_access,
+        Arc::clone(&registry),
+    ));
+    Ok(GuestBridgeHandle {
+        guest_name,
+        uds_path: PathBuf::from(match default_listen {
+            Some(listen) => format!("tcp://{}", listen),
+            None => control_port_file
+                .map(|path| format!("tcp://{}", path.display()))
+                .unwrap_or_else(|| "tcp://unresolved".to_string()),
+        }),
         registry,
         task: std::sync::Mutex::new(Some(task)),
     })
@@ -690,7 +875,8 @@ async fn exec_on_channel(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut exit_code: Option<u32> = None;
-    let mut saw_terminal_event = false;
+    let mut saw_eof = false;
+    let mut saw_close = false;
 
     while let Some(msg) = channel.wait().await {
         match msg {
@@ -698,7 +884,7 @@ async fn exec_on_channel(
                 ssh_exec_trace!("exec_on_channel[{guest_name}]: stdout {} bytes", data.len());
                 stdout.extend_from_slice(data)
             }
-            ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
+            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
                 ssh_exec_trace!("exec_on_channel[{guest_name}]: stderr {} bytes", data.len());
                 stderr.extend_from_slice(data)
             }
@@ -708,19 +894,18 @@ async fn exec_on_channel(
             }
             ChannelMsg::Eof => {
                 ssh_exec_trace!("exec_on_channel[{guest_name}]: eof received");
-                saw_terminal_event = true;
-                break;
+                saw_eof = true;
             }
             ChannelMsg::Close => {
                 ssh_exec_trace!("exec_on_channel[{guest_name}]: close received");
-                saw_terminal_event = true;
+                saw_close = true;
                 break;
             }
             _ => {}
         }
     }
 
-    if exit_code.is_none() && saw_terminal_event {
+    if exit_code.is_none() && (saw_eof || saw_close) {
         ssh_exec_trace!(
             "exec_on_channel[{guest_name}]: treating terminal event without exit status as success"
         );
@@ -1695,15 +1880,15 @@ pub struct GuestClientHandler;
 impl russh::client::Handler for GuestClientHandler {
     type Error = SshProxyError;
 
-    fn check_server_key(
+    async fn check_server_key(
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+    ) -> Result<bool, Self::Error> {
         // The guest bridge connects over a host-created UDS/vsock path and
         // authenticates the guest with a fresh CA-signed ephemeral cert.
         // The guest-side sshd server key is therefore accepted as part of the
         // localhost/vsock trust boundary for this harness-owned channel.
-        async { Ok(true) }
+        Ok(true)
     }
 }
 
@@ -1712,10 +1897,10 @@ pub struct ProxyClientHandler;
 impl russh::client::Handler for ProxyClientHandler {
     type Error = SshProxyError;
 
-    fn check_server_key(
+    async fn check_server_key(
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        async { Ok(true) }
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
     }
 }

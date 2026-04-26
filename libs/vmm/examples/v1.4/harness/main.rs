@@ -433,6 +433,7 @@ async fn main() -> Result<(), DynError> {
         PrepareRequest {
             guest,
             namespace: instance.namespace.clone(),
+            backend_kind: runtime.hypervisor.kind(),
             network_modes: NetworkModes {
                 admin: AdminNetMode::None,
                 egress: EgressNetMode::VhostUser,

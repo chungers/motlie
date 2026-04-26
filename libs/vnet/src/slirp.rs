@@ -416,6 +416,12 @@ impl Drop for SlirpInstance {
     }
 }
 
+impl Default for SlirpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PollEvents <-> libc::poll flag conversion
 // ---------------------------------------------------------------------------
@@ -423,19 +429,19 @@ impl Drop for SlirpInstance {
 fn poll_events_to_poll_flags(events: &PollEvents) -> i16 {
     let mut flags: i16 = 0;
     if events.has_in() {
-        flags |= libc::POLLIN as i16;
+        flags |= libc::POLLIN;
     }
     if events.has_out() {
-        flags |= libc::POLLOUT as i16;
+        flags |= libc::POLLOUT;
     }
     if events.has_pri() {
-        flags |= libc::POLLPRI as i16;
+        flags |= libc::POLLPRI;
     }
     if events.has_err() {
-        flags |= libc::POLLERR as i16;
+        flags |= libc::POLLERR;
     }
     if events.has_hup() {
-        flags |= libc::POLLHUP as i16;
+        flags |= libc::POLLHUP;
     }
     flags
 }

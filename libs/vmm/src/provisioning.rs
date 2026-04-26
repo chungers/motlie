@@ -237,6 +237,7 @@ impl GuestProvisioner {
                 PrepareRequest {
                     guest: spec.clone(),
                     namespace: self.inner.namespace.clone(),
+                    backend_kind: self.inner.services.runtime.hypervisor.kind(),
                     network_modes: self.inner.network_modes,
                     base_dir: self.inner.base_dir.clone(),
                     ssh_ca_pubkey: Some(self.inner.ssh_ca_pubkey.clone()),
@@ -247,6 +248,10 @@ impl GuestProvisioner {
 
         let net_assignment = prepared.net_assignment.clone();
         let handle = Arc::new(boot(prepared, self.inner.services.clone()).await?);
+        // First-contact auto-provisioning must stop at the backend's
+        // interactive-ready contract. Slow certification belongs in explicit
+        // harness validation, otherwise an unknown SSH principal inherits Vz
+        // image/package/build long poles that CH does not expose here.
         handle.ready(&self.inner.readiness_policy).await?;
         self.upsert_record(&principal, spec.clone(), Some(Arc::clone(&handle)))?;
 

@@ -7,4 +7,5 @@
 
 pub mod ssh_proxy;
 pub mod vfs;
+#[cfg(target_os = "linux")]
 pub mod vnet;
