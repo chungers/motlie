@@ -3,7 +3,6 @@
 set -euo pipefail
 
 SSH_TARGET=""
-CAPTURE_SECONDS=""
 FIFO_PATH=""
 BACKEND="whisper"
 QUIET_FLAG="--quiet"
@@ -22,16 +21,29 @@ render_shell_command() {
   printf '%s\n' "${rendered}"
 }
 
-mac_rec_source_command() {
-  local format="$1"
-  local trim_suffix=""
-  if [[ -n "${CAPTURE_SECONDS}" ]]; then
-    trim_suffix=" trim 0 ${CAPTURE_SECONDS}"
+cleanup_stale_listeners() {
+  local pids
+  mapfile -t pids < <(
+    ps -eo pid=,args= | awk -v fifo="${FIFO_PATH}" '
+      index($0, fifo) && index($0, " listen ") { print $1 }
+    '
+  )
+
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    return 0
   fi
 
-  cat <<EOF
-if [ -x /opt/homebrew/bin/rec ]; then exec /opt/homebrew/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t ${format} -${trim_suffix}; elif [ -x /usr/local/bin/rec ]; then exec /usr/local/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t ${format} -${trim_suffix}; elif [ -x /opt/local/bin/rec ]; then exec /opt/local/bin/rec -q -c 1 -r 16000 -b 16 -e signed-integer -t ${format} -${trim_suffix}; elif command -v rec >/dev/null 2>&1; then exec rec -q -c 1 -r 16000 -b 16 -e signed-integer -t ${format} -${trim_suffix}; else echo 'rec not found; install sox with brew install sox' >&2; exit 127; fi
-EOF
+  kill "${pids[@]}" 2>/dev/null || true
+  sleep 1
+
+  mapfile -t pids < <(
+    ps -eo pid=,args= | awk -v fifo="${FIFO_PATH}" '
+      index($0, fifo) && index($0, " listen ") { print $1 }
+    '
+  )
+  if [[ ${#pids[@]} -gt 0 ]]; then
+    kill -9 "${pids[@]}" 2>/dev/null || true
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -41,7 +53,6 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --seconds)
-      CAPTURE_SECONDS="$2"
       shift 2
       ;;
     --fifo)
@@ -72,6 +83,7 @@ if [[ -z "${FIFO_PATH}" ]]; then
   FIFO_PATH="/tmp/motlie-voice-listen.wav.pipe"
 fi
 
+cleanup_stale_listeners
 rm -f "${FIFO_PATH}"
 mkfifo "${FIFO_PATH}"
 
@@ -80,18 +92,35 @@ if [[ -n "${QUIET_FLAG}" ]]; then
   agent_listen_args+=("${QUIET_FLAG}")
 fi
 
-if [[ "${BACKEND}" == "moonshine" || "${BACKEND}" == "sherpa" ]]; then
-  agent_listen_args+=(--input-format raw-s16le)
-  HUMAN_MAC_SOURCE_CMD="$(mac_rec_source_command raw) 2>/dev/null"
-else
-  HUMAN_MAC_SOURCE_CMD="$(mac_rec_source_command wav) 2>/dev/null"
-fi
-
-REMOTE_FIFO_CMD="cat > $(printf '%q' "${FIFO_PATH}")"
 AGENT_LISTEN_CMD="$(render_shell_command "${agent_listen_args[@]}")"
-HUMAN_MAC_CMD="${HUMAN_MAC_SOURCE_CMD} | ssh ${SSH_TARGET} \"${REMOTE_FIFO_CMD}\""
-HUMAN_MAC_CMD_PRETTY="${HUMAN_MAC_SOURCE_CMD} \
-| ssh ${SSH_TARGET} \"${REMOTE_FIFO_CMD}\""
+HUMAN_MAC_CMD="tmp=/tmp/motlie-voice-listen.wav; /opt/homebrew/bin/rec -q \"\$tmp\" 2>/dev/null; [ -s \"\$tmp\" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < \"\$tmp\"; rm -f \"\$tmp\""
+HUMAN_MAC_CMD_PRETTY=$(cat <<CMD
+ tmp=/tmp/motlie-voice-listen.wav
+ /opt/homebrew/bin/rec -q "\$tmp" 2>/dev/null
+ [ -s "\$tmp" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < "\$tmp"
+ rm -f "\$tmp"
+CMD
+)
+HUMAN_MAC_FALLBACK_CMD="tmp=/tmp/motlie-voice-listen.wav; if [ -x /opt/homebrew/bin/rec ]; then recbin=/opt/homebrew/bin/rec; elif [ -x /usr/local/bin/rec ]; then recbin=/usr/local/bin/rec; elif [ -x /opt/local/bin/rec ]; then recbin=/opt/local/bin/rec; elif command -v rec >/dev/null 2>&1; then recbin=rec; else echo 'rec not found; install sox with brew install sox' >&2; exit 127; fi; \"\$recbin\" -q \"\$tmp\" 2>/dev/null; [ -s \"\$tmp\" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < \"\$tmp\"; rm -f \"\$tmp\""
+HUMAN_MAC_FALLBACK_CMD_PRETTY=$(cat <<CMD
+ tmp=/tmp/motlie-voice-listen.wav
+ if [ -x /opt/homebrew/bin/rec ]; then
+   recbin=/opt/homebrew/bin/rec
+ elif [ -x /usr/local/bin/rec ]; then
+   recbin=/usr/local/bin/rec
+ elif [ -x /opt/local/bin/rec ]; then
+   recbin=/opt/local/bin/rec
+ elif command -v rec >/dev/null 2>&1; then
+   recbin=rec
+ else
+   echo 'rec not found; install sox with brew install sox' >&2
+   exit 127
+ fi
+ "\$recbin" -q "\$tmp" 2>/dev/null
+ [ -s "\$tmp" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < "\$tmp"
+ rm -f "\$tmp"
+CMD
+)
 
 cat <<OUT
 SSH_TARGET=${SSH_TARGET}
@@ -100,5 +129,9 @@ AGENT_LISTEN_CMD=${AGENT_LISTEN_CMD}
 HUMAN_MAC_CMD=${HUMAN_MAC_CMD}
 HUMAN_MAC_CMD_PRETTY<<'CMD'
 ${HUMAN_MAC_CMD_PRETTY}
+CMD
+HUMAN_MAC_FALLBACK_CMD=${HUMAN_MAC_FALLBACK_CMD}
+HUMAN_MAC_FALLBACK_CMD_PRETTY<<'CMD'
+${HUMAN_MAC_FALLBACK_CMD_PRETTY}
 CMD
 OUT
