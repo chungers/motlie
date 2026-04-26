@@ -19,8 +19,9 @@ bootstraps curated model weights into `.agents/skills/voice/artifacts/hf-cache/`
 and talks to the typed Motlie TTS/ASR backends directly without shelling out to
 repo example binaries.
 
-When the full `motlie` repo is present, repo-based builds should also repopulate
-the packaged runtime sidecars in the skill tree:
+When the full `motlie` repo is present, one repo-based build should seed the three
+voice subskill `bin/` directories and repopulate the packaged runtime sidecars in
+the skill tree:
 
 - `.agents/skills/voice/lib/<os>-<arch>/` for ONNX Runtime shared libraries
 - `.agents/skills/voice/{speak,listen,turn}/bin/` for `voice-agent-*` and

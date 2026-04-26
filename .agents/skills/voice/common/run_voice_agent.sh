@@ -17,6 +17,7 @@ shift
 PROFILE="release"
 BUILD_CMD=(cargo build -p voice-agent --release)
 TARGET_DIR="release"
+VOICE_SUBSKILLS=(speak listen turn)
 
 PLATFORM_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 PLATFORM_ARCH="$(uname -m | tr '[:upper:]' '[:lower:]')"
@@ -43,7 +44,15 @@ source_available() {
 
 linux_ort_candidate_dirs() {
   local candidate
+  local extra
   shopt -s nullglob
+  if [[ -n "${MOTLIE_ORT_LIB_CANDIDATES:-}" ]]; then
+    IFS=':' read -r -a extra <<<"${MOTLIE_ORT_LIB_CANDIDATES}"
+    for candidate in "${extra[@]}"; do
+      [[ -d "${candidate}" ]] || continue
+      printf '%s\n' "${candidate}"
+    done
+  fi
   for candidate in \
     /usr/local/lib \
     /usr/lib \
@@ -83,7 +92,8 @@ ort_sidecar_dir() {
   elif [[ "${PLATFORM_OS}" == "darwin" ]]; then
     for candidate in \
       /opt/homebrew/lib \
-      /usr/local/lib; do
+      /usr/local/lib \
+      /opt/local/lib; do
       if [[ -e "${candidate}/libonnxruntime.dylib" ]]; then
         printf '%s\n' "${candidate}"
         return 0
@@ -133,37 +143,115 @@ CUDA build:
 EOT
 }
 
-install_runtime_sidecars() {
-  local qwen_lib
-  qwen_lib="$(find "${REPO_ROOT}/target/${TARGET_DIR}/build" -path '*/out/build/vendor-build/libqwen3tts.so.0' 2>/dev/null | sort | tail -n 1 || true)"
-  if [[ -n "${qwen_lib}" ]]; then
-    local qwen_lib_dir
-    qwen_lib_dir="$(dirname "${qwen_lib}")"
-    mkdir -p "${SKILL_BIN_DIR}"
-    cp -a "${qwen_lib_dir}/libqwen3tts.so" "${SKILL_BIN_DIR}/"
-    cp -a "${qwen_lib_dir}/libqwen3tts.so.0" "${SKILL_BIN_DIR}/"
-    cp -a "${qwen_lib_dir}/libqwen3tts.so.0.1.0" "${SKILL_BIN_DIR}/"
+subskill_bin_dir() {
+  printf '%s\n' "${VOICE_DIR}/$1/bin"
+}
+
+platform_binary_name() {
+  printf 'voice-agent-%s-%s-%s-%s\n' "${PLATFORM_OS}" "${PLATFORM_ARCH}" "${PROFILE}" "$1"
+}
+
+legacy_binary_name() {
+  printf 'voice-agent-%s-%s-%s\n' "${PLATFORM_OS}" "${PLATFORM_ARCH}" "${PROFILE}"
+}
+
+qwen_sidecar_present() {
+  local dir="$1"
+  [[ -e "${dir}/libqwen3tts.so.0" || -e "${dir}/libqwen3tts.dylib" ]]
+}
+
+resolve_qwen_sidecar_dir() {
+  local search_root="${REPO_ROOT}/target/${TARGET_DIR}"
+  local candidate
+  [[ -d "${search_root}" ]] || return 1
+  while IFS= read -r candidate; do
+    printf '%s\n' "$(dirname "${candidate}")"
+    return 0
+  done < <(find "${search_root}" \( -type f -o -type l \) \( -name 'libqwen3tts.so' -o -name 'libqwen3tts.so.*' -o -name 'libqwen3tts.dylib' -o -name 'libqwen3tts.*.dylib' \) 2>/dev/null | sort)
+  return 1
+}
+
+copy_qwen_sidecars_to_dir() {
+  local source_dir="$1"
+  local target_dir="$2"
+  mkdir -p "${target_dir}"
+  if [[ "${PLATFORM_OS}" == "linux" ]]; then
+    cp -a "${source_dir}/libqwen3tts.so"* "${target_dir}/"
+  elif [[ "${PLATFORM_OS}" == "darwin" ]]; then
+    cp -a "${source_dir}/libqwen3tts"*.dylib* "${target_dir}/"
+  fi
+}
+
+install_qwen_sidecars() {
+  local mode="$1"
+  local qwen_dir
+  qwen_dir="$(resolve_qwen_sidecar_dir || true)"
+  if [[ -z "${qwen_dir}" ]]; then
+    if [[ "${mode}" == "require" ]]; then
+      echo "voice-agent build completed, but libqwen3tts sidecars were not found under target/${TARGET_DIR}" >&2
+      echo "the qwen3-tts.cpp backend layout likely changed; update install_qwen_sidecars before shipping this skill" >&2
+      exit 127
+    fi
+    return 0
   fi
 
+  local subskill
+  for subskill in "${VOICE_SUBSKILLS[@]}"; do
+    copy_qwen_sidecars_to_dir "${qwen_dir}" "$(subskill_bin_dir "${subskill}")"
+  done
+}
+
+install_ort_sidecars() {
   local ort_dir
   ort_dir="$(ort_sidecar_dir || true)"
-  if [[ -n "${ort_dir}" ]]; then
-    if [[ "${ort_dir}" == "${VOICE_LIB_DIR}" ]]; then
-      return 0
-    fi
-    mkdir -p "${VOICE_LIB_DIR}"
-    if [[ "${PLATFORM_OS}" == "linux" ]]; then
-      cp -a "${ort_dir}/libonnxruntime.so"* "${VOICE_LIB_DIR}/"
-      [[ -e "${ort_dir}/libonnxruntime_providers_shared.so" ]] && cp -a "${ort_dir}/libonnxruntime_providers_shared.so" "${VOICE_LIB_DIR}/"
-      [[ -e "${ort_dir}/libonnxruntime_providers_cuda.so" ]] && cp -a "${ort_dir}/libonnxruntime_providers_cuda.so" "${VOICE_LIB_DIR}/"
-    elif [[ "${PLATFORM_OS}" == "darwin" ]]; then
-      cp -a "${ort_dir}/libonnxruntime.dylib" "${VOICE_LIB_DIR}/"
-      for candidate in "${ort_dir}"/libonnxruntime.*.dylib; do
-        [[ -e "${candidate}" ]] || continue
-        cp -a "${candidate}" "${VOICE_LIB_DIR}/"
-      done
-    fi
+  if [[ -z "${ort_dir}" || "${ort_dir}" == "${VOICE_LIB_DIR}" ]]; then
+    return 0
   fi
+
+  mkdir -p "${VOICE_LIB_DIR}"
+  if [[ "${PLATFORM_OS}" == "linux" ]]; then
+    cp -a "${ort_dir}/libonnxruntime.so"* "${VOICE_LIB_DIR}/"
+    [[ -e "${ort_dir}/libonnxruntime_providers_shared.so" ]] && cp -a "${ort_dir}/libonnxruntime_providers_shared.so" "${VOICE_LIB_DIR}/"
+    [[ -e "${ort_dir}/libonnxruntime_providers_cuda.so" ]] && cp -a "${ort_dir}/libonnxruntime_providers_cuda.so" "${VOICE_LIB_DIR}/"
+  elif [[ "${PLATFORM_OS}" == "darwin" ]]; then
+    cp -a "${ort_dir}/libonnxruntime.dylib" "${VOICE_LIB_DIR}/"
+    local candidate
+    for candidate in "${ort_dir}"/libonnxruntime.*.dylib; do
+      [[ -e "${candidate}" ]] || continue
+      cp -a "${candidate}" "${VOICE_LIB_DIR}/"
+    done
+  fi
+}
+
+link_or_copy_file() {
+  local source="$1"
+  local target="$2"
+  rm -f "${target}"
+  if ! ln "${source}" "${target}" 2>/dev/null; then
+    cp -a "${source}" "${target}"
+  fi
+}
+
+install_voice_agent_binary() {
+  local source_binary="$1"
+  local flavor="$2"
+  local binary_name primary_dir primary_binary subskill dir target
+  binary_name="$(platform_binary_name "${flavor}")"
+  primary_dir="$(subskill_bin_dir "${SUBCOMMAND}")"
+  mkdir -p "${primary_dir}"
+  primary_binary="${primary_dir}/${binary_name}"
+  rm -f "${primary_binary}"
+  cp -a "${source_binary}" "${primary_binary}"
+  chmod +x "${primary_binary}"
+
+  for subskill in "${VOICE_SUBSKILLS[@]}"; do
+    dir="$(subskill_bin_dir "${subskill}")"
+    mkdir -p "${dir}"
+    target="${dir}/${binary_name}"
+    [[ "${target}" == "${primary_binary}" ]] && continue
+    link_or_copy_file "${primary_binary}" "${target}"
+    chmod +x "${target}"
+  done
 }
 
 exec_with_skill_env() {
@@ -177,12 +265,20 @@ exec_with_skill_env() {
     exit 127
   fi
 
+  local binary_dir
+  binary_dir="$(dirname "${binary}")"
+  if ! qwen_sidecar_present "${binary_dir}"; then
+    echo "voice-agent binary '${binary}' is missing libqwen3tts sidecars in '${binary_dir}'" >&2
+    echo "rebuild from source or repopulate the per-skill bin directories before running the voice skill" >&2
+    exit 127
+  fi
+
   local loader_var="LD_LIBRARY_PATH"
   if [[ "${PLATFORM_OS}" == "darwin" ]]; then
     loader_var="DYLD_FALLBACK_LIBRARY_PATH"
   fi
 
-  local loader_path="${SKILL_BIN_DIR}:${ort_dir}"
+  local loader_path="${binary_dir}:${ort_dir}"
   if [[ -n "${!loader_var:-}" ]]; then
     loader_path="${loader_path}:${!loader_var}"
   fi
@@ -195,31 +291,24 @@ exec_with_skill_env() {
     "${binary}" "$@"
 }
 
+source_tree_newer_than_binary() {
+  local binary="$1"
+  find     "${REPO_ROOT}/Cargo.toml"     "${REPO_ROOT}/Cargo.lock"     "${REPO_ROOT}/bins/voice-agent"     "${REPO_ROOT}/libs/model"     "${REPO_ROOT}/libs/models"     "${REPO_ROOT}/libs/voice"     \( -path '*/target' -o -path '*/target/*' -o -path '*/vendor/qwen3-tts.cpp/ggml/build' -o -path '*/vendor/qwen3-tts.cpp/ggml/build/*' \) -prune -o     -type f -newer "${binary}" -print -quit 2>/dev/null | grep -q .
+}
+
 binary_is_current() {
   local binary="$1"
 
   [[ -x "${binary}" ]] || return 1
+  if ! qwen_sidecar_present "$(dirname "${binary}")"; then
+    return 1
+  fi
 
   if ! command -v cargo >/dev/null 2>&1; then
     return 0
   fi
 
-  shopt -s globstar nullglob
-  [[ -e "${SKILL_BIN_DIR}/libqwen3tts.so.0" ]] || return 1
-
-  local path
-  for path in \
-    "${REPO_ROOT}/Cargo.toml" \
-    "${REPO_ROOT}/Cargo.lock" \
-    "${REPO_ROOT}/bins/voice-agent"/** \
-    "${REPO_ROOT}/libs/model"/** \
-    "${REPO_ROOT}/libs/models"/** \
-    "${REPO_ROOT}/libs/voice"/**; do
-    if [[ -f "${path}" && "${path}" -nt "${binary}" ]]; then
-      return 1
-    fi
-  done
-  return 0
+  ! source_tree_newer_than_binary "${binary}"
 }
 
 resolve_flavor() {
@@ -231,33 +320,38 @@ resolve_flavor() {
 }
 
 PREFERRED_FLAVOR="$(resolve_flavor)"
-SKILL_BIN_DIR="${VOICE_DIR}/${SUBCOMMAND}/bin"
+SKILL_BIN_DIR="$(subskill_bin_dir "${SUBCOMMAND}")"
 VOICE_LIB_DIR="${VOICE_DIR}/lib/${PLATFORM_OS}-${PLATFORM_ARCH}"
-LEGACY_BINARY="${SKILL_BIN_DIR}/voice-agent-${PLATFORM_OS}-${PLATFORM_ARCH}-${PROFILE}"
+LEGACY_BINARY="${SKILL_BIN_DIR}/$(legacy_binary_name)"
 
 if [[ "${PREFERRED_FLAVOR}" == "cuda" ]]; then
   BUILD_CMD+=(--features cuda)
 fi
 
-flavor_candidate_binaries() {
+flavor_candidates() {
   if [[ "${PREFERRED_FLAVOR}" == "cuda" ]]; then
-    printf '%s\n' \
-      "${SKILL_BIN_DIR}/voice-agent-${PLATFORM_OS}-${PLATFORM_ARCH}-${PROFILE}-cuda" \
-      "${SKILL_BIN_DIR}/voice-agent-${PLATFORM_OS}-${PLATFORM_ARCH}-${PROFILE}-cpu"
+    printf '%s\n' cuda cpu
   else
-    printf '%s\n' \
-      "${SKILL_BIN_DIR}/voice-agent-${PLATFORM_OS}-${PLATFORM_ARCH}-${PROFILE}-cpu" \
-      "${SKILL_BIN_DIR}/voice-agent-${PLATFORM_OS}-${PLATFORM_ARCH}-${PROFILE}-cuda"
+    printf '%s\n' cpu cuda
   fi
 }
 
-while IFS= read -r INSTALLED_BINARY; do
-  if binary_is_current "${INSTALLED_BINARY}"; then
-    exec_with_skill_env "${INSTALLED_BINARY}" "${SUBCOMMAND}" "$@"
-  fi
-done < <(flavor_candidate_binaries)
+installed_binary_candidates() {
+  local flavor subskill
+  while IFS= read -r flavor; do
+    for subskill in "${VOICE_SUBSKILLS[@]}"; do
+      printf '%s\n' "$(subskill_bin_dir "${subskill}")/$(platform_binary_name "${flavor}")"
+    done
+  done < <(flavor_candidates)
+}
 
-INSTALL_BINARY="${SKILL_BIN_DIR}/voice-agent-${PLATFORM_OS}-${PLATFORM_ARCH}-${PROFILE}-${PREFERRED_FLAVOR}"
+while IFS= read -r installed_binary; do
+  if binary_is_current "${installed_binary}"; then
+    exec_with_skill_env "${installed_binary}" "${SUBCOMMAND}" "$@"
+  fi
+done < <(installed_binary_candidates)
+
+INSTALL_BINARY="${SKILL_BIN_DIR}/$(platform_binary_name "${PREFERRED_FLAVOR}")"
 
 if ! command -v cargo >/dev/null 2>&1; then
   if [[ -x "${LEGACY_BINARY}" ]]; then
@@ -281,8 +375,8 @@ fi
 
 cd "${REPO_ROOT}"
 ensure_qwen_submodule
-mkdir -p "${SKILL_BIN_DIR}" "${VOICE_LIB_DIR}"
-install_runtime_sidecars
+mkdir -p "${VOICE_LIB_DIR}"
+install_ort_sidecars
 ACTIVE_ORT_DIR="$(ort_sidecar_dir || true)"
 if [[ -z "${ACTIVE_ORT_DIR}" ]]; then
   print_ort_install_guidance
@@ -292,8 +386,7 @@ fi
 BUILD_ENV=(env "ORT_LIB_PATH=${ACTIVE_ORT_DIR}" "ORT_PREFER_DYNAMIC_LINK=1")
 echo "[voice-agent] building optimized ${PREFERRED_FLAVOR} binary for ${PLATFORM_OS}-${PLATFORM_ARCH}; please wait..." >&2
 "${BUILD_ENV[@]}" "${BUILD_CMD[@]}"
-mkdir -p "${SKILL_BIN_DIR}"
-cp "${REPO_ROOT}/target/${TARGET_DIR}/voice-agent" "${INSTALL_BINARY}"
-chmod +x "${INSTALL_BINARY}"
-install_runtime_sidecars
+install_voice_agent_binary "${REPO_ROOT}/target/${TARGET_DIR}/voice-agent" "${PREFERRED_FLAVOR}"
+install_qwen_sidecars require
+install_ort_sidecars
 exec_with_skill_env "${INSTALL_BINARY}" "${SUBCOMMAND}" "$@"
