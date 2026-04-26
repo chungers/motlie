@@ -14,6 +14,7 @@ Draft.
 | 2026-04-26 | @gpt55-dgx | Closed remaining PR #227 design-feedback decisions: main-view plain Left/Right stay reserved no-ops, short-mode status hints use ASCII-first compact labels, monitor history is fixed at 10,000 lines for v1, and the SVG mock now covers all required selector states. |
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 re-review: added missing PLAN/API/CLI docs and pinned monitor historical fetch, kill-by-session-id, and monitored-session-close behavior. |
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 round-3 cross-doc consistency feedback: aligned host events with API (`session_id`, no window-level variants), changed detail activation to `SelectedSession`, and documented stable session-id dispatch as a fourth library gap. |
+| 2026-04-26 | @gpt55-dgx | Updated the MOTD-absent default placeholder art to the compact motlie glyph supplied for `/etc/motd` fallback. |
 
 ## Product Scope
 
@@ -66,25 +67,24 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - `LT` height is dynamic: enough lines to show MOTD content, capped at 30% of
   the left-pane height. `LB` receives the remaining height.
 - When `/etc/motd` is missing,
-  empty, or unreadable, `LT` renders a built-in bold-green motlie ASCII
+  empty, or unreadable, `LT` renders a built-in bold-green motlie glyph
   placeholder followed by a `(no /etc/motd)` caption (or
   `(motd unavailable: <reason>)` on read failure). In this case `LT` height
   bypasses the 30% cap and expands to exactly fit
-  `ascii_rows + caption_row + chrome` so the user always sees the full art.
-  When `L_width < 48` columns or there is not enough vertical room to expand,
+  `glyph_rows + caption_row + chrome` so the user always sees the full art.
+  When `L_width < 44` columns or there is not enough vertical room to expand,
   fall back to a single-line `motlie · no /etc/motd` (still bold-green). The
-  ASCII asset is baked into the binary as a `&'static str` (no inline ANSI
+  glyph asset is baked into the binary as a `&'static str` (no inline ANSI
   escapes); styling is applied at render time via ratatui
   `Style { fg: Color::Green, add_modifier: Modifier::BOLD }`. Asset glyphs
   (use exactly):
 
   ```text
-  ███╗   ███╗ ██████╗ ████████╗██╗     ██╗███████╗
-  ████╗ ████║██╔═══██╗╚══██╔══╝██║     ██║██╔════╝
-  ██╔████╔██║██║   ██║   ██║   ██║     ██║█████╗
-  ██║╚██╔╝██║██║   ██║   ██║   ██║     ██║██╔══╝
-  ██║ ╚═╝ ██║╚██████╔╝   ██║   ███████╗██║███████╗
-  ╚═╝     ╚═╝ ╚═════╝    ╚═╝   ╚══════╝╚═╝╚══════╝
+  ▄   ▄ ▄
+   ▄ ▄▄ ▄▄▄   ▄▄▄ ┃ ┃▄┃ (▄) ▄▄▄   ╲╲ ║ ╱╱
+  ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
+  ┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
+  ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃
   ```
 - `LB` lists tmux sessions on the target host and has default focus.
 - `LB` and `R` are both scrollable.
@@ -310,7 +310,7 @@ The body area is split horizontally into `L` and `R`.
 
 - `LT`: MOTD, height `min(rendered_motd_lines + chrome, 30% of L height)`
   when MOTD is present. When MOTD
-  is absent/empty/unreadable, `LT` height = `ascii_rows + caption + chrome`
+  is absent/empty/unreadable, `LT` height = `glyph_rows + caption + chrome`
   (bypasses the 30% cap so the motlie placeholder fully renders); narrow-
   terminal fallback collapses `LT` to a single line. See §Functional
   Requirements for the placeholder rendering rule.
@@ -427,7 +427,7 @@ The SVG mock includes the following panels:
 3. Monitor mode with `R` scrolled up and auto-tail paused.
 4. `New Session` modal.
 5. Kill confirmation modal with title `Kill session <name>?`.
-6. MOTD-absent state with bold-green motlie ASCII placeholder.
+6. MOTD-absent state with bold-green motlie glyph placeholder.
 7. Short mode (`-s`) main view with focused `T`.
 8. Short mode focused-`B` variant.
 
@@ -974,7 +974,7 @@ detail.
 |------------|-----|----------|
 | `ratatui` | layout/widgets/rendering | Use. Already used by tmux examples and driver frontend. |
 | `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
-| `ansi-to-tui` | optional ANSI rendering for captured/monitored pane content | Defer to a follow-up. The first pass renders captured content as plain text; styling for captured panes is non-critical UX. The motlie ASCII placeholder is hand-styled via ratatui `Style` with no ANSI parsing required. |
+| `ansi-to-tui` | optional ANSI rendering for captured/monitored pane content | Defer to a follow-up. The first pass renders captured content as plain text; styling for captured panes is non-critical UX. The motlie glyph placeholder is hand-styled via ratatui `Style` with no ANSI parsing required. |
 | `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
 | `tempfile` | remote MOTD download target | Use if remote MOTD is implemented through `HostHandle::download()`. Already a dev dependency in parts of the repo; PLAN should decide package placement. |
 
@@ -985,7 +985,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
 - Unit tests for layout calculations:
   - MOTD height cap (present case)
   - MOTD-absent placeholder
-    expansion: `LT` height = `ascii_rows + caption + chrome`, bypasses 30%
+    expansion: `LT` height = `glyph_rows + caption + chrome`, bypasses 30%
     cap; narrow-terminal fallback collapses to single line
   - status bar reservation
   - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
@@ -1006,7 +1006,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     `l` `R`→`Lb`, `Esc` outside modal `R`→`Lb`, no-op when already focused
   - `Esc` inside modal = `Cancel`
 - Style/snapshot tests:
-  - motlie placeholder spans carry `Modifier::BOLD` and `Color::Green`
+  - motlie glyph placeholder spans carry `Modifier::BOLD` and `Color::Green`
   - focused pane border style differs from unfocused pane border style
 - Mock-backed tests through `motlie-tmux`:
   - session list rendering
