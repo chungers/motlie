@@ -10,6 +10,7 @@ Draft.
 |------|-----|---------|
 | 2026-04-26 | @gpt55-dgx | Initial DESIGN for GitHub issue #226: local/remote tmux session selector TUI, session detail sources, monitoring mode, modal create/kill flows, accepted current-PTY attach gap, host-wide SSH integration, and SVG mock. |
 | 2026-04-26 | @opus47-macos-tmux | Proposed (pending @gpt55-dgx acceptance): live session-list event stream via tmux control-mode notifications; focus model with `l` / `v` / `Esc` and visual focus borders; both panes scrollable with R-pane resample-backwards; bold-green motlie ASCII placeholder when MOTD absent (LT bypasses 30% cap to fit); PTY handoff non-functional requirement (no VTE-in-middle); spawn-and-wait attach with `setpgid`+`tcsetpgrp` signal hygiene; default-attach polarity with opt-in `--print-session` and opt-in `--dashboard` (re-enter on clean detach, bounded by `child.status.success()` AND list refresh AND user pick); two new accepted library gaps (`HostHandle::watch_host_events()`, `ScrollbackQuery::LinesRange`); alternatives B/C moved to appendix; testing-strategy additions; open-questions resolutions. |
+| 2026-04-26 | @opus47-macos-tmux | Proposed: short-mode layout via `-s` flag, optimized for 32×65 terminals (mobile SSH clients, IDE terminals, tmux pop-ups). Vertical T/B split at 40:60 (T = session list, B = detail), default focus T. MOTD/motlie omitted in short mode for density. Resize keys promoted to Ctrl-modifier: `Ctrl-Up`/`Ctrl-Down` resize T/B in short mode; `Ctrl-Left`/`Ctrl-Right` resize L/R in normal mode (replacing plain `Left`/`Right`, which become reserved in main view). All other keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`Ctrl-C`) and modal behavior identical across modes. |
 
 ## Product Scope
 
@@ -160,6 +161,19 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   re-enters the TUI on clean child exit (see §Data Flow → Attach for the
   bounded re-entry rule). `--print-session` and `--dashboard` are mutually
   exclusive; combining them is a startup error.
+- (@opus47-macos-tmux 2026-04-26 — proposed) The binary accepts a short-mode
+  flag `-s`. Short mode renders a compact layout optimized for 32 rows × ~65
+  columns: the body splits vertically into Top (`T`, default focus, lists
+  sessions) and Bottom (`B`, detail pane) at a 40:60 ratio. MOTD and the
+  motlie placeholder are omitted in short mode to maximize content density.
+  All command keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`Ctrl-C`), modal
+  behavior, focus model semantics, and detail-source trait usage are
+  identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
+  differ by mode: short mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
+  normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`. Plain
+  `Left`/`Right` no longer resize in main view (they remain reserved); modal
+  use of `Left`/`Right` for button selection is unchanged. `-s` composes
+  with `--print-session`, `--dashboard`, and SSH targets.
 - The binary must use `motlie-tmux` for tmux operations and must not duplicate
   tmux command logic in the binary.
 
@@ -271,6 +285,7 @@ finds positional friction with deployment tools.
 | (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). Selector exits with the child's `ExitStatus`. |
 | `--print-session` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --print-session)"`. |
 | `--dashboard` | TUI → select → spawn-and-wait attach → on clean child exit (`status.success()`), re-enter the TUI; on non-zero child exit, exit with the child's status. `Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). See §Data Flow → Attach for the bounded re-entry rule. |
+| `-s` | Short-mode layout: vertical T/B split (40:60) optimized for 32×65 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--print-session`, `--dashboard`, and SSH targets. See §Layout → Short mode. |
 | `--print-session` + `--dashboard` | Mutually exclusive — startup error. |
 
 Polarity rationale (default attach): the binary's primary product is a session
@@ -328,16 +343,74 @@ Main-selector keymap (focus-aware):
 | `l` | (no-op) | Focus → `Lb` |
 | `v` | Focus → `R` | (no-op) |
 | `Esc` | (no-op outside modal; `Cancel` inside modal) | Focus → `Lb` (outside modal); `Cancel` inside modal |
-| Left / Right | Resize `L`/`R` split | Resize `L`/`R` split (focus-independent) |
+| `Ctrl-Left` / `Ctrl-Right` | Resize `L`/`R` split (normal mode only) | Resize `L`/`R` split (normal mode only; focus-independent) |
+| Left / Right | (no-op in main view; reserved) | (no-op in main view; reserved) |
 | `m` | Start/switch monitoring on highlight | Same |
 | `n` | Open `New Session` modal | Same |
 | `k` | Open kill-confirmation modal | Same |
 | Enter / `g` | Attach highlight | Attach highlight (focus-independent) |
 | `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
+(@opus47-macos-tmux 2026-04-26 — proposed: resize keys promoted to
+Ctrl-modifier so plain arrows are unambiguously navigation/scroll. Normal
+mode resizes the L/R split with `Ctrl-Left`/`Ctrl-Right`; short mode
+resizes the T/B split with `Ctrl-Up`/`Ctrl-Down` — see §Short mode below.)
+
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok`; `Enter` exits and applies `Ok` if selected; `Esc` is
 `Cancel`.
+
+### Short mode (`-s`) (@opus47-macos-tmux 2026-04-26 — proposed)
+
+Short mode is optimized for compact terminal contexts where horizontal width
+is constrained: mobile SSH clients, IDE-embedded terminals, tmux pop-ups
+(`display-popup`), narrow ForceCommand deployments.
+
+**Target dimensions:** 32 rows × ~65 columns. The layout must remain usable
+at smaller sizes but is tuned for this target.
+
+**Layout:**
+
+- Body area: 31 rows (32 total minus 1 status-bar row).
+- Body splits *vertically* into Top (`T`) and Bottom (`B`) at a 40:60 ratio
+  (T ≈ 12 rows, B ≈ 19 rows for a 32-row terminal).
+- `T` = session list. Equivalent to `LB` in normal mode (same scrolling,
+  same position indicator, same auto-scroll-to-keep-highlight-visible
+  behavior). Default focus.
+- `B` = detail pane. Equivalent to `R` in normal mode (same trait-backed
+  sample/monitor sources, same scroll-back-on-up, same monitor tail-pause).
+- MOTD (`LT`) and the motlie placeholder are **omitted** in short mode to
+  maximize content density. Status-bar focus indicator and key hints
+  remain, but key hints must be terser to fit ~65 cols (PLAN to choose
+  abbreviations, e.g., `↑↓ pick · v detail · m mon · n new · k kill · ⏎ go`).
+
+**Focus model:** Identical to normal mode, with `T` ↔ `Lb` and `B` ↔ `R`:
+
+- Default focus is `T`.
+- `v` → focus `B` (no-op if already `B`).
+- `l` → focus `T` (no-op if already `T`).
+- `Esc` outside modal: equivalent to `l` when focus is `B`; no-op when focus
+  is `T`.
+- Visual focus borders: same rule (bright/doubled for focused; dim/single
+  for unfocused).
+
+**Resize keys (mode-dependent):**
+
+| Key | Normal mode | Short mode |
+|-----|-------------|------------|
+| `Ctrl-Left` / `Ctrl-Right` | Resize `L`/`R` split | (no-op; `L`/`R` not present) |
+| `Ctrl-Up` / `Ctrl-Down` | (no-op; `T`/`B` not present) | Resize `T`/`B` split |
+| Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above | Navigation/scroll per focus-aware keymap above (same — use `T`/`B` in place of `Lb`/`R`) |
+
+**All other keys and modal behavior:** identical to normal mode (see the
+focus-aware keymap above). `m`, `n`, `k`, `g`/Enter, `Ctrl-C` are
+focus-independent and behave the same. Modal keymap (Left/Right for button
+selection, Enter to apply, Esc to Cancel) is unchanged.
+
+**Composition with other flags:** `-s` composes with `--print-session`,
+`--dashboard`, SSH targets, and the `MOTLIE_TMUX_SELECT_BYPASS` env-var
+admin bypass. ForceCommand deployments may use `-s` for tight-display
+hosts (`ForceCommand /usr/local/bin/tmux_select -s --dashboard`).
 
 ## SVG Mock
 
@@ -363,6 +436,11 @@ following panels (current revision shows main + `New Session` modal only):
 6. MOTD-absent state (new — `LT` rendered with the bold-green motlie ASCII
    placeholder and `(no /etc/motd)` caption; `fill="#22c55e"` or chosen brand
    green).
+7. (@opus47-macos-tmux 2026-04-26 — proposed) Short mode (`-s`) main view
+   (new — 32×65 viewport, vertical T/B split at 40:60, no MOTD; show focused-
+   `T`/unfocused-`B` border styles and the terser status-bar key hints).
+8. (@opus47-macos-tmux 2026-04-26 — proposed) Short mode focused-`B`
+   variant (new — same layout, focus borders flipped).
 
 PLAN owns the SVG update.
 
@@ -897,6 +975,14 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     cap; narrow-terminal fallback collapses to single line
   - status bar reservation
   - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
+  - (@opus47-macos-tmux 2026-04-26 — proposed) Short mode (`-s`) layout at
+    32×65 viewport: body = 31 rows; T/B split at 40:60 yields T ≈ 12 rows
+    and B ≈ 19 rows; MOTD/motlie omitted; status bar present
+  - (@opus47-macos-tmux 2026-04-26 — proposed) Short mode `Ctrl-Up`/
+    `Ctrl-Down` resize bounds (minimum heights so neither pane collapses
+    to 0); normal mode `Ctrl-Left`/`Ctrl-Right` parallel
+  - (@opus47-macos-tmux 2026-04-26 — proposed) Plain `Left`/`Right` in main
+    view is a no-op in both modes (modal use unchanged)
 - Unit tests for state transitions:
   - highlight movement
   - sample vs monitor mode
