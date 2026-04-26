@@ -3,13 +3,14 @@
 ## Status
 
 Draft implementation plan for the `tmux_select` selector described in
-[DESIGN.md](./DESIGN.md). This PR still contains docs only; no Rust
-implementation is included.
+[DESIGN.md](./DESIGN.md). Implementation has started with the blocking
+`motlie-tmux` library gaps the selector needs before binary work.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Started Phase 1.1 and 1.4 implementation: added `Target::attach_current_pty`, `AttachExit`, local/SSH attach command construction, process-group terminal handoff, signal status mapping, command/status unit tests, and `HostHandle::session_by_id`; localhost PTY smoke and rename-race tests remain open. |
 | 2026-04-26 | @gpt55-dgx | Initial PLAN for issue #226 and PR #227 re-review: orders accepted `motlie-tmux` gaps before binary work, defines the selector phases, and makes the test harness concrete. |
 
 ## Scope
@@ -66,18 +67,18 @@ cargo test -p motlie-tmux-select --test ssh_integration -- --ignored
 References: [Current PTY Attach](./DESIGN.md#current-pty-attach),
 [Attach](./DESIGN.md#attach), [Non-Functional](./DESIGN.md#non-functional).
 
-- [ ] 1.1a Add `Target::attach_current_pty(&self) -> Result<AttachExit>` in
+- [x] 1.1a Add `Target::attach_current_pty(&self) -> Result<AttachExit>` in
   `libs/tmux` with spawn-and-wait semantics.
-- [ ] 1.1b Local attach spawns `tmux attach-session -t <target>` with inherited
+- [x] 1.1b Local attach spawns `tmux attach-session -t <target>` with inherited
   stdio, no pipe wrapping.
-- [ ] 1.1c SSH attach spawns `ssh -t ... tmux attach-session -t <target>` with
+- [x] 1.1c SSH attach spawns `ssh -t ... tmux attach-session -t <target>` with
   inherited stdio, using `SshConfig` connection information owned by the
   library.
-- [ ] 1.1d Put the attach child in its own process group and transfer the
+- [x] 1.1d Put the attach child in its own process group and transfer the
   controlling terminal with `tcsetpgrp`; restore the selector process group
   after `wait()`.
-- [ ] 1.1e Translate signal termination to `128 + signal` in `AttachExit`.
-- [ ] 1.1f Add unit tests for command construction and process-status mapping.
+- [x] 1.1e Translate signal termination to `128 + signal` in `AttachExit`.
+- [x] 1.1f Add unit tests for command construction and process-status mapping.
 - [ ] 1.1g Add localhost smoke coverage that verifies terminal state is restored
   before and after attach.
 
@@ -116,7 +117,7 @@ References: [Kill Session](./DESIGN.md#kill-session),
 
 - [ ] 1.4a Ensure lifecycle operations used by the selector can dispatch
   against stable `SessionInfo.id`, not a potentially stale display name.
-- [ ] 1.4b If the existing `Target` internals cannot target session ids safely,
+- [x] 1.4b If the existing `Target` internals cannot target session ids safely,
   add a small library-owned helper such as `HostHandle::session_by_id()`.
 - [ ] 1.4c Add a rename-race test: open kill confirmation, rename the session
   externally, confirm kill, and assert the original id is killed.

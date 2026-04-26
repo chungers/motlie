@@ -4,8 +4,8 @@
 
 Draft API contract for the planned selector and its required `motlie-tmux`
 support. This document is intentionally explicit about current gaps: the
-selector binary is not implemented in this PR, and the accepted library gaps are
-not yet present on `main`.
+selector binary is not implemented yet, and only the first accepted
+`motlie-tmux` gaps have started landing on this branch.
 
 After implementation, this file must be revised into an implemented API
 reference that matches code exactly.
@@ -14,6 +14,7 @@ reference that matches code exactly.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Mark current-PTY attach and stable session-id lookup as started in `motlie-tmux`; host event stream and windowed scrollback remain open selector dependencies. |
 | 2026-04-26 | @gpt55-dgx | Initial API contract for PR #227: documents existing library dependencies, accepted `motlie-tmux` gaps, and the selector's internal API shape. |
 
 ## Existing motlie-tmux Surface Used
@@ -73,6 +74,9 @@ Required behavior:
 - controlling terminal is transferred to the child and restored after wait
 - signal exits are surfaced as `128 + signal`
 
+Status: implemented in `motlie-tmux` for session targets; localhost PTY smoke
+coverage is still tracked in PLAN 1.1g.
+
 ### Host Event Stream
 
 Design target:
@@ -128,6 +132,9 @@ impl HostHandle {
     pub async fn session_by_id(&self, id: &str) -> motlie_tmux::Result<Option<Target>>;
 }
 ```
+
+Status: implemented as `HostHandle::session_by_id()`. Rename-race lifecycle
+coverage remains tracked in PLAN 1.4c.
 
 ## Selector Internal Types
 
