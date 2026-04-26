@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 
 use crate::artifacts::{
-    ArtifactError, CloudInitArtifacts, LaunchArtifactRenderConfig, render_cloud_init_artifacts,
-    render_launch_script,
+    render_cloud_init_artifacts, render_launch_script, ArtifactError, CloudInitArtifacts,
+    LaunchArtifactRenderConfig,
 };
 use crate::backend::{BackendHandle, BackendKind};
-use crate::network::{NetworkModeError, NetworkModes, validate_network_modes};
+use crate::network::{validate_network_modes, NetworkModeError, NetworkModes};
 use crate::network_alloc::{GuestNetAllocator, GuestNetAllocatorError, GuestNetAssignment};
 use crate::observability::{
     ControlPlaneObservability, FilesystemObservability, NetworkObservability, VmArtifactKind,
@@ -430,7 +430,7 @@ impl VmHandle {
 
     pub async fn ready(&self, policy: &ReadinessPolicy) -> Result<(), OrchestratorError> {
         match self.backend_handle.kind() {
-            BackendKind::ChShell => {
+            BackendKind::ChShell | BackendKind::ChForkExec | BackendKind::ChVmmThread => {
                 self.wait_for_path(
                     &self.runtime_paths.api_socket,
                     ReadinessStage::ApiSocketReady,
@@ -459,16 +459,6 @@ impl VmHandle {
 
                 if let Some(filesystem) = self.filesystem.as_ref() {
                     filesystem.wait_ready(policy.guestfs_timeout).await?;
-                }
-            }
-            _ => {
-                if let Some(filesystem) = self.filesystem.as_ref() {
-                    filesystem.wait_ready(policy.guestfs_timeout).await?;
-                }
-
-                if let Some(control_plane) = self.control_plane.as_ref() {
-                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
-                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
                 }
             }
         }

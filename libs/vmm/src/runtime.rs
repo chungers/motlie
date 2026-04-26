@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::ch::shell::ChShellBackend;
-use crate::backend::vz::shell::VzShellBackend;
 use crate::backend::motlie::ssh_proxy::{MotlieSshProxyBacking, MotlieSshProxyHandle};
 use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
 #[cfg(target_os = "linux")]
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
+use crate::backend::vz::shell::VzShellBackend;
 use crate::backend::{BackendError, BackendHandle, BackendShutdownOutcome};
 use crate::guestfs::GuestFsError;
 use crate::observability::{
@@ -196,22 +196,17 @@ impl NetworkBacking {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl NetworkHandle {
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
         match self {
-            #[cfg(target_os = "linux")]
             Self::MotlieVnet(handle) => Ok(handle.shutdown()?),
-            #[cfg(not(target_os = "linux"))]
-            _ => unreachable!("NetworkHandle is only constructed on Linux"),
         }
     }
 
     pub fn backing_name(&self) -> &'static str {
         match self {
-            #[cfg(target_os = "linux")]
             Self::MotlieVnet(_) => "motlie-vnet",
-            #[cfg(not(target_os = "linux"))]
-            _ => unreachable!("NetworkHandle is only constructed on Linux"),
         }
     }
 
@@ -220,6 +215,21 @@ impl NetworkHandle {
             backing: self.backing_name(),
             socket_path: Some(runtime_paths.vnet_socket.clone()),
         }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl NetworkHandle {
+    pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
+        match *self {}
+    }
+
+    pub fn backing_name(&self) -> &'static str {
+        match *self {}
+    }
+
+    pub fn observability(&self, _runtime_paths: &GuestRuntimePaths) -> NetworkObservability {
+        match *self {}
     }
 }
 

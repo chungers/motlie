@@ -3,6 +3,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
+use crate::backend::vz;
 use crate::network::NetworkModes;
 use crate::network_alloc::GuestNetAssignment;
 use crate::spec::{GuestRuntimePaths, GuestSpec};
@@ -28,20 +29,6 @@ pub struct LaunchArtifactRenderConfig<'a> {
 pub enum ArtifactError {
     #[error("mount '{tag}' is missing guest_path; cannot render mounts.yaml")]
     MissingGuestPath { tag: String },
-}
-
-pub fn vz_artifacts_dir(runtime_paths: &GuestRuntimePaths) -> std::path::PathBuf {
-    runtime_paths.runtime_dir.join("vz-artifacts")
-}
-
-pub fn vz_vm_name(runtime_paths: &GuestRuntimePaths, guest_id: &str) -> String {
-    let runtime_stem = runtime_paths
-        .runtime_dir
-        .parent()
-        .and_then(|path| path.file_name())
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| "runtime".into());
-    sanitize_vz_name(&format!("motlie-v1-45-{runtime_stem}-{guest_id}"))
 }
 
 pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError> {
@@ -297,8 +284,8 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         cfg.network_modes.egress,
         crate::network::EgressNetMode::VzUserspace
     ) {
-        let vz_artifacts_dir = vz_artifacts_dir(cfg.runtime_paths);
-        let vz_vm_name = vz_vm_name(cfg.runtime_paths, &cfg.guest.guest_id);
+        let vz_artifacts_dir = vz::artifacts_dir(cfg.runtime_paths);
+        let vz_vm_name = vz::vm_name(cfg.runtime_paths, &cfg.guest.guest_id);
         if cfg.ssh_ca_pubkey.is_some() {
             out.push_str("export MOTLIE_VZ_SSH_CA_PUBKEY=\"$SSH_CA_PUBKEY\"\n");
         }
@@ -309,201 +296,94 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
             "# Full VFS/VNET/egress certification stays in harness validate/scenario steps.\n",
         );
         out.push_str("export MOTLIE_VZ_INLINE_VALIDATION=0\n");
-        writeln!(
+        export_path(&mut out, "MOTLIE_VZ_ARTIFACTS_DIR", &vz_artifacts_dir);
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_ARTIFACTS_DIR={}",
-            shell_single_quote(vz_artifacts_dir.to_string_lossy().as_ref())
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_EGRESS_SOCKET_PATH",
+            &cfg.runtime_paths.runtime_dir.join("egress.sock"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_EGRESS_SOCKET_PATH={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("egress.sock")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_RUNNER_PID_FILE",
+            &cfg.runtime_paths.runtime_dir.join("vz-runner.pid"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_RUNNER_PID_FILE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("vz-runner.pid")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_EGRESS_HELPER_PID_FILE",
+            &cfg.runtime_paths.runtime_dir.join("vz-egress-helper.pid"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_EGRESS_HELPER_PID_FILE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("vz-egress-helper.pid")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_RESULT_JSON",
+            &cfg.runtime_paths.runtime_dir.join("vz-launch-result.json"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_RESULT_JSON={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("vz-launch-result.json")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_SERIAL_LOG",
+            &cfg.runtime_paths.serial_log,
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_SERIAL_LOG={}",
-            shell_single_quote(cfg.runtime_paths.serial_log.to_string_lossy().as_ref())
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_GUEST_IP_FILE",
+            &cfg.runtime_paths.runtime_dir.join("guest-ip.txt"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_GUEST_IP_FILE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("guest-ip.txt")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_EGRESS_LOG",
+            &cfg.runtime_paths.runtime_dir.join("egress.log"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_EGRESS_LOG={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("egress.log")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_SEED_DIR",
+            &cfg.runtime_paths.runtime_dir.join("seed"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_SEED_DIR={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("seed")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_SEED_IMAGE",
+            &cfg.runtime_paths.runtime_dir.join("seed.dmg"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_SEED_IMAGE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("seed.dmg")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_CONTROL_READY_FILE",
+            &cfg.runtime_paths.runtime_dir.join("control-plane-ready"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_CONTROL_READY_FILE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("control-plane-ready")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_INTERACTIVE_READY_FILE",
+            &cfg.runtime_paths.runtime_dir.join("interactive-ready"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_INTERACTIVE_READY_FILE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("interactive-ready")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_VALIDATION_COMPLETE_FILE",
+            &cfg.runtime_paths.runtime_dir.join("validation-complete"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_VALIDATION_COMPLETE_FILE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("validation-complete")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_PHASES_LOG",
+            &cfg.runtime_paths.runtime_dir.join("vz-phases.log"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_PHASES_LOG={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("vz-phases.log")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_CONTROL_PORT_FILE",
+            &cfg.runtime_paths.runtime_dir.join("control-port"),
+        );
+        export_path(
             &mut out,
-            "export MOTLIE_VZ_CONTROL_PORT_FILE={}",
-            shell_single_quote(
-                cfg.runtime_paths
-                    .runtime_dir
-                    .join("control-port")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
+            "MOTLIE_VZ_VFS_VSOCK_SOCKET",
+            &cfg.guest.socket_path,
+        );
+        export_value(
             &mut out,
-            "export MOTLIE_VZ_VFS_VSOCK_SOCKET={}",
-            shell_single_quote(cfg.guest.socket_path.to_string_lossy().as_ref())
-        )
-        .expect("writing to String cannot fail");
-        writeln!(
-            &mut out,
-            "export MOTLIE_VZ_SSH_VSOCK_SOCKET={}",
-            shell_single_quote(&format!(
-                "{}_2222",
-                cfg.runtime_paths.vsock_socket.to_string_lossy()
-            ))
-        )
-        .expect("writing to String cannot fail");
+            "MOTLIE_VZ_SSH_VSOCK_SOCKET",
+            &format!("{}_2222", cfg.runtime_paths.vsock_socket.to_string_lossy()),
+        );
         if let Some(home_mount) = cfg
             .guest
             .mounts
             .iter()
             .find(|mount| mount.guest_path.as_deref() == Some(cfg.guest.user.home.as_path()))
         {
-            writeln!(
-                &mut out,
-                "export MOTLIE_VZ_HOST_HOME_DIR={}",
-                shell_single_quote(home_mount.host_path.to_string_lossy().as_ref())
-            )
-            .expect("writing to String cannot fail");
+            export_path(&mut out, "MOTLIE_VZ_HOST_HOME_DIR", &home_mount.host_path);
         }
         if let Some(workspace_mount) = cfg
             .guest
@@ -511,12 +391,11 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
             .iter()
             .find(|mount| mount.guest_path.as_deref() == Some(Path::new("/workspace")))
         {
-            writeln!(
+            export_path(
                 &mut out,
-                "export MOTLIE_VZ_HOST_WORKSPACE_DIR={}",
-                shell_single_quote(workspace_mount.host_path.to_string_lossy().as_ref())
-            )
-            .expect("writing to String cannot fail");
+                "MOTLIE_VZ_HOST_WORKSPACE_DIR",
+                &workspace_mount.host_path,
+            );
         }
         if let Some(agent_state_mount) = cfg
             .guest
@@ -524,12 +403,11 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
             .iter()
             .find(|mount| mount.guest_path.as_deref() == Some(Path::new("/agent-state")))
         {
-            writeln!(
+            export_path(
                 &mut out,
-                "export MOTLIE_VZ_HOST_AGENT_STATE_DIR={}",
-                shell_single_quote(agent_state_mount.host_path.to_string_lossy().as_ref())
-            )
-            .expect("writing to String cannot fail");
+                "MOTLIE_VZ_HOST_AGENT_STATE_DIR",
+                &agent_state_mount.host_path,
+            );
         }
         out.push_str("export MOTLIE_VZ_LOGIN_USER=\"$SSH_LOGIN_USER\"\n");
         out.push_str("export MOTLIE_VZ_UID_NUM=\"$LOGIN_UID\"\n");
@@ -583,15 +461,13 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-fn sanitize_vz_name(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(byte as char),
-            _ => out.push('-'),
-        }
-    }
-    out
+fn export_value(out: &mut String, name: &str, value: &str) {
+    writeln!(out, "export {name}={}", shell_single_quote(value))
+        .expect("writing to String cannot fail");
+}
+
+fn export_path(out: &mut String, name: &str, path: &Path) {
+    export_value(out, name, path.to_string_lossy().as_ref());
 }
 
 fn mac_fmt(m: &[u8; 6]) -> String {
@@ -727,9 +603,7 @@ mod tests {
         assert!(script.contains("GUEST_ID='alice'"));
         assert!(script.contains("SEED_DIR=\"${SEED_DIR:-/tmp/motlie-vmm-v14-cloud-init-alice}\""));
         assert!(script.contains("RUNTIME_ROOT=\"${RUNTIME_ROOT:-/tmp/motlie-vmm-v14-runtime}\""));
-        assert!(
-            script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\"")
-        );
+        assert!(script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\""));
         assert!(
             script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\"")
         );
@@ -787,16 +661,10 @@ mod tests {
         assert!(script.contains(
             "export MOTLIE_VZ_PHASES_LOG='/tmp/motlie-vmm-v14-runtime/alice/vz-phases.log'"
         ));
-        assert!(
-            script.contains(
-                "export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"
-            )
-        );
-        assert!(
-            script.contains(
-                "export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"
-            )
-        );
+        assert!(script
+            .contains("export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"));
+        assert!(script
+            .contains("export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"));
         assert!(script.contains("export MOTLIE_VZ_EGRESS_GUEST_IP=\"$EGRESS_GUEST_IP\""));
         assert!(script.contains("export MOTLIE_VZ_EGRESS_HOST_IP=\"$EGRESS_HOST_IP\""));
         assert!(script.contains("export MOTLIE_VZ_EGRESS_DNS_IP=\"$EGRESS_DNS_IP\""));

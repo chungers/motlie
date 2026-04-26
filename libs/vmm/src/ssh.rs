@@ -884,7 +884,7 @@ async fn exec_on_channel(
                 ssh_exec_trace!("exec_on_channel[{guest_name}]: stdout {} bytes", data.len());
                 stdout.extend_from_slice(data)
             }
-            ChannelMsg::ExtendedData { ref data, ext } if ext == 1 => {
+            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
                 ssh_exec_trace!("exec_on_channel[{guest_name}]: stderr {} bytes", data.len());
                 stderr.extend_from_slice(data)
             }
@@ -1880,15 +1880,15 @@ pub struct GuestClientHandler;
 impl russh::client::Handler for GuestClientHandler {
     type Error = SshProxyError;
 
-    fn check_server_key(
+    async fn check_server_key(
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+    ) -> Result<bool, Self::Error> {
         // The guest bridge connects over a host-created UDS/vsock path and
         // authenticates the guest with a fresh CA-signed ephemeral cert.
         // The guest-side sshd server key is therefore accepted as part of the
         // localhost/vsock trust boundary for this harness-owned channel.
-        async { Ok(true) }
+        Ok(true)
     }
 }
 
@@ -1897,10 +1897,10 @@ pub struct ProxyClientHandler;
 impl russh::client::Handler for ProxyClientHandler {
     type Error = SshProxyError;
 
-    fn check_server_key(
+    async fn check_server_key(
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        async { Ok(true) }
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
     }
 }

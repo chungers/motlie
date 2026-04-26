@@ -7,7 +7,6 @@ use std::sync::Mutex;
 
 use thiserror::Error;
 
-use crate::artifacts::{vz_artifacts_dir, vz_vm_name};
 use crate::backend::{
     BackendError, BackendHandle, BackendKind, BackendShutdownOutcome, VmBackendCapabilities,
 };
@@ -261,8 +260,8 @@ impl VzShellBackend {
             guest_id: prepared.guest.guest_id.clone(),
             base_dir: prepared.base_dir.clone(),
             launch_script_path,
-            artifacts_dir: vz_artifacts_dir(&prepared.runtime_paths),
-            vm_name: vz_vm_name(&prepared.runtime_paths, &prepared.guest.guest_id),
+            artifacts_dir: super::artifacts_dir(&prepared.runtime_paths),
+            vm_name: super::vm_name(&prepared.runtime_paths, &prepared.guest.guest_id),
             runner_pid_file: prepared.runtime_paths.runtime_dir.join("vz-runner.pid"),
             egress_helper_pid_file: prepared
                 .runtime_paths

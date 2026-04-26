@@ -140,11 +140,13 @@ pub struct FsServer {
 }
 
 pub struct FsServerBuilder {
-    mounts: Vec<(String, PathBuf, bool, Option<(u32, u32)>)>,
+    mounts: Vec<MountConfig>,
     event_capacity: Option<usize>,
     policy: Option<Box<dyn PolicyFn>>,
     overlay_enabled: bool,
 }
+
+type MountConfig = (String, PathBuf, bool, Option<(u32, u32)>);
 
 impl FsServer {
     pub fn builder() -> FsServerBuilder {
@@ -763,6 +765,7 @@ impl FsServer {
             })
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the FUSE lock request fields.
     fn do_getlk(
         &self,
         mount: &MountState,
@@ -800,6 +803,7 @@ impl FsServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the FUSE lock request fields.
     fn do_setlk(
         &self,
         mount: &MountState,
@@ -1172,8 +1176,7 @@ impl FsServer {
                     OverlayEntryKind::Content(_) => {
                         merged.insert(name, (FileType::RegularFile, InodeKind::Content, None));
                     }
-                    OverlayEntryKind::Symlink(target) => {
-                        let _ = target;
+                    OverlayEntryKind::Symlink(_) => {
                         merged.insert(name, (FileType::Symlink, InodeKind::Symlink, None));
                     }
                     OverlayEntryKind::SyntheticDir => {
@@ -1400,6 +1403,7 @@ impl FsServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the FUSE create request fields.
     fn do_create(
         &self,
         mount: &MountState,
@@ -1583,7 +1587,7 @@ impl FsServer {
             if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
                 if let Some(overlay) = &self.overlay {
                     let ov_attrs = super::overlay::OverlayAttrs { mode, uid, gid };
-                    if let Err(_) = overlay.create_dir(&layer, &mount.tag, &rel_path, ov_attrs) {
+                    if overlay.create_dir(&layer, &mount.tag, &rel_path, ov_attrs).is_err() {
                         return FsResult::Error { errno: libc::EIO };
                     }
                     let now = SystemTime::now();
@@ -1845,6 +1849,8 @@ impl FsServer {
             // Disk → overlay (editor atomic-save path)
             (false, true) => {
                 let host_src = mount.backing.resolve(&src_path);
+                // Preserve disk ownership/mode when an editor moves a backing
+                // file into an overlay-managed parent during atomic save.
                 match (fs::read(&host_src), fs::symlink_metadata(&host_src)) {
                     (Ok(content), Ok(meta)) => {
                         if let Some(layer) = self.writable_layer(&mount.tag, &dst_path) {
@@ -2009,7 +2015,7 @@ impl FsServer {
                 }
             }
         };
-        if entry.host_path.is_none() {
+        let Some(hp) = entry.host_path.clone() else {
             if let Some(overlay) = &self.overlay {
                 if let Some(target) = overlay.symlink_target(&mount.tag, &entry.path) {
                     return FsResult::Symlink { target };
@@ -2018,8 +2024,7 @@ impl FsServer {
             return FsResult::Error {
                 errno: libc::ENOTSUP,
             };
-        }
-        let hp = entry.host_path.clone().unwrap();
+        };
         drop(table);
         match fs::read_link(&hp) {
             Ok(target) => FsResult::Symlink {
@@ -2215,13 +2220,13 @@ fn write_lock_type() -> i32 {
     libc::F_WRLCK as i32
 }
 
-fn find_conflict<'a>(
-    locks: &'a [FileLock],
+fn find_conflict(
+    locks: &[FileLock],
     lock_owner: u64,
     start: u64,
     end: u64,
     typ: i32,
-) -> Option<&'a FileLock> {
+) -> Option<&FileLock> {
     locks.iter().find(|lock| {
         lock.owner != lock_owner
             && ranges_overlap(lock.start, lock.end, start, end)
@@ -2414,12 +2419,19 @@ fn list_xattrs(_path: &Path) -> Result<Vec<u8>, i32> {
 }
 
 #[cfg(target_os = "macos")]
+const LINUX_ENODATA: i32 = 61;
+#[cfg(target_os = "macos")]
+const LINUX_ENOTSUP: i32 = 95;
+
+#[cfg(target_os = "macos")]
 fn normalize_guest_xattr_errno(errno: i32) -> i32 {
+    // The guest observes Linux errno values even when the host VFS backend is
+    // running on macOS, so normalize host xattr errno values at the boundary.
     match errno {
-        libc::ENOTSUP => 95, // Linux ENOTSUP/EOPNOTSUPP
-        libc::ENODATA => 61, // Linux ENODATA
+        libc::ENOTSUP => LINUX_ENOTSUP,
+        libc::ENODATA => LINUX_ENODATA,
         #[allow(unreachable_patterns)]
-        libc::ENOATTR => 61, // Linux ENODATA
+        libc::ENOATTR => LINUX_ENODATA,
         _ => errno,
     }
 }
@@ -2813,7 +2825,7 @@ fn truncate_file(path: &Path, size: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
@@ -3231,6 +3243,11 @@ mod tests {
         let path = dir.path().join("secret.txt");
         fs::write(&path, b"secret").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        let owner_uid = meta.uid();
+        let owner_gid = meta.gid();
+        let other_uid = if owner_uid == u32::MAX { owner_uid - 1 } else { owner_uid + 1 };
+        let other_gid = if owner_gid == u32::MAX { owner_gid - 1 } else { owner_gid + 1 };
 
         let server = build_test_server(dir.path());
         let inode = match server.handle_op(
@@ -3250,8 +3267,8 @@ mod tests {
                 FsOp::Access {
                     inode,
                     mask: libc::R_OK,
-                    uid: 1000,
-                    gid: 1000
+                    uid: owner_uid,
+                    gid: owner_gid
                 }
             ),
             FsResult::Ok
@@ -3262,14 +3279,14 @@ mod tests {
                 FsOp::Access {
                     inode,
                     mask: libc::W_OK,
-                    uid: 1000,
-                    gid: 1000
+                    uid: owner_uid,
+                    gid: owner_gid
                 }
             ),
             FsResult::Ok
         ));
         assert!(matches!(
-            server.handle_op("test", FsOp::Access { inode, mask: libc::R_OK, uid: 2000, gid: 2000 }),
+            server.handle_op("test", FsOp::Access { inode, mask: libc::R_OK, uid: other_uid, gid: other_gid }),
             FsResult::Error { errno } if errno == libc::EACCES
         ));
     }
@@ -3598,9 +3615,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn normalize_guest_xattr_errno_uses_linux_values() {
-        assert_eq!(normalize_guest_xattr_errno(libc::ENODATA), 61);
-        assert_eq!(normalize_guest_xattr_errno(libc::ENOTSUP), 95);
+        assert_eq!(normalize_guest_xattr_errno(libc::ENODATA), LINUX_ENODATA);
+        assert_eq!(normalize_guest_xattr_errno(libc::ENOTSUP), LINUX_ENOTSUP);
     }
 
     #[test]

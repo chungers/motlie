@@ -172,7 +172,15 @@ impl MemOverlay {
             default_gid: 0,
         }
     }
+}
 
+impl Default for MemOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemOverlay {
     // --- Layer management ---
 
     pub fn put_layer(&self, name: &str, priority: u32) -> Result<()> {
@@ -579,9 +587,7 @@ impl MemOverlay {
                 if t != tag { continue; }
                 if !is_direct_child(p, dir_path, &prefix) { continue; }
                 let name = child_name(p, dir_path);
-                if !seen.contains_key(&name) {
-                    seen.insert(name, node.kind.clone());
-                }
+                seen.entry(name).or_insert_with(|| node.kind.clone());
             }
         }
         seen.into_iter().collect()
@@ -672,12 +678,10 @@ fn prune_parents(layer: &mut Layer, tag: &str, path: &str) {
         let key = (tag.to_string(), parent.clone());
         if let Some(entry) = layer.entries.get_mut(&key) {
             entry.child_count = entry.child_count.saturating_sub(1);
-            if entry.child_count == 0 {
-                if matches!(entry.kind, OverlayEntryKind::SyntheticDir) {
-                    layer.entries.remove(&key);
-                    current = parent;
-                    continue;
-                }
+            if entry.child_count == 0 && matches!(entry.kind, OverlayEntryKind::SyntheticDir) {
+                layer.entries.remove(&key);
+                current = parent;
+                continue;
             }
         }
         break;

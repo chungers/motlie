@@ -16,17 +16,12 @@ const DEFAULT_SCROLLBACK: usize = 2_000;
 const DEFAULT_CHUNK_TIMEOUT: Duration = Duration::from_millis(500);
 const CURSOR_POSITION_REQUEST: &[u8] = b"\x1b[6n";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalBackendKind {
     Vt100,
+    #[default]
     Shadow,
-}
-
-impl Default for TerminalBackendKind {
-    fn default() -> Self {
-        Self::Shadow
-    }
 }
 
 impl std::fmt::Display for TerminalBackendKind {
@@ -93,8 +88,8 @@ struct TerminalFeedResult {
 }
 
 enum TerminalEmulator {
-    Vt100(Vt100Engine),
-    Shadow(ShadowEngine),
+    Vt100(Box<Vt100Engine>),
+    Shadow(Box<ShadowEngine>),
 }
 
 impl TerminalEmulator {
@@ -102,8 +97,8 @@ impl TerminalEmulator {
         let rows = request.row_height.try_into().unwrap_or(u16::MAX);
         let cols = request.col_width.try_into().unwrap_or(u16::MAX);
         match kind {
-            TerminalBackendKind::Vt100 => Self::Vt100(Vt100Engine::new(rows, cols)),
-            TerminalBackendKind::Shadow => Self::Shadow(ShadowEngine::new(rows, cols)),
+            TerminalBackendKind::Vt100 => Self::Vt100(Box::new(Vt100Engine::new(rows, cols))),
+            TerminalBackendKind::Shadow => Self::Shadow(Box::new(ShadowEngine::new(rows, cols))),
         }
     }
 
@@ -313,6 +308,7 @@ impl std::fmt::Debug for HarnessTerminalSession {
 }
 
 impl HarnessTerminalSession {
+    #[allow(clippy::too_many_arguments)] // The harness wires one PTY session to four artifact sinks.
     pub fn new(
         name: impl Into<String>,
         inner: GuestPtySession,
@@ -616,6 +612,7 @@ struct AsciicastTerm<'a> {
     term_type: &'a str,
 }
 
+#[allow(clippy::too_many_arguments)] // Asciicast v2 metadata is flat by file-format design.
 pub fn persist_asciicast(
     path: &Path,
     title: &str,
