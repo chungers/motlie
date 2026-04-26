@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="680" viewBox="0 0 960 680" role="img" aria-label="tmux_select TUI design mock">
+  <rect x="0" y="0" width="960" height="680" fill="#111827"/>
+
+  <text x="24" y="34" fill="#f8fafc" font-family="monospace" font-size="18">Main selector with sample/monitor-capable R pane</text>
+  <rect x="18" y="52" width="924" height="360" fill="#0f172a" stroke="#94a3b8" stroke-width="2"/>
+  <rect x="18" y="52" width="326" height="360" fill="#111827" stroke="#64748b" stroke-width="2"/>
+  <rect x="344" y="52" width="598" height="360" fill="#020617" stroke="#64748b" stroke-width="2"/>
+  <rect x="18" y="52" width="326" height="96" fill="#1f2937" stroke="#64748b" stroke-width="2"/>
+  <rect x="18" y="148" width="326" height="264" fill="#0b1220" stroke="#64748b" stroke-width="2"/>
+  <rect x="18" y="412" width="924" height="36" fill="#1e293b" stroke="#94a3b8" stroke-width="2"/>
+
+  <text x="34" y="80" fill="#f8fafc" font-family="monospace" font-size="16">LT /etc/motd</text>
+  <text x="34" y="108" fill="#cbd5e1" font-family="monospace" font-size="14">Welcome to target-host</text>
+  <text x="34" y="132" fill="#cbd5e1" font-family="monospace" font-size="14">System status and access notes</text>
+
+  <text x="34" y="176" fill="#f8fafc" font-family="monospace" font-size="16">LB tmux sessions</text>
+  <rect x="30" y="198" width="302" height="30" fill="#2563eb"/>
+  <text x="44" y="219" fill="#ffffff" font-family="monospace" font-size="15">&gt; dev          3 windows</text>
+  <text x="44" y="254" fill="#cbd5e1" font-family="monospace" font-size="15">  build        1 window</text>
+  <text x="44" y="289" fill="#cbd5e1" font-family="monospace" font-size="15">  logs         2 windows</text>
+  <text x="44" y="324" fill="#cbd5e1" font-family="monospace" font-size="15">  jarvis       4 windows</text>
+
+  <text x="360" y="82" fill="#f8fafc" font-family="monospace" font-size="16">R selected session detail: dev</text>
+  <text x="360" y="112" fill="#93c5fd" font-family="monospace" font-size="14">mode: sample  (press m to monitor)</text>
+  <text x="360" y="146" fill="#cbd5e1" font-family="monospace" font-size="14">--- dev(%12) ---</text>
+  <text x="360" y="172" fill="#cbd5e1" font-family="monospace" font-size="14">cargo test -p motlie-tmux</text>
+  <text x="360" y="198" fill="#cbd5e1" font-family="monospace" font-size="14">running 148 tests</text>
+  <text x="360" y="224" fill="#cbd5e1" font-family="monospace" font-size="14">test result: ok</text>
+  <text x="360" y="266" fill="#94a3b8" font-family="monospace" font-size="14">monitor mode replaces this with live HistoryHandle output</text>
+
+  <text x="34" y="435" fill="#e2e8f0" font-family="monospace" font-size="13">host: target-host   time: 14:37   keys: Up/Down select | Left/Right resize | n new | k kill | m monitor | Enter/g attach</text>
+
+  <text x="24" y="490" fill="#f8fafc" font-family="monospace" font-size="18">Modal state</text>
+  <rect x="210" y="510" width="540" height="140" fill="#111827" stroke="#f8fafc" stroke-width="2"/>
+  <text x="242" y="544" fill="#f8fafc" font-family="monospace" font-size="18">New Session</text>
+  <rect x="242" y="566" width="476" height="32" fill="#020617" stroke="#64748b" stroke-width="1"/>
+  <text x="254" y="588" fill="#cbd5e1" font-family="monospace" font-size="14">session-name</text>
+  <rect x="364" y="616" width="96" height="28" fill="#334155" stroke="#94a3b8"/>
+  <text x="384" y="636" fill="#e2e8f0" font-family="monospace" font-size="14">Cancel</text>
+  <rect x="500" y="616" width="96" height="28" fill="#2563eb" stroke="#bfdbfe"/>
+  <text x="534" y="636" fill="#ffffff" font-family="monospace" font-size="14">Ok</text>
+  <text x="242" y="666" fill="#94a3b8" font-family="monospace" font-size="12">Kill confirmation uses same buttons with title: Kill session &lt;name&gt;?</text>
+</svg>
