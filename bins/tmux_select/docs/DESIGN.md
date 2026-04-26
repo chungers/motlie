@@ -13,6 +13,7 @@ Draft.
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 short-mode review addition from @opus47-macos-tmux: short-mode layout via `-s` flag, optimized for 32×65 terminals (mobile SSH clients, IDE terminals, tmux pop-ups). Vertical T/B split at 40:60 (T = session list, B = detail), default focus T. MOTD/motlie omitted in short mode for density. Resize keys promoted to Ctrl-modifier: `Ctrl-Up`/`Ctrl-Down` resize T/B in short mode; `Ctrl-Left`/`Ctrl-Right` resize L/R in normal mode (replacing plain `Left`/`Right`, which become reserved in main view). All other keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`Ctrl-C`) and modal behavior identical across modes. |
 | 2026-04-26 | @gpt55-dgx | Closed remaining PR #227 design-feedback decisions: main-view plain Left/Right stay reserved no-ops, short-mode status hints use ASCII-first compact labels, monitor history is fixed at 10,000 lines for v1, and the SVG mock now covers all required selector states. |
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 re-review: added missing PLAN/API/CLI docs and pinned monitor historical fetch, kill-by-session-id, and monitored-session-close behavior. |
+| 2026-04-26 | @gpt55-dgx | Addressed PR #227 round-3 cross-doc consistency feedback: aligned host events with API (`session_id`, no window-level variants), changed detail activation to `SelectedSession`, and documented stable session-id dispatch as a fourth library gap. |
 
 ## Product Scope
 
@@ -227,7 +228,7 @@ tmux_select binary
         +-- SessionStore
         |      +-- HostHandle::list_sessions()
         |      +-- HostHandle::create_session()
-        |      +-- HostHandle::session(name).await?           // -> Option<Target>
+        |      +-- HostHandle::session_by_id(id).await?       // -> Option<Target>
         |          .ok_or(SessionVanished)?                   // race: see below
         |          .kill().await?
         |
@@ -436,12 +437,17 @@ The `R` pane should depend on a trait, not directly on sampling or monitoring
 implementation details.
 
 ```rust
+pub struct SelectedSession {
+    pub id: String,
+    pub name: String,
+}
+
 #[async_trait::async_trait]
 trait SessionDetailSource {
     async fn activate(
         &mut self,
         host: &motlie_tmux::HostHandle,
-        session_name: &str,
+        session: &SelectedSession,
     ) -> anyhow::Result<()>;
 
     // DetailDelta replaces the
@@ -477,8 +483,9 @@ pub enum DetailDelta {
 
 Initial shipped implementations:
 
-- `SampleDetailSource`: resolves `host.session(name)`, captures session content,
-  sorts panes by `(window, pane)`, omits empty panes, and renders text sections.
+- `SampleDetailSource`: resolves the selected session by stable id, captures
+  session content, sorts panes by `(window, pane)`, omits empty panes, and
+  renders text sections.
   `fetch_older` issues
   `Target::sample_text(&ScrollbackQuery::LinesRange { older_than_lines, count })`
   for paginated backwards fetch (see §Accepted Library Gaps →
@@ -551,9 +558,8 @@ Subscribe-and-reconcile loop:
      user's next explicit detail/monitor action.
    - `SessionRenamed { id, old, new }`: update display name in place; preserve
      highlight.
-   - `WindowAdded` / `WindowClosed`: update `window_count` for the affected
-     session.
-   - `ClientDetached` / `ClientAttached`: update `attached` flag.
+   - `ClientDetached { session_id }` / `ClientAttached { session_id }`:
+     update `attached` flag.
    - `Disconnect { reason }`: control-mode link died. Show status-bar
      indicator. Begin polling fallback (recommended cadence: 5s) until
      reconnect succeeds.
@@ -651,10 +657,10 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    bounded buffer that survives the attach window).
 3. Restore raw mode and leave the alternate screen. Restore termios to
    canonical state.
-4. Resolve the highlighted session to a `Target` via
-   `host.session(name).await? .ok_or(SessionVanished)?`. If the session
-   vanished between selection and resolve (race), show stderr message and
-   either re-enter the TUI (under `--dashboard`) or exit non-zero (default).
+4. Resolve the highlighted session id to a `Target` via the stable-id
+   library path. If the session vanished between selection and resolve
+   (race), show stderr message and either re-enter the TUI (under
+   `--dashboard`) or exit non-zero (default).
 5. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited
@@ -771,10 +777,8 @@ pub enum HostEvent {
     SessionAdded { id: String, name: String },        // derived
     SessionClosed { id: String, name: String },       // derived
     SessionRenamed { id: String, old: String, new: String },
-    WindowAdded { session: String, window: u32 },
-    WindowClosed { session: String, window: u32 },
-    ClientAttached { session: String },
-    ClientDetached { session: String },
+    ClientAttached { session_id: String },
+    ClientDetached { session_id: String },
     Disconnect { reason: String },                    // control-mode link died
 }
 ```
@@ -831,6 +835,25 @@ already has 200 lines loaded and needs the previous page, it requests
 `MonitorDetailSource::fetch_older`; monitor mode uses the same tmux capture
 history anchor and does not treat the rolling monitor buffer as the source of
 truth for historical fetches.
+
+### Stable Session-Id Dispatch
+
+The selector captures `SessionInfo.id` for destructive operations, attach, and
+detail-source activation. Display names can change while a modal is open or
+while the user is browsing sessions, so resolving by name is not sufficient.
+
+API shape:
+
+```rust
+impl HostHandle {
+    pub async fn session_by_id(&self, id: &str) -> Result<Option<Target>>;
+}
+```
+
+The library owns id-to-target resolution so the binary does not duplicate
+tmux discovery or command construction. If tmux cannot address a session by id
+directly for a needed operation, the library must perform the safe lookup and
+race handling internally before returning `Target`.
 
 ### Remote MOTD
 
@@ -928,9 +951,9 @@ Pros:
 Cons:
 
 - needs some TUI state machinery duplicated from existing frontend patterns
-- depends on three accepted library gaps
+- depends on four accepted library gaps
   (`Target::attach_current_pty`, `HostHandle::watch_host_events`,
-  `ScrollbackQuery::LinesRange`)
+  `ScrollbackQuery::LinesRange`, `HostHandle::session_by_id`)
 
 Comparison of all three
 alternatives along the four CLAUDE.md greenfield axes:
