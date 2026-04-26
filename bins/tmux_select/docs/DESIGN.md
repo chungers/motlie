@@ -12,6 +12,7 @@ Draft.
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 review additions from @opus47-macos-tmux: live session-list event stream via tmux control-mode notifications; focus model with `l` / `v` / `Esc` and visual focus borders; both panes scrollable with R-pane resample-backwards; bold-green motlie ASCII placeholder when MOTD absent (LT bypasses 30% cap to fit); PTY handoff non-functional requirement (no VTE-in-middle); spawn-and-wait attach with `setpgid`+`tcsetpgrp` signal hygiene; default-attach polarity with opt-in `--print-session` and opt-in `--dashboard` (re-enter on clean detach, bounded by `child.status.success()` AND list refresh AND user pick); two new accepted library gaps (`HostHandle::watch_host_events()`, `ScrollbackQuery::LinesRange`); alternatives B/C moved to appendix; testing-strategy additions; open-questions resolutions. |
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 short-mode review addition from @opus47-macos-tmux: short-mode layout via `-s` flag, optimized for 32×65 terminals (mobile SSH clients, IDE terminals, tmux pop-ups). Vertical T/B split at 40:60 (T = session list, B = detail), default focus T. MOTD/motlie omitted in short mode for density. Resize keys promoted to Ctrl-modifier: `Ctrl-Up`/`Ctrl-Down` resize T/B in short mode; `Ctrl-Left`/`Ctrl-Right` resize L/R in normal mode (replacing plain `Left`/`Right`, which become reserved in main view). All other keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`Ctrl-C`) and modal behavior identical across modes. |
 | 2026-04-26 | @gpt55-dgx | Closed remaining PR #227 design-feedback decisions: main-view plain Left/Right stay reserved no-ops, short-mode status hints use ASCII-first compact labels, monitor history is fixed at 10,000 lines for v1, and the SVG mock now covers all required selector states. |
+| 2026-04-26 | @gpt55-dgx | Addressed PR #227 re-review: added missing PLAN/API/CLI docs and pinned monitor historical fetch, kill-by-session-id, and monitored-session-close behavior. |
 
 ## Product Scope
 
@@ -489,7 +490,11 @@ Initial shipped implementations:
   events to its internal buffer, but the UI viewport stays anchored at the
   user's position. `fetch_older` for monitor mode falls back to a one-shot
   `Target::sample_text(&LinesRange { ... })` against the same target —
-  monitor history rolls forward, so historical fetch reuses sample.
+  monitor history rolls forward, so historical fetch reuses sample. When the
+  10,000-line rolling monitor buffer is full and the user scrolls older than
+  that buffer start, `fetch_older` must query tmux pre-monitor scrollback via
+  `LinesRange` against the same target, not treat the rolling-buffer start as
+  the history boundary.
 
 Implementation should prefer static dispatch for shipped modes:
 
@@ -541,6 +546,9 @@ Subscribe-and-reconcile loop:
      `list_sessions()` and merge into `LB` model by stable session id (not
      name — `%session-renamed` requires id-based identity;
      `SessionInfo.id` exists in `libs/tmux/src/types.rs:66`).
+     If `SessionClosed { id }` matches the currently monitored session id,
+     stop the monitor and clear `R` to a placeholder or empty state until the
+     user's next explicit detail/monitor action.
    - `SessionRenamed { id, old, new }`: update display name in place; preserve
      highlight.
    - `WindowAdded` / `WindowClosed`: update `window_count` for the affected
@@ -616,12 +624,11 @@ When the target host has zero tmux sessions (at startup, or after a kill under
 
 1. Pressing `k` opens confirmation for the highlighted session.
 2. User selects `Ok`.
-3. Resolve
-   `host.session(name).await?`. The actual return is `Result<Option<Target>>`
-   (libs/tmux/src/host.rs:344). If `None` (the session was killed by another
-   client between list and resolve), surface a brief inline status message
-   ("session already gone") and let the host-event subscription's
-   reconciliation refresh `LB` — do not error out.
+3. On kill-modal-open, capture the stable session id from the highlighted
+   `SessionInfo` and dispatch the kill against that id, not the display name.
+   If the session was killed by another client between list and resolve,
+   surface a brief inline status message ("session already gone") and let the
+   host-event subscription's reconciliation refresh `LB` — do not error out.
 4. Call `Target::kill()`. On error (connection dropped, permission), show
    inline error without corrupting terminal state.
 5. Stop monitor state if it was monitoring that session.
@@ -752,7 +759,7 @@ control-mode parser already classifies `%`-prefixed notifications as
 `ControlModeMessage::Notification` (`libs/tmux/src/monitor.rs:58–96`) but
 discards them at `monitor.rs:337–341`.
 
-Proposed API:
+API shape:
 
 ```rust
 impl HostHandle {
@@ -804,7 +811,7 @@ lines"). The selector could simulate it by re-issuing
 the entire history each step — O(N²) bandwidth over SSH. Unacceptable for
 long-lived sessions.
 
-Proposed addition:
+API shape:
 
 ```rust
 pub enum ScrollbackQuery {
@@ -816,10 +823,14 @@ pub enum ScrollbackQuery {
 }
 ```
 
-Semantics: return up to `count` lines older than `older_than_lines` (where
-`older_than_lines` is an offset from the current head/tail, depending on the
-buffer's anchor). Empty result means "no more history available." Used by
-`SampleDetailSource::fetch_older` and `MonitorDetailSource::fetch_older`.
+Semantics: return up to `count` lines older than `older_than_lines`, where
+`older_than_lines` is anchored at the current capture tail. If the detail pane
+already has 200 lines loaded and needs the previous page, it requests
+`LinesRange { older_than_lines: 200, count: page_size }`. Empty result means
+"no more history available." Used by `SampleDetailSource::fetch_older` and
+`MonitorDetailSource::fetch_older`; monitor mode uses the same tmux capture
+history anchor and does not treat the rolling monitor buffer as the source of
+truth for historical fetches.
 
 ### Remote MOTD
 
