@@ -2,18 +2,15 @@
 
 ## Status
 
-Draft API contract for the planned selector and its required `motlie-tmux`
-support. This document is intentionally explicit about current gaps: the
-selector binary is not implemented yet, and only the first accepted
-`motlie-tmux` gaps have started landing on this branch.
-
-After implementation, this file must be revised into an implemented API
-reference that matches code exactly.
+Implemented API contract for the initial `tmux_select` selector and the
+`motlie-tmux` support it consumes. This document reflects the code in
+`bins/tmux_select/main.rs` and the new support APIs in `libs/tmux`.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated API reference to implemented reality: selector CLI config, trait-backed sample/monitor detail sources, stable-id create/kill/attach flows, `HostEventStream`, host shell MOTD read, and `LinesRange` scrollback. |
 | 2026-04-26 | @gpt55-dgx | Mark current-PTY attach and stable session-id lookup as started in `motlie-tmux`; host event stream and windowed scrollback remain open selector dependencies. |
 | 2026-04-26 | @gpt55-dgx | Initial API contract for PR #227: documents existing library dependencies, accepted `motlie-tmux` gaps, and the selector's internal API shape. |
 
@@ -101,6 +98,12 @@ The selector reconciles session state by `SessionInfo.id`, not by display name.
 If `SessionClosed` matches the monitored session id, the selector stops monitor
 mode and clears the detail pane until the user's next action.
 
+Status: implemented as a typed stream backed by one-second `list_sessions()`
+snapshot reconciliation. It emits stable-id add/close/rename and client
+attach/detach events, plus `Disconnect` events on transient list failures.
+Direct tmux control-mode host notification wiring is still tracked in
+`PLAN.md` 1.2b.
+
 ### Windowed Scrollback
 
 Design target:
@@ -118,6 +121,9 @@ pub enum ScrollbackQuery {
 both sample mode and monitor mode when the user scrolls older than the current
 buffer start.
 
+Status: implemented in `motlie-tmux` capture paths and used by
+`tmux_select` PageUp detail fetches.
+
 ### Stable Session-Id Dispatch
 
 The selector captures the highlighted `SessionInfo.id` when opening destructive
@@ -133,8 +139,8 @@ impl HostHandle {
 }
 ```
 
-Status: implemented as `HostHandle::session_by_id()`. Rename-race lifecycle
-coverage remains tracked in PLAN 1.4c.
+Status: implemented as `HostHandle::session_by_id()`. Session `kill()` and
+`rename()` dispatch by stable session id when available.
 
 ## Selector Internal Types
 
@@ -177,7 +183,6 @@ struct SelectedSession {
 The R/B detail pane is decoupled from concrete data sources:
 
 ```rust
-#[async_trait::async_trait]
 trait SessionDetailSource {
     async fn activate(
         &mut self,
@@ -202,8 +207,9 @@ enum DetailDelta {
 }
 ```
 
-Implementation should prefer a closed enum over `Box<dyn ...>` for shipped
-detail modes:
+The implementation uses the stable Rust private async trait directly; no
+`async-trait` dependency is required. Shipped detail modes use a closed enum
+over `Box<dyn ...>`:
 
 ```rust
 enum DetailMode {
@@ -250,8 +256,8 @@ already has a suitable structured error when implementation starts.
 The API layer should expose parsed CLI config to the application loop:
 
 ```rust
-struct CliConfig {
-    target: Option<String>,
+struct Cli {
+    ssh_uri: Option<String>,
     short: bool,
     print_session: bool,
     dashboard: bool,
@@ -263,6 +269,8 @@ Validation rules:
 - `--print-session` and `--dashboard` are mutually exclusive
 - target is positional SSH URI only
 - omitted target means local host
+- `SSH_ORIGINAL_COMMAND` is rejected unless `MOTLIE_TMUX_SELECT_BYPASS=1`
+  delegates to `sh -lc "$SSH_ORIGINAL_COMMAND"` before the selector starts
 
 ## Testing Contracts
 
@@ -274,3 +282,10 @@ API tests must cover:
 - session-id dispatch under rename race
 - detail source append/replace/fetch older behavior
 - dashboard re-entry and no-loop conditions
+
+Current implementation coverage:
+
+- `cargo test -p motlie-tmux`: attach command/status, `LinesRange`, stable-id
+  host-event diffing, and stable-id kill coverage.
+- `cargo test -p motlie-tmux-select`: CLI mutual exclusion and stable-id
+  highlight preservation.

@@ -21,13 +21,13 @@ pub use capture::{
 };
 pub use error::{Error, Result};
 pub use filter::{
-    AgentTuiFilter, ContentFilter, RawFilter, ShellFilter,
-    clean_line, diff_new_lines, is_tui_chrome,
+    clean_line, diff_new_lines, is_tui_chrome, AgentTuiFilter, ContentFilter, RawFilter,
+    ShellFilter,
 };
 pub use fleet::{Fleet, HostStatus, SessionMonitorStatus};
 pub use host::{
-    ExecHandle, HostHandle, PaneTargetTree, SessionTargetTree, SessionWatchHandle,
-    SessionWatchOptions, Target, WindowTargetTree,
+    ExecHandle, HostEvent, HostEventStream, HostHandle, PaneTargetTree, SessionTargetTree,
+    SessionWatchHandle, SessionWatchOptions, Target, WindowTargetTree,
 };
 pub use keys::{KeySequence, SpecialKey};
 pub use monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitorHandle};

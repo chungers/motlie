@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
 
 use crate::attach::{self, AttachCommand};
@@ -123,6 +123,47 @@ pub struct HostHandle {
     inner: Arc<HostHandleInner>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEvent {
+    SessionsChanged,
+    SessionAdded {
+        id: String,
+        name: String,
+    },
+    SessionClosed {
+        id: String,
+        name: String,
+    },
+    SessionRenamed {
+        id: String,
+        old: String,
+        new: String,
+    },
+    ClientAttached {
+        session_id: String,
+    },
+    ClientDetached {
+        session_id: String,
+    },
+    Disconnect {
+        reason: String,
+    },
+}
+
+pub struct HostEventStream {
+    rx: mpsc::Receiver<HostEvent>,
+}
+
+impl HostEventStream {
+    pub async fn recv(&mut self) -> Option<HostEvent> {
+        self.rx.recv().await
+    }
+
+    pub fn into_receiver(self) -> mpsc::Receiver<HostEvent> {
+        self.rx
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionWatchOptions {
     pub queue_capacity: usize,
@@ -136,6 +177,79 @@ impl Default for SessionWatchOptions {
             history: HistoryOptions::default(),
         }
     }
+}
+
+fn session_key(session: &SessionInfo) -> String {
+    if session.id.is_empty() {
+        session.name.clone()
+    } else {
+        session.id.clone()
+    }
+}
+
+fn sessions_by_key(sessions: Vec<SessionInfo>) -> HashMap<String, SessionInfo> {
+    sessions
+        .into_iter()
+        .map(|session| (session_key(&session), session))
+        .collect()
+}
+
+fn diff_session_events(
+    previous: &HashMap<String, SessionInfo>,
+    current: &HashMap<String, SessionInfo>,
+) -> Vec<HostEvent> {
+    let mut events = Vec::new();
+    let mut changed = false;
+
+    for (id, session) in current {
+        if !previous.contains_key(id) {
+            changed = true;
+            events.push(HostEvent::SessionAdded {
+                id: id.clone(),
+                name: session.name.clone(),
+            });
+        }
+    }
+
+    for (id, session) in previous {
+        if !current.contains_key(id) {
+            changed = true;
+            events.push(HostEvent::SessionClosed {
+                id: id.clone(),
+                name: session.name.clone(),
+            });
+        }
+    }
+
+    for (id, before) in previous {
+        if let Some(after) = current.get(id) {
+            if before.name != after.name {
+                changed = true;
+                events.push(HostEvent::SessionRenamed {
+                    id: id.clone(),
+                    old: before.name.clone(),
+                    new: after.name.clone(),
+                });
+            }
+            if before.attached != after.attached {
+                changed = true;
+                if after.attached {
+                    events.push(HostEvent::ClientAttached {
+                        session_id: id.clone(),
+                    });
+                } else {
+                    events.push(HostEvent::ClientDetached {
+                        session_id: id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if changed {
+        events.insert(0, HostEvent::SessionsChanged);
+    }
+    events
 }
 
 pub struct SessionWatchHandle {
@@ -299,6 +413,55 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Execute a shell command on this host and return stdout.
+    ///
+    /// This is host-scoped rather than tmux-target scoped and is intended for
+    /// selector/deployment metadata such as `/etc/motd`.
+    pub async fn exec_shell(&self, command: &str) -> Result<String> {
+        self.inner.transport.exec(command).await
+    }
+
+    /// Watch host-level tmux session changes.
+    ///
+    /// The stream reconciles `list_sessions()` snapshots by stable session id
+    /// and emits typed events. It continues after transient failures by
+    /// reporting `Disconnect` and retrying on the next poll tick.
+    pub async fn watch_host_events(&self) -> Result<HostEventStream> {
+        let initial = self.list_sessions().await?;
+        let host = self.clone();
+        let (tx, rx) = mpsc::channel(128);
+
+        tokio::spawn(async move {
+            let mut previous = sessions_by_key(initial);
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                match host.list_sessions().await {
+                    Ok(current_sessions) => {
+                        let current = sessions_by_key(current_sessions);
+                        let events = diff_session_events(&previous, &current);
+                        previous = current;
+                        for event in events {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let event = HostEvent::Disconnect {
+                            reason: err.to_string(),
+                        };
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(HostEventStream { rx })
+    }
+
     /// List attached clients on this host (DC20, Phase 1.9b).
     pub async fn list_clients(&self) -> Result<Vec<ClientInfo>> {
         let prefix = self.inner.tmux_prefix().await;
@@ -333,7 +496,9 @@ impl HostHandle {
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
-            .ok_or_else(|| Error::State(format!("session '{}' created but not found in list", name)))?;
+            .ok_or_else(|| {
+                Error::State(format!("session '{}' created but not found in list", name))
+            })?;
 
         Ok(Target {
             inner: self.inner.clone(),
@@ -376,12 +541,10 @@ impl HostHandle {
         };
 
         match (spec.window_selector(), spec.pane_index()) {
-            (None, Some(_)) => {
-                return Err(Error::Parse(format!(
+            (None, Some(_)) => Err(Error::Parse(format!(
                     "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
                     spec.session_name()
-                )));
-            }
+                ))),
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
@@ -683,8 +846,7 @@ impl HostHandle {
                             }
                             return Err(Error::State(format!(
                                 "monitor for '{}' exhausted {} reconnect attempts",
-                                session,
-                                max_retries
+                                session, max_retries
                             )));
                         }
 
@@ -914,9 +1076,9 @@ impl HostHandle {
             .monitor_signals
             .lock()
             .expect("monitor_signals lock poisoned");
-        let tx = signals
-            .get(session_name)
-            .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", session_name)))?;
+        let tx = signals.get(session_name).ok_or_else(|| {
+            Error::NotFound(format!("session '{}' not being monitored", session_name))
+        })?;
         let _ = tx.send(true);
         Ok(())
     }
@@ -974,9 +1136,7 @@ impl ExecHandle {
 
     /// Await completion, consuming the handle. Returns the final `ExecState`.
     pub async fn wait(self) -> Result<ExecState> {
-        self.task
-            .await
-            .map_err(Error::JoinError)?
+        self.task.await.map_err(Error::JoinError)?
     }
 }
 
@@ -1185,7 +1345,7 @@ impl Target {
         .await?;
 
         let pane = panes.into_iter().find(|p| {
-            p.address.pane == index && window_filter.map_or(true, |wi| p.address.window == wi)
+            p.address.pane == index && window_filter.is_none_or(|wi| p.address.window == wi)
         });
 
         Ok(pane.map(|p| Target {
@@ -1218,9 +1378,9 @@ impl Target {
             TargetAddress::Window(_) => Err(Error::Parse(
                 "new_window() requires a session target, got window".to_string(),
             )),
-            TargetAddress::Pane(_) => {
-                Err(Error::Parse("new_window() requires a session target, got pane".to_string()))
-            }
+            TargetAddress::Pane(_) => Err(Error::Parse(
+                "new_window() requires a session target, got pane".to_string(),
+            )),
         }
     }
 
@@ -1436,7 +1596,8 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                control::kill_session_with_prefix(&self.inner.transport, &prefix, &s.name).await
+                let target = if s.id.is_empty() { &s.name } else { &s.id };
+                control::kill_session_with_prefix(&self.inner.transport, &prefix, target).await
             }
             TargetAddress::Window(_) => {
                 control::kill_window_with_prefix(
@@ -1513,10 +1674,11 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
+                let target = if s.id.is_empty() { &s.name } else { &s.id };
                 control::rename_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &s.name,
+                    target,
                     new_name,
                 )
                 .await?;
@@ -1823,8 +1985,12 @@ impl Target {
         let handle = self.start_exec(command, timeout).await?;
         match handle.wait().await? {
             ExecState::Completed(output) => Ok(output),
-            ExecState::Unknown { reason } => Err(Error::State(format!("exec result unknown: {}", reason))),
-            ExecState::Running => Err(Error::State("internal error: Running after wait".to_string())),
+            ExecState::Unknown { reason } => {
+                Err(Error::State(format!("exec result unknown: {}", reason)))
+            }
+            ExecState::Running => Err(Error::State(
+                "internal error: Running after wait".to_string(),
+            )),
         }
     }
 }
@@ -2070,6 +2236,86 @@ mod tests {
         let host = mock_host(mock);
         let target = host.session_by_id("$1").await.unwrap();
         assert!(target.is_none());
+    }
+
+    #[test]
+    fn diff_session_events_reports_add_close_rename_and_client_state() {
+        let previous = sessions_by_key(vec![
+            SessionInfo {
+                name: "old".to_string(),
+                id: "$1".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "gone".to_string(),
+                id: "$2".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+        ]);
+        let current = sessions_by_key(vec![
+            SessionInfo {
+                name: "new".to_string(),
+                id: "$1".to_string(),
+                created: 0,
+                attached: true,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "added".to_string(),
+                id: "$3".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+        ]);
+
+        let events = diff_session_events(&previous, &current);
+        assert_eq!(events[0], HostEvent::SessionsChanged);
+        assert!(events.contains(&HostEvent::SessionAdded {
+            id: "$3".to_string(),
+            name: "added".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::SessionClosed {
+            id: "$2".to_string(),
+            name: "gone".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::SessionRenamed {
+            id: "$1".to_string(),
+            old: "old".to_string(),
+            new: "new".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::ClientAttached {
+            session_id: "$1".to_string(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn kill_session_uses_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("kill-session -t 'build'", "used display name")
+            .with_response("kill-session -t '$7'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: "$7".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            }),
+        };
+
+        target.kill().await.unwrap();
     }
 
     #[tokio::test]

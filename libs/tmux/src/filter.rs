@@ -253,7 +253,7 @@ impl ContentFilter for AgentTuiFilter {
     fn is_prompt(&self, line: &str) -> bool {
         let t = line.trim();
         let prefix = format!("{} ", self.prompt_char);
-        t.starts_with(&prefix) || t == &self.prompt_char.to_string()
+        t.starts_with(&prefix) || t == self.prompt_char.to_string()
     }
 }
 

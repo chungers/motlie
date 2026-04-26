@@ -233,7 +233,9 @@ impl TmuxSocket {
     /// This isolates automation workloads from the user's default tmux server.
     pub fn automation(scope: &str) -> Result<Self> {
         if scope.is_empty() {
-            return Err(Error::Parse("automation scope must not be empty".to_string()));
+            return Err(Error::Parse(
+                "automation scope must not be empty".to_string(),
+            ));
         }
         if scope.len() > 64 {
             return Err(Error::Parse(format!(
@@ -256,9 +258,10 @@ impl TmuxSocket {
 }
 
 /// SSH host key verification policy (DC2).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum HostKeyPolicy {
     /// Verify against ~/.ssh/known_hosts (default)
+    #[default]
     Verify,
     /// Accept and persist on first connect, reject on mismatch.
     ///
@@ -270,12 +273,6 @@ pub enum HostKeyPolicy {
     TrustFirstUse,
     /// Accept all, log warning
     Insecure,
-}
-
-impl Default for HostKeyPolicy {
-    fn default() -> Self {
-        HostKeyPolicy::Verify
-    }
 }
 
 /// Structured output from `Target::exec()` (DC19).
@@ -344,9 +341,10 @@ impl ExecState {
 /// Capture normalization mode (DC20).
 ///
 /// Controls how captured pane content is processed before delivery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CaptureNormalizeMode {
     /// No transformation. Uses `capture-pane -p` (tmux-rendered text, no ANSI).
+    #[default]
     Raw,
     /// Canonical line endings, trim width-artifact trailing spaces.
     /// Uses `capture-pane -ep` to preserve ANSI/control sequences.
@@ -354,12 +352,6 @@ pub enum CaptureNormalizeMode {
     /// Explicit ANSI/control stripping for human/LLM text workflows.
     /// Uses `capture-pane -p`, then normalizes line endings.
     PlainText,
-}
-
-impl Default for CaptureNormalizeMode {
-    fn default() -> Self {
-        CaptureNormalizeMode::Raw
-    }
 }
 
 /// Options for capture operations with fidelity metadata.
@@ -444,18 +436,13 @@ pub struct CreateWindowOptions {
 }
 
 /// Direction for `split-window` (DC25).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitDirection {
     /// Create panes side-by-side (`split-window -h`).
     Horizontal,
     /// Create panes stacked top/bottom (`split-window -v`).
+    #[default]
     Vertical,
-}
-
-impl Default for SplitDirection {
-    fn default() -> Self {
-        SplitDirection::Vertical
-    }
 }
 
 /// Size override for `split-window` (DC25).
@@ -665,6 +652,11 @@ pub enum ScrollbackQuery {
     Until { pattern: Regex, max_lines: usize },
     /// Capture last N lines, stop early if pattern matches.
     LastLinesUntil { lines: usize, stop_pattern: Regex },
+    /// Capture a bounded window of scrollback older than the most recent N lines.
+    LinesRange {
+        older_than_lines: usize,
+        count: usize,
+    },
 }
 
 #[cfg(test)]
