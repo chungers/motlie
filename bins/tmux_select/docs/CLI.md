@@ -11,6 +11,7 @@ the exact shipped behavior.
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-04-26 | @gpt55-dgx | Initial CLI contract for issue #226 and PR #227: modes, arguments, keymap, stdout/stderr behavior, ForceCommand usage, and exit semantics. |
+| 2026-04-26 | @gpt55-dgx | Addressed PR #227 round-3 keymap feedback by marking `Ctrl-Left`/`Ctrl-Right` resize as normal-mode-only in the table. |
 
 ## Synopsis
 
@@ -126,7 +127,7 @@ Normal mode main-view keys:
 | `v` | Focus detail pane | No-op |
 | `l` | No-op | Focus session list |
 | `Esc` | No-op outside modal | Focus session list |
-| `Ctrl-Left` / `Ctrl-Right` | Resize L/R split | Resize L/R split |
+| `Ctrl-Left` / `Ctrl-Right` | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
 | Left / Right | Reserved no-op | Reserved no-op |
 | `m` | Monitor highlighted session | Monitor highlighted session |
 | `n` | Open New Session modal | Open New Session modal |
