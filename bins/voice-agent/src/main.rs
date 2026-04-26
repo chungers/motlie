@@ -1171,26 +1171,38 @@ fn remote_command_with_fallbacks(
     alternate: Option<(&[&str], &str, &str)>,
     error_message: &str,
 ) -> String {
-    let mut command = String::new();
+    let mut clauses = Vec::new();
     for path in preferred_paths {
-        command.push_str(&format!("if [ -x {path} ]; then exec {path} {args}; elif ",));
+        clauses.push((format!("[ -x {path} ]"), format!("exec {path} {args}")));
     }
-    command.push_str(&format!(
-        "command -v {fallback_name} >/dev/null 2>&1; then exec {fallback_name} {args};"
+    clauses.push((
+        format!("command -v {fallback_name} >/dev/null 2>&1"),
+        format!("exec {fallback_name} {args}"),
     ));
 
     if let Some((alternate_paths, alternate_name, alternate_args)) = alternate {
         for path in alternate_paths {
-            command.push_str(&format!(
-                " elif [ -x {path} ]; then exec {path} {alternate_args};"
+            clauses.push((
+                format!("[ -x {path} ]"),
+                format!("exec {path} {alternate_args}"),
             ));
         }
-        command.push_str(&format!(
-            " elif command -v {alternate_name} >/dev/null 2>&1; then exec {alternate_name} {alternate_args};"
+        clauses.push((
+            format!("command -v {alternate_name} >/dev/null 2>&1"),
+            format!("exec {alternate_name} {alternate_args}"),
         ));
     }
 
-    command.push_str(&format!(" else echo '{error_message}' >&2; exit 127; fi"));
+    let mut clauses = clauses.into_iter();
+    let Some((first_condition, first_action)) = clauses.next() else {
+        return format!("echo '{error_message}' >&2; exit 127");
+    };
+
+    let mut command = format!("if {first_condition}; then {first_action}");
+    for (condition, action) in clauses {
+        command.push_str(&format!("; elif {condition}; then {action}"));
+    }
+    command.push_str(&format!("; else echo '{error_message}' >&2; exit 127; fi"));
     command
 }
 

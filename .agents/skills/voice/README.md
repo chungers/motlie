@@ -28,6 +28,8 @@ This README is the conversational playbook for the repo-local voice skills:
 - on macOS, reverse tunnels do not fix microphone TCC; if the human is remote on a Mac, prefer the local Mac Terminal/iTerm2 push flow over SSH capture
 - if SSH capture on macOS is silent, switch to the local Mac Terminal/iTerm2 push flow automatically
 - when preparing that push flow, infer the SSH destination from the current host name first and only ask the human if that destination is unclear or not reachable from the Mac
+- when the human has to run a command, prefer one short, copy-pasteable command line first
+- keep the longer compatibility fallback command in reserve and only show it if the short command fails
 - discover runtime details progressively through the conversation with the human
 
 ## Prerequisites
@@ -260,15 +262,15 @@ On macOS over SSH, good agent follow-up:
 
 If the agent is using the remote Mac push flow, good agent behavior:
 
-`I am listening now. Speak on the Mac and press Ctrl-C when you are done. I will print the final transcript after EOF arrives.`
+`I am listening now. Speak on the Mac and press Ctrl-C when you are done recording. After Ctrl-C, the Mac command will stream the recorded WAV to me. I will wait for EOF, then print the final transcript and clean up this listen session before the next one.`
 
 Agent-side helper:
 
 ```bash
-.agents/skills/voice/listen/scripts/prepare_remote_push.sh --ssh-target dchung@spark-2f6e --seconds 6
+.agents/skills/voice/listen/scripts/prepare_remote_push.sh --ssh-target dchung@spark-2f6e
 ```
 
-That prepares a stable FIFO path, one agent-only listen command, and one short human-facing Mac command. The agent should run the listen side itself and only show the human the short Mac command. For `whisper`, `sherpa`, and `moonshine`, the remote-push behavior is the same: wait for EOF from Ctrl-C on the Mac and then print one final transcript.
+That prepares a stable FIFO path, one agent-only listen command, one short human-facing Mac command that records locally until Ctrl-C and then streams the recorded WAV, and one longer fallback command. The agent should run the listen side itself in one live polled session, not as a detached background job, kill any stale listener still attached to the fixed FIFO before starting a new one, show the human the short command first, poll until EOF arrives, and only offer the fallback command if the short one fails. After the listen returns or fails, clean up the FIFO path before the next run. For `whisper`, `sherpa`, and `moonshine`, the remote-push behavior is the same: wait for EOF from Ctrl-C on the Mac and then print one final transcript.
 
 ## Operational Questions
 
@@ -282,4 +284,4 @@ Good agent answer:
 
 Good agent answer:
 
-`By default I try the local microphone on the machine running the skill. If your microphone is on another host, I can capture WAV over SSH with ssh:<host>. On a Mac, the simplest setup is Homebrew sox, which provides rec. Install it with 'brew install sox'. If I need to build or run the ONNX-backed voice runtime on a Mac host, I also need 'brew install onnxruntime'. If your microphone is remote on a Mac, I will usually listen here and ask you to run one short rec command locally in Terminal or iTerm2 so the capture uses the app that has microphone permission.`
+`By default I try the local microphone on the machine running the skill. If your microphone is on another host, I can capture WAV over SSH with ssh:<host>. On a Mac, the simplest setup is Homebrew sox, which provides rec. Install it with 'brew install sox'. If I need to build or run the ONNX-backed voice runtime on a Mac host, I also need 'brew install onnxruntime'. If your microphone is remote on a Mac, I will usually listen here and ask you to run one short rec command locally in Terminal or iTerm2 so the capture uses the app that has microphone permission. I do not force sample-rate or channel flags there because the Mac input device may ignore them anyway. If that short command fails, I will then give you a longer compatibility fallback.`

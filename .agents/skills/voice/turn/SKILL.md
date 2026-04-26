@@ -47,10 +47,12 @@ Agent decision rule:
 - if local playback or capture did not work, ask the human whether to use a remote SSH host
 - when remote is requested, pass `--playback-endpoint ssh:<host>` and/or `--capture-endpoint ssh:<host>`
 - if the reply microphone is remote on a Mac, prompt for the local Mac Terminal/iTerm2 push flow for the listen half of the turn
+- when the human has to run a command, give one short, copy-pasteable command first
+- only give the longer compatibility fallback if the short command fails
 - infer the SSH destination for that push flow from the current host name first and only ask the human if it is unclear or likely unreachable from the Mac
 - if the listen side reports silent capture, tell the human the capture host likely has the wrong input device selected or is missing microphone permission
 - on macOS, explain that SSH/non-interactive capture may not share Terminal/iTerm2 microphone permission, so reverse tunnels alone do not solve it
-- if that happens, switch to a human-run local Mac `rec` command that streams WAV over SSH into a stable waiting FIFO for the listen half of the turn; the agent should run the waiting listen side itself and only show the human the short Mac command
+- if that happens, switch to a human-run local Mac `rec` command that records locally on the Mac until Ctrl-C, then streams the recorded WAV over SSH into a stable waiting FIFO for the listen half of the turn; the agent should kill any stale listener on that FIFO before starting a new one, run the waiting listen side itself in one live polled session instead of a detached background job, show the human the short Mac command first, poll until EOF arrives, and only offer the fallback command if the short one fails
 - if the wrapper says it is building the optimized binary, tell the human to wait
 - if the wrapper reports missing dependencies like ONNX Runtime or `sox`, tell the human exactly what to install and then retry
 
