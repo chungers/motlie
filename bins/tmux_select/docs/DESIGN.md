@@ -15,6 +15,7 @@ Draft.
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 re-review: added missing PLAN/API/CLI docs and pinned monitor historical fetch, kill-by-session-id, and monitored-session-close behavior. |
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 round-3 cross-doc consistency feedback: aligned host events with API (`session_id`, no window-level variants), changed detail activation to `SelectedSession`, and documented stable session-id dispatch as a fourth library gap. |
 | 2026-04-26 | @gpt55-dgx | Updated the MOTD-absent default placeholder art to the compact motlie glyph supplied for `/etc/motd` fallback. |
+| 2026-04-26 | @gpt55-dgx | Replaced the MOTD-absent default placeholder with the full-width MOTLIE glyph supplied for `/etc/motd` fallback. |
 
 ## Product Scope
 
@@ -72,7 +73,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `(motd unavailable: <reason>)` on read failure). In this case `LT` height
   bypasses the 30% cap and expands to exactly fit
   `glyph_rows + caption_row + chrome` so the user always sees the full art.
-  When `L_width < 44` columns or there is not enough vertical room to expand,
+  When `L_width < 63` columns or there is not enough vertical room to expand,
   fall back to a single-line `motlie · no /etc/motd` (still bold-green). The
   glyph asset is baked into the binary as a `&'static str` (no inline ANSI
   escapes); styling is applied at render time via ratatui
@@ -80,11 +81,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   (use exactly):
 
   ```text
-  ▄   ▄ ▄
-   ▄ ▄▄ ▄▄▄   ▄▄▄ ┃ ┃▄┃ (▄) ▄▄▄   ╲╲ ║ ╱╱
-  ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
-  ┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
-  ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃
+  ███╗   ███╗  ██████╗  ████████╗ ██╗      ██╗ ███████╗
+   ████╗ ████║ ██╔═══██╗ ╚══██╔══╝ ██║      ██║ ██╔════╝
+   ██╔████╔██║ ██║   ██║    ██║    ██║      ██║ █████╗    ╲╲ ║ ╱╱
+   ██║╚██╔╝██║ ██║   ██║    ██║    ██║      ██║ ██╔══╝    ══ ╬ ══
+   ██║ ╚═╝ ██║ ╚██████╔╝    ██║    ███████╗ ██║ ███████╗  ╱╱ ║ ╲╲
+   ╚═╝     ╚═╝  ╚═════╝     ╚═╝    ╚══════╝ ╚═╝ ╚══════╝
   ```
 - `LB` lists tmux sessions on the target host and has default focus.
 - `LB` and `R` are both scrollable.
