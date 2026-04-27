@@ -45,6 +45,7 @@ Agent decision rule:
 - if local capture did not work, ask:
   - `Should I listen on a remote host over SSH? If so, what host should I use?`
 - when the user says remote, pass `--endpoint ssh:<host>`
+- for the remote Mac push helper, only emit validated shell-safe SSH targets and FIFO paths; fail clearly instead of printing a risky command
 - if the microphone is remote on a Mac, prompt for the local Mac Terminal/iTerm2 push flow instead of assuming SSH capture will work
 - when the human has to run a command, give one short, copy-pasteable command first
 - only give the longer compatibility fallback if the short command fails

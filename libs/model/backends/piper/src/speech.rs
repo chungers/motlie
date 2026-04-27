@@ -417,6 +417,13 @@ struct PiperSynthesisScales {
     speaker_id: Option<i64>,
 }
 
+fn piper_ort_target() -> OrtExecutionTarget {
+    match std::env::var("MOTLIE_PIPER_ALLOW_CUDA") {
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => OrtExecutionTarget::Auto,
+        _ => OrtExecutionTarget::CpuOnly,
+    }
+}
+
 fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelError> {
     let config = PiperConfig::from_path(&artifacts.config)?;
     if config.sample_rate_hz != PIPER_SAMPLE_RATE_HZ {
@@ -427,13 +434,14 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
     }
 
     Ok(PiperRuntime {
-        // @codex-tts 2026-04-24 -- Piper exits with glibc heap corruption on this host when
-        // the ONNX Runtime CUDA execution provider is enabled. Keep Piper on CPU until the
-        // upstream/native teardown issue is understood and fixed.
+        // @codex-tts 2026-04-27 -- Piper exits with glibc heap corruption on this host when
+        // the ONNX Runtime CUDA execution provider is enabled during teardown. Default to CPU
+        // for Piper as a stability workaround, but allow explicit opt-in probing with
+        // MOTLIE_PIPER_ALLOW_CUDA=1 on hosts that may not reproduce the crash.
         session: Mutex::new(build_session_with_target(
             "piper",
             &artifacts.model,
-            OrtExecutionTarget::CpuOnly,
+            piper_ort_target(),
         )?),
         config,
     })

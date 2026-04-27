@@ -21,6 +21,15 @@ render_shell_command() {
   printf '%s\n' "${rendered}"
 }
 
+require_safe_shell_value() {
+  local label="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[A-Za-z0-9._/@:+=-]+$ ]]; then
+    echo "unsupported ${label} '${value}': only shell-safe path/host characters are allowed" >&2
+    exit 64
+  fi
+}
+
 cleanup_stale_listeners() {
   local pids
   mapfile -t pids < <(
@@ -83,6 +92,9 @@ if [[ -z "${FIFO_PATH}" ]]; then
   FIFO_PATH="/tmp/motlie-voice-listen.wav.pipe"
 fi
 
+require_safe_shell_value ssh-target "${SSH_TARGET}"
+require_safe_shell_value fifo-path "${FIFO_PATH}"
+
 cleanup_stale_listeners
 rm -f "${FIFO_PATH}"
 mkfifo "${FIFO_PATH}"
@@ -93,32 +105,34 @@ if [[ -n "${QUIET_FLAG}" ]]; then
 fi
 
 AGENT_LISTEN_CMD="$(render_shell_command "${agent_listen_args[@]}")"
-HUMAN_MAC_CMD="tmp=/tmp/motlie-voice-listen.wav; /opt/homebrew/bin/rec -q \"\$tmp\" 2>/dev/null; [ -s \"\$tmp\" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < \"\$tmp\"; rm -f \"\$tmp\""
+SSH_TARGET_CMD="$(render_shell_command ssh "${SSH_TARGET}")"
+REMOTE_WRITER="cat >${FIFO_PATH}"
+HUMAN_MAC_CMD="tmp=/tmp/motlie-voice-listen.wav; /opt/homebrew/bin/rec -q \"\$tmp\" 2>/dev/null; [ -s \"\$tmp\" ] && ${SSH_TARGET_CMD} '${REMOTE_WRITER}' < \"\$tmp\"; rm -f \"\$tmp\""
 HUMAN_MAC_CMD_PRETTY=$(cat <<CMD
- tmp=/tmp/motlie-voice-listen.wav
- /opt/homebrew/bin/rec -q "\$tmp" 2>/dev/null
- [ -s "\$tmp" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < "\$tmp"
- rm -f "\$tmp"
+tmp=/tmp/motlie-voice-listen.wav
+/opt/homebrew/bin/rec -q "\$tmp" 2>/dev/null
+[ -s "\$tmp" ] && ${SSH_TARGET_CMD} '${REMOTE_WRITER}' < "\$tmp"
+rm -f "\$tmp"
 CMD
 )
-HUMAN_MAC_FALLBACK_CMD="tmp=/tmp/motlie-voice-listen.wav; if [ -x /opt/homebrew/bin/rec ]; then recbin=/opt/homebrew/bin/rec; elif [ -x /usr/local/bin/rec ]; then recbin=/usr/local/bin/rec; elif [ -x /opt/local/bin/rec ]; then recbin=/opt/local/bin/rec; elif command -v rec >/dev/null 2>&1; then recbin=rec; else echo 'rec not found; install sox with brew install sox' >&2; exit 127; fi; \"\$recbin\" -q \"\$tmp\" 2>/dev/null; [ -s \"\$tmp\" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < \"\$tmp\"; rm -f \"\$tmp\""
+HUMAN_MAC_FALLBACK_CMD="tmp=/tmp/motlie-voice-listen.wav; if [ -x /opt/homebrew/bin/rec ]; then recbin=/opt/homebrew/bin/rec; elif [ -x /usr/local/bin/rec ]; then recbin=/usr/local/bin/rec; elif [ -x /opt/local/bin/rec ]; then recbin=/opt/local/bin/rec; elif command -v rec >/dev/null 2>&1; then recbin=rec; else echo 'rec not found; install sox with brew install sox' >&2; exit 127; fi; \"\$recbin\" -q \"\$tmp\" 2>/dev/null; [ -s \"\$tmp\" ] && ${SSH_TARGET_CMD} '${REMOTE_WRITER}' < \"\$tmp\"; rm -f \"\$tmp\""
 HUMAN_MAC_FALLBACK_CMD_PRETTY=$(cat <<CMD
- tmp=/tmp/motlie-voice-listen.wav
- if [ -x /opt/homebrew/bin/rec ]; then
-   recbin=/opt/homebrew/bin/rec
- elif [ -x /usr/local/bin/rec ]; then
-   recbin=/usr/local/bin/rec
- elif [ -x /opt/local/bin/rec ]; then
-   recbin=/opt/local/bin/rec
- elif command -v rec >/dev/null 2>&1; then
-   recbin=rec
- else
-   echo 'rec not found; install sox with brew install sox' >&2
-   exit 127
- fi
- "\$recbin" -q "\$tmp" 2>/dev/null
- [ -s "\$tmp" ] && ssh ${SSH_TARGET} 'cat >${FIFO_PATH}' < "\$tmp"
- rm -f "\$tmp"
+tmp=/tmp/motlie-voice-listen.wav
+if [ -x /opt/homebrew/bin/rec ]; then
+  recbin=/opt/homebrew/bin/rec
+elif [ -x /usr/local/bin/rec ]; then
+  recbin=/usr/local/bin/rec
+elif [ -x /opt/local/bin/rec ]; then
+  recbin=/opt/local/bin/rec
+elif command -v rec >/dev/null 2>&1; then
+  recbin=rec
+else
+  echo 'rec not found; install sox with brew install sox' >&2
+  exit 127
+fi
+"\$recbin" -q "\$tmp" 2>/dev/null
+[ -s "\$tmp" ] && ${SSH_TARGET_CMD} '${REMOTE_WRITER}' < "\$tmp"
+rm -f "\$tmp"
 CMD
 )
 
