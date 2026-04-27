@@ -43,6 +43,12 @@ const MOTLIE_PLACEHOLDER: &str = r#"███╗   ███╗  █████
  ██║ ╚═╝ ██║ ╚██████╔╝    ██║    ███████╗ ██║ ███████╗  ╱╱ ║ ╲╲
  ╚═╝     ╚═╝  ╚═════╝     ╚═╝    ╚══════╝ ╚═╝ ╚══════╝"#;
 
+const COMPACT_MOTLIE_PLACEHOLDER: &str = r#"▄   ▄ ▄
+ ▄ ▄▄ ▄▄▄   ▄▄▄ ┃ ┃▄┃ (▄) ▄▄▄   ╲╲ ║ ╱╱
+┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
+┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
+┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃"#;
+
 #[derive(Debug, Clone, Parser)]
 #[command(name = "tmux_select")]
 #[command(about = "Select, preview, monitor, and attach tmux sessions")]
@@ -134,8 +140,13 @@ impl SessionDetailSource for SampleDetailSource {
             return Ok(format!("session {} disappeared", session.name));
         };
         target
-            .sample_text(&ScrollbackQuery::LastLines(DEFAULT_DETAIL_LINES))
+            .sample_text_with_options(
+                &ScrollbackQuery::LastLines(DEFAULT_DETAIL_LINES),
+                &CaptureOptions::with_mode(CaptureNormalizeMode::ScreenStable),
+                None,
+            )
             .await
+            .map(|capture| capture.text)
             .context("sample selected session")
     }
 
@@ -150,11 +161,16 @@ impl SessionDetailSource for SampleDetailSource {
             return Ok(String::new());
         };
         target
-            .sample_text(&ScrollbackQuery::LinesRange {
-                older_than_lines,
-                count,
-            })
+            .sample_text_with_options(
+                &ScrollbackQuery::LinesRange {
+                    older_than_lines,
+                    count,
+                },
+                &CaptureOptions::with_mode(CaptureNormalizeMode::ScreenStable),
+                None,
+            )
             .await
+            .map(|capture| capture.text)
             .context("fetch older sample lines")
     }
 
@@ -836,8 +852,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
             return Ok(KeyOutcome::Cancel);
         }
         (KeyCode::Char('q'), _) => return Ok(KeyOutcome::Cancel),
-        (KeyCode::Char('v'), _) => app.focus = Focus::Detail,
-        (KeyCode::Char('l'), _) | (KeyCode::Esc, _) => app.focus = Focus::List,
+        (KeyCode::Esc, _) => app.focus = Focus::List,
         (KeyCode::Char('m'), _) => start_monitor(host, app).await?,
         (KeyCode::Char('n'), _) => {
             app.modal = Some(ModalState::NewSession {
@@ -856,7 +871,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
                 app.status = "no session selected".to_string();
             }
         }
-        (KeyCode::Enter, _) | (KeyCode::Char('g'), _) => {
+        (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
             if let Some(selected) = app.selected_session() {
                 return Ok(KeyOutcome::Select(selected));
             }
@@ -892,6 +907,8 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
         {
             app.left_percent = app.left_percent.saturating_add(5).min(MAX_LEFT_PERCENT);
         }
+        (KeyCode::Right, _) if app.focus == Focus::List => app.focus = Focus::Detail,
+        (KeyCode::Left, _) if app.focus == Focus::Detail => app.focus = Focus::List,
         (KeyCode::Up, _) => {
             if app.focus == Focus::List {
                 if app.move_selection(-1) {
@@ -1188,7 +1205,7 @@ fn use_compact_placeholder(app: &AppState, width: u16, height: u16) -> bool {
 
 fn motd_render_line_count(app: &AppState, compact_placeholder: bool) -> u16 {
     if app.motd_is_placeholder && compact_placeholder {
-        1
+        COMPACT_MOTLIE_PLACEHOLDER.lines().count().saturating_add(1) as u16
     } else if app.motd_is_placeholder {
         app.motd.lines().count().saturating_add(1) as u16
     } else {
@@ -1201,7 +1218,7 @@ fn motd_render_text(app: &AppState, area: Rect) -> String {
         return app.motd.clone();
     }
     if use_compact_placeholder(app, area.width, area.height) {
-        "motlie - no /etc/motd".to_string()
+        format!("{COMPACT_MOTLIE_PLACEHOLDER}\n(no /etc/motd)")
     } else {
         format!("{}\n(no /etc/motd)", app.motd)
     }
@@ -1291,9 +1308,8 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &st
         .title(title)
         .borders(Borders::ALL)
         .border_style(focused_style(app, Focus::Detail));
-    let parse_ansi = app.detail_source.mode() == DetailMode::Monitor;
     frame.render_widget(
-        Paragraph::new(detail_text_for_render(&visible, parse_ansi))
+        Paragraph::new(detail_text_for_render(&visible))
             .block(block)
             .wrap(Wrap { trim: false }),
         area,
@@ -1313,13 +1329,9 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &st
     }
 }
 
-fn detail_text_for_render(text: &str, parse_ansi: bool) -> Text<'_> {
-    if parse_ansi {
-        text.into_text()
-            .unwrap_or_else(|_| Text::raw(strip_ansi(text)))
-    } else {
-        Text::raw(text.to_string())
-    }
+fn detail_text_for_render(text: &str) -> Text<'_> {
+    text.into_text()
+        .unwrap_or_else(|_| Text::raw(strip_ansi(text)))
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -1332,9 +1344,9 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         LayoutMode::Short => "short",
     };
     let keys = if app.layout_mode == LayoutMode::Short {
-        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | mod-up/down resize | q quit"
+        "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-up/down resize | q quit"
     } else {
-        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | mod-left/right resize | q quit"
+        "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-left/right resize | q quit"
     };
     let text = format!(
         " {} | {} | {} | {} | {} ",
@@ -1457,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn motd_placeholder_uses_compact_text_when_narrow() {
+    fn motd_placeholder_uses_compact_graphic_when_narrow() {
         let app = AppState::new(
             "host".to_string(),
             LayoutMode::Normal,
@@ -1465,7 +1477,8 @@ mod tests {
             true,
         );
         let text = motd_render_text(&app, Rect::new(0, 0, 40, 5));
-        assert_eq!(text, "motlie - no /etc/motd");
+        assert!(text.contains('▄'));
+        assert!(text.contains("(no /etc/motd)"));
     }
 
     #[tokio::test]
@@ -1529,6 +1542,119 @@ mod tests {
         assert!(matches!(outcome, KeyOutcome::Cancel));
     }
 
+    fn app_with_session() -> AppState {
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        app.sessions = vec![SessionInfo {
+            name: "dev".to_string(),
+            id: "$1".to_string(),
+            created: 0,
+            attached: false,
+            window_count: 1,
+            group: None,
+        }];
+        app
+    }
+
+    #[tokio::test]
+    async fn a_attaches_like_enter() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            KeyOutcome::Select(SelectedSession { name, .. }) if name == "dev"
+        ));
+    }
+
+    #[tokio::test]
+    async fn g_no_longer_attaches() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn right_arrow_focuses_detail_from_session_list() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert_eq!(app.focus, Focus::Detail);
+    }
+
+    #[tokio::test]
+    async fn right_arrow_focuses_monitor_detail_from_session_list() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+        app.detail_source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+            session_id: Some("$1".to_string()),
+        }));
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert_eq!(app.focus, Focus::Detail);
+        assert_eq!(app.detail_source.mode(), DetailMode::Monitor);
+    }
+
+    #[tokio::test]
+    async fn left_arrow_focuses_list_from_detail_or_monitor() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+        app.focus = Focus::Detail;
+        app.detail_source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+            session_id: Some("$1".to_string()),
+        }));
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.detail_source.mode(), DetailMode::Monitor);
+    }
+
     #[tokio::test]
     async fn ctrl_left_with_extra_modifiers_resizes_normal_layout() {
         let host = HostHandle::local();
@@ -1566,7 +1692,7 @@ mod tests {
         let outcome = handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT),
         )
         .await
         .unwrap();
@@ -1640,10 +1766,27 @@ mod tests {
     }
 
     #[test]
-    fn monitor_detail_uses_ansi_vte_parser_for_screen_content() {
-        let text = detail_text_for_render("\x1b[31mred\x1b[0m", true);
+    fn detail_uses_ansi_vte_parser_for_screen_content() {
+        let text = detail_text_for_render("\x1b[31mred\x1b[0m");
         assert_eq!(text.lines[0].spans[0].content.as_ref(), "red");
         assert!(!text.lines[0].spans[0].content.contains('\x1b'));
+    }
+
+    #[tokio::test]
+    async fn sample_detail_preserves_ansi_color_for_detail_pane() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "dev $7 0 0 1 \n")
+            .with_response("capture-pane -ep", "\x1b[34mBLUE\x1b[0m\n");
+        let host = HostHandle::new(TransportKind::Mock(mock), None);
+        let selected = SelectedSession {
+            id: "$7".to_string(),
+            name: "dev".to_string(),
+        };
+        let mut source = SampleDetailSource;
+
+        let rendered = source.render(&host, &selected).await.unwrap();
+
+        assert!(rendered.contains("\x1b[34mBLUE\x1b[0m"));
     }
 
     #[tokio::test]

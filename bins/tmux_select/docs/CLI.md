@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated selector keymap for attach on `a`, arrow-key pane focus, Shift-arrow resize behavior on macOS iTerm2, ANSI color in detail mode, polling-backed session refresh, and compact MOTD fallback graphics. |
 | 2026-04-26 | @gpt55-dgx | Updated key and dashboard semantics after validation: resize accepts modified-arrow fallbacks when terminals remap Ctrl-arrow, monitor mode mirrors rendered screen content, and dashboard detach is protected against stopped selector jobs. |
 | 2026-04-26 | @gpt55-dgx | Updated CLI reference to match implemented binary behavior: `-s`, `--print-session`, `--dashboard`, optional SSH URI, ForceCommand rejection/bypass, stdout/stderr split, and exit semantics. |
 | 2026-04-26 | @gpt55-dgx | Initial CLI contract for issue #226 and PR #227: modes, arguments, keymap, stdout/stderr behavior, ForceCommand usage, and exit semantics. |
@@ -50,7 +51,7 @@ The v1 target form is positional only. There is no `--target` flag in v1.
 tmux_select
 ```
 
-Default mode opens the TUI against the local host. Pressing Enter or `g`
+Default mode opens the TUI against the local host. Pressing Enter or `a`
 attaches the user's current PTY to the highlighted tmux session. The selector
 restores terminal state and exits with the attach child status.
 
@@ -129,21 +130,27 @@ Normal mode main-view keys:
 | Up / Down | Move highlighted session | Scroll detail one line |
 | PgUp / PgDn | Page session list | Page detail buffer |
 | Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
-| `v` | Focus detail pane | No-op |
-| `l` | No-op | Focus session list |
+| Right | Focus detail pane | No-op |
+| Left | No-op | Focus session list |
 | `Esc` | No-op outside modal | Focus session list |
-| `Ctrl-Left` / `Ctrl-Right` | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
-| Alt/Shift Left / Right, or terminal word-left/word-right fallback | Resize L/R split when the terminal remaps Ctrl-arrow | Resize L/R split when the terminal remaps Ctrl-arrow |
-| Left / Right | Reserved no-op | Reserved no-op |
+| `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
 | `m` | Monitor highlighted session | Monitor highlighted session |
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
-| Enter / `g` | Attach highlighted session | Attach highlighted session |
+| Enter / `a` | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
 Short mode maps `T` to `Lb` and `B` to `R`. It uses
 `Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
 accepted as compatibility fallbacks.
+
+On macOS iTerm2, the resize keys observed during validation are
+`Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.
+
+The session list auto-refreshes through `HostHandle::watch_host_events()`,
+which is currently a one-second polling loop over `list_sessions()` with
+stable-id snapshot diffing. It is not currently driven by direct tmux
+control-mode host notifications.
 
 Modal keys:
 
