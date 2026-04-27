@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
 | 2026-04-26 | @gpt55-dgx | Added an `h` About modal that shows the built-in motlie logo and the build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
 | 2026-04-26 | @gpt55-dgx | Updated status bar contract: omit layout labels from the status text and render the bar with a blue background. |
@@ -189,7 +190,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `--landscape` / `-l`. The flags are mutually exclusive. Portrait mode
   renders a compact layout optimized for 32 rows x ~64
   columns: the body splits vertically into Top (`T`, default focus, lists
-  sessions) and Bottom (`B`, detail pane) at a 40:60 ratio. MOTD and the
+  sessions) and Bottom (`B`, detail pane) at a 30:70 ratio. MOTD and the
   motlie placeholder are omitted in portrait mode to maximize content density.
   All command keys (Left/Right focus, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
@@ -310,7 +311,7 @@ Additional flags:
 |------|----------|
 | (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). On clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). |
 | `--script` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --script)"`. |
-| `--portrait` / `-p` | Force portrait layout: vertical T/B split (40:60) optimized for 32x64 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--script` and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
+| `--portrait` / `-p` | Force portrait layout: vertical T/B split (30:70) optimized for 32x64 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--script` and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
 | `--landscape` / `-l` | Force landscape/normal layout: `L`/`R` split with `LT` MOTD and `LB` session list. Composes with `--script` and SSH targets. Mutually exclusive with `--portrait` / `-p`. |
 | `--portrait` + `--landscape` | Mutually exclusive — startup error. |
 
@@ -399,8 +400,8 @@ at smaller sizes but is tuned for this target.
 **Layout:**
 
 - Body area: 31 rows (32 total minus 1 status-bar row).
-- Body splits *vertically* into Top (`T`) and Bottom (`B`) at a 40:60 ratio
-  (T ≈ 12 rows, B ≈ 19 rows for a 32-row terminal).
+- Body splits *vertically* into Top (`T`) and Bottom (`B`) at a 30:70 ratio
+  (T ≈ 9 rows, B ≈ 22 rows for a 32-row terminal).
 - `T` = session list. Equivalent to `LB` in normal mode (same scrolling,
   same position indicator, same auto-scroll-to-keep-highlight-visible
   behavior). Default focus.
@@ -1022,8 +1023,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - status bar reservation
   - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
   - Portrait mode layout at
-    64x32 viewport: body = 31 rows; T/B split at 40:60 yields T ≈ 12 rows
-    and B ≈ 19 rows; MOTD/motlie omitted; status bar present
+    64x32 viewport: body = 31 rows; T/B split at 30:70 yields T ≈ 9 rows
+    and B ≈ 22 rows; MOTD/motlie omitted; status bar present
   - Portrait mode modified Up/Down resize bounds (minimum heights so neither pane
     collapses to 0); normal mode modified Left/Right parallel
   - PTY aspect-ratio auto-detection: 64x32, 66x30, 80x24, 100x30, 160x40,
