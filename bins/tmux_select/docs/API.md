@@ -10,6 +10,7 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated implementation notes for validation fixes: monitor detail uses `CaptureNormalizeMode::PlainText`, `q` exits like `Ctrl-C`, and dashboard can re-enter after detach even when tmux returns a non-zero detach status. |
 | 2026-04-26 | @gpt55-dgx | Updated API reference to implemented reality: selector CLI config, trait-backed sample/monitor detail sources, stable-id create/kill/attach flows, `HostEventStream`, host shell MOTD read, and `LinesRange` scrollback. |
 | 2026-04-26 | @gpt55-dgx | Mark current-PTY attach and stable session-id lookup as started in `motlie-tmux`; host event stream and windowed scrollback remain open selector dependencies. |
 | 2026-04-26 | @gpt55-dgx | Initial API contract for PR #227: documents existing library dependencies, accepted `motlie-tmux` gaps, and the selector's internal API shape. |
@@ -217,6 +218,10 @@ enum DetailMode {
     Monitor(MonitorDetailSource),
 }
 ```
+
+`MonitorDetailSource` requests `CaptureNormalizeMode::PlainText` from
+`motlie-tmux` so ratatui receives readable text instead of raw ANSI/control
+bytes from tmux control mode.
 
 ## Session Operations
 

@@ -12,14 +12,16 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use motlie_tmux::{
-    CreateSessionOptions, HistoryOptions, HostEvent, HostHandle, LabelFormat, RenderMode,
-    ScrollbackQuery, SessionInfo, SessionWatchHandle, SessionWatchOptions, SshConfig,
+    CaptureNormalizeMode, CreateSessionOptions, HistoryOptions, HostEvent, HostHandle, LabelFormat,
+    RenderMode, ScrollbackQuery, SessionInfo, SessionWatchHandle, SessionWatchOptions, SshConfig,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as TuiSpan};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
@@ -180,6 +182,7 @@ impl SessionDetailSource for MonitorDetailSource {
         self.deactivate().await?;
         let opts = SessionWatchOptions {
             queue_capacity: 256,
+            normalize: CaptureNormalizeMode::PlainText,
             history: HistoryOptions {
                 max_entries: MONITOR_HISTORY_LINES,
                 max_render_chars: 0,
@@ -315,6 +318,7 @@ struct AppState {
     list_scroll: usize,
     detail_lines: Vec<String>,
     detail_scroll: usize,
+    detail_view_height: usize,
     detail_source: DetailSource,
     status: String,
     left_percent: u16,
@@ -336,6 +340,7 @@ impl AppState {
             list_scroll: 0,
             detail_lines: Vec::new(),
             detail_scroll: 0,
+            detail_view_height: 1,
             detail_source: DetailSource::sample(),
             status: "loading sessions".to_string(),
             left_percent: 42,
@@ -389,12 +394,21 @@ impl AppState {
         self.auto_tail = true;
     }
 
+    fn max_detail_scroll(&self) -> usize {
+        self.detail_lines
+            .len()
+            .saturating_sub(self.detail_view_height)
+    }
+
     fn scroll_detail(&mut self, delta: isize) {
         let old = self.detail_scroll;
         if delta < 0 {
             self.detail_scroll = self.detail_scroll.saturating_sub(delta.unsigned_abs());
         } else {
-            self.detail_scroll = self.detail_scroll.saturating_add(delta as usize);
+            self.detail_scroll = self
+                .detail_scroll
+                .saturating_add(delta as usize)
+                .min(self.max_detail_scroll());
         }
         self.auto_tail = self.detail_scroll == 0;
         if old != self.detail_scroll {
@@ -403,7 +417,7 @@ impl AppState {
     }
 
     fn detail_home(&mut self) {
-        self.detail_scroll = self.detail_lines.len();
+        self.detail_scroll = self.max_detail_scroll();
         self.auto_tail = false;
     }
 
@@ -510,11 +524,22 @@ async fn run() -> Result<i32> {
         };
         let exit = target.attach_current_pty().await?;
         let code = exit.shell_status();
-        if cli.dashboard && exit.success() {
+        if cli.dashboard && dashboard_should_reenter(&host, &selected, &exit).await? {
             continue;
         }
         return Ok(code);
     }
+}
+
+async fn dashboard_should_reenter(
+    host: &HostHandle,
+    selected: &SelectedSession,
+    exit: &motlie_tmux::AttachExit,
+) -> Result<bool> {
+    if exit.success() {
+        return Ok(true);
+    }
+    Ok(host.session_by_id(&selected.id).await?.is_some())
 }
 
 fn maybe_run_forcecommand_bypass() -> Result<Option<i32>> {
@@ -743,7 +768,10 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(KeyOutcome::Cancel),
+        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            return Ok(KeyOutcome::Cancel);
+        }
+        (KeyCode::Char('q'), _) => return Ok(KeyOutcome::Cancel),
         (KeyCode::Char('v'), _) => app.focus = Focus::Detail,
         (KeyCode::Char('l'), _) | (KeyCode::Esc, _) => app.focus = Focus::List,
         (KeyCode::Char('m'), _) => start_monitor(host, app).await?,
@@ -770,16 +798,28 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
             }
             app.status = "no session selected".to_string();
         }
-        (KeyCode::Up, KeyModifiers::CONTROL) if app.layout_mode == LayoutMode::Short => {
+        (KeyCode::Up, modifiers)
+            if app.layout_mode == LayoutMode::Short
+                && modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             app.top_percent = app.top_percent.saturating_sub(5).max(MIN_TOP_PERCENT);
         }
-        (KeyCode::Down, KeyModifiers::CONTROL) if app.layout_mode == LayoutMode::Short => {
+        (KeyCode::Down, modifiers)
+            if app.layout_mode == LayoutMode::Short
+                && modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             app.top_percent = app.top_percent.saturating_add(5).min(MAX_TOP_PERCENT);
         }
-        (KeyCode::Left, KeyModifiers::CONTROL) if app.layout_mode == LayoutMode::Normal => {
+        (KeyCode::Left, modifiers)
+            if app.layout_mode == LayoutMode::Normal
+                && modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             app.left_percent = app.left_percent.saturating_sub(5).max(MIN_LEFT_PERCENT);
         }
-        (KeyCode::Right, KeyModifiers::CONTROL) if app.layout_mode == LayoutMode::Normal => {
+        (KeyCode::Right, modifiers)
+            if app.layout_mode == LayoutMode::Normal
+                && modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             app.left_percent = app.left_percent.saturating_add(5).min(MAX_LEFT_PERCENT);
         }
         (KeyCode::Up, _) => {
@@ -790,7 +830,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
                     refresh_detail(host, app, true).await?;
                 }
             } else {
-                app.scroll_detail(-1);
+                app.scroll_detail(1);
             }
         }
         (KeyCode::Down, _) => {
@@ -801,7 +841,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
                     refresh_detail(host, app, true).await?;
                 }
             } else {
-                app.scroll_detail(1);
+                app.scroll_detail(-1);
             }
         }
         (KeyCode::PageUp, _) => {
@@ -1003,7 +1043,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
     }
 }
 
-fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -1032,7 +1072,7 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     draw_detail(frame, columns[1], app, " Detail ");
 }
 
-fn draw_short(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn draw_short(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1142,8 +1182,10 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState, title: &str)
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, title: &str) {
+fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &str) {
     let height = area.height.saturating_sub(2) as usize;
+    app.detail_view_height = max(1, height);
+    app.detail_scroll = app.detail_scroll.min(app.max_detail_scroll());
     let total = app.detail_lines.len();
     let end = total.saturating_sub(app.detail_scroll);
     let start = end.saturating_sub(height);
@@ -1154,9 +1196,14 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, title: &str) {
     } else {
         String::new()
     };
+    let position = if total == 0 {
+        "0/0".to_string()
+    } else {
+        format!("{}-{}/{}", start + 1, end, total)
+    };
     let title = match app.detail_source.mode() {
-        DetailMode::Sample => title.to_string(),
-        DetailMode::Monitor => " Detail - monitor ".to_string(),
+        DetailMode::Sample => format!("{title} {position} "),
+        DetailMode::Monitor => format!(" Detail - monitor {position} "),
     };
     let block = Block::default()
         .title(title)
@@ -1168,6 +1215,19 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, title: &str) {
             .wrap(Wrap { trim: false }),
         area,
     );
+
+    if total > height {
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .position(start)
+            .viewport_content_length(height);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_style(Style::default().fg(Color::Green))
+                .track_style(Style::default().fg(Color::DarkGray)),
+            area,
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -1180,9 +1240,9 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         LayoutMode::Short => "short",
     };
     let keys = if app.layout_mode == LayoutMode::Short {
-        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | ctrl-up/down resize | ctrl-c quit"
+        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | ctrl-up/down resize | q quit"
     } else {
-        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | ctrl-left/right resize | ctrl-c quit"
+        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | ctrl-left/right resize | q quit"
     };
     let text = format!(
         " {} | {} | {} | {} | {} ",
@@ -1334,5 +1394,69 @@ mod tests {
         assert_eq!(closed, Some("dev".to_string()));
         assert_eq!(app.detail_source.mode(), DetailMode::Sample);
         assert!(app.detail_lines.is_empty());
+    }
+
+    #[test]
+    fn detail_scroll_up_moves_toward_older_content() {
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        app.detail_lines = (0..100).map(|n| format!("line {n}")).collect();
+        app.detail_view_height = 10;
+
+        app.scroll_detail(1);
+        assert_eq!(app.detail_scroll, 1);
+        assert!(!app.auto_tail);
+
+        app.scroll_detail(-1);
+        assert_eq!(app.detail_scroll, 0);
+        assert!(app.auto_tail);
+    }
+
+    #[tokio::test]
+    async fn q_exits_like_ctrl_c() {
+        let host = HostHandle::local();
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Cancel));
+    }
+
+    #[tokio::test]
+    async fn ctrl_left_with_extra_modifiers_resizes_normal_layout() {
+        let host = HostHandle::local();
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        let before = app.left_percent;
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.left_percent < before);
     }
 }

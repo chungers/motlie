@@ -168,6 +168,7 @@ impl HostEventStream {
 pub struct SessionWatchOptions {
     pub queue_capacity: usize,
     pub history: HistoryOptions,
+    pub normalize: CaptureNormalizeMode,
 }
 
 impl Default for SessionWatchOptions {
@@ -175,6 +176,7 @@ impl Default for SessionWatchOptions {
         Self {
             queue_capacity: 64,
             history: HistoryOptions::default(),
+            normalize: CaptureNormalizeMode::Raw,
         }
     }
 }
@@ -757,6 +759,15 @@ impl HostHandle {
         &self,
         session_name: &str,
     ) -> Result<SessionMonitorHandle> {
+        self.start_monitoring_session_with_normalize(session_name, CaptureNormalizeMode::Raw)
+            .await
+    }
+
+    async fn start_monitoring_session_with_normalize(
+        &self,
+        session_name: &str,
+        normalize: CaptureNormalizeMode,
+    ) -> Result<SessionMonitorHandle> {
         let bus = self.output_bus();
         let host_alias = self.inner.host_alias.clone();
         let session = session_name.to_string();
@@ -808,9 +819,10 @@ impl HostHandle {
             };
 
             loop {
-                let mut monitor = SessionMonitor::new(session.clone(), host_alias.clone())
-                    .with_socket(inner_ref.socket.clone())
-                    .with_tmux_bin(Some(resolved_tmux_bin.clone()));
+                let mut monitor =
+                    SessionMonitor::with_normalize(session.clone(), host_alias.clone(), normalize)
+                        .with_socket(inner_ref.socket.clone())
+                        .with_tmux_bin(Some(resolved_tmux_bin.clone()));
 
                 let exit = monitor
                     .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
@@ -1028,7 +1040,10 @@ impl HostHandle {
         let subscription = bus.subscribe(vec![filter], opts.queue_capacity)?;
         let subscription_id = subscription.id();
 
-        match self.start_monitoring_session(session_name).await {
+        match self
+            .start_monitoring_session_with_normalize(session_name, opts.normalize)
+            .await
+        {
             Ok(monitor) => {
                 let history = subscription.history(opts.history.clone());
                 Ok(SessionWatchHandle {
