@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, default startup auto-detects PTY aspect ratio, the old `-s` flag is rejected, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
 | 2026-04-26 | @gpt55-dgx | Updated selector keymap for attach on `a`, arrow-key pane focus, Shift-arrow resize behavior on macOS iTerm2, ANSI color in detail mode, polling-backed session refresh, and compact MOTD fallback graphics. |
 | 2026-04-26 | @gpt55-dgx | Updated key and dashboard semantics after validation: resize accepts modified-arrow fallbacks when terminals remap Ctrl-arrow, monitor mode mirrors rendered screen content, and dashboard detach is protected against stopped selector jobs. |
 | 2026-04-26 | @gpt55-dgx | Updated CLI reference to match implemented binary behavior: `-s`, `--print-session`, `--dashboard`, optional SSH URI, ForceCommand rejection/bypass, stdout/stderr split, and exit semantics. |
@@ -25,7 +26,7 @@ Examples:
 
 ```bash
 tmux_select
-tmux_select -s
+tmux_select --portrait
 tmux_select --dashboard
 tmux_select --print-session
 tmux_select ssh://user@host
@@ -38,7 +39,7 @@ tmux_select 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
 |------|----------|
 | no `ssh-uri` | Operate on the local host. |
 | `[ssh-uri]` | Operate on the remote SSH target for MOTD, session list, sampling, monitor, create, kill, and attach. |
-| `-s` | Use compact short mode. Body is split into `T` session list and `B` detail pane. MOTD is omitted. |
+| `--portrait` | Force portrait layout. Body is split into `T` session list and `B` detail pane. MOTD is omitted. Without this flag, layout is auto-detected from the current PTY dimensions. |
 | `--print-session` | Select a session, print exactly `<name>\n` to stdout, and exit 0. Cancel exits non-zero with empty stdout. |
 | `--dashboard` | Re-enter the selector after a clean attach child exit, or after a non-zero detach when the selected session still exists. Other non-zero child exits exit with that status. |
 | `--print-session --dashboard` | Invalid. Startup error. |
@@ -104,22 +105,28 @@ session survived. Re-entry is bounded:
 Non-zero child exit with no selected session remaining, or refresh failure,
 exits instead of looping.
 
-## Short Mode
+## Portrait Mode
 
 ```bash
-tmux_select -s
-tmux_select -s --dashboard
-tmux_select -s ssh://user@host
+tmux_select --portrait
+tmux_select --portrait --dashboard
+tmux_select --portrait ssh://user@host
 ```
 
-Short mode is optimized for 32 row by roughly 65 column terminals. It uses a
+Portrait mode is optimized for 32 row by roughly 65 column terminals. It uses a
 vertical split:
 
 - `T`: session list, default focus
 - `B`: detail pane
 - one-row status bar
 
-MOTD and the motlie placeholder are omitted in short mode.
+MOTD and the motlie placeholder are omitted in portrait mode.
+
+Without `--portrait`, startup calls `crossterm::terminal::size()` on the
+connecting PTY and chooses portrait layout when the character-cell aspect ratio
+is narrow (`columns / rows < 2.2`). This treats typical 80x24 and 100x30
+terminals as normal landscape layout, while narrow or square-ish terminals use
+portrait layout. If the size cannot be read, startup defaults to normal layout.
 
 ## TUI Keymap
 
@@ -140,7 +147,7 @@ Normal mode main-view keys:
 | Enter / `a` | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
-Short mode maps `T` to `Lb` and `B` to `R`. It uses
+Portrait mode maps `T` to `Lb` and `B` to `R`. It uses
 `Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
 accepted as compatibility fallbacks.
 
@@ -175,10 +182,10 @@ Dashboard deployment:
 ForceCommand /usr/local/bin/tmux_select --dashboard
 ```
 
-Short-mode dashboard deployment:
+Portrait-mode dashboard deployment:
 
 ```text
-ForceCommand /usr/local/bin/tmux_select -s --dashboard
+ForceCommand /usr/local/bin/tmux_select --portrait --dashboard
 ```
 
 By default, `SSH_ORIGINAL_COMMAND` is rejected with a clear stderr message.

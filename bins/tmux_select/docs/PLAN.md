@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Replaced short mode tracking with portrait mode: `--portrait`, PTY aspect-ratio auto-detection, old `-s` rejection, updated layout/test references, and the requested Claude artifact ASCII logo. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation tracking for validation changes: Enter/`a` attach, Left/Right focus transitions, macOS iTerm2 Shift-arrow resize documentation, ANSI-preserving sample detail, polling-backed session refresh, and compact graphical MOTD fallback. |
 | 2026-04-26 | @gpt55-dgx | Addressed second manual validation feedback: monitor mode now mirrors rendered screen snapshots with ANSI/VTE parsing, modified-arrow fallback resize is tested, and attach PTY restore uses a `SIGTTOU`-safe foreground-process-group path. |
 | 2026-04-26 | @gpt55-dgx | Addressed manual validation feedback: robust Ctrl-arrow resize matching, readable monitor-mode normalization, conventional detail scroll direction with scrollbar/range indicator, `q` quit key, and dashboard re-entry after detach when the selected session still exists. |
@@ -147,7 +148,7 @@ References: [Target Model](./DESIGN.md#target-model),
   `ratatui`, `crossterm`, and `async-trait` only if the final trait shape
   requires it.
 - [x] 2.5 Implement CLI parsing for positional `ssh-uri`, `--print-session`,
-  `--dashboard`, and `-s`.
+  `--dashboard`, and `--portrait`; reject the old `-s` flag.
 - [x] 2.6 Add startup validation for mutually exclusive `--print-session` and
   `--dashboard`.
 - [x] 2.7 Add smoke tests for startup-error cases.
@@ -172,19 +173,20 @@ References: [Layout](./DESIGN.md#layout), [Data Flow](./DESIGN.md#data-flow),
 ## Phase 4: Layout and Rendering
 
 References: [Layout](./DESIGN.md#layout),
-[Short Mode](./DESIGN.md#short-mode--s), [SVG Mock](./DESIGN.md#svg-mock).
+[Portrait Mode](./DESIGN.md#portrait-mode), [SVG Mock](./DESIGN.md#svg-mock).
 
 - [x] 4.1 Implement normal layout: `L`/`R`, `LT`/`LB`, one-row status bar.
 - [x] 4.2 Implement dynamic MOTD height cap: fit content up to 30% of left
   pane height.
 - [x] 4.3 Implement absent-MOTD motlie placeholder with narrow-terminal
   fallback.
-- [x] 4.4 Implement short mode `-s`: `T`/`B` split at 40:60 and omit MOTD.
+- [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 40:60 and
+  omit MOTD.
 - [x] 4.5 Implement focused/unfocused border styles.
 - [x] 4.6 Implement status bar with host, time, focus, and ASCII-first key
   hints.
-- [ ] 4.7 Add layout unit tests for 32x65 short mode, narrow placeholder
-  fallback, status bar reservation, and resize bounds.
+- [ ] 4.7 Add layout unit tests for 32x65 portrait mode, PTY auto-detection,
+  narrow placeholder fallback, status bar reservation, and resize bounds.
 - [ ] 4.8 Add snapshot/style tests for focused borders and motlie placeholder
   styling.
 
@@ -199,7 +201,7 @@ References: [Functional Requirements](./DESIGN.md#functional),
 - [x] 5.3 Implement R/B scrolling, page movement, Home/End, and monitor
   auto-tail resume on End.
 - [x] 5.4 Implement resize keys: `Ctrl-Left`/`Ctrl-Right` for normal mode and
-  `Ctrl-Up`/`Ctrl-Down` for short mode. Accept modified-arrow and word-arrow
+  `Ctrl-Up`/`Ctrl-Down` for portrait mode. Accept modified-arrow and word-arrow
   fallback sequences for terminals that remap Ctrl-arrow.
 - [x] 5.5 Implement `New Session` modal with text input, Cancel/Ok, Enter, and
   Esc handling.
@@ -305,7 +307,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Library attach | Unit + localhost smoke | command construction, process group handoff, exit status mapping, terminal restore |
 | Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
-| Layout | Pure unit tests | normal split, short mode 32x65, MOTD cap, placeholder fallback, resize bounds |
+| Layout | Pure unit tests | normal split, portrait mode 32x65, PTY auto-detect, MOTD cap, placeholder fallback, resize bounds |
 | Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/dashboard |
@@ -318,7 +320,7 @@ The implementation is ready for review when:
 
 - all accepted `motlie-tmux` gaps are implemented in `libs/tmux`
 - the selector binary builds as `motlie-tmux-select`
-- default, `--print-session`, `--dashboard`, `-s`, local, SSH, and ForceCommand
+- default, `--print-session`, `--dashboard`, `--portrait`, local, SSH, and ForceCommand
   flows have targeted tests
 - `DESIGN.md`, `PLAN.md`, `API.md`, and `CLI.md` are consistent with code
 - `cargo fmt`, `cargo clippy -- -D warnings`, and relevant tests pass
