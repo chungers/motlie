@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to the clean `columns / rows <= 2.0` rule and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, startup auto-detects portrait layout from PTY dimensions, the old `-s` flag is no longer accepted, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
@@ -170,17 +171,14 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode host notifications remain a future hardening item; see
   §Data Flow → Live Session List and §Accepted motlie-tmux Library Gaps →
   Host Event Stream.
-- Default mode (no flag): on `a`
-  or Enter, leave the TUI cleanly and spawn-and-wait attach (see §Data Flow →
-  Attach). When invoked with `--print-session`, the binary instead leaves the
-  TUI cleanly, prints the selected session name (and only the session name)
-  followed by a newline to stdout, and exits 0; cancellation (`q`/`Ctrl-C`, no
-  selection) exits non-zero with no stdout. All UI rendering, status, and
-  errors go to stderr only. When invoked with `--dashboard`, the binary
-  re-enters the TUI on clean child exit, or on non-zero child exit when the
-  selected session still exists (see §Data Flow → Attach for the
-  bounded re-entry rule). `--print-session` and `--dashboard` are mutually
-  exclusive; combining them is a startup error.
+- Default mode (no behavior flag): on `a` or Enter, leave the TUI cleanly and
+  spawn-and-wait attach (see §Data Flow → Attach). Default mode re-enters the
+  TUI on clean child exit, or on non-zero child exit when the selected session
+  still exists (see §Data Flow → Attach for the bounded re-entry rule). When
+  invoked with `--script`, the binary instead leaves the TUI cleanly, prints
+  the selected session name (and only the session name) followed by a newline to
+  stdout, and exits 0; cancellation (`q`/`Ctrl-C`, no selection) exits non-zero
+  with no stdout. All UI rendering, status, and errors go to stderr only.
 - The binary accepts explicit layout force flags: `--portrait` / `-p` and
   `--landscape` / `-l`. The flags are mutually exclusive. Portrait mode
   renders a compact layout optimized for 32 rows x ~64
@@ -198,8 +196,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   layout force flag, the selector calls `crossterm::terminal::size()` on the
   connecting PTY and selects portrait mode when `columns / rows <= 4.0`;
   otherwise it uses landscape layout. If the PTY size cannot be read, it
-  defaults to landscape layout. The layout force flags compose with
-  `--print-session`, `--dashboard`, and SSH targets.
+  defaults to landscape layout. The layout force flags compose with `--script`
+  and SSH targets.
 - The binary must use `motlie-tmux` for tmux operations and must not duplicate
   tmux command logic in the binary.
 
@@ -304,23 +302,21 @@ Additional flags:
 
 | Flag | Behavior |
 |------|----------|
-| (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). Selector exits with the child's `ExitStatus`. |
-| `--print-session` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --print-session)"`. |
-| `--dashboard` | TUI → select → spawn-and-wait attach → on clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). See §Data Flow → Attach for the bounded re-entry rule. |
-| `--portrait` / `-p` | Force portrait layout: vertical T/B split (40:60) optimized for 32x64 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--print-session`, `--dashboard`, and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
-| `--landscape` / `-l` | Force landscape/normal layout: `L`/`R` split with `LT` MOTD and `LB` session list. Composes with `--print-session`, `--dashboard`, and SSH targets. Mutually exclusive with `--portrait` / `-p`. |
-| `--print-session` + `--dashboard` | Mutually exclusive — startup error. |
+| (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). On clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). |
+| `--script` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --script)"`. |
+| `--portrait` / `-p` | Force portrait layout: vertical T/B split (40:60) optimized for 32x64 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--script` and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
+| `--landscape` / `-l` | Force landscape/normal layout: `L`/`R` split with `LT` MOTD and `LB` session list. Composes with `--script` and SSH targets. Mutually exclusive with `--portrait` / `-p`. |
 | `--portrait` + `--landscape` | Mutually exclusive — startup error. |
 
-Polarity rationale (default attach): the binary's primary product is a session
-selector that attaches; ForceCommand is the headline deployment story; users
-typing `tmux_select` directly expect to enter tmux. Composable usage is opt-in
-via `--print-session`.
+Polarity rationale (default attach/re-enter): the binary's primary product is a
+host-wide session selector that keeps users inside the selector workflow across
+tmux detaches. Shell-script composition is opt-in via `--script`, which makes
+stdout ownership explicit.
 
-ForceCommand-mode incompatibility: `--print-session` is incompatible with
-ForceCommand mode (the user has no shell to consume the output). ForceCommand
-deployments must omit the flag; the binary should warn (stderr) on a
-best-effort heuristic if both are detected.
+ForceCommand-mode incompatibility: `--script` is incompatible with ForceCommand
+mode (the user has no shell to consume the output). ForceCommand deployments
+must omit the flag; the binary should warn (stderr) on a best-effort heuristic
+if both are detected.
 
 ## Layout
 
@@ -438,11 +434,11 @@ selection, Enter to apply, Esc to Cancel) is unchanged.
 `crossterm::terminal::size()`. It selects portrait mode when
 `columns / rows <= 4.0`; 66x30, 80x24, 100x30, 160x40, and square-ish PTYs use
 portrait mode. Wider PTYs use landscape mode. If the size cannot be read,
-landscape mode is used. Layout force flags compose with `--print-session`,
-`--dashboard`, SSH targets, and the `MOTLIE_TMUX_SELECT_BYPASS` env-var
+landscape mode is used. Layout force flags compose with `--script`, SSH
+targets, and the `MOTLIE_TMUX_SELECT_BYPASS` env-var
 admin bypass. ForceCommand deployments may use explicit layout flags for fixed
-display contexts (`ForceCommand /usr/local/bin/tmux_select --portrait --dashboard`
-or `ForceCommand /usr/local/bin/tmux_select --landscape --dashboard`).
+display contexts (`ForceCommand /usr/local/bin/tmux_select --portrait`
+or `ForceCommand /usr/local/bin/tmux_select --landscape`).
 
 ## SVG Mock
 
@@ -553,8 +549,8 @@ initial hot path.
 ### Startup
 
 1. Parse CLI target and flags (`--portrait` / `-p`, `--landscape` / `-l`,
-   `--print-session`, `--dashboard`;
-   `--print-session` and `--dashboard` are mutually exclusive — error on both).
+   `--script`; `--portrait` and `--landscape` are mutually exclusive — error
+   on both).
 2. Connect to local or SSH target with `motlie-tmux`.
 3. Load target host MOTD (or render the motlie placeholder when absent).
 4. List sessions.
@@ -609,10 +605,9 @@ Subscribe-and-reconcile loop:
    disappeared, move highlight to the next valid row (or to the previous if
    the highlighted row was the last).
 4. Empty-list state (zero sessions): see §Empty Session List below.
-5. Under `--dashboard`, the host-event subscription runs on a separate tokio
-   task that survives the spawn-and-wait attach window. Events arriving
-   during attach are buffered (bounded queue, drop-oldest on overflow); the
-   buffer drains on re-entry before the first redraw.
+5. In default attach/re-enter mode, the active TUI subscription is dropped
+   before attach. On re-entry the selector takes a fresh `list_sessions()`
+   snapshot and starts a new host-event subscription before the first redraw.
 
 Polling semantics: re-issue `list_sessions()` every 1s through
 `HostHandle::watch_host_events()`. The public stream is event-shaped for the
@@ -620,8 +615,8 @@ selector, but freshness is polling-backed in the current implementation.
 
 ### Empty Session List
 
-When the target host has zero tmux sessions (at startup, or after a kill under
-`--dashboard` re-entry):
+When the target host has zero tmux sessions (at startup, or after a kill during
+selector re-entry):
 
 1. `LB` renders an inline placeholder row: `(no sessions on <host> — press n
    to create)`.
@@ -694,15 +689,13 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 
 1. Pressing Enter or `a` in the main selector (any focus) records the
    highlighted session id.
-2. Stop monitor/detail state. Drop any host-event subscription draining task
-   (or under `--dashboard`, leave it running on a separate tokio task with a
-   bounded buffer that survives the attach window).
+2. Stop monitor/detail state. Drop the active host-event subscription; re-entry
+   starts from a fresh session snapshot.
 3. Restore raw mode and leave the alternate screen. Restore termios to
    canonical state.
 4. Resolve the highlighted session id to a `Target` via the stable-id
    library path. If the session vanished between selection and resolve
-   (race), show stderr message and either re-enter the TUI (under
-   `--dashboard`) or exit non-zero (default).
+   (race), show stderr message and re-enter the TUI.
 5. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited
@@ -714,44 +707,39 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
      group via `tcsetpgrp` so foreground signals (`SIGINT`, `SIGTSTP`,
      `SIGWINCH`) reach the child, not the parent.
 6. Call `wait()` (parent blocks while child holds the terminal).
-7. On `wait()` return, branch on flag and child exit status:
+7. On `wait()` return, branch on mode and child exit status:
 
    ```text
    wait() returns
        │
-       ├── --print-session ─→ (unreachable; --print-session bypasses attach)
+       ├── --script ───────→ (unreachable; --script bypasses attach)
        │
-       ├── default mode ────→ exit with child.status as selector exit code.
-       │                      Translate signal-terminated child to
-       │                      `128 + signal` per POSIX shell convention.
-       │
-       └── --dashboard ─────→ if child.status.success()
-                                  or selected session still exists:
-                                  re-enter TUI:
-                                    1. re-acquire alt-screen, raw mode
-                                    2. drain buffered host events
-                                    3. re-render LB (state may have changed)
-                                    4. if list_sessions() refresh fails →
-                                         exit with that error (bounded loop:
-                                         no infinite re-entry on broken target)
-                                  else (non-zero child exit and selected
-                                  session is gone):
-                                    exit with child.status.
-                                  q/Ctrl-C from re-entered TUI exits the
-                                  binary with code 0 (user-initiated).
+       └── default mode ───→ if child.status.success()
+                                 or selected session still exists:
+                                 re-enter TUI:
+                                   1. re-acquire alt-screen, raw mode
+                                   2. refresh list_sessions()
+                                   3. start a new host-event subscription
+                                   4. re-render LB (state may have changed)
+                                   5. if list_sessions() refresh fails →
+                                        exit with that error (bounded loop:
+                                        no infinite re-entry on broken target)
+                                 else (non-zero child exit and selected
+                                 session is gone):
+                                   exit with child.status.
+                                 q/Ctrl-C from re-entered TUI exits the
+                                 binary with code 0 (user-initiated).
    ```
 
 8. Detach status is treated conservatively. Some tmux/SSH attach paths can
    report non-zero even when the user detached and the selected session still
-   exists. `--dashboard` therefore uses child success as sufficient for
+   exists. Default mode therefore uses child success as sufficient for
    re-entry, and for non-zero exits probes the selected session id before
    deciding whether to re-enter or propagate the child status.
 
-9. Process count footprint: under default mode, two processes are resident
-   during the attach window (selector + child). Under exec-replace this
-   would be one, but exec-replace forecloses recovery, observability, and
-   testability — rejected. Under `--dashboard`, the same 2× count applies
-   per attach cycle.
+9. Process count footprint: two processes are resident during the attach window
+   (selector + child). Under exec-replace this would be one, but exec-replace
+   forecloses recovery, observability, and testability — rejected.
 
 ## Accepted motlie-tmux Library Gaps
 
@@ -963,15 +951,12 @@ configuration external to the binary while giving PLAN a concrete
 mechanism to implement and test.
 
 ForceCommand deployments must
-NOT use `--print-session` (the user has no shell to consume stdout).
+NOT use `--script` (the user has no shell to consume stdout).
 Recommended deployments:
 
 ```text
-# Default: TUI selector with attach
+# Default: TUI selector with attach/re-enter
 ForceCommand /usr/local/bin/tmux_select
-
-# Dashboard mode: re-enter selector on tmux detach (workspace UX)
-ForceCommand /usr/local/bin/tmux_select --dashboard
 ```
 
 ## Approach (Selected)
@@ -1079,22 +1064,22 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - list and sample it
   - monitor it
   - kill it
-  - `--print-session` contract:
+  - `--script` contract:
     stdout is exactly `<name>\n` on selection; empty on cancel; exit code 0
     on selection, non-zero on cancel; stderr can carry diagnostics without
     polluting stdout (assert via captured stdout in non-TTY harness)
-  - `--dashboard` re-entry on clean detach:
+  - default re-entry on clean detach:
     attach to a session, detach via `C-b d`, assert selector re-enters TUI and
     the session remains visible in refreshed `LB`
-  - `--dashboard` re-entry on non-zero detach with surviving session:
+  - default re-entry on non-zero detach with surviving session:
     simulate or trigger an attach child non-zero status while
     `session_by_id()` still finds the selected session; assert selector
     re-enters TUI
-  - `--dashboard` no-loop on
+  - default no-loop on
     failure: attach, force a non-zero child exit (e.g., target session
     vanished, or kill-server), assert selector exits with that status (no
     re-entry)
-  - `--dashboard` no-loop on
+  - default no-loop on
     refresh failure: attach, detach cleanly, but make `list_sessions()`
     fail at re-entry; assert selector exits with that error
 - SSH integration:

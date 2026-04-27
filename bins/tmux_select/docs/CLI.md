@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, default startup auto-detects PTY aspect ratio, the old `-s` flag is rejected, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
@@ -32,8 +33,7 @@ tmux_select --portrait
 tmux_select -p
 tmux_select --landscape
 tmux_select -l
-tmux_select --dashboard
-tmux_select --print-session
+tmux_select --script
 tmux_select ssh://user@host
 tmux_select 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
 ```
@@ -46,9 +46,7 @@ tmux_select 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
 | `[ssh-uri]` | Operate on the remote SSH target for MOTD, session list, sampling, monitor, create, kill, and attach. |
 | `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. MOTD is omitted. Mutually exclusive with `--landscape` / `-l`. |
 | `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L`/`R`, with `L` split into MOTD and session list. Mutually exclusive with `--portrait` / `-p`. |
-| `--print-session` | Select a session, print exactly `<name>\n` to stdout, and exit 0. Cancel exits non-zero with empty stdout. |
-| `--dashboard` | Re-enter the selector after a clean attach child exit, or after a non-zero detach when the selected session still exists. Other non-zero child exits exit with that status. |
-| `--print-session --dashboard` | Invalid. Startup error. |
+| `--script` | Select a session, print exactly `<name>\n` to stdout, and exit 0 without attaching. Cancel exits non-zero with empty stdout. |
 | `--portrait --landscape` | Invalid. Startup error. |
 
 The v1 target form is positional only. There is no `--target` flag in v1.
@@ -60,8 +58,11 @@ tmux_select
 ```
 
 Default mode opens the TUI against the local host. Pressing Enter or `a`
-attaches the user's current PTY to the highlighted tmux session. The selector
-restores terminal state and exits with the attach child status.
+attaches the user's current PTY to the highlighted tmux session. After detach,
+the selector re-enters the TUI if the attach child exited successfully or the
+selected session still exists. If the child exits non-zero and the selected
+session is gone, the selector exits with the child status. `q` / `Ctrl-C` exits
+without attach.
 
 For remote targets:
 
@@ -72,13 +73,13 @@ tmux_select ssh://user@host
 The TUI runs locally, but all tmux operations target the SSH host. Attach opens
 an interactive SSH PTY and runs remote tmux attach against the selected session.
 
-## Print-Session Mode
+## Script Mode
 
 ```bash
-tmux attach -t "$(tmux_select --print-session)"
+tmux attach -t "$(tmux_select --script)"
 ```
 
-`--print-session` is for shell composition. On selection:
+`--script` is for shell composition. On selection:
 
 - stdout: selected session name plus one newline
 - stderr: TUI, status, and diagnostics
@@ -93,31 +94,12 @@ On cancel:
 This mode is not appropriate for SSH `ForceCommand` deployments because the
 user has no shell to consume stdout.
 
-## Dashboard Mode
-
-```bash
-tmux_select --dashboard
-```
-
-`--dashboard` re-enters the selector after clean attach child exit. It also
-re-enters after a non-zero attach child exit when the selected session still
-exists, which covers tmux/SSH detach paths that report non-zero even though the
-session survived. Re-entry is bounded:
-
-1. attach child exits with success, or the selected session still exists after
-   a non-zero child exit
-2. session list refresh succeeds
-3. user explicitly selects a session again
-
-Non-zero child exit with no selected session remaining, or refresh failure,
-exits instead of looping.
-
 ## Portrait Mode
 
 ```bash
 tmux_select --portrait
 tmux_select -p
-tmux_select --portrait --dashboard
+tmux_select --portrait --script
 tmux_select --portrait ssh://user@host
 ```
 
@@ -187,22 +169,16 @@ Recommended local deployment after installing the built binary to
 ForceCommand /usr/local/bin/tmux_select
 ```
 
-Dashboard deployment:
+Portrait-mode deployment:
 
 ```text
-ForceCommand /usr/local/bin/tmux_select --dashboard
+ForceCommand /usr/local/bin/tmux_select --portrait
 ```
 
-Portrait-mode dashboard deployment:
+Landscape-mode deployment:
 
 ```text
-ForceCommand /usr/local/bin/tmux_select --portrait --dashboard
-```
-
-Landscape-mode dashboard deployment:
-
-```text
-ForceCommand /usr/local/bin/tmux_select --landscape --dashboard
+ForceCommand /usr/local/bin/tmux_select --landscape
 ```
 
 By default, `SSH_ORIGINAL_COMMAND` is rejected with a clear stderr message.
@@ -216,17 +192,16 @@ original command instead of launching the selector.
 | Condition | Exit behavior |
 |-----------|---------------|
 | `q` or `Ctrl-C` in TUI | Exit without attach. |
-| Default attach child exits | Exit with child status. |
-| `--dashboard` attach child exits 0 | Re-enter selector after refresh. |
-| `--dashboard` attach child exits non-zero and selected session still exists | Re-enter selector after refresh. |
-| `--dashboard` attach child exits non-zero and selected session is gone | Exit with child status. |
-| `--print-session` selection | Print name to stdout, exit 0. |
-| `--print-session` cancel | Empty stdout, non-zero exit. |
+| Default attach child exits 0 | Re-enter selector after refresh. |
+| Default attach child exits non-zero and selected session still exists | Re-enter selector after refresh. |
+| Default attach child exits non-zero and selected session is gone | Exit with child status. |
+| `--script` selection | Print name to stdout, exit 0. |
+| `--script` cancel | Empty stdout, non-zero exit. |
 | Startup argument error | Non-zero exit and stderr message. |
 
 ## Output Streams
 
-- stdout is reserved for `--print-session` selected-session output.
+- stdout is reserved for `--script` selected-session output.
 - stderr carries TUI rendering, status, diagnostics, and errors.
-- default attach and dashboard modes inherit stdio for the attach child after
-  terminal cleanup.
+- default attach mode inherits stdio for the attach child after terminal
+  cleanup.

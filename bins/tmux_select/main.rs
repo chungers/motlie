@@ -55,12 +55,9 @@ struct Cli {
     /// Force landscape layout instead of auto-detecting from the current PTY.
     #[arg(short = 'l', long, conflicts_with = "portrait")]
     landscape: bool,
-    /// Print the selected session name and exit instead of attaching.
-    #[arg(long, conflicts_with = "dashboard")]
-    print_session: bool,
-    /// Re-enter the selector after detach when the selected session remains.
+    /// Print the selected session name for shell-script integration instead of attaching.
     #[arg(long)]
-    dashboard: bool,
+    script: bool,
     /// Optional SSH URI target. Omitted means local host.
     ssh_uri: Option<String>,
 }
@@ -576,10 +573,10 @@ async fn run() -> Result<i32> {
         let outcome = run_selector_once(&host, &label, layout).await?;
         let selected = match outcome {
             SelectorOutcome::Selected(selected) => selected,
-            SelectorOutcome::Cancelled => return Ok(if cli.print_session { 1 } else { 0 }),
+            SelectorOutcome::Cancelled => return Ok(if cli.script { 1 } else { 0 }),
         };
 
-        if cli.print_session {
+        if cli.script {
             println!("{}", selected.name);
             return Ok(0);
         }
@@ -587,23 +584,20 @@ async fn run() -> Result<i32> {
         let target = match host.session_by_id(&selected.id).await? {
             Some(target) => target,
             None => {
-                if cli.dashboard {
-                    eprintln!("tmux_select: selected session disappeared; returning to dashboard");
-                    continue;
-                }
-                return Err(anyhow!("selected session disappeared before attach"));
+                eprintln!("tmux_select: selected session disappeared; returning to selector");
+                continue;
             }
         };
         let exit = target.attach_current_pty().await?;
         let code = exit.shell_status();
-        if cli.dashboard && dashboard_should_reenter(&host, &selected, &exit).await? {
+        if should_reenter_after_attach(&host, &selected, &exit).await? {
             continue;
         }
         return Ok(code);
     }
 }
 
-async fn dashboard_should_reenter(
+async fn should_reenter_after_attach(
     host: &HostHandle,
     selected: &SelectedSession,
     exit: &motlie_tmux::AttachExit,
@@ -1450,9 +1444,16 @@ mod tests {
     use motlie_tmux::{transport::MockTransport, TransportKind};
 
     #[test]
-    fn cli_rejects_print_session_with_dashboard() {
-        let result = Cli::try_parse_from(["tmux_select", "--print-session", "--dashboard"]);
-        assert!(result.is_err());
+    fn cli_accepts_script_and_rejects_removed_mode_flags() {
+        let script = Cli::try_parse_from(["tmux_select", "--script"]).unwrap();
+        assert!(script.script);
+
+        let print_session = Cli::try_parse_from(["tmux_select", "--print-session"]);
+        assert!(print_session.is_err());
+
+        let dashboard = Cli::try_parse_from(["tmux_select", "--dashboard"]);
+        assert!(dashboard.is_err());
+
         Cli::command().debug_assert();
     }
 
