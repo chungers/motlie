@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Changed plain Left/Right from one-way list/detail focus movement to cyclic pane focus movement. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector command to `mmux` and updated CLI/ForceCommand examples. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` status-bar label. |
 | 2026-04-27 | @gpt55-dgx | Moved the host label from the status bar into the Sessions pane title. |
@@ -134,23 +135,24 @@ be read, startup defaults to landscape layout.
 
 Normal mode main-view keys:
 
-| Key | `Lb` focused | `R` focused |
-|-----|--------------|-------------|
-| Up / Down | Move highlighted session | Scroll detail one line |
-| PgUp / PgDn | Page session list | Page detail buffer |
-| Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
-| Right | Focus detail pane | No-op |
-| Left | No-op | Focus session list |
-| `Esc` | No-op outside modal | Focus session list |
-| `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
-| `m` | Monitor highlighted session | Monitor highlighted session |
-| `n` | Open New Session modal | Open New Session modal |
-| `k` | Open Kill Session modal | Open Kill Session modal |
-| `h` | Open Help modal | Open Help modal |
-| Enter / `a` | Attach highlighted session | Attach highlighted session |
-| `q` / `Ctrl-C` | Exit without attach | Exit without attach |
+| Key | `MOTD` focused | `Lb` focused | `R` focused |
+|-----|----------------|--------------|-------------|
+| Up / Down | No-op | Move highlighted session | Scroll detail one line |
+| PgUp / PgDn | No-op | Page session list | Page detail buffer |
+| Home / End | No-op | First / last session | Top / bottom detail; End resumes monitor tail |
+| Right | Focus session list | Focus detail pane | Focus MOTD pane |
+| Left | Focus detail pane | Focus MOTD pane | Focus session list |
+| `Esc` | Focus session list | Focus session list | Focus session list |
+| `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
+| `m` | Monitor highlighted session | Monitor highlighted session | Monitor highlighted session |
+| `n` | Open New Session modal | Open New Session modal | Open New Session modal |
+| `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
+| `h` | Open Help modal | Open Help modal | Open Help modal |
+| Enter / `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
+| `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
 
-Portrait mode maps `T` to `Lb` and `B` to `R`. It uses
+Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, plain
+Left/Right cycle between `T` and `B`. It uses
 `Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
 accepted as compatibility fallbacks.
 
