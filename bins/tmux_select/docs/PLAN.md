@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated Sessions title tracking for count/hostname/IP format and removed the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Moved host-label tracking from the status bar to the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Updated status hint tracking to use arrow symbols and expanded help modal coverage for key functions. |
 | 2026-04-27 | @gpt55-dgx | Changed portrait mode implementation tracking from a 40:60 to a 30:70 T/B split. |
@@ -193,8 +194,9 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
   omit MOTD.
 - [x] 4.5 Implement focused/unfocused border styles.
-- [x] 4.6 Implement Sessions pane title with host label and blue status bar
-  with time, compact arrow-symbol key hints, and no host, focus, or layout-mode
+- [x] 4.6 Implement Sessions pane title formatted as
+  `Sessions [n] @ <hostname>, <ip address>` and a blue status bar with time,
+  compact arrow-symbol key hints, and no `keys`, host, focus, or layout-mode
   labels.
 - [ ] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar

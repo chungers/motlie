@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` label from the status bar. |
 | 2026-04-27 | @gpt55-dgx | Moved host label from the status bar into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
 | 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
@@ -167,14 +168,15 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   all operate against the SSH target.
 - For SSH targets, attach must open an interactive SSH PTY to the target host
   and attach that remote PTY to the selected remote tmux session.
-- The session-list pane title shows the target host label.
+- The session-list pane title shows the target host and session count as
+  `Sessions [n] @ <hostname>, <ip address>`.
 - A bottom status bar shows current time and supported keys.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`, and must include navigation between list and detail
   (`←/→`) plus always-on hints (`m monitor`, `n new`, `k kill`, `h help`,
-  attach, resize, `q quit`). The status bar must not show focus (`list`,
-  `detail`, `Lb`, `R`) or layout mode (`portrait`, `landscape`, or `normal`)
-  and must render with a blue background.
+  attach, resize, `q quit`). The status bar must not show a `keys` label,
+  focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
+  `landscape`, or `normal`) and must render with a blue background.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
@@ -362,8 +364,8 @@ two focus states: `Lb` (default) and `R`. Focus transitions are explicit:
 The currently focused pane must be visually distinguished from the unfocused
 pane via border style (bright/colored or doubled for focused; dim/single for
 unfocused). The blue status bar shows time and key hints only; it does not
-duplicate host, focus, or layout state. The target host appears in the
-Sessions pane title.
+duplicate host, focus, layout state, or a `keys` label. The target host appears
+in the Sessions pane title as `Sessions [n] @ <hostname>, <ip address>`.
 
 Main-selector keymap (focus-aware):
 

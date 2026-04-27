@@ -10,6 +10,7 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented Sessions title count/hostname/IP format and removal of the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Documented moving the host label from status text into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Documented arrow-symbol status hints and Help modal key-function content. |
 | 2026-04-27 | @gpt55-dgx | Documented portrait mode's 30:70 default T/B split. |
@@ -201,8 +202,9 @@ struct SelectedSession {
 }
 ```
 
-The Sessions pane title is derived from `AppState.host_label`. Status text
-contains only current time and compact key hints, not the host label.
+The Sessions pane title is derived from the app host identity and live session
+list length: `Sessions [n] @ <hostname>, <ip address>`. Status text contains
+only current time and compact key hints, not the host label or a `keys` prefix.
 
 ## Build Metadata
 
@@ -341,7 +343,8 @@ API tests must cover:
   behavior
 - modified-arrow resize fallback behavior
 - status hint arrow-symbol rendering
-- host label rendering in the Sessions pane title, not the status line
+- session count, hostname, and IP rendering in the Sessions pane title, not the
+  status line
 - Help modal open/close behavior, key-function display, and build SHA display
 - default attach/re-enter and no-loop conditions
 

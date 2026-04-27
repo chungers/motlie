@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 use std::io;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -47,9 +48,9 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("TMUX_SELECT_GIT_SHA");
 const NORMAL_STATUS_KEYS: &str =
-    "keys: ↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-←/→ resize | q quit";
+    "↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-←/→ resize | q quit";
 const PORTRAIT_STATUS_KEYS: &str =
-    "keys: ↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-↑/↓ resize | q quit";
+    "↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-↑/↓ resize | q quit";
 const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
 ←/→ switch list/detail panes
@@ -368,6 +369,7 @@ impl SessionDetailSource for DetailSource {
 
 struct AppState {
     host_label: String,
+    host_ip_address: String,
     layout_mode: LayoutMode,
     focus: Focus,
     motd: String,
@@ -387,9 +389,27 @@ struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     fn new(host_label: String, layout_mode: LayoutMode, motd: String, placeholder: bool) -> Self {
+        Self::new_with_host_ip(
+            host_label,
+            "unknown".to_string(),
+            layout_mode,
+            motd,
+            placeholder,
+        )
+    }
+
+    fn new_with_host_ip(
+        host_label: String,
+        host_ip_address: String,
+        layout_mode: LayoutMode,
+        motd: String,
+        placeholder: bool,
+    ) -> Self {
         Self {
             host_label,
+            host_ip_address,
             layout_mode,
             focus: Focus::List,
             motd,
@@ -586,11 +606,11 @@ async fn run() -> Result<i32> {
     }
 
     let cli = Cli::parse();
-    let (host, label) = connect_host(&cli).await?;
+    let (host, identity) = connect_host(&cli).await?;
     let layout = select_layout(cli.forced_layout());
 
     loop {
-        let outcome = run_selector_once(&host, &label, layout).await?;
+        let outcome = run_selector_once(&host, &identity, layout).await?;
         let selected = match outcome {
             SelectorOutcome::Selected(selected) => selected,
             SelectorOutcome::Cancelled => return Ok(if cli.script { 1 } else { 0 }),
@@ -667,15 +687,89 @@ fn shell_status(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
-async fn connect_host(cli: &Cli) -> Result<(HostHandle, String)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostIdentity {
+    hostname: String,
+    ip_address: String,
+}
+
+impl HostIdentity {
+    fn new(hostname: String, port: u16) -> Self {
+        let ip_address = resolve_ip_address(&hostname, port);
+        Self {
+            hostname,
+            ip_address,
+        }
+    }
+
+    fn local() -> Self {
+        let hostname = local_hostname();
+        let ip_address =
+            local_ip_address(&hostname).unwrap_or_else(|| resolve_ip_address(&hostname, 22));
+        Self {
+            hostname,
+            ip_address,
+        }
+    }
+}
+
+fn local_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| command_first_token("hostname", &[]))
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+fn local_ip_address(hostname: &str) -> Option<String> {
+    command_first_token("hostname", &["-I"]).or_else(|| {
+        let resolved = resolve_ip_address(hostname, 22);
+        if resolved == "unknown" {
+            None
+        } else {
+            Some(resolved)
+        }
+    })
+}
+
+fn command_first_token(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_ip_address(hostname: &str, port: u16) -> String {
+    if let Ok(ip) = hostname.parse::<IpAddr>() {
+        return ip.to_string();
+    }
+
+    let Ok(addrs) = (hostname, port).to_socket_addrs() else {
+        return "unknown".to_string();
+    };
+    let ips = addrs.map(|addr| addr.ip()).collect::<Vec<_>>();
+    ips.iter()
+        .find(|ip| matches!(ip, IpAddr::V4(_)))
+        .or_else(|| ips.first())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+async fn connect_host(cli: &Cli) -> Result<(HostHandle, HostIdentity)> {
     match &cli.ssh_uri {
         Some(uri) => {
             let config = SshConfig::parse(uri).context("parse ssh target")?;
-            let label = config.host().to_string();
+            let identity = HostIdentity::new(config.host().to_string(), config.port());
             let host = config.connect().await.context("connect ssh target")?;
-            Ok((host, label))
+            Ok((host, identity))
         }
-        None => Ok((HostHandle::local(), "localhost".to_string())),
+        None => Ok((HostHandle::local(), HostIdentity::local())),
     }
 }
 
@@ -707,11 +801,17 @@ fn is_portrait_pty(columns: u16, rows: u16) -> bool {
 
 async fn run_selector_once(
     host: &HostHandle,
-    label: &str,
+    identity: &HostIdentity,
     layout: LayoutMode,
 ) -> Result<SelectorOutcome> {
     let (motd, placeholder) = load_motd(host).await;
-    let mut app = AppState::new(label.to_string(), layout, motd, placeholder);
+    let mut app = AppState::new_with_host_ip(
+        identity.hostname.clone(),
+        identity.ip_address.clone(),
+        layout,
+        motd,
+        placeholder,
+    );
     refresh_sessions(host, &mut app, true).await?;
 
     let mut event_rx = host
@@ -1287,7 +1387,12 @@ fn draw_motd(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn sessions_title(app: &AppState) -> String {
-    format!(" Sessions - {} ", app.host_label)
+    format!(
+        " Sessions [{}] @ {}, {} ",
+        app.sessions.len(),
+        app.host_label,
+        app.host_ip_address
+    )
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -1563,7 +1668,8 @@ mod tests {
             false,
         );
         let normal_status = status_line_text(&normal, "12:34:56");
-        assert!(normal_status.contains(" 12:34:56 | keys:"));
+        assert!(normal_status.contains(" 12:34:56 | ↑/↓ select"));
+        assert!(!normal_status.contains("keys"));
         assert!(!normal_status.contains("host"));
         assert!(normal_status.contains("↑/↓ select"));
         assert!(normal_status.contains("←/→ pane"));
@@ -1586,7 +1692,8 @@ mod tests {
             false,
         );
         let portrait_status = status_line_text(&portrait, "12:34:56");
-        assert!(portrait_status.contains(" 12:34:56 | keys:"));
+        assert!(portrait_status.contains(" 12:34:56 | ↑/↓ select"));
+        assert!(!portrait_status.contains("keys"));
         assert!(!portrait_status.contains("host"));
         assert!(portrait_status.contains("↑/↓ select"));
         assert!(portrait_status.contains("←/→ pane"));
@@ -1605,14 +1712,41 @@ mod tests {
 
     #[test]
     fn sessions_title_includes_host_label() {
-        let app = AppState::new(
+        let mut app = AppState::new_with_host_ip(
             "target-host".to_string(),
+            "192.0.2.10".to_string(),
             LayoutMode::Normal,
             "motd".to_string(),
             false,
         );
+        app.sessions = vec![
+            SessionInfo {
+                name: "dev".to_string(),
+                id: "$1".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "build".to_string(),
+                id: "$2".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+        ];
 
-        assert_eq!(sessions_title(&app), " Sessions - target-host ");
+        assert_eq!(
+            sessions_title(&app),
+            " Sessions [2] @ target-host, 192.0.2.10 "
+        );
+    }
+
+    #[test]
+    fn resolve_ip_address_preserves_literal_ip() {
+        assert_eq!(resolve_ip_address("192.0.2.10", 22), "192.0.2.10");
     }
 
     #[test]
