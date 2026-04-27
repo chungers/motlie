@@ -48,9 +48,9 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 const NORMAL_STATUS_KEYS: &str =
-    "↑/↓ select | ←/→ cycle | m monitor | n new | k kill | h help | enter/a attach | mod-←/→ resize | q quit";
+    "↑/↓ select | ←/→ cycle | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-←/→ resize | (q)uit";
 const PORTRAIT_STATUS_KEYS: &str =
-    "↑/↓ select | ←/→ cycle | m monitor | n new | k kill | h help | enter/a attach | mod-↑/↓ resize | q quit";
+    "↑/↓ select | ←/→ cycle | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-↑/↓ resize | (q)uit";
 const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
 ←/→ cycle panes
@@ -1559,7 +1559,7 @@ fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<'static> {
 }
 
 fn top_status_host_text(app: &AppState) -> String {
-    format!(" {}, {} ", app.host_label, app.host_ip_address)
+    format!(" {} | {} ", app.host_label, app.host_ip_address)
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -1743,7 +1743,9 @@ mod tests {
         assert!(!normal_status.contains("host"));
         assert!(normal_status.contains("↑/↓ select"));
         assert!(normal_status.contains("←/→ cycle"));
-        assert!(normal_status.contains("h help"));
+        assert!(normal_status.contains("(h)elp | (m)onitor"));
+        assert!(!normal_status.contains("m monitor"));
+        assert!(!normal_status.contains("h help"));
         assert!(normal_status.contains("mod-←/→ resize"));
         assert!(!normal_status.contains("up/down"));
         assert!(!normal_status.contains("right/left"));
@@ -1768,7 +1770,9 @@ mod tests {
         assert!(!portrait_status.contains("host"));
         assert!(portrait_status.contains("↑/↓ select"));
         assert!(portrait_status.contains("←/→ cycle"));
-        assert!(portrait_status.contains("h help"));
+        assert!(portrait_status.contains("(h)elp | (m)onitor"));
+        assert!(!portrait_status.contains("m monitor"));
+        assert!(!portrait_status.contains("h help"));
         assert!(portrait_status.contains("mod-↑/↓ resize"));
         assert!(!portrait_status.contains("up/down"));
         assert!(!portrait_status.contains("right/left"));
@@ -1798,7 +1802,7 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(rendered.chars().count(), 40);
-        assert!(rendered.starts_with(" target-host, 192.0.2.10 "));
+        assert!(rendered.starts_with(" target-host | 192.0.2.10 "));
         assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert!(rendered.ends_with(" 12:34:56 "));
     }
