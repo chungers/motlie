@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Tracked modal layout polish: padded content, button separators, bordered New Session input, and Help metadata placement. |
 | 2026-04-27 | @gpt55-dgx | Tracked bottom status command ordering and `l` runtime layout toggling. |
 | 2026-04-27 | @gpt55-dgx | Updated keymap tracking so `p` cycles panes and plain Left/Right no longer do. |
 | 2026-04-27 | @gpt55-dgx | Tracked in-memory selector UI state retention across default attach/detach re-entry. |
@@ -232,12 +233,13 @@ References: [Functional Requirements](./DESIGN.md#functional),
 - [x] 5.4 Implement resize keys: `Ctrl-Left`/`Ctrl-Right` for normal mode and
   `Ctrl-Up`/`Ctrl-Down` for portrait mode. Accept modified-arrow and word-arrow
   fallback sequences for terminals that remap Ctrl-arrow.
-- [x] 5.5 Implement `New Session` modal with text input, Cancel/Ok, Enter, and
-  Esc handling.
-- [x] 5.6 Implement kill confirmation modal with id captured at modal-open.
+- [x] 5.5 Implement `New Session` modal with padded content, bordered text
+  input, separated Cancel/Ok button bar, Enter, and Esc handling.
+- [x] 5.6 Implement kill confirmation modal with padded content, separated
+  button bar, and id captured at modal-open.
 - [x] 5.7 Implement Help modal opened by `h`, showing the built-in motlie
-  logo, key functions, build date, and last 8 characters of the build git SHA
-  with a single Ok button; Enter or Esc closes it.
+  logo, build date, last 8 characters of the build git SHA, key functions,
+  and a separated single Ok button; Enter or Esc closes it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
   modal Esc behavior, `p` pane focus behavior, and `l` layout toggle behavior.
 

@@ -39,6 +39,13 @@ const LANDSCAPE_MIN_LEFT_PERCENT: u16 = 25;
 const LANDSCAPE_MAX_LEFT_PERCENT: u16 = 75;
 const PORTRAIT_MIN_TOP_PERCENT: u16 = 15;
 const PORTRAIT_MAX_TOP_PERCENT: u16 = 100 - PORTRAIT_MIN_TOP_PERCENT;
+const MODAL_MIN_WIDTH: u16 = 60;
+const MODAL_OUTER_MARGIN: u16 = 2;
+const MODAL_CONTENT_HORIZONTAL_PADDING: u16 = 2;
+const MODAL_CONTENT_VERTICAL_PADDING: u16 = 1;
+const MODAL_SEPARATOR_HEIGHT: u16 = 1;
+const MODAL_BUTTON_HEIGHT: u16 = 1;
+const MODAL_TEXT_FIELD_HEIGHT: u16 = 3;
 const STATUS_BAR_BG: Color = Color::Blue;
 
 const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
@@ -117,6 +124,51 @@ enum ModalState {
         button: Button,
     },
     Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModalView {
+    title: &'static str,
+    body: ModalBody,
+    buttons: String,
+    active_button: Button,
+}
+
+impl ModalView {
+    #[cfg(test)]
+    fn body_text(&self) -> String {
+        match &self.body {
+            ModalBody::Text(text) => text.clone(),
+            ModalBody::NewSession { input } => format!("Session name\n{input}"),
+        }
+    }
+
+    fn content_height(&self) -> u16 {
+        match &self.body {
+            ModalBody::Text(text) => max(1, text.lines().count()) as u16,
+            ModalBody::NewSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
+        }
+    }
+
+    fn content_width(&self) -> u16 {
+        let body_width = match &self.body {
+            ModalBody::Text(text) => text
+                .lines()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0),
+            ModalBody::NewSession { input } => {
+                max("Session name".chars().count(), input.chars().count())
+            }
+        };
+        max(body_width, self.buttons.chars().count()) as u16
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModalBody {
+    Text(String),
+    NewSession { input: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1672,75 +1724,181 @@ fn status_line_text(app: &AppState) -> String {
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
-    let (title, body, button) = modal_content(modal);
-    let body_width = body
-        .lines()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0) as u16;
+    let view = modal_content(modal);
     let width = min(
-        max(60, body_width.saturating_add(4)),
-        area.width.saturating_sub(4),
+        max(
+            MODAL_MIN_WIDTH,
+            view.content_width()
+                .saturating_add(MODAL_CONTENT_HORIZONTAL_PADDING.saturating_mul(2))
+                .saturating_add(2),
+        ),
+        area.width
+            .saturating_sub(MODAL_OUTER_MARGIN.saturating_mul(2)),
     );
-    let body_height = body.lines().count() as u16;
     let height = min(
-        max(7, body_height.saturating_add(2)),
-        area.height.saturating_sub(2),
+        max(
+            7,
+            view.content_height()
+                .saturating_add(MODAL_CONTENT_VERTICAL_PADDING.saturating_mul(2))
+                .saturating_add(MODAL_SEPARATOR_HEIGHT)
+                .saturating_add(MODAL_BUTTON_HEIGHT)
+                .saturating_add(2),
+        ),
+        area.height
+            .saturating_sub(MODAL_OUTER_MARGIN.saturating_mul(2)),
     );
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = Rect::new(x, y, width, height);
     frame.render_widget(Clear, rect);
 
-    let border = if button == Button::Ok {
+    let border = if view.active_button == Button::Ok {
         Color::Green
     } else {
         Color::Yellow
     };
-    let paragraph = Paragraph::new(body)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border)),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, rect);
+    let block = Block::default()
+        .title(view.title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border));
+    frame.render_widget(block, rect);
+
+    let inner = inset_rect(rect, 1, 1);
+    if inner.height <= MODAL_SEPARATOR_HEIGHT + MODAL_BUTTON_HEIGHT || inner.width == 0 {
+        return;
+    }
+
+    let button_y = inner.y + inner.height.saturating_sub(MODAL_BUTTON_HEIGHT);
+    let separator_y = button_y.saturating_sub(MODAL_SEPARATOR_HEIGHT);
+    let content_outer = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        separator_y.saturating_sub(inner.y),
+    );
+    let content_rect = inset_rect(
+        content_outer,
+        MODAL_CONTENT_HORIZONTAL_PADDING,
+        MODAL_CONTENT_VERTICAL_PADDING,
+    );
+    draw_modal_body(frame, content_rect, &view.body);
+
+    let separator = "─".repeat(inner.width as usize);
+    frame.render_widget(
+        Paragraph::new(separator).style(Style::default().fg(Color::DarkGray)),
+        Rect::new(inner.x, separator_y, inner.width, MODAL_SEPARATOR_HEIGHT),
+    );
+    draw_modal_buttons(
+        frame,
+        inset_rect(
+            Rect::new(inner.x, button_y, inner.width, MODAL_BUTTON_HEIGHT),
+            MODAL_CONTENT_HORIZONTAL_PADDING,
+            0,
+        ),
+        &view.buttons,
+    );
 }
 
-fn modal_content(modal: &ModalState) -> (&'static str, String, Button) {
-    let (title, body, button) = match modal {
-        ModalState::NewSession { input, button } => (
-            " New Session ",
-            format!(
-                "Name: {input}\n\n{}   {}",
+fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    match body {
+        ModalBody::Text(text) => {
+            frame.render_widget(
+                Paragraph::new(text.as_str()).wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        ModalBody::NewSession { input } => {
+            frame.render_widget(
+                Paragraph::new("Session name"),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+            if area.height <= 1 {
+                return;
+            }
+            let input_rect = Rect::new(
+                area.x,
+                area.y.saturating_add(1),
+                area.width,
+                min(MODAL_TEXT_FIELD_HEIGHT, area.height.saturating_sub(1)),
+            );
+            frame.render_widget(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+                input_rect,
+            );
+            let input_inner = inset_rect(input_rect, 1, 1);
+            if input_inner.width > 0 && input_inner.height > 0 {
+                frame.render_widget(Paragraph::new(input.as_str()), input_inner);
+            }
+        }
+    }
+}
+
+fn draw_modal_buttons(frame: &mut Frame<'_>, area: Rect, buttons: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let button_width = min(buttons.chars().count() as u16, area.width);
+    let x = area.x + area.width.saturating_sub(button_width) / 2;
+    frame.render_widget(
+        Paragraph::new(buttons),
+        Rect::new(x, area.y, button_width, area.height),
+    );
+}
+
+fn inset_rect(rect: Rect, horizontal: u16, vertical: u16) -> Rect {
+    let x_offset = min(horizontal, rect.width);
+    let y_offset = min(vertical, rect.height);
+    Rect::new(
+        rect.x.saturating_add(x_offset),
+        rect.y.saturating_add(y_offset),
+        rect.width.saturating_sub(x_offset.saturating_mul(2)),
+        rect.height.saturating_sub(y_offset.saturating_mul(2)),
+    )
+}
+
+fn modal_content(modal: &ModalState) -> ModalView {
+    match modal {
+        ModalState::NewSession { input, button } => ModalView {
+            title: " New Session ",
+            body: ModalBody::NewSession {
+                input: input.clone(),
+            },
+            buttons: format!(
+                "{}   {}",
                 button_text(*button, Button::Cancel),
                 button_text(*button, Button::Ok)
             ),
-            *button,
-        ),
-        ModalState::KillSession { name, button, .. } => (
-            " Kill Session ",
-            format!(
-                "Kill session {name}?\n\n{}   {}",
+            active_button: *button,
+        },
+        ModalState::KillSession { name, button, .. } => ModalView {
+            title: " Kill Session ",
+            body: ModalBody::Text(format!("Kill session {name}?")),
+            buttons: format!(
+                "{}   {}",
                 button_text(*button, Button::Cancel),
                 button_text(*button, Button::Ok)
             ),
-            *button,
-        ),
-        ModalState::Help => (
-            " Help ",
-            format!(
-                "{}\n\n{}\n\nBuild date: {}\nGit SHA: {}\n\n[Ok]",
+            active_button: *button,
+        },
+        ModalState::Help => ModalView {
+            title: " Help ",
+            body: ModalBody::Text(format!(
+                "{}\n\nBuild date: {}\nGit SHA: {}\n\n{}",
                 MOTLIE_PLACEHOLDER,
-                HELP_KEY_FUNCTIONS,
                 BUILD_DATE,
-                short_build_git_sha()
-            ),
-            Button::Ok,
-        ),
-    };
-    (title, body, button)
+                short_build_git_sha(),
+                HELP_KEY_FUNCTIONS
+            )),
+            buttons: "[Ok]".to_string(),
+            active_button: Button::Ok,
+        },
+    }
 }
 
 fn short_build_git_sha() -> String {
@@ -2337,9 +2495,11 @@ mod tests {
         let Some(ModalState::Help) = app.modal.as_ref() else {
             panic!("expected help modal");
         };
-        let (title, body, button) = modal_content(app.modal.as_ref().unwrap());
-        assert_eq!(title, " Help ");
-        assert_eq!(button, Button::Ok);
+        let view = modal_content(app.modal.as_ref().unwrap());
+        assert_eq!(view.title, " Help ");
+        assert_eq!(view.active_button, Button::Ok);
+        assert_eq!(view.buttons, "[Ok]");
+        let body = view.body_text();
         assert!(body.contains(MOTLIE_PLACEHOLDER));
         assert!(body.contains(HELP_KEY_FUNCTIONS));
         assert!(body.contains("↑/↓ select session or scroll detail"));
@@ -2353,12 +2513,14 @@ mod tests {
         if BUILD_GIT_SHA.chars().count() > 8 {
             assert!(!body.contains(&format!("Git SHA: {BUILD_GIT_SHA}")));
         }
-        assert!(body.contains("[Ok]"));
         let logo_pos = body.find(MOTLIE_PLACEHOLDER).unwrap();
+        let build_date_pos = body.find("Build date: ").unwrap();
+        let git_sha_pos = body.find("Git SHA: ").unwrap();
         let keys_pos = body.find(HELP_KEY_FUNCTIONS).unwrap();
-        let ok_pos = body.find("[Ok]").unwrap();
         assert!(logo_pos < keys_pos);
-        assert!(keys_pos < ok_pos);
+        assert!(logo_pos < build_date_pos);
+        assert!(build_date_pos < git_sha_pos);
+        assert!(git_sha_pos < keys_pos);
 
         let outcome = handle_key(
             &host,
@@ -2386,6 +2548,32 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn modal_content_separates_body_from_button_bar() {
+        let new_session = modal_content(&ModalState::NewSession {
+            input: "dev".to_string(),
+            button: Button::Ok,
+        });
+        assert_eq!(new_session.title, " New Session ");
+        assert_eq!(new_session.active_button, Button::Ok);
+        assert_eq!(new_session.buttons, " Cancel    [Ok]");
+        assert!(matches!(
+            new_session.body,
+            ModalBody::NewSession { ref input } if input == "dev"
+        ));
+        assert!(!new_session.body_text().contains("[Ok]"));
+
+        let kill = modal_content(&ModalState::KillSession {
+            id: "$1".to_string(),
+            name: "dev".to_string(),
+            button: Button::Cancel,
+        });
+        assert_eq!(kill.title, " Kill Session ");
+        assert_eq!(kill.active_button, Button::Cancel);
+        assert_eq!(kill.body_text(), "Kill session dev?");
+        assert_eq!(kill.buttons, "[Cancel]    Ok ");
     }
 
     #[tokio::test]
