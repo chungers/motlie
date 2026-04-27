@@ -9,6 +9,8 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
+| 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, default startup auto-detects PTY aspect ratio, the old `-s` flag is rejected, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
 | 2026-04-26 | @gpt55-dgx | Updated selector keymap for attach on `a`, arrow-key pane focus, Shift-arrow resize behavior on macOS iTerm2, ANSI color in detail mode, polling-backed session refresh, and compact MOTD fallback graphics. |
 | 2026-04-26 | @gpt55-dgx | Updated key and dashboard semantics after validation: resize accepts modified-arrow fallbacks when terminals remap Ctrl-arrow, monitor mode mirrors rendered screen content, and dashboard detach is protected against stopped selector jobs. |
@@ -27,6 +29,9 @@ Examples:
 ```bash
 tmux_select
 tmux_select --portrait
+tmux_select -p
+tmux_select --landscape
+tmux_select -l
 tmux_select --dashboard
 tmux_select --print-session
 tmux_select ssh://user@host
@@ -39,10 +44,12 @@ tmux_select 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
 |------|----------|
 | no `ssh-uri` | Operate on the local host. |
 | `[ssh-uri]` | Operate on the remote SSH target for MOTD, session list, sampling, monitor, create, kill, and attach. |
-| `--portrait` | Force portrait layout. Body is split into `T` session list and `B` detail pane. MOTD is omitted. Without this flag, layout is auto-detected from the current PTY dimensions. |
+| `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. MOTD is omitted. Mutually exclusive with `--landscape` / `-l`. |
+| `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L`/`R`, with `L` split into MOTD and session list. Mutually exclusive with `--portrait` / `-p`. |
 | `--print-session` | Select a session, print exactly `<name>\n` to stdout, and exit 0. Cancel exits non-zero with empty stdout. |
 | `--dashboard` | Re-enter the selector after a clean attach child exit, or after a non-zero detach when the selected session still exists. Other non-zero child exits exit with that status. |
 | `--print-session --dashboard` | Invalid. Startup error. |
+| `--portrait --landscape` | Invalid. Startup error. |
 
 The v1 target form is positional only. There is no `--target` flag in v1.
 
@@ -109,6 +116,7 @@ exits instead of looping.
 
 ```bash
 tmux_select --portrait
+tmux_select -p
 tmux_select --portrait --dashboard
 tmux_select --portrait ssh://user@host
 ```
@@ -120,13 +128,16 @@ vertical split:
 - `B`: detail pane
 - one-row status bar
 
-MOTD and the motlie placeholder are omitted in portrait mode.
+MOTD and the motlie placeholder are omitted in portrait mode. Use
+`--landscape` / `-l` to force the normal `L`/`R` layout even when the PTY is
+auto-detected as portrait.
 
-Without `--portrait`, startup calls `crossterm::terminal::size()` on the
-connecting PTY and chooses portrait layout when the character-cell aspect ratio
-is narrow (`columns / rows < 2.2`). This treats typical 80x24 and 100x30
-terminals as normal landscape layout, while narrow or square-ish terminals use
-portrait layout. If the size cannot be read, startup defaults to normal layout.
+Without `--portrait` / `-p` or `--landscape` / `-l`, startup calls
+`crossterm::terminal::size()` on the connecting PTY and chooses portrait layout
+when the character-cell aspect ratio is `columns / rows <= 4.0`. This treats
+66x30, 80x24, 100x30, 160x40, and square-ish terminals as portrait layout.
+Terminals wider than the 4.0 threshold use landscape layout. If the size cannot
+be read, startup defaults to landscape layout.
 
 ## TUI Keymap
 
@@ -186,6 +197,12 @@ Portrait-mode dashboard deployment:
 
 ```text
 ForceCommand /usr/local/bin/tmux_select --portrait --dashboard
+```
+
+Landscape-mode dashboard deployment:
+
+```text
+ForceCommand /usr/local/bin/tmux_select --landscape --dashboard
 ```
 
 By default, `SSH_ORIGINAL_COMMAND` is rejected with a clear stderr message.

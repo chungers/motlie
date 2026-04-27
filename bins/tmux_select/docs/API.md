@@ -10,6 +10,8 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
+| 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Updated selector API reality for portrait mode: `LayoutMode::Portrait`, `Cli::portrait`, PTY auto-detection, and old `-s` rejection. |
 | 2026-04-26 | @gpt55-dgx | Updated API notes for current selector behavior: Enter/`a` attach, Left/Right focus transitions, one-second polling-backed session refresh, and ANSI-preserving sample/detail rendering. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for the second validation round: monitor detail now captures rendered screen snapshots with `ScreenStable` plus ANSI/VTE parsing, resize accepts modified-arrow fallbacks, and attach PTY restore is `SIGTTOU`-safe. |
@@ -279,6 +281,7 @@ The API layer should expose parsed CLI config to the application loop:
 struct Cli {
     ssh_uri: Option<String>,
     portrait: bool,
+    landscape: bool,
     print_session: bool,
     dashboard: bool,
 }
@@ -287,8 +290,11 @@ struct Cli {
 Validation rules:
 
 - `--print-session` and `--dashboard` are mutually exclusive
-- `--portrait` forces portrait layout; without it, startup reads the
-  connecting PTY dimensions and selects portrait when `columns / rows < 2.2`
+- `--portrait` / `-p` forces portrait layout
+- `--landscape` / `-l` forces landscape layout
+- `--portrait` and `--landscape` are mutually exclusive
+- without a layout force flag, startup reads the connecting PTY dimensions and
+  selects portrait when `columns / rows <= 4.0`
 - the old `-s` flag is rejected
 - target is positional SSH URI only
 - omitted target means local host
@@ -315,7 +321,7 @@ Current implementation coverage:
   `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
   and stable-id kill coverage.
 - `cargo test -p motlie-tmux-select`: CLI mutual exclusion, stable-id
-  highlight preservation, `--portrait` parsing, `-s` rejection, PTY aspect
+  highlight preservation, layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
   modified-arrow resize fallbacks, Left/Right focus transitions, sample color
   preservation, monitor screen capture, ANSI/VTE parsing, and
