@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented in-memory retained selector UI state for default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Documented mode-specific resize bounds: landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Replaced build metadata shellouts with Rust filesystem/time APIs in `build.rs`. |
 | 2026-04-27 | @gpt55-dgx | Documented Help modal build date and last-8-character git SHA display. |
@@ -336,6 +337,9 @@ Validation rules:
   attaching
 - without `--script`, the selector attaches and re-enters after detach when the
   attach child succeeds or the selected session still exists
+- default attach/re-entry keeps selected session/list index, pane split, and
+  focused pane in memory within the parent `mmux` process; this state is not
+  persisted across binary runs
 - `--portrait` / `-p` forces portrait layout
 - portrait layout initializes the `T`/`B` split at 30:70
 - `--landscape` / `-l` forces landscape layout

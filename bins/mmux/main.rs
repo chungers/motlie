@@ -33,6 +33,8 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
 const DEFAULT_DETAIL_LINES: usize = 80;
+const DEFAULT_LEFT_PERCENT: u16 = 42;
+const DEFAULT_TOP_PERCENT: u16 = 30;
 const LANDSCAPE_MIN_LEFT_PERCENT: u16 = 25;
 const LANDSCAPE_MAX_LEFT_PERCENT: u16 = 75;
 const PORTRAIT_MIN_TOP_PERCENT: u16 = 15;
@@ -126,6 +128,52 @@ enum DetailMode {
 struct SelectedSession {
     id: String,
     name: String,
+}
+
+#[derive(Debug, Clone)]
+struct RetainedUiState {
+    selected_session_id: Option<String>,
+    selected_index: usize,
+    focus: Focus,
+    left_percent: u16,
+    top_percent: u16,
+}
+
+impl Default for RetainedUiState {
+    fn default() -> Self {
+        Self {
+            selected_session_id: None,
+            selected_index: 0,
+            focus: Focus::List,
+            left_percent: DEFAULT_LEFT_PERCENT,
+            top_percent: DEFAULT_TOP_PERCENT,
+        }
+    }
+}
+
+impl RetainedUiState {
+    fn apply_to(&self, app: &mut AppState) {
+        app.selected = self.selected_index;
+        app.focus = focus_for_layout(self.focus, app.layout_mode);
+        app.left_percent = self
+            .left_percent
+            .clamp(LANDSCAPE_MIN_LEFT_PERCENT, LANDSCAPE_MAX_LEFT_PERCENT);
+        app.top_percent = self
+            .top_percent
+            .clamp(PORTRAIT_MIN_TOP_PERCENT, PORTRAIT_MAX_TOP_PERCENT);
+    }
+
+    fn update_from(&mut self, app: &AppState) {
+        self.selected_session_id = app.selected_session().map(|session| session.id);
+        self.selected_index = app.selected;
+        self.focus = app.focus;
+        self.left_percent = app.left_percent;
+        self.top_percent = app.top_percent;
+    }
+
+    fn selected_session_id(&self) -> Option<String> {
+        self.selected_session_id.clone()
+    }
 }
 
 trait SessionDetailSource {
@@ -424,8 +472,8 @@ impl AppState {
             detail_view_height: 1,
             detail_source: DetailSource::sample(),
             status: "loading sessions".to_string(),
-            left_percent: 42,
-            top_percent: 30,
+            left_percent: DEFAULT_LEFT_PERCENT,
+            top_percent: DEFAULT_TOP_PERCENT,
             modal: None,
             auto_tail: true,
         }
@@ -527,6 +575,13 @@ impl AppState {
             (LayoutMode::Portrait, Focus::Detail) => Focus::List,
             (LayoutMode::Portrait, Focus::Motd) => Focus::Detail,
         };
+    }
+}
+
+fn focus_for_layout(focus: Focus, layout_mode: LayoutMode) -> Focus {
+    match (layout_mode, focus) {
+        (LayoutMode::Portrait, Focus::Motd) => Focus::List,
+        _ => focus,
     }
 }
 
@@ -632,9 +687,10 @@ async fn run() -> Result<i32> {
     let cli = Cli::parse();
     let (host, identity) = connect_host(&cli).await?;
     let layout = select_layout(cli.forced_layout());
+    let mut ui_state = RetainedUiState::default();
 
     loop {
-        let outcome = run_selector_once(&host, &identity, layout).await?;
+        let outcome = run_selector_once(&host, &identity, layout, &mut ui_state).await?;
         let selected = match outcome {
             SelectorOutcome::Selected(selected) => selected,
             SelectorOutcome::Cancelled => return Ok(if cli.script { 1 } else { 0 }),
@@ -827,6 +883,7 @@ async fn run_selector_once(
     host: &HostHandle,
     identity: &HostIdentity,
     layout: LayoutMode,
+    ui_state: &mut RetainedUiState,
 ) -> Result<SelectorOutcome> {
     let (motd, placeholder) = load_motd(host).await;
     let mut app = AppState::new_with_host_ip(
@@ -836,7 +893,9 @@ async fn run_selector_once(
         motd,
         placeholder,
     );
-    refresh_sessions(host, &mut app, true).await?;
+    ui_state.apply_to(&mut app);
+    let previous_selection = ui_state.selected_session_id();
+    refresh_sessions_preserving(host, &mut app, true, previous_selection).await?;
 
     let mut event_rx = host
         .watch_host_events()
@@ -864,11 +923,13 @@ async fn run_selector_once(
             match handle_key(host, &mut app, key).await? {
                 KeyOutcome::Continue => {}
                 KeyOutcome::Select(selected) => {
+                    ui_state.update_from(&app);
                     stop_detail_source(&mut app).await;
                     terminal.restore()?;
                     return Ok(SelectorOutcome::Selected(selected));
                 }
                 KeyOutcome::Cancel => {
+                    ui_state.update_from(&app);
                     stop_detail_source(&mut app).await;
                     terminal.restore()?;
                     return Ok(SelectorOutcome::Cancelled);
@@ -897,6 +958,15 @@ async fn load_motd(host: &HostHandle) -> (String, bool) {
 
 async fn refresh_sessions(host: &HostHandle, app: &mut AppState, force_detail: bool) -> Result<()> {
     let previous = app.selected_session().map(|s| s.id);
+    refresh_sessions_preserving(host, app, force_detail, previous).await
+}
+
+async fn refresh_sessions_preserving(
+    host: &HostHandle,
+    app: &mut AppState,
+    force_detail: bool,
+    previous: Option<String>,
+) -> Result<()> {
     app.sessions = host.list_sessions().await.context("list tmux sessions")?;
     app.preserve_selection(previous);
     app.status = if app.sessions.is_empty() {
@@ -1926,6 +1996,149 @@ mod tests {
         assert_eq!(
             app.selected_session().map(|s| s.name),
             Some("new".to_string())
+        );
+    }
+
+    #[test]
+    fn retained_ui_state_restores_selection_and_split_on_reentry() {
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        app.sessions = vec![
+            SessionInfo {
+                name: "shell".to_string(),
+                id: "$1".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "build".to_string(),
+                id: "$2".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+        ];
+        app.selected = 1;
+        app.focus = Focus::Detail;
+        app.left_percent = 55;
+        app.top_percent = 45;
+
+        let mut retained = RetainedUiState::default();
+        retained.update_from(&app);
+
+        let mut reentered = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        retained.apply_to(&mut reentered);
+        reentered.sessions = vec![
+            SessionInfo {
+                name: "build".to_string(),
+                id: "$2".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "shell".to_string(),
+                id: "$1".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+        ];
+        reentered.preserve_selection(retained.selected_session_id());
+
+        assert_eq!(
+            reentered.selected_session().map(|session| session.name),
+            Some("build".to_string())
+        );
+        assert_eq!(reentered.focus, Focus::Detail);
+        assert_eq!(reentered.left_percent, 55);
+        assert_eq!(reentered.top_percent, 45);
+    }
+
+    #[test]
+    fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        app.sessions = vec![
+            SessionInfo {
+                name: "one".to_string(),
+                id: "$1".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "gone".to_string(),
+                id: "$2".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "three".to_string(),
+                id: "$3".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+        ];
+        app.selected = 1;
+
+        let mut retained = RetainedUiState::default();
+        retained.update_from(&app);
+
+        let mut reentered = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        retained.apply_to(&mut reentered);
+        reentered.sessions = vec![
+            SessionInfo {
+                name: "one".to_string(),
+                id: "$1".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+            SessionInfo {
+                name: "three".to_string(),
+                id: "$3".to_string(),
+                created: 0,
+                attached: false,
+                window_count: 1,
+                group: None,
+            },
+        ];
+        reentered.preserve_selection(retained.selected_session_id());
+
+        assert_eq!(reentered.selected, 1);
+        assert_eq!(
+            reentered.selected_session().map(|session| session.name),
+            Some("three".to_string())
         );
     }
 

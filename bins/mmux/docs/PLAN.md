@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Tracked in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Updated resize-bound tracking for landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Updated Help modal tracking for build date and last-8-character git SHA display. |
 | 2026-04-27 | @gpt55-dgx | Updated bottom status tracking for `↑/↓ sel` and `←/→ pane` direction hints. |
@@ -288,10 +289,12 @@ References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
   attach child exits cleanly or when detach returns non-zero but the selected
   session still exists; refresh succeeds and the user explicitly picks again.
 - [x] 8.6 On pre-spawn vanished-session race, re-enter the selector.
-- [ ] 8.7 Add localhost integration test pinning canonical tmux behavior:
+- [x] 8.7 Retain selected session/list index, pane split, and focus in memory
+  across default attach/detach re-entry within one parent `mmux` process.
+- [ ] 8.8 Add localhost integration test pinning canonical tmux behavior:
   externally killing the attached session exits the attach child with status 0.
-- [ ] 8.8 Add no-loop tests for non-zero child exit and refresh failure.
-- [x] 8.9 Add a unit guard for `SIGTTOU`-safe foreground-process-group restore
+- [ ] 8.9 Add no-loop tests for non-zero child exit and refresh failure.
+- [x] 8.10 Add a unit guard for `SIGTTOU`-safe foreground-process-group restore
   after attach detach.
 
 ## Phase 9: SSH and ForceCommand
