@@ -23,7 +23,7 @@
     <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">running 148 tests</text>
     <text x="220" y="152" fill="#cbd5e1" font-family="monospace" font-size="12">test result: ok</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ select | ←/→ cycle | (h)elp | (m)on | (n)ew | (k)ill | (a)ttach</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ sel | ←/→ pane | (h)elp | (m)on | (n)ew | (k)ill | (a)ttach</text>
     <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
     <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
     <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
@@ -48,7 +48,7 @@
     <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">older output line 13</text>
     <text x="220" y="152" fill="#cbd5e1" font-family="monospace" font-size="12">fetch_older() when past top</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ scroll | ←/→ cycle | (h)elp | (a)ttach | End tail</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ scroll | ←/→ pane | (h)elp | (a)ttach | End tail</text>
     <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
     <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
     <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
@@ -72,7 +72,7 @@
     <text x="220" y="152" fill="#94a3b8" font-family="monospace" font-size="12">2481 deploy   9.2  1.4 worker</text>
     <text x="220" y="182" fill="#93c5fd" font-family="monospace" font-size="12">ScreenStable + VTE parse</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">←/→ cycle | (h)elp | screen mirror | (q)uit</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">←/→ pane | (h)elp | screen mirror | (q)uit</text>
     <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
     <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
     <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
@@ -153,7 +153,7 @@
     <text x="16" y="132" fill="#e2e8f0" font-family="monospace" font-size="13">B detail: dev</text>
     <text x="16" y="160" fill="#cbd5e1" font-family="monospace" font-size="12">sample output, no MOTD in portrait mode</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ select | ←/→ cycle | (h)elp | (m)on | (n)ew | (k)ill | (a)ttach</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ sel | ←/→ pane | (h)elp | (m)on | (n)ew | (k)ill | (a)ttach</text>
     <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
     <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
     <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
@@ -171,7 +171,7 @@
     <text x="16" y="160" fill="#93c5fd" font-family="monospace" font-size="12">mode: sample | scroll 3/70</text>
     <text x="16" y="188" fill="#cbd5e1" font-family="monospace" font-size="12">↑/↓ scroll; Ctrl-↑/↓ resize T/B</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ scroll | ←/→ cycle | (h)elp | (a)ttach | End tail</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ scroll | ←/→ pane | (h)elp | (a)ttach | End tail</text>
     <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
     <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
     <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>

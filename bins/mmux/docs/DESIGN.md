@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
 | 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
 | 2026-04-27 | @gpt55-dgx | Changed plain Left/Right focus movement to cycle through panes, including the landscape MOTD pane. |
@@ -178,12 +179,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - The session-list pane title shows only the session count as `Sessions [n]`.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
-  `left`, or `right`, and must include pane focus cycling (`←/→`) plus
-  always-on hints ordered with `(h)elp` first, then `(m)onitor`, `(n)ew`,
-  `(k)ill`, attach, resize, and `(q)uit`. The bottom status bar must not show
-  a `keys` label, time, host, focus (`list`, `detail`, `Lb`, `R`), or layout
-  mode (`portrait`, `landscape`, or `normal`) and must render with a blue
-  background.
+  `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
+  `←/→ pane` for pane focus. Always-on command hints are ordered with
+  `(h)elp` first, then `(m)onitor`, `(n)ew`, `(k)ill`, attach, resize, and
+  `(q)uit`. The bottom status bar must not show a `keys` label, time, host,
+  focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
+  `landscape`, or `normal`) and must render with a blue background.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
@@ -427,7 +428,7 @@ at smaller sizes but is tuned for this target.
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar key hints remain, but key hints must be
   terser to fit ~64 cols. Use compact symbol labels for directional keys,
-  e.g., `↑/↓ select | ←/→ cycle | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach`.
+  e.g., `↑/↓ sel | ←/→ pane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach`.
 
 **Focus model:** Same semantics as normal mode, except MOTD is not present, so
 plain Left/Right cycle between `T` and `B`:

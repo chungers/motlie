@@ -48,9 +48,9 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 const NORMAL_STATUS_KEYS: &str =
-    "↑/↓ select | ←/→ cycle | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-←/→ resize | (q)uit";
+    "↑/↓ sel | ←/→ pane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-←/→ resize | (q)uit";
 const PORTRAIT_STATUS_KEYS: &str =
-    "↑/↓ select | ←/→ cycle | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-↑/↓ resize | (q)uit";
+    "↑/↓ sel | ←/→ pane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-↑/↓ resize | (q)uit";
 const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
 ←/→ cycle panes
@@ -1737,12 +1737,14 @@ mod tests {
             false,
         );
         let normal_status = status_line_text(&normal);
-        assert!(normal_status.contains(" ↑/↓ select"));
+        assert!(normal_status.contains(" ↑/↓ sel"));
         assert!(!normal_status.contains("12:34:56"));
         assert!(!normal_status.contains("keys"));
         assert!(!normal_status.contains("host"));
-        assert!(normal_status.contains("↑/↓ select"));
-        assert!(normal_status.contains("←/→ cycle"));
+        assert!(normal_status.contains("↑/↓ sel"));
+        assert!(normal_status.contains("←/→ pane"));
+        assert!(!normal_status.contains("↑/↓ select"));
+        assert!(!normal_status.contains("←/→ cycle"));
         assert!(normal_status.contains("(h)elp | (m)onitor"));
         assert!(!normal_status.contains("m monitor"));
         assert!(!normal_status.contains("h help"));
@@ -1764,12 +1766,14 @@ mod tests {
             false,
         );
         let portrait_status = status_line_text(&portrait);
-        assert!(portrait_status.contains(" ↑/↓ select"));
+        assert!(portrait_status.contains(" ↑/↓ sel"));
         assert!(!portrait_status.contains("12:34:56"));
         assert!(!portrait_status.contains("keys"));
         assert!(!portrait_status.contains("host"));
-        assert!(portrait_status.contains("↑/↓ select"));
-        assert!(portrait_status.contains("←/→ cycle"));
+        assert!(portrait_status.contains("↑/↓ sel"));
+        assert!(portrait_status.contains("←/→ pane"));
+        assert!(!portrait_status.contains("↑/↓ select"));
+        assert!(!portrait_status.contains("←/→ cycle"));
         assert!(portrait_status.contains("(h)elp | (m)onitor"));
         assert!(!portrait_status.contains("m monitor"));
         assert!(!portrait_status.contains("h help"));
