@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented compact bottom status direction hints `↑/↓ sel` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Documented `|` host/IP separator and `(h)elp`-first bottom status command hints. |
 | 2026-04-27 | @gpt55-dgx | Documented top status host/IP plus right-justified time and count-only Sessions title. |
 | 2026-04-27 | @gpt55-dgx | Documented cyclic Left/Right focus behavior, including landscape MOTD focus. |
@@ -212,7 +213,8 @@ current time renders right-justified. The Sessions pane title is derived only
 from the live session list length: `Sessions [n]`. Bottom status text contains
 compact key hints and app status, not the host label, current time, layout/focus
 labels, or a `keys` prefix. Command hints in the bottom status start with
-`(h)elp`, followed by `(m)onitor` and the other command mnemonics.
+`(h)elp`, followed by `(m)onitor` and the other command mnemonics. Direction
+hints render as `↑/↓ sel` and `←/→ pane`.
 
 ## Build Metadata
 
