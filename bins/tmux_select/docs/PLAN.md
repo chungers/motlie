@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Addressed manual validation feedback: robust Ctrl-arrow resize matching, readable monitor-mode normalization, conventional detail scroll direction with scrollbar/range indicator, `q` quit key, and dashboard re-entry after detach when the selected session still exists. |
 | 2026-04-26 | @gpt55-dgx | Implemented the initial selector binary and remaining library support: workspace package, CLI modes, normal/short TUI layouts, MOTD fallback art, trait-backed sample/monitor detail sources, create/kill modals, stable-id attach/kill, ForceCommand bypass/reject handling, `ScrollbackQuery::LinesRange`, host event diff stream, and docs/API/CLI updates. |
 | 2026-04-26 | @gpt55-dgx | Started Phase 1.1 and 1.4 implementation: added `Target::attach_current_pty`, `AttachExit`, local/SSH attach command construction, process-group terminal handoff, signal status mapping, command/status unit tests, and `HostHandle::session_by_id`; localhost PTY smoke and rename-race tests remain open. |
 | 2026-04-26 | @gpt55-dgx | Initial PLAN for issue #226 and PR #227 re-review: orders accepted `motlie-tmux` gaps before binary work, defines the selector phases, and makes the test harness concrete. |
@@ -190,7 +191,8 @@ References: [Layout](./DESIGN.md#layout),
 References: [Functional Requirements](./DESIGN.md#functional),
 [Layout](./DESIGN.md#layout).
 
-- [x] 5.1 Implement focus transitions: `v`, `l`, and outside-modal `Esc`.
+- [x] 5.1 Implement focus transitions: `v`, `l`, outside-modal `Esc`, and
+  `q` as an exit alias for `Ctrl-C`.
 - [x] 5.2 Implement session-list movement and scrolling for `LB`/`T`.
 - [x] 5.3 Implement R/B scrolling, page movement, Home/End, and monitor
   auto-tail resume on End.
@@ -211,7 +213,8 @@ References: [R Pane Detail Source](./DESIGN.md#r-pane-detail-source),
 - [x] 6.2 Implement `SampleDetailSource` using `motlie-tmux` capture/sample
   APIs.
 - [x] 6.3 Implement backwards chunk fetch through `LinesRange`.
-- [x] 6.4 Implement `MonitorDetailSource` using the monitor/history pipeline.
+- [x] 6.4 Implement `MonitorDetailSource` using the monitor/history pipeline
+  with plain-text normalization for TUI rendering.
 - [x] 6.5 Enforce the 10,000-line rolling monitor history bound.
 - [x] 6.6 When monitor history scrolls beyond the rolling-buffer start, fetch
   older tmux pre-monitor scrollback through `LinesRange` on the same target.
@@ -243,8 +246,9 @@ References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
 - [x] 8.3 Stop monitor state and host-event subscriptions before attach.
 - [x] 8.4 Implement `--print-session`: stdout exactly `<name>\n` on selection,
   non-zero exit and empty stdout on cancel.
-- [x] 8.5 Implement `--dashboard`: re-enter TUI only when child status is
-  success, refresh succeeds, and the user explicitly picks again.
+- [x] 8.5 Implement `--dashboard`: re-enter TUI when the attach child exits
+  cleanly or when detach returns non-zero but the selected session still
+  exists; refresh succeeds and the user explicitly picks again.
 - [x] 8.6 On pre-spawn vanished-session race, re-enter under `--dashboard` or
   exit non-zero in default mode.
 - [ ] 8.7 Add localhost integration test pinning canonical tmux behavior:

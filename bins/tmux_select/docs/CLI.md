@@ -38,7 +38,7 @@ tmux_select 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
 | `[ssh-uri]` | Operate on the remote SSH target for MOTD, session list, sampling, monitor, create, kill, and attach. |
 | `-s` | Use compact short mode. Body is split into `T` session list and `B` detail pane. MOTD is omitted. |
 | `--print-session` | Select a session, print exactly `<name>\n` to stdout, and exit 0. Cancel exits non-zero with empty stdout. |
-| `--dashboard` | After successful attach child exit, re-enter the selector. Non-zero child exit exits with that status. |
+| `--dashboard` | Re-enter the selector after a clean attach child exit, or after a non-zero detach when the selected session still exists. Other non-zero child exits exit with that status. |
 | `--print-session --dashboard` | Invalid. Startup error. |
 
 The v1 target form is positional only. There is no `--target` flag in v1.
@@ -89,14 +89,18 @@ user has no shell to consume stdout.
 tmux_select --dashboard
 ```
 
-`--dashboard` re-enters the selector after clean attach child exit. Re-entry is
-bounded:
+`--dashboard` re-enters the selector after clean attach child exit. It also
+re-enters after a non-zero attach child exit when the selected session still
+exists, which covers tmux/SSH detach paths that report non-zero even though the
+session survived. Re-entry is bounded:
 
-1. attach child exits with success
+1. attach child exits with success, or the selected session still exists after
+   a non-zero child exit
 2. session list refresh succeeds
 3. user explicitly selects a session again
 
-Non-zero child exit or refresh failure exits instead of looping.
+Non-zero child exit with no selected session remaining, or refresh failure,
+exits instead of looping.
 
 ## Short Mode
 
@@ -133,7 +137,7 @@ Normal mode main-view keys:
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
 | Enter / `g` | Attach highlighted session | Attach highlighted session |
-| `Ctrl-C` | Exit without attach | Exit without attach |
+| `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
 Short mode maps `T` to `Lb` and `B` to `R`. It uses
 `Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`.
@@ -177,10 +181,11 @@ original command instead of launching the selector.
 
 | Condition | Exit behavior |
 |-----------|---------------|
-| `Ctrl-C` in TUI | Exit without attach. |
+| `q` or `Ctrl-C` in TUI | Exit without attach. |
 | Default attach child exits | Exit with child status. |
 | `--dashboard` attach child exits 0 | Re-enter selector after refresh. |
-| `--dashboard` attach child exits non-zero | Exit with child status. |
+| `--dashboard` attach child exits non-zero and selected session still exists | Re-enter selector after refresh. |
+| `--dashboard` attach child exits non-zero and selected session is gone | Exit with child status. |
 | `--print-session` selection | Print name to stdout, exit 0. |
 | `--print-session` cancel | Empty stdout, non-zero exit. |
 | Startup argument error | Non-zero exit and stderr message. |

@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Document `SessionWatchOptions::normalize`, used by tmux selector monitor mode to strip raw ANSI/control bytes before TUI rendering. |
 | 2026-04-26 | @gpt55-dgx | Document `HostHandle::exec_shell`, `HostHandle::watch_host_events`, `HostEventStream`, and `ScrollbackQuery::LinesRange` added for the tmux selector implementation. |
 | 2026-04-26 | @gpt55-dgx | Document `HostHandle::session_by_id`, `AttachExit`, and `Target::attach_current_pty` added for tmux selector Phase 1.1 / 1.4. |
 
@@ -1893,6 +1894,27 @@ let history = sub.history(HistoryOptions {
 | `max_render_chars` | `usize` | 0 (unlimited) | Character budget; oldest entries trimmed first |
 | `label_format` | `LabelFormat` | `Bracketed` | Source label format for rendering |
 | `include_omission_marker` | `bool` | true | Prepend `[... N earlier entries omitted ...]` on trimming |
+
+`HostHandle::watch_session()` also accepts `SessionWatchOptions`, which wraps a
+`HistoryOptions` plus queue sizing and a monitor normalization mode:
+
+```rust
+use motlie_tmux::{CaptureNormalizeMode, HistoryOptions, SessionWatchOptions};
+
+let watch = host
+    .watch_session(
+        "build",
+        &SessionWatchOptions {
+            queue_capacity: 256,
+            normalize: CaptureNormalizeMode::PlainText,
+            history: HistoryOptions::default(),
+        },
+    )
+    .await?;
+```
+
+Use `PlainText` for ratatui/text UIs that cannot render ANSI escape sequences;
+use the default `Raw` mode when consumers need the original control-mode bytes.
 
 ### Snapshot for structured access
 

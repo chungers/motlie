@@ -16,6 +16,7 @@ Draft.
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 round-3 cross-doc consistency feedback: aligned host events with API (`session_id`, no window-level variants), changed detail activation to `SelectedSession`, and documented stable session-id dispatch as a fourth library gap. |
 | 2026-04-26 | @gpt55-dgx | Updated the MOTD-absent default placeholder art to the compact motlie glyph supplied for `/etc/motd` fallback. |
 | 2026-04-26 | @gpt55-dgx | Replaced the MOTD-absent default placeholder with the full-width MOTLIE glyph supplied for `/etc/motd` fallback. |
+| 2026-04-26 | @gpt55-dgx | Incorporated validation feedback: `q` exits like `Ctrl-C`, Ctrl-arrow resize accepts terminals that send extra modifiers, detail-pane scroll direction follows terminal convention and shows a scrollbar/range indicator, monitor mode strips raw ANSI/control bytes for TUI rendering, and dashboard re-enters after detach when the selected session still exists. |
 
 ## Product Scope
 
@@ -128,14 +129,16 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `v` moves focus from
   `Lb` to `R` (no-op if already `R`). Pressing `l` moves focus from `R` to
   `Lb` (no-op if already `Lb`). Outside any modal, `Esc` is equivalent to
-  `l` when focus is `R`, and is a no-op when focus is `Lb` (use `Ctrl-C` to
-  exit). The currently focused pane must be visually distinguished from the
+  `l` when focus is `R`, and is a no-op when focus is `Lb` (use `q` or
+  `Ctrl-C` to exit). The currently focused pane must be visually distinguished from the
   unfocused pane via border style — a bright/colored or doubled border for
   the focused pane, dim/single for the unfocused. The status-bar focus
   indicator (below) is complementary, not a substitute.
 - Pressing `g` or Enter in the main selector exits the TUI and attaches the
   current user PTY to the highlighted session. (Focus-independent: attach
   always operates on the `Lb` highlight regardless of which pane has focus.)
+- Pressing `q` exits the selector without attach, equivalent to `Ctrl-C` in
+  the main selector view.
 - The binary accepts an optional SSH URI / host target. Omitted means local host.
 - For SSH targets, listing, MOTD, sampling, create, kill, monitor, and attach
   all operate against the SSH target.
@@ -146,7 +149,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   show the current focus (`Lb` vs `R`) and a focus-conditional key-hint set:
   when `Lb`-focused, include `v view detail`; when `R`-focused, include
   `l list`. Always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
-  `Ctrl-C exit`) appear in both modes.
+  `q quit`) appear in both modes.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream and reconciling on
@@ -160,10 +163,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   or Enter, leave the TUI cleanly and spawn-and-wait attach (see §Data Flow →
   Attach). When invoked with `--print-session`, the binary instead leaves the
   TUI cleanly, prints the selected session name (and only the session name)
-  followed by a newline to stdout, and exits 0; cancellation (`Ctrl-C`, no
+  followed by a newline to stdout, and exits 0; cancellation (`q`/`Ctrl-C`, no
   selection) exits non-zero with no stdout. All UI rendering, status, and
   errors go to stderr only. When invoked with `--dashboard`, the binary
-  re-enters the TUI on clean child exit (see §Data Flow → Attach for the
+  re-enters the TUI on clean child exit, or on non-zero child exit when the
+  selected session still exists (see §Data Flow → Attach for the
   bounded re-entry rule). `--print-session` and `--dashboard` are mutually
   exclusive; combining them is a startup error.
 - The binary accepts a short-mode
@@ -171,7 +175,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 40:60 ratio. MOTD and the
   motlie placeholder are omitted in short mode to maximize content density.
-  All command keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`Ctrl-C`), modal
+  All command keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
   identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
   differ by mode: short mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
@@ -184,7 +188,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 
 ### Non-Functional
 
-- Terminal state must be restored on normal exit, attach, error, Ctrl-C, and
+- Terminal state must be restored on normal exit, attach, error, `q`/`Ctrl-C`, and
   panic paths.
 - Monitor handles and subscriptions must be stopped/unsubscribed when leaving
   monitoring mode, changing monitored session, killing the monitored session, or
@@ -285,7 +289,7 @@ Additional flags:
 |------|----------|
 | (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). Selector exits with the child's `ExitStatus`. |
 | `--print-session` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --print-session)"`. |
-| `--dashboard` | TUI → select → spawn-and-wait attach → on clean child exit (`status.success()`), re-enter the TUI; on non-zero child exit, exit with the child's status. `Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). See §Data Flow → Attach for the bounded re-entry rule. |
+| `--dashboard` | TUI → select → spawn-and-wait attach → on clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). See §Data Flow → Attach for the bounded re-entry rule. |
 | `-s` | Short-mode layout: vertical T/B split (40:60) optimized for 32×65 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--print-session`, `--dashboard`, and SSH targets. See §Layout → Short mode. |
 | `--print-session` + `--dashboard` | Mutually exclusive — startup error. |
 
@@ -325,7 +329,7 @@ two focus states: `Lb` (default) and `R`. Focus transitions are explicit:
 - `v` → focus `R` (no-op if already `R`)
 - `l` → focus `Lb` (no-op if already `Lb`)
 - `Esc` outside any modal: equivalent to `l` when focus is `R`; no-op when
-  focus is `Lb` (use `Ctrl-C` to exit). `Esc` inside any modal is equivalent
+  focus is `Lb` (use `q` or `Ctrl-C` to exit). `Esc` inside any modal is equivalent
   to that modal's `Cancel` button.
 
 The currently focused pane must be visually distinguished from the unfocused
@@ -349,7 +353,7 @@ Main-selector keymap (focus-aware):
 | `n` | Open `New Session` modal | Same |
 | `k` | Open kill-confirmation modal | Same |
 | Enter / `g` | Attach highlight | Attach highlight (focus-independent) |
-| `Ctrl-C` | Exit selector without attach | Exit selector without attach |
+| `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
 Resize keys use Ctrl modifiers so plain arrows are unambiguously reserved for
 navigation and scrolling. Normal mode resizes the L/R split with
@@ -404,8 +408,9 @@ at smaller sizes but is tuned for this target.
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above | Navigation/scroll per focus-aware keymap above (same — use `T`/`B` in place of `Lb`/`R`) |
 
 **All other keys and modal behavior:** identical to normal mode (see the
-focus-aware keymap above). `m`, `n`, `k`, `g`/Enter, `Ctrl-C` are
-focus-independent and behave the same. Modal keymap (Left/Right for button
+focus-aware keymap above). `m`, `n`, `k`, `g`/Enter, `q`/`Ctrl-C` are
+focus-independent and behave the same. `q`/`Ctrl-C` exits without attaching.
+Modal keymap (Left/Right for button
 selection, Enter to apply, Esc to Cancel) is unchanged.
 
 **Composition with other flags:** `-s` composes with `--print-session`,
@@ -685,7 +690,8 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
        │                      Translate signal-terminated child to
        │                      `128 + signal` per POSIX shell convention.
        │
-       └── --dashboard ─────→ if child.status.success():
+       └── --dashboard ─────→ if child.status.success()
+                                  or selected session still exists:
                                   re-enter TUI:
                                     1. re-acquire alt-screen, raw mode
                                     2. drain buffered host events
@@ -693,19 +699,18 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
                                     4. if list_sessions() refresh fails →
                                          exit with that error (bounded loop:
                                          no infinite re-entry on broken target)
-                                  else (non-zero child exit):
+                                  else (non-zero child exit and selected
+                                  session is gone):
                                     exit with child.status.
-                                  Ctrl-C from re-entered TUI exits the
+                                  q/Ctrl-C from re-entered TUI exits the
                                   binary with code 0 (user-initiated).
    ```
 
-8. Tested assumption (PLAN to verify): in canonical tmux 2.x/3.x, when an
-   attached session is destroyed by another client, the `tmux attach-session`
-   child exits with status 0 — same as user-driven `C-b d` detach. This is
-   why the `--dashboard` re-entry rule (`status.success()`) correctly
-   re-enters on session-killed-elsewhere. PLAN must include a localhost
-   integration test that pins this assumption against the target tmux
-   version.
+8. Detach status is treated conservatively. Some tmux/SSH attach paths can
+   report non-zero even when the user detached and the selected session still
+   exists. `--dashboard` therefore uses child success as sufficient for
+   re-entry, and for non-zero exits probes the selected session id before
+   deciding whether to re-enter or propagate the child status.
 
 9. Process count footprint: under default mode, two processes are resident
    during the attach window (selector + child). Under exec-replace this
@@ -1026,7 +1031,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     pins viewport; `End` re-engages auto-tail
 - Terminal smoke tests:
   - raw mode and alternate-screen restoration
-  - Ctrl-C behavior
+  - `q`/`Ctrl-C` behavior
   - attach path restores terminal before handoff
   - panic-path terminal restore:
     inject a panic during the main loop; assert termios + alt-screen are
@@ -1042,11 +1047,13 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     stdout is exactly `<name>\n` on selection; empty on cancel; exit code 0
     on selection, non-zero on cancel; stderr can carry diagnostics without
     polluting stdout (assert via captured stdout in non-TTY harness)
-  - `--dashboard` re-entry on
-    external kill: attach to a session, kill it via `tmux kill-session -t
-    <name>` from a sibling client, assert child exit status is 0
-    (canonical-tmux assumption), selector re-enters TUI, killed session is
-    absent from refreshed `LB`
+  - `--dashboard` re-entry on clean detach:
+    attach to a session, detach via `C-b d`, assert selector re-enters TUI and
+    the session remains visible in refreshed `LB`
+  - `--dashboard` re-entry on non-zero detach with surviving session:
+    simulate or trigger an attach child non-zero status while
+    `session_by_id()` still finds the selected session; assert selector
+    re-enters TUI
   - `--dashboard` no-loop on
     failure: attach, force a non-zero child exit (e.g., target session
     vanished, or kill-server), assert selector exits with that status (no
