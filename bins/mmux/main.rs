@@ -33,10 +33,10 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
 const DEFAULT_DETAIL_LINES: usize = 80;
-const MIN_LEFT_PERCENT: u16 = 25;
-const MAX_LEFT_PERCENT: u16 = 75;
-const MIN_TOP_PERCENT: u16 = 25;
-const MAX_TOP_PERCENT: u16 = 75;
+const LANDSCAPE_MIN_LEFT_PERCENT: u16 = 25;
+const LANDSCAPE_MAX_LEFT_PERCENT: u16 = 75;
+const PORTRAIT_MIN_TOP_PERCENT: u16 = 15;
+const PORTRAIT_MAX_TOP_PERCENT: u16 = 100 - PORTRAIT_MIN_TOP_PERCENT;
 const STATUS_BAR_BG: Color = Color::Blue;
 
 const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
@@ -1040,32 +1040,50 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
         (KeyCode::Up, modifiers)
             if app.layout_mode == LayoutMode::Portrait && is_resize_modifier(modifiers) =>
         {
-            app.top_percent = app.top_percent.saturating_sub(5).max(MIN_TOP_PERCENT);
+            app.top_percent = app
+                .top_percent
+                .saturating_sub(5)
+                .max(PORTRAIT_MIN_TOP_PERCENT);
         }
         (KeyCode::Down, modifiers)
             if app.layout_mode == LayoutMode::Portrait && is_resize_modifier(modifiers) =>
         {
-            app.top_percent = app.top_percent.saturating_add(5).min(MAX_TOP_PERCENT);
+            app.top_percent = app
+                .top_percent
+                .saturating_add(5)
+                .min(PORTRAIT_MAX_TOP_PERCENT);
         }
         (KeyCode::Left, modifiers)
             if app.layout_mode == LayoutMode::Normal && is_resize_modifier(modifiers) =>
         {
-            app.left_percent = app.left_percent.saturating_sub(5).max(MIN_LEFT_PERCENT);
+            app.left_percent = app
+                .left_percent
+                .saturating_sub(5)
+                .max(LANDSCAPE_MIN_LEFT_PERCENT);
         }
         (KeyCode::Right, modifiers)
             if app.layout_mode == LayoutMode::Normal && is_resize_modifier(modifiers) =>
         {
-            app.left_percent = app.left_percent.saturating_add(5).min(MAX_LEFT_PERCENT);
+            app.left_percent = app
+                .left_percent
+                .saturating_add(5)
+                .min(LANDSCAPE_MAX_LEFT_PERCENT);
         }
         (KeyCode::Char('b'), modifiers)
             if app.layout_mode == LayoutMode::Normal && is_word_left_resize(modifiers) =>
         {
-            app.left_percent = app.left_percent.saturating_sub(5).max(MIN_LEFT_PERCENT);
+            app.left_percent = app
+                .left_percent
+                .saturating_sub(5)
+                .max(LANDSCAPE_MIN_LEFT_PERCENT);
         }
         (KeyCode::Char('f'), modifiers)
             if app.layout_mode == LayoutMode::Normal && is_word_right_resize(modifiers) =>
         {
-            app.left_percent = app.left_percent.saturating_add(5).min(MAX_LEFT_PERCENT);
+            app.left_percent = app
+                .left_percent
+                .saturating_add(5)
+                .min(LANDSCAPE_MAX_LEFT_PERCENT);
         }
         (KeyCode::Right, _) => app.focus_next(),
         (KeyCode::Left, _) => app.focus_previous(),
@@ -2340,6 +2358,63 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert!(app.left_percent > shrunk);
+    }
+
+    #[tokio::test]
+    async fn resize_bounds_are_keyed_by_layout_mode() {
+        let host = HostHandle::local();
+        let mut landscape = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        landscape.left_percent = 5;
+
+        handle_key(
+            &host,
+            &mut landscape,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT),
+        )
+        .await
+        .unwrap();
+        assert_eq!(landscape.left_percent, LANDSCAPE_MIN_LEFT_PERCENT);
+
+        landscape.left_percent = 95;
+        handle_key(
+            &host,
+            &mut landscape,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+        )
+        .await
+        .unwrap();
+        assert_eq!(landscape.left_percent, LANDSCAPE_MAX_LEFT_PERCENT);
+
+        let mut portrait = AppState::new(
+            "host".to_string(),
+            LayoutMode::Portrait,
+            "motd".to_string(),
+            false,
+        );
+        portrait.top_percent = 5;
+        handle_key(
+            &host,
+            &mut portrait,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+        )
+        .await
+        .unwrap();
+        assert_eq!(portrait.top_percent, PORTRAIT_MIN_TOP_PERCENT);
+
+        portrait.top_percent = 95;
+        handle_key(
+            &host,
+            &mut portrait,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+        )
+        .await
+        .unwrap();
+        assert_eq!(portrait.top_percent, PORTRAIT_MAX_TOP_PERCENT);
     }
 
     #[tokio::test]

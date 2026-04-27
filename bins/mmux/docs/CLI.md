@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
 | 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
@@ -122,7 +123,8 @@ vertical split:
 - one-row top status bar and one-row bottom command/status bar
 
 The initial T/B ratio is 30:70, giving the detail pane more vertical space by
-default. `Ctrl-Up` / `Ctrl-Down` can resize the split after startup.
+default. `Ctrl-Up` / `Ctrl-Down` can resize the split after startup. Portrait
+mode clamps the split so both `T` and `B` keep at least 15% height.
 
 MOTD and the motlie placeholder are omitted in portrait mode. Use
 `--landscape` / `-l` to force the normal `L`/`R` layout even when the PTY is
@@ -158,7 +160,8 @@ Normal mode main-view keys:
 Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, plain
 Left/Right cycle between `T` and `B`. It uses
 `Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
-accepted as compatibility fallbacks.
+accepted as compatibility fallbacks. Normal mode L/R resize stays clamped to
+25/75; portrait T/B resize is clamped to 15/85.
 
 On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.

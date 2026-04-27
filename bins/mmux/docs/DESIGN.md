@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
 | 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
@@ -401,7 +402,8 @@ navigation, scrolling, and focus movement. Normal mode advertises
 `Ctrl-Left`/`Ctrl-Right` for the L/R split and also accepts common terminal
 fallbacks; on macOS iTerm2 the observed fallback is `Shift-Left` /
 `Shift-Right`. Portrait mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
-and accepts the same modifier family.
+and accepts the same modifier family. Resize bounds are mode-specific:
+landscape L/R clamps at 25/75, while portrait T/B clamps at 15/85.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok`; `Enter` exits and applies `Ok` if selected; `Esc` is
@@ -445,8 +447,8 @@ plain Left/Right cycle between `T` and `B`:
 
 | Key | Normal mode | Portrait mode |
 |-----|-------------|------------|
-| Modified Left / Right | Resize `L`/`R` split | (no-op; `L`/`R` not present) |
-| Modified Up / Down | (no-op; `T`/`B` not present) | Resize `T`/`B` split |
+| Modified Left / Right | Resize `L`/`R` split, clamped 25/75 | (no-op; `L`/`R` not present) |
+| Modified Up / Down | (no-op; `T`/`B` not present) | Resize `T`/`B` split, clamped 15/85 |
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above | Navigation/scroll per focus-aware keymap above (same — use `T`/`B` in place of `Lb`/`R`) |
 
 **All other keys and modal behavior:** identical to normal mode (see the
@@ -1042,12 +1044,11 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     expansion: `LT` height = `glyph_rows + caption + chrome`, bypasses 30%
     cap; narrow-terminal fallback still renders compact glyph art
   - status bar reservation
-  - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
+  - `L` / `R` resize bounds: landscape clamps at 25/75
   - Portrait mode layout at
     64x32 viewport: body = 31 rows; T/B split at 30:70 yields T ≈ 9 rows
     and B ≈ 22 rows; MOTD/motlie omitted; status bar present
-  - Portrait mode modified Up/Down resize bounds (minimum heights so neither pane
-    collapses to 0); normal mode modified Left/Right parallel
+  - Portrait mode modified Up/Down resize bounds: portrait clamps at 15/85
   - PTY aspect-ratio auto-detection: 64x32, 66x30, 80x24, 100x30, 160x40,
     and square-ish PTYs select portrait; 161x40 and wider-than-4.0 PTYs select
     landscape; `--portrait` forces portrait; `--landscape` forces landscape

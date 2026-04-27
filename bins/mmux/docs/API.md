@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented mode-specific resize bounds: landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Replaced build metadata shellouts with Rust filesystem/time APIs in `build.rs`. |
 | 2026-04-27 | @gpt55-dgx | Documented Help modal build date and last-8-character git SHA display. |
 | 2026-04-27 | @gpt55-dgx | Documented compact bottom status direction hints `↑/↓ sel` and `←/→ pane`. |
@@ -217,6 +218,10 @@ compact key hints and app status, not the host label, current time, layout/focus
 labels, or a `keys` prefix. Command hints in the bottom status start with
 `(h)elp`, followed by `(m)onitor` and the other command mnemonics. Direction
 hints render as `↑/↓ sel` and `←/→ pane`.
+
+Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
+both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing
+keeps both panes at least 15% tall (`15/85` through `85/15`).
 
 ## Build Metadata
 
