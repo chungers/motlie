@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
 | 2026-04-27 | @gpt55-dgx | Changed plain Left/Right from one-way list/detail focus movement to cyclic pane focus movement. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector command to `mmux` and updated CLI/ForceCommand examples. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` status-bar label. |
@@ -115,7 +116,7 @@ vertical split:
 
 - `T`: session list, default focus
 - `B`: detail pane
-- one-row status bar
+- one-row top status bar and one-row bottom command/status bar
 
 The initial T/B ratio is 30:70, giving the detail pane more vertical space by
 default. `Ctrl-Up` / `Ctrl-Down` can resize the split after startup.
@@ -164,9 +165,11 @@ which is currently a one-second polling loop over `list_sessions()` with
 stable-id snapshot diffing. It is not currently driven by direct tmux
 control-mode host notifications.
 
-The Sessions pane title uses `Sessions [n] @ <hostname>, <ip address>`, where
-`n` is the current session count. The blue status bar shows current time and
-compact key hints only; it does not repeat the host, show focus/layout mode, or
+The top status bar uses the same blue background as the bottom status bar. It
+shows `<hostname>, <ip address>` in bold at the left and the current time
+right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
+current session count. The bottom blue status bar shows compact key hints and
+status text only; it does not repeat the host/time, show focus/layout mode, or
 prefix the hints with a `keys` label.
 
 Modal keys:

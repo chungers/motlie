@@ -899,7 +899,7 @@ async fn refresh_sessions(host: &HostHandle, app: &mut AppState, force_detail: b
     app.sessions = host.list_sessions().await.context("list tmux sessions")?;
     app.preserve_selection(previous);
     app.status = if app.sessions.is_empty() {
-        format!("no sessions on {}", app.host_label)
+        "no sessions".to_string()
     } else {
         format!("{} session(s)", app.sessions.len())
     };
@@ -1295,14 +1295,19 @@ fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
+    draw_top_status(frame, chunks[0], app);
     match app.layout_mode {
-        LayoutMode::Normal => draw_normal(frame, chunks[0], app),
-        LayoutMode::Portrait => draw_portrait(frame, chunks[0], app),
+        LayoutMode::Normal => draw_normal(frame, chunks[1], app),
+        LayoutMode::Portrait => draw_portrait(frame, chunks[1], app),
     }
-    draw_status(frame, chunks[1], app);
+    draw_status(frame, chunks[2], app);
     if let Some(modal) = &app.modal {
         draw_modal(frame, area, modal);
     }
@@ -1412,12 +1417,7 @@ fn draw_motd(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn sessions_title(app: &AppState) -> String {
-    format!(
-        " Sessions [{}] @ {}, {} ",
-        app.sessions.len(),
-        app.host_label,
-        app.host_ip_address
-    )
+    format!(" Sessions [{}] ", app.sessions.len())
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -1510,7 +1510,7 @@ fn detail_text_for_render(text: &str) -> Text<'_> {
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let text = status_line_text(app, &chrono::Local::now().format("%H:%M:%S").to_string());
+    let text = status_line_text(app);
     let paragraph = Paragraph::new(Line::from(vec![
         TuiSpan::styled(text, Style::default().fg(Color::White).bg(STATUS_BAR_BG)),
         TuiSpan::styled(
@@ -1522,13 +1522,57 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(paragraph, area);
 }
 
-fn status_line_text(app: &AppState, time: &str) -> String {
+fn draw_top_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let time = chrono::Local::now().format("%H:%M:%S").to_string();
+    let paragraph = Paragraph::new(top_status_line(app, &time, area.width as usize))
+        .style(Style::default().bg(STATUS_BAR_BG));
+    frame.render_widget(paragraph, area);
+}
+
+fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<'static> {
+    let time = format!(" {time} ");
+    let time = truncate_chars(&time, min(time.chars().count(), width));
+    let max_left_width = width.saturating_sub(time.chars().count());
+    let left = if max_left_width == 0 {
+        String::new()
+    } else {
+        truncate_chars(&top_status_host_text(app), max_left_width)
+    };
+    let left_width = left.chars().count();
+    let time_width = time.chars().count();
+    let padding_width = width.saturating_sub(left_width + time_width);
+
+    Line::from(vec![
+        TuiSpan::styled(
+            left,
+            Style::default()
+                .fg(Color::White)
+                .bg(STATUS_BAR_BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        TuiSpan::styled(
+            " ".repeat(padding_width),
+            Style::default().bg(STATUS_BAR_BG),
+        ),
+        TuiSpan::styled(time, Style::default().fg(Color::White).bg(STATUS_BAR_BG)),
+    ])
+}
+
+fn top_status_host_text(app: &AppState) -> String {
+    format!(" {}, {} ", app.host_label, app.host_ip_address)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn status_line_text(app: &AppState) -> String {
     let keys = if app.layout_mode == LayoutMode::Portrait {
         PORTRAIT_STATUS_KEYS
     } else {
         NORMAL_STATUS_KEYS
     };
-    format!(" {} | {} ", time, keys)
+    format!(" {} ", keys)
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
@@ -1692,8 +1736,9 @@ mod tests {
             "motd".to_string(),
             false,
         );
-        let normal_status = status_line_text(&normal, "12:34:56");
-        assert!(normal_status.contains(" 12:34:56 | ↑/↓ select"));
+        let normal_status = status_line_text(&normal);
+        assert!(normal_status.contains(" ↑/↓ select"));
+        assert!(!normal_status.contains("12:34:56"));
         assert!(!normal_status.contains("keys"));
         assert!(!normal_status.contains("host"));
         assert!(normal_status.contains("↑/↓ select"));
@@ -1716,8 +1761,9 @@ mod tests {
             "motd".to_string(),
             false,
         );
-        let portrait_status = status_line_text(&portrait, "12:34:56");
-        assert!(portrait_status.contains(" 12:34:56 | ↑/↓ select"));
+        let portrait_status = status_line_text(&portrait);
+        assert!(portrait_status.contains(" ↑/↓ select"));
+        assert!(!portrait_status.contains("12:34:56"));
         assert!(!portrait_status.contains("keys"));
         assert!(!portrait_status.contains("host"));
         assert!(portrait_status.contains("↑/↓ select"));
@@ -1736,7 +1782,49 @@ mod tests {
     }
 
     #[test]
-    fn sessions_title_includes_host_label() {
+    fn top_status_includes_bold_host_and_right_justified_time() {
+        let app = AppState::new_with_host_ip(
+            "target-host".to_string(),
+            "192.0.2.10".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        let line = top_status_line(&app, "12:34:56", 40);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered.chars().count(), 40);
+        assert!(rendered.starts_with(" target-host, 192.0.2.10 "));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(rendered.ends_with(" 12:34:56 "));
+    }
+
+    #[test]
+    fn top_status_truncates_host_before_time_when_narrow() {
+        let app = AppState::new_with_host_ip(
+            "target-host".to_string(),
+            "192.0.2.10".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        let line = top_status_line(&app, "12:34:56", 16);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered.chars().count(), 16);
+        assert!(rendered.ends_with(" 12:34:56 "));
+    }
+
+    #[test]
+    fn sessions_title_only_includes_count() {
         let mut app = AppState::new_with_host_ip(
             "target-host".to_string(),
             "192.0.2.10".to_string(),
@@ -1763,10 +1851,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(
-            sessions_title(&app),
-            " Sessions [2] @ target-host, 192.0.2.10 "
-        );
+        assert_eq!(sessions_title(&app), " Sessions [2] ");
     }
 
     #[test]
