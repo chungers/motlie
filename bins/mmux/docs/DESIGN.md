@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
 | 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Added in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
@@ -168,6 +169,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   focused pane must be visually distinguished from the unfocused panes via
   border style — a bright/colored or doubled border for the focused pane,
   dim/single for the unfocused. The status bar does not duplicate focus state.
+- Pressing `l` toggles the current TUI between portrait and landscape layout.
+  The toggle is runtime-only and is retained in memory across default
+  attach/detach re-entry within the same `mmux` parent process.
 - Pressing `a` or Enter in the main selector exits the TUI and attaches the
   current user PTY to the highlighted session. (Focus-independent: attach
   always operates on the `Lb` highlight regardless of which pane has focus.)
@@ -186,8 +190,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
   `(p)ane` for pane focus. Always-on command hints are ordered with
-  `(h)elp` first, then `(m)onitor`, `(n)ew`, `(k)ill`, attach, resize, and
-  `(q)uit`. The bottom status bar must not show a `keys` label, time, host,
+  `(h)elp`, `(p)ane`, `(m)onitor`, `enter/(a)ttach`, `(n)ew`, `(k)ill`,
+  `(q)uit`, `(l)ayout`, then mode-specific resize. The bottom status bar must
+  not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a blue background.
 - The selector must keep `LB`
@@ -212,7 +217,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 30:70 ratio. MOTD and the
   motlie placeholder are omitted in portrait mode to maximize content density.
-  All command keys (`p` focus cycling, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
+  All command keys (`p` focus cycling, `l` layout toggle, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
   identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
   differ by mode: portrait mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
@@ -224,7 +229,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   connecting PTY and selects portrait mode when `columns / rows <= 4.0`;
   otherwise it uses landscape layout. If the PTY size cannot be read, it
   defaults to landscape layout. The layout force flags compose with `--script`
-  and SSH targets.
+  and SSH targets, but `l` can still toggle the layout while the TUI is
+  running.
 - The binary must use `motlie-tmux` for tmux operations and must not duplicate
   tmux command logic in the binary.
 
@@ -393,6 +399,7 @@ Main-selector keymap (focus-aware):
 | Left / Right | No-op | No-op | No-op |
 | `Esc` | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal |
 | Modified Left / Right | Resize `L`/`R` split (normal mode only; `Ctrl`, Alt, Shift, and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) | Resize `L`/`R` split (normal mode only; focus-independent) |
+| `l` | Toggle portrait/landscape layout | Same | Same |
 | `m` | Start/switch monitoring on highlight | Same | Same |
 | `n` | Open `New Session` modal | Same | Same |
 | `k` | Open kill-confirmation modal | Same | Same |
@@ -434,7 +441,7 @@ at smaller sizes but is tuned for this target.
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar key hints remain, but key hints must be
   terser to fit ~64 cols. Use compact symbol labels for directional keys,
-  e.g., `↑/↓ sel | (p)ane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach`.
+  e.g., `↑/↓ sel | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout`.
 
 **Focus model:** Same semantics as normal mode, except MOTD is not present, so
 `p` cycles between `T` and `B`:
@@ -725,9 +732,9 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 2. Stop monitor/detail state. Drop the active host-event subscription; re-entry
    starts from a fresh session snapshot.
    The parent process also snapshots a small amount of UI state in memory:
-   selected session id, selected list index, focused pane, and the current
-   layout split percentages. This state is only for the current `mmux` process
-   and is not written to disk.
+   selected session id, selected list index, layout mode, focused pane, and
+   the current layout split percentages. This state is only for the current
+   `mmux` process and is not written to disk.
 3. Restore raw mode and leave the alternate screen. Restore termios to
    canonical state.
 4. Resolve the highlighted session id to a `Target` via the stable-id
@@ -760,7 +767,8 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
                                    4. re-render LB (state may have changed)
                                    5. restore selected session by id, or the
                                       previous list index if the id vanished
-                                   6. restore pane focus and split percentages
+                                   6. restore layout mode, pane focus, and
+                                      split percentages
                                    7. if list_sessions() refresh fails →
                                         exit with that error (bounded loop:
                                         no infinite re-entry on broken target)
@@ -1063,6 +1071,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     landscape; `--portrait` forces portrait; `--landscape` forces landscape
   - `p` cycles pane focus in the main view; modal use of Left/Right for button
     selection is unchanged
+  - `l` toggles layout mode and normalizes focus when switching to portrait
 - Unit tests for state transitions:
   - highlight movement
   - sample vs monitor mode
@@ -1155,6 +1164,10 @@ that remain speculative stay explicitly open.
   Portrait mode cycles `T <-> B` because MOTD is omitted. Plain Left/Right are
   no-ops in main view, modified arrows own resize, and modal Left/Right keeps
   button selection behavior.
+- **Runtime layout toggle** — `l` toggles between portrait and landscape
+  layout. The selected CLI force flag controls startup only; runtime `l`
+  toggles are intentionally allowed and retained only in memory for the current
+  parent process.
 - **Portrait-mode status hints** — ASCII-first compact labels. Unicode affordance
   glyphs can be considered later, but v1 must render predictably in narrow
   SSH clients and IDE terminals.

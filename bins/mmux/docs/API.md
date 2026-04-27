@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented bottom status command ordering and `l` runtime layout toggling. |
 | 2026-04-27 | @gpt55-dgx | Documented `p` as the main-view pane-cycle key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Documented in-memory retained selector UI state for default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Documented mode-specific resize bounds: landscape 25/75 and portrait 15/85. |
@@ -218,12 +219,16 @@ current time renders right-justified. The Sessions pane title is derived only
 from the live session list length: `Sessions [n]`. Bottom status text contains
 compact key hints and app status, not the host label, current time, layout/focus
 labels, or a `keys` prefix. Command hints in the bottom status start with
-`(h)elp`, followed by `(m)onitor` and the other command mnemonics. Direction
-hints render as `↑/↓ sel` and `(p)ane`.
+`(h)elp`, then `(p)ane`, `(m)onitor`, `enter/(a)ttach`, `(n)ew`, `(k)ill`,
+`(q)uit`, `(l)ayout`, and the mode-specific resize hint. Direction hints render
+as `↑/↓ sel` and `(p)ane`.
 
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing
 keeps both panes at least 15% tall (`15/85` through `85/15`).
+The `l` key toggles `LayoutMode` at runtime and normalizes focus if the MOTD
+pane is focused while switching into portrait. Default attach/re-entry retains
+that layout choice in memory inside the parent `mmux` process.
 
 ## Build Metadata
 
@@ -338,9 +343,9 @@ Validation rules:
   attaching
 - without `--script`, the selector attaches and re-enters after detach when the
   attach child succeeds or the selected session still exists
-- default attach/re-entry keeps selected session/list index, pane split, and
-  focused pane in memory within the parent `mmux` process; this state is not
-  persisted across binary runs
+- default attach/re-entry keeps selected session/list index, layout mode, pane
+  split, and focused pane in memory within the parent `mmux` process; this
+  state is not persisted across binary runs
 - `--portrait` / `-p` forces portrait layout
 - portrait layout initializes the `T`/`B` split at 30:70
 - `--landscape` / `-l` forces landscape layout
@@ -368,6 +373,7 @@ API tests must cover:
   behavior
 - modified-arrow resize fallback behavior
 - `p` key focus-cycling behavior in landscape and portrait layouts
+- `l` key layout toggling and retained layout re-entry behavior
 - status hint arrow-symbol rendering
 - top status rendering for bold hostname/IP and right-justified current time
 - session count rendering in the Sessions pane title without hostname/IP
@@ -384,7 +390,7 @@ Current implementation coverage:
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
-  modified-arrow resize fallbacks, `p` pane focus transitions, compact
-  status hint rendering, sample color preservation, Help modal
+  modified-arrow resize fallbacks, `p` pane focus transitions, `l` layout
+  toggle behavior, compact status hint rendering, sample color preservation, Help modal
   key-function/display/close behavior, monitor screen capture, ANSI/VTE
   parsing, and monitored-session-close reset.

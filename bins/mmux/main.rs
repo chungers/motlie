@@ -51,12 +51,13 @@ const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 const NORMAL_STATUS_KEYS: &str =
-    "↑/↓ sel | (p)ane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-←/→ resize | (q)uit";
+    "↑/↓ sel | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout | mod-←/→ resize";
 const PORTRAIT_STATUS_KEYS: &str =
-    "↑/↓ sel | (p)ane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-↑/↓ resize | (q)uit";
+    "↑/↓ sel | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout | mod-↑/↓ resize";
 const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
 p cycle panes
+l toggle layout
 PgUp/PgDn page current pane
 Home/End jump current pane
 m monitor highlighted session
@@ -132,6 +133,7 @@ struct SelectedSession {
 
 #[derive(Debug, Clone)]
 struct RetainedUiState {
+    layout_mode: LayoutMode,
     selected_session_id: Option<String>,
     selected_index: usize,
     focus: Focus,
@@ -141,7 +143,14 @@ struct RetainedUiState {
 
 impl Default for RetainedUiState {
     fn default() -> Self {
+        Self::new(LayoutMode::Normal)
+    }
+}
+
+impl RetainedUiState {
+    fn new(layout_mode: LayoutMode) -> Self {
         Self {
+            layout_mode,
             selected_session_id: None,
             selected_index: 0,
             focus: Focus::List,
@@ -149,10 +158,9 @@ impl Default for RetainedUiState {
             top_percent: DEFAULT_TOP_PERCENT,
         }
     }
-}
 
-impl RetainedUiState {
     fn apply_to(&self, app: &mut AppState) {
+        app.layout_mode = self.layout_mode;
         app.selected = self.selected_index;
         app.focus = focus_for_layout(self.focus, app.layout_mode);
         app.left_percent = self
@@ -164,6 +172,7 @@ impl RetainedUiState {
     }
 
     fn update_from(&mut self, app: &AppState) {
+        self.layout_mode = app.layout_mode;
         self.selected_session_id = app.selected_session().map(|session| session.id);
         self.selected_index = app.selected;
         self.focus = app.focus;
@@ -565,6 +574,15 @@ impl AppState {
             (LayoutMode::Portrait, Focus::Motd) => Focus::List,
         };
     }
+
+    fn toggle_layout(&mut self) {
+        self.layout_mode = match self.layout_mode {
+            LayoutMode::Normal => LayoutMode::Portrait,
+            LayoutMode::Portrait => LayoutMode::Normal,
+        };
+        self.focus = focus_for_layout(self.focus, self.layout_mode);
+        self.status = "layout toggled".to_string();
+    }
 }
 
 fn focus_for_layout(focus: Focus, layout_mode: LayoutMode) -> Focus {
@@ -676,7 +694,7 @@ async fn run() -> Result<i32> {
     let cli = Cli::parse();
     let (host, identity) = connect_host(&cli).await?;
     let layout = select_layout(cli.forced_layout());
-    let mut ui_state = RetainedUiState::default();
+    let mut ui_state = RetainedUiState::new(layout);
 
     loop {
         let outcome = run_selector_once(&host, &identity, layout, &mut ui_state).await?;
@@ -1145,6 +1163,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
                 .min(LANDSCAPE_MAX_LEFT_PERCENT);
         }
         (KeyCode::Char('p'), _) => app.focus_next(),
+        (KeyCode::Char('l'), _) => app.toggle_layout(),
         (KeyCode::Up, _) => match app.focus {
             Focus::List => {
                 if app.move_selection(-1) {
@@ -1833,7 +1852,20 @@ mod tests {
         assert!(!normal_status.contains("↑/↓ select"));
         assert!(!normal_status.contains("←/→ pane"));
         assert!(!normal_status.contains("←/→ cycle"));
-        assert!(normal_status.contains("(h)elp | (m)onitor"));
+        assert_status_order(
+            &normal_status,
+            &[
+                "(h)elp",
+                "(p)ane",
+                "(m)onitor",
+                "enter/(a)ttach",
+                "(n)ew",
+                "(k)ill",
+                "(q)uit",
+                "(l)ayout",
+                "mod-←/→ resize",
+            ],
+        );
         assert!(!normal_status.contains("m monitor"));
         assert!(!normal_status.contains("h help"));
         assert!(normal_status.contains("mod-←/→ resize"));
@@ -1863,7 +1895,20 @@ mod tests {
         assert!(!portrait_status.contains("↑/↓ select"));
         assert!(!portrait_status.contains("←/→ pane"));
         assert!(!portrait_status.contains("←/→ cycle"));
-        assert!(portrait_status.contains("(h)elp | (m)onitor"));
+        assert_status_order(
+            &portrait_status,
+            &[
+                "(h)elp",
+                "(p)ane",
+                "(m)onitor",
+                "enter/(a)ttach",
+                "(n)ew",
+                "(k)ill",
+                "(q)uit",
+                "(l)ayout",
+                "mod-↑/↓ resize",
+            ],
+        );
         assert!(!portrait_status.contains("m monitor"));
         assert!(!portrait_status.contains("h help"));
         assert!(portrait_status.contains("mod-↑/↓ resize"));
@@ -1876,6 +1921,20 @@ mod tests {
         assert!(!portrait_status.contains("normal"));
         assert!(!portrait_status.contains("landscape"));
         assert!(!portrait_status.contains("portrait"));
+    }
+
+    fn assert_status_order(status: &str, tokens: &[&str]) {
+        let mut last = 0;
+        for token in tokens {
+            let pos = status.find(token).unwrap_or_else(|| {
+                panic!("missing status token {token:?} in {status:?}");
+            });
+            assert!(
+                pos >= last,
+                "status token {token:?} is out of order in {status:?}"
+            );
+            last = pos;
+        }
     }
 
     #[test]
@@ -1990,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_ui_state_restores_selection_and_split_on_reentry() {
+    fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
         let mut app = AppState::new(
             "host".to_string(),
             LayoutMode::Normal,
@@ -2017,6 +2076,7 @@ mod tests {
         ];
         app.selected = 1;
         app.focus = Focus::Detail;
+        app.layout_mode = LayoutMode::Portrait;
         app.left_percent = 55;
         app.top_percent = 45;
 
@@ -2054,6 +2114,7 @@ mod tests {
             reentered.selected_session().map(|session| session.name),
             Some("build".to_string())
         );
+        assert_eq!(reentered.layout_mode, LayoutMode::Portrait);
         assert_eq!(reentered.focus, Focus::Detail);
         assert_eq!(reentered.left_percent, 55);
         assert_eq!(reentered.top_percent, 45);
@@ -2282,6 +2343,7 @@ mod tests {
         assert!(body.contains(MOTLIE_PLACEHOLDER));
         assert!(body.contains(HELP_KEY_FUNCTIONS));
         assert!(body.contains("↑/↓ select session or scroll detail"));
+        assert!(body.contains("l toggle layout"));
         assert!(body.contains("mod-←/→ resize L/R in landscape"));
         assert!(body.contains("mod-↑/↓ resize T/B in portrait"));
         assert!(body.contains("Build date: "));
@@ -2441,6 +2503,36 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[tokio::test]
+    async fn l_toggles_layout_and_normalizes_motd_focus_for_portrait() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+        app.focus = Focus::Motd;
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert_eq!(app.layout_mode, LayoutMode::Portrait);
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.status, "layout toggled");
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.layout_mode, LayoutMode::Normal);
         assert_eq!(app.focus, Focus::List);
     }
 
