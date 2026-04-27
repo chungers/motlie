@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated keymap tracking so `p` cycles panes and plain Left/Right no longer do. |
 | 2026-04-27 | @gpt55-dgx | Tracked in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Updated resize-bound tracking for landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Updated Help modal tracking for build date and last-8-character git SHA display. |
@@ -206,7 +207,7 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.6 Implement a blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the blue bottom status bar to
-  compact arrow-symbol direction hints (`↑/↓ sel`, `←/→ pane`), command hints
+  compact direction hints (`↑/↓ sel`, `(p)ane`), command hints
   ordered with `(h)elp` first, and app status with no `keys`, host, time,
   focus, or layout-mode labels.
 - [ ] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
@@ -220,7 +221,7 @@ References: [Layout](./DESIGN.md#layout),
 References: [Functional Requirements](./DESIGN.md#functional),
 [Layout](./DESIGN.md#layout).
 
-- [x] 5.1 Implement focus transitions: cyclic Right/Left pane navigation,
+- [x] 5.1 Implement focus transitions: `p` pane navigation,
   outside-modal `Esc` returning to the session list, and `q` as an exit alias
   for `Ctrl-C`.
 - [x] 5.2 Implement session-list movement and scrolling for `LB`/`T`.
@@ -236,7 +237,7 @@ References: [Functional Requirements](./DESIGN.md#functional),
   logo, key functions, build date, and last 8 characters of the build git SHA
   with a single Ok button; Enter or Esc closes it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
-  modal Esc behavior, and cyclic plain Left/Right focus behavior.
+  modal Esc behavior, and `p` pane focus behavior.
 
 ## Phase 6: Detail Sources
 
@@ -255,7 +256,7 @@ References: [R Pane Detail Source](./DESIGN.md#r-pane-detail-source),
 - [x] 6.6 When the user requests older detail content in monitor mode, fetch
   tmux scrollback through `LinesRange` on the same target.
 - [x] 6.7 Add mock-backed tests for monitor screen capture, ANSI/VTE parsing,
-  modified-arrow resize fallbacks, Left/Right focus transitions,
+  modified-arrow resize fallbacks, `p` focus transitions,
   ANSI-preserving sample detail, and monitored-session close behavior.
 
 ## Phase 7: Session Lifecycle Operations

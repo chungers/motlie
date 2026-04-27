@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Documented in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
@@ -153,8 +154,8 @@ Normal mode main-view keys:
 | Up / Down | No-op | Move highlighted session | Scroll detail one line |
 | PgUp / PgDn | No-op | Page session list | Page detail buffer |
 | Home / End | No-op | First / last session | Top / bottom detail; End resumes monitor tail |
-| Right | Focus session list | Focus detail pane | Focus MOTD pane |
-| Left | Focus detail pane | Focus MOTD pane | Focus session list |
+| `p` | Focus session list | Focus detail pane | Focus MOTD pane |
+| Left / Right | No-op | No-op | No-op |
 | `Esc` | Focus session list | Focus session list | Focus session list |
 | `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
 | `m` | Monitor highlighted session | Monitor highlighted session | Monitor highlighted session |
@@ -164,8 +165,8 @@ Normal mode main-view keys:
 | Enter / `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
 
-Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, plain
-Left/Right cycle between `T` and `B`. It uses
+Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, `p`
+cycles between `T` and `B`. It uses
 `Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
 accepted as compatibility fallbacks. Normal mode L/R resize stays clamped to
 25/75; portrait T/B resize is clamped to 15/85.
@@ -183,7 +184,7 @@ shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
-`←/→ pane` for pane focus. It starts command hints with `(h)elp`, then
+`(p)ane` for pane focus. It starts command hints with `(h)elp`, then
 `(m)onitor` and the remaining commands. It does not repeat the host/time, show
 focus/layout mode, or prefix the hints with a `keys` label.
 
