@@ -22,7 +22,8 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-26 | @gpt55-dgx | Document `SessionWatchOptions::normalize`, used by tmux selector monitor mode to strip raw ANSI/control bytes before TUI rendering. |
+| 2026-04-26 | @gpt55-dgx | Document that current-PTY attach restores the parent foreground process group through a `SIGTTOU`-safe path so selector/dashboard callers do not remain stopped after detach. |
+| 2026-04-26 | @gpt55-dgx | Document `SessionWatchOptions::normalize`, available to watch-session consumers that need to strip raw ANSI/control bytes before text rendering. |
 | 2026-04-26 | @gpt55-dgx | Document `HostHandle::exec_shell`, `HostHandle::watch_host_events`, `HostEventStream`, and `ScrollbackQuery::LinesRange` added for the tmux selector implementation. |
 | 2026-04-26 | @gpt55-dgx | Document `HostHandle::session_by_id`, `AttachExit`, and `Target::attach_current_pty` added for tmux selector Phase 1.1 / 1.4. |
 
@@ -798,6 +799,11 @@ interactive `ssh -t ... tmux attach-session -t <target>` command using the
 `SshConfig` already owned by the `HostHandle`. The child runs in its own process
 group; on Unix the current terminal foreground process group is transferred to
 the child and restored after `wait()`.
+
+The Unix restore path ignores `SIGTTOU` only around `tcsetpgrp()`. This matters
+because the selector parent is briefly a background process group after the
+attach child exits; without that guard, shells can leave dashboard callers in a
+stopped-job state after `Ctrl-b d`.
 
 `AttachExit::shell_status()` maps normal exits to their exit code and Unix
 signal exits to `128 + signal`, which is the value CLI callers should return.

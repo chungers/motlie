@@ -5376,6 +5376,7 @@ dependencies = [
 name = "motlie-tmux-select"
 version = "0.1.0"
 dependencies = [
+ "ansi-to-tui",
  "anyhow",
  "chrono",
  "clap",
