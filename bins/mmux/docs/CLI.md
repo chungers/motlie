@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
 | 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Documented in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
@@ -81,8 +82,8 @@ without attach.
 During default attach/re-entry, the parent `mmux` process keeps a small
 in-memory UI snapshot. On return from tmux detach, the selector restores the
 last selected session when it still exists, falls back to the same list index
-when it does not, and keeps the user's pane split and focused pane. This state
-does not persist across separate `mmux` runs.
+when it does not, and keeps the user's layout mode, pane split, and focused
+pane. This state does not persist across separate `mmux` runs.
 
 For remote targets:
 
@@ -158,6 +159,7 @@ Normal mode main-view keys:
 | Left / Right | No-op | No-op | No-op |
 | `Esc` | Focus session list | Focus session list | Focus session list |
 | `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
+| `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
 | `m` | Monitor highlighted session | Monitor highlighted session | Monitor highlighted session |
 | `n` | Open New Session modal | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
@@ -184,9 +186,10 @@ shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
-`(p)ane` for pane focus. It starts command hints with `(h)elp`, then
-`(m)onitor` and the remaining commands. It does not repeat the host/time, show
-focus/layout mode, or prefix the hints with a `keys` label.
+`(p)ane` for pane focus. It orders command hints as `(h)elp`, `(p)ane`,
+`(m)onitor`, `enter/(a)ttach`, `(n)ew`, `(k)ill`, `(q)uit`, `(l)ayout`, then
+mode-specific resize. It does not repeat the host/time, show focus/layout
+mode, or prefix the hints with a `keys` label.
 
 Modal keys:
 
