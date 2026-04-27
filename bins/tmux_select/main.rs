@@ -13,7 +13,8 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use motlie_tmux::{
     has_visible_text, strip_ansi, CaptureNormalizeMode, CaptureOptions, CaptureResult,
@@ -36,26 +37,21 @@ const MAX_LEFT_PERCENT: u16 = 75;
 const MIN_TOP_PERCENT: u16 = 25;
 const MAX_TOP_PERCENT: u16 = 75;
 
-const MOTLIE_PLACEHOLDER: &str = r#"███╗   ███╗  ██████╗  ████████╗ ██╗      ██╗ ███████╗
- ████╗ ████║ ██╔═══██╗ ╚══██╔══╝ ██║      ██║ ██╔════╝
- ██╔████╔██║ ██║   ██║    ██║    ██║      ██║ █████╗    ╲╲ ║ ╱╱
- ██║╚██╔╝██║ ██║   ██║    ██║    ██║      ██║ ██╔══╝    ══ ╬ ══
- ██║ ╚═╝ ██║ ╚██████╔╝    ██║    ███████╗ ██║ ███████╗  ╱╱ ║ ╲╲
- ╚═╝     ╚═╝  ╚═════╝     ╚═╝    ╚══════╝ ╚═╝ ╚══════╝"#;
-
-const COMPACT_MOTLIE_PLACEHOLDER: &str = r#"▄   ▄ ▄
- ▄ ▄▄ ▄▄▄   ▄▄▄ ┃ ┃▄┃ (▄) ▄▄▄   ╲╲ ║ ╱╱
+const MOTLIE_PLACEHOLDER: &str = r#"_   _ _
+ _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱
 ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
 ┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
 ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃"#;
+
+const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "tmux_select")]
 #[command(about = "Select, preview, monitor, and attach tmux sessions")]
 struct Cli {
-    /// Use compact short mode.
-    #[arg(short = 's')]
-    short: bool,
+    /// Force portrait layout instead of auto-detecting from the current PTY.
+    #[arg(long)]
+    portrait: bool,
     /// Print the selected session name and exit instead of attaching.
     #[arg(long, conflicts_with = "dashboard")]
     print_session: bool,
@@ -69,7 +65,7 @@ struct Cli {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayoutMode {
     Normal,
-    Short,
+    Portrait,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,11 +567,7 @@ async fn run() -> Result<i32> {
 
     let cli = Cli::parse();
     let (host, label) = connect_host(&cli).await?;
-    let layout = if cli.short {
-        LayoutMode::Short
-    } else {
-        LayoutMode::Normal
-    };
+    let layout = select_layout(cli.portrait);
 
     loop {
         let outcome = run_selector_once(&host, &label, layout).await?;
@@ -668,6 +660,20 @@ async fn connect_host(cli: &Cli) -> Result<(HostHandle, String)> {
         }
         None => Ok((HostHandle::local(), "localhost".to_string())),
     }
+}
+
+fn select_layout(force_portrait: bool) -> LayoutMode {
+    if force_portrait {
+        return LayoutMode::Portrait;
+    }
+    match terminal_size() {
+        Ok((columns, rows)) if is_portrait_pty(columns, rows) => LayoutMode::Portrait,
+        _ => LayoutMode::Normal,
+    }
+}
+
+fn is_portrait_pty(columns: u16, rows: u16) -> bool {
+    rows > 0 && (columns as u32).saturating_mul(10) < (rows as u32).saturating_mul(22)
 }
 
 async fn run_selector_once(
@@ -878,12 +884,12 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
             app.status = "no session selected".to_string();
         }
         (KeyCode::Up, modifiers)
-            if app.layout_mode == LayoutMode::Short && is_resize_modifier(modifiers) =>
+            if app.layout_mode == LayoutMode::Portrait && is_resize_modifier(modifiers) =>
         {
             app.top_percent = app.top_percent.saturating_sub(5).max(MIN_TOP_PERCENT);
         }
         (KeyCode::Down, modifiers)
-            if app.layout_mode == LayoutMode::Short && is_resize_modifier(modifiers) =>
+            if app.layout_mode == LayoutMode::Portrait && is_resize_modifier(modifiers) =>
         {
             app.top_percent = app.top_percent.saturating_add(5).min(MAX_TOP_PERCENT);
         }
@@ -1134,7 +1140,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
 
     match app.layout_mode {
         LayoutMode::Normal => draw_normal(frame, chunks[0], app),
-        LayoutMode::Short => draw_short(frame, chunks[0], app),
+        LayoutMode::Portrait => draw_portrait(frame, chunks[0], app),
     }
     draw_status(frame, chunks[1], app);
     if let Some(modal) = &app.modal {
@@ -1171,7 +1177,7 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     draw_detail(frame, columns[1], app, " Detail ");
 }
 
-fn draw_short(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1341,9 +1347,9 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     };
     let mode = match app.layout_mode {
         LayoutMode::Normal => "normal",
-        LayoutMode::Short => "short",
+        LayoutMode::Portrait => "portrait",
     };
-    let keys = if app.layout_mode == LayoutMode::Short {
+    let keys = if app.layout_mode == LayoutMode::Portrait {
         "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-up/down resize | q quit"
     } else {
         "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-left/right resize | q quit"
@@ -1433,6 +1439,24 @@ mod tests {
         let result = Cli::try_parse_from(["tmux_select", "--print-session", "--dashboard"]);
         assert!(result.is_err());
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_accepts_portrait_and_rejects_old_short_flag() {
+        let portrait = Cli::try_parse_from(["tmux_select", "--portrait"]).unwrap();
+        assert!(portrait.portrait);
+
+        let old_short = Cli::try_parse_from(["tmux_select", "-s"]);
+        assert!(old_short.is_err());
+    }
+
+    #[test]
+    fn layout_auto_detection_uses_pty_aspect_ratio() {
+        assert_eq!(select_layout(true), LayoutMode::Portrait);
+        assert!(is_portrait_pty(65, 32));
+        assert!(is_portrait_pty(40, 40));
+        assert!(!is_portrait_pty(80, 24));
+        assert!(!is_portrait_pty(100, 30));
     }
 
     #[test]

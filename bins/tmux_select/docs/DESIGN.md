@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, startup auto-detects portrait layout from PTY dimensions, the old `-s` flag is no longer accepted, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
 | 2026-04-26 | @gpt55-dgx | Updated implemented keymap and rendering details: attach is Enter/`a`, Right/Left move focus between list and detail/monitor panes, Shift-arrow resize is documented for macOS iTerm2, sample detail preserves ANSI color, session-list refresh is polling-backed snapshot reconciliation, and narrow MOTD fallback stays graphical. |
 | 2026-04-26 | @gpt55-dgx | Initial DESIGN for GitHub issue #226: local/remote tmux session selector TUI, session detail sources, monitoring mode, modal create/kill flows, accepted current-PTY attach gap, host-wide SSH integration, and SVG mock. |
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 review additions from @opus47-macos-tmux: live session-list event stream via tmux control-mode notifications; focus model with `l` / `v` / `Esc` and visual focus borders; both panes scrollable with R-pane resample-backwards; bold-green motlie ASCII placeholder when MOTD absent (LT bypasses 30% cap to fit); PTY handoff non-functional requirement (no VTE-in-middle); spawn-and-wait attach with `setpgid`+`tcsetpgrp` signal hygiene; default-attach polarity with opt-in `--print-session` and opt-in `--dashboard` (re-enter on clean detach, bounded by `child.status.success()` AND list refresh AND user pick); two new accepted library gaps (`HostHandle::watch_host_events()`, `ScrollbackQuery::LinesRange`); alternatives B/C moved to appendix; testing-strategy additions; open-questions resolutions. |
@@ -76,28 +77,17 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `(motd unavailable: <reason>)` on read failure). In this case `LT` height
   bypasses the 30% cap and expands to exactly fit
   `glyph_rows + caption_row + chrome` when space allows. When `L_width < 63`
-  columns or there is not enough vertical room to expand, fall back to the
-  compact motlie glyph plus `(no /etc/motd)` caption (still bold-green), not a
-  text-only placeholder. The glyph assets are baked into the binary as
-  `&'static str` values (no inline ANSI
+  columns or there is not enough vertical room to expand, keep the same
+  motlie glyph plus `(no /etc/motd)` caption (still bold-green), not a
+  text-only placeholder. The glyph asset is baked into the binary as a
+  `&'static str` value (no inline ANSI
   escapes); styling is applied at render time via ratatui
   `Style { fg: Color::Green, add_modifier: Modifier::BOLD }`. Asset glyphs
-  (use exactly for the full-width placeholder):
+  (use exactly):
 
   ```text
-  ███╗   ███╗  ██████╗  ████████╗ ██╗      ██╗ ███████╗
-   ████╗ ████║ ██╔═══██╗ ╚══██╔══╝ ██║      ██║ ██╔════╝
-   ██╔████╔██║ ██║   ██║    ██║    ██║      ██║ █████╗    ╲╲ ║ ╱╱
-   ██║╚██╔╝██║ ██║   ██║    ██║    ██║      ██║ ██╔══╝    ══ ╬ ══
-   ██║ ╚═╝ ██║ ╚██████╔╝    ██║    ███████╗ ██║ ███████╗  ╱╱ ║ ╲╲
-   ╚═╝     ╚═╝  ╚═════╝     ╚═╝    ╚══════╝ ╚═╝ ╚══════╝
-  ```
-
-  Compact placeholder:
-
-  ```text
-  ▄   ▄ ▄
-   ▄ ▄▄ ▄▄▄   ▄▄▄ ┃ ┃▄┃ (▄) ▄▄▄   ╲╲ ║ ╱╱
+  _   _ _
+   _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱
   ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
   ┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
   ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃
@@ -189,20 +179,24 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   selected session still exists (see §Data Flow → Attach for the
   bounded re-entry rule). `--print-session` and `--dashboard` are mutually
   exclusive; combining them is a startup error.
-- The binary accepts a short-mode
-  flag `-s`. Short mode renders a compact layout optimized for 32 rows × ~65
+- The binary accepts a portrait-mode
+  flag `--portrait`. Portrait mode renders a compact layout optimized for 32 rows × ~65
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 40:60 ratio. MOTD and the
-  motlie placeholder are omitted in short mode to maximize content density.
+  motlie placeholder are omitted in portrait mode to maximize content density.
   All command keys (Left/Right focus, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
   identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
-  differ by mode: short mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
+  differ by mode: portrait mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
   normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`, with
   modified-arrow fallback sequences accepted for terminal compatibility. Plain
   `Left`/`Right` move focus between list and detail/monitor in main view;
-  modal use of `Left`/`Right` for button selection is unchanged. `-s` composes
-  with `--print-session`, `--dashboard`, and SSH targets.
+  modal use of `Left`/`Right` for button selection is unchanged. Without
+  `--portrait`, the selector calls `crossterm::terminal::size()` on the
+  connecting PTY and selects portrait mode when `columns / rows < 2.2`;
+  otherwise it uses normal landscape layout. If the PTY size cannot be read,
+  it defaults to normal layout. `--portrait` composes with `--print-session`,
+  `--dashboard`, and SSH targets.
 - The binary must use `motlie-tmux` for tmux operations and must not duplicate
   tmux command logic in the binary.
 
@@ -310,7 +304,7 @@ Additional flags:
 | (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). Selector exits with the child's `ExitStatus`. |
 | `--print-session` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --print-session)"`. |
 | `--dashboard` | TUI → select → spawn-and-wait attach → on clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). See §Data Flow → Attach for the bounded re-entry rule. |
-| `-s` | Short-mode layout: vertical T/B split (40:60) optimized for 32×65 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--print-session`, `--dashboard`, and SSH targets. See §Layout → Short mode. |
+| `--portrait` | Force portrait layout: vertical T/B split (40:60) optimized for 32×65 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--print-session`, `--dashboard`, and SSH targets. Without this flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
 | `--print-session` + `--dashboard` | Mutually exclusive — startup error. |
 
 Polarity rationale (default attach): the binary's primary product is a session
@@ -378,16 +372,16 @@ Resize keys use modified arrows so plain arrows are unambiguously reserved for
 navigation, scrolling, and focus movement. Normal mode advertises
 `Ctrl-Left`/`Ctrl-Right` for the L/R split and also accepts common terminal
 fallbacks; on macOS iTerm2 the observed fallback is `Shift-Left` /
-`Shift-Right`. Short mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
+`Shift-Right`. Portrait mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
 and accepts the same modifier family.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok`; `Enter` exits and applies `Ok` if selected; `Esc` is
 `Cancel`.
 
-### Short Mode (`-s`)
+### Portrait Mode
 
-Short mode is optimized for compact terminal contexts where horizontal width is
+Portrait mode is optimized for compact terminal contexts where horizontal width is
 constrained: mobile SSH clients, IDE-embedded terminals, tmux pop-ups
 (`display-popup`), and narrow ForceCommand deployments.
 
@@ -404,7 +398,7 @@ at smaller sizes but is tuned for this target.
   behavior). Default focus.
 - `B` = detail pane. Equivalent to `R` in normal mode (same trait-backed
   sample/monitor sources, same scroll-back-on-up, same monitor tail-pause).
-- MOTD (`LT`) and the motlie placeholder are **omitted** in short mode to
+- MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar focus indicator and key hints
   remain, but key hints must be terser to fit ~65 cols. Use ASCII-first
   compact labels so narrow SSH clients and IDE terminals render predictably,
@@ -422,7 +416,7 @@ at smaller sizes but is tuned for this target.
 
 **Resize keys (mode-dependent):**
 
-| Key | Normal mode | Short mode |
+| Key | Normal mode | Portrait mode |
 |-----|-------------|------------|
 | Modified Left / Right | Resize `L`/`R` split | (no-op; `L`/`R` not present) |
 | Modified Up / Down | (no-op; `T`/`B` not present) | Resize `T`/`B` split |
@@ -434,10 +428,14 @@ focus-independent and behave the same. `q`/`Ctrl-C` exits without attaching.
 Modal keymap (Left/Right for button
 selection, Enter to apply, Esc to Cancel) is unchanged.
 
-**Composition with other flags:** `-s` composes with `--print-session`,
+**Auto-detection and composition:** Without `--portrait`, startup reads the
+current PTY size through `crossterm::terminal::size()`. It selects portrait mode
+when `columns / rows < 2.2`; typical 80x24 and 100x30 terminals stay normal,
+while 65x32 and square-ish PTYs use portrait mode. If the size cannot be read,
+normal mode is used. `--portrait` composes with `--print-session`,
 `--dashboard`, SSH targets, and the `MOTLIE_TMUX_SELECT_BYPASS` env-var
-admin bypass. ForceCommand deployments may use `-s` for tight-display
-hosts (`ForceCommand /usr/local/bin/tmux_select -s --dashboard`).
+admin bypass. ForceCommand deployments may use `--portrait` for tight-display
+hosts (`ForceCommand /usr/local/bin/tmux_select --portrait --dashboard`).
 
 ## SVG Mock
 
@@ -456,8 +454,8 @@ The SVG mock includes the following panels:
 4. `New Session` modal.
 5. Kill confirmation modal with title `Kill session <name>?`.
 6. MOTD-absent state with bold-green motlie glyph placeholder.
-7. Short mode (`-s`) main view with focused `T`.
-8. Short mode focused-`B` variant.
+7. Portrait mode main view with focused `T`.
+8. Portrait mode focused-`B` variant.
 
 ## R Pane Detail Source
 
@@ -547,8 +545,8 @@ initial hot path.
 
 ### Startup
 
-1. Parse CLI target and flags (`--print-session`, `--dashboard`; mutually
-   exclusive — error on both).
+1. Parse CLI target and flags (`--portrait`, `--print-session`, `--dashboard`;
+   `--print-session` and `--dashboard` are mutually exclusive — error on both).
 2. Connect to local or SSH target with `motlie-tmux`.
 3. Load target host MOTD (or render the motlie placeholder when absent).
 4. List sessions.
@@ -1023,11 +1021,13 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     cap; narrow-terminal fallback still renders compact glyph art
   - status bar reservation
   - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
-  - Short mode (`-s`) layout at
+  - Portrait mode layout at
     32×65 viewport: body = 31 rows; T/B split at 40:60 yields T ≈ 12 rows
     and B ≈ 19 rows; MOTD/motlie omitted; status bar present
-  - Short mode modified Up/Down resize bounds (minimum heights so neither pane
+  - Portrait mode modified Up/Down resize bounds (minimum heights so neither pane
     collapses to 0); normal mode modified Left/Right parallel
+  - PTY aspect-ratio auto-detection: 65x32 and square-ish PTYs select portrait;
+    80x24 and 100x30 select normal; `--portrait` forces portrait
   - Plain Right focuses detail from list; plain Left focuses list from detail;
     modal use of Left/Right for button selection is unchanged
 - Unit tests for state transitions:
@@ -1121,7 +1121,7 @@ that remain speculative stay explicitly open.
   session list to detail/monitor, and plain Left returns focus to the session
   list. Modified arrows own resize. Modal Left/Right keeps button selection
   behavior.
-- **Short-mode status hints** — ASCII-first compact labels. Unicode affordance
+- **Portrait-mode status hints** — ASCII-first compact labels. Unicode affordance
   glyphs can be considered later, but v1 must render predictably in narrow
   SSH clients and IDE terminals.
 - **Monitor history bound** — Superseded by screen-mirror monitor mode. The
