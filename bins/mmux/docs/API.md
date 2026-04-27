@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented modal padding, button-bar separators, bordered New Session input, and Help build metadata placement. |
 | 2026-04-27 | @gpt55-dgx | Documented bottom status command ordering and `l` runtime layout toggling. |
 | 2026-04-27 | @gpt55-dgx | Documented `p` as the main-view pane-cycle key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Documented in-memory retained selector UI state for default attach/detach re-entry. |
@@ -238,8 +239,10 @@ environment override or by reading `.git`/`HEAD`/refs/`packed-refs` directly
 with Rust filesystem APIs. It sets `MMUX_BUILD_DATE` from an explicit
 environment override or from `SystemTime` converted to a UTC `YYYY-MM-DD` date
 in Rust. The Help modal opened by `h` renders the build date and only the last
-8 characters of the git SHA below the built-in motlie logo and key-function
-reference.
+8 characters of the git SHA below the built-in motlie logo and above the
+key-function reference. Modal content is padded inside the outer border, and
+the button bar is separated from the main content by a horizontal rule.
+New Session also renders its session-name input in a bordered field.
 
 ## Detail Source Contract
 

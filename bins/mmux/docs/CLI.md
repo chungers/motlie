@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
 | 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
 | 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Documented in-memory selector UI state retention across default attach/detach re-entry. |
@@ -199,9 +200,10 @@ Modal keys:
 | Enter | Close modal. Applies Ok when selected in New Session or Kill Session. |
 | Esc | Cancel New Session / Kill Session, or close Help. |
 
-The Help modal shows the built-in motlie logo, key functions below the logo,
-the build date, the last 8 characters of the build git SHA, and a single Ok
-button.
+Modal content is padded inside the border. New Session renders the session-name
+field with its own border. Help renders the built-in motlie logo, build date,
+last 8 characters of the build git SHA, key functions, and a single Ok button.
+All modal content areas are separated from the button bar by a horizontal line.
 
 ## ForceCommand
 

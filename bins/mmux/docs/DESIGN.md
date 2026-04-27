@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
 | 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
 | 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Added in-memory selector UI state retention across default attach/detach re-entry. |
@@ -152,13 +153,16 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode `%output` replay, because TUI programs rely on cursor movement,
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
-- Pressing `n` opens a centered `New Session` modal with a session-name text
-  field and `Cancel` / `Ok` buttons.
+- Pressing `n` opens a centered `New Session` modal with padded content, a
+  bordered session-name text field, a horizontal separator, and `Cancel` /
+  `Ok` buttons in the button bar.
 - Pressing `k` opens a centered `Kill session <name>?` confirmation modal with
-  `Cancel` / `Ok` buttons.
+  padded content, a horizontal separator, and `Cancel` / `Ok` buttons in the
+  button bar.
 - Pressing `h` opens a centered help modal with the built-in motlie logo,
-  key-function reference text, the current build git SHA, and an `Ok` button.
-  The key-function reference renders below the logo and above the `Ok` button.
+  build date, current build git SHA, key-function reference text, a horizontal
+  separator, and an `Ok` button. Build metadata renders below the logo and
+  above the key-function reference.
 - In create/kill modal dialogs, Left and Right choose between `Cancel` and
   `Ok`; Enter exits the modal and applies `Ok` when selected. `Esc` in a modal
   is `Cancel` and closes without applying. In the help modal, Enter or `Esc`
@@ -375,8 +379,7 @@ The body area is split horizontally into `L` and `R`.
 **Focus model.** The landscape main view has three focus states: `LT`, `Lb`
 (default), and `R`. Focus transitions are explicit:
 
-- Right → cycle `LT -> Lb -> R -> LT`
-- Left → cycle `LT -> R -> Lb -> LT`
+- `p` → cycle `LT -> Lb -> R -> LT`
 - `Esc` outside any modal: return focus to `Lb` (use `q` or `Ctrl-C` to
   exit). `Esc` inside any modal is equivalent to that modal's `Cancel` button.
 
@@ -699,6 +702,8 @@ selector re-entry):
 
 1. Pressing `n` opens the modal.
 2. User enters a name and selects `Ok`.
+   The text field is bordered, and the button bar is separated from the
+   padded content area by a horizontal rule.
 3. Call `HostHandle::create_session(name, &Default::default())`.
 4. Refresh session list.
 5. Highlight the created session.
@@ -708,6 +713,8 @@ selector re-entry):
 
 1. Pressing `k` opens confirmation for the highlighted session.
 2. User selects `Ok`.
+   The confirmation text is padded away from the modal border, and the button
+   bar is separated from content by a horizontal rule.
 3. On kill-modal-open, capture the stable session id from the highlighted
    `SessionInfo` and dispatch the kill against that id, not the display name.
    If the session was killed by another client between list and resolve,
@@ -1077,10 +1084,10 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - sample vs monitor mode
   - modal button selection
   - create/kill success and error paths
-  - Help modal opens on `h`, shows the logo, key functions, build date, and
-    last 8 characters of the build git SHA, and closes on Enter or `Esc`
-  - focus cycling: Right `LT`→`Lb`→`R`→`LT`, Left in reverse, `Esc` outside
-    modal returns focus to `Lb`
+  - Help modal opens on `h`, shows the logo, build date, last 8 characters of
+    the build git SHA, key functions, and closes on Enter or `Esc`
+  - focus cycling: `p` cycles `LT`→`Lb`→`R`→`LT`; `Esc` outside modal returns
+    focus to `Lb`
   - `Esc` inside modal = `Cancel`
 - Style/snapshot tests:
   - motlie glyph placeholder spans carry `Modifier::BOLD` and `Color::Green`
