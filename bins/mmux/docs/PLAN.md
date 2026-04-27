@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated status tracking for `|` host/IP separator and `(h)elp`-first bottom command hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status/title tracking for a top host/time status bar and count-only Sessions title. |
 | 2026-04-27 | @gpt55-dgx | Updated focus/input tracking for cyclic Left/Right pane navigation, including landscape MOTD focus. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector workspace package/path/binary references to `motlie-mmux`, `bins/mmux`, and `mmux`. |
@@ -199,10 +200,10 @@ References: [Layout](./DESIGN.md#layout),
   omit MOTD.
 - [x] 4.5 Implement focused/unfocused border styles.
 - [x] 4.6 Implement a blue top status bar with bold left-justified
-  `<hostname>, <ip address>` and right-justified time; keep the Sessions pane
+  `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the blue bottom status bar to
-  compact arrow-symbol key hints and app status with no `keys`, host, time,
-  focus, or layout-mode labels.
+  compact arrow-symbol key hints ordered with `(h)elp` first and app status
+  with no `keys`, host, time, focus, or layout-mode labels.
 - [ ] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.

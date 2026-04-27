@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
 | 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
 | 2026-04-27 | @gpt55-dgx | Changed plain Left/Right from one-way list/detail focus movement to cyclic pane focus movement. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector command to `mmux` and updated CLI/ForceCommand examples. |
@@ -166,11 +167,12 @@ stable-id snapshot diffing. It is not currently driven by direct tmux
 control-mode host notifications.
 
 The top status bar uses the same blue background as the bottom status bar. It
-shows `<hostname>, <ip address>` in bold at the left and the current time
+shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom blue status bar shows compact key hints and
-status text only; it does not repeat the host/time, show focus/layout mode, or
-prefix the hints with a `keys` label.
+status text only; it starts command hints with `(h)elp`, then `(m)onitor` and
+the remaining commands. It does not repeat the host/time, show focus/layout
+mode, or prefix the hints with a `keys` label.
 
 Modal keys:
 
