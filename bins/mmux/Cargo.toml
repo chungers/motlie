@@ -1,5 +1,5 @@
 [package]
-name = "motlie-tmux-select"
+name = "motlie-mmux"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 description = "TUI tmux session selector"
 
 [[bin]]
-name = "tmux_select"
+name = "mmux"
 path = "main.rs"
 
 [dependencies]

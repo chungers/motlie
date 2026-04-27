@@ -1,15 +1,16 @@
-# tmux_select API
+# mmux API
 
 ## Status
 
-Implemented API contract for the initial `tmux_select` selector and the
+Implemented API contract for the initial `mmux` selector and the
 `motlie-tmux` support it consumes. This document reflects the code in
-`bins/tmux_select/main.rs` and the new support APIs in `libs/tmux`.
+`bins/mmux/main.rs` and the new support APIs in `libs/tmux`.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Renamed the selector binary/package docs to `mmux` / `motlie-mmux`. |
 | 2026-04-27 | @gpt55-dgx | Documented Sessions title count/hostname/IP format and removal of the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Documented moving the host label from status text into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Documented arrow-symbol status hints and Help modal key-function content. |
@@ -140,7 +141,7 @@ both sample mode and monitor mode when the user scrolls older than the current
 buffer start.
 
 Status: implemented in `motlie-tmux` capture paths and used by
-`tmux_select` PageUp detail fetches.
+`mmux` PageUp detail fetches.
 
 ### Stable Session-Id Dispatch
 
@@ -209,8 +210,8 @@ only current time and compact key hints, not the host label or a `keys` prefix.
 ## Build Metadata
 
 The binary embeds a build-time git SHA in a private `BUILD_GIT_SHA` constant.
-`bins/tmux_select/build.rs` sets `TMUX_SELECT_GIT_SHA` from
-`git rev-parse HEAD`, or uses an explicit `TMUX_SELECT_GIT_SHA` environment
+`bins/mmux/build.rs` sets `MMUX_GIT_SHA` from
+`git rev-parse HEAD`, or uses an explicit `MMUX_GIT_SHA` environment
 override when provided. The Help modal opened by `h` renders that value below
 the built-in motlie logo and key-function reference.
 
@@ -327,7 +328,7 @@ Validation rules:
 - the old `-s` flag is rejected
 - target is positional SSH URI only
 - omitted target means local host
-- `SSH_ORIGINAL_COMMAND` is rejected unless `MOTLIE_TMUX_SELECT_BYPASS=1`
+- `SSH_ORIGINAL_COMMAND` is rejected unless `MOTLIE_MMUX_BYPASS=1`
   delegates to `sh -lc "$SSH_ORIGINAL_COMMAND"` before the selector starts
 
 ## Testing Contracts
@@ -353,7 +354,7 @@ Current implementation coverage:
 - `cargo test -p motlie-tmux`: attach command/status including the
   `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
   and stable-id kill coverage.
-- `cargo test -p motlie-tmux-select`: CLI mutual exclusion, stable-id
+- `cargo test -p motlie-mmux`: CLI mutual exclusion, stable-id
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,

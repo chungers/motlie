@@ -1,4 +1,4 @@
-# tmux_select Design
+# mmux Design
 
 ## Status
 
@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Renamed the selector executable and docs to `mmux`, including ForceCommand examples and mock asset references. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` label from the status bar. |
 | 2026-04-27 | @gpt55-dgx | Moved host label from the status bar into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
@@ -34,7 +35,7 @@ Draft.
 ## Product Scope
 
 This is a greenfield product surface. The repository already has `motlie-tmux`
-and `motlie-driver`, but `tmux_select` is a new user-facing binary with no
+and `motlie-driver`, but `mmux` is a new user-facing binary with no
 compatibility or migration burden. Backward compatibility for an older selector
 CLI is out of scope.
 
@@ -254,7 +255,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 current terminal / SSH client PTY
         |
         v
-tmux_select binary
+mmux binary
         |
         +-- TargetConnection
         |      +-- local: HostHandle::local()
@@ -302,13 +303,13 @@ enum TargetConnection {
 The CLI accepts:
 
 ```text
-tmux_select
-tmux_select ssh://user@host
-tmux_select 'ssh://user@host?identity-file=/path/to/key'
+mmux
+mmux ssh://user@host
+mmux 'ssh://user@host?identity-file=/path/to/key'
 ```
 
 The accepted v1 CLI target form is a positional SSH URI:
-`tmux_select [ssh-uri]`. Do not add `--target` in v1; keeping a single target
+`mmux [ssh-uri]`. Do not add `--target` in v1; keeping a single target
 form keeps help text and ForceCommand examples unambiguous. Revisit in a
 follow-up only if PLAN finds positional friction with deployment tools.
 
@@ -317,7 +318,7 @@ Additional flags:
 | Flag | Behavior |
 |------|----------|
 | (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). On clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). |
-| `--script` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --script)"`. |
+| `--script` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(mmux --script)"`. |
 | `--portrait` / `-p` | Force portrait layout: vertical T/B split (30:70) optimized for 32x64 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--script` and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
 | `--landscape` / `-l` | Force landscape/normal layout: `L`/`R` split with `LT` MOTD and `LB` session list. Composes with `--script` and SSH targets. Mutually exclusive with `--portrait` / `-p`. |
 | `--portrait` + `--landscape` | Mutually exclusive — startup error. |
@@ -450,16 +451,16 @@ selection, Enter to apply, Esc to Cancel) is unchanged.
 `columns / rows <= 4.0`; 66x30, 80x24, 100x30, 160x40, and square-ish PTYs use
 portrait mode. Wider PTYs use landscape mode. If the size cannot be read,
 landscape mode is used. Layout force flags compose with `--script`, SSH
-targets, and the `MOTLIE_TMUX_SELECT_BYPASS` env-var
+targets, and the `MOTLIE_MMUX_BYPASS` env-var
 admin bypass. ForceCommand deployments may use explicit layout flags for fixed
-display contexts (`ForceCommand /usr/local/bin/tmux_select --portrait`
-or `ForceCommand /usr/local/bin/tmux_select --landscape`).
+display contexts (`ForceCommand /usr/local/bin/mmux --portrait`
+or `ForceCommand /usr/local/bin/mmux --landscape`).
 
 ## SVG Mock
 
 The DESIGN mock source is checked in beside this document:
 
-![tmux_select TUI mock](./tmux-select-mock.svg)
+![mmux TUI mock](./mmux-mock.svg)
 
 If GitHub issue rendering supports the chosen SVG embedding path, this same SVG
 should be attached or linked from issue #226 after the branch is pushed.
@@ -925,13 +926,13 @@ The local-host deployment target is `ForceCommand`.
 ```text
 Match Group tmux-users
     PermitTTY yes
-    ForceCommand /usr/local/bin/tmux_select
+    ForceCommand /usr/local/bin/mmux
 ```
 
 Operational behavior:
 
 1. `sshd` allocates the user's PTY.
-2. `sshd` starts `tmux_select` instead of the login shell.
+2. `sshd` starts `mmux` instead of the login shell.
 3. The selector targets the local host unless deployment passes an allowed SSH
    target argument.
 4. User selects, monitors, creates, kills, or attaches.
@@ -954,12 +955,12 @@ Recommended initial deployment policy:
   admin bypass is configured outside the binary.
 
 Concrete admin-bypass mechanism:
-the binary reads the environment variable `MOTLIE_TMUX_SELECT_BYPASS` at
+the binary reads the environment variable `MOTLIE_MMUX_BYPASS` at
 startup. If unset or empty, `SSH_ORIGINAL_COMMAND` is rejected with a stderr
 message and the binary exits non-zero. If set to `1` (or any non-empty
 value), the binary exec's `SSH_ORIGINAL_COMMAND` via the user's login shell
 (`/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) and bypasses the TUI entirely.
-Deployments enable this by adding `AcceptEnv MOTLIE_TMUX_SELECT_BYPASS` to
+Deployments enable this by adding `AcceptEnv MOTLIE_MMUX_BYPASS` to
 `sshd_config` for the relevant `Match Group` (or by setting the variable
 via PAM/login.defs for specific users/groups). This keeps the bypass
 configuration external to the binary while giving PLAN a concrete
@@ -971,13 +972,13 @@ Recommended deployments:
 
 ```text
 # Default: TUI selector with attach/re-enter
-ForceCommand /usr/local/bin/tmux_select
+ForceCommand /usr/local/bin/mmux
 ```
 
 ## Approach (Selected)
 
 **A. New Binary Built Directly On motlie-tmux** — adopted as the main body
-of this DESIGN. Create `tmux_select` as a focused binary that uses
+of this DESIGN. Create `mmux` as a focused binary that uses
 `motlie-tmux` APIs for all tmux and SSH operations.
 
 Pros:
@@ -1107,7 +1108,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - attach to remote selected session through an interactive PTY
   - `SSH_ORIGINAL_COMMAND` is
     rejected in default mode; bypassed (exec'd via shell) when
-    `MOTLIE_TMUX_SELECT_BYPASS=1` and present
+    `MOTLIE_MMUX_BYPASS=1` and present
 
 ## Open Questions
 
@@ -1116,7 +1117,7 @@ that remain speculative stay explicitly open.
 
 ### Decided
 
-- **CLI form** — Positional SSH URI only (`tmux_select [ssh-uri]`). No
+- **CLI form** — Positional SSH URI only (`mmux [ssh-uri]`). No
   `--target` flag in v1. Revisit if PLAN finds positional friction.
 - **Modal `Esc`** — `Esc` in any modal is equivalent to `Cancel`.
 - **`Esc` outside modal** — Equivalent to Left when focus is `R`; no-op when

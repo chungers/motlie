@@ -1,8 +1,8 @@
-# tmux_select Implementation Plan
+# mmux Implementation Plan
 
 ## Status
 
-Implementation plan for the `tmux_select` selector described in
+Implementation plan for the `mmux` selector described in
 [DESIGN.md](./DESIGN.md). The first implementation pass has landed on the
 `@gpt55-dgx/session-selector-impl` branch with the selector binary, the accepted
 current-PTY attach gap, windowed scrollback, stable session-id dispatch, and a
@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Renamed the selector workspace package/path/binary references to `motlie-mmux`, `bins/mmux`, and `mmux`. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title tracking for count/hostname/IP format and removed the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Moved host-label tracking from the status bar to the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Updated status hint tracking to use arrow symbols and expanded help modal coverage for key functions. |
@@ -38,7 +39,7 @@ compatibility requirement for an older selector binary.
 Implementation must proceed in this order:
 
 1. Add the `motlie-tmux` capabilities the selector depends on.
-2. Add the binary scaffold under `bins/tmux_select`.
+2. Add the binary scaffold under `bins/mmux`.
 3. Build the TUI in slices that are independently testable.
 4. Add attach and deployment flows after terminal cleanup is reliable.
 
@@ -51,8 +52,8 @@ Use a dedicated tmux socket for local tests so developer sessions are not
 modified:
 
 ```bash
-export MOTLIE_TMUX_SELECT_SOCKET=motlie-select-test
-tmux -L "$MOTLIE_TMUX_SELECT_SOCKET" start-server
+export MOTLIE_MMUX_SOCKET=motlie-select-test
+tmux -L "$MOTLIE_MMUX_SOCKET" start-server
 ```
 
 Recommended verification commands as phases land:
@@ -61,20 +62,20 @@ Recommended verification commands as phases land:
 cargo fmt --all
 cargo check -p motlie-tmux
 cargo test -p motlie-tmux
-cargo check -p motlie-tmux-select
-cargo test -p motlie-tmux-select
+cargo check -p motlie-mmux
+cargo test -p motlie-mmux
 cargo clippy -p motlie-tmux -- -D warnings
-cargo clippy -p motlie-tmux-select -- -D warnings
+cargo clippy -p motlie-mmux -- -D warnings
 ```
 
-The `motlie-tmux-select` package now exists under `bins/tmux_select`.
+The `motlie-mmux` package now exists under `bins/mmux`.
 
 SSH integration tests should be env-gated so normal local test runs do not
 require an SSH daemon:
 
 ```bash
-export MOTLIE_TMUX_SELECT_SSH_URI='ssh://user@host?identity-file=/path/to/key'
-cargo test -p motlie-tmux-select --test ssh_integration -- --ignored
+export MOTLIE_MMUX_SSH_URI='ssh://user@host?identity-file=/path/to/key'
+cargo test -p motlie-mmux --test ssh_integration -- --ignored
 ```
 
 ## Phase 1: motlie-tmux Library Gaps
@@ -149,9 +150,9 @@ References: [Kill Session](./DESIGN.md#kill-session),
 References: [Target Model](./DESIGN.md#target-model),
 [CLI.md](./CLI.md), [API.md](./API.md).
 
-- [x] 2.1 Add `bins/tmux_select/Cargo.toml` as package
-  `motlie-tmux-select`.
-- [x] 2.2 Add `bins/tmux_select/main.rs` as the binary entrypoint requested by
+- [x] 2.1 Add `bins/mmux/Cargo.toml` as package
+  `motlie-mmux`.
+- [x] 2.2 Add `bins/mmux/main.rs` as the binary entrypoint requested by
   issue #226.
 - [x] 2.3 Add the package to workspace `Cargo.toml`.
 - [x] 2.4 Add dependencies: `motlie-tmux`, `tokio`, `anyhow`, `clap`,
@@ -290,7 +291,7 @@ References: [SSH ForceCommand Integration](./DESIGN.md#ssh-forcecommand-integrat
 
 - [x] 9.1 Implement local ForceCommand entrypoint behavior.
 - [x] 9.2 Reject `SSH_ORIGINAL_COMMAND` by default with a clear stderr message.
-- [x] 9.3 Implement `MOTLIE_TMUX_SELECT_BYPASS` external bypass behavior.
+- [x] 9.3 Implement `MOTLIE_MMUX_BYPASS` external bypass behavior.
 - [x] 9.4 Implement operator-provided SSH URI target mode for list, MOTD,
   sample, create, kill, monitor, and attach.
 - [x] 9.5 Document recommended `sshd_config` snippets in `CLI.md` after
@@ -308,9 +309,9 @@ References: [Testing Strategy](./DESIGN.md#testing-strategy),
 - [ ] 10.3 Add README or examples references if runnable examples are created.
 - [ ] 10.4 Run `cargo fmt --all`.
 - [x] 10.5 Run `cargo clippy -p motlie-tmux -- -D warnings`.
-- [x] 10.6 Run `cargo clippy -p motlie-tmux-select -- -D warnings`.
+- [x] 10.6 Run `cargo clippy -p motlie-mmux -- -D warnings`.
 - [x] 10.7 Run `cargo test -p motlie-tmux`.
-- [x] 10.8 Run `cargo test -p motlie-tmux-select`.
+- [x] 10.8 Run `cargo test -p motlie-mmux`.
 - [ ] 10.9 Run env-gated SSH tests where credentials are available.
 
 @gpt55-dgx 2026-04-26 -- Validation note: `cargo fmt --all --check` fails on
@@ -337,7 +338,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 The implementation is ready for review when:
 
 - all accepted `motlie-tmux` gaps are implemented in `libs/tmux`
-- the selector binary builds as `motlie-tmux-select`
+- the selector package builds as `motlie-mmux` and produces the `mmux` binary
 - default attach/re-enter, `--script`, `--portrait` / `-p`,
   `--landscape` / `-l`, local, SSH, and ForceCommand flows have targeted tests
 - `DESIGN.md`, `PLAN.md`, `API.md`, and `CLI.md` are consistent with code
