@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Added in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
 | 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
@@ -722,6 +723,10 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    highlighted session id.
 2. Stop monitor/detail state. Drop the active host-event subscription; re-entry
    starts from a fresh session snapshot.
+   The parent process also snapshots a small amount of UI state in memory:
+   selected session id, selected list index, focused pane, and the current
+   layout split percentages. This state is only for the current `mmux` process
+   and is not written to disk.
 3. Restore raw mode and leave the alternate screen. Restore termios to
    canonical state.
 4. Resolve the highlighted session id to a `Target` via the stable-id
@@ -752,7 +757,10 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
                                    2. refresh list_sessions()
                                    3. start a new host-event subscription
                                    4. re-render LB (state may have changed)
-                                   5. if list_sessions() refresh fails →
+                                   5. restore selected session by id, or the
+                                      previous list index if the id vanished
+                                   6. restore pane focus and split percentages
+                                   7. if list_sessions() refresh fails →
                                         exit with that error (bounded loop:
                                         no infinite re-entry on broken target)
                                  else (non-zero child exit and selected

@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
 | 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
@@ -75,6 +76,12 @@ the selector re-enters the TUI if the attach child exited successfully or the
 selected session still exists. If the child exits non-zero and the selected
 session is gone, the selector exits with the child status. `q` / `Ctrl-C` exits
 without attach.
+
+During default attach/re-entry, the parent `mmux` process keeps a small
+in-memory UI snapshot. On return from tmux detach, the selector restores the
+last selected session when it still exists, falls back to the same list index
+when it does not, and keeps the user's pane split and focused pane. This state
+does not persist across separate `mmux` runs.
 
 For remote targets:
 
