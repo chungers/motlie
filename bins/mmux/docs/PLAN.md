@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated resize-bound tracking for landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Updated Help modal tracking for build date and last-8-character git SHA display. |
 | 2026-04-27 | @gpt55-dgx | Updated bottom status tracking for `↑/↓ sel` and `←/→ pane` direction hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status tracking for `|` host/IP separator and `(h)elp`-first bottom command hints. |
@@ -199,7 +200,7 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.3 Implement absent-MOTD motlie placeholder with narrow-terminal
   fallback.
 - [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
-  omit MOTD.
+  omit MOTD; clamp portrait resize bounds at 15/85.
 - [x] 4.5 Implement focused/unfocused border styles.
 - [x] 4.6 Implement a blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
