@@ -36,6 +36,7 @@ const MIN_LEFT_PERCENT: u16 = 25;
 const MAX_LEFT_PERCENT: u16 = 75;
 const MIN_TOP_PERCENT: u16 = 25;
 const MAX_TOP_PERCENT: u16 = 75;
+const STATUS_BAR_BG: Color = Color::Blue;
 
 const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
  _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱
@@ -1350,35 +1351,29 @@ fn detail_text_for_render(text: &str) -> Text<'_> {
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let text = status_line_text(app, &chrono::Local::now().format("%H:%M:%S").to_string());
+    let paragraph = Paragraph::new(Line::from(vec![
+        TuiSpan::styled(text, Style::default().fg(Color::White).bg(STATUS_BAR_BG)),
+        TuiSpan::styled(
+            format!(" | {}", app.status),
+            Style::default().fg(Color::Yellow).bg(STATUS_BAR_BG),
+        ),
+    ]))
+    .style(Style::default().bg(STATUS_BAR_BG));
+    frame.render_widget(paragraph, area);
+}
+
+fn status_line_text(app: &AppState, time: &str) -> String {
     let focus = match app.focus {
         Focus::List => "list",
         Focus::Detail => "detail",
-    };
-    let mode = match app.layout_mode {
-        LayoutMode::Normal => "normal",
-        LayoutMode::Portrait => "portrait",
     };
     let keys = if app.layout_mode == LayoutMode::Portrait {
         "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-up/down resize | q quit"
     } else {
         "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-left/right resize | q quit"
     };
-    let text = format!(
-        " {} | {} | {} | {} | {} ",
-        app.host_label,
-        chrono::Local::now().format("%H:%M:%S"),
-        mode,
-        focus,
-        keys
-    );
-    let paragraph = Paragraph::new(Line::from(vec![
-        TuiSpan::styled(text, Style::default().fg(Color::Black).bg(Color::White)),
-        TuiSpan::styled(
-            format!(" | {}", app.status),
-            Style::default().fg(Color::Yellow).bg(Color::Black),
-        ),
-    ]));
-    frame.render_widget(paragraph, area);
+    format!(" {} | {} | {} | {} ", app.host_label, time, focus, keys)
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
@@ -1496,6 +1491,33 @@ mod tests {
         assert!(is_portrait_pty(40, 40));
         assert!(!is_portrait_pty(161, 40));
         assert!(!is_portrait_pty(200, 40));
+    }
+
+    #[test]
+    fn status_line_omits_layout_mode() {
+        let normal = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        let normal_status = status_line_text(&normal, "12:34:56");
+        assert!(normal_status.contains(" host | 12:34:56 | list | keys:"));
+        assert!(!normal_status.contains("normal"));
+        assert!(!normal_status.contains("landscape"));
+        assert!(!normal_status.contains("portrait"));
+
+        let portrait = AppState::new(
+            "host".to_string(),
+            LayoutMode::Portrait,
+            "motd".to_string(),
+            false,
+        );
+        let portrait_status = status_line_text(&portrait, "12:34:56");
+        assert!(portrait_status.contains(" host | 12:34:56 | list | keys:"));
+        assert!(!portrait_status.contains("normal"));
+        assert!(!portrait_status.contains("landscape"));
+        assert!(!portrait_status.contains("portrait"));
     }
 
     #[test]
