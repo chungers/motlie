@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated status bar tracking: omit layout labels from the status text and render the bar with a blue background. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0`, updated layout test targets, and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
@@ -187,8 +188,8 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 40:60 and
   omit MOTD.
 - [x] 4.5 Implement focused/unfocused border styles.
-- [x] 4.6 Implement status bar with host, time, focus, and ASCII-first key
-  hints.
+- [x] 4.6 Implement blue status bar with host, time, focus, and ASCII-first key
+  hints; omit layout-mode labels.
 - [ ] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.

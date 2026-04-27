@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated status bar contract: omit layout labels from the status text and render the bar with a blue background. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to the clean `columns / rows <= 2.0` rule and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
@@ -162,7 +163,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   show the current focus (`Lb` vs `R`) and a focus-conditional key-hint set:
   when `Lb`-focused, include Right for detail; when `R`-focused, include
   Left for list. Always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
-  `q quit`) appear in both modes.
+  `q quit`) appear in both modes. The status bar must not show the layout mode
+  (`portrait`, `landscape`, or `normal`) and must render with a blue background.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
@@ -349,8 +351,8 @@ two focus states: `Lb` (default) and `R`. Focus transitions are explicit:
 
 The currently focused pane must be visually distinguished from the unfocused
 pane via border style (bright/colored or doubled for focused; dim/single for
-unfocused). The status-bar focus indicator (target host, time, focus, key
-hints) is complementary, not a substitute.
+unfocused). The blue status-bar focus indicator (target host, time, focus, key
+hints; no layout-mode label) is complementary, not a substitute.
 
 Main-selector keymap (focus-aware):
 
