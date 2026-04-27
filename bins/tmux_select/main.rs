@@ -1364,16 +1364,12 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn status_line_text(app: &AppState, time: &str) -> String {
-    let focus = match app.focus {
-        Focus::List => "list",
-        Focus::Detail => "detail",
-    };
     let keys = if app.layout_mode == LayoutMode::Portrait {
         "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-up/down resize | q quit"
     } else {
         "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-left/right resize | q quit"
     };
-    format!(" {} | {} | {} | {} ", app.host_label, time, focus, keys)
+    format!(" {} | {} | {} ", app.host_label, time, keys)
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
@@ -1502,7 +1498,9 @@ mod tests {
             false,
         );
         let normal_status = status_line_text(&normal, "12:34:56");
-        assert!(normal_status.contains(" host | 12:34:56 | list | keys:"));
+        assert!(normal_status.contains(" host | 12:34:56 | keys:"));
+        assert!(!normal_status.contains("list"));
+        assert!(!normal_status.contains("detail"));
         assert!(!normal_status.contains("normal"));
         assert!(!normal_status.contains("landscape"));
         assert!(!normal_status.contains("portrait"));
@@ -1514,7 +1512,9 @@ mod tests {
             false,
         );
         let portrait_status = status_line_text(&portrait, "12:34:56");
-        assert!(portrait_status.contains(" host | 12:34:56 | list | keys:"));
+        assert!(portrait_status.contains(" host | 12:34:56 | keys:"));
+        assert!(!portrait_status.contains("list"));
+        assert!(!portrait_status.contains("detail"));
         assert!(!portrait_status.contains("normal"));
         assert!(!portrait_status.contains("landscape"));
         assert!(!portrait_status.contains("portrait"));

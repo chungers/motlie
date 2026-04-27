@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
 | 2026-04-26 | @gpt55-dgx | Updated status bar contract: omit layout labels from the status text and render the bar with a blue background. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
@@ -159,12 +160,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - For SSH targets, attach must open an interactive SSH PTY to the target host
   and attach that remote PTY to the selected remote tmux session.
 - A bottom status bar shows target host, current time, and supported keys.
-  The status bar must additionally
-  show the current focus (`Lb` vs `R`) and a focus-conditional key-hint set:
-  when `Lb`-focused, include Right for detail; when `R`-focused, include
-  Left for list. Always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
-  `q quit`) appear in both modes. The status bar must not show the layout mode
-  (`portrait`, `landscape`, or `normal`) and must render with a blue background.
+  Key hints must include navigation between list and detail (`Right`/`Left`)
+  plus always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
+  `q quit`). The status bar must not show focus (`list`, `detail`, `Lb`, `R`)
+  or layout mode (`portrait`, `landscape`, or `normal`) and must render with a
+  blue background.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
@@ -351,8 +351,8 @@ two focus states: `Lb` (default) and `R`. Focus transitions are explicit:
 
 The currently focused pane must be visually distinguished from the unfocused
 pane via border style (bright/colored or doubled for focused; dim/single for
-unfocused). The blue status-bar focus indicator (target host, time, focus, key
-hints; no layout-mode label) is complementary, not a substitute.
+unfocused). The blue status bar shows target host, time, and key hints only;
+it does not duplicate focus or layout state.
 
 Main-selector keymap (focus-aware):
 
@@ -402,8 +402,8 @@ at smaller sizes but is tuned for this target.
 - `B` = detail pane. Equivalent to `R` in normal mode (same trait-backed
   sample/monitor sources, same scroll-back-on-up, same monitor tail-pause).
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
-  maximize content density. Status-bar focus indicator and key hints
-  remain, but key hints must be terser to fit ~64 cols. Use ASCII-first
+  maximize content density. Status-bar key hints remain, but key hints must be
+  terser to fit ~64 cols. Use ASCII-first
   compact labels so narrow SSH clients and IDE terminals render predictably,
   e.g., `Up/Dn pick | right detail | m mon | n new | k kill | Enter/a go`.
 
