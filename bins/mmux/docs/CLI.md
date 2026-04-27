@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `mmux` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
 | 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
 | 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
@@ -185,7 +186,8 @@ Modal keys:
 | Esc | Cancel New Session / Kill Session, or close Help. |
 
 The Help modal shows the built-in motlie logo, key functions below the logo,
-the build git SHA, and a single Ok button.
+the build date, the last 8 characters of the build git SHA, and a single Ok
+button.
 
 ## ForceCommand
 

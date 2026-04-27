@@ -47,6 +47,7 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
+const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 const NORMAL_STATUS_KEYS: &str =
     "↑/↓ sel | ←/→ pane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-←/→ resize | (q)uit";
 const PORTRAIT_STATUS_KEYS: &str =
@@ -1635,12 +1636,22 @@ fn modal_content(modal: &ModalState) -> (&'static str, String, Button) {
         ModalState::Help => (
             " Help ",
             format!(
-                "{MOTLIE_PLACEHOLDER}\n\n{HELP_KEY_FUNCTIONS}\n\nGit SHA: {BUILD_GIT_SHA}\n\n[Ok]"
+                "{}\n\n{}\n\nBuild date: {}\nGit SHA: {}\n\n[Ok]",
+                MOTLIE_PLACEHOLDER,
+                HELP_KEY_FUNCTIONS,
+                BUILD_DATE,
+                short_build_git_sha()
             ),
             Button::Ok,
         ),
     };
     (title, body, button)
+}
+
+fn short_build_git_sha() -> String {
+    let mut chars = BUILD_GIT_SHA.chars().rev().take(8).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 fn button_text(active: Button, button: Button) -> String {
@@ -2052,8 +2063,13 @@ mod tests {
         assert!(body.contains("↑/↓ select session or scroll detail"));
         assert!(body.contains("mod-←/→ resize L/R in landscape"));
         assert!(body.contains("mod-↑/↓ resize T/B in portrait"));
+        assert!(body.contains("Build date: "));
+        assert!(body.contains(BUILD_DATE));
         assert!(body.contains("Git SHA: "));
-        assert!(body.contains(BUILD_GIT_SHA));
+        assert!(body.contains(&format!("Git SHA: {}", short_build_git_sha())));
+        if BUILD_GIT_SHA.chars().count() > 8 {
+            assert!(!body.contains(&format!("Git SHA: {BUILD_GIT_SHA}")));
+        }
         assert!(body.contains("[Ok]"));
         let logo_pos = body.find(MOTLIE_PLACEHOLDER).unwrap();
         let keys_pos = body.find(HELP_KEY_FUNCTIONS).unwrap();
