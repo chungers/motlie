@@ -9,6 +9,8 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Moved the host label from the status bar into the Sessions pane title. |
+| 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
 | 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
 | 2026-04-26 | @gpt55-dgx | Added the `h` key for an About modal showing the motlie logo and build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
@@ -142,7 +144,7 @@ Normal mode main-view keys:
 | `m` | Monitor highlighted session | Monitor highlighted session |
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
-| `h` | Open About modal | Open About modal |
+| `h` | Open Help modal | Open Help modal |
 | Enter / `a` | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
@@ -158,16 +160,20 @@ which is currently a one-second polling loop over `list_sessions()` with
 stable-id snapshot diffing. It is not currently driven by direct tmux
 control-mode host notifications.
 
+The Sessions pane title includes the target host label. The blue status bar
+shows current time and compact key hints only; it does not repeat the host,
+focus, or layout mode.
+
 Modal keys:
 
 | Key | Behavior |
 |-----|----------|
-| Left / Right | Choose Cancel or Ok in New Session and Kill Session modals. No-op in About. |
+| Left / Right | Choose Cancel or Ok in New Session and Kill Session modals. No-op in Help. |
 | Enter | Close modal. Applies Ok when selected in New Session or Kill Session. |
-| Esc | Cancel New Session / Kill Session, or close About. |
+| Esc | Cancel New Session / Kill Session, or close Help. |
 
-The About modal shows the built-in motlie logo, the build git SHA, and a single
-Ok button.
+The Help modal shows the built-in motlie logo, key functions below the logo,
+the build git SHA, and a single Ok button.
 
 ## ForceCommand
 

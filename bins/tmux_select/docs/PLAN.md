@@ -12,6 +12,8 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Moved host-label tracking from the status bar to the Sessions pane title. |
+| 2026-04-27 | @gpt55-dgx | Updated status hint tracking to use arrow symbols and expanded help modal coverage for key functions. |
 | 2026-04-27 | @gpt55-dgx | Changed portrait mode implementation tracking from a 40:60 to a 30:70 T/B split. |
 | 2026-04-26 | @gpt55-dgx | Added implementation tracking for the `h` About modal with build git SHA display and Enter/Esc close behavior. |
 | 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
@@ -191,8 +193,9 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
   omit MOTD.
 - [x] 4.5 Implement focused/unfocused border styles.
-- [x] 4.6 Implement blue status bar with host, time, and ASCII-first key hints;
-  omit focus and layout-mode labels.
+- [x] 4.6 Implement Sessions pane title with host label and blue status bar
+  with time, compact arrow-symbol key hints, and no host, focus, or layout-mode
+  labels.
 - [ ] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.
@@ -215,8 +218,9 @@ References: [Functional Requirements](./DESIGN.md#functional),
 - [x] 5.5 Implement `New Session` modal with text input, Cancel/Ok, Enter, and
   Esc handling.
 - [x] 5.6 Implement kill confirmation modal with id captured at modal-open.
-- [x] 5.7 Implement About modal opened by `h`, showing the built-in motlie
-  logo and build git SHA with a single Ok button; Enter or Esc closes it.
+- [x] 5.7 Implement Help modal opened by `h`, showing the built-in motlie
+  logo, key functions, and build git SHA with a single Ok button; Enter or Esc
+  closes it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
   modal Esc behavior, and plain Left/Right focus behavior.
 
@@ -320,7 +324,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
-| Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc, About modal `h` key and build SHA display |
+| Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, and build SHA display |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |

@@ -8,6 +8,8 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Moved host label from the status bar into the Sessions pane title. |
+| 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
 | 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
 | 2026-04-26 | @gpt55-dgx | Added an `h` About modal that shows the built-in motlie logo and the build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
@@ -140,11 +142,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   field and `Cancel` / `Ok` buttons.
 - Pressing `k` opens a centered `Kill session <name>?` confirmation modal with
   `Cancel` / `Ok` buttons.
-- Pressing `h` opens a centered `About` modal with the built-in motlie logo,
-  the current build git SHA, and an `Ok` button.
+- Pressing `h` opens a centered help modal with the built-in motlie logo,
+  key-function reference text, the current build git SHA, and an `Ok` button.
+  The key-function reference renders below the logo and above the `Ok` button.
 - In create/kill modal dialogs, Left and Right choose between `Cancel` and
   `Ok`; Enter exits the modal and applies `Ok` when selected. `Esc` in a modal
-  is `Cancel` and closes without applying. In the About modal, Enter or `Esc`
+  is `Cancel` and closes without applying. In the help modal, Enter or `Esc`
   closes the modal without changing selector state.
 - Pressing Right moves focus from
   `Lb` to `R` (no-op if already `R`). Pressing Left moves focus from `R` to
@@ -152,8 +155,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Left when focus is `R`, and is a no-op when focus is `Lb` (use `q` or
   `Ctrl-C` to exit). The currently focused pane must be visually distinguished from the
   unfocused pane via border style — a bright/colored or doubled border for
-  the focused pane, dim/single for the unfocused. The status-bar focus
-  indicator (below) is complementary, not a substitute.
+  the focused pane, dim/single for the unfocused. The status bar does not
+  duplicate focus state.
 - Pressing `a` or Enter in the main selector exits the TUI and attaches the
   current user PTY to the highlighted session. (Focus-independent: attach
   always operates on the `Lb` highlight regardless of which pane has focus.)
@@ -164,12 +167,14 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   all operate against the SSH target.
 - For SSH targets, attach must open an interactive SSH PTY to the target host
   and attach that remote PTY to the selected remote tmux session.
-- A bottom status bar shows target host, current time, and supported keys.
-  Key hints must include navigation between list and detail (`Right`/`Left`)
-  plus always-on hints (`m monitor`, `n new`, `k kill`, `h about`, attach, resize,
-  `q quit`). The status bar must not show focus (`list`, `detail`, `Lb`, `R`)
-  or layout mode (`portrait`, `landscape`, or `normal`) and must render with a
-  blue background.
+- The session-list pane title shows the target host label.
+- A bottom status bar shows current time and supported keys.
+  Key hints must use arrow symbols instead of spelling out `up`, `down`,
+  `left`, or `right`, and must include navigation between list and detail
+  (`←/→`) plus always-on hints (`m monitor`, `n new`, `k kill`, `h help`,
+  attach, resize, `q quit`). The status bar must not show focus (`list`,
+  `detail`, `Lb`, `R`) or layout mode (`portrait`, `landscape`, or `normal`)
+  and must render with a blue background.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
@@ -356,8 +361,9 @@ two focus states: `Lb` (default) and `R`. Focus transitions are explicit:
 
 The currently focused pane must be visually distinguished from the unfocused
 pane via border style (bright/colored or doubled for focused; dim/single for
-unfocused). The blue status bar shows target host, time, and key hints only;
-it does not duplicate focus or layout state.
+unfocused). The blue status bar shows time and key hints only; it does not
+duplicate host, focus, or layout state. The target host appears in the
+Sessions pane title.
 
 Main-selector keymap (focus-aware):
 
@@ -373,7 +379,7 @@ Main-selector keymap (focus-aware):
 | `m` | Start/switch monitoring on highlight | Same |
 | `n` | Open `New Session` modal | Same |
 | `k` | Open kill-confirmation modal | Same |
-| `h` | Open About modal with logo and build git SHA | Same |
+| `h` | Open help modal with logo, key functions, and build git SHA | Same |
 | Enter / `a` | Attach highlight | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
@@ -409,9 +415,8 @@ at smaller sizes but is tuned for this target.
   sample/monitor sources, same scroll-back-on-up, same monitor tail-pause).
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar key hints remain, but key hints must be
-  terser to fit ~64 cols. Use ASCII-first
-  compact labels so narrow SSH clients and IDE terminals render predictably,
-  e.g., `Up/Dn pick | right detail | m mon | n new | k kill | h about | Enter/a go`.
+  terser to fit ~64 cols. Use compact symbol labels for directional keys,
+  e.g., `↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | Enter/a go`.
 
 **Focus model:** Identical to normal mode, with `T` ↔ `Lb` and `B` ↔ `R`:
 
@@ -1037,8 +1042,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - sample vs monitor mode
   - modal button selection
   - create/kill success and error paths
-  - About modal opens on `h`, shows the logo and build git SHA, and closes on
-    Enter or `Esc`
+  - Help modal opens on `h`, shows the logo, key functions, and build git SHA,
+    and closes on Enter or `Esc`
   - focus toggles: Right `Lb`→`R`,
     Left `R`→`Lb`, `Esc` outside modal `R`→`Lb`, no-op when already focused
   - `Esc` inside modal = `Cancel`

@@ -10,6 +10,8 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented moving the host label from status text into the Sessions pane title. |
+| 2026-04-27 | @gpt55-dgx | Documented arrow-symbol status hints and Help modal key-function content. |
 | 2026-04-27 | @gpt55-dgx | Documented portrait mode's 30:70 default T/B split. |
 | 2026-04-26 | @gpt55-dgx | Documented the About modal state and build-time git SHA metadata used by the `h` key. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
@@ -190,7 +192,7 @@ enum Focus {
 enum ModalState {
     NewSession { input: String, button: Button },
     KillSession { id: String, name: String, button: Button },
-    About,
+    Help,
 }
 
 struct SelectedSession {
@@ -199,13 +201,16 @@ struct SelectedSession {
 }
 ```
 
+The Sessions pane title is derived from `AppState.host_label`. Status text
+contains only current time and compact key hints, not the host label.
+
 ## Build Metadata
 
 The binary embeds a build-time git SHA in a private `BUILD_GIT_SHA` constant.
 `bins/tmux_select/build.rs` sets `TMUX_SELECT_GIT_SHA` from
 `git rev-parse HEAD`, or uses an explicit `TMUX_SELECT_GIT_SHA` environment
-override when provided. The About modal opened by `h` renders that value beside
-the built-in motlie logo.
+override when provided. The Help modal opened by `h` renders that value below
+the built-in motlie logo and key-function reference.
 
 ## Detail Source Contract
 
@@ -335,7 +340,9 @@ API tests must cover:
 - sample color preservation, monitor screen capture, and ANSI/VTE parser
   behavior
 - modified-arrow resize fallback behavior
-- About modal open/close behavior and build SHA display
+- status hint arrow-symbol rendering
+- host label rendering in the Sessions pane title, not the status line
+- Help modal open/close behavior, key-function display, and build SHA display
 - default attach/re-enter and no-loop conditions
 
 Current implementation coverage:
@@ -347,6 +354,7 @@ Current implementation coverage:
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
-  modified-arrow resize fallbacks, Left/Right focus transitions, sample color
-  preservation, About modal display/close behavior, monitor screen capture,
-  ANSI/VTE parsing, and monitored-session-close reset.
+  modified-arrow resize fallbacks, Left/Right focus transitions, compact
+  status hint rendering, sample color preservation, Help modal
+  key-function/display/close behavior, monitor screen capture, ANSI/VTE
+  parsing, and monitored-session-close reset.

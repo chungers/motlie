@@ -46,6 +46,23 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("TMUX_SELECT_GIT_SHA");
+const NORMAL_STATUS_KEYS: &str =
+    "keys: ↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-←/→ resize | q quit";
+const PORTRAIT_STATUS_KEYS: &str =
+    "keys: ↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-↑/↓ resize | q quit";
+const HELP_KEY_FUNCTIONS: &str = r#"Keys:
+↑/↓ select session or scroll detail
+←/→ switch list/detail panes
+PgUp/PgDn page current pane
+Home/End jump current pane
+m monitor highlighted session
+n create session
+k kill highlighted session
+h help
+Enter/a attach highlighted session
+mod-←/→ resize L/R in landscape
+mod-↑/↓ resize T/B in portrait
+q/Ctrl-C quit"#;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "tmux_select")]
@@ -93,7 +110,7 @@ enum ModalState {
         name: String,
         button: Button,
     },
-    About,
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -871,7 +888,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
         }
         (KeyCode::Char('q'), _) => return Ok(KeyOutcome::Cancel),
         (KeyCode::Esc, _) => app.focus = Focus::List,
-        (KeyCode::Char('h'), _) => app.modal = Some(ModalState::About),
+        (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
         (KeyCode::Char('m'), _) => start_monitor(host, app).await?,
         (KeyCode::Char('n'), _) => {
             app.modal = Some(ModalState::NewSession {
@@ -1049,7 +1066,7 @@ async fn handle_modal_key(
             }
             _ => {}
         },
-        Some(ModalState::About) => match key.code {
+        Some(ModalState::Help) => match key.code {
             KeyCode::Esc | KeyCode::Enter => close = true,
             _ => {}
         },
@@ -1092,7 +1109,7 @@ async fn handle_modal_key(
                         }
                     }
                 }
-                Some(ModalState::About) => {}
+                Some(ModalState::Help) => {}
                 None => {}
             }
         }
@@ -1191,7 +1208,7 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         .split(columns[0]);
 
     draw_motd(frame, left[0], app);
-    draw_sessions(frame, left[1], app, " Sessions ");
+    draw_sessions(frame, left[1], app);
     draw_detail(frame, columns[1], app, " Detail ");
 }
 
@@ -1203,7 +1220,7 @@ fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             Constraint::Percentage(100 - app.top_percent),
         ])
         .split(area);
-    draw_sessions(frame, rows[0], app, " Sessions ");
+    draw_sessions(frame, rows[0], app);
     draw_detail(frame, rows[1], app, " Detail ");
 }
 
@@ -1269,7 +1286,11 @@ fn draw_motd(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState, title: &str) {
+fn sessions_title(app: &AppState) -> String {
+    format!(" Sessions - {} ", app.host_label)
+}
+
+fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let mut lines = Vec::new();
     if app.sessions.is_empty() {
@@ -1299,7 +1320,7 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState, title: &str)
     }
 
     let block = Block::default()
-        .title(title)
+        .title(sessions_title(app))
         .borders(Borders::ALL)
         .border_style(focused_style(app, Focus::List));
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -1373,11 +1394,11 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
 fn status_line_text(app: &AppState, time: &str) -> String {
     let keys = if app.layout_mode == LayoutMode::Portrait {
-        "keys: up/down select | right/left pane | m monitor | n new | k kill | h about | enter/a attach | mod-up/down resize | q quit"
+        PORTRAIT_STATUS_KEYS
     } else {
-        "keys: up/down select | right/left pane | m monitor | n new | k kill | h about | enter/a attach | mod-left/right resize | q quit"
+        NORMAL_STATUS_KEYS
     };
-    format!(" {} | {} | {} ", app.host_label, time, keys)
+    format!(" {} | {} ", time, keys)
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
@@ -1437,9 +1458,11 @@ fn modal_content(modal: &ModalState) -> (&'static str, String, Button) {
             ),
             *button,
         ),
-        ModalState::About => (
-            " About ",
-            format!("{MOTLIE_PLACEHOLDER}\n\nGit SHA: {BUILD_GIT_SHA}\n\n[Ok]"),
+        ModalState::Help => (
+            " Help ",
+            format!(
+                "{MOTLIE_PLACEHOLDER}\n\n{HELP_KEY_FUNCTIONS}\n\nGit SHA: {BUILD_GIT_SHA}\n\n[Ok]"
+            ),
             Button::Ok,
         ),
     };
@@ -1540,8 +1563,15 @@ mod tests {
             false,
         );
         let normal_status = status_line_text(&normal, "12:34:56");
-        assert!(normal_status.contains(" host | 12:34:56 | keys:"));
-        assert!(normal_status.contains("h about"));
+        assert!(normal_status.contains(" 12:34:56 | keys:"));
+        assert!(!normal_status.contains("host"));
+        assert!(normal_status.contains("↑/↓ select"));
+        assert!(normal_status.contains("←/→ pane"));
+        assert!(normal_status.contains("h help"));
+        assert!(normal_status.contains("mod-←/→ resize"));
+        assert!(!normal_status.contains("up/down"));
+        assert!(!normal_status.contains("right/left"));
+        assert!(!normal_status.contains("mod-left/right"));
         assert!(!normal_status.contains("list"));
         assert!(!normal_status.contains("detail"));
         assert!(!normal_status.contains("focus"));
@@ -1556,14 +1586,33 @@ mod tests {
             false,
         );
         let portrait_status = status_line_text(&portrait, "12:34:56");
-        assert!(portrait_status.contains(" host | 12:34:56 | keys:"));
-        assert!(portrait_status.contains("h about"));
+        assert!(portrait_status.contains(" 12:34:56 | keys:"));
+        assert!(!portrait_status.contains("host"));
+        assert!(portrait_status.contains("↑/↓ select"));
+        assert!(portrait_status.contains("←/→ pane"));
+        assert!(portrait_status.contains("h help"));
+        assert!(portrait_status.contains("mod-↑/↓ resize"));
+        assert!(!portrait_status.contains("up/down"));
+        assert!(!portrait_status.contains("right/left"));
+        assert!(!portrait_status.contains("mod-up/down"));
         assert!(!portrait_status.contains("list"));
         assert!(!portrait_status.contains("detail"));
         assert!(!portrait_status.contains("focus"));
         assert!(!portrait_status.contains("normal"));
         assert!(!portrait_status.contains("landscape"));
         assert!(!portrait_status.contains("portrait"));
+    }
+
+    #[test]
+    fn sessions_title_includes_host_label() {
+        let app = AppState::new(
+            "target-host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+
+        assert_eq!(sessions_title(&app), " Sessions - target-host ");
     }
 
     #[test]
@@ -1727,7 +1776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn h_opens_about_modal_and_enter_or_escape_closes_it() {
+    async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
         let host = HostHandle::local();
         let mut app = app_with_session();
 
@@ -1740,15 +1789,25 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, KeyOutcome::Continue));
-        let Some(ModalState::About) = app.modal.as_ref() else {
-            panic!("expected about modal");
+        let Some(ModalState::Help) = app.modal.as_ref() else {
+            panic!("expected help modal");
         };
-        let (_title, body, button) = modal_content(app.modal.as_ref().unwrap());
+        let (title, body, button) = modal_content(app.modal.as_ref().unwrap());
+        assert_eq!(title, " Help ");
         assert_eq!(button, Button::Ok);
         assert!(body.contains(MOTLIE_PLACEHOLDER));
+        assert!(body.contains(HELP_KEY_FUNCTIONS));
+        assert!(body.contains("↑/↓ select session or scroll detail"));
+        assert!(body.contains("mod-←/→ resize L/R in landscape"));
+        assert!(body.contains("mod-↑/↓ resize T/B in portrait"));
         assert!(body.contains("Git SHA: "));
         assert!(body.contains(BUILD_GIT_SHA));
         assert!(body.contains("[Ok]"));
+        let logo_pos = body.find(MOTLIE_PLACEHOLDER).unwrap();
+        let keys_pos = body.find(HELP_KEY_FUNCTIONS).unwrap();
+        let ok_pos = body.find("[Ok]").unwrap();
+        assert!(logo_pos < keys_pos);
+        assert!(keys_pos < ok_pos);
 
         let outcome = handle_key(
             &host,

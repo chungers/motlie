@@ -12,7 +12,7 @@
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
     <text x="14" y="70" fill="#cbd5e1" font-family="monospace" font-size="12">Welcome target-host</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions 1/4</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host 1/4</text>
     <rect x="12" y="138" width="180" height="26" fill="#2563eb"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev      3 windows</text>
     <text x="20" y="184" fill="#cbd5e1" font-family="monospace" font-size="12">  build    1 window</text>
@@ -23,7 +23,7 @@
     <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">running 148 tests</text>
     <text x="220" y="152" fill="#cbd5e1" font-family="monospace" font-size="12">test result: ok</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus Lb | Up/Dn select | Right detail | m mon | n new | k kill | a attach</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">12:34 | ↑/↓ select | ←/→ pane | m mon | n new | k kill | h help | a attach</text>
   </g>
 
   <g transform="translate(664 96)">
@@ -35,7 +35,7 @@
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#475569" stroke-width="1"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
     <text x="14" y="70" fill="#cbd5e1" font-family="monospace" font-size="12">Welcome target-host</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host</text>
     <rect x="12" y="138" width="180" height="26" fill="#1d4ed8"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="20" y="184" fill="#94a3b8" font-family="monospace" font-size="12">  build</text>
@@ -45,7 +45,7 @@
     <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">older output line 13</text>
     <text x="220" y="152" fill="#cbd5e1" font-family="monospace" font-size="12">fetch_older() when past top</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus R | Up/Dn scroll | PgUp/PgDn | Left list | End tail | a attach</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">12:34 | ↑/↓ scroll | PgUp/PgDn | ← pane | End tail | a attach</text>
   </g>
 
   <g transform="translate(32 484)">
@@ -56,7 +56,7 @@
     <rect x="0" y="18" width="204" height="76" fill="#1f2937" stroke="#475569" stroke-width="1"/>
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#475569" stroke-width="1"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host</text>
     <rect x="12" y="138" width="180" height="26" fill="#1d4ed8"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; logs</text>
     <text x="220" y="46" fill="#f8fafc" font-family="monospace" font-size="13">R detail: logs</text>
@@ -66,7 +66,7 @@
     <text x="220" y="152" fill="#94a3b8" font-family="monospace" font-size="12">2481 deploy   9.2  1.4 worker</text>
     <text x="220" y="182" fill="#93c5fd" font-family="monospace" font-size="12">ScreenStable + VTE parse</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus R | Left list | Right keeps focus | screen mirror | q quit</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">12:34 | ← pane | → no-op | screen mirror | q quit</text>
   </g>
 
   <g transform="translate(664 484)">
@@ -114,13 +114,13 @@
     <text x="8" y="89" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">┃ ┃ ┃ ┃ ┃ ┃ (_) ┃ ┃_┃ ┃ ┃  __╱  ╱╱ ║ ╲╲</text>
     <text x="8" y="105" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃</text>
     <text x="14" y="146" fill="#cbd5e1" font-family="monospace" font-size="12">(no /etc/motd)</text>
-    <text x="14" y="184" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions</text>
+    <text x="14" y="184" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host</text>
     <rect x="12" y="200" width="198" height="26" fill="#2563eb"/>
     <text x="20" y="218" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="240" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">R detail still renders</text>
     <text x="240" y="74" fill="#cbd5e1" font-family="monospace" font-size="12">LT bypasses 30% cap</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus Lb | placeholder visible</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">12:34 | placeholder visible</text>
   </g>
 
   <g transform="translate(32 1260)">
@@ -128,14 +128,14 @@
     <rect x="0" y="18" width="584" height="318" fill="#020617" stroke="#64748b" stroke-width="2"/>
     <rect x="0" y="18" width="584" height="84" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
     <rect x="0" y="102" width="584" height="196" fill="#020617" stroke="#334155" stroke-width="2"/>
-    <text x="16" y="48" fill="#f8fafc" font-family="monospace" font-size="13">T sessions 1/4</text>
+    <text x="16" y="48" fill="#f8fafc" font-family="monospace" font-size="13">T sessions - h 1/4</text>
     <rect x="14" y="64" width="552" height="26" fill="#2563eb"/>
     <text x="24" y="82" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev      3 windows</text>
     <text x="24" y="98" fill="#cbd5e1" font-family="monospace" font-size="12">  build    1 window</text>
     <text x="16" y="132" fill="#e2e8f0" font-family="monospace" font-size="13">B detail: dev</text>
     <text x="16" y="160" fill="#cbd5e1" font-family="monospace" font-size="12">sample output, no MOTD in portrait mode</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host h | Up/Dn pick | Right detail | m mon | n new | k kill | h about | a go</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">12:34 | ↑/↓ select | ←/→ pane | m mon | n new | k kill | h help | a go</text>
   </g>
 
   <g transform="translate(664 1260)">
@@ -143,13 +143,13 @@
     <rect x="0" y="18" width="584" height="318" fill="#020617" stroke="#64748b" stroke-width="2"/>
     <rect x="0" y="18" width="584" height="84" fill="#0b1220" stroke="#334155" stroke-width="2"/>
     <rect x="0" y="102" width="584" height="196" fill="#020617" stroke="#38bdf8" stroke-width="3"/>
-    <text x="16" y="48" fill="#e2e8f0" font-family="monospace" font-size="13">T sessions</text>
+    <text x="16" y="48" fill="#e2e8f0" font-family="monospace" font-size="13">T sessions - h</text>
     <rect x="14" y="64" width="552" height="26" fill="#1d4ed8"/>
     <text x="24" y="82" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="16" y="132" fill="#f8fafc" font-family="monospace" font-size="13">B detail: dev</text>
     <text x="16" y="160" fill="#93c5fd" font-family="monospace" font-size="12">mode: sample | scroll 3/70</text>
-    <text x="16" y="188" fill="#cbd5e1" font-family="monospace" font-size="12">Up/Dn scroll; Ctrl-Up/Dn resize T/B</text>
+    <text x="16" y="188" fill="#cbd5e1" font-family="monospace" font-size="12">↑/↓ scroll; Ctrl-↑/↓ resize T/B</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host h | Up/Dn scroll | Left list | End tail | h about | a go</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">12:34 | ↑/↓ scroll | ← pane | End tail | h help | a go</text>
   </g>
 </svg>
