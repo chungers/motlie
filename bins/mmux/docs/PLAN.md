@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated focus/input tracking for cyclic Left/Right pane navigation, including landscape MOTD focus. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector workspace package/path/binary references to `motlie-mmux`, `bins/mmux`, and `mmux`. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title tracking for count/hostname/IP format and removed the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Moved host-label tracking from the status bar to the Sessions pane title. |
@@ -210,8 +211,9 @@ References: [Layout](./DESIGN.md#layout),
 References: [Functional Requirements](./DESIGN.md#functional),
 [Layout](./DESIGN.md#layout).
 
-- [x] 5.1 Implement focus transitions: Right, Left, outside-modal `Esc`, and
-  `q` as an exit alias for `Ctrl-C`.
+- [x] 5.1 Implement focus transitions: cyclic Right/Left pane navigation,
+  outside-modal `Esc` returning to the session list, and `q` as an exit alias
+  for `Ctrl-C`.
 - [x] 5.2 Implement session-list movement and scrolling for `LB`/`T`.
 - [x] 5.3 Implement R/B scrolling, page movement, Home/End, and monitor
   auto-tail resume on End.
@@ -225,7 +227,7 @@ References: [Functional Requirements](./DESIGN.md#functional),
   logo, key functions, and build git SHA with a single Ok button; Enter or Esc
   closes it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
-  modal Esc behavior, and plain Left/Right focus behavior.
+  modal Esc behavior, and cyclic plain Left/Right focus behavior.
 
 ## Phase 6: Detail Sources
 
@@ -327,7 +329,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
-| Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, and build SHA display |
+| Input model | Pure unit tests | cyclic focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, and build SHA display |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |

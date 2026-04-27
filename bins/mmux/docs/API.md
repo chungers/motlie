@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented cyclic Left/Right focus behavior, including landscape MOTD focus. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector binary/package docs to `mmux` / `motlie-mmux`. |
 | 2026-04-27 | @gpt55-dgx | Documented Sessions title count/hostname/IP format and removal of the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Documented moving the host label from status text into the Sessions pane title. |
@@ -343,6 +344,7 @@ API tests must cover:
 - sample color preservation, monitor screen capture, and ANSI/VTE parser
   behavior
 - modified-arrow resize fallback behavior
+- cyclic Left/Right focus behavior in landscape and portrait layouts
 - status hint arrow-symbol rendering
 - session count, hostname, and IP rendering in the Sessions pane title, not the
   status line
@@ -358,7 +360,7 @@ Current implementation coverage:
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
-  modified-arrow resize fallbacks, Left/Right focus transitions, compact
+  modified-arrow resize fallbacks, cyclic Left/Right focus transitions, compact
   status hint rendering, sample color preservation, Help modal
   key-function/display/close behavior, monitor screen capture, ANSI/VTE
   parsing, and monitored-session-close reset.

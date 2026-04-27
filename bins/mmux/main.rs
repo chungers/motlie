@@ -48,12 +48,12 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 const NORMAL_STATUS_KEYS: &str =
-    "↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-←/→ resize | q quit";
+    "↑/↓ select | ←/→ cycle | m monitor | n new | k kill | h help | enter/a attach | mod-←/→ resize | q quit";
 const PORTRAIT_STATUS_KEYS: &str =
-    "↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-↑/↓ resize | q quit";
+    "↑/↓ select | ←/→ cycle | m monitor | n new | k kill | h help | enter/a attach | mod-↑/↓ resize | q quit";
 const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
-←/→ switch list/detail panes
+←/→ cycle panes
 PgUp/PgDn page current pane
 Home/End jump current pane
 m monitor highlighted session
@@ -90,6 +90,7 @@ enum LayoutMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    Motd,
     List,
     Detail,
 }
@@ -503,6 +504,28 @@ impl AppState {
     fn detail_end(&mut self) {
         self.detail_scroll = 0;
         self.auto_tail = true;
+    }
+
+    fn focus_next(&mut self) {
+        self.focus = match (self.layout_mode, self.focus) {
+            (LayoutMode::Normal, Focus::Motd) => Focus::List,
+            (LayoutMode::Normal, Focus::List) => Focus::Detail,
+            (LayoutMode::Normal, Focus::Detail) => Focus::Motd,
+            (LayoutMode::Portrait, Focus::List) => Focus::Detail,
+            (LayoutMode::Portrait, Focus::Detail) => Focus::List,
+            (LayoutMode::Portrait, Focus::Motd) => Focus::List,
+        };
+    }
+
+    fn focus_previous(&mut self) {
+        self.focus = match (self.layout_mode, self.focus) {
+            (LayoutMode::Normal, Focus::Motd) => Focus::Detail,
+            (LayoutMode::Normal, Focus::List) => Focus::Motd,
+            (LayoutMode::Normal, Focus::Detail) => Focus::List,
+            (LayoutMode::Portrait, Focus::List) => Focus::Detail,
+            (LayoutMode::Portrait, Focus::Detail) => Focus::List,
+            (LayoutMode::Portrait, Focus::Motd) => Focus::Detail,
+        };
     }
 }
 
@@ -1043,77 +1066,79 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
         {
             app.left_percent = app.left_percent.saturating_add(5).min(MAX_LEFT_PERCENT);
         }
-        (KeyCode::Right, _) if app.focus == Focus::List => app.focus = Focus::Detail,
-        (KeyCode::Left, _) if app.focus == Focus::Detail => app.focus = Focus::List,
-        (KeyCode::Up, _) => {
-            if app.focus == Focus::List {
+        (KeyCode::Right, _) => app.focus_next(),
+        (KeyCode::Left, _) => app.focus_previous(),
+        (KeyCode::Up, _) => match app.focus {
+            Focus::List => {
                 if app.move_selection(-1) {
                     stop_detail_source(app).await;
                     app.detail_source = DetailSource::sample();
                     refresh_detail(host, app, true).await?;
                 }
-            } else {
-                app.scroll_detail(1);
             }
-        }
-        (KeyCode::Down, _) => {
-            if app.focus == Focus::List {
+            Focus::Detail => app.scroll_detail(1),
+            Focus::Motd => {}
+        },
+        (KeyCode::Down, _) => match app.focus {
+            Focus::List => {
                 if app.move_selection(1) {
                     stop_detail_source(app).await;
                     app.detail_source = DetailSource::sample();
                     refresh_detail(host, app, true).await?;
                 }
-            } else {
-                app.scroll_detail(-1);
             }
-        }
-        (KeyCode::PageUp, _) => {
-            if app.focus == Focus::List {
+            Focus::Detail => app.scroll_detail(-1),
+            Focus::Motd => {}
+        },
+        (KeyCode::PageUp, _) => match app.focus {
+            Focus::List => {
                 if app.move_selection(-10) {
                     stop_detail_source(app).await;
                     app.detail_source = DetailSource::sample();
                     refresh_detail(host, app, true).await?;
                 }
-            } else {
+            }
+            Focus::Detail => {
                 fetch_older_detail(host, app).await?;
                 app.scroll_detail(10);
             }
-        }
-        (KeyCode::PageDown, _) => {
-            if app.focus == Focus::List {
+            Focus::Motd => {}
+        },
+        (KeyCode::PageDown, _) => match app.focus {
+            Focus::List => {
                 if app.move_selection(10) {
                     stop_detail_source(app).await;
                     app.detail_source = DetailSource::sample();
                     refresh_detail(host, app, true).await?;
                 }
-            } else {
-                app.scroll_detail(-10);
             }
-        }
-        (KeyCode::Home, _) => {
-            if app.focus == Focus::List {
+            Focus::Detail => app.scroll_detail(-10),
+            Focus::Motd => {}
+        },
+        (KeyCode::Home, _) => match app.focus {
+            Focus::List => {
                 if !app.sessions.is_empty() {
                     app.selected = 0;
                     stop_detail_source(app).await;
                     app.detail_source = DetailSource::sample();
                     refresh_detail(host, app, true).await?;
                 }
-            } else {
-                app.detail_home();
             }
-        }
-        (KeyCode::End, _) => {
-            if app.focus == Focus::List {
+            Focus::Detail => app.detail_home(),
+            Focus::Motd => {}
+        },
+        (KeyCode::End, _) => match app.focus {
+            Focus::List => {
                 if !app.sessions.is_empty() {
                     app.selected = app.sessions.len().saturating_sub(1);
                     stop_detail_source(app).await;
                     app.detail_source = DetailSource::sample();
                     refresh_detail(host, app, true).await?;
                 }
-            } else {
-                app.detail_end();
             }
-        }
+            Focus::Detail => app.detail_end(),
+            Focus::Motd => {}
+        },
         _ => {}
     }
 
@@ -1380,7 +1405,7 @@ fn draw_motd(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             Block::default()
                 .title(" MOTD ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(focused_style(app, Focus::Motd)),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
@@ -1672,7 +1697,7 @@ mod tests {
         assert!(!normal_status.contains("keys"));
         assert!(!normal_status.contains("host"));
         assert!(normal_status.contains("↑/↓ select"));
-        assert!(normal_status.contains("←/→ pane"));
+        assert!(normal_status.contains("←/→ cycle"));
         assert!(normal_status.contains("h help"));
         assert!(normal_status.contains("mod-←/→ resize"));
         assert!(!normal_status.contains("up/down"));
@@ -1696,7 +1721,7 @@ mod tests {
         assert!(!portrait_status.contains("keys"));
         assert!(!portrait_status.contains("host"));
         assert!(portrait_status.contains("↑/↓ select"));
-        assert!(portrait_status.contains("←/→ pane"));
+        assert!(portrait_status.contains("←/→ cycle"));
         assert!(portrait_status.contains("h help"));
         assert!(portrait_status.contains("mod-↑/↓ resize"));
         assert!(!portrait_status.contains("up/down"));
@@ -2032,6 +2057,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn left_and_right_arrows_cycle_landscape_panes() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::Detail);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::Motd);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::List);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::Motd);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::Detail);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[tokio::test]
+    async fn left_and_right_arrows_cycle_portrait_panes_without_motd() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+        app.layout_mode = LayoutMode::Portrait;
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::Detail);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::List);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::Detail);
+    }
+
+    #[tokio::test]
+    async fn motd_focus_does_not_scroll_or_change_selection() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+        app.focus = Focus::Motd;
+        app.detail_lines = (0..20).map(|idx| format!("line {idx}")).collect();
+        app.detail_view_height = 5;
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.detail_scroll, 0);
+    }
+
+    #[tokio::test]
     async fn ctrl_left_with_extra_modifiers_resizes_normal_layout() {
         let host = HostHandle::local();
         let mut app = AppState::new(
@@ -2139,6 +2285,7 @@ mod tests {
 
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert_eq!(app.left_percent, initial);
+        assert_eq!(app.focus, Focus::Motd);
     }
 
     #[test]
