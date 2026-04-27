@@ -10,6 +10,7 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Updated selector API reality for portrait mode: `LayoutMode::Portrait`, `Cli::portrait`, PTY auto-detection, and old `-s` rejection. |
@@ -282,19 +283,23 @@ struct Cli {
     ssh_uri: Option<String>,
     portrait: bool,
     landscape: bool,
-    print_session: bool,
-    dashboard: bool,
+    script: bool,
 }
 ```
 
 Validation rules:
 
-- `--print-session` and `--dashboard` are mutually exclusive
+- `--script` prints the selected session name to stdout and exits without
+  attaching
+- without `--script`, the selector attaches and re-enters after detach when the
+  attach child succeeds or the selected session still exists
 - `--portrait` / `-p` forces portrait layout
 - `--landscape` / `-l` forces landscape layout
 - `--portrait` and `--landscape` are mutually exclusive
 - without a layout force flag, startup reads the connecting PTY dimensions and
   selects portrait when `columns / rows <= 4.0`
+- the removed `--print-session` and `--dashboard` flags are not accepted in the
+  finalized CLI contract
 - the old `-s` flag is rejected
 - target is positional SSH URI only
 - omitted target means local host
@@ -313,7 +318,7 @@ API tests must cover:
 - sample color preservation, monitor screen capture, and ANSI/VTE parser
   behavior
 - modified-arrow resize fallback behavior
-- dashboard re-entry and no-loop conditions
+- default attach/re-enter and no-loop conditions
 
 Current implementation coverage:
 
@@ -321,7 +326,8 @@ Current implementation coverage:
   `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
   and stable-id kill coverage.
 - `cargo test -p motlie-tmux-select`: CLI mutual exclusion, stable-id
-  highlight preservation, layout force-flag parsing, `-s` rejection, PTY aspect
+  highlight preservation, `--script` parsing, removed mode-flag rejection,
+  layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
   modified-arrow resize fallbacks, Left/Right focus transitions, sample color
   preservation, monitor screen capture, ANSI/VTE parsing, and

@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0`, updated layout test targets, and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode tracking with portrait mode: `--portrait`, PTY aspect-ratio auto-detection, old `-s` rejection, updated layout/test references, and the requested Claude artifact ASCII logo. |
@@ -149,11 +150,11 @@ References: [Target Model](./DESIGN.md#target-model),
 - [x] 2.4 Add dependencies: `motlie-tmux`, `tokio`, `anyhow`, `clap`,
   `ratatui`, `crossterm`, and `async-trait` only if the final trait shape
   requires it.
-- [x] 2.5 Implement CLI parsing for positional `ssh-uri`, `--print-session`,
-  `--dashboard`, `--portrait` / `-p`, and `--landscape` / `-l`; reject the old
-  `-s` flag and mutually reject both layout force flags.
-- [x] 2.6 Add startup validation for mutually exclusive `--print-session` and
-  `--dashboard`.
+- [x] 2.5 Implement CLI parsing for positional `ssh-uri`, `--script`,
+  `--portrait` / `-p`, and `--landscape` / `-l`; reject removed
+  `--print-session` / `--dashboard`, reject the old `-s` flag, and mutually
+  reject both layout force flags.
+- [x] 2.6 Add startup validation for mutually exclusive layout force flags.
 - [x] 2.7 Add smoke tests for startup-error cases.
 
 ## Phase 3: Selector State Model
@@ -249,20 +250,21 @@ References: [Create Session](./DESIGN.md#create-session),
 - [ ] 7.6 Add localhost integration tests for create, list, sample, monitor,
   kill, and empty-list transition.
 
-## Phase 8: Attach, Print, and Dashboard Modes
+## Phase 8: Attach And Script Modes
 
 References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
 
 - [x] 8.1 Implement default Enter/`a` attach path.
 - [x] 8.2 Restore alternate screen and terminal raw mode before attach.
-- [x] 8.3 Stop monitor state and host-event subscriptions before attach.
-- [x] 8.4 Implement `--print-session`: stdout exactly `<name>\n` on selection,
+- [x] 8.3 Stop monitor state and drop the active host-event subscription before
+  attach; selector re-entry starts from a fresh `list_sessions()` snapshot and
+  new subscription.
+- [x] 8.4 Implement `--script`: stdout exactly `<name>\n` on selection,
   non-zero exit and empty stdout on cancel.
-- [x] 8.5 Implement `--dashboard`: re-enter TUI when the attach child exits
-  cleanly or when detach returns non-zero but the selected session still
-  exists; refresh succeeds and the user explicitly picks again.
-- [x] 8.6 On pre-spawn vanished-session race, re-enter under `--dashboard` or
-  exit non-zero in default mode.
+- [x] 8.5 Implement default attach/re-enter behavior: re-enter TUI when the
+  attach child exits cleanly or when detach returns non-zero but the selected
+  session still exists; refresh succeeds and the user explicitly picks again.
+- [x] 8.6 On pre-spawn vanished-session race, re-enter the selector.
 - [ ] 8.7 Add localhost integration test pinning canonical tmux behavior:
   externally killing the attached session exits the attach child with status 0.
 - [ ] 8.8 Add no-loop tests for non-zero child exit and refresh failure.
@@ -314,7 +316,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
 | Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
-| Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/dashboard |
+| Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |
 | Terminal cleanup | PTY harness | raw mode restore, alternate-screen restore, panic-path cleanup |
 
@@ -324,7 +326,7 @@ The implementation is ready for review when:
 
 - all accepted `motlie-tmux` gaps are implemented in `libs/tmux`
 - the selector binary builds as `motlie-tmux-select`
-- default, `--print-session`, `--dashboard`, `--portrait` / `-p`,
+- default attach/re-enter, `--script`, `--portrait` / `-p`,
   `--landscape` / `-l`, local, SSH, and ForceCommand flows have targeted tests
 - `DESIGN.md`, `PLAN.md`, `API.md`, and `CLI.md` are consistent with code
 - `cargo fmt`, `cargo clippy -- -D warnings`, and relevant tests pass
