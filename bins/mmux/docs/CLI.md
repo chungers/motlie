@@ -1,14 +1,15 @@
-# tmux_select CLI
+# mmux CLI
 
 ## Status
 
-Implemented CLI contract for the initial `tmux_select` binary in
-`bins/tmux_select/main.rs`.
+Implemented CLI contract for the initial `mmux` binary in
+`bins/mmux/main.rs`.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Renamed the selector command to `mmux` and updated CLI/ForceCommand examples. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` status-bar label. |
 | 2026-04-27 | @gpt55-dgx | Moved the host label from the status bar into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
@@ -27,20 +28,20 @@ Implemented CLI contract for the initial `tmux_select` binary in
 ## Synopsis
 
 ```text
-tmux_select [OPTIONS] [SSH_URI]
+mmux [OPTIONS] [SSH_URI]
 ```
 
 Examples:
 
 ```bash
-tmux_select
-tmux_select --portrait
-tmux_select -p
-tmux_select --landscape
-tmux_select -l
-tmux_select --script
-tmux_select ssh://user@host
-tmux_select 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
+mmux
+mmux --portrait
+mmux -p
+mmux --landscape
+mmux -l
+mmux --script
+mmux ssh://user@host
+mmux 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
 ```
 
 ## Arguments and Options
@@ -59,7 +60,7 @@ The v1 target form is positional only. There is no `--target` flag in v1.
 ## Default Mode
 
 ```bash
-tmux_select
+mmux
 ```
 
 Default mode opens the TUI against the local host. Pressing Enter or `a`
@@ -72,7 +73,7 @@ without attach.
 For remote targets:
 
 ```bash
-tmux_select ssh://user@host
+mmux ssh://user@host
 ```
 
 The TUI runs locally, but all tmux operations target the SSH host. Attach opens
@@ -81,7 +82,7 @@ an interactive SSH PTY and runs remote tmux attach against the selected session.
 ## Script Mode
 
 ```bash
-tmux attach -t "$(tmux_select --script)"
+tmux attach -t "$(mmux --script)"
 ```
 
 `--script` is for shell composition. On selection:
@@ -102,10 +103,10 @@ user has no shell to consume stdout.
 ## Portrait Mode
 
 ```bash
-tmux_select --portrait
-tmux_select -p
-tmux_select --portrait --script
-tmux_select --portrait ssh://user@host
+mmux --portrait
+mmux -p
+mmux --portrait --script
+mmux --portrait ssh://user@host
 ```
 
 Portrait mode is optimized for 32 row by roughly 65 column terminals. It uses a
@@ -180,27 +181,27 @@ the build git SHA, and a single Ok button.
 ## ForceCommand
 
 Recommended local deployment after installing the built binary to
-`/usr/local/bin/tmux_select`:
+`/usr/local/bin/mmux`:
 
 ```text
-ForceCommand /usr/local/bin/tmux_select
+ForceCommand /usr/local/bin/mmux
 ```
 
 Portrait-mode deployment:
 
 ```text
-ForceCommand /usr/local/bin/tmux_select --portrait
+ForceCommand /usr/local/bin/mmux --portrait
 ```
 
 Landscape-mode deployment:
 
 ```text
-ForceCommand /usr/local/bin/tmux_select --landscape
+ForceCommand /usr/local/bin/mmux --landscape
 ```
 
 By default, `SSH_ORIGINAL_COMMAND` is rejected with a clear stderr message.
 Operators can configure an external bypass by allowing
-`MOTLIE_TMUX_SELECT_BYPASS=1` for selected users or groups. When both
+`MOTLIE_MMUX_BYPASS=1` for selected users or groups. When both
 `SSH_ORIGINAL_COMMAND` and the bypass are present, the binary delegates to the
 original command instead of launching the selector.
 

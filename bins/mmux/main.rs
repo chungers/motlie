@@ -46,7 +46,7 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃"#;
 
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
-const BUILD_GIT_SHA: &str = env!("TMUX_SELECT_GIT_SHA");
+const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 const NORMAL_STATUS_KEYS: &str =
     "↑/↓ select | ←/→ pane | m monitor | n new | k kill | h help | enter/a attach | mod-←/→ resize | q quit";
 const PORTRAIT_STATUS_KEYS: &str =
@@ -66,7 +66,7 @@ mod-↑/↓ resize T/B in portrait
 q/Ctrl-C quit"#;
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "tmux_select")]
+#[command(name = "mmux")]
 #[command(about = "Select, preview, monitor, and attach tmux sessions")]
 struct Cli {
     /// Force portrait layout instead of auto-detecting from the current PTY.
@@ -593,7 +593,7 @@ async fn main() {
     let code = match run().await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("tmux_select: {err:#}");
+            eprintln!("mmux: {err:#}");
             1
         }
     };
@@ -624,7 +624,7 @@ async fn run() -> Result<i32> {
         let target = match host.session_by_id(&selected.id).await? {
             Some(target) => target,
             None => {
-                eprintln!("tmux_select: selected session disappeared; returning to selector");
+                eprintln!("mmux: selected session disappeared; returning to selector");
                 continue;
             }
         };
@@ -654,7 +654,7 @@ fn maybe_run_forcecommand_bypass() -> Result<Option<i32>> {
         _ => return Ok(None),
     };
 
-    if std::env::var("MOTLIE_TMUX_SELECT_BYPASS").ok().as_deref() == Some("1") {
+    if std::env::var("MOTLIE_MMUX_BYPASS").ok().as_deref() == Some("1") {
         let status = Command::new("sh")
             .arg("-lc")
             .arg(original)
@@ -664,7 +664,7 @@ fn maybe_run_forcecommand_bypass() -> Result<Option<i32>> {
     }
 
     eprintln!(
-        "tmux_select: SSH_ORIGINAL_COMMAND is disabled for this account; set MOTLIE_TMUX_SELECT_BYPASS=1 to delegate explicitly"
+        "mmux: SSH_ORIGINAL_COMMAND is disabled for this account; set MOTLIE_MMUX_BYPASS=1 to delegate explicitly"
     );
     Ok(Some(126))
 }
@@ -1594,13 +1594,13 @@ mod tests {
 
     #[test]
     fn cli_accepts_script_and_rejects_removed_mode_flags() {
-        let script = Cli::try_parse_from(["tmux_select", "--script"]).unwrap();
+        let script = Cli::try_parse_from(["mmux", "--script"]).unwrap();
         assert!(script.script);
 
-        let print_session = Cli::try_parse_from(["tmux_select", "--print-session"]);
+        let print_session = Cli::try_parse_from(["mmux", "--print-session"]);
         assert!(print_session.is_err());
 
-        let dashboard = Cli::try_parse_from(["tmux_select", "--dashboard"]);
+        let dashboard = Cli::try_parse_from(["mmux", "--dashboard"]);
         assert!(dashboard.is_err());
 
         Cli::command().debug_assert();
@@ -1608,24 +1608,24 @@ mod tests {
 
     #[test]
     fn cli_accepts_layout_force_flags_and_rejects_old_short_flag() {
-        let portrait = Cli::try_parse_from(["tmux_select", "--portrait"]).unwrap();
+        let portrait = Cli::try_parse_from(["mmux", "--portrait"]).unwrap();
         assert!(portrait.portrait);
         assert_eq!(portrait.forced_layout(), Some(LayoutMode::Portrait));
 
-        let portrait_short = Cli::try_parse_from(["tmux_select", "-p"]).unwrap();
+        let portrait_short = Cli::try_parse_from(["mmux", "-p"]).unwrap();
         assert!(portrait_short.portrait);
 
-        let landscape = Cli::try_parse_from(["tmux_select", "--landscape"]).unwrap();
+        let landscape = Cli::try_parse_from(["mmux", "--landscape"]).unwrap();
         assert!(landscape.landscape);
         assert_eq!(landscape.forced_layout(), Some(LayoutMode::Normal));
 
-        let landscape_short = Cli::try_parse_from(["tmux_select", "-l"]).unwrap();
+        let landscape_short = Cli::try_parse_from(["mmux", "-l"]).unwrap();
         assert!(landscape_short.landscape);
 
-        let old_short = Cli::try_parse_from(["tmux_select", "-s"]);
+        let old_short = Cli::try_parse_from(["mmux", "-s"]);
         assert!(old_short.is_err());
 
-        let conflicting = Cli::try_parse_from(["tmux_select", "--portrait", "--landscape"]);
+        let conflicting = Cli::try_parse_from(["mmux", "--portrait", "--landscape"]);
         assert!(conflicting.is_err());
     }
 

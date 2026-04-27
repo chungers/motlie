@@ -7,14 +7,14 @@ fn main() {
     for path in git_rerun_paths() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    println!("cargo:rerun-if-env-changed=TMUX_SELECT_GIT_SHA");
+    println!("cargo:rerun-if-env-changed=MMUX_GIT_SHA");
 
-    let sha = std::env::var("TMUX_SELECT_GIT_SHA")
+    let sha = std::env::var("MMUX_GIT_SHA")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(current_git_sha);
 
-    println!("cargo:rustc-env=TMUX_SELECT_GIT_SHA={sha}");
+    println!("cargo:rustc-env=MMUX_GIT_SHA={sha}");
 }
 
 fn git_rerun_paths() -> Vec<PathBuf> {

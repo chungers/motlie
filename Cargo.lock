@@ -5187,6 +5187,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-mmux"
+version = "0.1.0"
+dependencies = [
+ "ansi-to-tui",
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm 0.29.0",
+ "motlie-tmux",
+ "ratatui",
+ "tokio",
+]
+
+[[package]]
 name = "motlie-model"
 version = "0.1.0"
 dependencies = [
@@ -5369,20 +5383,6 @@ dependencies = [
  "ratatui",
  "reedline",
  "shlex",
- "tokio",
-]
-
-[[package]]
-name = "motlie-tmux-select"
-version = "0.1.0"
-dependencies = [
- "ansi-to-tui",
- "anyhow",
- "chrono",
- "clap",
- "crossterm 0.29.0",
- "motlie-tmux",
- "ratatui",
  "tokio",
 ]
 
