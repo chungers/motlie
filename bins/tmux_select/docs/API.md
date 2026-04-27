@@ -10,6 +10,7 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Documented the About modal state and build-time git SHA metadata used by the `h` key. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
@@ -185,11 +186,25 @@ enum Focus {
     Detail,
 }
 
+enum ModalState {
+    NewSession { input: String, button: Button },
+    KillSession { id: String, name: String, button: Button },
+    About,
+}
+
 struct SelectedSession {
     id: String,
     name: String,
 }
 ```
+
+## Build Metadata
+
+The binary embeds a build-time git SHA in a private `BUILD_GIT_SHA` constant.
+`bins/tmux_select/build.rs` sets `TMUX_SELECT_GIT_SHA` from
+`git rev-parse HEAD`, or uses an explicit `TMUX_SELECT_GIT_SHA` environment
+override when provided. The About modal opened by `h` renders that value beside
+the built-in motlie logo.
 
 ## Detail Source Contract
 
@@ -318,6 +333,7 @@ API tests must cover:
 - sample color preservation, monitor screen capture, and ANSI/VTE parser
   behavior
 - modified-arrow resize fallback behavior
+- About modal open/close behavior and build SHA display
 - default attach/re-enter and no-loop conditions
 
 Current implementation coverage:
@@ -330,5 +346,5 @@ Current implementation coverage:
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
   modified-arrow resize fallbacks, Left/Right focus transitions, sample color
-  preservation, monitor screen capture, ANSI/VTE parsing, and
-  monitored-session-close reset.
+  preservation, About modal display/close behavior, monitor screen capture,
+  ANSI/VTE parsing, and monitored-session-close reset.

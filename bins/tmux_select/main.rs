@@ -45,6 +45,7 @@ const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃"#;
 
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
+const BUILD_GIT_SHA: &str = env!("TMUX_SELECT_GIT_SHA");
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "tmux_select")]
@@ -92,6 +93,7 @@ enum ModalState {
         name: String,
         button: Button,
     },
+    About,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -869,6 +871,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
         }
         (KeyCode::Char('q'), _) => return Ok(KeyOutcome::Cancel),
         (KeyCode::Esc, _) => app.focus = Focus::List,
+        (KeyCode::Char('h'), _) => app.modal = Some(ModalState::About),
         (KeyCode::Char('m'), _) => start_monitor(host, app).await?,
         (KeyCode::Char('n'), _) => {
             app.modal = Some(ModalState::NewSession {
@@ -1046,6 +1049,10 @@ async fn handle_modal_key(
             }
             _ => {}
         },
+        Some(ModalState::About) => match key.code {
+            KeyCode::Esc | KeyCode::Enter => close = true,
+            _ => {}
+        },
         None => {}
     }
 
@@ -1085,6 +1092,7 @@ async fn handle_modal_key(
                         }
                     }
                 }
+                Some(ModalState::About) => {}
                 None => {}
             }
         }
@@ -1365,21 +1373,51 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
 fn status_line_text(app: &AppState, time: &str) -> String {
     let keys = if app.layout_mode == LayoutMode::Portrait {
-        "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-up/down resize | q quit"
+        "keys: up/down select | right/left pane | m monitor | n new | k kill | h about | enter/a attach | mod-up/down resize | q quit"
     } else {
-        "keys: up/down select | right/left focus | m monitor | n new | k kill | enter/a attach | mod-left/right resize | q quit"
+        "keys: up/down select | right/left pane | m monitor | n new | k kill | h about | enter/a attach | mod-left/right resize | q quit"
     };
     format!(" {} | {} | {} ", app.host_label, time, keys)
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
-    let width = min(60, area.width.saturating_sub(4));
-    let height = 7;
+    let (title, body, button) = modal_content(modal);
+    let body_width = body
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let width = min(
+        max(60, body_width.saturating_add(4)),
+        area.width.saturating_sub(4),
+    );
+    let body_height = body.lines().count() as u16;
+    let height = min(
+        max(7, body_height.saturating_add(2)),
+        area.height.saturating_sub(2),
+    );
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = Rect::new(x, y, width, height);
     frame.render_widget(Clear, rect);
 
+    let border = if button == Button::Ok {
+        Color::Green
+    } else {
+        Color::Yellow
+    };
+    let paragraph = Paragraph::new(body)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, rect);
+}
+
+fn modal_content(modal: &ModalState) -> (&'static str, String, Button) {
     let (title, body, button) = match modal {
         ModalState::NewSession { input, button } => (
             " New Session ",
@@ -1399,21 +1437,13 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
             ),
             *button,
         ),
+        ModalState::About => (
+            " About ",
+            format!("{MOTLIE_PLACEHOLDER}\n\nGit SHA: {BUILD_GIT_SHA}\n\n[Ok]"),
+            Button::Ok,
+        ),
     };
-    let border = if button == Button::Ok {
-        Color::Green
-    } else {
-        Color::Yellow
-    };
-    let paragraph = Paragraph::new(body)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border)),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, rect);
+    (title, body, button)
 }
 
 fn button_text(active: Button, button: Button) -> String {
@@ -1499,8 +1529,10 @@ mod tests {
         );
         let normal_status = status_line_text(&normal, "12:34:56");
         assert!(normal_status.contains(" host | 12:34:56 | keys:"));
+        assert!(normal_status.contains("h about"));
         assert!(!normal_status.contains("list"));
         assert!(!normal_status.contains("detail"));
+        assert!(!normal_status.contains("focus"));
         assert!(!normal_status.contains("normal"));
         assert!(!normal_status.contains("landscape"));
         assert!(!normal_status.contains("portrait"));
@@ -1513,8 +1545,10 @@ mod tests {
         );
         let portrait_status = status_line_text(&portrait, "12:34:56");
         assert!(portrait_status.contains(" host | 12:34:56 | keys:"));
+        assert!(portrait_status.contains("h about"));
         assert!(!portrait_status.contains("list"));
         assert!(!portrait_status.contains("detail"));
+        assert!(!portrait_status.contains("focus"));
         assert!(!portrait_status.contains("normal"));
         assert!(!portrait_status.contains("landscape"));
         assert!(!portrait_status.contains("portrait"));
@@ -1678,6 +1712,58 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, KeyOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn h_opens_about_modal_and_enter_or_escape_closes_it() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        let Some(ModalState::About) = app.modal.as_ref() else {
+            panic!("expected about modal");
+        };
+        let (_title, body, button) = modal_content(app.modal.as_ref().unwrap());
+        assert_eq!(button, Button::Ok);
+        assert!(body.contains(MOTLIE_PLACEHOLDER));
+        assert!(body.contains("Git SHA: "));
+        assert!(body.contains(BUILD_GIT_SHA));
+        assert!(body.contains("[Ok]"));
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.modal.is_none());
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.modal.is_none());
     }
 
     #[tokio::test]

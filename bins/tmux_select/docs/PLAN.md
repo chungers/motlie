@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Added implementation tracking for the `h` About modal with build git SHA display and Enter/Esc close behavior. |
 | 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
 | 2026-04-26 | @gpt55-dgx | Updated status bar tracking: omit layout labels from the status text and render the bar with a blue background. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
@@ -213,7 +214,9 @@ References: [Functional Requirements](./DESIGN.md#functional),
 - [x] 5.5 Implement `New Session` modal with text input, Cancel/Ok, Enter, and
   Esc handling.
 - [x] 5.6 Implement kill confirmation modal with id captured at modal-open.
-- [ ] 5.7 Add unit tests for every key transition, modal button selection,
+- [x] 5.7 Implement About modal opened by `h`, showing the built-in motlie
+  logo and build git SHA with a single Ok button; Enter or Esc closes it.
+- [ ] 5.8 Add unit tests for every key transition, modal button selection,
   modal Esc behavior, and plain Left/Right focus behavior.
 
 ## Phase 6: Detail Sources
@@ -316,7 +319,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
-| Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc |
+| Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc, About modal `h` key and build SHA display |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |
