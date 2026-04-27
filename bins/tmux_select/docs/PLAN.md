@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Changed portrait mode implementation tracking from a 40:60 to a 30:70 T/B split. |
 | 2026-04-26 | @gpt55-dgx | Added implementation tracking for the `h` About modal with build git SHA display and Enter/Esc close behavior. |
 | 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
 | 2026-04-26 | @gpt55-dgx | Updated status bar tracking: omit layout labels from the status text and render the bar with a blue background. |
@@ -187,7 +188,7 @@ References: [Layout](./DESIGN.md#layout),
   pane height.
 - [x] 4.3 Implement absent-MOTD motlie placeholder with narrow-terminal
   fallback.
-- [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 40:60 and
+- [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
   omit MOTD.
 - [x] 4.5 Implement focused/unfocused border styles.
 - [x] 4.6 Implement blue status bar with host, time, and ASCII-first key hints;

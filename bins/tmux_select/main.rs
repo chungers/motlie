@@ -386,7 +386,7 @@ impl AppState {
             detail_source: DetailSource::sample(),
             status: "loading sessions".to_string(),
             left_percent: 42,
-            top_percent: 40,
+            top_percent: 30,
             modal: None,
             auto_tail: true,
         }
@@ -1517,6 +1517,18 @@ mod tests {
         assert!(is_portrait_pty(40, 40));
         assert!(!is_portrait_pty(161, 40));
         assert!(!is_portrait_pty(200, 40));
+    }
+
+    #[test]
+    fn portrait_default_split_is_30_70() {
+        let app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Portrait,
+            "motd".to_string(),
+            false,
+        );
+
+        assert_eq!(app.top_percent, 30);
     }
 
     #[test]

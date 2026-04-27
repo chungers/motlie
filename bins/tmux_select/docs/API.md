@@ -10,6 +10,7 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented portrait mode's 30:70 default T/B split. |
 | 2026-04-26 | @gpt55-dgx | Documented the About modal state and build-time git SHA metadata used by the `h` key. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
@@ -309,6 +310,7 @@ Validation rules:
 - without `--script`, the selector attaches and re-enters after detach when the
   attach child succeeds or the selected session still exists
 - `--portrait` / `-p` forces portrait layout
+- portrait layout initializes the `T`/`B` split at 30:70
 - `--landscape` / `-l` forces landscape layout
 - `--portrait` and `--landscape` are mutually exclusive
 - without a layout force flag, startup reads the connecting PTY dimensions and

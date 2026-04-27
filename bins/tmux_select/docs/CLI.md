@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
 | 2026-04-26 | @gpt55-dgx | Added the `h` key for an About modal showing the motlie logo and build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
@@ -110,6 +111,9 @@ vertical split:
 - `T`: session list, default focus
 - `B`: detail pane
 - one-row status bar
+
+The initial T/B ratio is 30:70, giving the detail pane more vertical space by
+default. `Ctrl-Up` / `Ctrl-Down` can resize the split after startup.
 
 MOTD and the motlie placeholder are omitted in portrait mode. Use
 `--landscape` / `-l` to force the normal `L`/`R` layout even when the PTY is
