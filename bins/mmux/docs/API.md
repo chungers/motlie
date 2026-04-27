@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented `p` as the main-view pane-cycle key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Documented in-memory retained selector UI state for default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Documented mode-specific resize bounds: landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Replaced build metadata shellouts with Rust filesystem/time APIs in `build.rs`. |
@@ -218,7 +219,7 @@ from the live session list length: `Sessions [n]`. Bottom status text contains
 compact key hints and app status, not the host label, current time, layout/focus
 labels, or a `keys` prefix. Command hints in the bottom status start with
 `(h)elp`, followed by `(m)onitor` and the other command mnemonics. Direction
-hints render as `↑/↓ sel` and `←/→ pane`.
+hints render as `↑/↓ sel` and `(p)ane`.
 
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing
@@ -366,7 +367,7 @@ API tests must cover:
 - sample color preservation, monitor screen capture, and ANSI/VTE parser
   behavior
 - modified-arrow resize fallback behavior
-- cyclic Left/Right focus behavior in landscape and portrait layouts
+- `p` key focus-cycling behavior in landscape and portrait layouts
 - status hint arrow-symbol rendering
 - top status rendering for bold hostname/IP and right-justified current time
 - session count rendering in the Sessions pane title without hostname/IP
@@ -383,7 +384,7 @@ Current implementation coverage:
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
-  modified-arrow resize fallbacks, cyclic Left/Right focus transitions, compact
+  modified-arrow resize fallbacks, `p` pane focus transitions, compact
   status hint rendering, sample color preservation, Help modal
   key-function/display/close behavior, monitor screen capture, ANSI/VTE
   parsing, and monitored-session-close reset.

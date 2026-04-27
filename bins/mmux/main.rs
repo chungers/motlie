@@ -51,12 +51,12 @@ const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 const NORMAL_STATUS_KEYS: &str =
-    "↑/↓ sel | ←/→ pane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-←/→ resize | (q)uit";
+    "↑/↓ sel | (p)ane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-←/→ resize | (q)uit";
 const PORTRAIT_STATUS_KEYS: &str =
-    "↑/↓ sel | ←/→ pane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-↑/↓ resize | (q)uit";
+    "↑/↓ sel | (p)ane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach | mod-↑/↓ resize | (q)uit";
 const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
-←/→ cycle panes
+p cycle panes
 PgUp/PgDn page current pane
 Home/End jump current pane
 m monitor highlighted session
@@ -563,17 +563,6 @@ impl AppState {
             (LayoutMode::Portrait, Focus::List) => Focus::Detail,
             (LayoutMode::Portrait, Focus::Detail) => Focus::List,
             (LayoutMode::Portrait, Focus::Motd) => Focus::List,
-        };
-    }
-
-    fn focus_previous(&mut self) {
-        self.focus = match (self.layout_mode, self.focus) {
-            (LayoutMode::Normal, Focus::Motd) => Focus::Detail,
-            (LayoutMode::Normal, Focus::List) => Focus::Motd,
-            (LayoutMode::Normal, Focus::Detail) => Focus::List,
-            (LayoutMode::Portrait, Focus::List) => Focus::Detail,
-            (LayoutMode::Portrait, Focus::Detail) => Focus::List,
-            (LayoutMode::Portrait, Focus::Motd) => Focus::Detail,
         };
     }
 }
@@ -1155,8 +1144,7 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
                 .saturating_add(5)
                 .min(LANDSCAPE_MAX_LEFT_PERCENT);
         }
-        (KeyCode::Right, _) => app.focus_next(),
-        (KeyCode::Left, _) => app.focus_previous(),
+        (KeyCode::Char('p'), _) => app.focus_next(),
         (KeyCode::Up, _) => match app.focus {
             Focus::List => {
                 if app.move_selection(-1) {
@@ -1841,8 +1829,9 @@ mod tests {
         assert!(!normal_status.contains("keys"));
         assert!(!normal_status.contains("host"));
         assert!(normal_status.contains("↑/↓ sel"));
-        assert!(normal_status.contains("←/→ pane"));
+        assert!(normal_status.contains("(p)ane"));
         assert!(!normal_status.contains("↑/↓ select"));
+        assert!(!normal_status.contains("←/→ pane"));
         assert!(!normal_status.contains("←/→ cycle"));
         assert!(normal_status.contains("(h)elp | (m)onitor"));
         assert!(!normal_status.contains("m monitor"));
@@ -1870,8 +1859,9 @@ mod tests {
         assert!(!portrait_status.contains("keys"));
         assert!(!portrait_status.contains("host"));
         assert!(portrait_status.contains("↑/↓ sel"));
-        assert!(portrait_status.contains("←/→ pane"));
+        assert!(portrait_status.contains("(p)ane"));
         assert!(!portrait_status.contains("↑/↓ select"));
+        assert!(!portrait_status.contains("←/→ pane"));
         assert!(!portrait_status.contains("←/→ cycle"));
         assert!(portrait_status.contains("(h)elp | (m)onitor"));
         assert!(!portrait_status.contains("m monitor"));
@@ -2337,14 +2327,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn right_arrow_focuses_detail_from_session_list() {
+    async fn p_focuses_detail_from_session_list() {
         let host = HostHandle::local();
         let mut app = app_with_session();
 
         let outcome = handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
         )
         .await
         .unwrap();
@@ -2354,7 +2344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn right_arrow_focuses_monitor_detail_from_session_list() {
+    async fn p_focuses_monitor_detail_from_session_list() {
         let host = HostHandle::local();
         let mut app = app_with_session();
         app.detail_source = DetailSource::Monitor(Box::new(MonitorDetailSource {
@@ -2364,7 +2354,7 @@ mod tests {
         let outcome = handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
         )
         .await
         .unwrap();
@@ -2375,7 +2365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn left_arrow_focuses_list_from_detail_or_monitor() {
+    async fn p_cycles_from_detail_without_changing_monitor_source() {
         let host = HostHandle::local();
         let mut app = app_with_session();
         app.focus = Focus::Detail;
@@ -2386,25 +2376,25 @@ mod tests {
         let outcome = handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
         )
         .await
         .unwrap();
 
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.focus, Focus::Motd);
         assert_eq!(app.detail_source.mode(), DetailMode::Monitor);
     }
 
     #[tokio::test]
-    async fn left_and_right_arrows_cycle_landscape_panes() {
+    async fn p_cycles_landscape_panes() {
         let host = HostHandle::local();
         let mut app = app_with_session();
 
         handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
         )
         .await
         .unwrap();
@@ -2413,7 +2403,7 @@ mod tests {
         handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
         )
         .await
         .unwrap();
@@ -2422,34 +2412,7 @@ mod tests {
         handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.focus, Focus::List);
-
-        handle_key(
-            &host,
-            &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.focus, Focus::Motd);
-
-        handle_key(
-            &host,
-            &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.focus, Focus::Detail);
-
-        handle_key(
-            &host,
-            &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
         )
         .await
         .unwrap();
@@ -2457,7 +2420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn left_and_right_arrows_cycle_portrait_panes_without_motd() {
+    async fn p_cycles_portrait_panes_without_motd() {
         let host = HostHandle::local();
         let mut app = app_with_session();
         app.layout_mode = LayoutMode::Portrait;
@@ -2465,11 +2428,35 @@ mod tests {
         handle_key(
             &host,
             &mut app,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
         )
         .await
         .unwrap();
         assert_eq!(app.focus, Focus::Detail);
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[tokio::test]
+    async fn plain_left_and_right_do_not_cycle_panes() {
+        let host = HostHandle::local();
+        let mut app = app_with_session();
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.focus, Focus::List);
 
         handle_key(
             &host,
@@ -2479,15 +2466,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(app.focus, Focus::List);
-
-        handle_key(
-            &host,
-            &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.focus, Focus::Detail);
     }
 
     #[tokio::test]
@@ -2662,7 +2640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plain_left_does_not_resize_normal_layout() {
+    async fn plain_left_does_not_resize_or_cycle_normal_layout() {
         let host = HostHandle::local();
         let mut app = AppState::new(
             "host".to_string(),
@@ -2682,7 +2660,7 @@ mod tests {
 
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert_eq!(app.left_percent, initial);
-        assert_eq!(app.focus, Focus::Motd);
+        assert_eq!(app.focus, Focus::List);
     }
 
     #[test]

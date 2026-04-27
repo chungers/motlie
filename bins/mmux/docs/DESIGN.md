@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |
 | 2026-04-27 | @gpt55-dgx | Added in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
@@ -128,7 +129,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   modified-arrow sequences such as Alt/Shift arrows and word-left/word-right
   when a client does not report Ctrl-arrow distinctly. On macOS iTerm2, manual
   validation observed `Shift-Left` and `Shift-Right` for L/R resize. Plain
-  Right cycles focus `LT -> Lb -> R -> LT`; plain Left cycles in reverse.
+  Left/Right do not change pane focus in the main view.
+- Pressing `p` cycles focus `LT -> Lb -> R -> LT` in landscape mode.
 - `R` initially shows sampled detail for the highlighted session.
 - `R` detail is supplied through a trait so future view models can summarize or
   otherwise transform session content.
@@ -160,9 +162,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `Ok`; Enter exits the modal and applies `Ok` when selected. `Esc` in a modal
   is `Cancel` and closes without applying. In the help modal, Enter or `Esc`
   closes the modal without changing selector state.
-- Pressing Right cycles focus through the landscape panes in this order:
-  `LT -> Lb -> R -> LT`. Pressing Left cycles in reverse. Outside any modal,
-  `Esc` returns focus to `Lb` (use `q` or `Ctrl-C` to exit). The currently
+- Pressing `p` cycles focus through the landscape panes in this order:
+  `LT -> Lb -> R -> LT`. Outside any modal, `Esc` returns focus to `Lb`
+  (use `q` or `Ctrl-C` to exit). The currently
   focused pane must be visually distinguished from the unfocused panes via
   border style — a bright/colored or doubled border for the focused pane,
   dim/single for the unfocused. The status bar does not duplicate focus state.
@@ -183,7 +185,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
-  `←/→ pane` for pane focus. Always-on command hints are ordered with
+  `(p)ane` for pane focus. Always-on command hints are ordered with
   `(h)elp` first, then `(m)onitor`, `(n)ew`, `(k)ill`, attach, resize, and
   `(q)uit`. The bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
@@ -210,13 +212,13 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 30:70 ratio. MOTD and the
   motlie placeholder are omitted in portrait mode to maximize content density.
-  All command keys (Left/Right focus cycling, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
+  All command keys (`p` focus cycling, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
   identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
   differ by mode: portrait mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
   normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`, with
   modified-arrow fallback sequences accepted for terminal compatibility. Plain
-  `Left`/`Right` cycle focus between panes in main view;
+  `Left`/`Right` do not cycle focus in the main view;
   modal use of `Left`/`Right` for button selection is unchanged. Without a
   layout force flag, the selector calls `crossterm::terminal::size()` on the
   connecting PTY and selects portrait mode when `columns / rows <= 4.0`;
@@ -387,8 +389,8 @@ Main-selector keymap (focus-aware):
 | Up / Down | No-op | Move highlight; LB viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
 | PgUp / PgDn | No-op | Page through session list | Page through R buffer |
 | Home / End | No-op | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
-| Left | Focus → `R` | Focus → `LT` | Focus → `Lb` |
-| Right | Focus → `Lb` | Focus → `R` | Focus → `LT` |
+| `p` | Focus → `Lb` | Focus → `R` | Focus → `LT` |
+| Left / Right | No-op | No-op | No-op |
 | `Esc` | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal |
 | Modified Left / Right | Resize `L`/`R` split (normal mode only; `Ctrl`, Alt, Shift, and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) | Resize `L`/`R` split (normal mode only; focus-independent) |
 | `m` | Start/switch monitoring on highlight | Same | Same |
@@ -398,8 +400,8 @@ Main-selector keymap (focus-aware):
 | Enter / `a` | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach | Exit selector without attach |
 
-Resize keys use modified arrows so plain arrows are unambiguously reserved for
-navigation, scrolling, and focus movement. Normal mode advertises
+Resize keys use modified arrows so plain arrows stay available to terminals and
+modal button selection while `p` owns main-view pane cycling. Normal mode advertises
 `Ctrl-Left`/`Ctrl-Right` for the L/R split and also accepts common terminal
 fallbacks; on macOS iTerm2 the observed fallback is `Shift-Left` /
 `Shift-Right`. Portrait mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
@@ -432,14 +434,13 @@ at smaller sizes but is tuned for this target.
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar key hints remain, but key hints must be
   terser to fit ~64 cols. Use compact symbol labels for directional keys,
-  e.g., `↑/↓ sel | ←/→ pane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach`.
+  e.g., `↑/↓ sel | (p)ane | (h)elp | (m)onitor | (n)ew | (k)ill | enter/(a)ttach`.
 
 **Focus model:** Same semantics as normal mode, except MOTD is not present, so
-plain Left/Right cycle between `T` and `B`:
+`p` cycles between `T` and `B`:
 
 - Default focus is `T`.
-- Right → cycle `T -> B -> T`.
-- Left → cycle `T -> B -> T`.
+- `p` → cycle `T -> B -> T`.
 - `Esc` outside modal returns focus to `T`.
 - Visual focus borders: same rule (bright/doubled for focused; dim/single
   for unfocused).
@@ -450,7 +451,7 @@ plain Left/Right cycle between `T` and `B`:
 |-----|-------------|------------|
 | Modified Left / Right | Resize `L`/`R` split, clamped 25/75 | (no-op; `L`/`R` not present) |
 | Modified Up / Down | (no-op; `T`/`B` not present) | Resize `T`/`B` split, clamped 15/85 |
-| Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above | Navigation/scroll per focus-aware keymap above (same — use `T`/`B` in place of `Lb`/`R`) |
+| Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view |
 
 **All other keys and modal behavior:** identical to normal mode (see the
 focus-aware keymap above). `m`, `n`, `k`, `a`/Enter, `q`/`Ctrl-C` are
@@ -489,8 +490,8 @@ The SVG mock includes the following panels:
 7. Portrait mode main view with focused `T`.
 8. Portrait mode focused-`B` variant.
 
-The mock is conceptual; current implementation also allows plain Left/Right to
-cycle focus through `LT`, `Lb`, and `R` in landscape mode.
+The mock is conceptual; current implementation uses `p` to cycle focus through
+`LT`, `Lb`, and `R` in landscape mode.
 
 ## R Pane Detail Source
 
@@ -1060,8 +1061,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - PTY aspect-ratio auto-detection: 64x32, 66x30, 80x24, 100x30, 160x40,
     and square-ish PTYs select portrait; 161x40 and wider-than-4.0 PTYs select
     landscape; `--portrait` forces portrait; `--landscape` forces landscape
-  - Plain Right/Left cycle pane focus in the main view; modal use of
-    Left/Right for button selection is unchanged
+  - `p` cycles pane focus in the main view; modal use of Left/Right for button
+    selection is unchanged
 - Unit tests for state transitions:
   - highlight movement
   - sample vs monitor mode
@@ -1142,8 +1143,7 @@ that remain speculative stay explicitly open.
 - **CLI form** — Positional SSH URI only (`mmux [ssh-uri]`). No
   `--target` flag in v1. Revisit if PLAN finds positional friction.
 - **Modal `Esc`** — `Esc` in any modal is equivalent to `Cancel`.
-- **`Esc` outside modal** — Equivalent to Left when focus is `R`; no-op when
-  focus is `Lb`.
+- **`Esc` outside modal** — Return focus to the session-list pane.
 - **Monitor follow on highlight change** — No automatic follow. Monitor only
   switches when the user explicitly presses `m` on a different highlight.
   (Unchanged from initial DESIGN; reaffirmed.)
@@ -1151,10 +1151,10 @@ that remain speculative stay explicitly open.
   flags). Future enhancement.
 - **Remote targets in ForceCommand** — Local-only ForceCommand initially.
   Operator-invoked CLI mode may pass an SSH URI.
-- **Main-view plain Left/Right keys** — Plain Right cycles landscape focus
-  `LT -> Lb -> R -> LT`; plain Left cycles in reverse. Portrait mode cycles
-  `T <-> B` because MOTD is omitted. Modified arrows own resize. Modal
-  Left/Right keeps button selection behavior.
+- **Main-view pane key** — `p` cycles landscape focus `LT -> Lb -> R -> LT`.
+  Portrait mode cycles `T <-> B` because MOTD is omitted. Plain Left/Right are
+  no-ops in main view, modified arrows own resize, and modal Left/Right keeps
+  button selection behavior.
 - **Portrait-mode status hints** — ASCII-first compact labels. Unicode affordance
   glyphs can be considered later, but v1 must render predictably in narrow
   SSH clients and IDE terminals.
