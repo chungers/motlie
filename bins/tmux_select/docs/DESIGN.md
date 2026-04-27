@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated implemented keymap and rendering details: attach is Enter/`a`, Right/Left move focus between list and detail/monitor panes, Shift-arrow resize is documented for macOS iTerm2, sample detail preserves ANSI color, session-list refresh is polling-backed snapshot reconciliation, and narrow MOTD fallback stays graphical. |
 | 2026-04-26 | @gpt55-dgx | Initial DESIGN for GitHub issue #226: local/remote tmux session selector TUI, session detail sources, monitoring mode, modal create/kill flows, accepted current-PTY attach gap, host-wide SSH integration, and SVG mock. |
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 review additions from @opus47-macos-tmux: live session-list event stream via tmux control-mode notifications; focus model with `l` / `v` / `Esc` and visual focus borders; both panes scrollable with R-pane resample-backwards; bold-green motlie ASCII placeholder when MOTD absent (LT bypasses 30% cap to fit); PTY handoff non-functional requirement (no VTE-in-middle); spawn-and-wait attach with `setpgid`+`tcsetpgrp` signal hygiene; default-attach polarity with opt-in `--print-session` and opt-in `--dashboard` (re-enter on clean detach, bounded by `child.status.success()` AND list refresh AND user pick); two new accepted library gaps (`HostHandle::watch_host_events()`, `ScrollbackQuery::LinesRange`); alternatives B/C moved to appendix; testing-strategy additions; open-questions resolutions. |
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 short-mode review addition from @opus47-macos-tmux: short-mode layout via `-s` flag, optimized for 32×65 terminals (mobile SSH clients, IDE terminals, tmux pop-ups). Vertical T/B split at 40:60 (T = session list, B = detail), default focus T. MOTD/motlie omitted in short mode for density. Resize keys promoted to Ctrl-modifier: `Ctrl-Up`/`Ctrl-Down` resize T/B in short mode; `Ctrl-Left`/`Ctrl-Right` resize L/R in normal mode (replacing plain `Left`/`Right`, which become reserved in main view). All other keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`Ctrl-C`) and modal behavior identical across modes. |
@@ -74,13 +75,14 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   placeholder followed by a `(no /etc/motd)` caption (or
   `(motd unavailable: <reason>)` on read failure). In this case `LT` height
   bypasses the 30% cap and expands to exactly fit
-  `glyph_rows + caption_row + chrome` so the user always sees the full art.
-  When `L_width < 63` columns or there is not enough vertical room to expand,
-  fall back to a single-line `motlie · no /etc/motd` (still bold-green). The
-  glyph asset is baked into the binary as a `&'static str` (no inline ANSI
+  `glyph_rows + caption_row + chrome` when space allows. When `L_width < 63`
+  columns or there is not enough vertical room to expand, fall back to the
+  compact motlie glyph plus `(no /etc/motd)` caption (still bold-green), not a
+  text-only placeholder. The glyph assets are baked into the binary as
+  `&'static str` values (no inline ANSI
   escapes); styling is applied at render time via ratatui
   `Style { fg: Color::Green, add_modifier: Modifier::BOLD }`. Asset glyphs
-  (use exactly):
+  (use exactly for the full-width placeholder):
 
   ```text
   ███╗   ███╗  ██████╗  ████████╗ ██╗      ██╗ ███████╗
@@ -89,6 +91,16 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
    ██║╚██╔╝██║ ██║   ██║    ██║    ██║      ██║ ██╔══╝    ══ ╬ ══
    ██║ ╚═╝ ██║ ╚██████╔╝    ██║    ███████╗ ██║ ███████╗  ╱╱ ║ ╲╲
    ╚═╝     ╚═╝  ╚═════╝     ╚═╝    ╚══════╝ ╚═╝ ╚══════╝
+  ```
+
+  Compact placeholder:
+
+  ```text
+  ▄   ▄ ▄
+   ▄ ▄▄ ▄▄▄   ▄▄▄ ┃ ┃▄┃ (▄) ▄▄▄   ╲╲ ║ ╱╱
+  ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
+  ┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
+  ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃
   ```
 - `LB` lists tmux sessions on the target host and has default focus.
 - `LB` and `R` are both scrollable.
@@ -103,9 +115,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - `Ctrl-Left` and `Ctrl-Right` resize the `L` / `R` split in the normal main
   selector view. The implementation also accepts terminal fallback
   modified-arrow sequences such as Alt/Shift arrows and word-left/word-right
-  when a client does not report Ctrl-arrow distinctly. Plain Left and Right
-  are reserved in the main view so arrows remain unambiguous for navigation
-  and scrolling.
+  when a client does not report Ctrl-arrow distinctly. On macOS iTerm2, manual
+  validation observed `Shift-Left` and `Shift-Right` for L/R resize. Plain
+  Right moves focus from `Lb` to `R`; plain Left moves focus from `R` back to
+  `Lb`.
 - `R` initially shows sampled detail for the highlighted session.
 - `R` detail is supplied through a trait so future view models can summarize or
   otherwise transform session content.
@@ -133,15 +146,15 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - In modal dialogs, Left and Right choose between `Cancel` and `Ok`; Enter
   exits the modal and applies `Ok` when selected. `Esc` in a modal is
   `Cancel` and closes without applying.
-- Pressing `v` moves focus from
-  `Lb` to `R` (no-op if already `R`). Pressing `l` moves focus from `R` to
+- Pressing Right moves focus from
+  `Lb` to `R` (no-op if already `R`). Pressing Left moves focus from `R` to
   `Lb` (no-op if already `Lb`). Outside any modal, `Esc` is equivalent to
-  `l` when focus is `R`, and is a no-op when focus is `Lb` (use `q` or
+  Left when focus is `R`, and is a no-op when focus is `Lb` (use `q` or
   `Ctrl-C` to exit). The currently focused pane must be visually distinguished from the
   unfocused pane via border style — a bright/colored or doubled border for
   the focused pane, dim/single for the unfocused. The status-bar focus
   indicator (below) is complementary, not a substitute.
-- Pressing `g` or Enter in the main selector exits the TUI and attaches the
+- Pressing `a` or Enter in the main selector exits the TUI and attaches the
   current user PTY to the highlighted session. (Focus-independent: attach
   always operates on the `Lb` highlight regardless of which pane has focus.)
 - Pressing `q` exits the selector without attach, equivalent to `Ctrl-C` in
@@ -154,19 +167,18 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - A bottom status bar shows target host, current time, and supported keys.
   The status bar must additionally
   show the current focus (`Lb` vs `R`) and a focus-conditional key-hint set:
-  when `Lb`-focused, include `v view detail`; when `R`-focused, include
-  `l list`. Always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
+  when `Lb`-focused, include Right for detail; when `R`-focused, include
+  Left for list. Always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
   `q quit`) appear in both modes.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
-  by subscribing at startup to a host-level event stream and reconciling on
-  each event by stable session id (not name — `%session-renamed` requires
-  id-based identity; `SessionInfo.id` exists). Polling
-  (`list_sessions()` every N seconds) is acceptable only as a fallback when
-  the control-mode link is unavailable; cadence is specified in §Data Flow →
-  Live Session List below. See §Accepted motlie-tmux Library Gaps → Host
-  Event Stream for the new accepted gap this requires.
-- Default mode (no flag): on `g`
+  by subscribing at startup to a host-level event stream. In the current
+  implementation that stream polls `list_sessions()` once per second and
+  reconciles snapshots by stable session id (not name). Direct tmux
+  control-mode host notifications remain a future hardening item; see
+  §Data Flow → Live Session List and §Accepted motlie-tmux Library Gaps →
+  Host Event Stream.
+- Default mode (no flag): on `a`
   or Enter, leave the TUI cleanly and spawn-and-wait attach (see §Data Flow →
   Attach). When invoked with `--print-session`, the binary instead leaves the
   TUI cleanly, prints the selected session name (and only the session name)
@@ -182,14 +194,14 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 40:60 ratio. MOTD and the
   motlie placeholder are omitted in short mode to maximize content density.
-  All command keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`q`/`Ctrl-C`), modal
+  All command keys (Left/Right focus, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
   identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
   differ by mode: short mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
   normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`, with
   modified-arrow fallback sequences accepted for terminal compatibility. Plain
-  `Left`/`Right` no longer resize in main view (they remain reserved); modal
-  use of `Left`/`Right` for button selection is unchanged. `-s` composes
+  `Left`/`Right` move focus between list and detail/monitor in main view;
+  modal use of `Left`/`Right` for button selection is unchanged. `-s` composes
   with `--print-session`, `--dashboard`, and SSH targets.
 - The binary must use `motlie-tmux` for tmux operations and must not duplicate
   tmux command logic in the binary.
@@ -334,9 +346,9 @@ The body area is split horizontally into `L` and `R`.
 **Focus model.** The main view has
 two focus states: `Lb` (default) and `R`. Focus transitions are explicit:
 
-- `v` → focus `R` (no-op if already `R`)
-- `l` → focus `Lb` (no-op if already `Lb`)
-- `Esc` outside any modal: equivalent to `l` when focus is `R`; no-op when
+- Right → focus `R` (no-op if already `R`)
+- Left → focus `Lb` (no-op if already `Lb`)
+- `Esc` outside any modal: equivalent to Left when focus is `R`; no-op when
   focus is `Lb` (use `q` or `Ctrl-C` to exit). `Esc` inside any modal is equivalent
   to that modal's `Cancel` button.
 
@@ -352,21 +364,22 @@ Main-selector keymap (focus-aware):
 | Up / Down | Move highlight; LB viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
 | PgUp / PgDn | Page through session list | Page through R buffer |
 | Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
-| `l` | (no-op) | Focus → `Lb` |
-| `v` | Focus → `R` | (no-op) |
+| Left | (no-op) | Focus → `Lb` |
+| Right | Focus → `R` | (no-op) |
 | `Esc` | (no-op outside modal; `Cancel` inside modal) | Focus → `Lb` (outside modal); `Cancel` inside modal |
-| `Ctrl-Left` / `Ctrl-Right` | Resize `L`/`R` split (normal mode only; Alt/Shift arrow and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) |
-| Left / Right | (no-op in main view; reserved) | (no-op in main view; reserved) |
+| Modified Left / Right | Resize `L`/`R` split (normal mode only; `Ctrl`, Alt, Shift, and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) |
 | `m` | Start/switch monitoring on highlight | Same |
 | `n` | Open `New Session` modal | Same |
 | `k` | Open kill-confirmation modal | Same |
-| Enter / `g` | Attach highlight | Attach highlight (focus-independent) |
+| Enter / `a` | Attach highlight | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
 Resize keys use modified arrows so plain arrows are unambiguously reserved for
-navigation and scrolling. Normal mode advertises `Ctrl-Left`/`Ctrl-Right` for
-the L/R split and also accepts common terminal fallbacks; short mode advertises
-`Ctrl-Up`/`Ctrl-Down` for the T/B split and accepts the same modifier family.
+navigation, scrolling, and focus movement. Normal mode advertises
+`Ctrl-Left`/`Ctrl-Right` for the L/R split and also accepts common terminal
+fallbacks; on macOS iTerm2 the observed fallback is `Shift-Left` /
+`Shift-Right`. Short mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
+and accepts the same modifier family.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok`; `Enter` exits and applies `Ok` if selected; `Esc` is
@@ -395,14 +408,14 @@ at smaller sizes but is tuned for this target.
   maximize content density. Status-bar focus indicator and key hints
   remain, but key hints must be terser to fit ~65 cols. Use ASCII-first
   compact labels so narrow SSH clients and IDE terminals render predictably,
-  e.g., `Up/Dn pick | v detail | m mon | n new | k kill | Enter go`.
+  e.g., `Up/Dn pick | right detail | m mon | n new | k kill | Enter/a go`.
 
 **Focus model:** Identical to normal mode, with `T` ↔ `Lb` and `B` ↔ `R`:
 
 - Default focus is `T`.
-- `v` → focus `B` (no-op if already `B`).
-- `l` → focus `T` (no-op if already `T`).
-- `Esc` outside modal: equivalent to `l` when focus is `B`; no-op when focus
+- Right → focus `B` (no-op if already `B`).
+- Left → focus `T` (no-op if already `T`).
+- `Esc` outside modal: equivalent to Left when focus is `B`; no-op when focus
   is `T`.
 - Visual focus borders: same rule (bright/doubled for focused; dim/single
   for unfocused).
@@ -416,7 +429,7 @@ at smaller sizes but is tuned for this target.
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above | Navigation/scroll per focus-aware keymap above (same — use `T`/`B` in place of `Lb`/`R`) |
 
 **All other keys and modal behavior:** identical to normal mode (see the
-focus-aware keymap above). `m`, `n`, `k`, `g`/Enter, `q`/`Ctrl-C` are
+focus-aware keymap above). `m`, `n`, `k`, `a`/Enter, `q`/`Ctrl-C` are
 focus-independent and behave the same. `q`/`Ctrl-C` exits without attaching.
 Modal keymap (Left/Right for button
 selection, Enter to apply, Esc to Cancel) is unchanged.
@@ -479,8 +492,8 @@ trait SessionDetailSource {
     // `before_line` (where `before_line` is an index into the source's
     // current buffer's oldest line); up to `count` lines. Empty Vec means
     // "no more history available." `SampleDetailSource` implements this via
-    // `Target::sample_text(&ScrollbackQuery::LinesRange { older_than_lines,
-    // count })` — see §Accepted Library Gaps.
+    // `Target::sample_text_with_options(&ScrollbackQuery::LinesRange { ... },
+    // ScreenStable, None)` — see §Accepted Library Gaps.
     async fn fetch_older(
         &mut self,
         before_line: usize,
@@ -499,10 +512,11 @@ pub enum DetailDelta {
 Initial shipped implementations:
 
 - `SampleDetailSource`: resolves the selected session by stable id, captures
-  session content, sorts panes by `(window, pane)`, omits empty panes, and
-  renders text sections.
+  session content with `sample_text_with_options(..., ScreenStable, ...)` so
+  ANSI color/style escapes are preserved, then renders through
+  `ansi-to-tui`'s VTE parser in `R`.
   `fetch_older` issues
-  `Target::sample_text(&ScrollbackQuery::LinesRange { older_than_lines, count })`
+  `Target::sample_text_with_options(&ScrollbackQuery::LinesRange { older_than_lines, count }, ScreenStable, None)`
   for paginated backwards fetch (see §Accepted Library Gaps →
   ScrollbackQuery::LinesRange).
 - `MonitorDetailSource`: resolves the selected session by stable id, captures
@@ -511,7 +525,8 @@ Initial shipped implementations:
   `ansi-to-tui`'s VTE parser in `R`. When the user scrolls up in monitor mode,
   auto-tail pauses; refreshes continue, but the UI viewport stays anchored at
   the user's position. `fetch_older` for monitor mode falls back to a one-shot
-  `Target::sample_text(&LinesRange { ... })` against the same target. The
+  `Target::sample_text_with_options(&LinesRange { ... }, ScreenStable, None)`
+  against the same target. The
   monitor screen mirror is a current-screen source, not a rolling transcript
   source.
 
@@ -549,12 +564,20 @@ The `LB` list must stay consistent with the target host's tmux state without
 user-driven refresh. Other clients may create, kill, or rename sessions;
 sessions may exit unexpectedly. The selector must reconcile.
 
-Preferred mechanism: tmux control-mode notifications. The library already
+Shipped v1 mechanism: `HostHandle::watch_host_events()` is a typed stream
+backed by one-second polling. It performs an initial `list_sessions()`, then
+calls `list_sessions()` every second, diffs the current snapshot against the
+previous snapshot by stable session id, and emits typed add/close/rename and
+client attach/detach events. On transient list failure it emits
+`Disconnect { reason }` and retries on the next tick. This is poll-based
+snapshot reconciliation, not direct tmux control-mode host notifications.
+
+Future hardening target: tmux control-mode notifications. The library already
 parses `%`-prefixed control-mode lines as `ControlModeMessage::Notification`
 (`libs/tmux/src/monitor.rs:58–96`) but currently discards them
-(`monitor.rs:337–341`). The accepted library gap (§Accepted Library
-Gaps → Host Event Stream) surfaces these as a host-level
-`HostEventStream` that the selector subscribes to.
+(`monitor.rs:337–341`). A later implementation can wire those notifications
+into the same `HostEventStream` contract without changing the selector UI
+model.
 
 Subscribe-and-reconcile loop:
 
@@ -572,9 +595,9 @@ Subscribe-and-reconcile loop:
      highlight.
    - `ClientDetached { session_id }` / `ClientAttached { session_id }`:
      update `attached` flag.
-   - `Disconnect { reason }`: control-mode link died. Show status-bar
-     indicator. Begin polling fallback (recommended cadence: 5s) until
-     reconnect succeeds.
+   - `Disconnect { reason }`: polling list operation failed. Show status-bar
+     indicator. Keep the existing snapshot and retry on the next one-second
+     tick.
 3. Reconciliation must preserve the user's highlight when possible: if the
    highlighted session id still exists, keep it highlighted; if it
    disappeared, move highlight to the next valid row (or to the previous if
@@ -585,9 +608,9 @@ Subscribe-and-reconcile loop:
    during attach are buffered (bounded queue, drop-oldest on overflow); the
    buffer drains on re-entry before the first redraw.
 
-Polling fallback semantics (when control-mode link is unavailable): re-issue
-`list_sessions()` every 5s. Indicate "polling" mode in the status bar to
-distinguish from event-driven freshness.
+Polling semantics: re-issue `list_sessions()` every 1s through
+`HostHandle::watch_host_events()`. The public stream is event-shaped for the
+selector, but freshness is polling-backed in the current implementation.
 
 ### Empty Session List
 
@@ -598,7 +621,7 @@ When the target host has zero tmux sessions (at startup, or after a kill under
    to create)`.
 2. `R` renders nothing (or an inline hint mirroring the same `n to create`
    message).
-3. Highlight is unset; `m`, `k`, `g`, `Enter` are all no-ops in this state.
+3. Highlight is unset; `m`, `k`, `a`, `Enter` are all no-ops in this state.
 4. `n` remains active and opens the New Session modal as usual.
 5. ForceCommand mode treats this as the normal first-run path: the user
    creates their first session via `n`, which then becomes the highlight,
@@ -652,10 +675,9 @@ When the target host has zero tmux sessions (at startup, or after a kill under
 4. Call `Target::kill()`. On error (connection dropped, permission), show
    inline error without corrupting terminal state.
 5. Stop monitor state if it was monitoring that session.
-6. Do not eagerly refresh; the
-   host-event subscription will receive `%sessions-changed` and reconcile
-   `LB` automatically. (If polling fallback is active, re-issue
-   `list_sessions()` here.)
+6. Refresh immediately after a successful kill for responsive feedback; the
+   polling-backed host-event stream will reconcile the same state on its next
+   tick as a backstop.
 7. Move highlight to the next valid row. If the killed session was the only
    one, transition to §Empty Session List state.
 
@@ -664,7 +686,7 @@ When the target host has zero tmux sessions (at startup, or after a kill under
 The attach handoff transfers the user's controlling terminal directly to
 the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 
-1. Pressing Enter or `g` in the main selector (any focus) records the
+1. Pressing Enter or `a` in the main selector (any focus) records the
    highlighted session id.
 2. Stop monitor/detail state. Drop any host-event subscription draining task
    (or under `--dashboard`, leave it running on a separate tokio task with a
@@ -768,16 +790,14 @@ Required semantics:
 ### Host Event Stream
 
 The selector requires a host-level event stream to keep `LB` consistent with
-the target's tmux state without polling (see §Functional Requirements and
-§Data Flow → Live Session List).
+the target's tmux state without user-driven refresh (see §Functional
+Requirements and §Data Flow → Live Session List).
 
-Today, `motlie-tmux` is per-session-only: `watch_session(name)`,
-`start_monitoring_session(name)`, each opening its own
-`tmux -C attach-session -t <name>` connection
-(`libs/tmux/src/monitor.rs:363–377`). There is no host-scoped event API. The
-control-mode parser already classifies `%`-prefixed notifications as
-`ControlModeMessage::Notification` (`libs/tmux/src/monitor.rs:58–96`) but
-discards them at `monitor.rs:337–341`.
+Implemented v1 behavior: `watch_host_events()` is a polling-backed typed event
+stream. It reconciles `list_sessions()` snapshots once per second by stable
+session id and emits `SessionAdded`, `SessionClosed`, `SessionRenamed`,
+`ClientAttached`, `ClientDetached`, and `Disconnect` events. It does not yet
+open a host-scoped tmux control-mode notification connection.
 
 API shape:
 
@@ -793,14 +813,14 @@ pub enum HostEvent {
     SessionRenamed { id: String, old: String, new: String },
     ClientAttached { session_id: String },
     ClientDetached { session_id: String },
-    Disconnect { reason: String },                    // control-mode link died
+    Disconnect { reason: String },                    // event source/listing failed
 }
 ```
 
-Implementation: open a single shared `tmux -C` connection per host (e.g.,
-`tmux -C new-session -d -s motlie-events` or attach to a long-lived sentinel
-session), surface the already-parsed `Notification` lines as typed
-`HostEvent`s. Reconnect transparently on transient drops; emit
+Future implementation target: open a single shared `tmux -C` connection per
+host (e.g., `tmux -C new-session -d -s motlie-events` or attach to a
+long-lived sentinel session), surface the already-parsed `Notification` lines
+as typed `HostEvent`s. Reconnect transparently on transient drops; emit
 `Disconnect { reason }` and reconnect events at the boundaries.
 
 Recommended over the alternative (extending `OutputBus` with a host-level
@@ -988,7 +1008,7 @@ detail.
 |------------|-----|----------|
 | `ratatui` | layout/widgets/rendering | Use. Already used by tmux examples and driver frontend. |
 | `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
-| `ansi-to-tui` | ANSI/VTE rendering for captured/monitored pane content | Adopted for monitor mode so `capture-pane -ep` screen snapshots render without leaking escape bytes into ratatui text. |
+| `ansi-to-tui` | ANSI/VTE rendering for captured/monitored pane content | Adopted for sample and monitor modes so ANSI-preserving captures render color/style without leaking escape bytes into ratatui text. |
 | `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
 | `tempfile` | remote MOTD download target | Use if remote MOTD is implemented through `HostHandle::download()`. Already a dev dependency in parts of the repo; PLAN should decide package placement. |
 
@@ -1000,7 +1020,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - MOTD height cap (present case)
   - MOTD-absent placeholder
     expansion: `LT` height = `glyph_rows + caption + chrome`, bypasses 30%
-    cap; narrow-terminal fallback collapses to single line
+    cap; narrow-terminal fallback still renders compact glyph art
   - status bar reservation
   - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
   - Short mode (`-s`) layout at
@@ -1008,22 +1028,23 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     and B ≈ 19 rows; MOTD/motlie omitted; status bar present
   - Short mode modified Up/Down resize bounds (minimum heights so neither pane
     collapses to 0); normal mode modified Left/Right parallel
-  - Plain `Left`/`Right` in main
-    view is a no-op in both modes (modal use unchanged)
+  - Plain Right focuses detail from list; plain Left focuses list from detail;
+    modal use of Left/Right for button selection is unchanged
 - Unit tests for state transitions:
   - highlight movement
   - sample vs monitor mode
   - modal button selection
   - create/kill success and error paths
-  - focus toggles: `v` `Lb`→`R`,
-    `l` `R`→`Lb`, `Esc` outside modal `R`→`Lb`, no-op when already focused
+  - focus toggles: Right `Lb`→`R`,
+    Left `R`→`Lb`, `Esc` outside modal `R`→`Lb`, no-op when already focused
   - `Esc` inside modal = `Cancel`
 - Style/snapshot tests:
   - motlie glyph placeholder spans carry `Modifier::BOLD` and `Color::Green`
   - focused pane border style differs from unfocused pane border style
 - Mock-backed tests through `motlie-tmux`:
   - session list rendering
-  - detail source rendering
+  - detail source rendering, including ANSI color preservation in sample and
+    monitor modes
   - create session refresh and highlight
   - kill session refresh and highlight
   - host-event reconciliation:
@@ -1087,7 +1108,7 @@ that remain speculative stay explicitly open.
 - **CLI form** — Positional SSH URI only (`tmux_select [ssh-uri]`). No
   `--target` flag in v1. Revisit if PLAN finds positional friction.
 - **Modal `Esc`** — `Esc` in any modal is equivalent to `Cancel`.
-- **`Esc` outside modal** — Equivalent to `l` when focus is `R`; no-op when
+- **`Esc` outside modal** — Equivalent to Left when focus is `R`; no-op when
   focus is `Lb`.
 - **Monitor follow on highlight change** — No automatic follow. Monitor only
   switches when the user explicitly presses `m` on a different highlight.
@@ -1096,8 +1117,9 @@ that remain speculative stay explicitly open.
   flags). Future enhancement.
 - **Remote targets in ForceCommand** — Local-only ForceCommand initially.
   Operator-invoked CLI mode may pass an SSH URI.
-- **Main-view plain Left/Right keys** — Reserved no-ops in normal and short
-  mode. Modified arrows own resize. Modal Left/Right keeps button selection
+- **Main-view plain Left/Right keys** — Plain Right moves focus from the
+  session list to detail/monitor, and plain Left returns focus to the session
+  list. Modified arrows own resize. Modal Left/Right keeps button selection
   behavior.
 - **Short-mode status hints** — ASCII-first compact labels. Unicode affordance
   glyphs can be considered later, but v1 must render predictably in narrow

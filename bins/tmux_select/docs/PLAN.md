@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated implementation tracking for validation changes: Enter/`a` attach, Left/Right focus transitions, macOS iTerm2 Shift-arrow resize documentation, ANSI-preserving sample detail, polling-backed session refresh, and compact graphical MOTD fallback. |
 | 2026-04-26 | @gpt55-dgx | Addressed second manual validation feedback: monitor mode now mirrors rendered screen snapshots with ANSI/VTE parsing, modified-arrow fallback resize is tested, and attach PTY restore uses a `SIGTTOU`-safe foreground-process-group path. |
 | 2026-04-26 | @gpt55-dgx | Addressed manual validation feedback: robust Ctrl-arrow resize matching, readable monitor-mode normalization, conventional detail scroll direction with scrollbar/range indicator, `q` quit key, and dashboard re-entry after detach when the selected session still exists. |
 | 2026-04-26 | @gpt55-dgx | Implemented the initial selector binary and remaining library support: workspace package, CLI modes, normal/short TUI layouts, MOTD fallback art, trait-backed sample/monitor detail sources, create/kill modals, stable-id attach/kill, ForceCommand bypass/reject handling, `ScrollbackQuery::LinesRange`, host event diff stream, and docs/API/CLI updates. |
@@ -192,7 +193,7 @@ References: [Layout](./DESIGN.md#layout),
 References: [Functional Requirements](./DESIGN.md#functional),
 [Layout](./DESIGN.md#layout).
 
-- [x] 5.1 Implement focus transitions: `v`, `l`, outside-modal `Esc`, and
+- [x] 5.1 Implement focus transitions: Right, Left, outside-modal `Esc`, and
   `q` as an exit alias for `Ctrl-C`.
 - [x] 5.2 Implement session-list movement and scrolling for `LB`/`T`.
 - [x] 5.3 Implement R/B scrolling, page movement, Home/End, and monitor
@@ -204,7 +205,7 @@ References: [Functional Requirements](./DESIGN.md#functional),
   Esc handling.
 - [x] 5.6 Implement kill confirmation modal with id captured at modal-open.
 - [ ] 5.7 Add unit tests for every key transition, modal button selection,
-  modal Esc behavior, and reserved plain Left/Right no-op behavior.
+  modal Esc behavior, and plain Left/Right focus behavior.
 
 ## Phase 6: Detail Sources
 
@@ -213,7 +214,7 @@ References: [R Pane Detail Source](./DESIGN.md#r-pane-detail-source),
 
 - [x] 6.1 Implement `SessionDetailSource` or equivalent closed enum wrapper.
 - [x] 6.2 Implement `SampleDetailSource` using `motlie-tmux` capture/sample
-  APIs.
+  APIs with ANSI-preserving `ScreenStable` capture for colored detail output.
 - [x] 6.3 Implement backwards chunk fetch through `LinesRange`.
 - [x] 6.4 Implement `MonitorDetailSource` as a rendered screen mirror using
   `capture_all_with_options(CaptureNormalizeMode::ScreenStable)` and
@@ -223,8 +224,8 @@ References: [R Pane Detail Source](./DESIGN.md#r-pane-detail-source),
 - [x] 6.6 When the user requests older detail content in monitor mode, fetch
   tmux scrollback through `LinesRange` on the same target.
 - [x] 6.7 Add mock-backed tests for monitor screen capture, ANSI/VTE parsing,
-  modified-arrow resize fallbacks, reserved plain arrows, and monitored-session
-  close behavior.
+  modified-arrow resize fallbacks, Left/Right focus transitions,
+  ANSI-preserving sample detail, and monitored-session close behavior.
 
 ## Phase 7: Session Lifecycle Operations
 
@@ -246,7 +247,7 @@ References: [Create Session](./DESIGN.md#create-session),
 
 References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
 
-- [x] 8.1 Implement default Enter/`g` attach path.
+- [x] 8.1 Implement default Enter/`a` attach path.
 - [x] 8.2 Restore alternate screen and terminal raw mode before attach.
 - [x] 8.3 Stop monitor state and host-event subscriptions before attach.
 - [x] 8.4 Implement `--print-session`: stdout exactly `<name>\n` on selection,
@@ -302,11 +303,11 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Area | Harness | Required coverage |
 |------|---------|-------------------|
 | Library attach | Unit + localhost smoke | command construction, process group handoff, exit status mapping, terminal restore |
-| Host events | Mock control-mode stream | add, close, rename, disconnect, polling fallback |
+| Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, short mode 32x65, MOTD cap, placeholder fallback, resize bounds |
-| Input model | Pure unit tests | focus transitions, scrolling, reserved arrows, modal Enter/Esc |
-| Detail source | Mock `motlie-tmux` facade | sample replace, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
+| Input model | Pure unit tests | focus transitions, scrolling, attach key, modal Enter/Esc |
+| Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/dashboard |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |
 | Terminal cleanup | PTY harness | raw mode restore, alternate-screen restore, panic-path cleanup |

@@ -10,6 +10,7 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated API notes for current selector behavior: Enter/`a` attach, Left/Right focus transitions, one-second polling-backed session refresh, and ANSI-preserving sample/detail rendering. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for the second validation round: monitor detail now captures rendered screen snapshots with `ScreenStable` plus ANSI/VTE parsing, resize accepts modified-arrow fallbacks, and attach PTY restore is `SIGTTOU`-safe. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for validation fixes: monitor detail uses `CaptureNormalizeMode::PlainText`, `q` exits like `Ctrl-C`, and dashboard can re-enter after detach even when tmux returns a non-zero detach status. |
 | 2026-04-26 | @gpt55-dgx | Updated API reference to implemented reality: selector CLI config, trait-backed sample/monitor detail sources, stable-id create/kill/attach flows, `HostEventStream`, host shell MOTD read, and `LinesRange` scrollback. |
@@ -44,7 +45,13 @@ For existing target operations:
 
 ```rust
 let target = host.session("dev").await?.ok_or_else(|| anyhow::anyhow!("gone"))?;
-let sample = target.sample_text(&motlie_tmux::ScrollbackQuery::LastLines(80)).await?;
+let sample = target
+    .sample_text_with_options(
+        &motlie_tmux::ScrollbackQuery::LastLines(80),
+        &motlie_tmux::CaptureOptions::with_mode(motlie_tmux::CaptureNormalizeMode::ScreenStable),
+        None,
+    )
+    .await?;
 target.kill().await?;
 ```
 
@@ -220,11 +227,15 @@ enum DetailMode {
 }
 ```
 
-`MonitorDetailSource` resolves the selected session by stable id, calls
+`SampleDetailSource` resolves the selected session by stable id and calls
+`sample_text_with_options(..., CaptureNormalizeMode::ScreenStable, None)` so
+normal detail mode can preserve ANSI color/style. `MonitorDetailSource`
+resolves the selected session by stable id, calls
 `capture_all_with_options(CaptureNormalizeMode::ScreenStable)`, and renders the
-visible content through `ansi-to-tui`'s VTE parser. This makes monitor mode a
-rendered screen mirror suitable for TUI sessions instead of a raw `%output`
-control-mode transcript.
+visible content through `ansi-to-tui`'s VTE parser. Both modes parse the
+captured content before rendering so escape bytes do not leak into ratatui
+text, while monitor mode remains a rendered screen mirror suitable for TUI
+sessions instead of a raw `%output` control-mode transcript.
 
 ## Session Operations
 
@@ -289,7 +300,8 @@ API tests must cover:
 - `LinesRange` scrollback boundaries
 - session-id dispatch under rename race
 - detail source append/replace/fetch older behavior
-- monitor screen capture and ANSI/VTE parser behavior
+- sample color preservation, monitor screen capture, and ANSI/VTE parser
+  behavior
 - modified-arrow resize fallback behavior
 - dashboard re-entry and no-loop conditions
 
@@ -299,6 +311,7 @@ Current implementation coverage:
   `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
   and stable-id kill coverage.
 - `cargo test -p motlie-tmux-select`: CLI mutual exclusion, stable-id
-  highlight preservation, `q` exit, detail scroll direction, modified-arrow
-  resize fallbacks, reserved plain arrows, monitor screen capture, ANSI/VTE
-  parsing, and monitored-session-close reset.
+  highlight preservation, `q` exit, Enter/`a` attach, detail scroll direction,
+  modified-arrow resize fallbacks, Left/Right focus transitions, sample color
+  preservation, monitor screen capture, ANSI/VTE parsing, and
+  monitored-session-close reset.
