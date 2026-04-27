@@ -8,6 +8,8 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
+| 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to the clean `columns / rows <= 2.0` rule and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, startup auto-detects portrait layout from PTY dimensions, the old `-s` flag is no longer accepted, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
 | 2026-04-26 | @gpt55-dgx | Updated implemented keymap and rendering details: attach is Enter/`a`, Right/Left move focus between list and detail/monitor panes, Shift-arrow resize is documented for macOS iTerm2, sample detail preserves ANSI color, session-list refresh is polling-backed snapshot reconciliation, and narrow MOTD fallback stays graphical. |
 | 2026-04-26 | @gpt55-dgx | Initial DESIGN for GitHub issue #226: local/remote tmux session selector TUI, session detail sources, monitoring mode, modal create/kill flows, accepted current-PTY attach gap, host-wide SSH integration, and SVG mock. |
@@ -86,10 +88,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   (use exactly):
 
   ```text
-  _   _ _
+                   _   _ _
    _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱
   ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
-  ┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
+  ┃ ┃ ┃ ┃ ┃ ┃ (_) ┃ ┃_┃ ┃ ┃  __╱  ╱╱ ║ ╲╲
   ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃
   ```
 - `LB` lists tmux sessions on the target host and has default focus.
@@ -179,8 +181,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   selected session still exists (see §Data Flow → Attach for the
   bounded re-entry rule). `--print-session` and `--dashboard` are mutually
   exclusive; combining them is a startup error.
-- The binary accepts a portrait-mode
-  flag `--portrait`. Portrait mode renders a compact layout optimized for 32 rows × ~65
+- The binary accepts explicit layout force flags: `--portrait` / `-p` and
+  `--landscape` / `-l`. The flags are mutually exclusive. Portrait mode
+  renders a compact layout optimized for 32 rows x ~64
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 40:60 ratio. MOTD and the
   motlie placeholder are omitted in portrait mode to maximize content density.
@@ -191,12 +194,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`, with
   modified-arrow fallback sequences accepted for terminal compatibility. Plain
   `Left`/`Right` move focus between list and detail/monitor in main view;
-  modal use of `Left`/`Right` for button selection is unchanged. Without
-  `--portrait`, the selector calls `crossterm::terminal::size()` on the
-  connecting PTY and selects portrait mode when `columns / rows < 2.2`;
-  otherwise it uses normal landscape layout. If the PTY size cannot be read,
-  it defaults to normal layout. `--portrait` composes with `--print-session`,
-  `--dashboard`, and SSH targets.
+  modal use of `Left`/`Right` for button selection is unchanged. Without a
+  layout force flag, the selector calls `crossterm::terminal::size()` on the
+  connecting PTY and selects portrait mode when `columns / rows <= 4.0`;
+  otherwise it uses landscape layout. If the PTY size cannot be read, it
+  defaults to landscape layout. The layout force flags compose with
+  `--print-session`, `--dashboard`, and SSH targets.
 - The binary must use `motlie-tmux` for tmux operations and must not duplicate
   tmux command logic in the binary.
 
@@ -304,8 +307,10 @@ Additional flags:
 | (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). Selector exits with the child's `ExitStatus`. |
 | `--print-session` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(tmux_select --print-session)"`. |
 | `--dashboard` | TUI → select → spawn-and-wait attach → on clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). See §Data Flow → Attach for the bounded re-entry rule. |
-| `--portrait` | Force portrait layout: vertical T/B split (40:60) optimized for 32×65 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--print-session`, `--dashboard`, and SSH targets. Without this flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
+| `--portrait` / `-p` | Force portrait layout: vertical T/B split (40:60) optimized for 32x64 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--print-session`, `--dashboard`, and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
+| `--landscape` / `-l` | Force landscape/normal layout: `L`/`R` split with `LT` MOTD and `LB` session list. Composes with `--print-session`, `--dashboard`, and SSH targets. Mutually exclusive with `--portrait` / `-p`. |
 | `--print-session` + `--dashboard` | Mutually exclusive — startup error. |
+| `--portrait` + `--landscape` | Mutually exclusive — startup error. |
 
 Polarity rationale (default attach): the binary's primary product is a session
 selector that attaches; ForceCommand is the headline deployment story; users
@@ -385,7 +390,7 @@ Portrait mode is optimized for compact terminal contexts where horizontal width 
 constrained: mobile SSH clients, IDE-embedded terminals, tmux pop-ups
 (`display-popup`), and narrow ForceCommand deployments.
 
-**Target dimensions:** 32 rows × ~65 columns. The layout must remain usable
+**Target dimensions:** 32 rows x ~64 columns. The layout must remain usable
 at smaller sizes but is tuned for this target.
 
 **Layout:**
@@ -400,7 +405,7 @@ at smaller sizes but is tuned for this target.
   sample/monitor sources, same scroll-back-on-up, same monitor tail-pause).
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar focus indicator and key hints
-  remain, but key hints must be terser to fit ~65 cols. Use ASCII-first
+  remain, but key hints must be terser to fit ~64 cols. Use ASCII-first
   compact labels so narrow SSH clients and IDE terminals render predictably,
   e.g., `Up/Dn pick | right detail | m mon | n new | k kill | Enter/a go`.
 
@@ -428,14 +433,16 @@ focus-independent and behave the same. `q`/`Ctrl-C` exits without attaching.
 Modal keymap (Left/Right for button
 selection, Enter to apply, Esc to Cancel) is unchanged.
 
-**Auto-detection and composition:** Without `--portrait`, startup reads the
-current PTY size through `crossterm::terminal::size()`. It selects portrait mode
-when `columns / rows < 2.2`; typical 80x24 and 100x30 terminals stay normal,
-while 65x32 and square-ish PTYs use portrait mode. If the size cannot be read,
-normal mode is used. `--portrait` composes with `--print-session`,
+**Auto-detection and composition:** Without `--portrait` / `-p` or
+`--landscape` / `-l`, startup reads the current PTY size through
+`crossterm::terminal::size()`. It selects portrait mode when
+`columns / rows <= 4.0`; 66x30, 80x24, 100x30, 160x40, and square-ish PTYs use
+portrait mode. Wider PTYs use landscape mode. If the size cannot be read,
+landscape mode is used. Layout force flags compose with `--print-session`,
 `--dashboard`, SSH targets, and the `MOTLIE_TMUX_SELECT_BYPASS` env-var
-admin bypass. ForceCommand deployments may use `--portrait` for tight-display
-hosts (`ForceCommand /usr/local/bin/tmux_select --portrait --dashboard`).
+admin bypass. ForceCommand deployments may use explicit layout flags for fixed
+display contexts (`ForceCommand /usr/local/bin/tmux_select --portrait --dashboard`
+or `ForceCommand /usr/local/bin/tmux_select --landscape --dashboard`).
 
 ## SVG Mock
 
@@ -545,7 +552,8 @@ initial hot path.
 
 ### Startup
 
-1. Parse CLI target and flags (`--portrait`, `--print-session`, `--dashboard`;
+1. Parse CLI target and flags (`--portrait` / `-p`, `--landscape` / `-l`,
+   `--print-session`, `--dashboard`;
    `--print-session` and `--dashboard` are mutually exclusive — error on both).
 2. Connect to local or SSH target with `motlie-tmux`.
 3. Load target host MOTD (or render the motlie placeholder when absent).
@@ -1022,12 +1030,13 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - status bar reservation
   - `L` / `R` resize bounds (minimum widths so neither pane collapses to 0)
   - Portrait mode layout at
-    32×65 viewport: body = 31 rows; T/B split at 40:60 yields T ≈ 12 rows
+    64x32 viewport: body = 31 rows; T/B split at 40:60 yields T ≈ 12 rows
     and B ≈ 19 rows; MOTD/motlie omitted; status bar present
   - Portrait mode modified Up/Down resize bounds (minimum heights so neither pane
     collapses to 0); normal mode modified Left/Right parallel
-  - PTY aspect-ratio auto-detection: 65x32 and square-ish PTYs select portrait;
-    80x24 and 100x30 select normal; `--portrait` forces portrait
+  - PTY aspect-ratio auto-detection: 64x32, 66x30, 80x24, 100x30, 160x40,
+    and square-ish PTYs select portrait; 161x40 and wider-than-4.0 PTYs select
+    landscape; `--portrait` forces portrait; `--landscape` forces landscape
   - Plain Right focuses detail from list; plain Left focuses list from detail;
     modal use of Left/Right for button selection is unchanged
 - Unit tests for state transitions:

@@ -37,10 +37,10 @@ const MAX_LEFT_PERCENT: u16 = 75;
 const MIN_TOP_PERCENT: u16 = 25;
 const MAX_TOP_PERCENT: u16 = 75;
 
-const MOTLIE_PLACEHOLDER: &str = r#"_   _ _
+const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
  _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱
 ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
-┃ ┃ ┃ ┃ ┃ ┃ (▄) ┃ ┃▄┃ ┃ ┃  ▄▄╱  ╱╱ ║ ╲╲
+┃ ┃ ┃ ┃ ┃ ┃ (_) ┃ ┃_┃ ┃ ┃  __╱  ╱╱ ║ ╲╲
 ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃"#;
 
 const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
@@ -50,8 +50,11 @@ const COMPACT_MOTLIE_PLACEHOLDER: &str = MOTLIE_PLACEHOLDER;
 #[command(about = "Select, preview, monitor, and attach tmux sessions")]
 struct Cli {
     /// Force portrait layout instead of auto-detecting from the current PTY.
-    #[arg(long)]
+    #[arg(short = 'p', long, conflicts_with = "landscape")]
     portrait: bool,
+    /// Force landscape layout instead of auto-detecting from the current PTY.
+    #[arg(short = 'l', long, conflicts_with = "portrait")]
+    landscape: bool,
     /// Print the selected session name and exit instead of attaching.
     #[arg(long, conflicts_with = "dashboard")]
     print_session: bool,
@@ -567,7 +570,7 @@ async fn run() -> Result<i32> {
 
     let cli = Cli::parse();
     let (host, label) = connect_host(&cli).await?;
-    let layout = select_layout(cli.portrait);
+    let layout = select_layout(cli.forced_layout());
 
     loop {
         let outcome = run_selector_once(&host, &label, layout).await?;
@@ -662,9 +665,21 @@ async fn connect_host(cli: &Cli) -> Result<(HostHandle, String)> {
     }
 }
 
-fn select_layout(force_portrait: bool) -> LayoutMode {
-    if force_portrait {
-        return LayoutMode::Portrait;
+impl Cli {
+    fn forced_layout(&self) -> Option<LayoutMode> {
+        if self.portrait {
+            Some(LayoutMode::Portrait)
+        } else if self.landscape {
+            Some(LayoutMode::Normal)
+        } else {
+            None
+        }
+    }
+}
+
+fn select_layout(force: Option<LayoutMode>) -> LayoutMode {
+    if let Some(layout) = force {
+        return layout;
     }
     match terminal_size() {
         Ok((columns, rows)) if is_portrait_pty(columns, rows) => LayoutMode::Portrait,
@@ -673,7 +688,7 @@ fn select_layout(force_portrait: bool) -> LayoutMode {
 }
 
 fn is_portrait_pty(columns: u16, rows: u16) -> bool {
-    rows > 0 && (columns as u32).saturating_mul(10) < (rows as u32).saturating_mul(22)
+    rows > 0 && (columns as u32) <= (rows as u32).saturating_mul(4)
 }
 
 async fn run_selector_once(
@@ -1442,21 +1457,44 @@ mod tests {
     }
 
     #[test]
-    fn cli_accepts_portrait_and_rejects_old_short_flag() {
+    fn cli_accepts_layout_force_flags_and_rejects_old_short_flag() {
         let portrait = Cli::try_parse_from(["tmux_select", "--portrait"]).unwrap();
         assert!(portrait.portrait);
+        assert_eq!(portrait.forced_layout(), Some(LayoutMode::Portrait));
+
+        let portrait_short = Cli::try_parse_from(["tmux_select", "-p"]).unwrap();
+        assert!(portrait_short.portrait);
+
+        let landscape = Cli::try_parse_from(["tmux_select", "--landscape"]).unwrap();
+        assert!(landscape.landscape);
+        assert_eq!(landscape.forced_layout(), Some(LayoutMode::Normal));
+
+        let landscape_short = Cli::try_parse_from(["tmux_select", "-l"]).unwrap();
+        assert!(landscape_short.landscape);
 
         let old_short = Cli::try_parse_from(["tmux_select", "-s"]);
         assert!(old_short.is_err());
+
+        let conflicting = Cli::try_parse_from(["tmux_select", "--portrait", "--landscape"]);
+        assert!(conflicting.is_err());
     }
 
     #[test]
     fn layout_auto_detection_uses_pty_aspect_ratio() {
-        assert_eq!(select_layout(true), LayoutMode::Portrait);
-        assert!(is_portrait_pty(65, 32));
+        assert_eq!(
+            select_layout(Some(LayoutMode::Portrait)),
+            LayoutMode::Portrait
+        );
+        assert_eq!(select_layout(Some(LayoutMode::Normal)), LayoutMode::Normal);
+        assert!(is_portrait_pty(64, 32));
+        assert!(is_portrait_pty(60, 30));
+        assert!(is_portrait_pty(66, 30));
+        assert!(is_portrait_pty(80, 24));
+        assert!(is_portrait_pty(100, 30));
+        assert!(is_portrait_pty(160, 40));
         assert!(is_portrait_pty(40, 40));
-        assert!(!is_portrait_pty(80, 24));
-        assert!(!is_portrait_pty(100, 30));
+        assert!(!is_portrait_pty(161, 40));
+        assert!(!is_portrait_pty(200, 40));
     }
 
     #[test]
