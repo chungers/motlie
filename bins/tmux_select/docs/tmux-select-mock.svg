@@ -12,7 +12,7 @@
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
     <text x="14" y="70" fill="#cbd5e1" font-family="monospace" font-size="12">Welcome target-host</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host 1/4</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [4] @ target-host, 192.0.2.10</text>
     <rect x="12" y="138" width="180" height="26" fill="#2563eb"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev      3 windows</text>
     <text x="20" y="184" fill="#cbd5e1" font-family="monospace" font-size="12">  build    1 window</text>
@@ -35,7 +35,7 @@
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#475569" stroke-width="1"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
     <text x="14" y="70" fill="#cbd5e1" font-family="monospace" font-size="12">Welcome target-host</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [4] @ target-host, 192.0.2.10</text>
     <rect x="12" y="138" width="180" height="26" fill="#1d4ed8"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="20" y="184" fill="#94a3b8" font-family="monospace" font-size="12">  build</text>
@@ -56,7 +56,7 @@
     <rect x="0" y="18" width="204" height="76" fill="#1f2937" stroke="#475569" stroke-width="1"/>
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#475569" stroke-width="1"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [3] @ target-host, 192.0.2.10</text>
     <rect x="12" y="138" width="180" height="26" fill="#1d4ed8"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; logs</text>
     <text x="220" y="46" fill="#f8fafc" font-family="monospace" font-size="13">R detail: logs</text>
@@ -114,7 +114,7 @@
     <text x="8" y="89" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">┃ ┃ ┃ ┃ ┃ ┃ (_) ┃ ┃_┃ ┃ ┃  __╱  ╱╱ ║ ╲╲</text>
     <text x="8" y="105" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃</text>
     <text x="14" y="146" fill="#cbd5e1" font-family="monospace" font-size="12">(no /etc/motd)</text>
-    <text x="14" y="184" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions - target-host</text>
+    <text x="14" y="184" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [1] @ target-host, 192.0.2.10</text>
     <rect x="12" y="200" width="198" height="26" fill="#2563eb"/>
     <text x="20" y="218" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="240" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">R detail still renders</text>
@@ -128,7 +128,7 @@
     <rect x="0" y="18" width="584" height="318" fill="#020617" stroke="#64748b" stroke-width="2"/>
     <rect x="0" y="18" width="584" height="84" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
     <rect x="0" y="102" width="584" height="196" fill="#020617" stroke="#334155" stroke-width="2"/>
-    <text x="16" y="48" fill="#f8fafc" font-family="monospace" font-size="13">T sessions - h 1/4</text>
+    <text x="16" y="48" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [4] @ h, 192.0.2.10</text>
     <rect x="14" y="64" width="552" height="26" fill="#2563eb"/>
     <text x="24" y="82" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev      3 windows</text>
     <text x="24" y="98" fill="#cbd5e1" font-family="monospace" font-size="12">  build    1 window</text>
@@ -143,7 +143,7 @@
     <rect x="0" y="18" width="584" height="318" fill="#020617" stroke="#64748b" stroke-width="2"/>
     <rect x="0" y="18" width="584" height="84" fill="#0b1220" stroke="#334155" stroke-width="2"/>
     <rect x="0" y="102" width="584" height="196" fill="#020617" stroke="#38bdf8" stroke-width="3"/>
-    <text x="16" y="48" fill="#e2e8f0" font-family="monospace" font-size="13">T sessions - h</text>
+    <text x="16" y="48" fill="#e2e8f0" font-family="monospace" font-size="13">Sessions [4] @ h, 192.0.2.10</text>
     <rect x="14" y="64" width="552" height="26" fill="#1d4ed8"/>
     <text x="24" y="82" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="16" y="132" fill="#f8fafc" font-family="monospace" font-size="13">B detail: dev</text>

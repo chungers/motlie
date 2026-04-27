@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` status-bar label. |
 | 2026-04-27 | @gpt55-dgx | Moved the host label from the status bar into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
 | 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
@@ -160,9 +161,10 @@ which is currently a one-second polling loop over `list_sessions()` with
 stable-id snapshot diffing. It is not currently driven by direct tmux
 control-mode host notifications.
 
-The Sessions pane title includes the target host label. The blue status bar
-shows current time and compact key hints only; it does not repeat the host,
-focus, or layout mode.
+The Sessions pane title uses `Sessions [n] @ <hostname>, <ip address>`, where
+`n` is the current session count. The blue status bar shows current time and
+compact key hints only; it does not repeat the host, show focus/layout mode, or
+prefix the hints with a `keys` label.
 
 Modal keys:
 
