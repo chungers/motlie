@@ -24,7 +24,7 @@ pub fn build_session_with_target(
     #[cfg(not(feature = "cuda"))]
     let _ = target;
 
-    let builder = Session::builder().map_err(|err| ModelError::BackendInitialization {
+    let mut builder = Session::builder().map_err(|err| ModelError::BackendInitialization {
         backend,
         message: format!("failed to create ONNX Runtime session builder: {err}"),
     })?;

@@ -16,7 +16,7 @@ This README is the conversational playbook for the repo-local voice skills:
 - if no binary is available for this host, build the most optimized one for the host
 - the build always uses `release`
 - prefer CUDA when the host supports it
-- keep Piper on CPU even in CUDA builds for now; the ONNX Runtime CUDA path is unstable on shutdown in the current validation environment
+- keep Piper on CPU by default even in CUDA builds for now; this is a shutdown-stability workaround in the current validation environment, and advanced users can opt back into CUDA probing with MOTLIE_PIPER_ALLOW_CUDA=1
 - if the selected backend weights are missing, download them into the shared skill cache:
   - `.agents/skills/voice/artifacts/hf-cache/`
 - if the full `motlie` repo is present, repo-based builds should repopulate the skill runtime sidecars:
@@ -270,7 +270,7 @@ Agent-side helper:
 .agents/skills/voice/listen/scripts/prepare_remote_push.sh --ssh-target dchung@spark-2f6e
 ```
 
-That prepares a stable FIFO path, one agent-only listen command, one short human-facing Mac command that records locally until Ctrl-C and then streams the recorded WAV, and one longer fallback command. The agent should run the listen side itself in one live polled session, not as a detached background job, kill any stale listener still attached to the fixed FIFO before starting a new one, show the human the short command first, poll until EOF arrives, and only offer the fallback command if the short one fails. After the listen returns or fails, clean up the FIFO path before the next run. For `whisper`, `sherpa`, and `moonshine`, the remote-push behavior is the same: wait for EOF from Ctrl-C on the Mac and then print one final transcript.
+That prepares a stable FIFO path, one agent-only listen command, one short human-facing Mac command that records locally until Ctrl-C and then streams the recorded WAV, and one longer fallback command. The agent should run the listen side itself in one live polled session, not as a detached background job, kill any stale listener still attached to the fixed FIFO before starting a new one, show the human the short command first, poll until EOF arrives, only emit commands for validated shell-safe SSH targets and FIFO paths, and only offer the fallback command if the short one fails. After the listen returns or fails, clean up the FIFO path before the next run. For `whisper`, `sherpa`, and `moonshine`, the remote-push behavior is the same: wait for EOF from Ctrl-C on the Mac and then print one final transcript.
 
 ## Operational Questions
 

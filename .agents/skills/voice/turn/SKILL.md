@@ -48,6 +48,7 @@ Agent decision rule:
 - when remote is requested, pass `--playback-endpoint ssh:<host>` and/or `--capture-endpoint ssh:<host>`
 - if the reply microphone is remote on a Mac, prompt for the local Mac Terminal/iTerm2 push flow for the listen half of the turn
 - when the human has to run a command, give one short, copy-pasteable command first
+- for the remote Mac push helper, only emit validated shell-safe SSH targets and FIFO paths; fail clearly instead of printing a risky command
 - only give the longer compatibility fallback if the short command fails
 - infer the SSH destination for that push flow from the current host name first and only ask the human if it is unclear or likely unreachable from the Mac
 - if the listen side reports silent capture, tell the human the capture host likely has the wrong input device selected or is missing microphone permission
