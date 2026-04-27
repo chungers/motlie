@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated Help modal tracking for build date and last-8-character git SHA display. |
 | 2026-04-27 | @gpt55-dgx | Updated bottom status tracking for `↑/↓ sel` and `←/→ pane` direction hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status tracking for `|` host/IP separator and `(h)elp`-first bottom command hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status/title tracking for a top host/time status bar and count-only Sessions title. |
@@ -230,8 +231,8 @@ References: [Functional Requirements](./DESIGN.md#functional),
   Esc handling.
 - [x] 5.6 Implement kill confirmation modal with id captured at modal-open.
 - [x] 5.7 Implement Help modal opened by `h`, showing the built-in motlie
-  logo, key functions, and build git SHA with a single Ok button; Enter or Esc
-  closes it.
+  logo, key functions, build date, and last 8 characters of the build git SHA
+  with a single Ok button; Enter or Esc closes it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
   modal Esc behavior, and cyclic plain Left/Right focus behavior.
 
@@ -335,7 +336,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
-| Input model | Pure unit tests | cyclic focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, and build SHA display |
+| Input model | Pure unit tests | cyclic focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, build date, and short build SHA display |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |

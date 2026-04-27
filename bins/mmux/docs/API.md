@@ -10,6 +10,8 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Replaced build metadata shellouts with Rust filesystem/time APIs in `build.rs`. |
+| 2026-04-27 | @gpt55-dgx | Documented Help modal build date and last-8-character git SHA display. |
 | 2026-04-27 | @gpt55-dgx | Documented compact bottom status direction hints `↑/↓ sel` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Documented `|` host/IP separator and `(h)elp`-first bottom status command hints. |
 | 2026-04-27 | @gpt55-dgx | Documented top status host/IP plus right-justified time and count-only Sessions title. |
@@ -218,11 +220,14 @@ hints render as `↑/↓ sel` and `←/→ pane`.
 
 ## Build Metadata
 
-The binary embeds a build-time git SHA in a private `BUILD_GIT_SHA` constant.
-`bins/mmux/build.rs` sets `MMUX_GIT_SHA` from
-`git rev-parse HEAD`, or uses an explicit `MMUX_GIT_SHA` environment
-override when provided. The Help modal opened by `h` renders that value below
-the built-in motlie logo and key-function reference.
+The binary embeds build metadata in private `BUILD_GIT_SHA` and `BUILD_DATE`
+constants. `bins/mmux/build.rs` sets `MMUX_GIT_SHA` from an explicit
+environment override or by reading `.git`/`HEAD`/refs/`packed-refs` directly
+with Rust filesystem APIs. It sets `MMUX_BUILD_DATE` from an explicit
+environment override or from `SystemTime` converted to a UTC `YYYY-MM-DD` date
+in Rust. The Help modal opened by `h` renders the build date and only the last
+8 characters of the git SHA below the built-in motlie logo and key-function
+reference.
 
 ## Detail Source Contract
 
@@ -356,7 +361,8 @@ API tests must cover:
 - status hint arrow-symbol rendering
 - top status rendering for bold hostname/IP and right-justified current time
 - session count rendering in the Sessions pane title without hostname/IP
-- Help modal open/close behavior, key-function display, and build SHA display
+- Help modal open/close behavior, key-function display, build date display,
+  and last-8-character build SHA display
 - default attach/re-enter and no-loop conditions
 
 Current implementation coverage:
