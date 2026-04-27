@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Added an `h` About modal that shows the built-in motlie logo and the build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
 | 2026-04-26 | @gpt55-dgx | Updated status bar contract: omit layout labels from the status text and render the bar with a blue background. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
@@ -138,9 +139,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   field and `Cancel` / `Ok` buttons.
 - Pressing `k` opens a centered `Kill session <name>?` confirmation modal with
   `Cancel` / `Ok` buttons.
-- In modal dialogs, Left and Right choose between `Cancel` and `Ok`; Enter
-  exits the modal and applies `Ok` when selected. `Esc` in a modal is
-  `Cancel` and closes without applying.
+- Pressing `h` opens a centered `About` modal with the built-in motlie logo,
+  the current build git SHA, and an `Ok` button.
+- In create/kill modal dialogs, Left and Right choose between `Cancel` and
+  `Ok`; Enter exits the modal and applies `Ok` when selected. `Esc` in a modal
+  is `Cancel` and closes without applying. In the About modal, Enter or `Esc`
+  closes the modal without changing selector state.
 - Pressing Right moves focus from
   `Lb` to `R` (no-op if already `R`). Pressing Left moves focus from `R` to
   `Lb` (no-op if already `Lb`). Outside any modal, `Esc` is equivalent to
@@ -161,7 +165,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   and attach that remote PTY to the selected remote tmux session.
 - A bottom status bar shows target host, current time, and supported keys.
   Key hints must include navigation between list and detail (`Right`/`Left`)
-  plus always-on hints (`m monitor`, `n new`, `k kill`, attach, resize,
+  plus always-on hints (`m monitor`, `n new`, `k kill`, `h about`, attach, resize,
   `q quit`). The status bar must not show focus (`list`, `detail`, `Lb`, `R`)
   or layout mode (`portrait`, `landscape`, or `normal`) and must render with a
   blue background.
@@ -368,6 +372,7 @@ Main-selector keymap (focus-aware):
 | `m` | Start/switch monitoring on highlight | Same |
 | `n` | Open `New Session` modal | Same |
 | `k` | Open kill-confirmation modal | Same |
+| `h` | Open About modal with logo and build git SHA | Same |
 | Enter / `a` | Attach highlight | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
@@ -405,7 +410,7 @@ at smaller sizes but is tuned for this target.
   maximize content density. Status-bar key hints remain, but key hints must be
   terser to fit ~64 cols. Use ASCII-first
   compact labels so narrow SSH clients and IDE terminals render predictably,
-  e.g., `Up/Dn pick | right detail | m mon | n new | k kill | Enter/a go`.
+  e.g., `Up/Dn pick | right detail | m mon | n new | k kill | h about | Enter/a go`.
 
 **Focus model:** Identical to normal mode, with `T` ↔ `Lb` and `B` ↔ `R`:
 
@@ -1031,6 +1036,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - sample vs monitor mode
   - modal button selection
   - create/kill success and error paths
+  - About modal opens on `h`, shows the logo and build git SHA, and closes on
+    Enter or `Esc`
   - focus toggles: Right `Lb`→`R`,
     Left `R`→`Lb`, `Esc` outside modal `R`→`Lb`, no-op when already focused
   - `Esc` inside modal = `Cancel`

@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Added the `h` key for an About modal showing the motlie logo and build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
@@ -137,6 +138,7 @@ Normal mode main-view keys:
 | `m` | Monitor highlighted session | Monitor highlighted session |
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
+| `h` | Open About modal | Open About modal |
 | Enter / `a` | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
@@ -156,9 +158,12 @@ Modal keys:
 
 | Key | Behavior |
 |-----|----------|
-| Left / Right | Choose Cancel or Ok |
-| Enter | Close modal and apply Ok if selected |
-| Esc | Cancel |
+| Left / Right | Choose Cancel or Ok in New Session and Kill Session modals. No-op in About. |
+| Enter | Close modal. Applies Ok when selected in New Session or Kill Session. |
+| Esc | Cancel New Session / Kill Session, or close About. |
+
+The About modal shows the built-in motlie logo, the build git SHA, and a single
+Ok button.
 
 ## ForceCommand
 
