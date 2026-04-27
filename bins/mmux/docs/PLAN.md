@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Updated status/title tracking for a top host/time status bar and count-only Sessions title. |
 | 2026-04-27 | @gpt55-dgx | Updated focus/input tracking for cyclic Left/Right pane navigation, including landscape MOTD focus. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector workspace package/path/binary references to `motlie-mmux`, `bins/mmux`, and `mmux`. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title tracking for count/hostname/IP format and removed the `keys` status label. |
@@ -188,7 +189,8 @@ References: [Layout](./DESIGN.md#layout), [Data Flow](./DESIGN.md#data-flow),
 References: [Layout](./DESIGN.md#layout),
 [Portrait Mode](./DESIGN.md#portrait-mode), [SVG Mock](./DESIGN.md#svg-mock).
 
-- [x] 4.1 Implement normal layout: `L`/`R`, `LT`/`LB`, one-row status bar.
+- [x] 4.1 Implement normal layout: `L`/`R`, `LT`/`LB`, one-row top status bar,
+  and one-row bottom command/status bar.
 - [x] 4.2 Implement dynamic MOTD height cap: fit content up to 30% of left
   pane height.
 - [x] 4.3 Implement absent-MOTD motlie placeholder with narrow-terminal
@@ -196,10 +198,11 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
   omit MOTD.
 - [x] 4.5 Implement focused/unfocused border styles.
-- [x] 4.6 Implement Sessions pane title formatted as
-  `Sessions [n] @ <hostname>, <ip address>` and a blue status bar with time,
-  compact arrow-symbol key hints, and no `keys`, host, focus, or layout-mode
-  labels.
+- [x] 4.6 Implement a blue top status bar with bold left-justified
+  `<hostname>, <ip address>` and right-justified time; keep the Sessions pane
+  title count-only as `Sessions [n]`; keep the blue bottom status bar to
+  compact arrow-symbol key hints and app status with no `keys`, host, time,
+  focus, or layout-mode labels.
 - [ ] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.

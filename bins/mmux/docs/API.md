@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Documented top status host/IP plus right-justified time and count-only Sessions title. |
 | 2026-04-27 | @gpt55-dgx | Documented cyclic Left/Right focus behavior, including landscape MOTD focus. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector binary/package docs to `mmux` / `motlie-mmux`. |
 | 2026-04-27 | @gpt55-dgx | Documented Sessions title count/hostname/IP format and removal of the `keys` status label. |
@@ -204,9 +205,12 @@ struct SelectedSession {
 }
 ```
 
-The Sessions pane title is derived from the app host identity and live session
-list length: `Sessions [n] @ <hostname>, <ip address>`. Status text contains
-only current time and compact key hints, not the host label or a `keys` prefix.
+The top status bar is derived from the app host identity and current local
+clock: `<hostname>, <ip address>` renders as bold left-justified text, and the
+current time renders right-justified. The Sessions pane title is derived only
+from the live session list length: `Sessions [n]`. Bottom status text contains
+compact key hints and app status, not the host label, current time, layout/focus
+labels, or a `keys` prefix.
 
 ## Build Metadata
 
@@ -346,8 +350,8 @@ API tests must cover:
 - modified-arrow resize fallback behavior
 - cyclic Left/Right focus behavior in landscape and portrait layouts
 - status hint arrow-symbol rendering
-- session count, hostname, and IP rendering in the Sessions pane title, not the
-  status line
+- top status rendering for bold hostname/IP and right-justified current time
+- session count rendering in the Sessions pane title without hostname/IP
 - Help modal open/close behavior, key-function display, and build SHA display
 - default attach/re-enter and no-loop conditions
 

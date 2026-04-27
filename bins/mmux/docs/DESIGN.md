@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
 | 2026-04-27 | @gpt55-dgx | Changed plain Left/Right focus movement to cycle through panes, including the landscape MOTD pane. |
 | 2026-04-27 | @gpt55-dgx | Renamed the selector executable and docs to `mmux`, including ForceCommand examples and mock asset references. |
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` label from the status bar. |
@@ -170,15 +171,18 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   all operate against the SSH target.
 - For SSH targets, attach must open an interactive SSH PTY to the target host
   and attach that remote PTY to the selected remote tmux session.
-- The session-list pane title shows the target host and session count as
-  `Sessions [n] @ <hostname>, <ip address>`.
-- A bottom status bar shows current time and supported keys.
+- A top status bar shows the target host as `<hostname>, <ip address>` in bold,
+  left-justified text and the current time right-justified. It uses the same
+  blue background as the bottom status bar.
+- The session-list pane title shows only the session count as `Sessions [n]`.
+- A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`, and must include pane focus cycling (`←/→`) plus
   always-on hints (`m monitor`, `n new`, `k kill`, `h help`,
-  attach, resize, `q quit`). The status bar must not show a `keys` label,
-  focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
-  `landscape`, or `normal`) and must render with a blue background.
+  attach, resize, `q quit`). The bottom status bar must not show a `keys`
+  label, time, host, focus (`list`, `detail`, `Lb`, `R`), or layout mode
+  (`portrait`, `landscape`, or `normal`) and must render with a blue
+  background.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
@@ -338,8 +342,9 @@ if both are detected.
 
 The terminal is split into:
 
-- body area: everything except the bottom status bar
-- status bar: one terminal row
+- top status bar: one terminal row
+- body area: everything between the top and bottom status bars
+- bottom status bar: one terminal row
 
 The body area is split horizontally into `L` and `R`.
 
@@ -364,9 +369,10 @@ The body area is split horizontally into `L` and `R`.
 
 The currently focused pane must be visually distinguished from unfocused panes
 via border style (bright/colored or doubled for focused; dim/single for
-unfocused). The blue status bar shows time and key hints only; it does not
-duplicate host, focus, layout state, or a `keys` label. The target host appears
-in the Sessions pane title as `Sessions [n] @ <hostname>, <ip address>`.
+unfocused). The blue top status bar shows bold host/IP at left and
+right-justified time. The blue bottom status bar shows key hints and status
+text only; it does not duplicate host, time, focus, layout state, or a `keys`
+label. The Sessions pane title is count-only: `Sessions [n]`.
 
 Main-selector keymap (focus-aware):
 
@@ -408,9 +414,9 @@ at smaller sizes but is tuned for this target.
 
 **Layout:**
 
-- Body area: 31 rows (32 total minus 1 status-bar row).
+- Body area: 30 rows (32 total minus 1 top status row and 1 bottom status row).
 - Body splits *vertically* into Top (`T`) and Bottom (`B`) at a 30:70 ratio
-  (T ≈ 9 rows, B ≈ 22 rows for a 32-row terminal).
+  (T ≈ 9 rows, B ≈ 21 rows for a 32-row terminal).
 - `T` = session list. Equivalent to `LB` in normal mode (same scrolling,
   same position indicator, same auto-scroll-to-keep-highlight-visible
   behavior). Default focus.
