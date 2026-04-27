@@ -60,13 +60,13 @@
     <rect x="12" y="138" width="180" height="26" fill="#1d4ed8"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; logs</text>
     <text x="220" y="46" fill="#f8fafc" font-family="monospace" font-size="13">R detail: logs</text>
-    <text x="220" y="72" fill="#facc15" font-family="monospace" font-size="12">mode: monitor | auto-tail paused</text>
-    <text x="220" y="104" fill="#cbd5e1" font-family="monospace" font-size="12">[12:01:08] service started</text>
-    <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">[12:01:09] request /health</text>
-    <text x="220" y="152" fill="#94a3b8" font-family="monospace" font-size="12">+ 8 new lines below viewport</text>
-    <text x="220" y="182" fill="#93c5fd" font-family="monospace" font-size="12">End resumes tail</text>
+    <text x="220" y="72" fill="#facc15" font-family="monospace" font-size="12">mode: monitor | rendered screen mirror</text>
+    <text x="220" y="104" fill="#cbd5e1" font-family="monospace" font-size="12">top - 18:58:21 up 12 days</text>
+    <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">PID USER      CPU  MEM COMMAND</text>
+    <text x="220" y="152" fill="#94a3b8" font-family="monospace" font-size="12">2481 deploy   9.2  1.4 worker</text>
+    <text x="220" y="182" fill="#93c5fd" font-family="monospace" font-size="12">ScreenStable + VTE parse</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus R | l list | End tail | 10,000 line buffer | Ctrl-C exit</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus R | l list | End tail | screen mirror | q quit</text>
   </g>
 
   <g transform="translate(664 484)">

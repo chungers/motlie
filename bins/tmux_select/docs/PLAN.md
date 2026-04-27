@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Addressed second manual validation feedback: monitor mode now mirrors rendered screen snapshots with ANSI/VTE parsing, modified-arrow fallback resize is tested, and attach PTY restore uses a `SIGTTOU`-safe foreground-process-group path. |
 | 2026-04-26 | @gpt55-dgx | Addressed manual validation feedback: robust Ctrl-arrow resize matching, readable monitor-mode normalization, conventional detail scroll direction with scrollbar/range indicator, `q` quit key, and dashboard re-entry after detach when the selected session still exists. |
 | 2026-04-26 | @gpt55-dgx | Implemented the initial selector binary and remaining library support: workspace package, CLI modes, normal/short TUI layouts, MOTD fallback art, trait-backed sample/monitor detail sources, create/kill modals, stable-id attach/kill, ForceCommand bypass/reject handling, `ScrollbackQuery::LinesRange`, host event diff stream, and docs/API/CLI updates. |
 | 2026-04-26 | @gpt55-dgx | Started Phase 1.1 and 1.4 implementation: added `Target::attach_current_pty`, `AttachExit`, local/SSH attach command construction, process-group terminal handoff, signal status mapping, command/status unit tests, and `HostHandle::session_by_id`; localhost PTY smoke and rename-race tests remain open. |
@@ -197,7 +198,8 @@ References: [Functional Requirements](./DESIGN.md#functional),
 - [x] 5.3 Implement R/B scrolling, page movement, Home/End, and monitor
   auto-tail resume on End.
 - [x] 5.4 Implement resize keys: `Ctrl-Left`/`Ctrl-Right` for normal mode and
-  `Ctrl-Up`/`Ctrl-Down` for short mode.
+  `Ctrl-Up`/`Ctrl-Down` for short mode. Accept modified-arrow and word-arrow
+  fallback sequences for terminals that remap Ctrl-arrow.
 - [x] 5.5 Implement `New Session` modal with text input, Cancel/Ok, Enter, and
   Esc handling.
 - [x] 5.6 Implement kill confirmation modal with id captured at modal-open.
@@ -213,13 +215,16 @@ References: [R Pane Detail Source](./DESIGN.md#r-pane-detail-source),
 - [x] 6.2 Implement `SampleDetailSource` using `motlie-tmux` capture/sample
   APIs.
 - [x] 6.3 Implement backwards chunk fetch through `LinesRange`.
-- [x] 6.4 Implement `MonitorDetailSource` using the monitor/history pipeline
-  with plain-text normalization for TUI rendering.
-- [x] 6.5 Enforce the 10,000-line rolling monitor history bound.
-- [x] 6.6 When monitor history scrolls beyond the rolling-buffer start, fetch
-  older tmux pre-monitor scrollback through `LinesRange` on the same target.
-- [ ] 6.7 Add mock-backed tests for sample replace, monitor append, tail pause,
-  End resume, and older-history fetch anchoring.
+- [x] 6.4 Implement `MonitorDetailSource` as a rendered screen mirror using
+  `capture_all_with_options(CaptureNormalizeMode::ScreenStable)` and
+  `ansi-to-tui`/VTE parsing for TUI-safe display.
+- [x] 6.5 Keep monitor refresh bounded to the current screen; do not retain a
+  raw control-mode transcript in the selector binary.
+- [x] 6.6 When the user requests older detail content in monitor mode, fetch
+  tmux scrollback through `LinesRange` on the same target.
+- [x] 6.7 Add mock-backed tests for monitor screen capture, ANSI/VTE parsing,
+  modified-arrow resize fallbacks, reserved plain arrows, and monitored-session
+  close behavior.
 
 ## Phase 7: Session Lifecycle Operations
 
@@ -254,6 +259,8 @@ References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
 - [ ] 8.7 Add localhost integration test pinning canonical tmux behavior:
   externally killing the attached session exits the attach child with status 0.
 - [ ] 8.8 Add no-loop tests for non-zero child exit and refresh failure.
+- [x] 8.9 Add a unit guard for `SIGTTOU`-safe foreground-process-group restore
+  after attach detach.
 
 ## Phase 9: SSH and ForceCommand
 
@@ -299,7 +306,7 @@ builds/tests/clippy, and `cargo build --bins --examples` passed.
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, short mode 32x65, MOTD cap, placeholder fallback, resize bounds |
 | Input model | Pure unit tests | focus transitions, scrolling, reserved arrows, modal Enter/Esc |
-| Detail source | Mock `motlie-tmux` facade | sample replace, monitor append, tail pause, older-history fetch |
+| Detail source | Mock `motlie-tmux` facade | sample replace, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/dashboard |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |
 | Terminal cleanup | PTY harness | raw mode restore, alternate-screen restore, panic-path cleanup |

@@ -233,13 +233,7 @@ impl ForegroundProcessGroup {
             .try_into()
             .map_err(|_| Error::Transport(format!("child pid {} does not fit pid_t", child_pid)))?;
 
-        if unsafe { libc::tcsetpgrp(fd, child_pgrp) } == -1 {
-            return Err(Error::Transport(format!(
-                "failed to transfer terminal foreground process group to child {}: {}",
-                child_pid,
-                std::io::Error::last_os_error()
-            )));
-        }
+        tcsetpgrp_ignoring_sigttou(fd, child_pgrp, "transfer terminal foreground process group")?;
 
         Ok(Some(Self {
             fd,
@@ -252,10 +246,76 @@ impl ForegroundProcessGroup {
 #[cfg(unix)]
 impl Drop for ForegroundProcessGroup {
     fn drop(&mut self) {
-        if self.active && unsafe { libc::tcsetpgrp(self.fd, self.original_pgrp) } == -1 {
+        if self.active {
+            if let Err(err) = tcsetpgrp_ignoring_sigttou(
+                self.fd,
+                self.original_pgrp,
+                "restore terminal foreground process group after attach",
+            ) {
+                tracing::warn!(error = %err, "failed to restore terminal foreground process group");
+            }
+        }
+        self.active = false;
+    }
+}
+
+#[cfg(unix)]
+fn tcsetpgrp_ignoring_sigttou(fd: libc::c_int, pgrp: libc::pid_t, action: &str) -> Result<()> {
+    let _guard = SignalDispositionGuard::ignore(libc::SIGTTOU)?;
+    if unsafe { libc::tcsetpgrp(fd, pgrp) } == -1 {
+        return Err(Error::Transport(format!(
+            "failed to {action}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct SignalDispositionGuard {
+    signal: libc::c_int,
+    previous: libc::sigaction,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl SignalDispositionGuard {
+    fn ignore(signal: libc::c_int) -> Result<Self> {
+        let mut next: libc::sigaction = unsafe { std::mem::zeroed() };
+        next.sa_sigaction = libc::SIG_IGN;
+        if unsafe { libc::sigemptyset(&mut next.sa_mask) } == -1 {
+            return Err(Error::Transport(format!(
+                "failed to initialize signal mask: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(signal, &next, &mut previous) } == -1 {
+            return Err(Error::Transport(format!(
+                "failed to ignore signal {signal}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        Ok(Self {
+            signal,
+            previous,
+            active: true,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SignalDispositionGuard {
+    fn drop(&mut self) {
+        if self.active
+            && unsafe { libc::sigaction(self.signal, &self.previous, std::ptr::null_mut()) } == -1
+        {
             tracing::warn!(
+                signal = self.signal,
                 error = %std::io::Error::last_os_error(),
-                "failed to restore terminal foreground process group after attach"
+                "failed to restore signal disposition"
             );
         }
         self.active = false;
@@ -362,6 +422,22 @@ mod tests {
         assert_eq!(shell_status_code(&ExitStatus::from_raw(0)), 0);
         assert_eq!(shell_status_code(&ExitStatus::from_raw(7 << 8)), 7);
         assert_eq!(shell_status_code(&ExitStatus::from_raw(libc::SIGTERM)), 143);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tcsetpgrp_helper_uses_sigttou_safe_path() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+
+        let result =
+            tcsetpgrp_ignoring_sigttou(fds[0], unsafe { libc::getpgrp() }, "test tcsetpgrp");
+
+        let _ = unsafe { libc::close(fds[0]) };
+        let _ = unsafe { libc::close(fds[1]) };
+        assert!(result.is_err());
+        let message = result.err().map(|err| err.to_string()).unwrap_or_default();
+        assert!(message.contains("failed to test tcsetpgrp"));
     }
 
     #[test]

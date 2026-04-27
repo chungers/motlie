@@ -10,6 +10,7 @@ Implemented API contract for the initial `tmux_select` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated implementation notes for the second validation round: monitor detail now captures rendered screen snapshots with `ScreenStable` plus ANSI/VTE parsing, resize accepts modified-arrow fallbacks, and attach PTY restore is `SIGTTOU`-safe. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for validation fixes: monitor detail uses `CaptureNormalizeMode::PlainText`, `q` exits like `Ctrl-C`, and dashboard can re-enter after detach even when tmux returns a non-zero detach status. |
 | 2026-04-26 | @gpt55-dgx | Updated API reference to implemented reality: selector CLI config, trait-backed sample/monitor detail sources, stable-id create/kill/attach flows, `HostEventStream`, host shell MOTD read, and `LinesRange` scrollback. |
 | 2026-04-26 | @gpt55-dgx | Mark current-PTY attach and stable session-id lookup as started in `motlie-tmux`; host event stream and windowed scrollback remain open selector dependencies. |
@@ -219,9 +220,11 @@ enum DetailMode {
 }
 ```
 
-`MonitorDetailSource` requests `CaptureNormalizeMode::PlainText` from
-`motlie-tmux` so ratatui receives readable text instead of raw ANSI/control
-bytes from tmux control mode.
+`MonitorDetailSource` resolves the selected session by stable id, calls
+`capture_all_with_options(CaptureNormalizeMode::ScreenStable)`, and renders the
+visible content through `ansi-to-tui`'s VTE parser. This makes monitor mode a
+rendered screen mirror suitable for TUI sessions instead of a raw `%output`
+control-mode transcript.
 
 ## Session Operations
 
@@ -286,11 +289,16 @@ API tests must cover:
 - `LinesRange` scrollback boundaries
 - session-id dispatch under rename race
 - detail source append/replace/fetch older behavior
+- monitor screen capture and ANSI/VTE parser behavior
+- modified-arrow resize fallback behavior
 - dashboard re-entry and no-loop conditions
 
 Current implementation coverage:
 
-- `cargo test -p motlie-tmux`: attach command/status, `LinesRange`, stable-id
-  host-event diffing, and stable-id kill coverage.
-- `cargo test -p motlie-tmux-select`: CLI mutual exclusion and stable-id
-  highlight preservation.
+- `cargo test -p motlie-tmux`: attach command/status including the
+  `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
+  and stable-id kill coverage.
+- `cargo test -p motlie-tmux-select`: CLI mutual exclusion, stable-id
+  highlight preservation, `q` exit, detail scroll direction, modified-arrow
+  resize fallbacks, reserved plain arrows, monitor screen capture, ANSI/VTE
+  parsing, and monitored-session-close reset.

@@ -9,6 +9,7 @@ Implemented CLI contract for the initial `tmux_select` binary in
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-26 | @gpt55-dgx | Updated key and dashboard semantics after validation: resize accepts modified-arrow fallbacks when terminals remap Ctrl-arrow, monitor mode mirrors rendered screen content, and dashboard detach is protected against stopped selector jobs. |
 | 2026-04-26 | @gpt55-dgx | Updated CLI reference to match implemented binary behavior: `-s`, `--print-session`, `--dashboard`, optional SSH URI, ForceCommand rejection/bypass, stdout/stderr split, and exit semantics. |
 | 2026-04-26 | @gpt55-dgx | Initial CLI contract for issue #226 and PR #227: modes, arguments, keymap, stdout/stderr behavior, ForceCommand usage, and exit semantics. |
 | 2026-04-26 | @gpt55-dgx | Addressed PR #227 round-3 keymap feedback by marking `Ctrl-Left`/`Ctrl-Right` resize as normal-mode-only in the table. |
@@ -132,6 +133,7 @@ Normal mode main-view keys:
 | `l` | No-op | Focus session list |
 | `Esc` | No-op outside modal | Focus session list |
 | `Ctrl-Left` / `Ctrl-Right` | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
+| Alt/Shift Left / Right, or terminal word-left/word-right fallback | Resize L/R split when the terminal remaps Ctrl-arrow | Resize L/R split when the terminal remaps Ctrl-arrow |
 | Left / Right | Reserved no-op | Reserved no-op |
 | `m` | Monitor highlighted session | Monitor highlighted session |
 | `n` | Open New Session modal | Open New Session modal |
@@ -140,7 +142,8 @@ Normal mode main-view keys:
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
 Short mode maps `T` to `Lb` and `B` to `R`. It uses
-`Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`.
+`Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
+accepted as compatibility fallbacks.
 
 Modal keys:
 

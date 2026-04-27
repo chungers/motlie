@@ -3,22 +3,27 @@ use std::io;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use ansi_to_tui::IntoText;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use motlie_tmux::{
-    CaptureNormalizeMode, CreateSessionOptions, HistoryOptions, HostEvent, HostHandle, LabelFormat,
-    RenderMode, ScrollbackQuery, SessionInfo, SessionWatchHandle, SessionWatchOptions, SshConfig,
+    has_visible_text, strip_ansi, CaptureNormalizeMode, CaptureOptions, CaptureResult,
+    CreateSessionOptions, HostEvent, HostHandle, PaneAddress, ScrollbackQuery, SessionInfo,
+    SshConfig,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span as TuiSpan};
+use ratatui::text::{Line, Span as TuiSpan, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
@@ -26,7 +31,6 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
 const DEFAULT_DETAIL_LINES: usize = 80;
-const MONITOR_HISTORY_LINES: usize = 10_000;
 const MIN_LEFT_PERCENT: u16 = 25;
 const MAX_LEFT_PERCENT: u16 = 75;
 const MIN_TOP_PERCENT: u16 = 25;
@@ -49,7 +53,7 @@ struct Cli {
     /// Print the selected session name and exit instead of attaching.
     #[arg(long, conflicts_with = "dashboard")]
     print_session: bool,
-    /// Re-enter the selector after a clean attach detach.
+    /// Re-enter the selector after detach when the selected session remains.
     #[arg(long)]
     dashboard: bool,
     /// Optional SSH URI target. Omitted means local host.
@@ -164,48 +168,36 @@ impl SessionDetailSource for SampleDetailSource {
 }
 
 struct MonitorDetailSource {
-    handle: Option<SessionWatchHandle>,
     session_id: Option<String>,
 }
 
 impl MonitorDetailSource {
     fn new() -> Self {
-        Self {
-            handle: None,
-            session_id: None,
-        }
+        Self { session_id: None }
     }
 }
 
 impl SessionDetailSource for MonitorDetailSource {
     async fn activate(&mut self, host: &HostHandle, session: &SelectedSession) -> Result<()> {
         self.deactivate().await?;
-        let opts = SessionWatchOptions {
-            queue_capacity: 256,
-            normalize: CaptureNormalizeMode::PlainText,
-            history: HistoryOptions {
-                max_entries: MONITOR_HISTORY_LINES,
-                max_render_chars: 0,
-                label_format: LabelFormat::Bracketed,
-                include_omission_marker: true,
-                render_mode: RenderMode::Interleaved,
-                global_max_render_chars: 0,
-            },
-        };
-        self.handle = Some(
-            host.watch_session(&session.name, &opts)
-                .await
-                .context("start session monitor")?,
-        );
+        if host.session_by_id(&session.id).await?.is_none() {
+            return Err(anyhow!("session {} disappeared", session.name));
+        }
         self.session_id = Some(session.id.clone());
         Ok(())
     }
 
-    async fn render(&mut self, _host: &HostHandle, _session: &SelectedSession) -> Result<String> {
-        match self.handle.as_ref() {
-            Some(handle) => Ok(handle.render_text().await),
-            None => Ok(String::new()),
-        }
+    async fn render(&mut self, host: &HostHandle, session: &SelectedSession) -> Result<String> {
+        let Some(target) = host.session_by_id(&session.id).await? else {
+            return Ok(format!("session {} disappeared", session.name));
+        };
+        let panes = target
+            .capture_all_with_options(&CaptureOptions::with_mode(
+                CaptureNormalizeMode::ScreenStable,
+            ))
+            .await
+            .context("capture monitored session screen")?;
+        Ok(render_screen_capture(&session.name, panes))
     }
 
     async fn fetch_older(
@@ -222,15 +214,50 @@ impl SessionDetailSource for MonitorDetailSource {
     }
 
     async fn deactivate(&mut self) -> Result<()> {
-        if let Some(handle) = self.handle.take() {
-            handle.shutdown().await?;
-        }
         self.session_id = None;
         Ok(())
     }
 
     fn mode(&self) -> DetailMode {
         DetailMode::Monitor
+    }
+}
+
+fn render_screen_capture(
+    session_name: &str,
+    panes: std::collections::HashMap<PaneAddress, CaptureResult>,
+) -> String {
+    if panes.is_empty() {
+        return "(no visible content)\n".to_string();
+    }
+
+    let mut pane_list: Vec<_> = panes.into_iter().collect();
+    pane_list.sort_by_key(|(addr, _)| (addr.window, addr.pane));
+
+    if pane_list.len() == 1 {
+        let text = pane_list.remove(0).1.text;
+        if has_visible_text(&text) {
+            return text;
+        }
+        return "(no visible content)\n".to_string();
+    }
+
+    let mut rendered = String::new();
+    for (addr, result) in pane_list {
+        if !has_visible_text(&result.text) {
+            continue;
+        }
+        rendered.push_str(&format!("--- {}({}) ---\n", session_name, addr.pane_id));
+        rendered.push_str(&result.text);
+        if !result.text.ends_with('\n') {
+            rendered.push('\n');
+        }
+    }
+
+    if rendered.is_empty() {
+        "(no visible content)\n".to_string()
+    } else {
+        rendered
     }
 }
 
@@ -435,18 +462,26 @@ enum SelectorOutcome {
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<io::Stderr>>,
     active: bool,
+    keyboard_enhanced: bool,
 }
 
 impl TerminalSession {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("enable terminal raw mode")?;
         let mut stderr = io::stderr();
-        execute!(stderr, EnterAlternateScreen, Hide).context("enter alternate screen")?;
+        execute!(
+            stderr,
+            PushKeyboardEnhancementFlags(keyboard_enhancement_flags()),
+            EnterAlternateScreen,
+            Hide
+        )
+        .context("enter alternate screen")?;
         let backend = CrosstermBackend::new(stderr);
         let terminal = Terminal::new(backend).context("create terminal backend")?;
         Ok(Self {
             terminal,
             active: true,
+            keyboard_enhanced: true,
         })
     }
 
@@ -458,8 +493,19 @@ impl TerminalSession {
     fn restore(&mut self) -> Result<()> {
         if self.active {
             disable_raw_mode().context("disable terminal raw mode")?;
-            execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen)
+            if self.keyboard_enhanced {
+                execute!(
+                    self.terminal.backend_mut(),
+                    PopKeyboardEnhancementFlags,
+                    Show,
+                    LeaveAlternateScreen
+                )
                 .context("leave alternate screen")?;
+                self.keyboard_enhanced = false;
+            } else {
+                execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen)
+                    .context("leave alternate screen")?;
+            }
             self.active = false;
         }
         Ok(())
@@ -470,9 +516,24 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.active {
             let _ = disable_raw_mode();
-            let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+            if self.keyboard_enhanced {
+                let _ = execute!(
+                    self.terminal.backend_mut(),
+                    PopKeyboardEnhancementFlags,
+                    Show,
+                    LeaveAlternateScreen
+                );
+            } else {
+                let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+            }
         }
     }
+}
+
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 #[tokio::main]
@@ -622,6 +683,9 @@ async fn run_selector_once(
             let Event::Key(key) = event::read().context("read terminal event")? else {
                 continue;
             };
+            if key.kind == KeyEventKind::Release {
+                continue;
+            }
             match handle_key(host, &mut app, key).await? {
                 KeyOutcome::Continue => {}
                 KeyOutcome::Select(selected) => {
@@ -799,26 +863,32 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
             app.status = "no session selected".to_string();
         }
         (KeyCode::Up, modifiers)
-            if app.layout_mode == LayoutMode::Short
-                && modifiers.contains(KeyModifiers::CONTROL) =>
+            if app.layout_mode == LayoutMode::Short && is_resize_modifier(modifiers) =>
         {
             app.top_percent = app.top_percent.saturating_sub(5).max(MIN_TOP_PERCENT);
         }
         (KeyCode::Down, modifiers)
-            if app.layout_mode == LayoutMode::Short
-                && modifiers.contains(KeyModifiers::CONTROL) =>
+            if app.layout_mode == LayoutMode::Short && is_resize_modifier(modifiers) =>
         {
             app.top_percent = app.top_percent.saturating_add(5).min(MAX_TOP_PERCENT);
         }
         (KeyCode::Left, modifiers)
-            if app.layout_mode == LayoutMode::Normal
-                && modifiers.contains(KeyModifiers::CONTROL) =>
+            if app.layout_mode == LayoutMode::Normal && is_resize_modifier(modifiers) =>
         {
             app.left_percent = app.left_percent.saturating_sub(5).max(MIN_LEFT_PERCENT);
         }
         (KeyCode::Right, modifiers)
-            if app.layout_mode == LayoutMode::Normal
-                && modifiers.contains(KeyModifiers::CONTROL) =>
+            if app.layout_mode == LayoutMode::Normal && is_resize_modifier(modifiers) =>
+        {
+            app.left_percent = app.left_percent.saturating_add(5).min(MAX_LEFT_PERCENT);
+        }
+        (KeyCode::Char('b'), modifiers)
+            if app.layout_mode == LayoutMode::Normal && is_word_left_resize(modifiers) =>
+        {
+            app.left_percent = app.left_percent.saturating_sub(5).max(MIN_LEFT_PERCENT);
+        }
+        (KeyCode::Char('f'), modifiers)
+            if app.layout_mode == LayoutMode::Normal && is_word_right_resize(modifiers) =>
         {
             app.left_percent = app.left_percent.saturating_add(5).min(MAX_LEFT_PERCENT);
         }
@@ -895,6 +965,18 @@ async fn handle_key(host: &HostHandle, app: &mut AppState, key: KeyEvent) -> Res
     }
 
     Ok(KeyOutcome::Continue)
+}
+
+fn is_resize_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
+}
+
+fn is_word_left_resize(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
+}
+
+fn is_word_right_resize(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
 }
 
 async fn handle_modal_key(
@@ -1209,8 +1291,9 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &st
         .title(title)
         .borders(Borders::ALL)
         .border_style(focused_style(app, Focus::Detail));
+    let parse_ansi = app.detail_source.mode() == DetailMode::Monitor;
     frame.render_widget(
-        Paragraph::new(visible)
+        Paragraph::new(detail_text_for_render(&visible, parse_ansi))
             .block(block)
             .wrap(Wrap { trim: false }),
         area,
@@ -1230,6 +1313,15 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &st
     }
 }
 
+fn detail_text_for_render(text: &str, parse_ansi: bool) -> Text<'_> {
+    if parse_ansi {
+        text.into_text()
+            .unwrap_or_else(|_| Text::raw(strip_ansi(text)))
+    } else {
+        Text::raw(text.to_string())
+    }
+}
+
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let focus = match app.focus {
         Focus::List => "list",
@@ -1240,9 +1332,9 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         LayoutMode::Short => "short",
     };
     let keys = if app.layout_mode == LayoutMode::Short {
-        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | ctrl-up/down resize | q quit"
+        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | mod-up/down resize | q quit"
     } else {
-        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | ctrl-left/right resize | q quit"
+        "keys: up/down select | v/l focus | m monitor | n new | k kill | enter/g attach | mod-left/right resize | q quit"
     };
     let text = format!(
         " {} | {} | {} | {} | {} ",
@@ -1322,6 +1414,7 @@ fn button_text(active: Button, button: Button) -> String {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use motlie_tmux::{transport::MockTransport, TransportKind};
 
     #[test]
     fn cli_rejects_print_session_with_dashboard() {
@@ -1384,7 +1477,6 @@ mod tests {
             false,
         );
         app.detail_source = DetailSource::Monitor(Box::new(MonitorDetailSource {
-            handle: None,
             session_id: Some("$1".to_string()),
         }));
         app.detail_lines = vec!["live".to_string()];
@@ -1458,5 +1550,119 @@ mod tests {
 
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert!(app.left_percent < before);
+    }
+
+    #[tokio::test]
+    async fn modified_left_and_right_resize_normal_layout() {
+        let host = HostHandle::local();
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        let initial = app.left_percent;
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.left_percent < initial);
+
+        let shrunk = app.left_percent;
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.left_percent > shrunk);
+    }
+
+    #[tokio::test]
+    async fn word_arrow_fallback_sequences_resize_normal_layout() {
+        let host = HostHandle::local();
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        let initial = app.left_percent;
+
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+        )
+        .await
+        .unwrap();
+        assert!(app.left_percent < initial);
+
+        let shrunk = app.left_percent;
+        handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT),
+        )
+        .await
+        .unwrap();
+        assert!(app.left_percent > shrunk);
+    }
+
+    #[tokio::test]
+    async fn plain_left_does_not_resize_normal_layout() {
+        let host = HostHandle::local();
+        let mut app = AppState::new(
+            "host".to_string(),
+            LayoutMode::Normal,
+            "motd".to_string(),
+            false,
+        );
+        let initial = app.left_percent;
+
+        let outcome = handle_key(
+            &host,
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert_eq!(app.left_percent, initial);
+    }
+
+    #[test]
+    fn monitor_detail_uses_ansi_vte_parser_for_screen_content() {
+        let text = detail_text_for_render("\x1b[31mred\x1b[0m", true);
+        assert_eq!(text.lines[0].spans[0].content.as_ref(), "red");
+        assert!(!text.lines[0].spans[0].content.contains('\x1b'));
+    }
+
+    #[tokio::test]
+    async fn monitor_detail_captures_rendered_screen_with_ansi() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "dash $7 0 0 1 \n")
+            .with_response("list-panes", "%0 dash 0 0 main bash 100 80 24 1\n")
+            .with_response("capture-pane -ep", "\x1b[32mREADY\x1b[0m\n");
+        let host = HostHandle::new(TransportKind::Mock(mock), None);
+        let selected = SelectedSession {
+            id: "$7".to_string(),
+            name: "dash".to_string(),
+        };
+        let mut source = MonitorDetailSource::new();
+
+        source.activate(&host, &selected).await.unwrap();
+        let rendered = source.render(&host, &selected).await.unwrap();
+
+        assert!(rendered.contains("\x1b[32mREADY\x1b[0m"));
+        assert!(!rendered.contains("%output"));
     }
 }

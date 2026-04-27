@@ -17,6 +17,7 @@ Draft.
 | 2026-04-26 | @gpt55-dgx | Updated the MOTD-absent default placeholder art to the compact motlie glyph supplied for `/etc/motd` fallback. |
 | 2026-04-26 | @gpt55-dgx | Replaced the MOTD-absent default placeholder with the full-width MOTLIE glyph supplied for `/etc/motd` fallback. |
 | 2026-04-26 | @gpt55-dgx | Incorporated validation feedback: `q` exits like `Ctrl-C`, Ctrl-arrow resize accepts terminals that send extra modifiers, detail-pane scroll direction follows terminal convention and shows a scrollbar/range indicator, monitor mode strips raw ANSI/control bytes for TUI rendering, and dashboard re-enters after detach when the selected session still exists. |
+| 2026-04-26 | @gpt55-dgx | Incorporated second validation feedback: monitor mode now mirrors rendered screen content through `capture_all_with_options(ScreenStable)` plus `ansi-to-tui`/VTE parsing, modified-arrow resize accepts terminal fallback sequences, and attach foreground-process-group restore ignores `SIGTTOU` to avoid stopped selector jobs after detach. |
 
 ## Product Scope
 
@@ -100,8 +101,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   top/bottom of the buffer. When focus is `Lb`, `PgUp`/`PgDn` page through the
   session list and `Home`/`End` jump to first/last session.
 - `Ctrl-Left` and `Ctrl-Right` resize the `L` / `R` split in the normal main
-  selector view. Plain Left and Right are reserved in the main view so arrows
-  remain unambiguous for navigation and scrolling.
+  selector view. The implementation also accepts terminal fallback
+  modified-arrow sequences such as Alt/Shift arrows and word-left/word-right
+  when a client does not report Ctrl-arrow distinctly. Plain Left and Right
+  are reserved in the main view so arrows remain unambiguous for navigation
+  and scrolling.
 - `R` initially shows sampled detail for the highlighted session.
 - `R` detail is supplied through a trait so future view models can summarize or
   otherwise transform session content.
@@ -116,9 +120,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   appended to the buffer but the viewport stays anchored at the user's
   position. `End` (or jump-to-bottom key) re-engages auto-tail.
 - Pressing `m` puts `R` into monitoring mode for the highlighted session, using
-  the `motlie-tmux` monitor/history pipeline to show live updates. (Focus-
-  independent: operates on the highlighted session regardless of which pane
-  has focus.)
+  `motlie-tmux` rendered screen capture (`capture_all_with_options` with
+  `CaptureNormalizeMode::ScreenStable`) plus VTE/ANSI parsing to show live
+  screen snapshots. This is intentionally a screen mirror, not raw tmux
+  control-mode `%output` replay, because TUI programs rely on cursor movement,
+  clearing, and repaint semantics. (Focus-independent: operates on the
+  highlighted session regardless of which pane has focus.)
 - Pressing `n` opens a centered `New Session` modal with a session-name text
   field and `Cancel` / `Ok` buttons.
 - Pressing `k` opens a centered `Kill session <name>?` confirmation modal with
@@ -179,7 +186,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   behavior, focus model semantics, and detail-source trait usage are
   identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
   differ by mode: short mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
-  normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`. Plain
+  normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`, with
+  modified-arrow fallback sequences accepted for terminal compatibility. Plain
   `Left`/`Right` no longer resize in main view (they remain reserved); modal
   use of `Left`/`Right` for button selection is unchanged. `-s` composes
   with `--print-session`, `--dashboard`, and SSH targets.
@@ -214,10 +222,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   must be chunked per page, not full-buffer rebuilds, so SSH-target detail
   panes remain responsive on long-lived sessions. See §Accepted Library
   Gaps → ScrollbackQuery::LinesRange.
-- Monitor-mode rolling history is bounded by line count: 10,000 lines in v1.
-  On overflow, oldest lines are dropped. The bound must be documented and
-  enforced to prevent unbounded memory growth on busy sessions. A configurable
-  bound is a follow-up, not part of v1.
+- Monitor mode is bounded to the rendered current screen. It does not retain a
+  raw control-mode transcript in the selector binary, preventing unbounded
+  memory growth on busy sessions. Older detail requests use chunked tmux
+  scrollback fetches via `LinesRange`.
 
 ## System Design
 
@@ -347,7 +355,7 @@ Main-selector keymap (focus-aware):
 | `l` | (no-op) | Focus → `Lb` |
 | `v` | Focus → `R` | (no-op) |
 | `Esc` | (no-op outside modal; `Cancel` inside modal) | Focus → `Lb` (outside modal); `Cancel` inside modal |
-| `Ctrl-Left` / `Ctrl-Right` | Resize `L`/`R` split (normal mode only) | Resize `L`/`R` split (normal mode only; focus-independent) |
+| `Ctrl-Left` / `Ctrl-Right` | Resize `L`/`R` split (normal mode only; Alt/Shift arrow and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) |
 | Left / Right | (no-op in main view; reserved) | (no-op in main view; reserved) |
 | `m` | Start/switch monitoring on highlight | Same |
 | `n` | Open `New Session` modal | Same |
@@ -355,10 +363,10 @@ Main-selector keymap (focus-aware):
 | Enter / `g` | Attach highlight | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
-Resize keys use Ctrl modifiers so plain arrows are unambiguously reserved for
-navigation and scrolling. Normal mode resizes the L/R split with
-`Ctrl-Left`/`Ctrl-Right`; short mode resizes the T/B split with
-`Ctrl-Up`/`Ctrl-Down`.
+Resize keys use modified arrows so plain arrows are unambiguously reserved for
+navigation and scrolling. Normal mode advertises `Ctrl-Left`/`Ctrl-Right` for
+the L/R split and also accepts common terminal fallbacks; short mode advertises
+`Ctrl-Up`/`Ctrl-Down` for the T/B split and accepts the same modifier family.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok`; `Enter` exits and applies `Ok` if selected; `Esc` is
@@ -403,8 +411,8 @@ at smaller sizes but is tuned for this target.
 
 | Key | Normal mode | Short mode |
 |-----|-------------|------------|
-| `Ctrl-Left` / `Ctrl-Right` | Resize `L`/`R` split | (no-op; `L`/`R` not present) |
-| `Ctrl-Up` / `Ctrl-Down` | (no-op; `T`/`B` not present) | Resize `T`/`B` split |
+| Modified Left / Right | Resize `L`/`R` split | (no-op; `L`/`R` not present) |
+| Modified Up / Down | (no-op; `T`/`B` not present) | Resize `T`/`B` split |
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above | Navigation/scroll per focus-aware keymap above (same — use `T`/`B` in place of `Lb`/`R`) |
 
 **All other keys and modal behavior:** identical to normal mode (see the
@@ -497,18 +505,15 @@ Initial shipped implementations:
   `Target::sample_text(&ScrollbackQuery::LinesRange { older_than_lines, count })`
   for paginated backwards fetch (see §Accepted Library Gaps →
   ScrollbackQuery::LinesRange).
-- `MonitorDetailSource`: starts `host.watch_session()` or the equivalent
-  monitor/history composition, then renders a rolling history into `R`.
-  When the user scrolls up in
-  monitor mode, auto-tail pauses; the source continues to receive and append
-  events to its internal buffer, but the UI viewport stays anchored at the
-  user's position. `fetch_older` for monitor mode falls back to a one-shot
-  `Target::sample_text(&LinesRange { ... })` against the same target —
-  monitor history rolls forward, so historical fetch reuses sample. When the
-  10,000-line rolling monitor buffer is full and the user scrolls older than
-  that buffer start, `fetch_older` must query tmux pre-monitor scrollback via
-  `LinesRange` against the same target, not treat the rolling-buffer start as
-  the history boundary.
+- `MonitorDetailSource`: resolves the selected session by stable id, captures
+  the rendered current screen for all panes through `capture_all_with_options`
+  using `CaptureNormalizeMode::ScreenStable`, and renders ANSI with
+  `ansi-to-tui`'s VTE parser in `R`. When the user scrolls up in monitor mode,
+  auto-tail pauses; refreshes continue, but the UI viewport stays anchored at
+  the user's position. `fetch_older` for monitor mode falls back to a one-shot
+  `Target::sample_text(&LinesRange { ... })` against the same target. The
+  monitor screen mirror is a current-screen source, not a rolling transcript
+  source.
 
 Implementation should prefer static dispatch for shipped modes:
 
@@ -616,11 +621,13 @@ When the target host has zero tmux sessions (at startup, or after a kill under
 
 1. Pressing `m` stops any existing monitor/detail source.
 2. Start monitoring the highlighted session.
-3. Subscribe to session output and render a bounded rolling history into `R`.
-   Bound is line-count based: 10,000 lines in v1, oldest dropped on overflow.
+3. Resolve the highlighted session by stable id and capture its rendered screen
+   using `capture_all_with_options(CaptureNormalizeMode::ScreenStable)`.
+   Render ANSI through the VTE parser so TUI screen snapshots display without
+   raw escape bytes.
 4. Status bar shows the monitored session.
 5. When focus is `R`, scrolling
-   up pauses auto-tail; new events still append to the source's internal
+   up pauses auto-tail; refreshes still replace the source's current-screen
    buffer but the viewport stays anchored. `End` re-engages auto-tail.
 6. Killing the monitored session or exiting the TUI stops monitor state.
 
@@ -981,7 +988,7 @@ detail.
 |------------|-----|----------|
 | `ratatui` | layout/widgets/rendering | Use. Already used by tmux examples and driver frontend. |
 | `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
-| `ansi-to-tui` | optional ANSI rendering for captured/monitored pane content | Defer to a follow-up. The first pass renders captured content as plain text; styling for captured panes is non-critical UX. The motlie glyph placeholder is hand-styled via ratatui `Style` with no ANSI parsing required. |
+| `ansi-to-tui` | ANSI/VTE rendering for captured/monitored pane content | Adopted for monitor mode so `capture-pane -ep` screen snapshots render without leaking escape bytes into ratatui text. |
 | `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
 | `tempfile` | remote MOTD download target | Use if remote MOTD is implemented through `HostHandle::download()`. Already a dev dependency in parts of the repo; PLAN should decide package placement. |
 
@@ -999,9 +1006,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - Short mode (`-s`) layout at
     32×65 viewport: body = 31 rows; T/B split at 40:60 yields T ≈ 12 rows
     and B ≈ 19 rows; MOTD/motlie omitted; status bar present
-  - Short mode `Ctrl-Up`/
-    `Ctrl-Down` resize bounds (minimum heights so neither pane collapses
-    to 0); normal mode `Ctrl-Left`/`Ctrl-Right` parallel
+  - Short mode modified Up/Down resize bounds (minimum heights so neither pane
+    collapses to 0); normal mode modified Left/Right parallel
   - Plain `Left`/`Right` in main
     view is a no-op in both modes (modal use unchanged)
 - Unit tests for state transitions:
@@ -1091,13 +1097,14 @@ that remain speculative stay explicitly open.
 - **Remote targets in ForceCommand** — Local-only ForceCommand initially.
   Operator-invoked CLI mode may pass an SSH URI.
 - **Main-view plain Left/Right keys** — Reserved no-ops in normal and short
-  mode. Ctrl-modified arrows own resize. Modal Left/Right keeps button
-  selection behavior.
+  mode. Modified arrows own resize. Modal Left/Right keeps button selection
+  behavior.
 - **Short-mode status hints** — ASCII-first compact labels. Unicode affordance
   glyphs can be considered later, but v1 must render predictably in narrow
   SSH clients and IDE terminals.
-- **Monitor history bound** — 10,000 retained lines in v1. Oldest lines are
-  dropped on overflow. Configurability is a follow-up.
+- **Monitor history bound** — Superseded by screen-mirror monitor mode. The
+  selector keeps only the current rendered screen in monitor mode; historical
+  fetch remains chunked through tmux scrollback.
 
 ### Still Open
 
