@@ -16,7 +16,7 @@ This README is the conversational playbook for the repo-local voice skills:
 - if no binary is available for this host, build the most optimized one for the host
 - the build always uses `release`
 - prefer CUDA when the host supports it
-- keep Piper on CPU by default even in CUDA builds for now; this is a shutdown-stability workaround in the current validation environment, and advanced users can opt back into CUDA probing with MOTLIE_PIPER_ALLOW_CUDA=1
+- keep Piper on CPU by default even in CUDA builds for now; this is a shutdown-stability workaround in the current validation environment, and advanced users can opt back into CUDA probing with MOTLIE_PIPER_ALLOW_CUDA=1 (tracked in issue #230)
 - if the selected backend weights are missing, download them into the shared skill cache:
   - `.agents/skills/voice/artifacts/hf-cache/`
 - if the full `motlie` repo is present, repo-based builds should repopulate the skill runtime sidecars:
