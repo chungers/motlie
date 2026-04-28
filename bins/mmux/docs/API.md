@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Updated session-list recency rendering to unlabeled `<active> / <age>` text with day formatting and a right margin. |
 | 2026-04-28 | @gpt55-dgx | Clarified that recency rendering uses `list_sessions_now()` with the library's tmux-empty-epoch fallback path. |
 | 2026-04-28 | @gpt55-dgx | Documented implemented session-list recency rendering with right-aligned `active` and `age` values from `list_sessions_now()`. |
 | 2026-04-28 | @gpt55-dgx | Documented bottom status command rendering as plain labels with underlined shortcut-letter spans instead of parenthesized mnemonics. |
@@ -242,13 +243,14 @@ The top status bar is derived from the app host identity and current local
 clock: `<hostname> | <ip address>` renders as bold left-justified text, and the
 current time renders right-justified. The Sessions pane title is derived only
 from the live session list length: `Sessions [n]`. List rows show the display
-name, attached marker, and right-aligned `active:<elapsed> / age:<elapsed>`
-recency text; stable session ids stay internal for dispatch. The attached
+name, attached marker, and right-aligned `<active> / <age>` recency text with a
+small right margin; stable session ids stay internal for dispatch. The attached
 marker is `*` when `SessionInfo::is_attached()` is true. Recency uses
-`HostHandle::list_sessions_now()` so both the session `activity` and `created`
+`HostHandle::list_sessions_now()` so the session `activity` and `created`
 timestamps are compared against the target tmux server clock when tmux exposes
 one; tmux versions that expand `#{epoch}` as empty use the library fallback
-clock clamped to the listed session timestamps.
+clock clamped to the listed session timestamps. Durations use `now`, `m`, `h`,
+or `d`; day values keep at most one decimal digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
 the bottom status start with `help`, then `pane`, `monitor`, `enter/attach`,

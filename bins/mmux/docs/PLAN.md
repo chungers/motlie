@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Tracked recency formatting polish: remove labels, add day bucket, and keep a right margin. |
 | 2026-04-28 | @gpt55-dgx | Added regression tracking for tmux versions that expand `#{epoch}` empty during session recency listing. |
 | 2026-04-28 | @gpt55-dgx | Marked mmux session-list recency rendering complete with aligned `active`/`age` columns and no window-alert flag display. |
 | 2026-04-28 | @gpt55-dgx | Marked issue #229 library support complete for `SessionInfo.activity`, `attached_count`, and `HostHandle::list_sessions_now()` skew-free recency math. |
@@ -199,6 +200,8 @@ References: [Live Session List](./DESIGN.md#live-session-list), issue #229.
   tmux window-alert flags out of the v1 list row.
 - [x] 1.6g Accept empty `#{epoch}` expansion from tmux 3.4-era servers and
   fall back to a local clock clamped to listed session timestamps.
+- [x] 1.6h Polish recency row formatting: remove labels, add `d` duration
+  bucket with at most one decimal digit, and reserve a right-side margin.
 
 ## Phase 2: Binary Scaffold
 

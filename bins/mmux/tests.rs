@@ -304,23 +304,25 @@ fn session_list_line_right_aligns_active_and_age() {
 
     assert_eq!(first.chars().count(), 42);
     assert_eq!(second.chars().count(), 42);
-    assert_eq!(first.find("active:"), second.find("active:"));
-    assert!(first.ends_with("active: 3m / age: 2h"));
-    assert!(second.ends_with("active:44m / age: 1h"));
+    assert_eq!(first.find(" / "), second.find(" / "));
+    assert!(first.ends_with("   3m /    2h  "));
+    assert!(second.ends_with("  44m /    1h  "));
 }
 
 #[test]
 fn session_recency_uses_now_minutes_and_hours() {
     let session = session_with_times("dev", "$1", 60, 3_590);
 
-    assert_eq!(
-        session_recency_text(&session, 3_600),
-        "active:now / age:59m"
-    );
-    assert_eq!(
-        session_recency_text(&session, 7_260),
-        "active: 1h / age: 2h"
-    );
+    assert_eq!(session_recency_text(&session, 3_600), "  now /   59m");
+    assert_eq!(session_recency_text(&session, 7_260), "   1h /    2h");
+}
+
+#[test]
+fn session_recency_uses_days_for_long_durations() {
+    let now = 340 * 60 * 60;
+    let session = session_with_times("dev", "$1", 0, now - 32 * 60 * 60);
+
+    assert_eq!(session_recency_text(&session, now), "  32h / 14.2d");
 }
 
 #[test]
