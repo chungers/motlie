@@ -658,10 +658,14 @@ EOF
   exit 1
 }
 
-if [[ -f "$RUNNER_PID_FILE" ]]; then
-  kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
-  rm -f "$RUNNER_PID_FILE"
-fi
+# @opus47-mac 2026-04-28 -- The previous pre-block here read the PID file,
+# sent SIGTERM, and removed the file before calling kill_stale_runners. That
+# preempted the new PID-file authority path in kill_stale_runners (the file
+# was gone by the time it ran) and skipped the wait/escalate loop, so a
+# runner mid-flush via stopWithCompletionHandler could be left racing the
+# script's cleanup/relaunch. kill_stale_runners now owns the full lifecycle:
+# read/validate PID file, union with ps-grep candidates, signal, poll,
+# SIGKILL escalate, and remove the file on success.
 kill_stale_runners
 kill_stale_egress_helpers
 
