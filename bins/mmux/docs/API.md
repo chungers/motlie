@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Consolidated mmux session-list polling so one `list_sessions_now()` loop drives activity ordering and structural state. |
 | 2026-04-28 | @gpt55-dgx | Documented one-second quiet visible-row refreshes for activity sorting and recency text. |
 | 2026-04-28 | @gpt55-dgx | Documented activity-descending session-list ordering with stable-id selection preservation. |
 | 2026-04-28 | @gpt55-dgx | Updated session-list recency rendering to unlabeled `<active> / <age>` text with day formatting and a right margin. |
@@ -140,10 +141,8 @@ impl HostHandle {
 }
 ```
 
-The selector reconciles session state by `SessionInfo.id` (`SessionId`), not by
-display name.
-If `SessionClosed` matches the monitored session id, the selector stops monitor
-mode and clears the detail pane until the user's next action.
+Event consumers should reconcile session state by `SessionInfo.id`
+(`SessionId`), not by display name.
 
 Status: implemented as a typed stream backed by one-second `list_sessions()`
 snapshot reconciliation. It emits stable-id add/close/rename and client
@@ -151,10 +150,10 @@ attach/detach events, plus `Disconnect` events on transient list failures.
 Direct tmux control-mode host notification wiring is reserved for a future
 event-driven implementation; the parser is documented as dormant plumbing.
 
-Because the event stream does not emit activity-only changes, the selector also
-performs a quiet visible-row refresh with `list_sessions_now()` once per second.
-That path updates recency text and activity-descending sort order even when
-there are no add/close/rename or attach/detach events.
+`mmux` keeps this library stream available but does not start it for the TUI
+session list. The selector uses one quiet `list_sessions_now()` refresh per
+second instead; that single snapshot updates recency text, activity-descending
+sort order, structural session state, and monitored-session closure handling.
 
 ### Windowed Scrollback
 
@@ -255,9 +254,10 @@ small right margin; stable session ids stay internal for dispatch. The attached
 marker is `*` when `SessionInfo::is_attached()` is true. The list is sorted by
 `SessionInfo.activity` descending, with name/id tie-breakers only for stable
 display order; `preserve_selection()` re-finds the highlighted row by stable
-session id after each refresh. A quiet one-second row refresh keeps this
-activity ordering current. Recency uses `HostHandle::list_sessions_now()`
-so the session `activity` and `created`
+session id after each refresh. A single quiet one-second `list_sessions_now()`
+refresh keeps this activity ordering current and notices structural session
+changes. Recency uses `HostHandle::list_sessions_now()` so the session
+`activity` and `created`
 timestamps are compared against the target tmux server clock when tmux exposes
 one; tmux versions that expand `#{epoch}` as empty use the library fallback
 clock clamped to the listed session timestamps. Durations use `now`, `m`, `h`,
