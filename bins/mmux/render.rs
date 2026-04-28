@@ -226,6 +226,7 @@ pub(crate) fn session_list_line(
     width: usize,
 ) -> String {
     const MIN_METADATA_GAP: usize = 2;
+    const RECENCY_RIGHT_MARGIN: usize = 2;
 
     if width == 0 {
         return String::new();
@@ -237,29 +238,34 @@ pub(crate) fn session_list_line(
     let metadata = session_recency_text(session, now);
     let prefix_width = char_width(&prefix);
     let metadata_width = char_width(&metadata);
-    if width < prefix_width + 1 + MIN_METADATA_GAP + metadata_width {
+    let content_width = width.saturating_sub(RECENCY_RIGHT_MARGIN);
+    if content_width < prefix_width + 1 + MIN_METADATA_GAP + metadata_width {
         return pad_or_truncate(format!("{prefix}{}", session.name), width);
     }
 
-    let name_width = width
+    let name_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(metadata_width)
         .saturating_sub(MIN_METADATA_GAP);
     let name = truncate_chars(&session.name, name_width);
     let left = format!("{prefix}{name}");
-    let padding = width
+    let padding = content_width
         .saturating_sub(char_width(&left))
         .saturating_sub(metadata_width);
-    format!("{left}{}{metadata}", " ".repeat(padding))
+    format!(
+        "{left}{}{metadata}{}",
+        " ".repeat(padding),
+        " ".repeat(width.saturating_sub(content_width))
+    )
 }
 
 pub(crate) fn session_recency_text(session: &SessionInfo, now: u64) -> String {
-    const RECENCY_FIELD_WIDTH: usize = 3;
+    const RECENCY_FIELD_WIDTH: usize = 5;
 
     let active = compact_elapsed(now, session.activity);
     let age = compact_elapsed(now, session.created);
     format!(
-        "active:{active:>width$} / age:{age:>width$}",
+        "{active:>width$} / {age:>width$}",
         width = RECENCY_FIELD_WIDTH
     )
 }
@@ -270,8 +276,21 @@ fn compact_elapsed(now: u64, then: u64) -> String {
         "now".to_string()
     } else if seconds < 60 * 60 {
         format!("{}m", seconds / 60)
-    } else {
+    } else if seconds < 48 * 60 * 60 {
         format!("{}h", seconds / 60 / 60)
+    } else {
+        compact_days(seconds)
+    }
+}
+
+fn compact_days(seconds: u64) -> String {
+    let tenths = (seconds.saturating_mul(10).saturating_add(12 * 60 * 60)) / (24 * 60 * 60);
+    let whole = tenths / 10;
+    let decimal = tenths % 10;
+    if decimal == 0 {
+        format!("{whole}d")
+    } else {
+        format!("{whole}.{decimal}d")
     }
 }
 
