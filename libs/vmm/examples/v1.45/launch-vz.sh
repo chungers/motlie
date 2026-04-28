@@ -454,14 +454,17 @@ PY
 
 cleanup() {
   if [[ "$KEEP_RUNNING" -eq 0 ]]; then
-    if [[ -f "$RUNNER_PID_FILE" ]]; then
-      kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
-      rm -f "$RUNNER_PID_FILE"
-    fi
-    if [[ -f "$EGRESS_HELPER_PID_FILE" ]]; then
-      kill "$(cat "$EGRESS_HELPER_PID_FILE")" >/dev/null 2>&1 || true
-      rm -f "$EGRESS_HELPER_PID_FILE"
-    fi
+    # @opus47-mac 2026-04-28 -- The previous body sent kill + rm without
+    # waiting for the runner's stopWithCompletionHandler flush to drain,
+    # then immediately rm -rf'd RUN_VM_DIR — racing the
+    # VZDiskImageSynchronizationModeFsync window against disk deletion.
+    # It also removed the PID file unconditionally, so a subsequent
+    # launch-vz.sh invocation could not find a prior orphan via the
+    # file path. Delegate to the same kill_stale_* helpers used at
+    # script start so the signal/wait/SIGKILL-escalate/remove flow is
+    # the single source of truth for the runner and egress lifecycle.
+    kill_stale_runners
+    kill_stale_egress_helpers
     rm -f "$EGRESS_SOCKET_PATH"
     if [[ "$REUSED_VM" -eq 0 ]] && [[ -n "$RUN_VM_DIR" && -d "$RUN_VM_DIR" ]]; then
       rm -rf "$RUN_VM_DIR"
