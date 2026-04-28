@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added PR #228 round-3 regression coverage for bounded host text reads, injectable MOTD fallback loading, full/compact placeholder rendering, and portrait MOTD omission. |
 | 2026-04-28 | @gpt55-dgx | Tracked PR #228 review cleanup: typed `SessionId`, bounded `read_text_file` MOTD loading, documented polling host events, decomposed selector state/status, split selector concerns into focused modules, and kept internal ids hidden from the list view. |
 | 2026-04-27 | @gpt55-dgx | Tracked modal layout polish: padded content, button separators, bordered New Session input, and Help metadata placement. |
 | 2026-04-27 | @gpt55-dgx | Tracked bottom status command ordering and `l` runtime layout toggling. |
@@ -170,6 +171,8 @@ References: [Remote MOTD](./DESIGN.md#remote-motd),
   attach, and host-event keying.
 - [x] 1.5d Shell-escape unsafe resolved tmux binary paths in generated tmux
   command prefixes without changing safe-path command text.
+- [x] 1.5e Add focused tests for `HostHandle::read_text_file`: missing,
+  empty, normal, oversized, unreadable local files, plus mock transport reads.
 
 ## Phase 2: Binary Scaffold
 
@@ -233,11 +236,15 @@ References: [Layout](./DESIGN.md#layout),
   ordered as `(h)elp`, `(p)ane`, `(m)onitor`, `enter/(a)ttach`, `(n)ew`,
   `(k)ill`, `(q)uit`, `(l)ayout`, then resize, and app status with no `keys`,
   host, time, focus, or layout-mode labels.
-- [ ] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
+- [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.
 - [ ] 4.8 Add snapshot/style tests for focused borders and motlie placeholder
   styling.
+- [x] 4.9 Add MOTD fallback regression tests for missing, empty,
+  whitespace-only, oversized, and readable files through an injectable
+  `load_motd_from` path; add full-logo wide rendering and portrait omission
+  tests.
 
 ## Phase 5: Input, Focus, and Modals
 

@@ -3,23 +3,26 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
     transport::MockTransport, HostHandle, SessionId, SessionInfo, TransportKind, SSH_DEFAULT_PORT,
 };
+use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
+use ratatui::Terminal;
 
 use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, LANDSCAPE_MAX_LEFT_PERCENT,
-    LANDSCAPE_MIN_LEFT_PERCENT, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT,
-    PORTRAIT_MIN_TOP_PERCENT,
+    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS,
+    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MOTLIE_PLACEHOLDER,
+    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
-use crate::controller::{handle_key, stop_monitor_if_closed, KeyOutcome};
+use crate::controller::{handle_key, load_motd_from, stop_monitor_if_closed, KeyOutcome};
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
 };
 use crate::model::{AppState, Button, Focus, LayoutMode, ModalBody, ModalState, SelectedSession};
 use crate::render::{
-    detail_text_for_render, modal_content, motd_render_text, session_list_line, sessions_title,
-    short_build_git_sha, status_line_text, top_status_line,
+    detail_text_for_render, draw, modal_content, motd_render_text, session_list_line,
+    sessions_title, short_build_git_sha, status_line_text, top_status_line,
+    use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
 
@@ -47,6 +50,24 @@ fn app_with_session() -> AppState {
     );
     app.session_list.sessions = vec![session("dev", "$1")];
     app
+}
+
+fn unique_test_path(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("mmux-{name}-{}-{nanos}", std::process::id()))
+}
+
+async fn write_test_file(name: &str, content: impl AsRef<[u8]>) -> std::path::PathBuf {
+    let path = unique_test_path(name);
+    tokio::fs::write(&path, content).await.unwrap();
+    path
+}
+
+async fn remove_test_file(path: &std::path::Path) {
+    let _ = tokio::fs::remove_file(path).await;
 }
 
 #[test]
@@ -340,6 +361,123 @@ fn motd_placeholder_uses_compact_graphic_when_narrow() {
     let text = motd_render_text(&app, Rect::new(0, 0, 40, 5));
     assert!(text.contains("motlie"));
     assert!(text.contains("(no /etc/motd)"));
+}
+
+#[test]
+fn motd_placeholder_renders_full_logo_when_wide() {
+    let app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        MOTLIE_PLACEHOLDER.to_string(),
+        true,
+    );
+
+    let text = motd_render_text(&app, Rect::new(0, 0, 100, 20));
+
+    assert!(text.contains(MOTLIE_PLACEHOLDER));
+    assert!(text.ends_with("(no /etc/motd)"));
+    assert!(!use_compact_placeholder(&app, 100, 20));
+}
+
+#[test]
+fn compact_placeholder_boundary_is_width_63() {
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        MOTLIE_PLACEHOLDER.to_string(),
+        true,
+    );
+
+    assert!(use_compact_placeholder(&app, 62, 20));
+    assert!(!use_compact_placeholder(&app, 63, 20));
+
+    app.motd.is_placeholder = false;
+    assert!(!use_compact_placeholder(&app, 30, 5));
+}
+
+#[test]
+fn portrait_layout_does_not_render_motd_widget() {
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Portrait,
+        MOTLIE_PLACEHOLDER.to_string(),
+        true,
+    );
+    app.session_list.sessions = vec![session("dev", "$1")];
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
+    assert!(!rendered.contains(COMPACT_MOTLIE_PLACEHOLDER));
+    assert!(!rendered.contains("MOTD"));
+}
+
+#[tokio::test]
+async fn load_motd_falls_back_to_placeholder_when_missing() {
+    let host = HostHandle::local();
+    let missing = unique_test_path("missing-motd");
+
+    let (text, is_placeholder) = load_motd_from(&host, &missing).await;
+
+    assert!(is_placeholder);
+    assert_eq!(text, MOTLIE_PLACEHOLDER);
+}
+
+#[tokio::test]
+async fn load_motd_falls_back_to_placeholder_when_empty() {
+    let host = HostHandle::local();
+    let path = write_test_file("empty-motd", b"").await;
+
+    let (text, is_placeholder) = load_motd_from(&host, &path).await;
+    remove_test_file(&path).await;
+
+    assert!(is_placeholder);
+    assert_eq!(text, MOTLIE_PLACEHOLDER);
+}
+
+#[tokio::test]
+async fn load_motd_falls_back_to_placeholder_when_whitespace_only() {
+    let host = HostHandle::local();
+    let path = write_test_file("whitespace-motd", b"  \n\t\n  ").await;
+
+    let (text, is_placeholder) = load_motd_from(&host, &path).await;
+    remove_test_file(&path).await;
+
+    assert!(is_placeholder);
+    assert_eq!(text, MOTLIE_PLACEHOLDER);
+}
+
+#[tokio::test]
+async fn load_motd_falls_back_to_placeholder_when_oversized() {
+    let host = HostHandle::local();
+    let path = write_test_file("oversized-motd", vec![b'x'; 70 * 1024]).await;
+
+    let (text, is_placeholder) = load_motd_from(&host, &path).await;
+    remove_test_file(&path).await;
+
+    assert!(is_placeholder);
+    assert_eq!(text, MOTLIE_PLACEHOLDER);
+}
+
+#[tokio::test]
+async fn load_motd_returns_content_when_readable() {
+    let host = HostHandle::local();
+    let path = write_test_file("normal-motd", b"Welcome to dev-host\n\n").await;
+
+    let (text, is_placeholder) = load_motd_from(&host, &path).await;
+    remove_test_file(&path).await;
+
+    assert!(!is_placeholder);
+    assert_eq!(text, "Welcome to dev-host");
 }
 
 #[tokio::test]

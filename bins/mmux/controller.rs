@@ -15,7 +15,11 @@ use crate::model::{
 };
 
 pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
-    match host.read_text_file(Path::new("/etc/motd"), 64 * 1024).await {
+    load_motd_from(host, Path::new("/etc/motd")).await
+}
+
+pub(crate) async fn load_motd_from(host: &HostHandle, path: &Path) -> (String, bool) {
+    match host.read_text_file(path, 64 * 1024).await {
         Ok(text) if !text.trim().is_empty() => (text.trim_end().to_string(), false),
         _ => (MOTLIE_PLACEHOLDER.to_string(), true),
     }
