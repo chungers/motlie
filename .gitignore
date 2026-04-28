@@ -16,3 +16,9 @@ target/
 .DS_Store
 examples/laion_benchmark/data/*.npy
 *.npy
+# Voice skill generated artifacts
+.agents/skills/voice/artifacts/hf-cache/
+.agents/skills/voice/*/bin/voice-agent-*
+.agents/skills/voice/*/bin/libqwen3tts.so*
+.agents/skills/voice/lib/*/libonnxruntime*
+.agents/skills/voice/lib/*/libonnxruntime_providers_*.so
