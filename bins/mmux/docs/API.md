@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Replaced the fixed compact-placeholder threshold with an embedded-logo fit check so landscape panes render the full motlie glyph when it fits. |
 | 2026-04-28 | @gpt55-dgx | Documented landscape render regression coverage that keeps the MOTD pane visible for both placeholder and host-provided MOTD content. |
 | 2026-04-28 | @gpt55-dgx | Documented round-3 PR feedback coverage for `load_motd_from`, MOTD fallback cases, full/compact placeholder rendering, portrait MOTD omission, and local `read_text_file` edge cases. |
 | 2026-04-28 | @gpt55-dgx | Documented PR #228 review cleanup: bounded `read_text_file` for MOTD, typed `SessionId`, decomposed selector state with `StatusBanner`, focused module split, and hidden internal session ids in the list view. |
@@ -405,8 +406,9 @@ API tests must cover:
 - Help modal open/close behavior, key-function display, build date display,
   and last-8-character build SHA display
 - MOTD fallback behavior for missing, empty, whitespace-only, oversized, and
-  readable files; wide full-logo rendering; compact narrow rendering; and
-  landscape full-frame MOTD pane rendering vs. portrait-mode MOTD omission
+  readable files; embedded-logo width fit for full vs. compact placeholder
+  rendering; and landscape full-frame MOTD pane rendering vs. portrait-mode
+  MOTD omission
 - default attach/re-enter and no-loop conditions
 
 Current implementation coverage:

@@ -394,7 +394,7 @@ fn motd_placeholder_renders_full_logo_when_wide() {
 }
 
 #[test]
-fn compact_placeholder_boundary_is_width_63() {
+fn compact_placeholder_boundary_uses_embedded_logo_width() {
     let mut app = AppState::new(
         "host".to_string(),
         LayoutMode::Normal,
@@ -402,8 +402,8 @@ fn compact_placeholder_boundary_is_width_63() {
         true,
     );
 
-    assert!(use_compact_placeholder(&app, 62, 20));
-    assert!(!use_compact_placeholder(&app, 63, 20));
+    assert!(use_compact_placeholder(&app, 40, 20));
+    assert!(!use_compact_placeholder(&app, 41, 20));
 
     app.motd.is_placeholder = false;
     assert!(!use_compact_placeholder(&app, 30, 5));
@@ -422,7 +422,8 @@ fn landscape_layout_renders_motd_pane_with_placeholder() {
     let rendered = render_to_string(&mut app, 120, 30);
 
     assert!(rendered.contains("MOTD"));
-    assert!(rendered.contains("motlie"));
+    assert!(rendered.contains("_ __ ___"));
+    assert!(!rendered.contains(COMPACT_MOTLIE_PLACEHOLDER));
     assert!(rendered.contains("(no /etc/motd)"));
     assert!(rendered.contains("Sessions [1]"));
 }
@@ -454,6 +455,7 @@ fn landscape_motd_height_preserves_visible_placeholder_before_sessions() {
     );
 
     assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 30)), 4);
+    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 41, 30)), 8);
     assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 6)), 3);
 }
 

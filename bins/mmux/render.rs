@@ -108,12 +108,24 @@ pub(crate) fn use_compact_placeholder(app: &AppState, width: u16, height: u16) -
     if !app.motd.is_placeholder {
         return false;
     }
-    let full_height = MOTLIE_PLACEHOLDER
+    width < full_placeholder_widget_width() || height < full_placeholder_widget_height()
+}
+
+fn full_placeholder_widget_width() -> u16 {
+    MOTLIE_PLACEHOLDER
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(2) as u16
+}
+
+fn full_placeholder_widget_height() -> u16 {
+    MOTLIE_PLACEHOLDER
         .lines()
         .count()
         .saturating_add(1)
-        .saturating_add(2) as u16;
-    width < 63 || height < full_height.saturating_add(3)
+        .saturating_add(2) as u16
 }
 
 fn motd_render_line_count(app: &AppState, compact_placeholder: bool) -> u16 {
