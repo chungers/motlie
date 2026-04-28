@@ -24,10 +24,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<20} {:<8} {:<8} {}",
-        "NAME", "ID", "WINDOWS", "ATTACHED"
-    );
+    println!("{:<20} {:<8} {:<8} {}", "NAME", "ID", "WINDOWS", "ATTACHED");
     println!("{}", "-".repeat(50));
     for s in &sessions {
         println!(

@@ -22,9 +22,10 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Replaced the selector-oriented host shell hook note with bounded `HostHandle::read_text_file`, documented `SessionId` as the stable non-empty session id type, and clarified that host events are currently polling-backed. |
 | 2026-04-26 | @gpt55-dgx | Document that current-PTY attach restores the parent foreground process group through a `SIGTTOU`-safe path so selector/dashboard callers do not remain stopped after detach. |
 | 2026-04-26 | @gpt55-dgx | Document `SessionWatchOptions::normalize`, available to watch-session consumers that need to strip raw ANSI/control bytes before text rendering. |
-| 2026-04-26 | @gpt55-dgx | Document `HostHandle::exec_shell`, `HostHandle::watch_host_events`, `HostEventStream`, and `ScrollbackQuery::LinesRange` added for the tmux selector implementation. |
+| 2026-04-26 | @gpt55-dgx | Document selector support APIs including host metadata reads, `HostHandle::watch_host_events`, `HostEventStream`, and `ScrollbackQuery::LinesRange`. |
 | 2026-04-26 | @gpt55-dgx | Document `HostHandle::session_by_id`, `AttachExit`, and `Target::attach_current_pty` added for tmux selector Phase 1.1 / 1.4. |
 
 ---
@@ -666,7 +667,7 @@ match host.session("build").await? {
 
 ```rust
 let sessions = host.list_sessions().await?;
-let selected_id = sessions[0].id.clone();
+let selected_id = sessions[0].id.as_str().to_string();
 
 match host.session_by_id(&selected_id).await? {
     Some(target) => target.kill().await?,
@@ -674,7 +675,8 @@ match host.session_by_id(&selected_id).await? {
 }
 ```
 
-`session_by_id()` is useful when a UI stores `SessionInfo.id` at selection time
+`SessionInfo.id` is a non-empty `SessionId` parsed from tmux `#{session_id}`.
+`session_by_id()` is useful when a UI stores that stable id at selection time
 and later needs to dispatch against the same tmux session after a display-name
 rename.
 
@@ -721,16 +723,19 @@ for c in &clients {
 // Useful for geometry/reflow detection (section 15).
 ```
 
-### Host shell command
+### Host text file read
 
 ```rust
-let motd = host.exec_shell("cat /etc/motd 2>/dev/null").await?;
+use std::path::Path;
+
+let motd = host.read_text_file(Path::new("/etc/motd"), 64 * 1024).await?;
 ```
 
-`exec_shell()` executes a host-scoped shell command through the underlying
-transport and returns stdout. Use it for host metadata that is not a tmux target
-operation, such as reading `/etc/motd` for a selector. Do not use it to spell
-tmux operations in callers; use the typed `HostHandle` and `Target` APIs.
+`read_text_file()` reads UTF-8 host metadata through a typed, bounded API. Local
+hosts use the local filesystem path directly; SSH/mock hosts use the existing
+file-transfer path and then enforce the caller's byte cap before returning the
+string. This keeps selector code free of shell syntax such as `cat` and
+redirection while still supporting `/etc/motd`.
 
 ### Host Event Stream
 
@@ -753,10 +758,12 @@ while let Some(event) = events.recv().await {
 }
 ```
 
-`watch_host_events()` emits typed host-level session events reconciled by
-stable `SessionInfo.id`. The initial implementation polls `list_sessions()` once
-per second and diffs snapshots. This gives selector UIs a stable event API
-without forcing callers to implement their own name-vs-id reconciliation.
+`watch_host_events()` currently polls `list_sessions()` once per second and
+derives events by diffing stable `SessionId` keys. The tmux control-mode
+notification parser remains reserved for a future event-driven watcher path.
+
+This gives selector UIs a stable event API without forcing callers to implement
+their own name-vs-id reconciliation.
 
 ---
 
@@ -2216,7 +2223,8 @@ assert!(issues.is_empty());
 
 | Type | Key fields |
 |------|-----------|
-| `SessionInfo` | name, id, attached, window_count, group |
+| `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
+| `SessionInfo` | name, id (`SessionId`), attached, window_count, group |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |

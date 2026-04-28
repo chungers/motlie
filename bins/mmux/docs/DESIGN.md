@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Updated review cleanup reality: MOTD loading now uses bounded `HostHandle::read_text_file`, session ids are typed `SessionId`s, host events remain documented as polling-backed with control-mode notifications reserved for future use, and selector state/render/input/detail concerns are split into focused modules plus typed `StatusBanner`. |
 | 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
 | 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
 | 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |
@@ -98,10 +99,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `(motd unavailable: <reason>)` on read failure). In this case `LT` height
   bypasses the 30% cap and expands to exactly fit
   `glyph_rows + caption_row + chrome` when space allows. When `L_width < 63`
-  columns or there is not enough vertical room to expand, keep the same
-  motlie glyph plus `(no /etc/motd)` caption (still bold-green), not a
-  text-only placeholder. The glyph asset is baked into the binary as a
-  `&'static str` value (no inline ANSI
+  columns or there is not enough vertical room to expand, render the compact
+  built-in glyph `motlie  ══╬══` plus `(no /etc/motd)` caption (still
+  bold-green), not a text-only placeholder. The glyph assets are baked into
+  the binary as `&'static str` values (no inline ANSI
   escapes); styling is applied at render time via ratatui
   `Style { fg: Color::Green, add_modifier: Modifier::BOLD }`. Asset glyphs
   (use exactly):
@@ -291,8 +292,7 @@ mmux binary
         |          .kill().await?
         |
         +-- MotdSource
-        |      +-- local read /etc/motd
-        |      +-- remote HostHandle::download(/etc/motd, temp)
+        |      +-- HostHandle::read_text_file(/etc/motd, 64 KiB)
         |
         +-- DetailPane
         |      +-- SampleDetailSource
@@ -355,6 +355,27 @@ mode (the user has no shell to consume the output). ForceCommand deployments
 must omit the flag; the binary should warn (stderr) on a best-effort heuristic
 if both are detected.
 
+## Internal State Model
+
+Implemented selector state is split by concern:
+
+- `HostContext`: display hostname/IP.
+- `LayoutState`: mode, focus, and resize percentages.
+- `MotdState`: MOTD text and fallback marker.
+- `SessionListState`: live `SessionInfo` rows, selected index, and list scroll.
+- `DetailState`: rendered lines, scroll state, source, and auto-tail behavior.
+- `StatusBanner`: typed loading/info/error status text for the bottom bar.
+
+`AppState` coordinates those pieces and owns modal state. Render feedback for
+detail-pane height is explicitly stored as `last_known_view_height` in
+`DetailState` so input handling can compute scroll bounds on the next tick.
+The main run loop is kept in `main.rs`. CLI parsing/layout detection,
+terminal lifecycle, ForceCommand bypass/reject handling, target-host identity
+resolution, detail sources, key handling/event refresh, and rendering live in
+`cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`, `detail.rs`,
+`controller.rs`, and `render.rs`; shared UI data structures live in
+`model.rs`.
+
 ## Layout
 
 The terminal is split into:
@@ -374,7 +395,8 @@ The body area is split horizontally into `L` and `R`.
   terminal fallback collapses `LT` to a single line. See §Functional
   Requirements for the placeholder rendering rule.
 - `LB`: session list, remaining height. The viewport scrolls to keep the
-  highlighted row visible. A position indicator is shown.
+  highlighted row visible. Rows render display names and attachment markers;
+  stable tmux session ids are retained in state for dispatch but not shown.
 
 **Focus model.** The landscape main view has three focus states: `LT`, `Lb`
 (default), and `R`. Focus transitions are explicit:
@@ -597,9 +619,9 @@ initial hot path.
 2. Connect to local or SSH target with `motlie-tmux`.
 3. Load target host MOTD (or render the motlie placeholder when absent).
 4. List sessions.
-5. Subscribe to host-level event
-   stream (see §Live Session List). On subscribe failure, fall back to
-   polling; emit a status-bar indicator so the user knows refresh is degraded.
+5. Subscribe to the host-level event stream (see §Live Session List). The v1
+   stream itself is polling-backed snapshot reconciliation; on stream failure,
+   keep the current snapshot and show an inline error status.
 6. Initialize UI state with `LB` focused and first session highlighted.
 7. Render sample detail for the highlighted session, if any.
 
@@ -632,7 +654,7 @@ Subscribe-and-reconcile loop:
    - `SessionsChanged` / `SessionAdded` / `SessionClosed`: re-issue
      `list_sessions()` and merge into `LB` model by stable session id (not
      name — `%session-renamed` requires id-based identity;
-     `SessionInfo.id` exists in `libs/tmux/src/types.rs:66`).
+     `SessionInfo.id` is a non-empty `SessionId`).
      If `SessionClosed { id }` matches the currently monitored session id,
      stop the monitor and clear `R` to a placeholder or empty state until the
      user's next explicit detail/monitor action.
@@ -940,23 +962,24 @@ race handling internally before returning `Target`.
 
 ### Remote MOTD
 
-The binary can use existing `HostHandle::download(remote, local, opts)`
-(`libs/tmux/src/host.rs:522`) to retrieve `/etc/motd` from SSH targets into
-a temporary local file. The
-fallback rationale below is concrete: `download()` requires temp-file
-lifecycle management (create, write, read-back, cleanup), and `/etc/motd`
-files of unbounded size could waste disk. If those concerns prove
-material in PLAN, the narrower library addition should be a host-level
-text-file read helper:
+The binary uses `HostHandle::read_text_file()` to retrieve `/etc/motd` from
+local, mock, or SSH targets without embedding shell syntax in the selector.
+The API requires a byte cap so a misconfigured MOTD cannot trigger an
+unbounded read:
 
 ```rust
 impl HostHandle {
-    pub async fn read_text_file(&self, path: &std::path::Path) -> Result<String>;
+    pub async fn read_text_file(
+        &self,
+        path: &std::path::Path,
+        max_bytes: usize,
+    ) -> Result<String>;
 }
 ```
 
-This is not accepted yet as a required gap; it is a design fallback if the
-existing file-transfer API is too awkward or unsafe for MOTD.
+For v1, `mmux` calls `read_text_file(Path::new("/etc/motd"), 64 * 1024)` and
+uses the embedded motlie placeholder when the read fails or returns only
+whitespace.
 
 ## Host-Wide SSH Integration
 
@@ -1056,7 +1079,7 @@ detail.
 | `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
 | `ansi-to-tui` | ANSI/VTE rendering for captured/monitored pane content | Adopted for sample and monitor modes so ANSI-preserving captures render color/style without leaking escape bytes into ratatui text. |
 | `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
-| `tempfile` | remote MOTD download target | Use if remote MOTD is implemented through `HostHandle::download()`. Already a dev dependency in parts of the repo; PLAN should decide package placement. |
+| `tempfile` | none in `mmux` | Not needed by the selector binary because MOTD reads go through `HostHandle::read_text_file()`. |
 
 ## Testing Strategy
 

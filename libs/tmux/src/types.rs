@@ -62,10 +62,58 @@ impl fmt::Display for PaneAddress {
     }
 }
 
+/// Stable tmux session identifier using tmux's `#{session_id}` (`$<id>`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// Create a non-empty session id.
+    pub fn new(id: impl Into<String>) -> Result<Self> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(Error::Parse("empty session id".to_string()));
+        }
+        Ok(Self(id))
+    }
+
+    /// Return the tmux id string for dispatch and stable keying.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(id: &str) -> Self {
+        Self::new(id).expect("test session id must be non-empty")
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for SessionId {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for SessionId {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionInfo {
     pub name: String,
-    pub id: String,
+    pub id: SessionId,
     pub created: u64,
     pub attached: bool,
     pub window_count: u32,
@@ -107,6 +155,16 @@ pub enum TargetLevel {
     Session,
     Window,
     Pane,
+}
+
+impl fmt::Display for TargetLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetLevel::Session => f.write_str("session"),
+            TargetLevel::Window => f.write_str("window"),
+            TargetLevel::Pane => f.write_str("pane"),
+        }
+    }
 }
 
 /// Builder for tmux target strings (DC17).

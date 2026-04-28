@@ -16,9 +16,12 @@ pub fn shell_escape(s: &str) -> String {
 }
 
 fn shell_escape_path(path: &Path) -> Result<String> {
-    let s = path
-        .to_str()
-        .ok_or_else(|| Error::Parse(format!("non-UTF-8 paths are not supported: {}", path.display())))?;
+    let s = path.to_str().ok_or_else(|| {
+        Error::Parse(format!(
+            "non-UTF-8 paths are not supported: {}",
+            path.display()
+        ))
+    })?;
     Ok(shell_escape(s))
 }
 
@@ -391,8 +394,14 @@ pub async fn rename_window(
     window_index: u32,
     new_name: &str,
 ) -> Result<()> {
-    rename_window_with_prefix(transport, &tmux_prefix(socket), session, window_index, new_name)
-        .await
+    rename_window_with_prefix(
+        transport,
+        &tmux_prefix(socket),
+        session,
+        window_index,
+        new_name,
+    )
+    .await
 }
 
 /// Rename a tmux window using a caller-provided prefix.
@@ -468,10 +477,13 @@ pub async fn get_history_limit_with_prefix(
         None => format!("{} show-option -gv history-limit", prefix),
     };
     let output = transport.exec(&cmd).await?;
-    output
-        .trim()
-        .parse::<u32>()
-        .map_err(|e| Error::Parse(format!("failed to parse history-limit '{}': {}", output.trim(), e)))
+    output.trim().parse::<u32>().map_err(|e| {
+        Error::Parse(format!(
+            "failed to parse history-limit '{}': {}",
+            output.trim(),
+            e
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -600,8 +612,7 @@ mod tests {
     #[tokio::test]
     async fn new_window_with_all_options_builds_expected_command() {
         let expected = "tmux new-window -P -F '#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}' -n 'editor' -x 200 -y 50 -c '/tmp/project' -t 'build' 'vim'";
-        let mock =
-            MockTransport::new().with_response(expected, "$0 build 1 editor 1 1 layout");
+        let mock = MockTransport::new().with_response(expected, "$0 build 1 editor 1 1 layout");
         let transport = TransportKind::Mock(mock);
         let opts = CreateWindowOptions {
             name: Some("editor".to_string()),

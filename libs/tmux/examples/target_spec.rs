@@ -57,10 +57,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TargetLevel::Pane => {
                     if let Some(addr) = target.pane_address() {
-                        println!(
-                            "  Pane: pane_id={}, address={}",
-                            addr.pane_id, addr
-                        );
+                        println!("  Pane: pane_id={}, address={}", addr.pane_id, addr);
                     }
                 }
             }

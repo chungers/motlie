@@ -1,6 +1,6 @@
 use crate::control::shell_escape;
 use crate::error::{Error, Result};
-use crate::transport::SshConfig;
+use crate::transport::{SshConfig, SSH_DEFAULT_PORT};
 use crate::types::{HostKeyPolicy, TmuxSocket};
 use std::ffi::OsString;
 use std::process::{ExitStatus, Stdio};
@@ -69,7 +69,7 @@ pub(crate) fn ssh_attach_command(
 ) -> AttachCommand {
     let mut args = vec![OsString::from("-t")];
 
-    if config.port() != 22 {
+    if config.port() != SSH_DEFAULT_PORT {
         args.push(OsString::from("-p"));
         args.push(OsString::from(config.port().to_string()));
     }
