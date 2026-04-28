@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
 | 2026-04-28 | @gpt55-dgx | Replaced the selector-oriented host shell hook note with bounded `HostHandle::read_text_file`, documented `SessionId` as the stable non-empty session id type, and clarified that host events are currently polling-backed. |
 | 2026-04-26 | @gpt55-dgx | Document that current-PTY attach restores the parent foreground process group through a `SIGTTOU`-safe path so selector/dashboard callers do not remain stopped after detach. |
@@ -655,11 +656,12 @@ for s in &sessions {
 
 > See [`examples/list_sessions.rs`](../examples/list_sessions.rs) for a runnable version.
 
-### List sessions with server-clock recency data
+### List sessions with recency data
 
 `list_sessions_now()` returns the same session rows plus a tmux-server clock
 snapshot. This avoids local/remote clock skew when a selector or dashboard
-renders "active N ago" or "age N" for an SSH target.
+renders "active N ago" or "age N" for an SSH target when the running tmux
+version exposes a current epoch format.
 
 ```rust
 let listing = host.list_sessions_now().await?;
@@ -675,9 +677,12 @@ for session in &listing.sessions {
 
 `SessionInfo.activity` is tmux `#{session_activity}` in epoch seconds.
 `SessionListing.now` is tmux `#{epoch}` from the same tmux invocation as the
-session list. If there is no tmux server or no sessions, the API returns
-`SessionListing { now: <local fallback epoch>, sessions: vec![] }`; the local
-fallback is only used because there is no server clock to query.
+session list when tmux expands that format. tmux 3.4 and some other versions
+expand `#{epoch}` to an empty string; in that case `SessionListing.now` falls
+back to the local selector clock clamped to at least the maximum
+`session_created` / `session_activity` timestamp in the listing. If there is no
+tmux server or no sessions, the API returns
+`SessionListing { now: <local fallback epoch>, sessions: vec![] }`.
 
 ### Find a session by name
 

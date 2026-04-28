@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Clarified recency clock behavior for tmux versions that expand `#{epoch}` empty: fall back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added implemented session-list recency rows: attached marker plus right-aligned `active` and `age` values from `list_sessions_now()`; tmux alert flags remain out of scope. |
 | 2026-04-28 | @gpt55-dgx | Added issue #229 library support note: session snapshots now include activity, attached client count, and server-clock listings for future recency rendering. |
 | 2026-04-28 | @gpt55-dgx | Changed bottom status command hints from parenthesized mnemonics to rendered underlined shortcut letters. |
@@ -201,7 +202,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   one or more tmux clients are attached, and a right-aligned
   `active:<elapsed> / age:<elapsed>` recency column. `active` is computed from
   `SessionInfo.activity`, `age` from `SessionInfo.created`, and both compare
-  against the target tmux server clock returned by `list_sessions_now()`.
+  against the clock returned by `list_sessions_now()`. That clock is the target
+  tmux server clock when tmux exposes one, otherwise a fallback local clock
+  clamped to the listed session timestamps.
   Window-level tmux alert/status flags such as `!`, `#`, and `~` are deferred.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
@@ -663,7 +666,8 @@ Issue #229 library support adds `SessionInfo.activity`,
 selector uses `list_sessions_now()` for its rendered session rows so
 `listing.now.saturating_sub(session.activity)` and
 `listing.now.saturating_sub(session.created)` are computed against the target
-tmux server clock rather than the local selector clock.
+tmux server clock when available. tmux versions that expand `#{epoch}` empty
+use the library fallback clock clamped to the listed session timestamps.
 
 Future hardening target: tmux control-mode notifications. The library already
 parses `%`-prefixed control-mode lines as `ControlModeMessage::Notification`
