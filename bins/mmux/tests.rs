@@ -412,6 +412,40 @@ async fn refresh_forces_detail_when_selected_session_changes() {
     assert_eq!(app.detail.lines, vec!["replacement screen".to_string()]);
 }
 
+#[tokio::test]
+async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
+    let mock = MockTransport::new()
+        .with_response(
+            "display-message -p '__MOTLIE_EPOCH:",
+            "__MOTLIE_EPOCH:500\nreplacement $2 20 0 1  400\n",
+        )
+        .with_response("list-sessions", "replacement $2 20 0 1  400\n")
+        .with_response("capture-pane -ep", "replacement screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.sessions = vec![
+        session_with_times("watched", "$1", 10, 300),
+        session_with_times("replacement", "$2", 20, 200),
+    ];
+    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+        session_id: Some("$1".to_string()),
+    }));
+    app.detail.lines = vec!["live".to_string()];
+
+    refresh_sessions_quiet(&host, &mut app, false)
+        .await
+        .unwrap();
+
+    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
+    assert_eq!(app.status.text(), "monitored session watched closed");
+    assert_eq!(app.detail.lines, vec!["replacement screen".to_string()]);
+}
+
 #[test]
 fn session_list_line_right_aligns_active_and_age() {
     let now = 7_200;

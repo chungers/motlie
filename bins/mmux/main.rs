@@ -20,11 +20,11 @@ use motlie_tmux::HostHandle;
 
 use cli::{select_layout, Cli};
 use controller::{
-    drain_host_events, handle_key, load_motd, refresh_detail, refresh_sessions_preserving,
-    refresh_sessions_quiet, stop_detail_source, KeyOutcome,
+    handle_key, load_motd, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
+    stop_detail_source, KeyOutcome,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
-use model::{AppState, LayoutMode, RetainedUiState, SelectedSession};
+use model::{AppState, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
 use target_host::{connect_host, HostIdentity};
 use terminal::TerminalSession;
 
@@ -113,19 +113,15 @@ async fn run_selector_once(
     let previous_selection = ui_state.selected_session_id();
     refresh_sessions_preserving(host, &mut app, true, previous_selection).await?;
 
-    let mut event_rx = host
-        .watch_host_events()
-        .await
-        .ok()
-        .map(motlie_tmux::HostEventStream::into_receiver);
     let mut terminal = TerminalSession::enter()?;
     let mut last_detail_refresh = Instant::now();
     let mut last_session_refresh = Instant::now();
 
     loop {
-        drain_host_events(host, &mut app, &mut event_rx).await?;
         if last_session_refresh.elapsed() >= Duration::from_secs(1) {
-            refresh_sessions_quiet(host, &mut app, false).await?;
+            if let Err(err) = refresh_sessions_quiet(host, &mut app, false).await {
+                app.status = StatusBanner::error(format!("session refresh failed: {err:#}"));
+            }
             last_session_refresh = Instant::now();
         }
         if last_detail_refresh.elapsed() >= Duration::from_millis(750) {

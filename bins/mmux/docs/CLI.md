@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Consolidated session-list refresh to a single one-second `list_sessions_now()` poller for both activity ordering and structural reconciliation. |
 | 2026-04-28 | @gpt55-dgx | Added a one-second visible-row refresh using `list_sessions_now()` so activity-sorted rows reorder even when no structural tmux event occurs. |
 | 2026-04-28 | @gpt55-dgx | Sorted session-list rows by `SessionInfo.activity` descending so the most recently active sessions appear first. |
 | 2026-04-28 | @gpt55-dgx | Changed session-list recency rows to unlabeled `<active> / <age>` text with a day bucket and right-side margin. |
@@ -183,13 +184,12 @@ accepted as compatibility fallbacks. Normal mode L/R resize stays clamped to
 On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.
 
-The session list auto-refreshes through two poll-backed paths. Visible rows are
-quietly refreshed once per second with `list_sessions_now()` so recency text and
-activity-descending ordering update even when the only change is tmux session
-activity. `HostHandle::watch_host_events()` also runs as a one-second
-`list_sessions()` snapshot reconciler for structural changes such as add,
-close, rename, attach, and detach. It is not currently driven by direct tmux
-control-mode host notifications.
+The session list auto-refreshes through one selector-owned poll-backed path.
+Visible rows are quietly refreshed once per second with `list_sessions_now()`,
+which updates recency text, activity-descending ordering, and structural session
+state in the same snapshot. The selector no longer starts a separate
+`watch_host_events()` poller for its TUI list. Direct tmux control-mode host
+notifications remain future work.
 
 Each session row includes the display name, an attached-client marker, and a
 right-aligned recency column. The attached marker is `*` when tmux reports one

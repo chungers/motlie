@@ -2,8 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use motlie_tmux::{CreateSessionOptions, HostEvent, HostHandle};
-use tokio::sync::mpsc;
+use motlie_tmux::{CreateSessionOptions, HostHandle};
 
 use crate::consts::{
     DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
@@ -63,6 +62,7 @@ async fn refresh_sessions_preserving_with_status(
         .list_sessions_now()
         .await
         .context("list tmux sessions with server clock")?;
+    let closed_monitored = closed_monitored_session(app, &listing.sessions);
     let previous_id = previous.clone();
     app.session_list.now = listing.now;
     app.session_list
@@ -76,8 +76,34 @@ async fn refresh_sessions_preserving_with_status(
         };
     }
     let selected_id = app.selected_session().map(|session| session.id);
+    if let Some((id, name)) = closed_monitored {
+        if let Some(name) = stop_monitor_if_closed(app, &id, name).await {
+            app.status = StatusBanner::info(format!("monitored session {name} closed"));
+        }
+    }
     refresh_detail(host, app, force_detail || previous_id != selected_id).await?;
     Ok(())
+}
+
+fn closed_monitored_session(
+    app: &AppState,
+    refreshed_sessions: &[motlie_tmux::SessionInfo],
+) -> Option<(String, String)> {
+    let monitored_id = app.detail.source.monitored_session_id()?;
+    if refreshed_sessions
+        .iter()
+        .any(|session| session.id.as_str() == monitored_id)
+    {
+        return None;
+    }
+    let name = app
+        .session_list
+        .sessions
+        .iter()
+        .find(|session| session.id.as_str() == monitored_id)
+        .map(|session| session.name.clone())
+        .unwrap_or_else(|| monitored_id.to_string());
+    Some((monitored_id.to_string(), name))
 }
 
 pub(crate) async fn refresh_detail(
@@ -119,45 +145,6 @@ pub(crate) async fn refresh_detail(
             if app.detail.auto_tail {
                 app.detail.scroll = 0;
             }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn drain_host_events(
-    host: &HostHandle,
-    app: &mut AppState,
-    event_rx: &mut Option<mpsc::Receiver<HostEvent>>,
-) -> Result<()> {
-    let Some(rx) = event_rx.as_mut() else {
-        return Ok(());
-    };
-    let mut should_refresh = false;
-    let mut closed_monitored_session = None;
-    loop {
-        match rx.try_recv() {
-            Ok(HostEvent::Disconnect { reason }) => {
-                app.status = StatusBanner::error(format!("event stream degraded: {reason}"));
-            }
-            Ok(HostEvent::SessionClosed { id, name }) => {
-                if closed_monitored_session.is_none() {
-                    closed_monitored_session = stop_monitor_if_closed(app, id.as_str(), name).await;
-                }
-                should_refresh = true;
-            }
-            Ok(_) => should_refresh = true,
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                app.status =
-                    StatusBanner::error("event stream disconnected; using manual refreshes");
-                break;
-            }
-        }
-    }
-    if should_refresh {
-        refresh_sessions(host, app, true).await?;
-        if let Some(name) = closed_monitored_session {
-            app.status = StatusBanner::info(format!("monitored session {name} closed"));
         }
     }
     Ok(())

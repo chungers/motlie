@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh to one `list_sessions_now()` poller for activity sorting, recency text, structural state, and monitored-session closure. |
 | 2026-04-28 | @gpt55-dgx | Tracked one-second quiet visible-row refreshes so activity sorting updates without structural host events. |
 | 2026-04-28 | @gpt55-dgx | Tracked activity-descending session ordering with stable-id selection preservation. |
 | 2026-04-28 | @gpt55-dgx | Tracked recency formatting polish: remove labels, add day bucket, and keep a right margin. |
@@ -210,6 +211,9 @@ References: [Live Session List](./DESIGN.md#live-session-list), issue #229.
 - [x] 1.6j Refresh visible session rows with `list_sessions_now()` once per
   second so activity-only changes update recency text and row order without
   waiting for add/close/rename/attach/detach events.
+- [x] 1.6k Consolidate mmux polling so the same one-second
+  `list_sessions_now()` snapshot drives recency text, activity ordering,
+  structural state, and monitored-session closure handling.
 
 ## Phase 2: Binary Scaffold
 

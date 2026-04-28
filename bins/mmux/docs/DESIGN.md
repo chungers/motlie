@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh from separate activity and structural pollers into one `list_sessions_now()` loop. |
 | 2026-04-28 | @gpt55-dgx | Added periodic visible-row refreshes because activity-only changes do not emit host events, but must reorder the activity-sorted session list. |
 | 2026-04-28 | @gpt55-dgx | Added activity-descending session-list ordering so the most recently active session appears first while selection remains stable by id. |
 | 2026-04-28 | @gpt55-dgx | Changed session-list recency display to unlabeled `<active> / <age>` values with day bucketing and a right margin. |
@@ -661,20 +662,13 @@ The `LB` list must stay consistent with the target host's tmux state without
 user-driven refresh. Other clients may create, kill, or rename sessions;
 sessions may exit unexpectedly. The selector must reconcile.
 
-Shipped v1 mechanism: `HostHandle::watch_host_events()` is a typed stream
-backed by one-second polling. It performs an initial `list_sessions()`, then
-calls `list_sessions()` every second, diffs the current snapshot against the
-previous snapshot by stable session id, and emits typed add/close/rename and
-client attach/detach events. On transient list failure it emits
-`Disconnect { reason }` and retries on the next tick. This is poll-based
-snapshot reconciliation, not direct tmux control-mode host notifications.
-
-Because activity-only changes update `SessionInfo.activity` without producing a
-structural host event, the selector also performs a quiet visible-row refresh
-with `list_sessions_now()` once per second. That refresh updates
-`SessionListState.now`, re-sorts rows by activity, preserves the highlight by
-stable session id, and only forces detail resampling when the selected session
-id changes.
+Shipped selector mechanism: `mmux` runs one quiet `list_sessions_now()` refresh
+per second. That single snapshot updates `SessionListState.now`, re-sorts rows
+by activity, reconciles structural session state by stable session id, preserves
+the highlight by stable id, and only forces detail resampling when the selected
+session id changes. If the monitored session disappears, the same refresh stops
+monitor mode and updates status. On transient refresh failure, the TUI keeps
+running and reports the error in the status bar.
 
 Issue #229 library support adds `SessionInfo.activity`,
 `SessionInfo.attached_count`, and `HostHandle::list_sessions_now()`. The
@@ -688,40 +682,36 @@ Future hardening target: tmux control-mode notifications. The library already
 parses `%`-prefixed control-mode lines as `ControlModeMessage::Notification`
 (`libs/tmux/src/monitor.rs:58–96`) but currently discards them
 (`monitor.rs:337–341`). A later implementation can wire those notifications
-into the same `HostEventStream` contract without changing the selector UI
-model.
+into either the library `HostEventStream` contract or the selector's single
+snapshot refresh path without changing the selector UI model.
 
-Subscribe-and-reconcile loop:
+Single-poll reconcile loop:
 
-1. On startup (after initial `list_sessions()`), call
-   `host.watch_host_events()` and spawn a tokio task to drain it.
-2. On each event:
-   - `SessionsChanged` / `SessionAdded` / `SessionClosed`: re-issue
-     `list_sessions()` and merge into `LB` model by stable session id (not
-     name — `%session-renamed` requires id-based identity;
-     `SessionInfo.id` is a non-empty `SessionId`).
-     If `SessionClosed { id }` matches the currently monitored session id,
-     stop the monitor and clear `R` to a placeholder or empty state until the
-     user's next explicit detail/monitor action.
-   - `SessionRenamed { id, old, new }`: update display name in place; preserve
-     highlight.
-   - `ClientDetached { session_id }` / `ClientAttached { session_id }`:
-     update attached-client state (`attached_count` / `is_attached()`).
-   - `Disconnect { reason }`: polling list operation failed. Show status-bar
-     indicator. Keep the existing snapshot and retry on the next one-second
-     tick.
-3. Reconciliation must preserve the user's highlight when possible: if the
+1. On startup, call `list_sessions_now()` and merge into `LB` model by stable
+   session id (not name; `SessionInfo.id` is a non-empty `SessionId`).
+2. Every second, call `list_sessions_now()` again.
+3. For each snapshot:
+   - store `SessionListing.now` for recency math
+   - sort sessions by `SessionInfo.activity` descending
+   - preserve highlighted session by stable id, falling back to the same row
+     index if the session disappeared
+   - if the monitored session id is absent, stop monitor mode and report that
+     the monitored session closed
+   - force detail resampling only when the selected session id changes
+   - on polling failure, show a status-bar error, keep the existing snapshot,
+     and retry on the next one-second tick
+4. Reconciliation must preserve the user's highlight when possible: if the
    highlighted session id still exists, keep it highlighted; if it
    disappeared, move highlight to the next valid row (or to the previous if
    the highlighted row was the last).
-4. Empty-list state (zero sessions): see §Empty Session List below.
-5. In default attach/re-enter mode, the active TUI subscription is dropped
-   before attach. On re-entry the selector takes a fresh `list_sessions()`
-   snapshot and starts a new host-event subscription before the first redraw.
+5. Empty-list state (zero sessions): see §Empty Session List below.
+6. In default attach/re-enter mode, the active TUI loop stops before attach.
+   On re-entry the selector takes a fresh `list_sessions_now()` snapshot before
+   the first redraw.
 
-Polling semantics: re-issue `list_sessions()` every 1s through
-`HostHandle::watch_host_events()`. The public stream is event-shaped for the
-selector, but freshness is polling-backed in the current implementation.
+Polling semantics: the selector re-issues `list_sessions_now()` every 1s. The
+library `HostHandle::watch_host_events()` remains available for other
+consumers, but the selector TUI no longer starts it as a second polling loop.
 
 ### Empty Session List
 
@@ -905,9 +895,10 @@ Required semantics:
 
 ### Host Event Stream
 
-The selector requires a host-level event stream to keep `LB` consistent with
-the target's tmux state without user-driven refresh (see §Functional
-Requirements and §Data Flow → Live Session List).
+The library exposes a host-level event stream for consumers that want typed
+session-change events. The selector originally used this stream, but now keeps
+`LB` consistent through its single `list_sessions_now()` refresh loop (see
+§Data Flow → Live Session List).
 
 Implemented v1 behavior: `watch_host_events()` is a polling-backed typed event
 stream. It reconciles `list_sessions()` snapshots once per second by stable
