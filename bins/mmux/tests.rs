@@ -20,8 +20,8 @@ use crate::detail::{
 };
 use crate::model::{AppState, Button, Focus, LayoutMode, ModalBody, ModalState, SelectedSession};
 use crate::render::{
-    detail_text_for_render, draw, modal_content, motd_render_text, session_list_line,
-    sessions_title, short_build_git_sha, status_line_text, top_status_line,
+    detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
+    session_list_line, sessions_title, short_build_git_sha, status_line_text, top_status_line,
     use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
@@ -68,6 +68,20 @@ async fn write_test_file(name: &str, content: impl AsRef<[u8]>) -> std::path::Pa
 
 async fn remove_test_file(path: &std::path::Path) {
     let _ = tokio::fs::remove_file(path).await;
+}
+
+fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| draw(frame, app)).unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>()
 }
 
 #[test]
@@ -396,6 +410,54 @@ fn compact_placeholder_boundary_is_width_63() {
 }
 
 #[test]
+fn landscape_layout_renders_motd_pane_with_placeholder() {
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        MOTLIE_PLACEHOLDER.to_string(),
+        true,
+    );
+    app.session_list.sessions = vec![session("dev", "$1")];
+
+    let rendered = render_to_string(&mut app, 120, 30);
+
+    assert!(rendered.contains("MOTD"));
+    assert!(rendered.contains("motlie"));
+    assert!(rendered.contains("(no /etc/motd)"));
+    assert!(rendered.contains("Sessions [1]"));
+}
+
+#[test]
+fn landscape_layout_renders_motd_pane_with_host_content() {
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "Welcome to dev-host".to_string(),
+        false,
+    );
+    app.session_list.sessions = vec![session("dev", "$1")];
+
+    let rendered = render_to_string(&mut app, 120, 30);
+
+    assert!(rendered.contains("MOTD"));
+    assert!(rendered.contains("Welcome to dev-host"));
+    assert!(rendered.contains("Sessions [1]"));
+}
+
+#[test]
+fn landscape_motd_height_preserves_visible_placeholder_before_sessions() {
+    let app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        MOTLIE_PLACEHOLDER.to_string(),
+        true,
+    );
+
+    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 30)), 4);
+    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 6)), 3);
+}
+
+#[test]
 fn portrait_layout_does_not_render_motd_widget() {
     let mut app = AppState::new(
         "host".to_string(),
@@ -404,17 +466,7 @@ fn portrait_layout_does_not_render_motd_widget() {
         true,
     );
     app.session_list.sessions = vec![session("dev", "$1")];
-    let backend = TestBackend::new(100, 30);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
+    let rendered = render_to_string(&mut app, 100, 30);
 
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
     assert!(!rendered.contains(COMPACT_MOTLIE_PLACEHOLDER));

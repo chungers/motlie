@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added landscape MOTD pane regression coverage for placeholder and host-provided MOTD content. |
 | 2026-04-28 | @gpt55-dgx | Added PR #228 round-3 regression coverage for bounded host text reads, injectable MOTD fallback loading, full/compact placeholder rendering, and portrait MOTD omission. |
 | 2026-04-28 | @gpt55-dgx | Tracked PR #228 review cleanup: typed `SessionId`, bounded `read_text_file` MOTD loading, documented polling host events, decomposed selector state/status, split selector concerns into focused modules, and kept internal ids hidden from the list view. |
 | 2026-04-27 | @gpt55-dgx | Tracked modal layout polish: padded content, button separators, bordered New Session input, and Help metadata placement. |
@@ -244,7 +245,8 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.9 Add MOTD fallback regression tests for missing, empty,
   whitespace-only, oversized, and readable files through an injectable
   `load_motd_from` path; add full-logo wide rendering and portrait omission
-  tests.
+  tests; add full-frame landscape render tests for placeholder and host MOTD
+  content.
 
 ## Phase 5: Input, Focus, and Modals
 

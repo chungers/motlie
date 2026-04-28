@@ -50,16 +50,7 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         ])
         .split(area);
 
-    let compact_placeholder = use_compact_placeholder(app, columns[0].width, columns[0].height);
-    let motd_lines = motd_render_line_count(app, compact_placeholder);
-    let max_motd = max(3, area.height.saturating_mul(30) / 100);
-    let desired = motd_lines.saturating_add(2);
-    let upper = if app.motd.is_placeholder {
-        min(desired, columns[0].height.saturating_sub(3))
-    } else {
-        min(desired, max_motd)
-    };
-    let upper = max(3, min(upper, columns[0].height.saturating_sub(3)));
+    let upper = normal_motd_height(app, columns[0]);
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(upper), Constraint::Min(3)])
@@ -68,6 +59,29 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     draw_motd(frame, left[0], app);
     draw_sessions(frame, left[1], app);
     draw_detail(frame, columns[1], app, " Detail ");
+}
+
+pub(crate) fn normal_motd_height(app: &AppState, left_area: Rect) -> u16 {
+    const MIN_WIDGET_HEIGHT: u16 = 3;
+    const MIN_SESSION_LIST_HEIGHT: u16 = 3;
+
+    if left_area.height <= MIN_SESSION_LIST_HEIGHT {
+        return left_area.height;
+    }
+
+    let available = left_area.height.saturating_sub(MIN_SESSION_LIST_HEIGHT);
+    let compact_placeholder = use_compact_placeholder(app, left_area.width, available);
+    let desired = motd_render_line_count(app, compact_placeholder).saturating_add(2);
+    let capped = if app.motd.is_placeholder {
+        desired
+    } else {
+        min(
+            desired,
+            max(MIN_WIDGET_HEIGHT, left_area.height.saturating_mul(30) / 100),
+        )
+    };
+
+    min(max(MIN_WIDGET_HEIGHT, capped), available)
 }
 
 fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
