@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added implemented session-list recency rows: attached marker plus right-aligned `active` and `age` values from `list_sessions_now()`; tmux alert flags remain out of scope. |
 | 2026-04-28 | @gpt55-dgx | Added issue #229 library support note: session snapshots now include activity, attached client count, and server-clock listings for future recency rendering. |
 | 2026-04-28 | @gpt55-dgx | Changed bottom status command hints from parenthesized mnemonics to rendered underlined shortcut letters. |
 | 2026-04-28 | @gpt55-dgx | Replaced the old fixed compact-placeholder width threshold with a fit check derived from the embedded motlie glyph dimensions. |
@@ -196,6 +197,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   left-justified text and the current time right-justified. It uses the same
   blue background as the bottom status bar.
 - The session-list pane title shows only the session count as `Sessions [n]`.
+- Each session row shows the display name, a `*` attached-client marker when
+  one or more tmux clients are attached, and a right-aligned
+  `active:<elapsed> / age:<elapsed>` recency column. `active` is computed from
+  `SessionInfo.activity`, `age` from `SessionInfo.created`, and both compare
+  against the target tmux server clock returned by `list_sessions_now()`.
+  Window-level tmux alert/status flags such as `!`, `#`, and `~` are deferred.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
@@ -368,7 +375,8 @@ Implemented selector state is split by concern:
 - `HostContext`: display hostname/IP.
 - `LayoutState`: mode, focus, and resize percentages.
 - `MotdState`: MOTD text and fallback marker.
-- `SessionListState`: live `SessionInfo` rows, selected index, and list scroll.
+- `SessionListState`: live `SessionInfo` rows, target-server `now` timestamp,
+  selected index, and list scroll.
 - `DetailState`: rendered lines, scroll state, source, and auto-tail behavior.
 - `StatusBanner`: typed loading/info/error status text for the bottom bar.
 
@@ -652,8 +660,9 @@ snapshot reconciliation, not direct tmux control-mode host notifications.
 
 Issue #229 library support adds `SessionInfo.activity`,
 `SessionInfo.attached_count`, and `HostHandle::list_sessions_now()`. The
-selector can use `list_sessions_now()` when row recency is added so
-`listing.now.saturating_sub(session.activity)` is computed against the target
+selector uses `list_sessions_now()` for its rendered session rows so
+`listing.now.saturating_sub(session.activity)` and
+`listing.now.saturating_sub(session.created)` are computed against the target
 tmux server clock rather than the local selector clock.
 
 Future hardening target: tmux control-mode notifications. The library already

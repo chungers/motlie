@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Marked mmux session-list recency rendering complete with aligned `active`/`age` columns and no window-alert flag display. |
 | 2026-04-28 | @gpt55-dgx | Marked issue #229 library support complete for `SessionInfo.activity`, `attached_count`, and `HostHandle::list_sessions_now()` skew-free recency math. |
 | 2026-04-28 | @gpt55-dgx | Tracked bottom status command hints as plain words with underlined shortcut letters instead of `(x)` mnemonics. |
 | 2026-04-28 | @gpt55-dgx | Updated placeholder tests so landscape requires the full motlie glyph whenever the embedded logo dimensions fit the pane. |
@@ -192,6 +193,9 @@ References: [Live Session List](./DESIGN.md#live-session-list), issue #229.
   listings, no-server fallback, malformed/missing epoch lines, and parsed
   `activity` / `attached_count`.
 - [x] 1.6e Document recency math in `libs/tmux/docs/API.md`.
+- [x] 1.6f Render mmux session rows with a right-aligned
+  `active:<elapsed> / age:<elapsed>` column from `list_sessions_now()` and keep
+  tmux window-alert flags out of the v1 list row.
 
 ## Phase 2: Binary Scaffold
 

@@ -21,8 +21,8 @@ use crate::detail::{
 use crate::model::{AppState, Button, Focus, LayoutMode, ModalBody, ModalState, SelectedSession};
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
-    session_list_line, sessions_title, short_build_git_sha, status_line, status_line_text,
-    top_status_line, use_compact_placeholder,
+    session_list_line, session_recency_text, sessions_title, short_build_git_sha, status_line,
+    status_line_text, top_status_line, use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
 
@@ -31,14 +31,18 @@ fn sid(id: &str) -> SessionId {
 }
 
 fn session(name: &str, id: &str) -> SessionInfo {
+    session_with_times(name, id, 0, 0)
+}
+
+fn session_with_times(name: &str, id: &str, created: u64, activity: u64) -> SessionInfo {
     SessionInfo {
         name: name.to_string(),
         id: sid(id),
-        created: 0,
+        created,
         attached_count: 0,
         window_count: 1,
         group: None,
-        activity: 0,
+        activity,
     }
 }
 
@@ -282,9 +286,41 @@ fn sessions_title_only_includes_count() {
 
 #[test]
 fn session_list_line_hides_stable_id() {
-    let line = session_list_line(&session("dev", "$42"), true);
-    assert_eq!(line, ">  dev");
+    let line = session_list_line(&session("dev", "$42"), true, 0, 16);
+    assert!(line.starts_with(">  dev"));
     assert!(!line.contains("$42"));
+}
+
+#[test]
+fn session_list_line_right_aligns_active_and_age() {
+    let now = 7_200;
+    let first = session_list_line(&session_with_times("dev", "$1", 0, 7_020), true, now, 42);
+    let second = session_list_line(
+        &session_with_times("longer-build-name", "$2", 3_600, 4_560),
+        false,
+        now,
+        42,
+    );
+
+    assert_eq!(first.chars().count(), 42);
+    assert_eq!(second.chars().count(), 42);
+    assert_eq!(first.find("active:"), second.find("active:"));
+    assert!(first.ends_with("active: 3m / age: 2h"));
+    assert!(second.ends_with("active:44m / age: 1h"));
+}
+
+#[test]
+fn session_recency_uses_now_minutes_and_hours() {
+    let session = session_with_times("dev", "$1", 60, 3_590);
+
+    assert_eq!(
+        session_recency_text(&session, 3_600),
+        "active:now / age:59m"
+    );
+    assert_eq!(
+        session_recency_text(&session, 7_260),
+        "active: 1h / age: 2h"
+    );
 }
 
 #[test]

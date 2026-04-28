@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Documented implemented session-list recency rendering with right-aligned `active` and `age` values from `list_sessions_now()`. |
 | 2026-04-28 | @gpt55-dgx | Documented bottom status command rendering as plain labels with underlined shortcut-letter spans instead of parenthesized mnemonics. |
 | 2026-04-28 | @gpt55-dgx | Replaced the fixed compact-placeholder threshold with an embedded-logo fit check so landscape panes render the full motlie glyph when it fits. |
 | 2026-04-28 | @gpt55-dgx | Documented landscape render regression coverage that keeps the MOTD pane visible for both placeholder and host-provided MOTD content. |
@@ -240,13 +241,18 @@ The top status bar is derived from the app host identity and current local
 clock: `<hostname> | <ip address>` renders as bold left-justified text, and the
 current time renders right-justified. The Sessions pane title is derived only
 from the live session list length: `Sessions [n]`. List rows show the display
-name and attached marker only; stable session ids stay internal for dispatch.
+name, attached marker, and right-aligned `active:<elapsed> / age:<elapsed>`
+recency text; stable session ids stay internal for dispatch. The attached
+marker is `*` when `SessionInfo::is_attached()` is true. Recency uses
+`HostHandle::list_sessions_now()` so both the session `activity` and `created`
+timestamps are compared against the target tmux server clock, not the local
+selector clock.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with
-`(h)elp`, then `(p)ane`, `(m)onitor`, `enter/(a)ttach`, `(n)ew`, `(k)ill`,
-`(q)uit`, `(l)ayout`, and the mode-specific resize hint. Direction hints render
-as `↑/↓ sel` and `(p)ane`.
+the bottom status start with `help`, then `pane`, `monitor`, `enter/attach`,
+`new`, `kill`, `quit`, `layout`, and the mode-specific resize hint; the command
+shortcut letter is underlined in each rendered label. Direction hints render as
+`↑/↓ sel`.
 
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing

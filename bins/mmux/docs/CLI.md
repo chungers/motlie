@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added aligned session-list recency columns for `active:<elapsed> / age:<elapsed>` using the target tmux server clock. |
 | 2026-04-28 | @gpt55-dgx | Changed bottom status command hints from parenthesized mnemonics to underlined shortcut letters, e.g. underlined `h` in `help`. |
 | 2026-04-28 | @gpt55-dgx | Documented review cleanup that keeps the CLI contract unchanged while moving CLI/state/detail/render/input/terminal/host helpers out of `main.rs` and hiding internal session ids from list rows. |
 | 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
@@ -182,6 +183,14 @@ The session list auto-refreshes through `HostHandle::watch_host_events()`,
 which is currently a one-second polling loop over `list_sessions()` with
 stable-id snapshot diffing. It is not currently driven by direct tmux
 control-mode host notifications.
+
+Each session row includes the display name, an attached-client marker, and a
+right-aligned recency column. The attached marker is `*` when tmux reports one
+or more clients attached to the session. The recency column is formatted as
+`active: 3m / age: 2h`, where `active` is based on
+`SessionInfo.activity`, `age` is based on `SessionInfo.created`, and both are
+computed against the target tmux server clock from `list_sessions_now()`.
+Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
 The top status bar uses the same blue background as the bottom status bar. It
 shows `<hostname> | <ip address>` in bold at the left and the current time
