@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Documented one-second quiet visible-row refreshes for activity sorting and recency text. |
 | 2026-04-28 | @gpt55-dgx | Documented activity-descending session-list ordering with stable-id selection preservation. |
 | 2026-04-28 | @gpt55-dgx | Updated session-list recency rendering to unlabeled `<active> / <age>` text with day formatting and a right margin. |
 | 2026-04-28 | @gpt55-dgx | Clarified that recency rendering uses `list_sessions_now()` with the library's tmux-empty-epoch fallback path. |
@@ -150,6 +151,11 @@ attach/detach events, plus `Disconnect` events on transient list failures.
 Direct tmux control-mode host notification wiring is reserved for a future
 event-driven implementation; the parser is documented as dormant plumbing.
 
+Because the event stream does not emit activity-only changes, the selector also
+performs a quiet visible-row refresh with `list_sessions_now()` once per second.
+That path updates recency text and activity-descending sort order even when
+there are no add/close/rename or attach/detach events.
+
 ### Windowed Scrollback
 
 Design target:
@@ -249,7 +255,8 @@ small right margin; stable session ids stay internal for dispatch. The attached
 marker is `*` when `SessionInfo::is_attached()` is true. The list is sorted by
 `SessionInfo.activity` descending, with name/id tie-breakers only for stable
 display order; `preserve_selection()` re-finds the highlighted row by stable
-session id after each refresh. Recency uses `HostHandle::list_sessions_now()`
+session id after each refresh. A quiet one-second row refresh keeps this
+activity ordering current. Recency uses `HostHandle::list_sessions_now()`
 so the session `activity` and `created`
 timestamps are compared against the target tmux server clock when tmux exposes
 one; tmux versions that expand `#{epoch}` as empty use the library fallback

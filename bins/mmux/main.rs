@@ -21,7 +21,7 @@ use motlie_tmux::HostHandle;
 use cli::{select_layout, Cli};
 use controller::{
     drain_host_events, handle_key, load_motd, refresh_detail, refresh_sessions_preserving,
-    stop_detail_source, KeyOutcome,
+    refresh_sessions_quiet, stop_detail_source, KeyOutcome,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, LayoutMode, RetainedUiState, SelectedSession};
@@ -120,9 +120,14 @@ async fn run_selector_once(
         .map(motlie_tmux::HostEventStream::into_receiver);
     let mut terminal = TerminalSession::enter()?;
     let mut last_detail_refresh = Instant::now();
+    let mut last_session_refresh = Instant::now();
 
     loop {
         drain_host_events(host, &mut app, &mut event_rx).await?;
+        if last_session_refresh.elapsed() >= Duration::from_secs(1) {
+            refresh_sessions_quiet(host, &mut app, false).await?;
+            last_session_refresh = Instant::now();
+        }
         if last_detail_refresh.elapsed() >= Duration::from_millis(750) {
             refresh_detail(host, &mut app, false).await?;
             last_detail_refresh = Instant::now();

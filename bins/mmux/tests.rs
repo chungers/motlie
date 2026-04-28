@@ -14,7 +14,10 @@ use crate::consts::{
     LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MOTLIE_PLACEHOLDER,
     PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
-use crate::controller::{handle_key, load_motd_from, stop_monitor_if_closed, KeyOutcome};
+use crate::controller::{
+    handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
+    stop_monitor_if_closed, KeyOutcome,
+};
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
 };
@@ -341,6 +344,72 @@ fn activity_sort_preserves_selection_by_stable_id() {
         app.selected_session().map(|session| session.name),
         Some("selected".to_string())
     );
+}
+
+#[tokio::test]
+async fn quiet_refresh_reorders_by_activity_without_overwriting_status() {
+    let mock = MockTransport::new()
+        .with_response(
+            "display-message -p '__MOTLIE_EPOCH:",
+            "__MOTLIE_EPOCH:500\nolder $1 10 0 1  100\nfresh $2 20 0 1  400\n",
+        )
+        .with_response(
+            "list-sessions",
+            "older $1 10 0 1  100\nfresh $2 20 0 1  400\n",
+        )
+        .with_response("capture-pane -ep", "fresh screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.status = crate::model::StatusBanner::info("keep this");
+
+    refresh_sessions_quiet(&host, &mut app, false)
+        .await
+        .unwrap();
+
+    let names = app
+        .session_list
+        .sessions
+        .iter()
+        .map(|session| session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["fresh", "older"]);
+    assert_eq!(app.status.text(), "keep this");
+}
+
+#[tokio::test]
+async fn refresh_forces_detail_when_selected_session_changes() {
+    let mock = MockTransport::new()
+        .with_response(
+            "display-message -p '__MOTLIE_EPOCH:",
+            "__MOTLIE_EPOCH:500\nreplacement $2 20 0 1  400\n",
+        )
+        .with_response("list-sessions", "replacement $2 20 0 1  400\n")
+        .with_response("capture-pane -ep", "replacement screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.sessions = vec![session_with_times("gone", "$1", 10, 300)];
+    app.session_list.selected = 0;
+    app.set_detail_text("stale screen".to_string());
+
+    refresh_sessions_preserving(&host, &mut app, false, Some("$1".to_string()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app.selected_session().map(|session| session.name),
+        Some("replacement".to_string())
+    );
+    assert_eq!(app.detail.lines, vec!["replacement screen".to_string()]);
 }
 
 #[test]

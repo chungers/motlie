@@ -31,7 +31,16 @@ pub(crate) async fn refresh_sessions(
     force_detail: bool,
 ) -> Result<()> {
     let previous = app.selected_session().map(|s| s.id);
-    refresh_sessions_preserving(host, app, force_detail, previous).await
+    refresh_sessions_preserving_with_status(host, app, force_detail, previous, true).await
+}
+
+pub(crate) async fn refresh_sessions_quiet(
+    host: &HostHandle,
+    app: &mut AppState,
+    force_detail: bool,
+) -> Result<()> {
+    let previous = app.selected_session().map(|s| s.id);
+    refresh_sessions_preserving_with_status(host, app, force_detail, previous, false).await
 }
 
 pub(crate) async fn refresh_sessions_preserving(
@@ -40,20 +49,34 @@ pub(crate) async fn refresh_sessions_preserving(
     force_detail: bool,
     previous: Option<String>,
 ) -> Result<()> {
+    refresh_sessions_preserving_with_status(host, app, force_detail, previous, true).await
+}
+
+async fn refresh_sessions_preserving_with_status(
+    host: &HostHandle,
+    app: &mut AppState,
+    force_detail: bool,
+    previous: Option<String>,
+    update_status: bool,
+) -> Result<()> {
     let listing = host
         .list_sessions_now()
         .await
         .context("list tmux sessions with server clock")?;
+    let previous_id = previous.clone();
     app.session_list.now = listing.now;
     app.session_list
         .set_sessions_sorted_by_activity(listing.sessions);
     app.preserve_selection(previous);
-    app.status = if app.session_list.sessions.is_empty() {
-        StatusBanner::info("no sessions")
-    } else {
-        StatusBanner::info(format!("{} session(s)", app.session_list.sessions.len()))
-    };
-    refresh_detail(host, app, force_detail).await?;
+    if update_status {
+        app.status = if app.session_list.sessions.is_empty() {
+            StatusBanner::info("no sessions")
+        } else {
+            StatusBanner::info(format!("{} session(s)", app.session_list.sessions.len()))
+        };
+    }
+    let selected_id = app.selected_session().map(|session| session.id);
+    refresh_detail(host, app, force_detail || previous_id != selected_id).await?;
     Ok(())
 }
 

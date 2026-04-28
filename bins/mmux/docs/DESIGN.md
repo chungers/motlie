@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added periodic visible-row refreshes because activity-only changes do not emit host events, but must reorder the activity-sorted session list. |
 | 2026-04-28 | @gpt55-dgx | Added activity-descending session-list ordering so the most recently active session appears first while selection remains stable by id. |
 | 2026-04-28 | @gpt55-dgx | Changed session-list recency display to unlabeled `<active> / <age>` values with day bucketing and a right margin. |
 | 2026-04-28 | @gpt55-dgx | Clarified recency clock behavior for tmux versions that expand `#{epoch}` empty: fall back to a local clock clamped to session timestamps. |
@@ -667,6 +668,13 @@ previous snapshot by stable session id, and emits typed add/close/rename and
 client attach/detach events. On transient list failure it emits
 `Disconnect { reason }` and retries on the next tick. This is poll-based
 snapshot reconciliation, not direct tmux control-mode host notifications.
+
+Because activity-only changes update `SessionInfo.activity` without producing a
+structural host event, the selector also performs a quiet visible-row refresh
+with `list_sessions_now()` once per second. That refresh updates
+`SessionListState.now`, re-sorts rows by activity, preserves the highlight by
+stable session id, and only forces detail resampling when the selected session
+id changes.
 
 Issue #229 library support adds `SessionInfo.activity`,
 `SessionInfo.attached_count`, and `HostHandle::list_sessions_now()`. The
