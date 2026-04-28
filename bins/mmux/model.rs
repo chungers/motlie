@@ -171,6 +171,7 @@ pub(crate) struct MotdState {
 #[derive(Debug, Clone)]
 pub(crate) struct SessionListState {
     pub(crate) sessions: Vec<SessionInfo>,
+    pub(crate) now: u64,
     pub(crate) selected: usize,
     pub(crate) scroll: usize,
 }
@@ -349,6 +350,7 @@ impl AppState {
             },
             session_list: SessionListState {
                 sessions: Vec::new(),
+                now: 0,
                 selected: 0,
                 scroll: 0,
             },

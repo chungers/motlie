@@ -176,6 +176,7 @@ pub(crate) fn sessions_title(app: &AppState) -> String {
 
 fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let height = area.height.saturating_sub(2) as usize;
+    let row_width = area.width.saturating_sub(2) as usize;
     let mut lines = Vec::new();
     if app.session_list.sessions.is_empty() {
         lines.push(Line::from(TuiSpan::styled(
@@ -205,7 +206,7 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                 Style::default().fg(Color::White)
             };
             lines.push(Line::from(TuiSpan::styled(
-                session_list_line(session, selected),
+                session_list_line(session, selected, app.session_list.now, row_width),
                 style,
             )));
         }
@@ -218,10 +219,74 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-pub(crate) fn session_list_line(session: &SessionInfo, selected: bool) -> String {
+pub(crate) fn session_list_line(
+    session: &SessionInfo,
+    selected: bool,
+    now: u64,
+    width: usize,
+) -> String {
+    const MIN_METADATA_GAP: usize = 2;
+
+    if width == 0 {
+        return String::new();
+    }
+
     let marker = if selected { ">" } else { " " };
     let attached = if session.is_attached() { "*" } else { " " };
-    format!("{marker}{attached} {}", session.name)
+    let prefix = format!("{marker}{attached} ");
+    let metadata = session_recency_text(session, now);
+    let prefix_width = char_width(&prefix);
+    let metadata_width = char_width(&metadata);
+    if width < prefix_width + 1 + MIN_METADATA_GAP + metadata_width {
+        return pad_or_truncate(format!("{prefix}{}", session.name), width);
+    }
+
+    let name_width = width
+        .saturating_sub(prefix_width)
+        .saturating_sub(metadata_width)
+        .saturating_sub(MIN_METADATA_GAP);
+    let name = truncate_chars(&session.name, name_width);
+    let left = format!("{prefix}{name}");
+    let padding = width
+        .saturating_sub(char_width(&left))
+        .saturating_sub(metadata_width);
+    format!("{left}{}{metadata}", " ".repeat(padding))
+}
+
+pub(crate) fn session_recency_text(session: &SessionInfo, now: u64) -> String {
+    const RECENCY_FIELD_WIDTH: usize = 3;
+
+    let active = compact_elapsed(now, session.activity);
+    let age = compact_elapsed(now, session.created);
+    format!(
+        "active:{active:>width$} / age:{age:>width$}",
+        width = RECENCY_FIELD_WIDTH
+    )
+}
+
+fn compact_elapsed(now: u64, then: u64) -> String {
+    let seconds = now.saturating_sub(then);
+    if seconds < 60 {
+        "now".to_string()
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 60 / 60)
+    }
+}
+
+fn pad_or_truncate(text: String, width: usize) -> String {
+    let text = truncate_chars(&text, width);
+    let text_width = char_width(&text);
+    if text_width >= width {
+        text
+    } else {
+        format!("{text}{}", " ".repeat(width - text_width))
+    }
+}
+
+fn char_width(text: &str) -> usize {
+    text.chars().count()
 }
 
 fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &str) {
