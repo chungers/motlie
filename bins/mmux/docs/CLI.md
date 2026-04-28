@@ -2,13 +2,13 @@
 
 ## Status
 
-Implemented CLI contract for the initial `mmux` binary in
-`bins/mmux/main.rs`.
+Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Documented review cleanup that keeps the CLI contract unchanged while moving CLI/state/detail/render/input/terminal/host helpers out of `main.rs` and hiding internal session ids from list rows. |
 | 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
 | 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
 | 2026-04-27 | @gpt55-dgx | Changed main-view pane cycling from plain Left/Right to the `p` key and updated status hints. |

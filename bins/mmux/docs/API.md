@@ -4,12 +4,13 @@
 
 Implemented API contract for the initial `mmux` selector and the
 `motlie-tmux` support it consumes. This document reflects the code in
-`bins/mmux/main.rs` and the new support APIs in `libs/tmux`.
+`bins/mmux/` and the new support APIs in `libs/tmux`.
 
 ## Changelog
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Documented PR #228 review cleanup: bounded `read_text_file` for MOTD, typed `SessionId`, decomposed selector state with `StatusBanner`, focused module split, and hidden internal session ids in the list view. |
 | 2026-04-27 | @gpt55-dgx | Documented modal padding, button-bar separators, bordered New Session input, and Help build metadata placement. |
 | 2026-04-27 | @gpt55-dgx | Documented bottom status command ordering and `l` runtime layout toggling. |
 | 2026-04-27 | @gpt55-dgx | Documented `p` as the main-view pane-cycle key and updated status hints. |
@@ -34,7 +35,7 @@ Implemented API contract for the initial `mmux` selector and the
 | 2026-04-26 | @gpt55-dgx | Updated API notes for current selector behavior: Enter/`a` attach, Left/Right focus transitions, one-second polling-backed session refresh, and ANSI-preserving sample/detail rendering. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for the second validation round: monitor detail now captures rendered screen snapshots with `ScreenStable` plus ANSI/VTE parsing, resize accepts modified-arrow fallbacks, and attach PTY restore is `SIGTTOU`-safe. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for validation fixes: monitor detail uses `CaptureNormalizeMode::PlainText`, `q` exits like `Ctrl-C`, and dashboard can re-enter after detach even when tmux returns a non-zero detach status. |
-| 2026-04-26 | @gpt55-dgx | Updated API reference to implemented reality: selector CLI config, trait-backed sample/monitor detail sources, stable-id create/kill/attach flows, `HostEventStream`, host shell MOTD read, and `LinesRange` scrollback. |
+| 2026-04-26 | @gpt55-dgx | Updated API reference to implemented reality: selector CLI config, trait-backed sample/monitor detail sources, stable-id create/kill/attach flows, `HostEventStream`, host MOTD read, and `LinesRange` scrollback. |
 | 2026-04-26 | @gpt55-dgx | Mark current-PTY attach and stable session-id lookup as started in `motlie-tmux`; host event stream and windowed scrollback remain open selector dependencies. |
 | 2026-04-26 | @gpt55-dgx | Initial API contract for PR #227: documents existing library dependencies, accepted `motlie-tmux` gaps, and the selector's internal API shape. |
 
@@ -60,6 +61,7 @@ let host = SshConfig::parse("ssh://user@host?identity-file=/path/to/key")?
     .connect()
     .await?;
 let sessions = host.list_sessions().await?;
+let motd = host.read_text_file(std::path::Path::new("/etc/motd"), 64 * 1024).await?;
 ```
 
 For existing target operations:
@@ -124,15 +126,16 @@ impl HostHandle {
 }
 ```
 
-The selector reconciles session state by `SessionInfo.id`, not by display name.
+The selector reconciles session state by `SessionInfo.id` (`SessionId`), not by
+display name.
 If `SessionClosed` matches the monitored session id, the selector stops monitor
 mode and clears the detail pane until the user's next action.
 
 Status: implemented as a typed stream backed by one-second `list_sessions()`
 snapshot reconciliation. It emits stable-id add/close/rename and client
 attach/detach events, plus `Disconnect` events on transient list failures.
-Direct tmux control-mode host notification wiring is still tracked in
-`PLAN.md` 1.2b.
+Direct tmux control-mode host notification wiring is reserved for a future
+event-driven implementation; the parser is documented as dormant plumbing.
 
 ### Windowed Scrollback
 
@@ -169,8 +172,9 @@ impl HostHandle {
 }
 ```
 
-Status: implemented as `HostHandle::session_by_id()`. Session `kill()` and
-`rename()` dispatch by stable session id when available.
+Status: implemented as `HostHandle::session_by_id()`. `SessionInfo.id` is a
+non-empty `SessionId`, so session lifecycle dispatch no longer falls back to
+display name when an id is absent.
 
 ## Selector Internal Types
 
@@ -214,12 +218,23 @@ struct SelectedSession {
 }
 ```
 
+Implemented state is decomposed by concern: `HostContext`, `LayoutState`,
+`MotdState`, `SessionListState`, `DetailState`, and `StatusBanner`. `AppState`
+now coordinates those structs rather than owning one flat collection of UI,
+host, selection, detail, layout, and status fields. `main.rs` contains the
+entry/run loop. CLI parsing, terminal lifecycle, ForceCommand handling,
+target-host identity, detail sources, key handling/event refresh, and rendering
+live in `cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`,
+`detail.rs`, `controller.rs`, and `render.rs`.
+
 The top status bar is derived from the app host identity and current local
 clock: `<hostname> | <ip address>` renders as bold left-justified text, and the
 current time renders right-justified. The Sessions pane title is derived only
-from the live session list length: `Sessions [n]`. Bottom status text contains
-compact key hints and app status, not the host label, current time, layout/focus
-labels, or a `keys` prefix. Command hints in the bottom status start with
+from the live session list length: `Sessions [n]`. List rows show the display
+name and attached marker only; stable session ids stay internal for dispatch.
+Bottom status text contains compact key hints and app status, not the host
+label, current time, layout/focus labels, or a `keys` prefix. Command hints in
+the bottom status start with
 `(h)elp`, then `(p)ane`, `(m)onitor`, `enter/(a)ttach`, `(n)ew`, `(k)ill`,
 `(q)uit`, `(l)ayout`, and the mode-specific resize hint. Direction hints render
 as `↑/↓ sel` and `(p)ane`.

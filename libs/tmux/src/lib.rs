@@ -38,11 +38,13 @@ pub use sink::{
     TargetOutput,
 };
 pub use sinks::stdio::{StdioFormat, StdioSink};
-pub use transport::{ShellChannelKind, ShellEvent, SshConfig, SshTransport, TransportKind};
+pub use transport::{
+    ShellChannelKind, ShellEvent, SshConfig, SshTransport, TransportKind, SSH_DEFAULT_PORT,
+};
 pub use types::{
     CaptureNormalizeMode, CaptureOptions, CaptureResult, ClientInfo, CreateSessionOptions,
     CreateWindowOptions, ExecId, ExecOutput, ExecState, FidelityIssue, GeometrySnapshot,
-    HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery,
+    HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery, SessionId,
     SessionInfo, SplitDirection, SplitPaneOptions, SplitSize, TargetAddress, TargetLevel,
     TargetSpec, TmuxSocket, TransferOptions, WindowInfo,
 };

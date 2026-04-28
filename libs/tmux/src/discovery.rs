@@ -3,8 +3,8 @@ use regex::Regex;
 
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
-    ClientInfo, GeometrySnapshot, PaneAddress, PaneGeometry, PaneInfo, SessionInfo, TmuxSocket,
-    WindowInfo,
+    ClientInfo, GeometrySnapshot, PaneAddress, PaneGeometry, PaneInfo, SessionId, SessionInfo,
+    TmuxSocket, WindowInfo,
 };
 
 /// Parse a line of tmux `q:`-escaped fields separated by spaces.
@@ -358,7 +358,7 @@ pub(crate) fn parse_sessions(output: &str) -> Result<Vec<SessionInfo>> {
         let fields = parse_exact_fields(line, 6, "session")?;
         sessions.push(SessionInfo {
             name: fields[0].clone(),
-            id: fields[1].clone(),
+            id: SessionId::new(fields[1].clone())?,
             created: parse_u64_field(&fields[2], "created", "session", line)?,
             attached: parse_u32_field(&fields[3], "attached", "session", line)? > 0,
             window_count: parse_u32_field(&fields[4], "window_count", "session", line)?,
@@ -489,7 +489,7 @@ mod tests {
         let sessions = list_sessions(&transport, None).await.unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "build");
-        assert_eq!(sessions[0].id, "$0");
+        assert_eq!(sessions[0].id.as_str(), "$0");
         assert!(sessions[0].attached);
         assert_eq!(sessions[0].window_count, 3);
         assert!(sessions[0].group.is_none());
@@ -504,6 +504,12 @@ mod tests {
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_sessions_rejects_empty_session_id() {
+        let err = parse_sessions("build  1709900000 0 1 \n").unwrap_err();
+        assert!(err.to_string().contains("empty session id"));
     }
 
     #[tokio::test]

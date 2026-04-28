@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Tracked PR #228 review cleanup: typed `SessionId`, bounded `read_text_file` MOTD loading, documented polling host events, decomposed selector state/status, split selector concerns into focused modules, and kept internal ids hidden from the list view. |
 | 2026-04-27 | @gpt55-dgx | Tracked modal layout polish: padded content, button separators, bordered New Session input, and Help metadata placement. |
 | 2026-04-27 | @gpt55-dgx | Tracked bottom status command ordering and `l` runtime layout toggling. |
 | 2026-04-27 | @gpt55-dgx | Updated keymap tracking so `p` cycles panes and plain Left/Right no longer do. |
@@ -117,8 +118,9 @@ References: [Host Event Stream](./DESIGN.md#host-event-stream),
 
 - [x] 1.2a Add `HostHandle::watch_host_events()` returning a typed
   `HostEventStream`.
-- [ ] 1.2b Surface tmux control-mode notifications currently parsed as
-  `ControlModeMessage::Notification`.
+- [x] 1.2b Decide control-mode notification scope for v1: keep parser support
+  dormant and documented for a future event-driven watcher; ship polling-backed
+  snapshot reconciliation now.
 - [x] 1.2c Map session add/close/rename, client attach, client detach, and
   disconnect conditions into stable `HostEvent` variants.
 - [x] 1.2d Reconcile by `SessionInfo.id`, not display name.
@@ -128,8 +130,8 @@ References: [Host Event Stream](./DESIGN.md#host-event-stream),
 @gpt55-dgx 2026-04-26 -- Implementation note: the v1 `HostEventStream`
 ships as a one-second `list_sessions()` snapshot reconciler. It preserves the
 typed event API and stable-id behavior needed by the selector. True tmux
-control-mode host notifications remain tracked by 1.2b as the next library
-hardening item.
+control-mode host notifications remain reserved for a future event-driven
+implementation under the same public event stream contract.
 
 ### 1.3 ScrollbackQuery::LinesRange
 
@@ -154,6 +156,20 @@ References: [Kill Session](./DESIGN.md#kill-session),
   add a small library-owned helper such as `HostHandle::session_by_id()`.
 - [x] 1.4c Add stable-id unit coverage that asserts session kill dispatches by
   `SessionInfo.id`.
+
+### 1.5 Review Cleanup: Host Metadata and Stable IDs
+
+References: [Remote MOTD](./DESIGN.md#remote-motd),
+[Live Session List](./DESIGN.md#live-session-list).
+
+- [x] 1.5a Replace the broad host shell helper with bounded
+  `HostHandle::read_text_file(path, max_bytes)` for `/etc/motd`.
+- [x] 1.5b Introduce non-empty `SessionId` for `SessionInfo.id` and reject
+  malformed empty ids at parse time.
+- [x] 1.5c Remove session lifecycle fallback to display name for kill, rename,
+  attach, and host-event keying.
+- [x] 1.5d Shell-escape unsafe resolved tmux binary paths in generated tmux
+  command prefixes without changing safe-path command text.
 
 ## Phase 2: Binary Scaffold
 
@@ -191,6 +207,10 @@ References: [Layout](./DESIGN.md#layout), [Data Flow](./DESIGN.md#data-flow),
   selector, or receiving a close event for the monitored session id.
 - [x] 3.6 Add unit tests for rename preservation and monitored-session close
   reset behavior.
+- [x] 3.7 Decompose selector state into host, layout, MOTD, session-list,
+  detail, and typed status concerns; split CLI parsing, terminal lifecycle,
+  ForceCommand, target-host identity, detail sources, rendering, and
+  input/event handling out of `main.rs`.
 
 ## Phase 4: Layout and Rendering
 

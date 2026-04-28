@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
@@ -182,11 +183,7 @@ impl Default for SessionWatchOptions {
 }
 
 fn session_key(session: &SessionInfo) -> String {
-    if session.id.is_empty() {
-        session.name.clone()
-    } else {
-        session.id.clone()
-    }
+    session.id.as_str().to_string()
 }
 
 fn sessions_by_key(sessions: Vec<SessionInfo>) -> HashMap<String, SessionInfo> {
@@ -252,6 +249,59 @@ fn diff_session_events(
         events.insert(0, HostEvent::SessionsChanged);
     }
     events
+}
+
+async fn read_local_text_file(path: &Path, max_bytes: usize) -> Result<String> {
+    let metadata = tokio::fs::metadata(path).await?;
+    ensure_text_file_size(path, metadata.len(), max_bytes)?;
+    let text = tokio::fs::read_to_string(path).await?;
+    ensure_text_buffer_size(path, text.len(), max_bytes)?;
+    Ok(text)
+}
+
+fn read_local_text_file_blocking(path: &Path, max_bytes: usize) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    ensure_text_file_size(path, metadata.len(), max_bytes)?;
+    let text = std::fs::read_to_string(path)?;
+    ensure_text_buffer_size(path, text.len(), max_bytes)?;
+    Ok(text)
+}
+
+fn ensure_text_file_size(path: &Path, len: u64, max_bytes: usize) -> Result<()> {
+    if len > max_bytes as u64 {
+        return Err(Error::State(format!(
+            "text file {} is {} bytes, exceeding max_bytes {}",
+            path.display(),
+            len,
+            max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_text_buffer_size(path: &Path, len: usize, max_bytes: usize) -> Result<()> {
+    if len > max_bytes {
+        return Err(Error::State(format!(
+            "text file {} is {} bytes, exceeding max_bytes {}",
+            path.display(),
+            len,
+            max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn temporary_download_path(remote_path: &Path) -> PathBuf {
+    let name = remote_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("text");
+    std::env::temp_dir().join(format!(
+        "motlie-tmux-read-{}-{}-{name}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
 }
 
 pub struct SessionWatchHandle {
@@ -415,12 +465,33 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
-    /// Execute a shell command on this host and return stdout.
+    /// Read a UTF-8 text file from the host with a caller-provided size cap.
     ///
-    /// This is host-scoped rather than tmux-target scoped and is intended for
-    /// selector/deployment metadata such as `/etc/motd`.
-    pub async fn exec_shell(&self, command: &str) -> Result<String> {
-        self.inner.transport.exec(command).await
+    /// This is intentionally narrower than arbitrary host command execution:
+    /// consumers that need metadata such as `/etc/motd` do not need to embed
+    /// shell syntax or redirection in application code.
+    pub async fn read_text_file(&self, path: &Path, max_bytes: usize) -> Result<String> {
+        match &self.inner.transport {
+            TransportKind::Local(_) => read_local_text_file(path, max_bytes).await,
+            TransportKind::Mock(_) | TransportKind::Ssh(_) => {
+                let local_path = temporary_download_path(path);
+                let opts = TransferOptions::default();
+                let download_result = self
+                    .inner
+                    .transport
+                    .download(path, &local_path, &opts)
+                    .await
+                    .and_then(|_| read_local_text_file_blocking(&local_path, max_bytes));
+                let cleanup_result = tokio::fs::remove_file(&local_path).await;
+                match (download_result, cleanup_result) {
+                    (Err(err), _) => Err(err),
+                    (Ok(_), Err(err)) if err.kind() != std::io::ErrorKind::NotFound => {
+                        Err(Error::Io(err))
+                    }
+                    (Ok(text), _) => Ok(text),
+                }
+            }
+        }
     }
 
     /// Watch host-level tmux session changes.
@@ -525,7 +596,7 @@ impl HostHandle {
         let sessions = self.list_sessions().await?;
         Ok(sessions
             .into_iter()
-            .find(|s| s.id == id)
+            .find(|s| s.id.as_str() == id)
             .map(|info| Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(info),
@@ -1611,8 +1682,8 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let target = if s.id.is_empty() { &s.name } else { &s.id };
-                control::kill_session_with_prefix(&self.inner.transport, &prefix, target).await
+                control::kill_session_with_prefix(&self.inner.transport, &prefix, s.id.as_str())
+                    .await
             }
             TargetAddress::Window(_) => {
                 control::kill_window_with_prefix(
@@ -1642,18 +1713,20 @@ impl Target {
     async fn attach_command(&self) -> Result<AttachCommand> {
         let session = match &self.address {
             TargetAddress::Session(session) => session,
-            TargetAddress::Window(_) | TargetAddress::Pane(_) => {
-                return Err(Error::State(format!(
-                    "attach_current_pty only supports session targets, got '{}'",
-                    self.target_string()
-                )));
+            TargetAddress::Window(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_current_pty",
+                    level: TargetLevel::Window,
+                });
+            }
+            TargetAddress::Pane(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_current_pty",
+                    level: TargetLevel::Pane,
+                });
             }
         };
-        let target = if session.id.is_empty() {
-            session.name.as_str()
-        } else {
-            session.id.as_str()
-        };
+        let target = session.id.as_str();
         let tmux_bin = self.inner.resolve_tmux_bin().await;
 
         match &self.inner.transport {
@@ -1689,11 +1762,10 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let target = if s.id.is_empty() { &s.name } else { &s.id };
                 control::rename_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    target,
+                    s.id.as_str(),
                     new_name,
                 )
                 .await?;
@@ -2162,7 +2234,7 @@ impl HostHandle {
             inner: self.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: session_name.to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
                 attached: false,
                 window_count: 1,
@@ -2242,7 +2314,7 @@ mod tests {
         let t = target.unwrap();
         assert_eq!(t.level(), TargetLevel::Session);
         assert_eq!(t.target_string(), "build");
-        assert_eq!(t.session_info().unwrap().id, "$7");
+        assert_eq!(t.session_info().unwrap().id.as_str(), "$7");
     }
 
     #[tokio::test]
@@ -2253,12 +2325,38 @@ mod tests {
         assert!(target.is_none());
     }
 
+    #[tokio::test]
+    async fn read_text_file_reads_mock_transport_file() {
+        let mock = MockTransport::new().with_file("/etc/motd", b"hello\n".to_vec());
+        let host = mock_host(mock);
+
+        let text = host
+            .read_text_file(Path::new("/etc/motd"), 64)
+            .await
+            .unwrap();
+
+        assert_eq!(text, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_enforces_size_cap() {
+        let mock = MockTransport::new().with_file("/etc/motd", b"too large".to_vec());
+        let host = mock_host(mock);
+
+        let err = host
+            .read_text_file(Path::new("/etc/motd"), 3)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("exceeding max_bytes"));
+    }
+
     #[test]
     fn diff_session_events_reports_add_close_rename_and_client_state() {
         let previous = sessions_by_key(vec![
             SessionInfo {
                 name: "old".to_string(),
-                id: "$1".to_string(),
+                id: SessionId::for_test("$1"),
                 created: 0,
                 attached: false,
                 window_count: 1,
@@ -2266,7 +2364,7 @@ mod tests {
             },
             SessionInfo {
                 name: "gone".to_string(),
-                id: "$2".to_string(),
+                id: SessionId::for_test("$2"),
                 created: 0,
                 attached: false,
                 window_count: 1,
@@ -2276,7 +2374,7 @@ mod tests {
         let current = sessions_by_key(vec![
             SessionInfo {
                 name: "new".to_string(),
-                id: "$1".to_string(),
+                id: SessionId::for_test("$1"),
                 created: 0,
                 attached: true,
                 window_count: 1,
@@ -2284,7 +2382,7 @@ mod tests {
             },
             SessionInfo {
                 name: "added".to_string(),
-                id: "$3".to_string(),
+                id: SessionId::for_test("$3"),
                 created: 0,
                 attached: false,
                 window_count: 1,
@@ -2322,7 +2420,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: "build".to_string(),
-                id: "$7".to_string(),
+                id: SessionId::for_test("$7"),
                 created: 0,
                 attached: false,
                 window_count: 1,
@@ -2474,7 +2572,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: "old".to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
                 attached: false,
                 window_count: 1,
@@ -2820,7 +2918,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: "build".to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
                 attached: false,
                 window_count: 1,

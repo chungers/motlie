@@ -8,6 +8,8 @@ use tokio::process::{Child, Command};
 
 use crate::types::{HostKeyPolicy, TmuxSocket, TransferOptions};
 
+pub const SSH_DEFAULT_PORT: u16 = 22;
+
 // ---------------------------------------------------------------------------
 // Static-dispatch transport (DC6)
 // ---------------------------------------------------------------------------
@@ -102,9 +104,9 @@ impl TransportKind {
 /// - If `src` has no filename component (e.g. `/`), returns an error.
 fn resolve_destination(src: &Path, dst: &Path) -> Result<std::path::PathBuf> {
     if dst.is_dir() {
-        let basename = src
-            .file_name()
-            .ok_or_else(|| Error::Transport(format!("source path has no filename: {}", src.display())))?;
+        let basename = src.file_name().ok_or_else(|| {
+            Error::Transport(format!("source path has no filename: {}", src.display()))
+        })?;
         Ok(dst.join(basename))
     } else {
         Ok(dst.to_path_buf())
@@ -126,7 +128,10 @@ fn copy_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> {
 
     // Reject symlinks
     if src_meta.file_type().is_symlink() {
-        return Err(Error::Transport(format!("symlink encountered at source: {}", src.display())));
+        return Err(Error::Transport(format!(
+            "symlink encountered at source: {}",
+            src.display()
+        )));
     }
 
     if src_meta.is_dir() {
@@ -247,18 +252,27 @@ fn copy_dir_local(src: &Path, dst: &Path, opts: &TransferOptions) -> Result<()> 
 
 /// Recursively copy directory contents with merge semantics.
 fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| Error::Transport(format!("failed to read directory {}: {}", src.display(), e)))?
-    {
-        let entry =
-            entry.map_err(|e| Error::Transport(format!("failed to read dir entry in {}: {}", src.display(), e)))?;
+    for entry in std::fs::read_dir(src).map_err(|e| {
+        Error::Transport(format!("failed to read directory {}: {}", src.display(), e))
+    })? {
+        let entry = entry.map_err(|e| {
+            Error::Transport(format!(
+                "failed to read dir entry in {}: {}",
+                src.display(),
+                e
+            ))
+        })?;
         let entry_path = entry.path();
-        let entry_meta = std::fs::symlink_metadata(&entry_path)
-            .map_err(|e| Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e)))?;
+        let entry_meta = std::fs::symlink_metadata(&entry_path).map_err(|e| {
+            Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e))
+        })?;
 
         // Reject symlinks
         if entry_meta.file_type().is_symlink() {
-            return Err(Error::Transport(format!("symlink encountered: {}", entry_path.display())));
+            return Err(Error::Transport(format!(
+                "symlink encountered: {}",
+                entry_path.display()
+            )));
         }
 
         let name = entry.file_name();
@@ -278,7 +292,11 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
                 // Merge into existing directory
             } else {
                 std::fs::create_dir(&dst_entry).map_err(|e| {
-                    Error::Transport(format!("failed to create directory {}: {}", dst_entry.display(), e))
+                    Error::Transport(format!(
+                        "failed to create directory {}: {}",
+                        dst_entry.display(),
+                        e
+                    ))
                 })?;
             }
             copy_dir_contents(&entry_path, &dst_entry)?;
@@ -316,9 +334,12 @@ async fn sftp_resolve_destination(
     src: &Path,
     dst: &Path,
 ) -> Result<String> {
-    let dst_str = dst
-        .to_str()
-        .ok_or_else(|| Error::Transport(format!("destination path is not valid UTF-8: {}", dst.display())))?;
+    let dst_str = dst.to_str().ok_or_else(|| {
+        Error::Transport(format!(
+            "destination path is not valid UTF-8: {}",
+            dst.display()
+        ))
+    })?;
 
     let dst_is_dir = match sftp.symlink_metadata(dst_str).await {
         Ok(meta) => meta.is_dir(),
@@ -326,9 +347,9 @@ async fn sftp_resolve_destination(
     };
 
     if dst_is_dir {
-        let basename = src
-            .file_name()
-            .ok_or_else(|| Error::Transport(format!("source path has no filename: {}", src.display())))?;
+        let basename = src.file_name().ok_or_else(|| {
+            Error::Transport(format!("source path has no filename: {}", src.display()))
+        })?;
         Ok(format!(
             "{}/{}",
             dst_str.trim_end_matches('/'),
@@ -384,8 +405,13 @@ async fn sftp_upload_file(
         }
     }
 
-    let data = std::fs::read(local_path)
-        .map_err(|e| Error::Transport(format!("failed to read local file {}: {}", local_path.display(), e)))?;
+    let data = std::fs::read(local_path).map_err(|e| {
+        Error::Transport(format!(
+            "failed to read local file {}: {}",
+            local_path.display(),
+            e
+        ))
+    })?;
     sftp.write(&effective_dst, &data).await.map_err(|e| {
         Error::Transport(format!(
             "SFTP write failed: {} -> {}: {}",
@@ -443,9 +469,9 @@ async fn sftp_upload_dir(
                     )));
                 }
             }
-            sftp.create_dir(&effective_dst)
-                .await
-                .map_err(|e| Error::Transport(format!("SFTP mkdir failed: {}: {}", effective_dst, e)))?;
+            sftp.create_dir(&effective_dst).await.map_err(|e| {
+                Error::Transport(format!("SFTP mkdir failed: {}: {}", effective_dst, e))
+            })?;
         }
     }
 
@@ -459,16 +485,24 @@ async fn sftp_upload_dir_contents(
     remote_dir: &str,
     opts: &TransferOptions,
 ) -> Result<()> {
-    for entry in std::fs::read_dir(local_dir)
-        .map_err(|e| Error::Transport(format!("failed to read local dir {}: {}", local_dir.display(), e)))?
-    {
+    for entry in std::fs::read_dir(local_dir).map_err(|e| {
+        Error::Transport(format!(
+            "failed to read local dir {}: {}",
+            local_dir.display(),
+            e
+        ))
+    })? {
         let entry = entry.map_err(|e| Error::Transport(format!("dir entry error: {}", e)))?;
         let entry_path = entry.path();
-        let meta = std::fs::symlink_metadata(&entry_path)
-            .map_err(|e| Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e)))?;
+        let meta = std::fs::symlink_metadata(&entry_path).map_err(|e| {
+            Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e))
+        })?;
 
         if meta.file_type().is_symlink() {
-            return Err(Error::Transport(format!("symlink encountered: {}", entry_path.display())));
+            return Err(Error::Transport(format!(
+                "symlink encountered: {}",
+                entry_path.display()
+            )));
         }
 
         let name = entry.file_name();
@@ -496,9 +530,9 @@ async fn sftp_upload_dir_contents(
                     }
                 }
                 Err(_) => {
-                    sftp.create_dir(&remote_entry)
-                        .await
-                        .map_err(|e| Error::Transport(format!("SFTP mkdir failed: {}: {}", remote_entry, e)))?;
+                    sftp.create_dir(&remote_entry).await.map_err(|e| {
+                        Error::Transport(format!("SFTP mkdir failed: {}: {}", remote_entry, e))
+                    })?;
                 }
             }
             Box::pin(sftp_upload_dir_contents(
@@ -518,11 +552,12 @@ async fn sftp_upload_dir_contents(
                     )));
                 }
             }
-            let data = std::fs::read(&entry_path)
-                .map_err(|e| Error::Transport(format!("failed to read {}: {}", entry_path.display(), e)))?;
-            sftp.write(&remote_entry, &data)
-                .await
-                .map_err(|e| Error::Transport(format!("SFTP write failed: {}: {}", remote_entry, e)))?;
+            let data = std::fs::read(&entry_path).map_err(|e| {
+                Error::Transport(format!("failed to read {}: {}", entry_path.display(), e))
+            })?;
+            sftp.write(&remote_entry, &data).await.map_err(|e| {
+                Error::Transport(format!("SFTP write failed: {}: {}", remote_entry, e))
+            })?;
         }
     }
     Ok(())
@@ -535,9 +570,12 @@ async fn sftp_download_file(
     local_path: &Path,
     opts: &TransferOptions,
 ) -> Result<()> {
-    let remote_str = remote_path
-        .to_str()
-        .ok_or_else(|| Error::Transport(format!("remote path is not valid UTF-8: {}", remote_path.display())))?;
+    let remote_str = remote_path.to_str().ok_or_else(|| {
+        Error::Transport(format!(
+            "remote path is not valid UTF-8: {}",
+            remote_path.display()
+        ))
+    })?;
 
     // Resolve destination: if local_path is an existing dir, copy into it
     let effective_dst = resolve_destination(remote_path, local_path)?;
@@ -617,13 +655,21 @@ async fn sftp_download_dir(
                 )));
             }
         }
-        std::fs::create_dir(&effective_dst)
-            .map_err(|e| Error::Transport(format!("failed to create dir {}: {}", effective_dst.display(), e)))?;
+        std::fs::create_dir(&effective_dst).map_err(|e| {
+            Error::Transport(format!(
+                "failed to create dir {}: {}",
+                effective_dst.display(),
+                e
+            ))
+        })?;
     }
 
-    let remote_str = remote_path
-        .to_str()
-        .ok_or_else(|| Error::Transport(format!("remote path is not valid UTF-8: {}", remote_path.display())))?;
+    let remote_str = remote_path.to_str().ok_or_else(|| {
+        Error::Transport(format!(
+            "remote path is not valid UTF-8: {}",
+            remote_path.display()
+        ))
+    })?;
     sftp_download_dir_contents(sftp, remote_str, &effective_dst, opts).await
 }
 
@@ -654,7 +700,10 @@ async fn sftp_download_dir_contents(
             .map_err(|e| Error::Transport(format!("SFTP lstat failed: {}: {}", remote_entry, e)))?;
 
         if meta.is_symlink() {
-            return Err(Error::Transport(format!("symlink encountered: {}", remote_entry)));
+            return Err(Error::Transport(format!(
+                "symlink encountered: {}",
+                remote_entry
+            )));
         }
 
         let local_entry = local_dir.join(&name);
@@ -665,7 +714,11 @@ async fn sftp_download_dir_contents(
         if meta.is_dir() {
             if !local_entry.exists() {
                 std::fs::create_dir(&local_entry).map_err(|e| {
-                    Error::Transport(format!("failed to create dir {}: {}", local_entry.display(), e))
+                    Error::Transport(format!(
+                        "failed to create dir {}: {}",
+                        local_entry.display(),
+                        e
+                    ))
                 })?;
             }
             Box::pin(sftp_download_dir_contents(
@@ -676,12 +729,12 @@ async fn sftp_download_dir_contents(
             ))
             .await?;
         } else {
-            let data = sftp
-                .read(&remote_entry)
-                .await
-                .map_err(|e| Error::Transport(format!("SFTP read failed: {}: {}", remote_entry, e)))?;
-            std::fs::write(&local_entry, &data)
-                .map_err(|e| Error::Transport(format!("failed to write {}: {}", local_entry.display(), e)))?;
+            let data = sftp.read(&remote_entry).await.map_err(|e| {
+                Error::Transport(format!("SFTP read failed: {}: {}", remote_entry, e))
+            })?;
+            std::fs::write(&local_entry, &data).map_err(|e| {
+                Error::Transport(format!("failed to write {}: {}", local_entry.display(), e))
+            })?;
         }
     }
     Ok(())
@@ -718,7 +771,12 @@ impl LocalTransport {
                 .output(),
         )
         .await
-        .map_err(|_| Error::Transport(format!("command timed out after {:?}: {}", self.timeout, command)))?
+        .map_err(|_| {
+            Error::Transport(format!(
+                "command timed out after {:?}: {}",
+                self.timeout, command
+            ))
+        })?
         .map_err(|e| Error::Transport(format!("failed to execute command: {}", e)))?;
 
         if !output.status.success() {
@@ -1028,8 +1086,9 @@ impl MockTransport {
             return Err(Error::Transport(msg.to_string()));
         }
 
-        let src_meta = std::fs::symlink_metadata(local_path)
-            .map_err(|e| Error::Transport(format!("source not found: {}: {}", local_path.display(), e)))?;
+        let src_meta = std::fs::symlink_metadata(local_path).map_err(|e| {
+            Error::Transport(format!("source not found: {}: {}", local_path.display(), e))
+        })?;
 
         if src_meta.file_type().is_symlink() {
             return Err(Error::Transport(format!(
@@ -1062,9 +1121,9 @@ impl MockTransport {
             .get(remote_path)
             .is_some_and(|e| matches!(e, MockFsEntry::Dir))
         {
-            let name = local_path
-                .file_name()
-                .ok_or_else(|| Error::Transport(format!("source has no filename: {}", local_path.display())))?;
+            let name = local_path.file_name().ok_or_else(|| {
+                Error::Transport(format!("source has no filename: {}", local_path.display()))
+            })?;
             remote_path.join(name)
         } else {
             remote_path.to_path_buf()
@@ -1095,8 +1154,9 @@ impl MockTransport {
             }
         }
 
-        let data = std::fs::read(local_path)
-            .map_err(|e| Error::Transport(format!("failed to read {}: {}", local_path.display(), e)))?;
+        let data = std::fs::read(local_path).map_err(|e| {
+            Error::Transport(format!("failed to read {}: {}", local_path.display(), e))
+        })?;
         fs.insert(effective_dst, MockFsEntry::File(data));
         Ok(())
     }
@@ -1113,9 +1173,9 @@ impl MockTransport {
                 .get(remote_path)
                 .is_some_and(|e| matches!(e, MockFsEntry::Dir))
             {
-                let name = local_path
-                    .file_name()
-                    .ok_or_else(|| Error::Transport(format!("source has no filename: {}", local_path.display())))?;
+                let name = local_path.file_name().ok_or_else(|| {
+                    Error::Transport(format!("source has no filename: {}", local_path.display()))
+                })?;
                 remote_path.join(name)
             } else {
                 remote_path.to_path_buf()
@@ -1157,21 +1217,25 @@ impl MockTransport {
         self.mock_upload_dir_contents(local_path, &effective_dst)
     }
 
-    fn mock_upload_dir_contents(
-        &self,
-        local_path: &Path,
-        remote_path: &Path,
-    ) -> Result<()> {
-        for entry in std::fs::read_dir(local_path)
-            .map_err(|e| Error::Transport(format!("failed to read dir {}: {}", local_path.display(), e)))?
-        {
+    fn mock_upload_dir_contents(&self, local_path: &Path, remote_path: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(local_path).map_err(|e| {
+            Error::Transport(format!(
+                "failed to read dir {}: {}",
+                local_path.display(),
+                e
+            ))
+        })? {
             let entry = entry.map_err(|e| Error::Transport(format!("dir entry error: {}", e)))?;
             let entry_path = entry.path();
-            let meta = std::fs::symlink_metadata(&entry_path)
-                .map_err(|e| Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e)))?;
+            let meta = std::fs::symlink_metadata(&entry_path).map_err(|e| {
+                Error::Transport(format!("failed to stat {}: {}", entry_path.display(), e))
+            })?;
 
             if meta.file_type().is_symlink() {
-                return Err(Error::Transport(format!("symlink encountered: {}", entry_path.display())));
+                return Err(Error::Transport(format!(
+                    "symlink encountered: {}",
+                    entry_path.display()
+                )));
             }
 
             let name = entry.file_name();
@@ -1186,8 +1250,9 @@ impl MockTransport {
                 }
                 self.mock_upload_dir_contents(&entry_path, &remote_entry)?;
             } else {
-                let data = std::fs::read(&entry_path)
-                    .map_err(|e| Error::Transport(format!("failed to read {}: {}", entry_path.display(), e)))?;
+                let data = std::fs::read(&entry_path).map_err(|e| {
+                    Error::Transport(format!("failed to read {}: {}", entry_path.display(), e))
+                })?;
                 let mut fs = self.fs.lock().unwrap();
                 fs.insert(remote_entry, MockFsEntry::File(data));
             }
@@ -1210,7 +1275,9 @@ impl MockTransport {
         let fs = self.fs.lock().unwrap();
         let entry = fs
             .get(remote_path)
-            .ok_or_else(|| Error::Transport(format!("source not found: {}", remote_path.display())))?
+            .ok_or_else(|| {
+                Error::Transport(format!("source not found: {}", remote_path.display()))
+            })?
             .clone();
         drop(fs);
 
@@ -1238,9 +1305,9 @@ impl MockTransport {
         opts: &TransferOptions,
     ) -> Result<()> {
         let effective_dst = if local_path.is_dir() {
-            let name = remote_path
-                .file_name()
-                .ok_or_else(|| Error::Transport(format!("source has no filename: {}", remote_path.display())))?;
+            let name = remote_path.file_name().ok_or_else(|| {
+                Error::Transport(format!("source has no filename: {}", remote_path.display()))
+            })?;
             local_path.join(name)
         } else {
             local_path.to_path_buf()
@@ -1270,8 +1337,13 @@ impl MockTransport {
             }
         }
 
-        std::fs::write(&effective_dst, data)
-            .map_err(|e| Error::Transport(format!("failed to write {}: {}", effective_dst.display(), e)))?;
+        std::fs::write(&effective_dst, data).map_err(|e| {
+            Error::Transport(format!(
+                "failed to write {}: {}",
+                effective_dst.display(),
+                e
+            ))
+        })?;
         Ok(())
     }
 
@@ -1282,9 +1354,9 @@ impl MockTransport {
         opts: &TransferOptions,
     ) -> Result<()> {
         let effective_dst = if local_path.is_dir() {
-            let name = remote_path
-                .file_name()
-                .ok_or_else(|| Error::Transport(format!("source has no filename: {}", remote_path.display())))?;
+            let name = remote_path.file_name().ok_or_else(|| {
+                Error::Transport(format!("source has no filename: {}", remote_path.display()))
+            })?;
             local_path.join(name)
         } else {
             local_path.to_path_buf()
@@ -1312,19 +1384,20 @@ impl MockTransport {
                     )));
                 }
             }
-            std::fs::create_dir(&effective_dst)
-                .map_err(|e| Error::Transport(format!("failed to create dir {}: {}", effective_dst.display(), e)))?;
+            std::fs::create_dir(&effective_dst).map_err(|e| {
+                Error::Transport(format!(
+                    "failed to create dir {}: {}",
+                    effective_dst.display(),
+                    e
+                ))
+            })?;
         }
 
         self.mock_download_dir_contents(remote_path, &effective_dst)
     }
 
     /// Download directory contents from mock fs to local fs (no cp-r placement).
-    fn mock_download_dir_contents(
-        &self,
-        remote_path: &Path,
-        local_dir: &Path,
-    ) -> Result<()> {
+    fn mock_download_dir_contents(&self, remote_path: &Path, local_dir: &Path) -> Result<()> {
         let children: Vec<(std::path::PathBuf, MockFsEntry)> = {
             let fs = self.fs.lock().unwrap();
             fs.iter()
@@ -1334,19 +1407,28 @@ impl MockTransport {
         };
 
         for (child_path, entry) in children {
-            let name = child_path
-                .file_name()
-                .ok_or_else(|| Error::Transport(format!("child has no filename: {}", child_path.display())))?;
+            let name = child_path.file_name().ok_or_else(|| {
+                Error::Transport(format!("child has no filename: {}", child_path.display()))
+            })?;
             let local_child = local_dir.join(name);
             match entry {
                 MockFsEntry::File(data) => {
-                    std::fs::write(&local_child, &data)
-                        .map_err(|e| Error::Transport(format!("failed to write {}: {}", local_child.display(), e)))?;
+                    std::fs::write(&local_child, &data).map_err(|e| {
+                        Error::Transport(format!(
+                            "failed to write {}: {}",
+                            local_child.display(),
+                            e
+                        ))
+                    })?;
                 }
                 MockFsEntry::Dir => {
                     if !local_child.exists() {
                         std::fs::create_dir(&local_child).map_err(|e| {
-                            Error::Transport(format!("failed to create dir {}: {}", local_child.display(), e))
+                            Error::Transport(format!(
+                                "failed to create dir {}: {}",
+                                local_child.display(),
+                                e
+                            ))
                         })?;
                     }
                     self.mock_download_dir_contents(&child_path, &local_child)?;
@@ -1391,7 +1473,7 @@ impl SshConfig {
     pub fn new(host: impl Into<String>, user: impl Into<String>) -> Self {
         SshConfig {
             host: host.into(),
-            port: 22,
+            port: SSH_DEFAULT_PORT,
             user: user.into(),
             host_key_policy: HostKeyPolicy::default(),
             timeout: std::time::Duration::from_secs(10),
@@ -1701,17 +1783,13 @@ impl SshTransport {
         .map_err(|_| {
             Error::Transport(format!(
                 "SSH connection to {}:{} timed out after {:?}",
-                config.host,
-                config.port,
-                config.timeout
+                config.host, config.port, config.timeout
             ))
         })?
         .map_err(|e| {
             Error::Transport(format!(
                 "SSH connection to {}:{} failed: {}",
-                config.host,
-                config.port,
-                e
+                config.host, config.port, e
             ))
         })?;
 
@@ -1753,7 +1831,8 @@ impl SshTransport {
 
         if identities.is_empty() {
             return Err(Error::Transport(
-                "SSH agent has no identities. Add a key with: ssh-add ~/.ssh/id_ed25519".to_string()
+                "SSH agent has no identities. Add a key with: ssh-add ~/.ssh/id_ed25519"
+                    .to_string(),
             ));
         }
 
@@ -1855,10 +1934,9 @@ impl SshTransport {
             // self-contained — its read/write operations don't need the Handle.
             let mut channel = {
                 let handle = self.handle.lock().await;
-                handle
-                    .channel_open_session()
-                    .await
-                    .map_err(|e| Error::Transport(format!("SSH: failed to open session channel: {}", e)))?
+                handle.channel_open_session().await.map_err(|e| {
+                    Error::Transport(format!("SSH: failed to open session channel: {}", e))
+                })?
             };
 
             channel
@@ -1895,8 +1973,7 @@ impl SshTransport {
         .map_err(|_| {
             Error::Transport(format!(
                 "SSH command timed out after {:?}: {}",
-                self.config.timeout,
-                command
+                self.config.timeout, command
             ))
         })??;
 
@@ -1910,10 +1987,12 @@ impl SshTransport {
     async fn open_shell(&self, cols: u32, rows: u32) -> Result<SshShellChannel> {
         let channel = {
             let handle = self.handle.lock().await;
-            handle
-                .channel_open_session()
-                .await
-                .map_err(|e| Error::Transport(format!("SSH: failed to open session channel for shell: {}", e)))?
+            handle.channel_open_session().await.map_err(|e| {
+                Error::Transport(format!(
+                    "SSH: failed to open session channel for shell: {}",
+                    e
+                ))
+            })?
         };
 
         // Request a PTY for interactive shell use
@@ -1959,20 +2038,23 @@ impl SshTransport {
     async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession> {
         let channel = {
             let handle = self.handle.lock().await;
-            handle
-                .channel_open_session()
-                .await
-                .map_err(|e| Error::Transport(format!("SSH: failed to open session channel for SFTP: {}", e)))?
+            handle.channel_open_session().await.map_err(|e| {
+                Error::Transport(format!(
+                    "SSH: failed to open session channel for SFTP: {}",
+                    e
+                ))
+            })?
         };
 
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| Error::Transport(format!("SSH: failed to request SFTP subsystem: {}", e)))?;
+        channel.request_subsystem(true, "sftp").await.map_err(|e| {
+            Error::Transport(format!("SSH: failed to request SFTP subsystem: {}", e))
+        })?;
 
         let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
             .await
-            .map_err(|e| Error::Transport(format!("SSH: failed to initialize SFTP session: {}", e)))?;
+            .map_err(|e| {
+                Error::Transport(format!("SSH: failed to initialize SFTP session: {}", e))
+            })?;
         Ok(sftp)
     }
 
@@ -1987,8 +2069,9 @@ impl SshTransport {
         opts: &TransferOptions,
     ) -> Result<()> {
         tokio::time::timeout(self.config.timeout, async {
-            let src_meta = std::fs::symlink_metadata(local_path)
-                .map_err(|e| Error::Transport(format!("source not found: {}: {}", local_path.display(), e)))?;
+            let src_meta = std::fs::symlink_metadata(local_path).map_err(|e| {
+                Error::Transport(format!("source not found: {}: {}", local_path.display(), e))
+            })?;
 
             if src_meta.file_type().is_symlink() {
                 return Err(Error::Transport(format!(
@@ -2036,14 +2119,20 @@ impl SshTransport {
             let sftp = self.open_sftp().await?;
 
             let remote_str = remote_path.to_str().ok_or_else(|| {
-                Error::Transport(format!("remote path is not valid UTF-8: {}", remote_path.display()))
+                Error::Transport(format!(
+                    "remote path is not valid UTF-8: {}",
+                    remote_path.display()
+                ))
             })?;
 
             // Use lstat (symlink_metadata) to detect symlinks without following
-            let remote_meta = sftp
-                .symlink_metadata(remote_str)
-                .await
-                .map_err(|e| Error::Transport(format!("source not found: {}: {}", remote_path.display(), e)))?;
+            let remote_meta = sftp.symlink_metadata(remote_str).await.map_err(|e| {
+                Error::Transport(format!(
+                    "source not found: {}: {}",
+                    remote_path.display(),
+                    e
+                ))
+            })?;
 
             if remote_meta.is_symlink() {
                 return Err(Error::Transport(format!(
@@ -2238,8 +2327,9 @@ pub fn tmux_prefix(socket: Option<&TmuxSocket>) -> String {
 
 /// Build the tmux command prefix using a specific binary path.
 pub fn tmux_prefix_with_bin(tmux_bin: &str, socket: Option<&TmuxSocket>) -> String {
+    let tmux_bin = shell_quote(tmux_bin);
     match socket {
-        None => tmux_bin.to_string(),
+        None => tmux_bin,
         Some(TmuxSocket::Name(n)) => format!("{} -L '{}'", tmux_bin, shell_escape_arg(n)),
         Some(TmuxSocket::Path(p)) => format!("{} -S '{}'", tmux_bin, shell_escape_arg(p)),
     }
@@ -2260,6 +2350,20 @@ pub fn is_valid_socket_name(name: &str) -> bool {
 /// POSIX shell escape: single-quote wrapping with '\'' for interior quotes.
 pub fn shell_escape_arg(s: &str) -> String {
     s.replace('\'', "'\\''")
+}
+
+fn shell_quote(s: &str) -> String {
+    if is_shell_safe_word(s) {
+        s.to_string()
+    } else {
+        format!("'{}'", shell_escape_arg(s))
+    }
+}
+
+fn is_shell_safe_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
 }
 
 #[cfg(test)]
@@ -2371,6 +2475,14 @@ mod tests {
     fn tmux_prefix_path() {
         let socket = TmuxSocket::Path("/tmp/tmux.sock".to_string());
         assert_eq!(tmux_prefix(Some(&socket)), "tmux -S '/tmp/tmux.sock'");
+    }
+
+    #[test]
+    fn tmux_prefix_with_bin_escapes_unsafe_binary_path() {
+        assert_eq!(
+            tmux_prefix_with_bin("/opt/tmux bin/tmux", None),
+            "'/opt/tmux bin/tmux'"
+        );
     }
 
     #[test]
@@ -2504,8 +2616,7 @@ mod tests {
 
     #[test]
     fn ssh_exec_timeout_does_not_imply_inactivity_timeout() {
-        let cfg = SshConfig::new("host", "user")
-            .with_timeout(std::time::Duration::from_secs(45));
+        let cfg = SshConfig::new("host", "user").with_timeout(std::time::Duration::from_secs(45));
         assert_eq!(cfg.timeout(), std::time::Duration::from_secs(45));
         assert_eq!(
             cfg.inactivity_timeout(),
