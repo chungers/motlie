@@ -87,7 +87,7 @@ pub async fn list_sessions_with_prefix(
     parse_sessions(&output)
 }
 
-/// List all tmux sessions and include the tmux server's current epoch seconds.
+/// List all tmux sessions and include a clock for recency calculations.
 pub async fn list_sessions_now(
     transport: &TransportKind,
     socket: Option<&TmuxSocket>,
@@ -95,7 +95,7 @@ pub async fn list_sessions_now(
     list_sessions_now_with_prefix(transport, &tmux_prefix(socket)).await
 }
 
-/// List all tmux sessions and include the server clock using a caller-provided prefix.
+/// List all tmux sessions and include a clock using a caller-provided prefix.
 pub async fn list_sessions_now_with_prefix(
     transport: &TransportKind,
     prefix: &str,
@@ -368,22 +368,30 @@ pub(crate) fn parse_session_listing(output: &str) -> Result<SessionListing> {
             "missing session listing epoch line".to_string(),
         ));
     };
-    let now = parse_session_listing_epoch(epoch_line)?;
     let session_output = lines.collect::<Vec<_>>().join("\n");
-    Ok(SessionListing {
-        now,
-        sessions: parse_sessions(&session_output)?,
-    })
+    let sessions = parse_sessions(&session_output)?;
+    let now = parse_session_listing_epoch(epoch_line)?
+        .unwrap_or_else(|| fallback_session_listing_now(local_epoch_seconds(), &sessions));
+    Ok(SessionListing { now, sessions })
 }
 
-fn parse_session_listing_epoch(line: &str) -> Result<u64> {
+fn parse_session_listing_epoch(line: &str) -> Result<Option<u64>> {
     let Some(value) = line.strip_prefix(SESSION_LISTING_EPOCH_PREFIX) else {
         return Err(Error::Command(format!(
             "malformed session listing epoch line: {}",
             line
         )));
     };
-    parse_u64_field(value, "now", "session listing", line)
+    if value.is_empty() {
+        return Ok(None);
+    }
+    parse_u64_field(value, "now", "session listing", line).map(Some)
+}
+
+fn fallback_session_listing_now(local_now: u64, sessions: &[SessionInfo]) -> u64 {
+    sessions.iter().fold(local_now, |now, session| {
+        now.max(session.created).max(session.activity)
+    })
 }
 
 fn parse_bool_field(value: &str, field: &str, kind: &str, line: &str) -> Result<bool> {
@@ -620,6 +628,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_sessions_now_accepts_empty_epoch_from_tmux() {
+        let mock = MockTransport::new().with_response(
+            "display-message -p '__MOTLIE_EPOCH:",
+            "__MOTLIE_EPOCH:\nbuild $0 4 0 1  7\nidle $1 1 0 1  2\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let listing = list_sessions_now(&transport, None).await.unwrap();
+
+        assert_eq!(listing.sessions.len(), 2);
+        assert!(listing.now >= 7);
+    }
+
+    #[test]
+    fn parse_session_listing_empty_epoch_clamps_to_session_timestamps() {
+        let listing =
+            parse_session_listing("__MOTLIE_EPOCH:\nbuild $0 4000000000 0 1  4000000300\n")
+                .unwrap();
+
+        assert_eq!(listing.now, 4000000300);
+        assert_eq!(listing.sessions[0].name, "build");
+    }
+
+    #[tokio::test]
     async fn list_sessions_now_empty_state_falls_back_to_local_epoch() {
         let cmd = list_sessions_now_command("tmux");
         let before = local_epoch_seconds();
@@ -655,6 +687,14 @@ mod tests {
         assert!(err
             .to_string()
             .contains("missing session listing epoch line"));
+    }
+
+    #[test]
+    fn parse_session_listing_rejects_invalid_epoch_value() {
+        let err = parse_session_listing("__MOTLIE_EPOCH:not-a-number\n").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid session listing now value"));
     }
 
     #[test]
