@@ -172,7 +172,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Catalog, LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX};
+    use crate::Catalog;
     use motlie_model::typed::SynthesisRequest;
     use motlie_model::{ArtifactPolicy, StartOptions};
     use std::time::{SystemTime, UNIX_EPOCH};
