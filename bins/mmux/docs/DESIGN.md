@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Clarified landscape MOTD sizing: `LT` is sized from the post-split left-column area so placeholder or host MOTD content remains visible before the session list. |
 | 2026-04-28 | @gpt55-dgx | Added round-3 testability clarification: MOTD loading is factored through `load_motd_from(host, path)` and regression-tested for fallback/readable cases, full/compact placeholder rendering, and portrait omission. |
 | 2026-04-28 | @gpt55-dgx | Updated review cleanup reality: MOTD loading now uses bounded `HostHandle::read_text_file`, session ids are typed `SessionId`s, host events remain documented as polling-backed with control-mode notifications reserved for future use, and selector state/render/input/detail concerns are split into focused modules plus typed `StatusBanner`. |
 | 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
@@ -392,9 +393,11 @@ The body area is split horizontally into `L` and `R`.
 - `LT`: MOTD, height `min(rendered_motd_lines + chrome, 30% of L height)`
   when MOTD is present. When MOTD
   is absent/empty/unreadable, `LT` height = `glyph_rows + caption + chrome`
-  (bypasses the 30% cap so the motlie placeholder fully renders); narrow-
-  terminal fallback collapses `LT` to a single line. See §Functional
-  Requirements for the placeholder rendering rule.
+  (bypasses the 30% cap so the motlie placeholder fully renders when there is
+  room). The height calculation uses the post-split `L` area and preserves
+  space for `LB`; when the full placeholder does not fit, `LT` falls back to
+  the compact motlie placeholder plus caption instead of disappearing. See
+  §Functional Requirements for the placeholder rendering rule.
 - `LB`: session list, remaining height. The viewport scrolls to keep the
   highlighted row visible. Rows render display names and attachment markers;
   stable tmux session ids are retained in state for dispatch but not shown.
