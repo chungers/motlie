@@ -14,7 +14,7 @@ use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, MODAL_BUTTON_HEIGHT,
     MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING, MODAL_MIN_WIDTH,
     MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT, MOTLIE_PLACEHOLDER,
-    NORMAL_STATUS_KEYS, PORTRAIT_STATUS_KEYS, STATUS_BAR_BG,
+    STATUS_BAR_BG,
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView};
@@ -278,12 +278,12 @@ pub(crate) fn detail_text_for_render(text: &str) -> Text<'_> {
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let text = status_line_text(app);
-    let paragraph = Paragraph::new(Line::from(vec![
-        TuiSpan::styled(text, Style::default().fg(Color::White).bg(STATUS_BAR_BG)),
-        TuiSpan::styled(format!(" | {}", app.status.text()), app.status.style()),
-    ]))
-    .style(Style::default().bg(STATUS_BAR_BG));
+    let mut line = status_line(app);
+    line.spans.push(TuiSpan::styled(
+        format!(" | {}", app.status.text()),
+        app.status.style(),
+    ));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(STATUS_BAR_BG));
     frame.render_widget(paragraph, area);
 }
 
@@ -331,13 +331,74 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
+#[cfg(test)]
 pub(crate) fn status_line_text(app: &AppState) -> String {
-    let keys = if app.layout.mode == LayoutMode::Portrait {
-        PORTRAIT_STATUS_KEYS
-    } else {
-        NORMAL_STATUS_KEYS
-    };
-    format!(" {} ", keys)
+    status_line(app)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+pub(crate) fn status_line(app: &AppState) -> Line<'static> {
+    let mut spans = vec![status_span(" ↑/↓ sel | ")];
+    push_status_command(&mut spans, "help", 'h');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "pane", 'p');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "monitor", 'm');
+    push_status_separator(&mut spans);
+    spans.push(status_span("enter/"));
+    push_status_command(&mut spans, "attach", 'a');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "new", 'n');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "kill", 'k');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "quit", 'q');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "layout", 'l');
+    push_status_separator(&mut spans);
+    spans.push(status_span(match app.layout.mode {
+        LayoutMode::Portrait => "mod-↑/↓ resize ",
+        LayoutMode::Normal => "mod-←/→ resize ",
+    }));
+    Line::from(spans)
+}
+
+fn push_status_separator(spans: &mut Vec<TuiSpan<'static>>) {
+    spans.push(status_span(" | "));
+}
+
+fn push_status_command(spans: &mut Vec<TuiSpan<'static>>, label: &'static str, mnemonic: char) {
+    let mut plain = String::new();
+    let mut found = false;
+    for ch in label.chars() {
+        if !found && ch == mnemonic {
+            if !plain.is_empty() {
+                spans.push(status_span(plain));
+                plain = String::new();
+            }
+            spans.push(TuiSpan::styled(
+                ch.to_string(),
+                status_base_style().add_modifier(Modifier::UNDERLINED),
+            ));
+            found = true;
+        } else {
+            plain.push(ch);
+        }
+    }
+    if !plain.is_empty() {
+        spans.push(status_span(plain));
+    }
+}
+
+fn status_span(text: impl Into<std::borrow::Cow<'static, str>>) -> TuiSpan<'static> {
+    TuiSpan::styled(text, status_base_style())
+}
+
+fn status_base_style() -> Style {
+    Style::default().fg(Color::White).bg(STATUS_BAR_BG)
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
