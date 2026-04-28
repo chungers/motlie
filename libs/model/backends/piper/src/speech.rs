@@ -437,7 +437,7 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
         // @codex-tts 2026-04-27 -- Piper exits with glibc heap corruption on this host when
         // the ONNX Runtime CUDA execution provider is enabled during teardown. Default to CPU
         // for Piper as a stability workaround, but allow explicit opt-in probing with
-        // MOTLIE_PIPER_ALLOW_CUDA=1 on hosts that may not reproduce the crash.
+        // MOTLIE_PIPER_ALLOW_CUDA=1 on hosts that may not reproduce the crash. See issue #230.
         session: Mutex::new(build_session_with_target(
             "piper",
             &artifacts.model,
