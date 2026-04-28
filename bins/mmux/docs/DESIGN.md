@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Replaced the old fixed compact-placeholder width threshold with a fit check derived from the embedded motlie glyph dimensions. |
 | 2026-04-28 | @gpt55-dgx | Clarified landscape MOTD sizing: `LT` is sized from the post-split left-column area so placeholder or host MOTD content remains visible before the session list. |
 | 2026-04-28 | @gpt55-dgx | Added round-3 testability clarification: MOTD loading is factored through `load_motd_from(host, path)` and regression-tested for fallback/readable cases, full/compact placeholder rendering, and portrait omission. |
 | 2026-04-28 | @gpt55-dgx | Updated review cleanup reality: MOTD loading now uses bounded `HostHandle::read_text_file`, session ids are typed `SessionId`s, host events remain documented as polling-backed with control-mode notifications reserved for future use, and selector state/render/input/detail concerns are split into focused modules plus typed `StatusBanner`. |
@@ -396,7 +397,9 @@ The body area is split horizontally into `L` and `R`.
   (bypasses the 30% cap so the motlie placeholder fully renders when there is
   room). The height calculation uses the post-split `L` area and preserves
   space for `LB`; when the full placeholder does not fit, `LT` falls back to
-  the compact motlie placeholder plus caption instead of disappearing. See
+  the compact motlie placeholder plus caption instead of disappearing. The
+  compact/full decision is based on the embedded placeholder's actual line
+  count and maximum line width, not a fixed terminal-width threshold. See
   §Functional Requirements for the placeholder rendering rule.
 - `LB`: session list, remaining height. The viewport scrolls to keep the
   highlighted row visible. Rows render display names and attachment markers;
