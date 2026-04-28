@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Documented round-3 PR feedback coverage for `load_motd_from`, MOTD fallback cases, full/compact placeholder rendering, portrait MOTD omission, and local `read_text_file` edge cases. |
 | 2026-04-28 | @gpt55-dgx | Documented PR #228 review cleanup: bounded `read_text_file` for MOTD, typed `SessionId`, decomposed selector state with `StatusBanner`, focused module split, and hidden internal session ids in the list view. |
 | 2026-04-27 | @gpt55-dgx | Documented modal padding, button-bar separators, bordered New Session input, and Help build metadata placement. |
 | 2026-04-27 | @gpt55-dgx | Documented bottom status command ordering and `l` runtime layout toggling. |
@@ -63,6 +64,11 @@ let host = SshConfig::parse("ssh://user@host?identity-file=/path/to/key")?
 let sessions = host.list_sessions().await?;
 let motd = host.read_text_file(std::path::Path::new("/etc/motd"), 64 * 1024).await?;
 ```
+
+`mmux` wraps that call in `load_motd_from(host, path)` so the default
+`/etc/motd` path and fallback policy can be tested separately. Missing, empty,
+whitespace-only, unreadable, and oversized files produce the embedded motlie
+placeholder; readable content is returned with trailing whitespace trimmed.
 
 For existing target operations:
 
@@ -397,18 +403,23 @@ API tests must cover:
 - session count rendering in the Sessions pane title without hostname/IP
 - Help modal open/close behavior, key-function display, build date display,
   and last-8-character build SHA display
+- MOTD fallback behavior for missing, empty, whitespace-only, oversized, and
+  readable files; wide full-logo rendering; compact narrow rendering; and
+  portrait-mode MOTD omission
 - default attach/re-enter and no-loop conditions
 
 Current implementation coverage:
 
 - `cargo test -p motlie-tmux`: attach command/status including the
   `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
-  and stable-id kill coverage.
+  stable-id kill coverage, and `read_text_file` local/mock behavior for
+  missing, empty, normal, oversized, and unreadable files.
 - `cargo test -p motlie-mmux`: CLI mutual exclusion, stable-id
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
   modified-arrow resize fallbacks, `p` pane focus transitions, `l` layout
-  toggle behavior, compact status hint rendering, sample color preservation, Help modal
-  key-function/display/close behavior, monitor screen capture, ANSI/VTE
-  parsing, and monitored-session-close reset.
+  toggle behavior, compact status hint rendering, MOTD fallback/readability
+  cases, full/compact placeholder rendering, portrait MOTD omission, sample
+  color preservation, Help modal key-function/display/close behavior, monitor
+  screen capture, ANSI/VTE parsing, and monitored-session-close reset.

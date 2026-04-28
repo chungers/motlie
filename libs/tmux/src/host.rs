@@ -2351,6 +2351,92 @@ mod tests {
         assert!(err.to_string().contains("exceeding max_bytes"));
     }
 
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("motlie-tmux-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    async fn write_test_file(name: &str, content: impl AsRef<[u8]>) -> PathBuf {
+        let path = unique_test_path(name);
+        tokio::fs::write(&path, content).await.unwrap();
+        path
+    }
+
+    async fn remove_test_file(path: &Path) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_missing_local_file() {
+        let host = HostHandle::local();
+        let missing = unique_test_path("missing");
+
+        let err = host.read_text_file(&missing, 64).await.unwrap_err();
+
+        assert!(err.to_string().contains("No such file"));
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_ok_for_empty_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("empty", b"").await;
+
+        let text = host.read_text_file(&path, 64).await.unwrap();
+        remove_test_file(&path).await;
+
+        assert_eq!(text, "");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_ok_for_normal_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("normal", b"hello\n").await;
+
+        let text = host.read_text_file(&path, 64).await.unwrap();
+        remove_test_file(&path).await;
+
+        assert_eq!(text, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_oversized_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("oversized", vec![b'x'; 128]).await;
+
+        let err = host.read_text_file(&path, 64).await.unwrap_err();
+        remove_test_file(&path).await;
+
+        assert!(err.to_string().contains("max_bytes"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_unreadable_local_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let host = HostHandle::local();
+        let path = write_test_file("unreadable", b"secret").await;
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let result = host.read_text_file(&path, 64).await;
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        remove_test_file(&path).await;
+
+        assert!(result.is_err());
+    }
+
     #[test]
     fn diff_session_events_reports_add_close_rename_and_client_state() {
         let previous = sessions_by_key(vec![

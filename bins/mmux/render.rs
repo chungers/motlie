@@ -90,7 +90,7 @@ fn focused_style(app: &AppState, focus: Focus) -> Style {
     }
 }
 
-fn use_compact_placeholder(app: &AppState, width: u16, height: u16) -> bool {
+pub(crate) fn use_compact_placeholder(app: &AppState, width: u16, height: u16) -> bool {
     if !app.motd.is_placeholder {
         return false;
     }

@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added round-3 testability clarification: MOTD loading is factored through `load_motd_from(host, path)` and regression-tested for fallback/readable cases, full/compact placeholder rendering, and portrait omission. |
 | 2026-04-28 | @gpt55-dgx | Updated review cleanup reality: MOTD loading now uses bounded `HostHandle::read_text_file`, session ids are typed `SessionId`s, host events remain documented as polling-backed with control-mode notifications reserved for future use, and selector state/render/input/detail concerns are split into focused modules plus typed `StatusBanner`. |
 | 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
 | 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
@@ -979,7 +980,10 @@ impl HostHandle {
 
 For v1, `mmux` calls `read_text_file(Path::new("/etc/motd"), 64 * 1024)` and
 uses the embedded motlie placeholder when the read fails or returns only
-whitespace.
+whitespace. The implementation exposes the same policy internally as
+`load_motd_from(host, path)` so tests can exercise missing, empty,
+whitespace-only, oversized, and readable files without mutating the host's real
+`/etc/motd`.
 
 ## Host-Wide SSH Integration
 
