@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Changed bottom status command hints from parenthesized mnemonics to underlined shortcut letters, e.g. underlined `h` in `help`. |
 | 2026-04-28 | @gpt55-dgx | Documented review cleanup that keeps the CLI contract unchanged while moving CLI/state/detail/render/input/terminal/host helpers out of `main.rs` and hiding internal session ids from list rows. |
 | 2026-04-27 | @gpt55-dgx | Updated modal layout: padded content, separator above button bar, bordered New Session input, and Help build metadata before key functions. |
 | 2026-04-27 | @gpt55-dgx | Reordered bottom status commands and added `l` to toggle portrait/landscape layout at runtime. |
@@ -187,10 +188,11 @@ shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
-`(p)ane` for pane focus. It orders command hints as `(h)elp`, `(p)ane`,
-`(m)onitor`, `enter/(a)ttach`, `(n)ew`, `(k)ill`, `(q)uit`, `(l)ayout`, then
-mode-specific resize. It does not repeat the host/time, show focus/layout
-mode, or prefix the hints with a `keys` label.
+`pane` for pane focus, with the shortcut letter underlined. It orders command
+hints as `help`, `pane`, `monitor`, `enter/attach`, `new`, `kill`, `quit`,
+`layout`, then mode-specific resize; the command shortcut letters
+`h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are underlined in the TUI. It does not repeat
+the host/time, show focus/layout mode, or prefix the hints with a `keys` label.
 
 Modal keys:
 

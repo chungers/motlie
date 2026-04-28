@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Tracked bottom status command hints as plain words with underlined shortcut letters instead of `(x)` mnemonics. |
 | 2026-04-28 | @gpt55-dgx | Updated placeholder tests so landscape requires the full motlie glyph whenever the embedded logo dimensions fit the pane. |
 | 2026-04-28 | @gpt55-dgx | Added landscape MOTD pane regression coverage for placeholder and host-provided MOTD content. |
 | 2026-04-28 | @gpt55-dgx | Added PR #228 round-3 regression coverage for bounded host text reads, injectable MOTD fallback loading, full/compact placeholder rendering, and portrait MOTD omission. |
@@ -234,10 +235,10 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.6 Implement a blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the blue bottom status bar to
-  compact direction hints (`↑/↓ sel`, `(p)ane`), command hints
-  ordered as `(h)elp`, `(p)ane`, `(m)onitor`, `enter/(a)ttach`, `(n)ew`,
-  `(k)ill`, `(q)uit`, `(l)ayout`, then resize, and app status with no `keys`,
-  host, time, focus, or layout-mode labels.
+  compact direction hints (`↑/↓ sel`, underlined `p` in `pane`), command hints
+  ordered as `help`, `pane`, `monitor`, `enter/attach`, `new`, `kill`, `quit`,
+  `layout`, then resize, with shortcut letters underlined and app status with
+  no `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.

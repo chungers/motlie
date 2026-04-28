@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Changed bottom status command hints from parenthesized mnemonics to rendered underlined shortcut letters. |
 | 2026-04-28 | @gpt55-dgx | Replaced the old fixed compact-placeholder width threshold with a fit check derived from the embedded motlie glyph dimensions. |
 | 2026-04-28 | @gpt55-dgx | Clarified landscape MOTD sizing: `LT` is sized from the post-split left-column area so placeholder or host MOTD content remains visible before the session list. |
 | 2026-04-28 | @gpt55-dgx | Added round-3 testability clarification: MOTD loading is factored through `load_motd_from(host, path)` and regression-tested for fallback/readable cases, full/compact placeholder rendering, and portrait omission. |
@@ -197,10 +198,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
-  `(p)ane` for pane focus. Always-on command hints are ordered with
-  `(h)elp`, `(p)ane`, `(m)onitor`, `enter/(a)ttach`, `(n)ew`, `(k)ill`,
-  `(q)uit`, `(l)ayout`, then mode-specific resize. The bottom status bar must
-  not show a `keys` label, time, host,
+  `pane` for pane focus, with the shortcut letter underlined. Always-on
+  command hints are ordered as `help`, `pane`, `monitor`, `enter/attach`,
+  `new`, `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
+  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are underlined in the TUI. The
+  bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a blue background.
 - The selector must keep `LB`
@@ -418,7 +420,8 @@ unfocused). The blue top status bar shows bold host/IP at left using `|` as
 the separator and
 right-justified time. The blue bottom status bar shows key hints and status
 text only; it does not duplicate host, time, focus, layout state, or a `keys`
-label. The Sessions pane title is count-only: `Sessions [n]`.
+label. Command shortcut letters are rendered with underline styling instead of
+parenthesized mnemonics. The Sessions pane title is count-only: `Sessions [n]`.
 
 Main-selector keymap (focus-aware):
 

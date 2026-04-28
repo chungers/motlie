@@ -25,10 +25,6 @@ pub(crate) const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 pub(crate) const COMPACT_MOTLIE_PLACEHOLDER: &str = "motlie  ══╬══";
 pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
-pub(crate) const NORMAL_STATUS_KEYS: &str =
-    "↑/↓ sel | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout | mod-←/→ resize";
-pub(crate) const PORTRAIT_STATUS_KEYS: &str =
-    "↑/↓ sel | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout | mod-↑/↓ resize";
 pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
 p cycle panes

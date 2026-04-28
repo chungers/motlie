@@ -21,8 +21,8 @@ use crate::detail::{
 use crate::model::{AppState, Button, Focus, LayoutMode, ModalBody, ModalState, SelectedSession};
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
-    session_list_line, sessions_title, short_build_git_sha, status_line_text, top_status_line,
-    use_compact_placeholder,
+    session_list_line, sessions_title, short_build_git_sha, status_line, status_line_text,
+    top_status_line, use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
 
@@ -163,18 +163,20 @@ fn status_line_omits_layout_mode() {
     assert!(normal_status.contains(" ↑/↓ sel"));
     assert!(!normal_status.contains("keys"));
     assert!(!normal_status.contains("host"));
-    assert!(normal_status.contains("(p)ane"));
+    assert!(!normal_status.contains("(h)elp"));
+    assert!(!normal_status.contains("(p)ane"));
+    assert!(normal_status.contains("pane"));
     assert_status_order(
         &normal_status,
         &[
-            "(h)elp",
-            "(p)ane",
-            "(m)onitor",
-            "enter/(a)ttach",
-            "(n)ew",
-            "(k)ill",
-            "(q)uit",
-            "(l)ayout",
+            "help",
+            "pane",
+            "monitor",
+            "enter/attach",
+            "new",
+            "kill",
+            "quit",
+            "layout",
             "mod-←/→ resize",
         ],
     );
@@ -190,21 +192,41 @@ fn status_line_omits_layout_mode() {
     );
     let portrait_status = status_line_text(&portrait);
     assert!(portrait_status.contains(" ↑/↓ sel"));
-    assert!(portrait_status.contains("(p)ane"));
+    assert!(portrait_status.contains("pane"));
     assert_status_order(
         &portrait_status,
         &[
-            "(h)elp",
-            "(p)ane",
-            "(m)onitor",
-            "enter/(a)ttach",
-            "(n)ew",
-            "(k)ill",
-            "(q)uit",
-            "(l)ayout",
+            "help",
+            "pane",
+            "monitor",
+            "enter/attach",
+            "new",
+            "kill",
+            "quit",
+            "layout",
             "mod-↑/↓ resize",
         ],
     );
+}
+
+#[test]
+fn status_line_underlines_command_mnemonics() {
+    let app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    let line = status_line(&app);
+    let underlined = line
+        .spans
+        .iter()
+        .filter(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(underlined, "hpmankql");
+    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | enter/attach | new | kill | quit | layout | mod-←/→ resize ");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {

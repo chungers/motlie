@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Documented bottom status command rendering as plain labels with underlined shortcut-letter spans instead of parenthesized mnemonics. |
 | 2026-04-28 | @gpt55-dgx | Replaced the fixed compact-placeholder threshold with an embedded-logo fit check so landscape panes render the full motlie glyph when it fits. |
 | 2026-04-28 | @gpt55-dgx | Documented landscape render regression coverage that keeps the MOTD pane visible for both placeholder and host-provided MOTD content. |
 | 2026-04-28 | @gpt55-dgx | Documented round-3 PR feedback coverage for `load_motd_from`, MOTD fallback cases, full/compact placeholder rendering, portrait MOTD omission, and local `read_text_file` edge cases. |
@@ -401,6 +402,7 @@ API tests must cover:
 - `p` key focus-cycling behavior in landscape and portrait layouts
 - `l` key layout toggling and retained layout re-entry behavior
 - status hint arrow-symbol rendering
+- bottom status command hints with underlined shortcut-letter spans
 - top status rendering for bold hostname/IP and right-justified current time
 - session count rendering in the Sessions pane title without hostname/IP
 - Help modal open/close behavior, key-function display, build date display,
