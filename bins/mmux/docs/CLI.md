@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Sorted session-list rows by `SessionInfo.activity` descending so the most recently active sessions appear first. |
 | 2026-04-28 | @gpt55-dgx | Changed session-list recency rows to unlabeled `<active> / <age>` text with a day bucket and right-side margin. |
 | 2026-04-28 | @gpt55-dgx | Documented that session-list recency tolerates tmux empty-epoch expansion through the library fallback clock. |
 | 2026-04-28 | @gpt55-dgx | Added aligned session-list recency columns for `active:<elapsed> / age:<elapsed>` using the target tmux server clock. |
@@ -188,14 +189,16 @@ control-mode host notifications.
 
 Each session row includes the display name, an attached-client marker, and a
 right-aligned recency column. The attached marker is `*` when tmux reports one
-or more clients attached to the session. The recency column is formatted as
-`  32h / 14.2d`, where the left value is based on `SessionInfo.activity`, the
-right value is based on `SessionInfo.created`, and both are computed through
-`list_sessions_now()`. The recency block is right-aligned with a small right
-margin. When tmux exposes a current epoch, that uses the target tmux server
-clock; when tmux expands that value empty, the library falls back to a local
-clock clamped to the listed session timestamps. Durations use `now`, `m`, `h`,
-or `d`; days keep at most one decimal digit.
+or more clients attached to the session. Rows are sorted by
+`SessionInfo.activity` descending so the most recently active session appears
+first. The recency column is formatted as `  32h / 14.2d`, where the left value
+is based on `SessionInfo.activity`, the right value is based on
+`SessionInfo.created`, and both are computed through `list_sessions_now()`.
+The recency block is right-aligned with a small right margin. When tmux exposes
+a current epoch, that uses the target tmux server clock; when tmux expands that
+value empty, the library falls back to a local clock clamped to the listed
+session timestamps. Durations use `now`, `m`, `h`, or `d`; days keep at most
+one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
 The top status bar uses the same blue background as the bottom status bar. It

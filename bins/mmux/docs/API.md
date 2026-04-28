@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Documented activity-descending session-list ordering with stable-id selection preservation. |
 | 2026-04-28 | @gpt55-dgx | Updated session-list recency rendering to unlabeled `<active> / <age>` text with day formatting and a right margin. |
 | 2026-04-28 | @gpt55-dgx | Clarified that recency rendering uses `list_sessions_now()` with the library's tmux-empty-epoch fallback path. |
 | 2026-04-28 | @gpt55-dgx | Documented implemented session-list recency rendering with right-aligned `active` and `age` values from `list_sessions_now()`. |
@@ -245,8 +246,11 @@ current time renders right-justified. The Sessions pane title is derived only
 from the live session list length: `Sessions [n]`. List rows show the display
 name, attached marker, and right-aligned `<active> / <age>` recency text with a
 small right margin; stable session ids stay internal for dispatch. The attached
-marker is `*` when `SessionInfo::is_attached()` is true. Recency uses
-`HostHandle::list_sessions_now()` so the session `activity` and `created`
+marker is `*` when `SessionInfo::is_attached()` is true. The list is sorted by
+`SessionInfo.activity` descending, with name/id tie-breakers only for stable
+display order; `preserve_selection()` re-finds the highlighted row by stable
+session id after each refresh. Recency uses `HostHandle::list_sessions_now()`
+so the session `activity` and `created`
 timestamps are compared against the target tmux server clock when tmux exposes
 one; tmux versions that expand `#{epoch}` as empty use the library fallback
 clock clamped to the listed session timestamps. Durations use `now`, `m`, `h`,

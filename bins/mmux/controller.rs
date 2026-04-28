@@ -45,7 +45,8 @@ pub(crate) async fn refresh_sessions_preserving(
         .await
         .context("list tmux sessions with server clock")?;
     app.session_list.now = listing.now;
-    app.session_list.sessions = listing.sessions;
+    app.session_list
+        .set_sessions_sorted_by_activity(listing.sessions);
     app.preserve_selection(previous);
     app.status = if app.session_list.sessions.is_empty() {
         StatusBanner::info("no sessions")

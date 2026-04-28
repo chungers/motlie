@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Tracked activity-descending session ordering with stable-id selection preservation. |
 | 2026-04-28 | @gpt55-dgx | Tracked recency formatting polish: remove labels, add day bucket, and keep a right margin. |
 | 2026-04-28 | @gpt55-dgx | Added regression tracking for tmux versions that expand `#{epoch}` empty during session recency listing. |
 | 2026-04-28 | @gpt55-dgx | Marked mmux session-list recency rendering complete with aligned `active`/`age` columns and no window-alert flag display. |
@@ -202,6 +203,9 @@ References: [Live Session List](./DESIGN.md#live-session-list), issue #229.
   fall back to a local clock clamped to listed session timestamps.
 - [x] 1.6h Polish recency row formatting: remove labels, add `d` duration
   bucket with at most one decimal digit, and reserve a right-side margin.
+- [x] 1.6i Sort session rows by `SessionInfo.activity` descending with stable
+  name/id tie-breakers and preserve highlight by stable session id after
+  refresh.
 
 ## Phase 2: Binary Scaffold
 

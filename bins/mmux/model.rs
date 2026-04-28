@@ -177,6 +177,17 @@ pub(crate) struct SessionListState {
 }
 
 impl SessionListState {
+    pub(crate) fn set_sessions_sorted_by_activity(&mut self, mut sessions: Vec<SessionInfo>) {
+        sessions.sort_by(|left, right| {
+            right
+                .activity
+                .cmp(&left.activity)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        self.sessions = sessions;
+    }
+
     pub(crate) fn selected_session(&self) -> Option<SelectedSession> {
         self.sessions
             .get(self.selected)

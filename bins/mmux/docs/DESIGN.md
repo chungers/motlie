@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added activity-descending session-list ordering so the most recently active session appears first while selection remains stable by id. |
 | 2026-04-28 | @gpt55-dgx | Changed session-list recency display to unlabeled `<active> / <age>` values with day bucketing and a right margin. |
 | 2026-04-28 | @gpt55-dgx | Clarified recency clock behavior for tmux versions that expand `#{epoch}` empty: fall back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added implemented session-list recency rows: attached marker plus right-aligned `active` and `age` values from `list_sessions_now()`; tmux alert flags remain out of scope. |
@@ -208,6 +209,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   exposes one, otherwise a fallback local clock clamped to the listed session
   timestamps. Durations use `now`, `m`, `h`, or `d`; day values keep at most one
   decimal digit.
+- Session rows are sorted by `SessionInfo.activity` descending so the most
+  recently active session is at the top. Stable session id preservation keeps
+  the current highlight on the same session after refresh even if the row moves.
   Window-level tmux alert/status flags such as `!`, `#`, and `~` are deferred.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,

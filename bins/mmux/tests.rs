@@ -292,6 +292,58 @@ fn session_list_line_hides_stable_id() {
 }
 
 #[test]
+fn session_list_sorts_most_recent_activity_first() {
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+
+    app.session_list.set_sessions_sorted_by_activity(vec![
+        session_with_times("older", "$1", 10, 100),
+        session_with_times("fresh", "$2", 20, 300),
+        session_with_times("alpha", "$3", 30, 200),
+        session_with_times("beta", "$4", 40, 200),
+    ]);
+
+    let names = app
+        .session_list
+        .sessions
+        .iter()
+        .map(|session| session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["fresh", "alpha", "beta", "older"]);
+}
+
+#[test]
+fn activity_sort_preserves_selection_by_stable_id() {
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.sessions = vec![
+        session_with_times("selected", "$1", 10, 100),
+        session_with_times("other", "$2", 20, 200),
+    ];
+    app.session_list.selected = 0;
+    let previous = app.selected_session().map(|session| session.id);
+
+    app.session_list.set_sessions_sorted_by_activity(vec![
+        session_with_times("selected", "$1", 10, 100),
+        session_with_times("other", "$2", 20, 300),
+    ]);
+    app.preserve_selection(previous);
+
+    assert_eq!(
+        app.selected_session().map(|session| session.name),
+        Some("selected".to_string())
+    );
+}
+
+#[test]
 fn session_list_line_right_aligns_active_and_age() {
     let now = 7_200;
     let first = session_list_line(&session_with_times("dev", "$1", 0, 7_020), true, now, 42);
