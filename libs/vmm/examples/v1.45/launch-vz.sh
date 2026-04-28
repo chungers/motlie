@@ -473,9 +473,26 @@ cleanup() {
 
 trap cleanup EXIT
 
+# @opus47-mac 2026-04-26 -- kill_stale_runners treats $RUNNER_PID_FILE as the
+# authoritative source for the previous run's PID, and uses the ps/awk grep
+# only as a fallback for orphans whose PID file was lost. The previous
+# implementation relied solely on the ps grep matching `vz-vsock-runner` plus
+# the MAC + socket path as substrings, which was fragile under multi-guest
+# (issue #215 / PR #212 finding #9): adjacent socket paths could collide as
+# substrings, ps output truncation could drop entries, and a debugger-wrapped
+# runner would not match the literal binary name. Same shape as
+# kill_stale_egress_helpers above.
 kill_stale_runners() {
   local stale_pids=()
   local stale_pid=""
+
+  if [[ -f "$RUNNER_PID_FILE" ]]; then
+    stale_pid="$(cat "$RUNNER_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$stale_pid" ]]; then
+      stale_pids+=("$stale_pid")
+    fi
+  fi
+
   while read -r stale_pid; do
     [[ -n "$stale_pid" ]] || continue
     stale_pids+=("$stale_pid")
@@ -484,11 +501,23 @@ kill_stale_runners() {
   ')
 
   if [[ "${#stale_pids[@]}" -eq 0 ]]; then
+    rm -f "$RUNNER_PID_FILE"
     return 0
   fi
 
+  local unique_pids=()
+  local seen=""
+  for stale_pid in "${stale_pids[@]}"; do
+    [[ -n "$stale_pid" ]] || continue
+    if [[ " $seen " == *" $stale_pid "* ]]; then
+      continue
+    fi
+    seen+=" $stale_pid"
+    unique_pids+=("$stale_pid")
+  done
+
   printf '%s\n' "--- terminating stale Vz runners for $GUEST_NAME ---"
-  kill "${stale_pids[@]}" >/dev/null 2>&1 || true
+  kill "${unique_pids[@]}" >/dev/null 2>&1 || true
 
   local attempts=0
   while [[ $attempts -lt 20 ]]; do
@@ -500,6 +529,7 @@ kill_stale_runners() {
       /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
     ')
     if [[ "${#survivors[@]}" -eq 0 ]]; then
+      rm -f "$RUNNER_PID_FILE"
       return 0
     fi
     sleep 0.5
