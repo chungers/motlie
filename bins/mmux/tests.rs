@@ -35,9 +35,10 @@ fn session(name: &str, id: &str) -> SessionInfo {
         name: name.to_string(),
         id: sid(id),
         created: 0,
-        attached: false,
+        attached_count: 0,
         window_count: 1,
         group: None,
+        activity: 0,
     }
 }
 
@@ -989,7 +990,7 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
 #[tokio::test]
 async fn sample_detail_preserves_ansi_color_for_detail_pane() {
     let mock = MockTransport::new()
-        .with_response("list-sessions", "dev $7 0 0 1 \n")
+        .with_response("list-sessions", "dev $7 0 0 1  0\n")
         .with_response("capture-pane -ep", "\x1b[34mBLUE\x1b[0m\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let selected = SelectedSession {
@@ -1006,7 +1007,7 @@ async fn sample_detail_preserves_ansi_color_for_detail_pane() {
 #[tokio::test]
 async fn monitor_detail_captures_rendered_screen_with_ansi() {
     let mock = MockTransport::new()
-        .with_response("list-sessions", "dash $7 0 0 1 \n")
+        .with_response("list-sessions", "dash $7 0 0 1  0\n")
         .with_response("list-panes", "%0 dash 0 0 main bash 100 80 24 1\n")
         .with_response("capture-pane -ep", "\x1b[32mREADY\x1b[0m\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);

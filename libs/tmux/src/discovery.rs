@@ -1,10 +1,11 @@
 use crate::error::{Error, Result};
 use regex::Regex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
     ClientInfo, GeometrySnapshot, PaneAddress, PaneGeometry, PaneInfo, SessionId, SessionInfo,
-    TmuxSocket, WindowInfo,
+    SessionListing, TmuxSocket, WindowInfo,
 };
 
 /// Parse a line of tmux `q:`-escaped fields separated by spaces.
@@ -47,7 +48,9 @@ pub const PANE_GEOMETRY_FMT: &str =
     "#{q:pane_width} #{q:pane_height} #{q:history_size} #{q:history_limit}";
 
 pub const LIST_SESSIONS_FMT: &str =
-    "#{q:session_name} #{q:session_id} #{q:session_created} #{q:session_attached} #{q:session_windows} #{q:session_group}";
+    "#{q:session_name} #{q:session_id} #{q:session_created} #{q:session_attached} #{q:session_windows} #{q:session_group} #{q:session_activity}";
+
+const SESSION_LISTING_EPOCH_PREFIX: &str = "__MOTLIE_EPOCH:";
 
 pub const LIST_WINDOWS_FMT: &str =
     "#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}";
@@ -82,6 +85,38 @@ pub async fn list_sessions_with_prefix(
     };
 
     parse_sessions(&output)
+}
+
+/// List all tmux sessions and include the tmux server's current epoch seconds.
+pub async fn list_sessions_now(
+    transport: &TransportKind,
+    socket: Option<&TmuxSocket>,
+) -> Result<SessionListing> {
+    list_sessions_now_with_prefix(transport, &tmux_prefix(socket)).await
+}
+
+/// List all tmux sessions and include the server clock using a caller-provided prefix.
+pub async fn list_sessions_now_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+) -> Result<SessionListing> {
+    let cmd = list_sessions_now_command(prefix);
+
+    let output = match transport.exec(&cmd).await {
+        Ok(o) => o,
+        Err(e) => {
+            let msg = e.to_string();
+            if is_tmux_empty_state_error(&msg, &cmd, &["no server running", "no sessions"]) {
+                return Ok(SessionListing {
+                    now: local_epoch_seconds(),
+                    sessions: Vec::new(),
+                });
+            }
+            return Err(e);
+        }
+    };
+
+    parse_session_listing(&output)
 }
 
 /// List windows in a session (using bare "tmux" prefix).
@@ -309,6 +344,48 @@ fn parse_u64_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u
     })
 }
 
+fn list_sessions_now_command(prefix: &str) -> String {
+    format!(
+        "{} display-message -p '{}#{{epoch}}' \\; list-sessions -F '{}'",
+        prefix, SESSION_LISTING_EPOCH_PREFIX, LIST_SESSIONS_FMT
+    )
+}
+
+fn local_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+pub(crate) fn parse_session_listing(output: &str) -> Result<SessionListing> {
+    let mut lines = output
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.is_empty());
+    let Some(epoch_line) = lines.next() else {
+        return Err(Error::Command(
+            "missing session listing epoch line".to_string(),
+        ));
+    };
+    let now = parse_session_listing_epoch(epoch_line)?;
+    let session_output = lines.collect::<Vec<_>>().join("\n");
+    Ok(SessionListing {
+        now,
+        sessions: parse_sessions(&session_output)?,
+    })
+}
+
+fn parse_session_listing_epoch(line: &str) -> Result<u64> {
+    let Some(value) = line.strip_prefix(SESSION_LISTING_EPOCH_PREFIX) else {
+        return Err(Error::Command(format!(
+            "malformed session listing epoch line: {}",
+            line
+        )));
+    };
+    parse_u64_field(value, "now", "session listing", line)
+}
+
 fn parse_bool_field(value: &str, field: &str, kind: &str, line: &str) -> Result<bool> {
     match value {
         "0" => Ok(false),
@@ -355,18 +432,20 @@ pub(crate) fn parse_sessions(output: &str) -> Result<Vec<SessionInfo>> {
         if line.is_empty() {
             continue;
         }
-        let fields = parse_exact_fields(line, 6, "session")?;
+        let fields = parse_exact_fields(line, 7, "session")?;
+        let attached_count = parse_u32_field(&fields[3], "attached", "session", line)?;
         sessions.push(SessionInfo {
             name: fields[0].clone(),
             id: SessionId::new(fields[1].clone())?,
             created: parse_u64_field(&fields[2], "created", "session", line)?,
-            attached: parse_u32_field(&fields[3], "attached", "session", line)? > 0,
+            attached_count,
             window_count: parse_u32_field(&fields[4], "window_count", "session", line)?,
             group: if fields[5].is_empty() {
                 None
             } else {
                 Some(fields[5].clone())
             },
+            activity: parse_u64_field(&fields[6], "activity", "session", line)?,
         });
     }
     Ok(sessions)
@@ -483,19 +562,23 @@ mod tests {
     async fn list_sessions_parses_output() {
         let mock = MockTransport::new().with_response(
             "list-sessions",
-            "build $0 1709900000 1 3 \ntest $1 1709900100 0 1 group1\n",
+            "build $0 1709900000 1 3  1709900200\ntest $1 1709900100 0 1 group1 1709900300\n",
         );
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "build");
         assert_eq!(sessions[0].id.as_str(), "$0");
-        assert!(sessions[0].attached);
+        assert_eq!(sessions[0].attached_count, 1);
+        assert!(sessions[0].is_attached());
         assert_eq!(sessions[0].window_count, 3);
         assert!(sessions[0].group.is_none());
+        assert_eq!(sessions[0].activity, 1709900200);
         assert_eq!(sessions[1].name, "test");
-        assert!(!sessions[1].attached);
+        assert_eq!(sessions[1].attached_count, 0);
+        assert!(!sessions[1].is_attached());
         assert_eq!(sessions[1].group.as_deref(), Some("group1"));
+        assert_eq!(sessions[1].activity, 1709900300);
     }
 
     #[tokio::test]
@@ -506,9 +589,77 @@ mod tests {
         assert!(sessions.is_empty());
     }
 
+    #[tokio::test]
+    async fn list_sessions_now_parses_server_epoch_and_sessions() {
+        let mock = MockTransport::new().with_response(
+            "display-message -p '__MOTLIE_EPOCH:",
+            "__MOTLIE_EPOCH:1709900400\nbuild $0 1709900000 1 3  1709900200\ntest $1 1709900100 0 1 group1 1709900300\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let listing = list_sessions_now(&transport, None).await.unwrap();
+
+        assert_eq!(listing.now, 1709900400);
+        assert_eq!(listing.sessions.len(), 2);
+        assert_eq!(listing.sessions[0].name, "build");
+        assert_eq!(listing.sessions[0].activity, 1709900200);
+        assert_eq!(listing.sessions[1].group.as_deref(), Some("group1"));
+        assert_eq!(listing.sessions[1].activity, 1709900300);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_now_accepts_empty_listing_with_epoch() {
+        let mock = MockTransport::new()
+            .with_response("display-message -p '__MOTLIE_EPOCH:", "__MOTLIE_EPOCH:42\n");
+        let transport = TransportKind::Mock(mock);
+
+        let listing = list_sessions_now(&transport, None).await.unwrap();
+
+        assert_eq!(listing.now, 42);
+        assert!(listing.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_now_empty_state_falls_back_to_local_epoch() {
+        let cmd = list_sessions_now_command("tmux");
+        let before = local_epoch_seconds();
+        let mock = MockTransport::new().with_error(
+            "display-message -p '__MOTLIE_EPOCH:",
+            format!(
+                "command failed (exit 1): {}\nstderr: no server running on /tmp/tmux-1000/default",
+                cmd
+            )
+            .as_str(),
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let listing = list_sessions_now(&transport, None).await.unwrap();
+        let after = local_epoch_seconds();
+
+        assert!(listing.sessions.is_empty());
+        assert!(listing.now >= before);
+        assert!(listing.now <= after);
+    }
+
+    #[test]
+    fn parse_session_listing_rejects_malformed_epoch_line() {
+        let err = parse_session_listing("not-epoch\nbuild $0 0 0 1  10\n").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("malformed session listing epoch line"));
+    }
+
+    #[test]
+    fn parse_session_listing_rejects_missing_epoch_line() {
+        let err = parse_session_listing("").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("missing session listing epoch line"));
+    }
+
     #[test]
     fn parse_sessions_rejects_empty_session_id() {
-        let err = parse_sessions("build  1709900000 0 1 \n").unwrap_err();
+        let err = parse_sessions("build  1709900000 0 1  1709900001\n").unwrap_err();
         assert!(err.to_string().contains("empty session id"));
     }
 
@@ -551,11 +702,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_attached_count_above_one_is_true() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 2 1 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 2 1  10\n");
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions(&transport, None).await.unwrap();
         assert_eq!(sessions.len(), 1);
-        assert!(sessions[0].attached);
+        assert_eq!(sessions[0].attached_count, 2);
+        assert!(sessions[0].is_attached());
     }
 
     #[tokio::test]

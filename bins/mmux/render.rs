@@ -220,7 +220,7 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
 pub(crate) fn session_list_line(session: &SessionInfo, selected: bool) -> String {
     let marker = if selected { ">" } else { " " };
-    let attached = if session.attached { "*" } else { " " };
+    let attached = if session.is_attached() { "*" } else { " " };
     format!("{marker}{attached} {}", session.name)
 }
 

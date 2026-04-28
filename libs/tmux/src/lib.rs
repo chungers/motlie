@@ -45,6 +45,6 @@ pub use types::{
     CaptureNormalizeMode, CaptureOptions, CaptureResult, ClientInfo, CreateSessionOptions,
     CreateWindowOptions, ExecId, ExecOutput, ExecState, FidelityIssue, GeometrySnapshot,
     HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery, SessionId,
-    SessionInfo, SplitDirection, SplitPaneOptions, SplitSize, TargetAddress, TargetLevel,
-    TargetSpec, TmuxSocket, TransferOptions, WindowInfo,
+    SessionInfo, SessionListing, SplitDirection, SplitPaneOptions, SplitSize, TargetAddress,
+    TargetLevel, TargetSpec, TmuxSocket, TransferOptions, WindowInfo,
 };

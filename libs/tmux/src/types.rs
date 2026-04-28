@@ -115,9 +115,23 @@ pub struct SessionInfo {
     pub name: String,
     pub id: SessionId,
     pub created: u64,
-    pub attached: bool,
+    pub attached_count: u32,
     pub window_count: u32,
     pub group: Option<String>,
+    pub activity: u64,
+}
+
+impl SessionInfo {
+    /// Return true when one or more tmux clients are attached to this session.
+    pub fn is_attached(&self) -> bool {
+        self.attached_count > 0
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionListing {
+    pub now: u64,
+    pub sessions: Vec<SessionInfo>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

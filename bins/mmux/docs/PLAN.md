@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Marked issue #229 library support complete for `SessionInfo.activity`, `attached_count`, and `HostHandle::list_sessions_now()` skew-free recency math. |
 | 2026-04-28 | @gpt55-dgx | Tracked bottom status command hints as plain words with underlined shortcut letters instead of `(x)` mnemonics. |
 | 2026-04-28 | @gpt55-dgx | Updated placeholder tests so landscape requires the full motlie glyph whenever the embedded logo dimensions fit the pane. |
 | 2026-04-28 | @gpt55-dgx | Added landscape MOTD pane regression coverage for placeholder and host-provided MOTD content. |
@@ -176,6 +177,21 @@ References: [Remote MOTD](./DESIGN.md#remote-motd),
   command prefixes without changing safe-path command text.
 - [x] 1.5e Add focused tests for `HostHandle::read_text_file`: missing,
   empty, normal, oversized, unreadable local files, plus mock transport reads.
+
+### 1.6 Session Activity and Server Clock Listing
+
+References: [Live Session List](./DESIGN.md#live-session-list), issue #229.
+
+- [x] 1.6a Add `SessionInfo.activity` from tmux `#{session_activity}`.
+- [x] 1.6b Replace lossy attached parsing with non-lossy
+  `SessionInfo.attached_count` and `SessionInfo::is_attached()`.
+- [x] 1.6c Add `SessionListing { now, sessions }` and
+  `HostHandle::list_sessions_now()` so remote recency math can use the tmux
+  server clock instead of the local selector clock.
+- [x] 1.6d Add parser and mock-backed tests for populated listings, empty
+  listings, no-server fallback, malformed/missing epoch lines, and parsed
+  `activity` / `attached_count`.
+- [x] 1.6e Document recency math in `libs/tmux/docs/API.md`.
 
 ## Phase 2: Binary Scaffold
 

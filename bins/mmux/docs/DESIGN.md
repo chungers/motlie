@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added issue #229 library support note: session snapshots now include activity, attached client count, and server-clock listings for future recency rendering. |
 | 2026-04-28 | @gpt55-dgx | Changed bottom status command hints from parenthesized mnemonics to rendered underlined shortcut letters. |
 | 2026-04-28 | @gpt55-dgx | Replaced the old fixed compact-placeholder width threshold with a fit check derived from the embedded motlie glyph dimensions. |
 | 2026-04-28 | @gpt55-dgx | Clarified landscape MOTD sizing: `LT` is sized from the post-split left-column area so placeholder or host MOTD content remains visible before the session list. |
@@ -649,6 +650,12 @@ client attach/detach events. On transient list failure it emits
 `Disconnect { reason }` and retries on the next tick. This is poll-based
 snapshot reconciliation, not direct tmux control-mode host notifications.
 
+Issue #229 library support adds `SessionInfo.activity`,
+`SessionInfo.attached_count`, and `HostHandle::list_sessions_now()`. The
+selector can use `list_sessions_now()` when row recency is added so
+`listing.now.saturating_sub(session.activity)` is computed against the target
+tmux server clock rather than the local selector clock.
+
 Future hardening target: tmux control-mode notifications. The library already
 parses `%`-prefixed control-mode lines as `ControlModeMessage::Notification`
 (`libs/tmux/src/monitor.rs:58–96`) but currently discards them
@@ -671,7 +678,7 @@ Subscribe-and-reconcile loop:
    - `SessionRenamed { id, old, new }`: update display name in place; preserve
      highlight.
    - `ClientDetached { session_id }` / `ClientAttached { session_id }`:
-     update `attached` flag.
+     update attached-client state (`attached_count` / `is_attached()`).
    - `Disconnect { reason }`: polling list operation failed. Show status-bar
      indicator. Keep the existing snapshot and retry on the next one-second
      tick.
