@@ -1775,9 +1775,10 @@ mod tests {
                 name: session.to_string(),
                 id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
             host: host.to_string(),
             content: content.to_string(),
@@ -2111,9 +2112,10 @@ mod tests {
                 name: "build".to_string(),
                 id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         assert_eq!(label.short(), "web-1:build");

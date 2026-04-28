@@ -230,9 +230,11 @@ fn diff_session_events(
                     new: after.name.clone(),
                 });
             }
-            if before.attached != after.attached {
+            let before_attached = before.is_attached();
+            let after_attached = after.is_attached();
+            if before_attached != after_attached {
                 changed = true;
-                if after.attached {
+                if after_attached {
                     events.push(HostEvent::ClientAttached {
                         session_id: id.clone(),
                     });
@@ -463,6 +465,12 @@ impl HostHandle {
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let prefix = self.inner.tmux_prefix().await;
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
+    }
+
+    /// List all tmux sessions on this host with the host tmux server's epoch seconds.
+    pub async fn list_sessions_now(&self) -> Result<SessionListing> {
+        let prefix = self.inner.tmux_prefix().await;
+        discovery::list_sessions_now_with_prefix(&self.inner.transport, &prefix).await
     }
 
     /// Read a UTF-8 text file from the host with a caller-provided size cap.
@@ -2236,9 +2244,10 @@ impl HostHandle {
                 name: session_name.to_string(),
                 id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         }
     }
@@ -2274,7 +2283,7 @@ mod tests {
     async fn create_session_returns_target() {
         let mock = MockTransport::new()
             .with_default("")
-            .with_response("list-sessions", "test $0 1700000000 0 1 \n");
+            .with_response("list-sessions", "test $0 1700000000 0 1  1700000005\n");
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())
@@ -2287,7 +2296,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1  0\n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -2295,7 +2304,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2  0\n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -2307,7 +2316,7 @@ mod tests {
     #[tokio::test]
     async fn session_by_id_found() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $7 0 1 2 \nother $8 0 0 1 \n");
+            .with_response("list-sessions", "build $7 0 1 2  0\nother $8 0 0 1  0\n");
         let host = mock_host(mock);
         let target = host.session_by_id("$7").await.unwrap();
         assert!(target.is_some());
@@ -2319,10 +2328,26 @@ mod tests {
 
     #[tokio::test]
     async fn session_by_id_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2  0\n");
         let host = mock_host(mock);
         let target = host.session_by_id("$1").await.unwrap();
         assert!(target.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_now_returns_server_epoch_and_activity() {
+        let mock = MockTransport::new().with_response(
+            "display-message -p '__MOTLIE_EPOCH:",
+            "__MOTLIE_EPOCH:100\nbuild $0 10 0 1  80\n",
+        );
+        let host = mock_host(mock);
+
+        let listing = host.list_sessions_now().await.unwrap();
+
+        assert_eq!(listing.now, 100);
+        assert_eq!(listing.sessions.len(), 1);
+        assert_eq!(listing.sessions[0].name, "build");
+        assert_eq!(listing.sessions[0].activity, 80);
     }
 
     #[tokio::test]
@@ -2444,17 +2469,19 @@ mod tests {
                 name: "old".to_string(),
                 id: SessionId::for_test("$1"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             },
             SessionInfo {
                 name: "gone".to_string(),
                 id: SessionId::for_test("$2"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             },
         ]);
         let current = sessions_by_key(vec![
@@ -2462,17 +2489,19 @@ mod tests {
                 name: "new".to_string(),
                 id: SessionId::for_test("$1"),
                 created: 0,
-                attached: true,
+                attached_count: 1,
                 window_count: 1,
                 group: None,
+                activity: 0,
             },
             SessionInfo {
                 name: "added".to_string(),
                 id: SessionId::for_test("$3"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             },
         ]);
 
@@ -2508,9 +2537,10 @@ mod tests {
                 name: "build".to_string(),
                 id: SessionId::for_test("$7"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
 
@@ -2519,7 +2549,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1  0\n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -2530,7 +2560,7 @@ mod tests {
     #[tokio::test]
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2 \n")
+            .with_response("list-sessions", "build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 1 1 layout\n$0 build 1 editor 0 1 layout\n",
@@ -2660,9 +2690,10 @@ mod tests {
                 name: "old".to_string(),
                 id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         let new_target = target.rename("new").await.unwrap();
@@ -2743,7 +2774,7 @@ mod tests {
         // Session with 2 windows: window 0 (inactive) and window 1 (active).
         // Both have pane 0. Session-level pane(0) should return window 1's pane.
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2 \n")
+            .with_response("list-sessions", "build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 0 1 layout\n$0 build 1 editor 1 1 layout\n",
@@ -3006,9 +3037,10 @@ mod tests {
                 name: "build".to_string(),
                 id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         let pane_target = Target {

@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
 | 2026-04-28 | @gpt55-dgx | Replaced the selector-oriented host shell hook note with bounded `HostHandle::read_text_file`, documented `SessionId` as the stable non-empty session id type, and clarified that host events are currently polling-backed. |
 | 2026-04-26 | @gpt55-dgx | Document that current-PTY attach restores the parent foreground process group through a `SIGTTOU`-safe path so selector/dashboard callers do not remain stopped after detach. |
 | 2026-04-26 | @gpt55-dgx | Document `SessionWatchOptions::normalize`, available to watch-session consumers that need to strip raw ANSI/control bytes before text rendering. |
@@ -647,12 +648,36 @@ tmux server running or no entities exist.
 ```rust
 let sessions = host.list_sessions().await?;
 for s in &sessions {
-    println!("{} (id={}, windows={}, attached={})",
-        s.name, s.id, s.window_count, s.attached);
+    println!("{} (id={}, windows={}, attached_clients={}, active={})",
+        s.name, s.id, s.window_count, s.attached_count, s.is_attached());
 }
 ```
 
 > See [`examples/list_sessions.rs`](../examples/list_sessions.rs) for a runnable version.
+
+### List sessions with server-clock recency data
+
+`list_sessions_now()` returns the same session rows plus a tmux-server clock
+snapshot. This avoids local/remote clock skew when a selector or dashboard
+renders "active N ago" or "age N" for an SSH target.
+
+```rust
+let listing = host.list_sessions_now().await?;
+for session in &listing.sessions {
+    let active_secs = listing.now.saturating_sub(session.activity);
+    let age_secs = listing.now.saturating_sub(session.created);
+    println!(
+        "{} active={}s age={}s",
+        session.name, active_secs, age_secs
+    );
+}
+```
+
+`SessionInfo.activity` is tmux `#{session_activity}` in epoch seconds.
+`SessionListing.now` is tmux `#{epoch}` from the same tmux invocation as the
+session list. If there is no tmux server or no sessions, the API returns
+`SessionListing { now: <local fallback epoch>, sessions: vec![] }`; the local
+fallback is only used because there is no server clock to query.
 
 ### Find a session by name
 
@@ -2224,7 +2249,8 @@ assert!(issues.is_empty());
 | Type | Key fields |
 |------|-----------|
 | `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
-| `SessionInfo` | name, id (`SessionId`), attached, window_count, group |
+| `SessionInfo` | name, id (`SessionId`), created, activity, attached_count, window_count, group |
+| `SessionListing` | server-clock `now` epoch seconds plus `Vec<SessionInfo>` from `list_sessions_now()` |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |
