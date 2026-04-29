@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use regex::Regex;
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
@@ -52,6 +53,12 @@ pub const LIST_SESSIONS_FMT: &str =
 
 const SESSION_LISTING_EPOCH_PREFIX: &str = "__MOTLIE_EPOCH:";
 
+/// Sentinel used by the chained `list-windows -a -F` query to mark per-window
+/// activity rows in the merged listing output. We aggregate `window_activity`
+/// across each session's windows because tmux's `session_activity` only
+/// tracks input from attached clients, not program output. See issue #237.
+const SESSION_LISTING_WIN_PREFIX: &str = "__MOTLIE_WIN__";
+
 pub const LIST_WINDOWS_FMT: &str =
     "#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}";
 
@@ -71,7 +78,7 @@ pub async fn list_sessions_with_prefix(
     transport: &TransportKind,
     prefix: &str,
 ) -> Result<Vec<SessionInfo>> {
-    let cmd = format!("{} list-sessions -F '{}'", prefix, LIST_SESSIONS_FMT);
+    let cmd = list_sessions_with_windows_command(prefix);
 
     let output = match transport.exec(&cmd).await {
         Ok(o) => o,
@@ -84,7 +91,7 @@ pub async fn list_sessions_with_prefix(
         }
     };
 
-    parse_sessions(&output)
+    parse_session_block(&output)
 }
 
 /// List all tmux sessions and include a clock for recency calculations.
@@ -346,9 +353,89 @@ fn parse_u64_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u
 
 fn list_sessions_now_command(prefix: &str) -> String {
     format!(
-        "{} display-message -p '{}#{{epoch}}' \\; list-sessions -F '{}'",
-        prefix, SESSION_LISTING_EPOCH_PREFIX, LIST_SESSIONS_FMT
+        "{} display-message -p '{}#{{epoch}}' \\; \
+         list-sessions -F '{}' \\; \
+         list-windows -a -F '{} #{{q:session_id}} #{{q:window_activity}}'",
+        prefix, SESSION_LISTING_EPOCH_PREFIX, LIST_SESSIONS_FMT, SESSION_LISTING_WIN_PREFIX
     )
+}
+
+fn list_sessions_with_windows_command(prefix: &str) -> String {
+    format!(
+        "{} list-sessions -F '{}' \\; \
+         list-windows -a -F '{} #{{q:session_id}} #{{q:window_activity}}'",
+        prefix, LIST_SESSIONS_FMT, SESSION_LISTING_WIN_PREFIX
+    )
+}
+
+/// Split the merged output of `list-sessions \; list-windows -a` (with our
+/// sentinel prefix) into session lines and window-activity lines, then run
+/// the existing session parser and apply per-session window-activity
+/// aggregation. Used by both `list_sessions_with_prefix` and
+/// `parse_session_listing` (the `_now` variant strips the epoch line first).
+fn parse_session_block(output: &str) -> Result<Vec<SessionInfo>> {
+    let (window_lines, session_lines): (Vec<&str>, Vec<&str>) = output
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.is_empty())
+        .partition(|line| line.starts_with(SESSION_LISTING_WIN_PREFIX));
+    let session_output = session_lines.join("\n");
+    let mut sessions = parse_sessions(&session_output)?;
+    let window_activity = parse_window_activity_block(&window_lines);
+    apply_window_activity_aggregation(&mut sessions, &window_activity);
+    Ok(sessions)
+}
+
+/// Build a `HashMap<session_id, max(window_activity)>` from the trailing
+/// `__MOTLIE_WIN__ <session_id> <window_activity>` block. Tmux issues one row
+/// per window across the entire server; we fold to a per-session max.
+///
+/// Lines that don't parse cleanly (corrupt timestamps, missing fields) are
+/// silently dropped — the worst case is that a session's window activity is
+/// treated as 0 and the session falls back to its `session_activity`.
+fn parse_window_activity_block(lines: &[&str]) -> HashMap<String, u64> {
+    let mut map: HashMap<String, u64> = HashMap::new();
+    for line in lines {
+        let Some(rest) = line.strip_prefix(SESSION_LISTING_WIN_PREFIX) else {
+            continue;
+        };
+        let trimmed = rest.trim_start();
+        let fields = parse_escaped_fields(trimmed);
+        if fields.len() != 2 || fields[0].is_empty() {
+            continue;
+        }
+        let Ok(activity) = fields[1].parse::<u64>() else {
+            continue;
+        };
+        map.entry(fields[0].clone())
+            .and_modify(|current| {
+                if activity > *current {
+                    *current = activity;
+                }
+            })
+            .or_insert(activity);
+    }
+    map
+}
+
+/// Update each session's `activity` to `max(session_activity, max(window_activity))`.
+///
+/// `session_activity` from tmux only tracks attached-client input (see issue
+/// #237 for the empirical confirmation). Program output writes only advance
+/// `window_activity` per window. Aggregating to the session level here gives
+/// `SessionInfo.activity` the "any-program-output OR any-client-input" meaning
+/// that recency UIs actually want.
+fn apply_window_activity_aggregation(
+    sessions: &mut [SessionInfo],
+    window_activity: &HashMap<String, u64>,
+) {
+    for session in sessions.iter_mut() {
+        if let Some(&max_window) = window_activity.get(session.id.as_str()) {
+            if max_window > session.activity {
+                session.activity = max_window;
+            }
+        }
+    }
 }
 
 fn local_epoch_seconds() -> u64 {
@@ -368,8 +455,8 @@ pub(crate) fn parse_session_listing(output: &str) -> Result<SessionListing> {
             "missing session listing epoch line".to_string(),
         ));
     };
-    let session_output = lines.collect::<Vec<_>>().join("\n");
-    let sessions = parse_sessions(&session_output)?;
+    let remainder = lines.collect::<Vec<_>>().join("\n");
+    let sessions = parse_session_block(&remainder)?;
     let now = parse_session_listing_epoch(epoch_line)?
         .unwrap_or_else(|| fallback_session_listing_now(local_epoch_seconds(), &sessions));
     Ok(SessionListing { now, sessions })
@@ -651,6 +738,106 @@ mod tests {
         assert_eq!(listing.sessions[0].name, "build");
     }
 
+    /// Issue #237: tmux's `session_activity` only tracks attached-client
+    /// input. Program output advances `window_activity` per window. Fold the
+    /// max window activity into `SessionInfo.activity` so the recency display
+    /// reflects "any-output OR any-input."
+    #[test]
+    fn session_activity_aggregates_max_window_activity() {
+        // Session $0 has session_activity=200, window_activity=500 (output is
+        // newer than the last input). Final activity should be 500.
+        // Session $1 has session_activity=900, window_activity=300 (input
+        // is newer than output). Final activity should stay at 900.
+        let listing = parse_session_listing(concat!(
+            "__MOTLIE_EPOCH:1000\n",
+            "build $0 100 0 1  200\n",
+            "talky $1 100 0 1  900\n",
+            "__MOTLIE_WIN__ $0 500\n",
+            "__MOTLIE_WIN__ $1 300\n",
+        ))
+        .unwrap();
+
+        assert_eq!(listing.now, 1000);
+        assert_eq!(listing.sessions.len(), 2);
+        let build = &listing.sessions[0];
+        let talky = &listing.sessions[1];
+        assert_eq!(build.name, "build");
+        assert_eq!(
+            build.activity, 500,
+            "window_activity (500) > session_activity (200): aggregator picks 500"
+        );
+        assert_eq!(talky.name, "talky");
+        assert_eq!(
+            talky.activity, 900,
+            "session_activity (900) > window_activity (300): aggregator preserves 900"
+        );
+    }
+
+    #[test]
+    fn session_activity_uses_max_across_multiple_windows() {
+        // A session with two windows: oldest, middle, newest. Aggregate to the
+        // newest. session_activity is older than both — final should be newest.
+        let listing = parse_session_listing(concat!(
+            "__MOTLIE_EPOCH:1000\n",
+            "multi $7 100 0 2  200\n",
+            "__MOTLIE_WIN__ $7 300\n",
+            "__MOTLIE_WIN__ $7 700\n",
+            "__MOTLIE_WIN__ $7 500\n",
+        ))
+        .unwrap();
+
+        assert_eq!(listing.sessions[0].activity, 700);
+    }
+
+    #[test]
+    fn session_activity_unchanged_when_no_window_rows_present() {
+        // Defensive: if the chained list-windows somehow returns nothing for
+        // a session id, the session falls back to its raw session_activity.
+        let listing = parse_session_listing(concat!(
+            "__MOTLIE_EPOCH:1000\n",
+            "lonely $9 100 0 1  250\n",
+        ))
+        .unwrap();
+
+        assert_eq!(listing.sessions[0].activity, 250);
+    }
+
+    #[test]
+    fn parse_window_activity_block_handles_corrupt_lines() {
+        // Lines that don't have exactly two fields, or whose timestamp doesn't
+        // parse, are silently dropped. The remaining valid rows still feed the
+        // aggregator. This protects against tmux version quirks that emit
+        // `__MOTLIE_WIN__ $0 ` (empty timestamp) or partial rows.
+        let map = parse_window_activity_block(&[
+            "__MOTLIE_WIN__ $0 700",
+            "__MOTLIE_WIN__ $0 not-a-number",
+            "__MOTLIE_WIN__ $0",
+            "__MOTLIE_WIN__ $0 200",
+            "__MOTLIE_WIN__  500", // empty session id — dropped
+        ]);
+        assert_eq!(map.get("$0").copied(), Some(700));
+        assert!(map.get("").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_prefix_aggregates_window_activity() {
+        // The non-`_now` variant also aggregates so all SessionInfo consumers
+        // see the same activity semantics regardless of which API they call.
+        let mock = MockTransport::new().with_response(
+            "list-sessions",
+            concat!(
+                "build $0 100 0 1  200\n",
+                "__MOTLIE_WIN__ $0 750\n",
+            ),
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let sessions = list_sessions(&transport, None).await.unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].activity, 750);
+    }
+
     #[tokio::test]
     async fn list_sessions_now_empty_state_falls_back_to_local_epoch() {
         let cmd = list_sessions_now_command("tmux");
@@ -713,7 +900,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_true_empty_state_returns_empty() {
-        let cmd = format!("tmux list-sessions -F '{}'", LIST_SESSIONS_FMT);
+        let cmd = list_sessions_with_windows_command("tmux");
         let mock = MockTransport::new().with_error(
             "list-sessions",
             format!(
