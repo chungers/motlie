@@ -102,6 +102,7 @@ impl TargetOutput {
 
 /// Events delivered to subscribers.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum SinkEvent {
     /// Normal output data.
     Data(TargetOutput),
@@ -174,11 +175,9 @@ impl CompiledSinkFilter {
     pub fn compile(filter: &SinkFilter) -> Result<Self> {
         let compile_opt = |opt: &Option<String>| -> Result<Option<regex::Regex>> {
             match opt {
-                Some(pat) => {
-                    Ok(Some(regex::Regex::new(pat).map_err(|e| {
-                        Error::Parse(format!("invalid filter regex '{}': {}", pat, e))
-                    })?))
-                }
+                Some(pat) => Ok(Some(regex::Regex::new(pat).map_err(|e| {
+                    Error::Parse(format!("invalid filter regex '{}': {}", pat, e))
+                })?)),
                 None => Ok(None),
             }
         };
@@ -285,17 +284,16 @@ impl SinkKind {
 pub struct CallbackSink {
     pub name: String,
     /// Shared state passed to callbacks.
-    pub state: std::sync::Arc<dyn Any + Send + Sync>,
+    pub state: CallbackState,
     /// Synchronous callback for each output event.
-    pub on_output:
-        fn(state: &std::sync::Arc<dyn Any + Send + Sync>, event: SinkEvent) -> Result<()>,
+    pub on_output: fn(state: &CallbackState, event: SinkEvent) -> Result<()>,
     /// Called on bus shutdown. Returns a boxed future.
-    pub on_flush: Option<
-        fn(
-            state: &std::sync::Arc<dyn Any + Send + Sync>,
-        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>,
-    >,
+    pub on_flush: Option<CallbackFlush>,
 }
+
+pub type CallbackState = std::sync::Arc<dyn Any + Send + Sync>;
+pub type CallbackFlush =
+    fn(state: &CallbackState) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
 // ---------------------------------------------------------------------------
 // Subscription — the composable seam (DC24)
@@ -363,10 +361,8 @@ impl Subscription {
                     SinkEvent::Gap { .. } => true,
                     SinkEvent::Discontinuity { .. } => true,
                 };
-                if should_forward {
-                    if tx.send(event).await.is_err() {
-                        break;
-                    }
+                if should_forward && tx.send(event).await.is_err() {
+                    break;
                 }
             }
         });
@@ -393,9 +389,7 @@ impl PipeHandle {
     /// drops the subscription's sender (via `unsubscribe()` or `shutdown()`),
     /// draining remaining buffered events and flushing the sink.
     pub async fn join(self) -> Result<()> {
-        self.task
-            .await
-            .map_err(Error::JoinError)
+        self.task.await.map_err(Error::JoinError)
     }
 }
 
@@ -546,18 +540,13 @@ impl JoinedStream {
 // ---------------------------------------------------------------------------
 
 /// Rendering mode for history output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Entries in arrival order with source labels on source transitions.
+    #[default]
     Interleaved,
     /// Group entries by source, render each source as a labeled section.
     PerSource,
-}
-
-impl Default for RenderMode {
-    fn default() -> Self {
-        RenderMode::Interleaved
-    }
 }
 
 /// Options for configuring a rolling transcript/history handle.
@@ -793,7 +782,10 @@ impl PollHistory {
         let mut index: HashMap<String, usize> = HashMap::new();
 
         for entry in &self.entries {
-            let key = entry.source.clone().unwrap_or_else(|| "__unsourced__".to_string());
+            let key = entry
+                .source
+                .clone()
+                .unwrap_or_else(|| "__unsourced__".to_string());
             if let Some(&idx) = index.get(&key) {
                 sections[idx].1.push(entry);
             } else {
@@ -829,6 +821,10 @@ impl PollHistory {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     fn trim(&mut self) {
@@ -878,7 +874,11 @@ impl SourceWindow {
             return false;
         }
         // Entry is guaranteed to exist and be Output after the guard above.
-        let old_chars = self.entries.back().map(|e| e.rendered_chars(label_format)).unwrap_or(0);
+        let old_chars = self
+            .entries
+            .back()
+            .map(|e| e.rendered_chars(label_format))
+            .unwrap_or(0);
         if let Some(HistoryEntry::Output {
             text: ref mut existing,
             ..
@@ -886,7 +886,11 @@ impl SourceWindow {
         {
             existing.push_str(text);
         }
-        let new_chars = self.entries.back().map(|e| e.rendered_chars(label_format)).unwrap_or(0);
+        let new_chars = self
+            .entries
+            .back()
+            .map(|e| e.rendered_chars(label_format))
+            .unwrap_or(0);
         self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
         true
     }
@@ -967,7 +971,7 @@ impl HistoryState {
                     self.source_order.push(key.clone());
                 }
                 self.last_written_source = Some(key.clone());
-                let label_format = self.label_format.clone();
+                let label_format = self.label_format;
                 let max_entries = self.max_entries;
                 let max_render_chars = self.max_render_chars;
                 let window = self.per_source.entry(key).or_insert_with(SourceWindow::new);
@@ -994,7 +998,11 @@ impl HistoryState {
             return false;
         }
         // Entry is guaranteed to exist and be Output after the guard above.
-        let old_chars = self.entries.back().map(|e| e.rendered_chars(&self.label_format)).unwrap_or(0);
+        let old_chars = self
+            .entries
+            .back()
+            .map(|e| e.rendered_chars(&self.label_format))
+            .unwrap_or(0);
         if let Some(HistoryEntry::Output {
             text: ref mut existing,
             ..
@@ -1002,7 +1010,11 @@ impl HistoryState {
         {
             existing.push_str(text);
         }
-        let new_chars = self.entries.back().map(|e| e.rendered_chars(&self.label_format)).unwrap_or(0);
+        let new_chars = self
+            .entries
+            .back()
+            .map(|e| e.rendered_chars(&self.label_format))
+            .unwrap_or(0);
         self.rendered_chars = self.rendered_chars.saturating_sub(old_chars) + new_chars;
         true
     }
@@ -1016,7 +1028,7 @@ impl HistoryState {
                 }
                 let max_entries = self.max_entries;
                 let max_render_chars = self.max_render_chars;
-                let label_format = self.label_format.clone();
+                let label_format = self.label_format;
                 window.trim(max_entries, max_render_chars, &label_format);
                 self.trim_global();
                 return true;
@@ -1202,9 +1214,7 @@ impl HistoryHandle {
     /// (via `unsubscribe()` or bus `shutdown()`), guaranteeing all buffered
     /// events have been drained into the snapshot.
     pub async fn join(self) -> Result<HistorySnapshot> {
-        self.task
-            .await
-            .map_err(Error::JoinError)?;
+        self.task.await.map_err(Error::JoinError)?;
         Ok(self.state.lock().await.snapshot())
     }
 }
@@ -1330,17 +1340,26 @@ pub enum FlushPolicy {
 impl FlushPolicy {
     /// Convenience: `LineCount { min_lines: 3, max_wait: 10s }`.
     pub fn line_count(min_lines: usize, max_wait: std::time::Duration) -> Self {
-        FlushPolicy::LineCount { min_lines, max_wait }
+        FlushPolicy::LineCount {
+            min_lines,
+            max_wait,
+        }
     }
 
     /// Convenience: `Idle { idle_duration: 3s, max_wait: 15s }`.
     pub fn idle(idle_duration: std::time::Duration, max_wait: std::time::Duration) -> Self {
-        FlushPolicy::Idle { idle_duration, max_wait }
+        FlushPolicy::Idle {
+            idle_duration,
+            max_wait,
+        }
     }
 
     /// Convenience: `PromptBoundary { max_wait: 30s, min_content_lines: 1 }`.
     pub fn prompt_boundary(max_wait: std::time::Duration, min_content_lines: usize) -> Self {
-        FlushPolicy::PromptBoundary { max_wait, min_content_lines }
+        FlushPolicy::PromptBoundary {
+            max_wait,
+            min_content_lines,
+        }
     }
 
     /// Evaluate whether a flush should happen given the current state.
@@ -1355,13 +1374,18 @@ impl FlushPolicy {
             return false;
         }
         match self {
-            FlushPolicy::LineCount { min_lines, max_wait } => {
-                pending.len() >= *min_lines || time_since_flush >= *max_wait
-            }
-            FlushPolicy::Idle { idle_duration, max_wait } => {
-                time_since_last_change >= *idle_duration || time_since_flush >= *max_wait
-            }
-            FlushPolicy::PromptBoundary { max_wait, min_content_lines } => {
+            FlushPolicy::LineCount {
+                min_lines,
+                max_wait,
+            } => pending.len() >= *min_lines || time_since_flush >= *max_wait,
+            FlushPolicy::Idle {
+                idle_duration,
+                max_wait,
+            } => time_since_last_change >= *idle_duration || time_since_flush >= *max_wait,
+            FlushPolicy::PromptBoundary {
+                max_wait,
+                min_content_lines,
+            } => {
                 if saw_prompt && pending.len() >= *min_content_lines {
                     return true;
                 }
@@ -1473,7 +1497,11 @@ impl SourceAccumulator {
         self.pending_lines.clear();
         self.last_flush = std::time::Instant::now();
         self.saw_prompt_since_flush = false;
-        if chunk.trim().is_empty() { None } else { Some(format!("{}\n", chunk)) }
+        if chunk.trim().is_empty() {
+            None
+        } else {
+            Some(format!("{}\n", chunk))
+        }
     }
 
     fn maybe_flush(&mut self) -> Option<String> {
@@ -1504,7 +1532,11 @@ impl SourceAccumulator {
         self.last_flush = std::time::Instant::now();
         self.saw_prompt_since_flush = false;
 
-        if chunk.trim().is_empty() { None } else { Some(format!("{}\n", chunk)) }
+        if chunk.trim().is_empty() {
+            None
+        } else {
+            Some(format!("{}\n", chunk))
+        }
     }
 }
 
@@ -1711,7 +1743,7 @@ impl Default for OutputBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{OutputFidelity, PaneAddress, SessionInfo};
+    use crate::types::{OutputFidelity, PaneAddress, SessionId, SessionInfo};
     use std::sync::Arc;
 
     fn make_output(
@@ -1741,11 +1773,12 @@ mod tests {
         TargetOutput {
             source: TargetAddress::Session(SessionInfo {
                 name: session.to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
             host: host.to_string(),
             content: content.to_string(),
@@ -2077,11 +2110,12 @@ mod tests {
             host: "web-1".to_string(),
             target: TargetAddress::Session(SessionInfo {
                 name: "build".to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         assert_eq!(label.short(), "web-1:build");
@@ -3092,7 +3126,13 @@ mod tests {
         let history = sub.history(HistoryOptions::default());
 
         for i in 0..5 {
-            bus.publish(make_output("h", "s", "%1", &format!("chunk{}", i), i as u64));
+            bus.publish(make_output(
+                "h",
+                "s",
+                "%1",
+                &format!("chunk{}", i),
+                i as u64,
+            ));
         }
 
         tokio::task::yield_now().await;
@@ -3139,18 +3179,38 @@ mod tests {
         });
 
         // Interleave source A and B
-        tx.send(SinkEvent::Data(make_output("h", "build", "%1", "compiling", 1)))
-            .await
-            .unwrap();
-        tx.send(SinkEvent::Data(make_output("h", "test", "%2", "test_a PASS", 1)))
-            .await
-            .unwrap();
-        tx.send(SinkEvent::Data(make_output("h", "build", "%1", "linking", 2)))
-            .await
-            .unwrap();
-        tx.send(SinkEvent::Data(make_output("h", "test", "%2", "test_b PASS", 2)))
-            .await
-            .unwrap();
+        tx.send(SinkEvent::Data(make_output(
+            "h",
+            "build",
+            "%1",
+            "compiling",
+            1,
+        )))
+        .await
+        .unwrap();
+        tx.send(SinkEvent::Data(make_output(
+            "h",
+            "test",
+            "%2",
+            "test_a PASS",
+            1,
+        )))
+        .await
+        .unwrap();
+        tx.send(SinkEvent::Data(make_output(
+            "h", "build", "%1", "linking", 2,
+        )))
+        .await
+        .unwrap();
+        tx.send(SinkEvent::Data(make_output(
+            "h",
+            "test",
+            "%2",
+            "test_b PASS",
+            2,
+        )))
+        .await
+        .unwrap();
 
         drop(tx);
         history.task.await.unwrap();
@@ -3305,36 +3365,38 @@ mod tests {
             ..Default::default()
         });
 
-        tx.send(SinkEvent::Data(make_output("web", "build", "%1", "compiling", 1)))
-            .await
-            .unwrap();
-        tx.send(SinkEvent::Data(make_output("web", "deploy", "%2", "deploying", 2)))
-            .await
-            .unwrap();
-        tx.send(SinkEvent::Data(make_output("web", "build", "%1", "done", 3)))
-            .await
-            .unwrap();
+        tx.send(SinkEvent::Data(make_output(
+            "web",
+            "build",
+            "%1",
+            "compiling",
+            1,
+        )))
+        .await
+        .unwrap();
+        tx.send(SinkEvent::Data(make_output(
+            "web",
+            "deploy",
+            "%2",
+            "deploying",
+            2,
+        )))
+        .await
+        .unwrap();
+        tx.send(SinkEvent::Data(make_output(
+            "web", "build", "%1", "done", 3,
+        )))
+        .await
+        .unwrap();
 
         drop(tx);
         history.task.await.unwrap();
 
         let text = history.state.lock().await.render_text();
         // Interleaved: entries in arrival order with labels on source change
-        assert!(
-            text.contains("[web:build(%1)] compiling"),
-            "got: {}",
-            text
-        );
-        assert!(
-            text.contains("[web:deploy(%2)] deploying"),
-            "got: {}",
-            text
-        );
-        assert!(
-            text.contains("[web:build(%1)] done"),
-            "got: {}",
-            text
-        );
+        assert!(text.contains("[web:build(%1)] compiling"), "got: {}", text);
+        assert!(text.contains("[web:deploy(%2)] deploying"), "got: {}", text);
+        assert!(text.contains("[web:build(%1)] done"), "got: {}", text);
         // Should NOT have per-source section headers
         assert!(
             !text.contains("==="),
@@ -3386,9 +3448,9 @@ mod tests {
             rx,
         };
         let history = sub.history(HistoryOptions {
-            max_entries: 100,                // large per-source limit
-            max_render_chars: 0,             // no per-source char limit
-            global_max_render_chars: 100,    // tight global cap
+            max_entries: 100,             // large per-source limit
+            max_render_chars: 0,          // no per-source char limit
+            global_max_render_chars: 100, // tight global cap
             render_mode: RenderMode::PerSource,
             include_omission_marker: false,
             ..Default::default()

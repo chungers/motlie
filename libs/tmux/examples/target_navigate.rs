@@ -67,8 +67,11 @@ async fn main() -> anyhow::Result<()> {
     );
     if let Some(info) = session_target.session_info() {
         println!(
-            "  id={}, windows={}, attached={}",
-            info.id, info.window_count, info.attached
+            "  id={}, windows={}, attached_clients={}, attached={}",
+            info.id,
+            info.window_count,
+            info.attached_count,
+            info.is_attached()
         );
     }
 

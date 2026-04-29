@@ -42,8 +42,12 @@ async fn main() -> anyhow::Result<()> {
                 TargetLevel::Session => {
                     if let Some(info) = target.session_info() {
                         println!(
-                            "  Session: name={}, id={}, windows={}, attached={}",
-                            info.name, info.id, info.window_count, info.attached
+                            "  Session: name={}, id={}, windows={}, attached_clients={}, attached={}",
+                            info.name,
+                            info.id,
+                            info.window_count,
+                            info.attached_count,
+                            info.is_attached()
                         );
                     }
                 }
@@ -57,10 +61,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TargetLevel::Pane => {
                     if let Some(addr) = target.pane_address() {
-                        println!(
-                            "  Pane: pane_id={}, address={}",
-                            addr.pane_id, addr
-                        );
+                        println!("  Pane: pane_id={}, address={}", addr.pane_id, addr);
                     }
                 }
             }

@@ -1,9 +1,11 @@
 use crate::error::{Error, Result};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
 
+use crate::attach::{self, AttachCommand};
 use crate::capture;
 use crate::control;
 use crate::discovery;
@@ -122,10 +124,52 @@ pub struct HostHandle {
     inner: Arc<HostHandleInner>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEvent {
+    SessionsChanged,
+    SessionAdded {
+        id: String,
+        name: String,
+    },
+    SessionClosed {
+        id: String,
+        name: String,
+    },
+    SessionRenamed {
+        id: String,
+        old: String,
+        new: String,
+    },
+    ClientAttached {
+        session_id: String,
+    },
+    ClientDetached {
+        session_id: String,
+    },
+    Disconnect {
+        reason: String,
+    },
+}
+
+pub struct HostEventStream {
+    rx: mpsc::Receiver<HostEvent>,
+}
+
+impl HostEventStream {
+    pub async fn recv(&mut self) -> Option<HostEvent> {
+        self.rx.recv().await
+    }
+
+    pub fn into_receiver(self) -> mpsc::Receiver<HostEvent> {
+        self.rx
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionWatchOptions {
     pub queue_capacity: usize,
     pub history: HistoryOptions,
+    pub normalize: CaptureNormalizeMode,
 }
 
 impl Default for SessionWatchOptions {
@@ -133,8 +177,133 @@ impl Default for SessionWatchOptions {
         Self {
             queue_capacity: 64,
             history: HistoryOptions::default(),
+            normalize: CaptureNormalizeMode::Raw,
         }
     }
+}
+
+fn session_key(session: &SessionInfo) -> String {
+    session.id.as_str().to_string()
+}
+
+fn sessions_by_key(sessions: Vec<SessionInfo>) -> HashMap<String, SessionInfo> {
+    sessions
+        .into_iter()
+        .map(|session| (session_key(&session), session))
+        .collect()
+}
+
+fn diff_session_events(
+    previous: &HashMap<String, SessionInfo>,
+    current: &HashMap<String, SessionInfo>,
+) -> Vec<HostEvent> {
+    let mut events = Vec::new();
+    let mut changed = false;
+
+    for (id, session) in current {
+        if !previous.contains_key(id) {
+            changed = true;
+            events.push(HostEvent::SessionAdded {
+                id: id.clone(),
+                name: session.name.clone(),
+            });
+        }
+    }
+
+    for (id, session) in previous {
+        if !current.contains_key(id) {
+            changed = true;
+            events.push(HostEvent::SessionClosed {
+                id: id.clone(),
+                name: session.name.clone(),
+            });
+        }
+    }
+
+    for (id, before) in previous {
+        if let Some(after) = current.get(id) {
+            if before.name != after.name {
+                changed = true;
+                events.push(HostEvent::SessionRenamed {
+                    id: id.clone(),
+                    old: before.name.clone(),
+                    new: after.name.clone(),
+                });
+            }
+            let before_attached = before.is_attached();
+            let after_attached = after.is_attached();
+            if before_attached != after_attached {
+                changed = true;
+                if after_attached {
+                    events.push(HostEvent::ClientAttached {
+                        session_id: id.clone(),
+                    });
+                } else {
+                    events.push(HostEvent::ClientDetached {
+                        session_id: id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if changed {
+        events.insert(0, HostEvent::SessionsChanged);
+    }
+    events
+}
+
+async fn read_local_text_file(path: &Path, max_bytes: usize) -> Result<String> {
+    let metadata = tokio::fs::metadata(path).await?;
+    ensure_text_file_size(path, metadata.len(), max_bytes)?;
+    let text = tokio::fs::read_to_string(path).await?;
+    ensure_text_buffer_size(path, text.len(), max_bytes)?;
+    Ok(text)
+}
+
+fn read_local_text_file_blocking(path: &Path, max_bytes: usize) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    ensure_text_file_size(path, metadata.len(), max_bytes)?;
+    let text = std::fs::read_to_string(path)?;
+    ensure_text_buffer_size(path, text.len(), max_bytes)?;
+    Ok(text)
+}
+
+fn ensure_text_file_size(path: &Path, len: u64, max_bytes: usize) -> Result<()> {
+    if len > max_bytes as u64 {
+        return Err(Error::State(format!(
+            "text file {} is {} bytes, exceeding max_bytes {}",
+            path.display(),
+            len,
+            max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_text_buffer_size(path: &Path, len: usize, max_bytes: usize) -> Result<()> {
+    if len > max_bytes {
+        return Err(Error::State(format!(
+            "text file {} is {} bytes, exceeding max_bytes {}",
+            path.display(),
+            len,
+            max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn temporary_download_path(remote_path: &Path) -> PathBuf {
+    let name = remote_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("text");
+    std::env::temp_dir().join(format!(
+        "motlie-tmux-read-{}-{}-{name}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
 }
 
 pub struct SessionWatchHandle {
@@ -298,6 +467,82 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// List all tmux sessions on this host with the host tmux server's epoch seconds.
+    pub async fn list_sessions_now(&self) -> Result<SessionListing> {
+        let prefix = self.inner.tmux_prefix().await;
+        discovery::list_sessions_now_with_prefix(&self.inner.transport, &prefix).await
+    }
+
+    /// Read a UTF-8 text file from the host with a caller-provided size cap.
+    ///
+    /// This is intentionally narrower than arbitrary host command execution:
+    /// consumers that need metadata such as `/etc/motd` do not need to embed
+    /// shell syntax or redirection in application code.
+    pub async fn read_text_file(&self, path: &Path, max_bytes: usize) -> Result<String> {
+        match &self.inner.transport {
+            TransportKind::Local(_) => read_local_text_file(path, max_bytes).await,
+            TransportKind::Mock(_) | TransportKind::Ssh(_) => {
+                let local_path = temporary_download_path(path);
+                let opts = TransferOptions::default();
+                let download_result = self
+                    .inner
+                    .transport
+                    .download(path, &local_path, &opts)
+                    .await
+                    .and_then(|_| read_local_text_file_blocking(&local_path, max_bytes));
+                let cleanup_result = tokio::fs::remove_file(&local_path).await;
+                match (download_result, cleanup_result) {
+                    (Err(err), _) => Err(err),
+                    (Ok(_), Err(err)) if err.kind() != std::io::ErrorKind::NotFound => {
+                        Err(Error::Io(err))
+                    }
+                    (Ok(text), _) => Ok(text),
+                }
+            }
+        }
+    }
+
+    /// Watch host-level tmux session changes.
+    ///
+    /// The stream reconciles `list_sessions()` snapshots by stable session id
+    /// and emits typed events. It continues after transient failures by
+    /// reporting `Disconnect` and retrying on the next poll tick.
+    pub async fn watch_host_events(&self) -> Result<HostEventStream> {
+        let initial = self.list_sessions().await?;
+        let host = self.clone();
+        let (tx, rx) = mpsc::channel(128);
+
+        tokio::spawn(async move {
+            let mut previous = sessions_by_key(initial);
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                match host.list_sessions().await {
+                    Ok(current_sessions) => {
+                        let current = sessions_by_key(current_sessions);
+                        let events = diff_session_events(&previous, &current);
+                        previous = current;
+                        for event in events {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let event = HostEvent::Disconnect {
+                            reason: err.to_string(),
+                        };
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(HostEventStream { rx })
+    }
+
     /// List attached clients on this host (DC20, Phase 1.9b).
     pub async fn list_clients(&self) -> Result<Vec<ClientInfo>> {
         let prefix = self.inner.tmux_prefix().await;
@@ -332,7 +577,9 @@ impl HostHandle {
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
-            .ok_or_else(|| Error::State(format!("session '{}' created but not found in list", name)))?;
+            .ok_or_else(|| {
+                Error::State(format!("session '{}' created but not found in list", name))
+            })?;
 
         Ok(Target {
             inner: self.inner.clone(),
@@ -352,6 +599,18 @@ impl HostHandle {
             }))
     }
 
+    /// Get a Target for an existing session by stable tmux session id.
+    pub async fn session_by_id(&self, id: &str) -> Result<Option<Target>> {
+        let sessions = self.list_sessions().await?;
+        Ok(sessions
+            .into_iter()
+            .find(|s| s.id.as_str() == id)
+            .map(|info| Target {
+                inner: self.inner.clone(),
+                address: TargetAddress::Session(info),
+            }))
+    }
+
     /// Get a Target from a TargetSpec. Verifies the entity exists.
     pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>> {
         let prefix = self.inner.tmux_prefix().await;
@@ -363,12 +622,10 @@ impl HostHandle {
         };
 
         match (spec.window_selector(), spec.pane_index()) {
-            (None, Some(_)) => {
-                return Err(Error::Parse(format!(
+            (None, Some(_)) => Err(Error::Parse(format!(
                     "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
                     spec.session_name()
-                )));
-            }
+                ))),
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
@@ -581,6 +838,15 @@ impl HostHandle {
         &self,
         session_name: &str,
     ) -> Result<SessionMonitorHandle> {
+        self.start_monitoring_session_with_normalize(session_name, CaptureNormalizeMode::Raw)
+            .await
+    }
+
+    async fn start_monitoring_session_with_normalize(
+        &self,
+        session_name: &str,
+        normalize: CaptureNormalizeMode,
+    ) -> Result<SessionMonitorHandle> {
         let bus = self.output_bus();
         let host_alias = self.inner.host_alias.clone();
         let session = session_name.to_string();
@@ -632,9 +898,10 @@ impl HostHandle {
             };
 
             loop {
-                let mut monitor = SessionMonitor::new(session.clone(), host_alias.clone())
-                    .with_socket(inner_ref.socket.clone())
-                    .with_tmux_bin(Some(resolved_tmux_bin.clone()));
+                let mut monitor =
+                    SessionMonitor::with_normalize(session.clone(), host_alias.clone(), normalize)
+                        .with_socket(inner_ref.socket.clone())
+                        .with_tmux_bin(Some(resolved_tmux_bin.clone()));
 
                 let exit = monitor
                     .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
@@ -670,8 +937,7 @@ impl HostHandle {
                             }
                             return Err(Error::State(format!(
                                 "monitor for '{}' exhausted {} reconnect attempts",
-                                session,
-                                max_retries
+                                session, max_retries
                             )));
                         }
 
@@ -853,7 +1119,10 @@ impl HostHandle {
         let subscription = bus.subscribe(vec![filter], opts.queue_capacity)?;
         let subscription_id = subscription.id();
 
-        match self.start_monitoring_session(session_name).await {
+        match self
+            .start_monitoring_session_with_normalize(session_name, opts.normalize)
+            .await
+        {
             Ok(monitor) => {
                 let history = subscription.history(opts.history.clone());
                 Ok(SessionWatchHandle {
@@ -901,9 +1170,9 @@ impl HostHandle {
             .monitor_signals
             .lock()
             .expect("monitor_signals lock poisoned");
-        let tx = signals
-            .get(session_name)
-            .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", session_name)))?;
+        let tx = signals.get(session_name).ok_or_else(|| {
+            Error::NotFound(format!("session '{}' not being monitored", session_name))
+        })?;
         let _ = tx.send(true);
         Ok(())
     }
@@ -961,9 +1230,7 @@ impl ExecHandle {
 
     /// Await completion, consuming the handle. Returns the final `ExecState`.
     pub async fn wait(self) -> Result<ExecState> {
-        self.task
-            .await
-            .map_err(Error::JoinError)?
+        self.task.await.map_err(Error::JoinError)?
     }
 }
 
@@ -1172,7 +1439,7 @@ impl Target {
         .await?;
 
         let pane = panes.into_iter().find(|p| {
-            p.address.pane == index && window_filter.map_or(true, |wi| p.address.window == wi)
+            p.address.pane == index && window_filter.is_none_or(|wi| p.address.window == wi)
         });
 
         Ok(pane.map(|p| Target {
@@ -1205,9 +1472,9 @@ impl Target {
             TargetAddress::Window(_) => Err(Error::Parse(
                 "new_window() requires a session target, got window".to_string(),
             )),
-            TargetAddress::Pane(_) => {
-                Err(Error::Parse("new_window() requires a session target, got pane".to_string()))
-            }
+            TargetAddress::Pane(_) => Err(Error::Parse(
+                "new_window() requires a session target, got pane".to_string(),
+            )),
         }
     }
 
@@ -1423,7 +1690,8 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                control::kill_session_with_prefix(&self.inner.transport, &prefix, &s.name).await
+                control::kill_session_with_prefix(&self.inner.transport, &prefix, s.id.as_str())
+                    .await
             }
             TargetAddress::Window(_) => {
                 control::kill_window_with_prefix(
@@ -1441,6 +1709,49 @@ impl Target {
                 )
                 .await
             }
+        }
+    }
+
+    /// Attach the current process PTY to this tmux session.
+    pub async fn attach_current_pty(&self) -> Result<crate::AttachExit> {
+        let command = self.attach_command().await?;
+        tokio::task::spawn_blocking(move || attach::run_attach_command(command)).await?
+    }
+
+    async fn attach_command(&self) -> Result<AttachCommand> {
+        let session = match &self.address {
+            TargetAddress::Session(session) => session,
+            TargetAddress::Window(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_current_pty",
+                    level: TargetLevel::Window,
+                });
+            }
+            TargetAddress::Pane(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_current_pty",
+                    level: TargetLevel::Pane,
+                });
+            }
+        };
+        let target = session.id.as_str();
+        let tmux_bin = self.inner.resolve_tmux_bin().await;
+
+        match &self.inner.transport {
+            TransportKind::Local(_) => Ok(attach::local_attach_command(
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+            )),
+            TransportKind::Ssh(ssh) => Ok(attach::ssh_attach_command(
+                ssh.config(),
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+            )),
+            TransportKind::Mock(_) => Err(Error::State(
+                "attach_current_pty is not supported for mock transports".to_string(),
+            )),
         }
     }
 
@@ -1462,7 +1773,7 @@ impl Target {
                 control::rename_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &s.name,
+                    s.id.as_str(),
                     new_name,
                 )
                 .await?;
@@ -1769,8 +2080,12 @@ impl Target {
         let handle = self.start_exec(command, timeout).await?;
         match handle.wait().await? {
             ExecState::Completed(output) => Ok(output),
-            ExecState::Unknown { reason } => Err(Error::State(format!("exec result unknown: {}", reason))),
-            ExecState::Running => Err(Error::State("internal error: Running after wait".to_string())),
+            ExecState::Unknown { reason } => {
+                Err(Error::State(format!("exec result unknown: {}", reason)))
+            }
+            ExecState::Running => Err(Error::State(
+                "internal error: Running after wait".to_string(),
+            )),
         }
     }
 }
@@ -1927,11 +2242,12 @@ impl HostHandle {
             inner: self.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: session_name.to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         }
     }
@@ -1967,7 +2283,7 @@ mod tests {
     async fn create_session_returns_target() {
         let mock = MockTransport::new()
             .with_default("")
-            .with_response("list-sessions", "test $0 1700000000 0 1 \n");
+            .with_response("list-sessions", "test $0 1700000000 0 1  1700000005\n");
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())
@@ -1980,7 +2296,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1  0\n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -1988,7 +2304,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2  0\n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -1998,8 +2314,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_by_id_found() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "build $7 0 1 2  0\nother $8 0 0 1  0\n");
+        let host = mock_host(mock);
+        let target = host.session_by_id("$7").await.unwrap();
+        assert!(target.is_some());
+        let t = target.unwrap();
+        assert_eq!(t.level(), TargetLevel::Session);
+        assert_eq!(t.target_string(), "build");
+        assert_eq!(t.session_info().unwrap().id.as_str(), "$7");
+    }
+
+    #[tokio::test]
+    async fn session_by_id_not_found() {
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2  0\n");
+        let host = mock_host(mock);
+        let target = host.session_by_id("$1").await.unwrap();
+        assert!(target.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_now_returns_server_epoch_and_activity() {
+        let mock = MockTransport::new().with_response(
+            "display-message -p '__MOTLIE_EPOCH:",
+            "__MOTLIE_EPOCH:100\nbuild $0 10 0 1  80\n",
+        );
+        let host = mock_host(mock);
+
+        let listing = host.list_sessions_now().await.unwrap();
+
+        assert_eq!(listing.now, 100);
+        assert_eq!(listing.sessions.len(), 1);
+        assert_eq!(listing.sessions[0].name, "build");
+        assert_eq!(listing.sessions[0].activity, 80);
+    }
+
+    #[tokio::test]
+    async fn read_text_file_reads_mock_transport_file() {
+        let mock = MockTransport::new().with_file("/etc/motd", b"hello\n".to_vec());
+        let host = mock_host(mock);
+
+        let text = host
+            .read_text_file(Path::new("/etc/motd"), 64)
+            .await
+            .unwrap();
+
+        assert_eq!(text, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_enforces_size_cap() {
+        let mock = MockTransport::new().with_file("/etc/motd", b"too large".to_vec());
+        let host = mock_host(mock);
+
+        let err = host
+            .read_text_file(Path::new("/etc/motd"), 3)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("exceeding max_bytes"));
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("motlie-tmux-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    async fn write_test_file(name: &str, content: impl AsRef<[u8]>) -> PathBuf {
+        let path = unique_test_path(name);
+        tokio::fs::write(&path, content).await.unwrap();
+        path
+    }
+
+    async fn remove_test_file(path: &Path) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_missing_local_file() {
+        let host = HostHandle::local();
+        let missing = unique_test_path("missing");
+
+        let err = host.read_text_file(&missing, 64).await.unwrap_err();
+
+        assert!(err.to_string().contains("No such file"));
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_ok_for_empty_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("empty", b"").await;
+
+        let text = host.read_text_file(&path, 64).await.unwrap();
+        remove_test_file(&path).await;
+
+        assert_eq!(text, "");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_ok_for_normal_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("normal", b"hello\n").await;
+
+        let text = host.read_text_file(&path, 64).await.unwrap();
+        remove_test_file(&path).await;
+
+        assert_eq!(text, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_oversized_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("oversized", vec![b'x'; 128]).await;
+
+        let err = host.read_text_file(&path, 64).await.unwrap_err();
+        remove_test_file(&path).await;
+
+        assert!(err.to_string().contains("max_bytes"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_unreadable_local_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let host = HostHandle::local();
+        let path = write_test_file("unreadable", b"secret").await;
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let result = host.read_text_file(&path, 64).await;
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        remove_test_file(&path).await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn diff_session_events_reports_add_close_rename_and_client_state() {
+        let previous = sessions_by_key(vec![
+            SessionInfo {
+                name: "old".to_string(),
+                id: SessionId::for_test("$1"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+            SessionInfo {
+                name: "gone".to_string(),
+                id: SessionId::for_test("$2"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+        ]);
+        let current = sessions_by_key(vec![
+            SessionInfo {
+                name: "new".to_string(),
+                id: SessionId::for_test("$1"),
+                created: 0,
+                attached_count: 1,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+            SessionInfo {
+                name: "added".to_string(),
+                id: SessionId::for_test("$3"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+        ]);
+
+        let events = diff_session_events(&previous, &current);
+        assert_eq!(events[0], HostEvent::SessionsChanged);
+        assert!(events.contains(&HostEvent::SessionAdded {
+            id: "$3".to_string(),
+            name: "added".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::SessionClosed {
+            id: "$2".to_string(),
+            name: "gone".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::SessionRenamed {
+            id: "$1".to_string(),
+            old: "old".to_string(),
+            new: "new".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::ClientAttached {
+            session_id: "$1".to_string(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn kill_session_uses_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("kill-session -t 'build'", "used display name")
+            .with_response("kill-session -t '$7'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target.kill().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1 \n");
+        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1  0\n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -2010,7 +2560,7 @@ mod tests {
     #[tokio::test]
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2 \n")
+            .with_response("list-sessions", "build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 1 1 layout\n$0 build 1 editor 0 1 layout\n",
@@ -2138,11 +2688,12 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: "old".to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         let new_target = target.rename("new").await.unwrap();
@@ -2223,7 +2774,7 @@ mod tests {
         // Session with 2 windows: window 0 (inactive) and window 1 (active).
         // Both have pane 0. Session-level pane(0) should return window 1's pane.
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2 \n")
+            .with_response("list-sessions", "build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 0 1 layout\n$0 build 1 editor 1 1 layout\n",
@@ -2484,11 +3035,12 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: "build".to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         let pane_target = Target {

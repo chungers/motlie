@@ -178,11 +178,7 @@ impl Fleet {
     // --- Monitoring lifecycle ---
 
     /// Start monitoring a specific session on a host.
-    pub async fn start_monitoring_session(
-        &mut self,
-        alias: &str,
-        session: &str,
-    ) -> Result<()> {
+    pub async fn start_monitoring_session(&mut self, alias: &str, session: &str) -> Result<()> {
         let host = self
             .hosts
             .get(alias)
@@ -243,8 +239,7 @@ impl Fleet {
         if !self.hosts.contains_key(host_alias) {
             return Err(Error::NotFound(format!(
                 "cannot bind workstream '{}': host '{}' not registered",
-                workstream,
-                host_alias
+                workstream, host_alias
             )));
         }
         self.workstreams.insert(
@@ -272,10 +267,9 @@ impl Fleet {
             .workstreams
             .get(workstream)
             .ok_or_else(|| Error::NotFound(format!("workstream '{}' not bound", workstream)))?;
-        let host = self
-            .hosts
-            .get(&entry.host_alias)
-            .ok_or_else(|| Error::NotFound(format!("host '{}' not registered", entry.host_alias)))?;
+        let host = self.hosts.get(&entry.host_alias).ok_or_else(|| {
+            Error::NotFound(format!("host '{}' not registered", entry.host_alias))
+        })?;
         host.target(&entry.target_spec).await
     }
 
@@ -288,28 +282,25 @@ impl Fleet {
 
     /// Send text to a workstream target.
     pub async fn send_text(&self, workstream: &str, text: &str) -> Result<()> {
-        let target = self
-            .find(workstream)
-            .await?
-            .ok_or_else(|| Error::NotFound(format!("workstream '{}' target not found", workstream)))?;
+        let target = self.find(workstream).await?.ok_or_else(|| {
+            Error::NotFound(format!("workstream '{}' target not found", workstream))
+        })?;
         target.send_text(text).await
     }
 
     /// Send keys to a workstream target.
     pub async fn send_keys(&self, workstream: &str, keys: &KeySequence) -> Result<()> {
-        let target = self
-            .find(workstream)
-            .await?
-            .ok_or_else(|| Error::NotFound(format!("workstream '{}' target not found", workstream)))?;
+        let target = self.find(workstream).await?.ok_or_else(|| {
+            Error::NotFound(format!("workstream '{}' target not found", workstream))
+        })?;
         target.send_keys(keys).await
     }
 
     /// Capture the current content of a workstream target.
     pub async fn capture(&self, workstream: &str) -> Result<String> {
-        let target = self
-            .find(workstream)
-            .await?
-            .ok_or_else(|| Error::NotFound(format!("workstream '{}' target not found", workstream)))?;
+        let target = self.find(workstream).await?.ok_or_else(|| {
+            Error::NotFound(format!("workstream '{}' target not found", workstream))
+        })?;
         target.capture().await
     }
 
@@ -342,9 +333,7 @@ mod tests {
 
     fn local_host_aliased(alias: &str) -> HostHandle {
         HostHandle::with_alias(
-            crate::transport::TransportKind::Local(
-                crate::transport::LocalTransport::new(),
-            ),
+            crate::transport::TransportKind::Local(crate::transport::LocalTransport::new()),
             None,
             alias,
         )
@@ -353,7 +342,9 @@ mod tests {
     #[test]
     fn fleet_register_and_lookup() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
         fleet.register("db-1", local_host_aliased("db-1")).unwrap();
 
         assert_eq!(fleet.host_count(), 2);
@@ -365,8 +356,12 @@ mod tests {
     #[test]
     fn fleet_alias_conflict_detection() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
-        let err = fleet.register("web-1", local_host_aliased("web-1")).unwrap_err();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
+        let err = fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap_err();
         assert!(err.to_string().contains("already registered"));
     }
 
@@ -391,7 +386,9 @@ mod tests {
     #[test]
     fn fleet_workstream_bind_find_unbind() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
 
         let spec = TargetSpec::session("build");
         fleet.bind("ci", "web-1", spec).unwrap();
@@ -423,7 +420,9 @@ mod tests {
     #[test]
     fn fleet_host_status_connected() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
         match fleet.host_status("web-1") {
             Some(HostStatus::Connected) => {}
             other => panic!("expected Connected, got {:?}", other),
@@ -447,7 +446,9 @@ mod tests {
     #[test]
     fn fleet_shutdown_clears_state() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
         fleet
             .bind("ci", "web-1", TargetSpec::session("build"))
             .unwrap();
@@ -460,7 +461,9 @@ mod tests {
     #[test]
     fn fleet_bus_injected_into_hosts() {
         let mut fleet = Fleet::new();
-        fleet.register("web-1", local_host_aliased("web-1")).unwrap();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
 
         // The host's output_bus() should return the fleet's shared bus
         let fleet_bus = fleet.output_bus();
