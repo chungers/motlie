@@ -454,14 +454,17 @@ PY
 
 cleanup() {
   if [[ "$KEEP_RUNNING" -eq 0 ]]; then
-    if [[ -f "$RUNNER_PID_FILE" ]]; then
-      kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
-      rm -f "$RUNNER_PID_FILE"
-    fi
-    if [[ -f "$EGRESS_HELPER_PID_FILE" ]]; then
-      kill "$(cat "$EGRESS_HELPER_PID_FILE")" >/dev/null 2>&1 || true
-      rm -f "$EGRESS_HELPER_PID_FILE"
-    fi
+    # @opus47-mac 2026-04-28 -- The previous body sent kill + rm without
+    # waiting for the runner's stopWithCompletionHandler flush to drain,
+    # then immediately rm -rf'd RUN_VM_DIR — racing the
+    # VZDiskImageSynchronizationModeFsync window against disk deletion.
+    # It also removed the PID file unconditionally, so a subsequent
+    # launch-vz.sh invocation could not find a prior orphan via the
+    # file path. Delegate to the same kill_stale_* helpers used at
+    # script start so the signal/wait/SIGKILL-escalate/remove flow is
+    # the single source of truth for the runner and egress lifecycle.
+    kill_stale_runners
+    kill_stale_egress_helpers
     rm -f "$EGRESS_SOCKET_PATH"
     if [[ "$REUSED_VM" -eq 0 ]] && [[ -n "$RUN_VM_DIR" && -d "$RUN_VM_DIR" ]]; then
       rm -rf "$RUN_VM_DIR"
@@ -473,9 +476,26 @@ cleanup() {
 
 trap cleanup EXIT
 
+# @opus47-mac 2026-04-26 -- kill_stale_runners treats $RUNNER_PID_FILE as the
+# authoritative source for the previous run's PID, and uses the ps/awk grep
+# only as a fallback for orphans whose PID file was lost. The previous
+# implementation relied solely on the ps grep matching `vz-vsock-runner` plus
+# the MAC + socket path as substrings, which was fragile under multi-guest
+# (issue #215 / PR #212 finding #9): adjacent socket paths could collide as
+# substrings, ps output truncation could drop entries, and a debugger-wrapped
+# runner would not match the literal binary name. Same shape as
+# kill_stale_egress_helpers above.
 kill_stale_runners() {
   local stale_pids=()
   local stale_pid=""
+
+  if [[ -f "$RUNNER_PID_FILE" ]]; then
+    stale_pid="$(cat "$RUNNER_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$stale_pid" ]]; then
+      stale_pids+=("$stale_pid")
+    fi
+  fi
+
   while read -r stale_pid; do
     [[ -n "$stale_pid" ]] || continue
     stale_pids+=("$stale_pid")
@@ -484,22 +504,56 @@ kill_stale_runners() {
   ')
 
   if [[ "${#stale_pids[@]}" -eq 0 ]]; then
+    rm -f "$RUNNER_PID_FILE"
     return 0
   fi
 
-  printf '%s\n' "--- terminating stale Vz runners for $GUEST_NAME ---"
-  kill "${stale_pids[@]}" >/dev/null 2>&1 || true
+  local unique_pids=()
+  local seen=""
+  for stale_pid in "${stale_pids[@]}"; do
+    [[ -n "$stale_pid" ]] || continue
+    if [[ " $seen " == *" $stale_pid "* ]]; then
+      continue
+    fi
+    seen+=" $stale_pid"
+    unique_pids+=("$stale_pid")
+  done
 
+  printf '%s\n' "--- terminating stale Vz runners for $GUEST_NAME ---"
+  kill "${unique_pids[@]}" >/dev/null 2>&1 || true
+
+  # @opus47-mac 2026-04-28 -- The survivor set must union both detection
+  # paths: kill -0 against unique_pids (catches PID-file-tracked PIDs the
+  # ps grep cannot see — debugger-wrapped or relocated runners — which
+  # is the entire reason the PID-file authority path exists), plus
+  # ps-grep matches (catches orphans whose PID file was already lost).
+  # Otherwise a debugger-wrapped runner gets SIGTERM, the loop sees no
+  # ps survivors, and the script proceeds to rm -rf RUN_VM_DIR while
+  # stopWithCompletionHandler is still flushing the disk.
   local attempts=0
   while [[ $attempts -lt 20 ]]; do
     local survivors=()
+    local seen_survivor=""
+    for stale_pid in "${unique_pids[@]}"; do
+      [[ -n "$stale_pid" ]] || continue
+      if kill -0 "$stale_pid" >/dev/null 2>&1; then
+        if [[ " $seen_survivor " != *" $stale_pid "* ]]; then
+          seen_survivor+=" $stale_pid"
+          survivors+=("$stale_pid")
+        fi
+      fi
+    done
     while read -r stale_pid; do
       [[ -n "$stale_pid" ]] || continue
-      survivors+=("$stale_pid")
+      if [[ " $seen_survivor " != *" $stale_pid "* ]]; then
+        seen_survivor+=" $stale_pid"
+        survivors+=("$stale_pid")
+      fi
     done < <(ps -Ao pid=,command= -ww | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
       /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
     ')
     if [[ "${#survivors[@]}" -eq 0 ]]; then
+      rm -f "$RUNNER_PID_FILE"
       return 0
     fi
     sleep 0.5
@@ -510,6 +564,14 @@ kill_stale_runners() {
   done
 
   echo "failed to terminate stale Vz runners for $GUEST_NAME" >&2
+  # Diagnostic must also enumerate PID-file-tracked survivors that the ps
+  # grep cannot match (same union as the survivor loop above).
+  for stale_pid in "${unique_pids[@]}"; do
+    [[ -n "$stale_pid" ]] || continue
+    if kill -0 "$stale_pid" >/dev/null 2>&1; then
+      ps -p "$stale_pid" -o pid,etime,command >&2 2>/dev/null || true
+    fi
+  done
   ps -Ao pid,etime,command | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
     /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print }
   ' >&2 || true
@@ -628,10 +690,14 @@ EOF
   exit 1
 }
 
-if [[ -f "$RUNNER_PID_FILE" ]]; then
-  kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
-  rm -f "$RUNNER_PID_FILE"
-fi
+# @opus47-mac 2026-04-28 -- The previous pre-block here read the PID file,
+# sent SIGTERM, and removed the file before calling kill_stale_runners. That
+# preempted the new PID-file authority path in kill_stale_runners (the file
+# was gone by the time it ran) and skipped the wait/escalate loop, so a
+# runner mid-flush via stopWithCompletionHandler could be left racing the
+# script's cleanup/relaunch. kill_stale_runners now owns the full lifecycle:
+# read/validate PID file, union with ps-grep candidates, signal, poll,
+# SIGKILL escalate, and remove the file on success.
 kill_stale_runners
 kill_stale_egress_helpers
 

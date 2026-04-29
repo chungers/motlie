@@ -669,6 +669,45 @@ static void install_signal_handler(int signum, dispatch_block_t block) {
     dispatch_resume(source);
 }
 
+// @opus47-mac 2026-04-26 -- request_clean_stop drives VZ shutdown via the
+// framework's stopWithCompletionHandler so destructors run, the disk
+// synchronization mode (VZDiskImageSynchronizationModeFsync) gets to flush,
+// and the kernel fd flush completes before the process exits. The previous
+// SIGINT/SIGTERM handlers called exit(0) directly, which under concurrent
+// multi-guest load could interrupt writes mid-flight (issue #215 / PR #212
+// finding #6).
+//
+// dispatch_once guards against double-stop on rapid Ctrl-C; the deadline
+// timer is a fallback for the rare case where stopWithCompletionHandler
+// hangs (e.g. framework deadlock). _exit avoids running atexit handlers
+// in that already-broken state.
+static dispatch_once_t s_stopOnce;
+static const int64_t STOP_DEADLINE_NS = 5LL * NSEC_PER_SEC;
+
+static void request_clean_stop(VzVsockRunner *runner, int signum) {
+    dispatch_once(&s_stopOnce, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, STOP_DEADLINE_NS),
+                       dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            fprintf(stderr,
+                    "vz-vsock-runner: stop deadline elapsed (sig=%d); forcing exit\n",
+                    signum);
+            _exit(1);
+        });
+        dispatch_async(runner.vmQueue, ^{
+            [runner.vm stopWithCompletionHandler:^(NSError * _Nullable error) {
+                if (error) {
+                    fprintf(stderr,
+                            "vz-vsock-runner: stop failed (sig=%d): %s\n",
+                            signum,
+                            error.localizedDescription.UTF8String);
+                    exit(1);
+                }
+                exit(0);
+            }];
+        });
+    });
+}
+
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         NSString *diskPath = nil;
@@ -798,10 +837,10 @@ int main(int argc, const char * argv[]) {
         }
 
         install_signal_handler(SIGINT, ^{
-            exit(0);
+            request_clean_stop(runner, SIGINT);
         });
         install_signal_handler(SIGTERM, ^{
-            exit(0);
+            request_clean_stop(runner, SIGTERM);
         });
 
         dispatch_main();
