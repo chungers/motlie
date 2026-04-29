@@ -30,9 +30,9 @@
 mod tui_mirror;
 
 use motlie_tmux::{
-    strip_ansi, CreateSessionOptions, CreateWindowOptions, KeySequence, LabelFormat, ScrollbackQuery,
-    SinkFilter, SplitDirection, SplitPaneOptions, SplitSize, SshConfig, TargetSpec,
-    TransferOptions,
+    strip_ansi, CreateSessionOptions, CreateWindowOptions, KeySequence, LabelFormat,
+    ScrollbackQuery, SinkFilter, SplitDirection, SplitPaneOptions, SplitSize, SshConfig,
+    TargetSpec, TransferOptions,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;

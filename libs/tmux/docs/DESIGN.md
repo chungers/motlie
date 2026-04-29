@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-28 | @gpt55-dgx: PR #228 selector cleanup — document the implemented non-empty `SessionId` wrapper for `SessionInfo.id` so stable id dispatch cannot silently fall back to names. | Discovery Types |
 | 2026-04-09 | @claude: Note anyhow→thiserror migration in dependency table and prototype sections. Library now uses typed `Error` enum via `thiserror`; `anyhow` retained as dev-dependency only. Prototype code snippets are pre-migration and preserved as historical context. | Dependencies, Prototype |
 | 2026-03-25 | @claude: DC33 — per-source coherent history rendering. Coalesce same-source chunks, add `RenderMode::PerSource`, per-source budgets. See [`docs/HISTORY.md`](./HISTORY.md). | DC28, DC33, History |
 | 2026-03-22 | @claude: Update Phase 5 section to reflect shipped DC32 split-screen REPL mode — replace "not in current scope" / generic `TuiSink` with shipped 5.1+5.2 status and binary-local consumer description. | Phase 5, DC32 |
@@ -1204,7 +1205,7 @@ listing and display.
 ```rust
 pub struct SessionInfo {
     pub name: String,
-    pub id: String,             // tmux internal $N id
+    pub id: SessionId,          // non-empty tmux internal $N id
     pub created: u64,           // unix timestamp
     pub attached: bool,         // has a client attached
     pub window_count: u32,
@@ -1232,6 +1233,11 @@ pub struct PaneInfo {
 }
 
 ```
+
+`SessionId` is parsed from tmux `#{session_id}` and rejects empty values at the
+discovery boundary. Callers that need a stable dispatch key use
+`session.id.as_str()`; falling back to display names for id-based dispatch is
+not part of the contract.
 
 These are populated by `tmux list-sessions -F`, `list-windows -F`, and `list-panes -F`
 with appropriate format strings. The format strings are centralized in `discovery.rs` to

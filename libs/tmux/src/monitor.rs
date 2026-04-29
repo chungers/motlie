@@ -54,6 +54,11 @@ use crate::types::*;
 // ---------------------------------------------------------------------------
 
 /// Parsed control mode message from tmux.
+///
+/// `Notification` is intentionally retained for the future event-driven host
+/// watcher. The current `HostHandle::watch_host_events()` implementation uses
+/// polling plus snapshot reconciliation; monitor sessions still parse and drop
+/// notifications so the control-mode decoder remains complete.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ControlModeMessage {
     /// `%output %<pane_id> <data>`
@@ -416,8 +421,7 @@ impl SessionMonitorHandle {
         let _ = self.stop_tx.send(true);
         let task = self.task.lock().expect("task lock poisoned").take();
         if let Some(task) = task {
-            task.await?
-                .map(|_| ())?;
+            task.await?.map(|_| ())?;
         }
         Ok(())
     }
@@ -612,10 +616,7 @@ mod tests {
 
     #[test]
     fn decode_multiple_escapes() {
-        assert_eq!(
-            decode_octal_escapes("a\\012b\\011c\\040d"),
-            "a\nb\tc d"
-        );
+        assert_eq!(decode_octal_escapes("a\\012b\\011c\\040d"), "a\nb\tc d");
     }
 
     #[test]
@@ -639,10 +640,7 @@ mod tests {
     #[test]
     fn decode_utf8_four_byte() {
         // 🎉 is U+1F389, encoded as 0xF0 0x9F 0x8E 0x89 (octal 360 237 216 211)
-        assert_eq!(
-            decode_octal_escapes("\\360\\237\\216\\211"),
-            "🎉"
-        );
+        assert_eq!(decode_octal_escapes("\\360\\237\\216\\211"), "🎉");
     }
 
     #[test]
@@ -789,8 +787,10 @@ mod tests {
         let target2 = crate::host::HostHandle::local().create_target_for_test("s2");
         let (tx1, _) = watch::channel(false);
         let (tx2, _) = watch::channel(false);
-        let task1 = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
-        let task2 = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
+        let task1 =
+            tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
+        let task2 =
+            tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
         let mut sessions = HashMap::new();
         sessions.insert(
@@ -817,7 +817,9 @@ mod tests {
     fn monitor_handle_get_by_spec() {
         let target = crate::host::HostHandle::local().create_target_for_test("build");
         let (tx, _) = watch::channel(false);
-        let task = tokio::runtime::Runtime::new().unwrap().spawn(async { Ok(MonitorExitReason::Stopped) });
+        let task = tokio::runtime::Runtime::new()
+            .unwrap()
+            .spawn(async { Ok(MonitorExitReason::Stopped) });
         let mut sessions = HashMap::new();
         sessions.insert(
             "build".to_string(),
@@ -836,9 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn monitor_handle_shutdown() {
-        let target = crate::host::HostHandle::local().create_target_for_test(
-            "test_session",
-        );
+        let target = crate::host::HostHandle::local().create_target_for_test("test_session");
         let (stop_tx, _stop_rx) = watch::channel(false);
         let task = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
@@ -857,8 +857,7 @@ mod tests {
 
         // Simulate control mode output: two %output frames then EOF
         let control_output = b"%output %5 hello world\n%output %6 second pane\n";
-        let mock = MockTransport::new()
-            .with_shell_data(vec![control_output.to_vec()]);
+        let mock = MockTransport::new().with_shell_data(vec![control_output.to_vec()]);
         let mut shell = mock.open_shell_for_test().await;
 
         let bus = OutputBus::new();
@@ -926,8 +925,7 @@ mod tests {
         use crate::transport::MockTransport;
 
         let control_output = b"%output %5 hello\n";
-        let mock = MockTransport::new()
-            .with_shell_data(vec![control_output.to_vec()]);
+        let mock = MockTransport::new().with_shell_data(vec![control_output.to_vec()]);
         let mut shell = mock.open_shell_for_test().await;
 
         let bus = OutputBus::new();
@@ -944,7 +942,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, MonitorExitReason::ConnectionLost);
-        ready_rx.await.expect("ready signal should be sent before EOF");
+        ready_rx
+            .await
+            .expect("ready signal should be sent before EOF");
 
         // Verify data was still published before EOF
         match rx.try_recv().unwrap() {

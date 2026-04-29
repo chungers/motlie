@@ -26,7 +26,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create session
-    let target = host.create_session(session_name, &Default::default()).await?;
+    let target = host
+        .create_session(session_name, &Default::default())
+        .await?;
     tokio::time::sleep(Duration::from_millis(500)).await; // let shell start
 
     // Send text (does NOT press Enter)

@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1680" viewBox="0 0 1280 1680" role="img" aria-label="tmux_select TUI design mock with eight selector states">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1680" viewBox="0 0 1280 1680" role="img" aria-label="mmux TUI design mock with eight selector states">
   <rect x="0" y="0" width="1280" height="1680" fill="#0f172a"/>
-  <text x="32" y="42" fill="#f8fafc" font-family="monospace" font-size="24">tmux_select TUI states</text>
-  <text x="32" y="70" fill="#cbd5e1" font-family="monospace" font-size="14">All panels are conceptual mocks for bins/tmux_select/main.rs design.</text>
+  <text x="32" y="42" fill="#f8fafc" font-family="monospace" font-size="24">mmux TUI states</text>
+  <text x="32" y="70" fill="#cbd5e1" font-family="monospace" font-size="14">All panels are conceptual mocks for bins/mmux/main.rs design.</text>
 
   <g transform="translate(32 96)">
     <text x="0" y="0" fill="#f8fafc" font-family="monospace" font-size="18">1. Main: Lb focused, sample detail</text>
@@ -12,7 +12,7 @@
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
     <text x="14" y="70" fill="#cbd5e1" font-family="monospace" font-size="12">Welcome target-host</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions 1/4</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [4]</text>
     <rect x="12" y="138" width="180" height="26" fill="#2563eb"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev      3 windows</text>
     <text x="20" y="184" fill="#cbd5e1" font-family="monospace" font-size="12">  build    1 window</text>
@@ -23,7 +23,10 @@
     <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">running 148 tests</text>
     <text x="220" y="152" fill="#cbd5e1" font-family="monospace" font-size="12">test result: ok</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus Lb | Up/Dn select | v detail | m mon | n new | k kill | Enter go</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ sel | (h)elp | (p)ane | (m)on | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 
   <g transform="translate(664 96)">
@@ -35,7 +38,7 @@
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#475569" stroke-width="1"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
     <text x="14" y="70" fill="#cbd5e1" font-family="monospace" font-size="12">Welcome target-host</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [4]</text>
     <rect x="12" y="138" width="180" height="26" fill="#1d4ed8"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="20" y="184" fill="#94a3b8" font-family="monospace" font-size="12">  build</text>
@@ -45,7 +48,10 @@
     <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">older output line 13</text>
     <text x="220" y="152" fill="#cbd5e1" font-family="monospace" font-size="12">fetch_older() when past top</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus R | Up/Dn scroll | PgUp/PgDn | l list | End tail | Enter go</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ scroll | (h)elp | (p)ane | (m)on | enter/(a)ttach | (q)uit | (l)ayout</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 
   <g transform="translate(32 484)">
@@ -56,17 +62,20 @@
     <rect x="0" y="18" width="204" height="76" fill="#1f2937" stroke="#475569" stroke-width="1"/>
     <rect x="0" y="94" width="204" height="204" fill="#0b1220" stroke="#475569" stroke-width="1"/>
     <text x="14" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">LT /etc/motd</text>
-    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions</text>
+    <text x="14" y="122" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [3]</text>
     <rect x="12" y="138" width="180" height="26" fill="#1d4ed8"/>
     <text x="20" y="156" fill="#ffffff" font-family="monospace" font-size="12">&gt; logs</text>
     <text x="220" y="46" fill="#f8fafc" font-family="monospace" font-size="13">R detail: logs</text>
-    <text x="220" y="72" fill="#facc15" font-family="monospace" font-size="12">mode: monitor | auto-tail paused</text>
-    <text x="220" y="104" fill="#cbd5e1" font-family="monospace" font-size="12">[12:01:08] service started</text>
-    <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">[12:01:09] request /health</text>
-    <text x="220" y="152" fill="#94a3b8" font-family="monospace" font-size="12">+ 8 new lines below viewport</text>
-    <text x="220" y="182" fill="#93c5fd" font-family="monospace" font-size="12">End resumes tail</text>
+    <text x="220" y="72" fill="#facc15" font-family="monospace" font-size="12">mode: monitor | rendered screen mirror</text>
+    <text x="220" y="104" fill="#cbd5e1" font-family="monospace" font-size="12">top - 18:58:21 up 12 days</text>
+    <text x="220" y="128" fill="#cbd5e1" font-family="monospace" font-size="12">PID USER      CPU  MEM COMMAND</text>
+    <text x="220" y="152" fill="#94a3b8" font-family="monospace" font-size="12">2481 deploy   9.2  1.4 worker</text>
+    <text x="220" y="182" fill="#93c5fd" font-family="monospace" font-size="12">ScreenStable + VTE parse</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus R | l list | End tail | 10,000 line buffer | Ctrl-C exit</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">(h)elp | (p)ane | (m)onitor | screen mirror | enter/(a)ttach | (q)uit | (l)ayout</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 
   <g transform="translate(664 484)">
@@ -75,8 +84,10 @@
     <rect x="0" y="18" width="584" height="280" fill="#0b1220" opacity="0.65"/>
     <rect x="102" y="82" width="380" height="160" fill="#111827" stroke="#f8fafc" stroke-width="2"/>
     <text x="130" y="116" fill="#f8fafc" font-family="monospace" font-size="18">New Session</text>
+    <text x="130" y="132" fill="#94a3b8" font-family="monospace" font-size="11">Session name</text>
     <rect x="130" y="138" width="324" height="34" fill="#020617" stroke="#64748b" stroke-width="1"/>
     <text x="144" y="160" fill="#cbd5e1" font-family="monospace" font-size="13">session-name</text>
+    <line x1="122" y1="184" x2="462" y2="184" stroke="#475569" stroke-width="1"/>
     <rect x="196" y="194" width="88" height="30" fill="#334155" stroke="#94a3b8"/>
     <text x="216" y="214" fill="#e2e8f0" font-family="monospace" font-size="13">Cancel</text>
     <rect x="306" y="194" width="88" height="30" fill="#2563eb" stroke="#bfdbfe"/>
@@ -84,6 +95,9 @@
     <text x="130" y="234" fill="#94a3b8" font-family="monospace" font-size="12">Left/Right choose button | Enter apply | Esc cancel</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
     <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">modal keymap overrides main view</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 
   <g transform="translate(32 872)">
@@ -93,12 +107,16 @@
     <rect x="102" y="96" width="380" height="132" fill="#111827" stroke="#f8fafc" stroke-width="2"/>
     <text x="130" y="132" fill="#f8fafc" font-family="monospace" font-size="18">Kill session dev?</text>
     <text x="130" y="160" fill="#cbd5e1" font-family="monospace" font-size="13">This runs Target::kill().</text>
+    <line x1="122" y1="174" x2="462" y2="174" stroke="#475569" stroke-width="1"/>
     <rect x="196" y="184" width="88" height="30" fill="#334155" stroke="#94a3b8"/>
     <text x="216" y="204" fill="#e2e8f0" font-family="monospace" font-size="13">Cancel</text>
     <rect x="306" y="184" width="88" height="30" fill="#dc2626" stroke="#fecaca"/>
     <text x="340" y="204" fill="#ffffff" font-family="monospace" font-size="13">Ok</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
     <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">Left/Right choose | Enter apply | Esc cancel</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 
   <g transform="translate(664 872)">
@@ -108,49 +126,57 @@
     <rect x="224" y="18" width="360" height="280" fill="#020617" stroke="#334155" stroke-width="2"/>
     <rect x="0" y="18" width="224" height="138" fill="#1f2937" stroke="#22c55e" stroke-width="2"/>
     <rect x="0" y="156" width="224" height="142" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
-    <text x="8" y="41" fill="#22c55e" font-family="monospace" font-size="5.5" font-weight="700" xml:space="preserve">███╗   ███╗  ██████╗  ████████╗ ██╗      ██╗ ███████╗</text>
-    <text x="8" y="55" fill="#22c55e" font-family="monospace" font-size="5.5" font-weight="700" xml:space="preserve"> ████╗ ████║ ██╔═══██╗ ╚══██╔══╝ ██║      ██║ ██╔════╝</text>
-    <text x="8" y="69" fill="#22c55e" font-family="monospace" font-size="5.5" font-weight="700" xml:space="preserve"> ██╔████╔██║ ██║   ██║    ██║    ██║      ██║ █████╗    ╲╲ ║ ╱╱</text>
-    <text x="8" y="83" fill="#22c55e" font-family="monospace" font-size="5.5" font-weight="700" xml:space="preserve"> ██║╚██╔╝██║ ██║   ██║    ██║    ██║      ██║ ██╔══╝    ══ ╬ ══</text>
-    <text x="8" y="97" fill="#22c55e" font-family="monospace" font-size="5.5" font-weight="700" xml:space="preserve"> ██║ ╚═╝ ██║ ╚██████╔╝    ██║    ███████╗ ██║ ███████╗  ╱╱ ║ ╲╲</text>
-    <text x="8" y="111" fill="#22c55e" font-family="monospace" font-size="5.5" font-weight="700" xml:space="preserve"> ╚═╝     ╚═╝  ╚═════╝     ╚═╝    ╚══════╝ ╚═╝ ╚══════╝</text>
+    <text x="8" y="41" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">                 _   _ _</text>
+    <text x="8" y="57" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve"> _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱</text>
+    <text x="8" y="73" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══</text>
+    <text x="8" y="89" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">┃ ┃ ┃ ┃ ┃ ┃ (_) ┃ ┃_┃ ┃ ┃  __╱  ╱╱ ║ ╲╲</text>
+    <text x="8" y="105" fill="#22c55e" font-family="monospace" font-size="7" font-weight="700" xml:space="preserve">┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃</text>
     <text x="14" y="146" fill="#cbd5e1" font-family="monospace" font-size="12">(no /etc/motd)</text>
-    <text x="14" y="184" fill="#f8fafc" font-family="monospace" font-size="13">LB sessions</text>
+    <text x="14" y="184" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [1]</text>
     <rect x="12" y="200" width="198" height="26" fill="#2563eb"/>
     <text x="20" y="218" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
     <text x="240" y="46" fill="#e2e8f0" font-family="monospace" font-size="13">R detail still renders</text>
     <text x="240" y="74" fill="#cbd5e1" font-family="monospace" font-size="12">LT bypasses 30% cap</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host target-host | focus Lb | placeholder visible</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">placeholder visible</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 
   <g transform="translate(32 1260)">
-    <text x="0" y="0" fill="#f8fafc" font-family="monospace" font-size="18">7. Short mode (-s): T focused</text>
+    <text x="0" y="0" fill="#f8fafc" font-family="monospace" font-size="18">7. Portrait mode (--portrait/auto): T focused</text>
     <rect x="0" y="18" width="584" height="318" fill="#020617" stroke="#64748b" stroke-width="2"/>
-    <rect x="0" y="18" width="584" height="118" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
-    <rect x="0" y="136" width="584" height="162" fill="#020617" stroke="#334155" stroke-width="2"/>
-    <text x="16" y="48" fill="#f8fafc" font-family="monospace" font-size="13">T sessions 1/4</text>
+    <rect x="0" y="18" width="584" height="84" fill="#0b1220" stroke="#38bdf8" stroke-width="3"/>
+    <rect x="0" y="102" width="584" height="196" fill="#020617" stroke="#334155" stroke-width="2"/>
+    <text x="16" y="48" fill="#f8fafc" font-family="monospace" font-size="13">Sessions [4]</text>
     <rect x="14" y="64" width="552" height="26" fill="#2563eb"/>
     <text x="24" y="82" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev      3 windows</text>
-    <text x="24" y="110" fill="#cbd5e1" font-family="monospace" font-size="12">  build    1 window</text>
-    <text x="16" y="166" fill="#e2e8f0" font-family="monospace" font-size="13">B detail: dev</text>
-    <text x="16" y="194" fill="#cbd5e1" font-family="monospace" font-size="12">sample output, no MOTD in short mode</text>
+    <text x="24" y="98" fill="#cbd5e1" font-family="monospace" font-size="12">  build    1 window</text>
+    <text x="16" y="132" fill="#e2e8f0" font-family="monospace" font-size="13">B detail: dev</text>
+    <text x="16" y="160" fill="#cbd5e1" font-family="monospace" font-size="12">sample output, no MOTD in portrait mode</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host h | focus T | Up/Dn pick | v detail | m mon | n new | k kill | Enter go</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ sel | (h)elp | (p)ane | (m)on | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 
   <g transform="translate(664 1260)">
-    <text x="0" y="0" fill="#f8fafc" font-family="monospace" font-size="18">8. Short mode (-s): B focused</text>
+    <text x="0" y="0" fill="#f8fafc" font-family="monospace" font-size="18">8. Portrait mode (--portrait/auto): B focused</text>
     <rect x="0" y="18" width="584" height="318" fill="#020617" stroke="#64748b" stroke-width="2"/>
-    <rect x="0" y="18" width="584" height="118" fill="#0b1220" stroke="#334155" stroke-width="2"/>
-    <rect x="0" y="136" width="584" height="162" fill="#020617" stroke="#38bdf8" stroke-width="3"/>
-    <text x="16" y="48" fill="#e2e8f0" font-family="monospace" font-size="13">T sessions</text>
+    <rect x="0" y="18" width="584" height="84" fill="#0b1220" stroke="#334155" stroke-width="2"/>
+    <rect x="0" y="102" width="584" height="196" fill="#020617" stroke="#38bdf8" stroke-width="3"/>
+    <text x="16" y="48" fill="#e2e8f0" font-family="monospace" font-size="13">Sessions [4]</text>
     <rect x="14" y="64" width="552" height="26" fill="#1d4ed8"/>
     <text x="24" y="82" fill="#ffffff" font-family="monospace" font-size="12">&gt; dev</text>
-    <text x="16" y="166" fill="#f8fafc" font-family="monospace" font-size="13">B detail: dev</text>
-    <text x="16" y="194" fill="#93c5fd" font-family="monospace" font-size="12">mode: sample | scroll 3/70</text>
-    <text x="16" y="222" fill="#cbd5e1" font-family="monospace" font-size="12">Up/Dn scroll; Ctrl-Up/Dn resize T/B</text>
+    <text x="16" y="132" fill="#f8fafc" font-family="monospace" font-size="13">B detail: dev</text>
+    <text x="16" y="160" fill="#93c5fd" font-family="monospace" font-size="12">mode: sample | scroll 3/70</text>
+    <text x="16" y="188" fill="#cbd5e1" font-family="monospace" font-size="12">↑/↓ scroll; Ctrl-↑/↓ resize T/B</text>
     <rect x="0" y="298" width="584" height="38" fill="#1e293b" stroke="#94a3b8" stroke-width="1"/>
-    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">host h | focus B | Up/Dn scroll | l list | End tail | Enter go</text>
+    <text x="12" y="322" fill="#e2e8f0" font-family="monospace" font-size="12">↑/↓ scroll | (h)elp | (p)ane | (m)on | enter/(a)ttach | (q)uit | (l)ayout</text>
+    <rect x="0" y="18" width="584" height="20" fill="#1e293b"/>
+    <text x="12" y="33" fill="#f8fafc" font-family="monospace" font-size="12" font-weight="700">target-host | 192.0.2.10</text>
+    <text x="524" y="33" fill="#f8fafc" font-family="monospace" font-size="12">12:34</text>
   </g>
 </svg>

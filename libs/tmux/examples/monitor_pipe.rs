@@ -17,8 +17,7 @@
 //!   ./target/debug/examples/monitor_pipe 'ssh://deploy@prod?identity-file=/path/to/key' build
 
 use motlie_tmux::{
-    CallbackSink, Error, Result, SinkEvent, SinkFilter, SinkKind, SshConfig, StdioFormat,
-    StdioSink,
+    CallbackSink, Error, Result, SinkEvent, SinkFilter, SinkKind, SshConfig, StdioFormat, StdioSink,
 };
 use std::any::Any;
 use std::future::Future;
@@ -103,7 +102,9 @@ fn parse_args() -> Result<Args> {
                     .get(i)
                     .ok_or_else(|| Error::Parse("--seconds requires a value".to_string()))?
                     .parse()
-                    .map_err(|_| Error::Parse("--seconds must be a positive integer".to_string()))?;
+                    .map_err(|_| {
+                        Error::Parse("--seconds must be a positive integer".to_string())
+                    })?;
                 if seconds == 0 {
                     return Err(Error::Parse("--seconds must be > 0".to_string()));
                 }
