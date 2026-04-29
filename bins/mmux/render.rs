@@ -461,7 +461,7 @@ pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<
 
 fn top_status_host_text(app: &AppState) -> String {
     if app.fleet.is_multi() {
-        format!(" mmux - multi-host mode ({}) ", app.fleet.len())
+        format!(" mmux - multi-host mode [{}] ", app.fleet.len())
     } else if let Some(entry) = app.fleet.first() {
         format!(" {} | {} ", entry.label, entry.ip_address)
     } else {
