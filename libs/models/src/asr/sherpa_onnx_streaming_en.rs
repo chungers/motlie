@@ -8,6 +8,7 @@ use motlie_model_sherpa_onnx::{
     SherpaOnnxHandle, SherpaOnnxStreamingBundle, SherpaOnnxStreamingSpec,
 };
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -114,7 +115,7 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
             root.display()
         )));
     }
@@ -138,7 +139,7 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
         let path = snapshot_dir.join(filename);
         if !path.exists() {
             return Err(ModelError::InvalidConfiguration(format!(
-                "artifact policy `LocalOnly` requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
+                "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
                 root.display()
             )));
         }
