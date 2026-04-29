@@ -18,6 +18,18 @@ All examples assume an async context (`#[tokio::main]` or `#[tokio::test]`).
 **Runnable examples** are in [`examples/`](../examples/) with full instructions
 in [`examples/README.md`](../examples/README.md).
 
+## Changelog
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
+| 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
+| 2026-04-28 | @gpt55-dgx | Replaced the selector-oriented host shell hook note with bounded `HostHandle::read_text_file`, documented `SessionId` as the stable non-empty session id type, and clarified that host events are currently polling-backed. |
+| 2026-04-26 | @gpt55-dgx | Document that current-PTY attach restores the parent foreground process group through a `SIGTTOU`-safe path so selector/dashboard callers do not remain stopped after detach. |
+| 2026-04-26 | @gpt55-dgx | Document `SessionWatchOptions::normalize`, available to watch-session consumers that need to strip raw ANSI/control bytes before text rendering. |
+| 2026-04-26 | @gpt55-dgx | Document selector support APIs including host metadata reads, `HostHandle::watch_host_events`, `HostEventStream`, and `ScrollbackQuery::LinesRange`. |
+| 2026-04-26 | @gpt55-dgx | Document `HostHandle::session_by_id`, `AttachExit`, and `Target::attach_current_pty` added for tmux selector Phase 1.1 / 1.4. |
+
 ---
 
 ## Table of Contents
@@ -33,7 +45,9 @@ in [`examples/README.md`](../examples/README.md).
 5. [HostHandle](#5-hosthandle)
 6. [Session Lifecycle](#6-session-lifecycle)
 7. [Discovery](#7-discovery)
+   - 7a. [Host Event Stream](#host-event-stream)
 8. [Target and Navigation](#8-target-and-navigation)
+   - 8a. [Current PTY Attach](#current-pty-attach)
 9. [Sending Input](#9-sending-input)
 10. [Capturing Output](#10-capturing-output)
 11. [Structured Command Execution](#11-structured-command-execution)
@@ -635,12 +649,40 @@ tmux server running or no entities exist.
 ```rust
 let sessions = host.list_sessions().await?;
 for s in &sessions {
-    println!("{} (id={}, windows={}, attached={})",
-        s.name, s.id, s.window_count, s.attached);
+    println!("{} (id={}, windows={}, attached_clients={}, active={})",
+        s.name, s.id, s.window_count, s.attached_count, s.is_attached());
 }
 ```
 
 > See [`examples/list_sessions.rs`](../examples/list_sessions.rs) for a runnable version.
+
+### List sessions with recency data
+
+`list_sessions_now()` returns the same session rows plus a tmux-server clock
+snapshot. This avoids local/remote clock skew when a selector or dashboard
+renders "active N ago" or "age N" for an SSH target when the running tmux
+version exposes a current epoch format.
+
+```rust
+let listing = host.list_sessions_now().await?;
+for session in &listing.sessions {
+    let active_secs = listing.now.saturating_sub(session.activity);
+    let age_secs = listing.now.saturating_sub(session.created);
+    println!(
+        "{} active={}s age={}s",
+        session.name, active_secs, age_secs
+    );
+}
+```
+
+`SessionInfo.activity` is tmux `#{session_activity}` in epoch seconds.
+`SessionListing.now` is tmux `#{epoch}` from the same tmux invocation as the
+session list when tmux expands that format. tmux 3.4 and some other versions
+expand `#{epoch}` to an empty string; in that case `SessionListing.now` falls
+back to the local selector clock clamped to at least the maximum
+`session_created` / `session_activity` timestamp in the listing. If there is no
+tmux server or no sessions, the API returns
+`SessionListing { now: <local fallback epoch>, sessions: vec![] }`.
 
 ### Find a session by name
 
@@ -650,6 +692,23 @@ match host.session("build").await? {
     None    => println!("not found"),
 }
 ```
+
+### Find a session by stable id
+
+```rust
+let sessions = host.list_sessions().await?;
+let selected_id = sessions[0].id.as_str().to_string();
+
+match host.session_by_id(&selected_id).await? {
+    Some(target) => target.kill().await?,
+    None => eprintln!("session disappeared before dispatch"),
+}
+```
+
+`SessionInfo.id` is a non-empty `SessionId` parsed from tmux `#{session_id}`.
+`session_by_id()` is useful when a UI stores that stable id at selection time
+and later needs to dispatch against the same tmux session after a display-name
+rename.
 
 ### Find by TargetSpec
 
@@ -694,6 +753,48 @@ for c in &clients {
 // Useful for geometry/reflow detection (section 15).
 ```
 
+### Host text file read
+
+```rust
+use std::path::Path;
+
+let motd = host.read_text_file(Path::new("/etc/motd"), 64 * 1024).await?;
+```
+
+`read_text_file()` reads UTF-8 host metadata through a typed, bounded API. Local
+hosts use the local filesystem path directly; SSH/mock hosts use the existing
+file-transfer path and then enforce the caller's byte cap before returning the
+string. This keeps selector code free of shell syntax such as `cat` and
+redirection while still supporting `/etc/motd`.
+
+### Host Event Stream
+
+```rust
+use motlie_tmux::{HostEvent, HostHandle};
+
+let mut events = host.watch_host_events().await?;
+while let Some(event) = events.recv().await {
+    match event {
+        HostEvent::SessionsChanged => println!("session list changed"),
+        HostEvent::SessionAdded { id, name } => println!("added {name} ({id})"),
+        HostEvent::SessionClosed { id, name } => println!("closed {name} ({id})"),
+        HostEvent::SessionRenamed { id, old, new } => {
+            println!("renamed {old} -> {new} ({id})");
+        }
+        HostEvent::ClientAttached { session_id } => println!("client attached to {session_id}"),
+        HostEvent::ClientDetached { session_id } => println!("client detached from {session_id}"),
+        HostEvent::Disconnect { reason } => eprintln!("event stream degraded: {reason}"),
+    }
+}
+```
+
+`watch_host_events()` currently polls `list_sessions()` once per second and
+derives events by diffing stable `SessionId` keys. The tmux control-mode
+notification parser remains reserved for a future event-driven watcher path.
+
+This gives selector UIs a stable event API without forcing callers to implement
+their own name-vs-id reconciliation.
+
 ---
 
 ## 8. Target and Navigation
@@ -716,6 +817,33 @@ target.address();        // &TargetAddress enum
 
 > See [`examples/target_navigate.rs`](../examples/target_navigate.rs) for a runnable hierarchy walk
 > and [`examples/target_spec.rs`](../examples/target_spec.rs) for TargetSpec resolution.
+
+### Current PTY Attach
+
+```rust
+let target = host
+    .session_by_id(&selected_id)
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("selected session disappeared".into()))?;
+
+let exit = target.attach_current_pty().await?;
+std::process::exit(exit.shell_status());
+```
+
+`attach_current_pty()` is session-target only. Local targets spawn
+`tmux attach-session -t <target>` with inherited stdio. SSH targets spawn an
+interactive `ssh -t ... tmux attach-session -t <target>` command using the
+`SshConfig` already owned by the `HostHandle`. The child runs in its own process
+group; on Unix the current terminal foreground process group is transferred to
+the child and restored after `wait()`.
+
+The Unix restore path ignores `SIGTTOU` only around `tcsetpgrp()`. This matters
+because the selector parent is briefly a background process group after the
+attach child exits; without that guard, shells can leave dashboard callers in a
+stopped-job state after `Ctrl-b d`.
+
+`AttachExit::shell_status()` maps normal exits to their exit code and Unix
+signal exits to `128 + signal`, which is the value CLI callers should return.
 
 ### Create child windows and panes
 
@@ -1115,6 +1243,22 @@ let query = ScrollbackQuery::LastLinesUntil {
 };
 let text = target.sample_text(&query).await?;
 ```
+
+### Windowed older range
+
+```rust
+let older = target
+    .sample_text(&ScrollbackQuery::LinesRange {
+        older_than_lines: 80,
+        count: 40,
+    })
+    .await?;
+```
+
+`LinesRange` captures a bounded scrollback window older than the most recent
+`older_than_lines`. It maps to tmux `capture-pane -S/-E` offsets instead of
+rebuilding the full scrollback buffer, making it suitable for paged TUI
+back-scroll over local and SSH transports.
 
 ### Incremental sampling with overlap dedup
 
@@ -1794,6 +1938,27 @@ let history = sub.history(HistoryOptions {
 | `label_format` | `LabelFormat` | `Bracketed` | Source label format for rendering |
 | `include_omission_marker` | `bool` | true | Prepend `[... N earlier entries omitted ...]` on trimming |
 
+`HostHandle::watch_session()` also accepts `SessionWatchOptions`, which wraps a
+`HistoryOptions` plus queue sizing and a monitor normalization mode:
+
+```rust
+use motlie_tmux::{CaptureNormalizeMode, HistoryOptions, SessionWatchOptions};
+
+let watch = host
+    .watch_session(
+        "build",
+        &SessionWatchOptions {
+            queue_capacity: 256,
+            normalize: CaptureNormalizeMode::PlainText,
+            history: HistoryOptions::default(),
+        },
+    )
+    .await?;
+```
+
+Use `PlainText` for ratatui/text UIs that cannot render ANSI escape sequences;
+use the default `Raw` mode when consumers need the original control-mode bytes.
+
 ### Snapshot for structured access
 
 ```rust
@@ -2073,6 +2238,7 @@ assert!(issues.is_empty());
 |------|-------------|-------|
 | `HostHandle` | Entry point — one per tmux host | Yes (Arc) |
 | `Target` | Unified session/window/pane handle | No |
+| `HostEventStream` | Async stream of host-level session events | No |
 
 ### Target addressing
 
@@ -2087,10 +2253,13 @@ assert!(issues.is_empty());
 
 | Type | Key fields |
 |------|-----------|
-| `SessionInfo` | name, id, attached, window_count, group |
+| `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
+| `SessionInfo` | name, id (`SessionId`), created, activity, attached_count, window_count, group |
+| `SessionListing` | server-clock `now` epoch seconds plus `Vec<SessionInfo>` from `list_sessions_now()` |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |
+| `HostEvent` | SessionsChanged, SessionAdded, SessionClosed, SessionRenamed, ClientAttached, ClientDetached, Disconnect |
 
 ### Input
 
@@ -2108,7 +2277,7 @@ assert!(issues.is_empty());
 | `CaptureResult` | text, raw_text (Option), fidelity |
 | `OutputFidelity` | degraded (bool), issues (Option<Vec>) — None on clean hot path |
 | `FidelityIssue` | Enum: ClientResize, PaneResize, HistoryTruncated, OverlapResync |
-| `ScrollbackQuery` | Enum: LastLines(n), Until { pattern, max_lines }, LastLinesUntil { lines, stop_pattern } |
+| `ScrollbackQuery` | Enum: LastLines(n), Until { pattern, max_lines }, LastLinesUntil { lines, stop_pattern }, LinesRange { older_than_lines, count } |
 | `ExecOutput` | stdout, exit_code, success() |
 
 ### Geometry

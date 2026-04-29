@@ -18,9 +18,11 @@ russh = "0.46"
 russh-keys = "0.46"
 russh-sftp = "2.1"
 async-trait = "0.1"
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+# Examples/tests are binaries; the library code remains anyhow-free.
 anyhow = { workspace = true }
 tempfile = "3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

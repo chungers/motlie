@@ -82,8 +82,8 @@ impl SpecialKey {
 /// validation is defense-in-depth.
 fn is_valid_tmux_key_name(name: &str) -> bool {
     const SHELL_DANGEROUS: &[char] = &[
-        ' ', '\t', '\n', '\r', '\0', ';', '`', '$', '|', '&', '>', '<', '(', ')', '{',
-        '}', '[', ']', '!', '#', '~', '"', '\'',
+        ' ', '\t', '\n', '\r', '\0', ';', '`', '$', '|', '&', '>', '<', '(', ')', '{', '}', '[',
+        ']', '!', '#', '~', '"', '\'',
     ];
     !name.is_empty() && !name.contains(SHELL_DANGEROUS)
 }
@@ -159,8 +159,7 @@ impl KeySequence {
 
     /// Append literal text.
     pub fn then_literal(mut self, text: &str) -> Self {
-        self.segments
-            .push(KeySegment::Literal(text.to_string()));
+        self.segments.push(KeySegment::Literal(text.to_string()));
         self
     }
 
@@ -222,7 +221,10 @@ mod tests {
     fn parse_literal_only() {
         let ks = KeySequence::parse("hello world").unwrap();
         assert_eq!(ks.segments.len(), 1);
-        assert_eq!(ks.segments[0], KeySegment::Literal("hello world".to_string()));
+        assert_eq!(
+            ks.segments[0],
+            KeySegment::Literal("hello world".to_string())
+        );
     }
 
     #[test]
@@ -277,7 +279,10 @@ mod tests {
     #[test]
     fn parse_raw_key() {
         let ks = KeySequence::parse("{F1}").unwrap();
-        assert_eq!(ks.segments[0], KeySegment::Special(SpecialKey::Raw("F1".to_string())));
+        assert_eq!(
+            ks.segments[0],
+            KeySegment::Special(SpecialKey::Raw("F1".to_string()))
+        );
     }
 
     #[test]

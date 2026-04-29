@@ -25,17 +25,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<20} {:<8} {:<8} {}",
-        "NAME", "ID", "WINDOWS", "ATTACHED"
+        "{:<20} {:<8} {:<8} {:<8} {}",
+        "NAME", "ID", "WINDOWS", "CLIENTS", "ATTACHED"
     );
     println!("{}", "-".repeat(50));
     for s in &sessions {
         println!(
-            "{:<20} {:<8} {:<8} {}",
+            "{:<20} {:<8} {:<8} {:<8} {}",
             s.name,
             s.id,
             s.window_count,
-            if s.attached { "yes" } else { "no" }
+            s.attached_count,
+            if s.is_attached() { "yes" } else { "no" }
         );
     }
 
