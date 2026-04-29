@@ -158,11 +158,7 @@ fn parse_wav_fmt_chunk(bytes: &[u8]) -> Result<hound::WavSpec> {
     let channels = u16::from_le_bytes([bytes[2], bytes[3]]);
     let sample_rate = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let bits_per_sample = u16::from_le_bytes([bytes[14], bytes[15]]);
-    let sample_format = match format_code {
-        1 => hound::SampleFormat::Int,
-        3 => hound::SampleFormat::Float,
-        format_code => return Err(VoiceError::UnsupportedWavFormatCode { format_code }),
-    };
+    let sample_format = parse_wav_sample_format(format_code, bytes)?;
 
     Ok(hound::WavSpec {
         channels,
@@ -170,6 +166,37 @@ fn parse_wav_fmt_chunk(bytes: &[u8]) -> Result<hound::WavSpec> {
         bits_per_sample,
         sample_format,
     })
+}
+
+fn parse_wav_sample_format(format_code: u16, fmt_bytes: &[u8]) -> Result<hound::SampleFormat> {
+    match format_code {
+        1 => Ok(hound::SampleFormat::Int),
+        3 => Ok(hound::SampleFormat::Float),
+        0xFFFE => parse_wave_format_extensible_subformat(fmt_bytes),
+        format_code => Err(VoiceError::UnsupportedWavFormatCode { format_code }),
+    }
+}
+
+fn parse_wave_format_extensible_subformat(fmt_bytes: &[u8]) -> Result<hound::SampleFormat> {
+    if fmt_bytes.len() < 40 {
+        return Err(VoiceError::WavFmtTooShort {
+            actual: fmt_bytes.len(),
+        });
+    }
+
+    let cb_size = u16::from_le_bytes([fmt_bytes[16], fmt_bytes[17]]) as usize;
+    if cb_size < 22 {
+        return Err(VoiceError::UnsupportedWavFormatCode {
+            format_code: 0xFFFE,
+        });
+    }
+
+    let subformat_tag = u16::from_le_bytes([fmt_bytes[24], fmt_bytes[25]]);
+    match subformat_tag {
+        1 => Ok(hound::SampleFormat::Int),
+        3 => Ok(hound::SampleFormat::Float),
+        format_code => Err(VoiceError::UnsupportedWavFormatCode { format_code }),
+    }
 }
 
 fn write_wav_header<W: Write>(
@@ -264,5 +291,39 @@ mod tests {
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0], 0.0);
         assert!((samples[1] - 0.5).abs() < 0.0001);
+    }
+
+    #[test]
+    fn decode_streaming_wav_accepts_extensible_pcm_fmt() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&16_000u32.to_le_bytes());
+        bytes.extend_from_slice(&32_000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(&22u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&[
+            0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA,
+            0x00, 0x38, 0x9B, 0x71, 0x00, 0x00,
+        ]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0i16.to_le_bytes());
+
+        let (spec, samples) =
+            decode_streaming_wav_to_f32(Cursor::new(bytes)).expect("extensible PCM should decode");
+        assert_eq!(spec.sample_rate, 16_000);
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_format, hound::SampleFormat::Int);
+        assert_eq!(samples, vec![0.0]);
     }
 }
