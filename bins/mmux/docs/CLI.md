@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status reads `mmux - multi-host mode (n)`, session rows insert a hostname column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
 | 2026-04-28 | @gpt55-dgx | Clarified ForceCommand bypass requires exactly `MOTLIE_MMUX_BYPASS=1` and cross-referenced issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated session-list refresh to a single one-second `list_sessions_now()` poller for both activity ordering and structural reconciliation. |
 | 2026-04-28 | @gpt55-dgx | Added a one-second visible-row refresh using `list_sessions_now()` so activity-sorted rows reorder even when no structural tmux event occurs. |
@@ -46,20 +47,22 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 ## Synopsis
 
 ```text
-mmux [OPTIONS] [SSH_URI]
+mmux [OPTIONS] [SSH_URI]...
 ```
 
 Examples:
 
 ```bash
-mmux
+mmux                                              # local host
 mmux --portrait
 mmux -p
 mmux --landscape
 mmux -l
 mmux --script
-mmux ssh://user@host
+mmux ssh://user@host                              # single SSH host
 mmux 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
+mmux ssh://a.example.com ssh://b.example.com      # multi-host (issue #235)
+mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 ```
 
 ## Arguments and Options
@@ -154,6 +157,68 @@ when the character-cell aspect ratio is `columns / rows <= 4.0`. This treats
 66x30, 80x24, 100x30, 160x40, and square-ish terminals as portrait layout.
 Terminals wider than the 4.0 threshold use landscape layout. If the size cannot
 be read, startup defaults to landscape layout.
+
+## Multi-host Mode (issue #235)
+
+Pass two or more SSH URIs on the command line to enter multi-host mode:
+
+```bash
+mmux ssh://a.example.com ssh://b.example.com
+mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
+```
+
+**Activation rule:**
+
+| `len(ssh_uris)` | Mode |
+|---|---|
+| `0` | Single-host, target = localhost |
+| `1` | Single-host, target = the SSH host |
+| `≥ 2` | Multi-host, targets = all listed SSH hosts |
+
+**UX differences in multi-host mode:**
+
+- Top status bar reads `mmux - multi-host mode (n)` (where `n` is the host
+  count) instead of the usual `<hostname> | <ip>`.
+- Session list rows insert the host's label between the attached marker and
+  the session name:
+
+  ```
+  > * a.example.com  dev          1m / 12d
+    * b.example.com  jarvis       4h / 19d
+      a.example.com  build        2d / 5d
+      b.example.com  logs         3d / 7d
+  ```
+
+  Hostname column width is sized to the widest configured label (capped to
+  keep the row readable; longer labels truncated with `…`).
+- Sort is `SessionInfo.activity` descending, applied to the **merged** list
+  across all hosts.
+- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, `Enter`/`a`,
+  `m`, `n`, `k`, `Ctrl-C`/`q`, `l`, `p`, `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
+  same as single-host. Each applies to the **highlighted row** and dispatches
+  against that row's host.
+- Attach uses the highlighted row's host: an interactive
+  `ssh -t <host> tmux attach-session -t <name>` for SSH targets.
+- New session and kill modals act on the highlighted row's host.
+- MOTD pane is **hidden** in multi-host mode (per-host MOTD is not
+  meaningful when multiple hosts coexist). Layout reflows accordingly.
+- Layout flags (`-p`/`-l`) compose with multi-host as expected.
+
+**Resilience:** if one host goes unreachable at refresh time, its rows
+disappear from the list and a status banner indicator shows the failure;
+other hosts continue to refresh. The failing host re-appears automatically
+when it recovers.
+
+**Skew-free recency math** is preserved per host: each row's recency
+(`active <Nm/h/d>`) is computed against that host's tmux server clock, so
+SSH clock skew between local and remote does not distort the display.
+Cross-host *sorting* uses absolute Unix timestamps from each
+`SessionInfo.activity`; this is correct as long as host clocks are within
+typical NTP drift (seconds). Wildly skewed host clocks may misorder rows
+across hosts, but recency text per row remains correct.
+
+**Empty case** is unchanged: zero SSH URIs uses localhost; single-host UX
+is identical to pre-multi-host behavior.
 
 ## TUI Keymap
 
