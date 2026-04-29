@@ -810,7 +810,9 @@ async fn localhost_automation_socket_lifecycle() {
     );
 
     // Ensure the server is running
-    host.ensure_socket_server().await.expect("ensure_socket_server failed");
+    host.ensure_socket_server()
+        .await
+        .expect("ensure_socket_server failed");
 
     // Create a session on the automation socket
     let session_name = unique_name("motlie_auto_test");

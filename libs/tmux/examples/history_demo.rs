@@ -13,9 +13,9 @@
 
 use anyhow::{anyhow, Result};
 use motlie_tmux::{
-    has_visible_text, AgentTuiFilter, ContentFilter, CreateSessionOptions,
-    FlushPolicy, HistoryOptions, KeySequence, LabelFormat, PollHistory, RawFilter, RenderMode,
-    ShellFilter, SinkFilter, SourceAccumulator, SplitPaneOptions, SshConfig,
+    has_visible_text, AgentTuiFilter, ContentFilter, CreateSessionOptions, FlushPolicy,
+    HistoryOptions, KeySequence, LabelFormat, PollHistory, RawFilter, RenderMode, ShellFilter,
+    SinkFilter, SourceAccumulator, SplitPaneOptions, SshConfig,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -224,12 +224,7 @@ fn parse_args() -> Result<Args> {
                     "lines" => FlushPolicyType::LineCount,
                     "idle" => FlushPolicyType::Idle,
                     "prompt" => FlushPolicyType::PromptBoundary,
-                    other => {
-                        return Err(anyhow!(
-                            "unknown policy '{}' (lines|idle|prompt)",
-                            other
-                        ))
-                    }
+                    other => return Err(anyhow!("unknown policy '{}' (lines|idle|prompt)", other)),
                 };
             }
             value if value.starts_with("ssh://") => {
