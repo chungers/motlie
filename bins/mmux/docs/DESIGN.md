@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-29 | @opus47-macos-tmux | Added Multi-host mode design (issue #235): CLI accepts multiple SSH hosts; aggregated activity-sorted session list across hosts; per-row hostname; per-host skew-free recency; MOTD hidden in multi-host; new internal `HostFleet` / `SessionRow` types; library-side fan-out left to the binary using existing `HostHandle::list_sessions_now()`. Outline of bin/lib impact added. |
 | 2026-04-28 | @gpt55-dgx | Fixed ForceCommand bypass contract inconsistency: bypass requires exactly `MOTLIE_MMUX_BYPASS=1`; linked issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh from separate activity and structural pollers into one `list_sessions_now()` loop. |
 | 2026-04-28 | @gpt55-dgx | Added periodic visible-row refreshes because activity-only changes do not emit host events, but must reorder the activity-sorted session list. |
@@ -533,6 +534,201 @@ targets, and the `MOTLIE_MMUX_BYPASS` env-var
 admin bypass. ForceCommand deployments may use explicit layout flags for fixed
 display contexts (`ForceCommand /usr/local/bin/mmux --portrait`
 or `ForceCommand /usr/local/bin/mmux --landscape`).
+
+### Multi-host Mode (issue #235)
+
+Multi-host mode is enabled implicitly when **two or more** SSH host arguments are
+passed on the command line. With one host (or none) the selector remains in the
+existing single-host mode unchanged.
+
+**Activation rule.**
+
+| `len(ssh_hosts)` | Mode |
+|---|---|
+| `0` | Single-host, target = localhost |
+| `1` | Single-host, target = the SSH host |
+| `≥ 2` | **Multi-host**, targets = all listed SSH hosts |
+
+**Functional differences in multi-host mode:**
+
+- Top status bar reads `mmux - multi-host mode (n)` where `n` is the host count;
+  the single-host hostname/IP indicator is replaced.
+- Session list rows insert a hostname column between the attached marker and the
+  session name. Format becomes:
+
+  ```
+  > * <hostname-padded> <session-name>          <active> / <age>
+  ```
+
+  Hostname column width is the max label width across the configured hosts,
+  truncated/elided at a sensible cap.
+- Sorting remains `SessionInfo.activity` descending — but applied to the
+  **merged** list of (host, session) rows across all hosts, not per-host.
+- All command keys (`Up`/`Down`, `Enter`/`a` attach, `m` monitor, `n` new,
+  `k` kill, `Ctrl-C`/`q` exit, `l` toggle layout, `p` cycle panes,
+  `Ctrl-←/→` and `Ctrl-↑/↓` resize) behave the same as single-host. Each
+  applies to the highlighted row and dispatches against that row's host.
+- Attach routes to the highlighted row's host: spawn-and-wait
+  `ssh -t <host> tmux attach-session -t <name>` for SSH targets (using each
+  host's `SshConfig` carried by its `HostHandle`).
+- New session / kill modal dispatch to the highlighted row's host (the row
+  whose host is currently selected). Default v1 policy: act on the highlighted
+  row's host; no host-picker modal.
+- MOTD pane is **hidden** in multi-host mode (per-host MOTD is not meaningful
+  when multiple hosts coexist in the list). Layout reflows to give the entire
+  left column to the session list (landscape) or the top region (portrait).
+- Layout flags `-l/--landscape` and `-p/--portrait` still compose with
+  multi-host. The auto-detect rule is unchanged.
+
+**Skew-free recency math** is preserved per host: each `SessionListing.now`
+comes from that host's tmux server clock, and recency for a row is computed as
+`row.server_now - row.session.activity`. Sorting uses `session.activity`
+directly across rows; that's a comparison of absolute Unix timestamps, which
+remains correct as long as host clocks are within typical NTP drift (seconds).
+Wildly skewed host clocks would mis-sort, but that's a host-config issue, not
+a selector issue. (Document this caveat in CLI.md.)
+
+**Resilience.** If one host is unreachable at refresh time, its
+`list_sessions_now()` errors but other hosts proceed; the failed host's rows
+disappear from the list until it recovers. A status-banner indicator shows
+the per-host failure count without blocking the rest of the UI.
+
+**MotdState** is replaced by an `Option<MotdState>`-style construct in
+multi-host: `None` in multi-host mode (no MOTD pane), `Some(motd)` in
+single-host mode.
+
+**Detail pane (R / B)** continues to operate on the highlighted row's session,
+with the dispatch routed through `row.host_id → fleet.entries[id].handle`.
+The `SessionDetailSource` trait does not change shape — it still takes
+`(host: &HostHandle, session: &SelectedSession)`. The binary just resolves
+`host` from the highlighted row instead of using a single global handle.
+
+**Per-host failure semantics for the detail pane:** if the highlighted row's
+host becomes unreachable, the detail pane shows a transient error string and
+the row disappears on the next refresh tick; selection drops to the next valid
+row (host-event reconciliation already handles this, generalized to multi-host).
+
+#### Internal data model
+
+```rust
+// model.rs additions
+
+pub(crate) struct HostId(pub(crate) String);  // ssh URI or "localhost"
+
+pub(crate) struct HostEntry {
+    pub(crate) id: HostId,
+    pub(crate) handle: motlie_tmux::HostHandle,
+    pub(crate) identity: HostIdentity,  // hostname, ip_address, label
+}
+
+pub(crate) struct HostFleet {
+    pub(crate) entries: Vec<HostEntry>,
+}
+
+impl HostFleet {
+    pub(crate) fn is_multi(&self) -> bool { self.entries.len() > 1 }
+    pub(crate) fn host_label_width(&self) -> usize { /* max label width */ }
+}
+
+pub(crate) struct SessionRow {
+    pub(crate) host_id: HostId,
+    pub(crate) host_label: String,    // pre-resolved for cheap render
+    pub(crate) server_now: u64,        // host's clock at refresh time
+    pub(crate) session: motlie_tmux::SessionInfo,
+}
+
+// SessionListState becomes:
+pub(crate) struct SessionListState {
+    pub(crate) rows: Vec<SessionRow>,  // was: Vec<SessionInfo>
+    pub(crate) selected: usize,
+    pub(crate) scroll: usize,
+}
+```
+
+`HostContext` is replaced by `HostFleet`; selection-by-id at the row level
+must compose `(host_id, session_id)` to remain stable across rename/reorder.
+
+#### Refresh loop (fan-out + merge)
+
+```rust
+async fn refresh_listings(fleet: &HostFleet) -> Vec<SessionRow> {
+    let futures = fleet.entries.iter().map(|entry| async move {
+        let listing = entry.handle.list_sessions_now().await;
+        (entry, listing)
+    });
+    let results = futures::future::join_all(futures).await;
+
+    let mut rows = Vec::new();
+    for (entry, listing) in results {
+        match listing {
+            Ok(listing) => {
+                for s in listing.sessions {
+                    rows.push(SessionRow {
+                        host_id: entry.id.clone(),
+                        host_label: entry.identity.label.clone(),
+                        server_now: listing.now,
+                        session: s,
+                    });
+                }
+            }
+            Err(_) => { /* surface to status banner; skip rows */ }
+        }
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.session.activity));
+    rows
+}
+```
+
+Use `join_all` (not `try_join_all`) so one host's failure doesn't drop the
+others. Errors are collected per host and fed to the status banner.
+
+The same path runs in single-host mode (`fleet.entries.len() == 1`); no
+divergent code path. This satisfies the "no duplication just because of the
+different views" requirement.
+
+#### Render: row format
+
+`render::draw_sessions` shifts to a single render path that emits the
+hostname column **only when `fleet.is_multi()`**. The column width is taken
+from `HostFleet::host_label_width()`. The host-label column is omitted when
+`is_multi()` is false, so single-host rendering is unchanged.
+
+#### Top status bar
+
+`render::draw_top_status` switches on `fleet.is_multi()`:
+
+- Single: `<hostname> | <ip>                                     <time>`
+- Multi:  `mmux - multi-host mode (<n>)                            <time>`
+
+#### Scope and impact analysis
+
+**Library (`libs/tmux/`):** *No new public API surface required.* The existing
+`HostHandle::list_sessions_now()`, `session_by_id()`, and
+`Target::attach_current_pty()` cover everything per-host. Multi-host fan-out
+is a binary-side concern (orchestration, not protocol). Optionally, the
+existing `Fleet` type could grow a `list_sessions_now_all() -> Vec<(HostId, Result<SessionListing>)>`
+convenience method, but this is purely sugar over `tokio::join_all` and is
+not required for v1.
+
+**Binary (`bins/mmux/`):**
+
+| File | Change |
+|---|---|
+| `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`). |
+| `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. Make `MotdState` an `Option<MotdState>` field on `AppState`. |
+| `target_host.rs` | Rename / split: `connect_host(cli) → connect_fleet(cli) -> Result<HostFleet>`. Internally calls existing single-host connect for each entry. |
+| `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. `load_motd` only called when `fleet.is_multi() == false`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
+| `render.rs` | Single render path. `draw_sessions` adds optional hostname column when `fleet.is_multi()`. `draw_top_status` switches text by mode. `draw_motd` is gated on `app.motd.is_some()` (already gated in portrait — generalize to multi-host). Status hint set unchanged. |
+| `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |
+| `main.rs` | Calls `connect_fleet` instead of `connect_host`. |
+| `forcecommand.rs` | No change (ForceCommand stays single-host; multi-host is operator-mode). |
+| `tests.rs` | New tests for: multi-host CLI parsing; fleet construction; merge-and-sort across hosts; row hostname column; top-status switching; per-host failure resilience; selection-by-(host_id, session_id) preservation across reorders. |
+
+**No abstraction changes** to: `consts.rs`, `terminal.rs`, `forcecommand.rs`,
+`detail.rs` shape (only call-site changes inside `controller.rs`).
+
+**Estimated diff** (binary only): ~+700 / −200 lines. No library changes
+expected for v1.
 
 ## SVG Mock
 
