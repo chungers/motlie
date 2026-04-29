@@ -1415,7 +1415,7 @@ fn multi_host_top_status_shows_mode_and_count() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(rendered.contains("multi-host mode (3)"));
+    assert!(rendered.contains("multi-host mode [3]"));
     assert!(!rendered.contains("alpha"));
     assert!(!rendered.contains("10.0.0"));
     assert!(rendered.ends_with(" 12:34:56 "));
@@ -1445,8 +1445,90 @@ fn multi_host_motd_pane_is_hidden() {
     let rendered = render_to_string(&mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-    assert!(rendered.contains("multi-host mode (2)"));
+    assert!(rendered.contains("multi-host mode [2]"));
     assert!(rendered.contains("Sessions [1]"));
+}
+
+#[test]
+fn host_label_width_pads_to_longest_host_label() {
+    // Mixed-length labels: shorter ones pad to the longest in the fleet.
+    let fleet = HostFleet::from_entries(vec![
+        HostEntry {
+            id: ssh_host_id("ssh://a"),
+            label: "alpha".to_string(), // 5 chars
+            ip_address: "x".to_string(),
+            handle: HostHandle::local(),
+        },
+        HostEntry {
+            id: ssh_host_id("ssh://b"),
+            label: "supercalifragilistic".to_string(), // 20 chars
+            ip_address: "y".to_string(),
+            handle: HostHandle::local(),
+        },
+        HostEntry {
+            id: ssh_host_id("ssh://c"),
+            label: "beta".to_string(), // 4 chars
+            ip_address: "z".to_string(),
+            handle: HostHandle::local(),
+        },
+    ]);
+    assert_eq!(
+        fleet.host_label_width(),
+        "supercalifragilistic".len(),
+        "host_label_width returns the longest configured label"
+    );
+
+    // Rendering each host through session_list_line with that width pads
+    // shorter labels to the longest one — column is rectangular.
+    let width = fleet.host_label_width();
+    let alpha_row = make_row_for_host(session("dev", "$1"), ssh_host_id("ssh://a"), "alpha");
+    let supercali_row = make_row_for_host(
+        session("dev", "$2"),
+        ssh_host_id("ssh://b"),
+        "supercalifragilistic",
+    );
+    let beta_row = make_row_for_host(session("dev", "$3"), ssh_host_id("ssh://c"), "beta");
+
+    let alpha_line = session_list_line(&alpha_row, false, width, 80);
+    let supercali_line = session_list_line(&supercali_row, false, width, 80);
+    let beta_line = session_list_line(&beta_row, false, width, 80);
+
+    // The session-name token "dev" appears at the same column index in every
+    // row regardless of which host produced the row — that's what padding to
+    // the longest hostname guarantees visually.
+    let alpha_dev_col = alpha_line.find("dev").unwrap();
+    let supercali_dev_col = supercali_line.find("dev").unwrap();
+    let beta_dev_col = beta_line.find("dev").unwrap();
+    assert_eq!(
+        alpha_dev_col, supercali_dev_col,
+        "alpha row's session-name column aligns with supercalifragilistic row"
+    );
+    assert_eq!(
+        beta_dev_col, supercali_dev_col,
+        "beta row's session-name column aligns with supercalifragilistic row"
+    );
+}
+
+#[test]
+fn host_label_width_caps_at_max() {
+    // Labels longer than HOST_LABEL_COLUMN_MAX (24) are clipped so an
+    // adversarial 200-char hostname does not steal the row width.
+    let huge_label: String = "x".repeat(200);
+    let fleet = HostFleet::from_entries(vec![
+        HostEntry {
+            id: ssh_host_id("ssh://a"),
+            label: "short".to_string(),
+            ip_address: "x".to_string(),
+            handle: HostHandle::local(),
+        },
+        HostEntry {
+            id: ssh_host_id("ssh://b"),
+            label: huge_label,
+            ip_address: "y".to_string(),
+            handle: HostHandle::local(),
+        },
+    ]);
+    assert_eq!(fleet.host_label_width(), 24);
 }
 
 #[test]
