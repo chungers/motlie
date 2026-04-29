@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Fixed ForceCommand bypass contract inconsistency: bypass requires exactly `MOTLIE_MMUX_BYPASS=1`; linked issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh from separate activity and structural pollers into one `list_sessions_now()` loop. |
 | 2026-04-28 | @gpt55-dgx | Added periodic visible-row refreshes because activity-only changes do not emit host events, but must reorder the activity-sorted session list. |
 | 2026-04-28 | @gpt55-dgx | Added activity-descending session-list ordering so the most recently active session appears first while selection remains stable by id. |
@@ -1058,14 +1059,18 @@ Recommended initial deployment policy:
 Concrete admin-bypass mechanism:
 the binary reads the environment variable `MOTLIE_MMUX_BYPASS` at
 startup. If unset or empty, `SSH_ORIGINAL_COMMAND` is rejected with a stderr
-message and the binary exits non-zero. If set to `1` (or any non-empty
-value), the binary exec's `SSH_ORIGINAL_COMMAND` via the user's login shell
-(`/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) and bypasses the TUI entirely.
+message and the binary exits non-zero. If set exactly to `1`, the binary exec's
+`SSH_ORIGINAL_COMMAND` via the user's login shell
+(`/bin/sh -c "$SSH_ORIGINAL_COMMAND"`) and bypasses the TUI entirely. Any other
+value is treated as no bypass.
 Deployments enable this by adding `AcceptEnv MOTLIE_MMUX_BYPASS` to
 `sshd_config` for the relevant `Match Group` (or by setting the variable
 via PAM/login.defs for specific users/groups). This keeps the bypass
 configuration external to the binary while giving PLAN a concrete
 mechanism to implement and test.
+
+Env-gated SSH/ForceCommand integration coverage is tracked in
+[issue #232](https://github.com/chungers/motlie/issues/232).
 
 ForceCommand deployments must
 NOT use `--script` (the user has no shell to consume stdout).

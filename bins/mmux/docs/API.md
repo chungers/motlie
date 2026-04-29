@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Clarified exact `MOTLIE_MMUX_BYPASS=1` behavior and linked issue #232 for env-gated SSH integration coverage. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux session-list polling so one `list_sessions_now()` loop drives activity ordering and structural state. |
 | 2026-04-28 | @gpt55-dgx | Documented one-second quiet visible-row refreshes for activity sorting and recency text. |
 | 2026-04-28 | @gpt55-dgx | Documented activity-descending session-list ordering with stable-id selection preservation. |
@@ -405,8 +406,12 @@ Validation rules:
 - the old `-s` flag is rejected
 - target is positional SSH URI only
 - omitted target means local host
-- `SSH_ORIGINAL_COMMAND` is rejected unless `MOTLIE_MMUX_BYPASS=1`
-  delegates to `sh -lc "$SSH_ORIGINAL_COMMAND"` before the selector starts
+- `SSH_ORIGINAL_COMMAND` is rejected unless `MOTLIE_MMUX_BYPASS` is exactly
+  `1`; exact bypass delegates to `sh -lc "$SSH_ORIGINAL_COMMAND"` before the
+  selector starts
+
+Env-gated SSH/ForceCommand integration coverage is tracked in
+[issue #232](https://github.com/chungers/motlie/issues/232).
 
 ## Testing Contracts
 

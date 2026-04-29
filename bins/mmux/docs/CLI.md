@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Clarified ForceCommand bypass requires exactly `MOTLIE_MMUX_BYPASS=1` and cross-referenced issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated session-list refresh to a single one-second `list_sessions_now()` poller for both activity ordering and structural reconciliation. |
 | 2026-04-28 | @gpt55-dgx | Added a one-second visible-row refresh using `list_sessions_now()` so activity-sorted rows reorder even when no structural tmux event occurs. |
 | 2026-04-28 | @gpt55-dgx | Sorted session-list rows by `SessionInfo.activity` descending so the most recently active sessions appear first. |
@@ -252,9 +253,13 @@ ForceCommand /usr/local/bin/mmux --landscape
 
 By default, `SSH_ORIGINAL_COMMAND` is rejected with a clear stderr message.
 Operators can configure an external bypass by allowing
-`MOTLIE_MMUX_BYPASS=1` for selected users or groups. When both
-`SSH_ORIGINAL_COMMAND` and the bypass are present, the binary delegates to the
-original command instead of launching the selector.
+`MOTLIE_MMUX_BYPASS=1` for selected users or groups. The value must be exactly
+`1`; unset, empty, or any other value is treated as no bypass. When both
+`SSH_ORIGINAL_COMMAND` and the exact bypass are present, the binary delegates to
+the original command instead of launching the selector.
+
+Env-gated SSH/ForceCommand integration coverage is tracked in
+[issue #232](https://github.com/chungers/motlie/issues/232).
 
 ## Exit Semantics
 

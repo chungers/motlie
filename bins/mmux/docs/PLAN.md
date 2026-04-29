@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-28 | @gpt55-dgx | Opened and linked issue #232 for Phase 9.6 env-gated SSH/ForceCommand integration tests; clarified exact bypass value contract. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh to one `list_sessions_now()` poller for activity sorting, recency text, structural state, and monitored-session closure. |
 | 2026-04-28 | @gpt55-dgx | Tracked one-second quiet visible-row refreshes so activity sorting updates without structural host events. |
 | 2026-04-28 | @gpt55-dgx | Tracked activity-descending session ordering with stable-id selection preservation. |
@@ -386,7 +387,10 @@ References: [SSH ForceCommand Integration](./DESIGN.md#ssh-forcecommand-integrat
 - [x] 9.5 Document recommended `sshd_config` snippets in `CLI.md` after
   implementation confirms exact paths.
 - [ ] 9.6 Add env-gated SSH integration tests for remote list, sample, monitor,
-  attach command construction, and bypass handling.
+  attach command construction, and bypass handling. Tracked by
+  [issue #232](https://github.com/chungers/motlie/issues/232). Include exact
+  `MOTLIE_MMUX_BYPASS=1` positive coverage and negative coverage for other
+  non-empty values.
 
 ## Phase 10: Final Validation and Docs
 
