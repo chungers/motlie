@@ -648,6 +648,33 @@ pub(crate) struct SessionListState {
 `HostContext` is replaced by `HostFleet`; selection-by-id at the row level
 must compose `(host_id, session_id)` to remain stable across rename/reorder.
 
+**Why a binary-side `HostFleet`, not `motlie_tmux::Fleet`?** The lib's `Fleet`
+(`libs/tmux/src/fleet.rs`) is the *monitoring/automation registry*. Its
+load-bearing features — a shared `OutputBus` aggregating output across hosts,
+per-host monitor lifecycle (`start_monitoring_session`, `start_monitoring_host`),
+workstream alias→`TargetSpec` bindings, and per-session health rollup
+(`HostStatus::Monitoring { sessions: Vec<SessionMonitorStatus> }`) — are
+orthogonal to what the selector does. The selector needs a flat list of hosts
+with per-host display metadata (label, ip) and 1 Hz fan-out polling via
+`list_sessions_now()`. Using `motlie_tmux::Fleet` would require:
+
+- Wrapping it to add display metadata on the side (the lib's `Fleet` stores
+  only `HashMap<alias, HostHandle>` — no label/ip);
+- Inheriting the alias-match constraint between fleet alias and
+  `HostHandle::host_alias()` (`Fleet::register` rejects mismatched aliases),
+  which conflicts with using the SSH URI as the stable selector id;
+- Carrying the unused `OutputBus` injection side effect on host registration;
+- Hand-rolling the `tokio::join_all` fan-out loop anyway, since `Fleet`
+  doesn't expose a multi-host listing helper.
+
+The binary-side `HostFleet` is ~30 LoC and fits the selector's concern
+exactly without unused dependencies or ceremony. If a future need arises to
+share this model across binaries, the right move is to add a new lightweight
+`motlie_tmux::HostRegistry` (a vec of `HostHandle`s plus per-host metadata,
+without monitoring lifecycle) that coexists with `Fleet`, rather than
+overloading `Fleet`. That work is explicitly out of scope here per the
+"no library changes for v1" constraint on issue #235.
+
 #### Refresh loop (fan-out + merge)
 
 ```rust
