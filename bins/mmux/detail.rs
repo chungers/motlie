@@ -7,7 +7,7 @@ use motlie_tmux::{
 };
 
 use crate::consts::DEFAULT_DETAIL_LINES;
-use crate::model::SelectedSession;
+use crate::model::{HostId, SelectedSession};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DetailMode {
@@ -91,11 +91,15 @@ impl SessionDetailSource for SampleDetailSource {
 
 pub(crate) struct MonitorDetailSource {
     pub(crate) session_id: Option<String>,
+    pub(crate) host_id: Option<HostId>,
 }
 
 impl MonitorDetailSource {
     pub(crate) fn new() -> Self {
-        Self { session_id: None }
+        Self {
+            session_id: None,
+            host_id: None,
+        }
     }
 }
 
@@ -106,6 +110,7 @@ impl SessionDetailSource for MonitorDetailSource {
             return Err(anyhow!("session {} disappeared", session.name));
         }
         self.session_id = Some(session.id.clone());
+        self.host_id = Some(session.host_id.clone());
         Ok(())
     }
 
@@ -137,6 +142,7 @@ impl SessionDetailSource for MonitorDetailSource {
 
     async fn deactivate(&mut self) -> Result<()> {
         self.session_id = None;
+        self.host_id = None;
         Ok(())
     }
 
@@ -198,6 +204,13 @@ impl DetailSource {
         match self {
             DetailSource::Sample(_) => None,
             DetailSource::Monitor(source) => source.session_id.as_deref(),
+        }
+    }
+
+    pub(crate) fn monitored_host_id(&self) -> Option<&HostId> {
+        match self {
+            DetailSource::Sample(_) => None,
+            DetailSource::Monitor(source) => source.host_id.as_ref(),
         }
     }
 }
