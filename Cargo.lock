@@ -5195,6 +5195,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm 0.29.0",
+ "futures",
  "motlie-tmux",
  "ratatui",
  "tokio",
