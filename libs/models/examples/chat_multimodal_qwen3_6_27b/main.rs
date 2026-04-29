@@ -3,7 +3,7 @@ use motlie_model::{
     ArtifactPolicy, BundleHandle, CapabilityKind, ChatMessage, ChatModel, ChatRequest, ChatRole,
     CompletionModel, ContentPart, QuantizationBits, StartOptions,
 };
-use motlie_models::{chat::ChatModels, default_artifact_root};
+use motlie_models::{chat::ChatModels, default_artifact_root, quantization_label_gguf};
 use std::path::Path;
 use std::time::Instant;
 
@@ -60,7 +60,10 @@ async fn main() -> Result<()> {
     println!("artifact-root: {}", artifact_root.display());
     println!("gpu-offload: {}", gpu_offload_summary());
     support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
-    println!("quantization: {}", quantization_label(quantization));
+    println!(
+        "requested-precision: {}",
+        requested_precision_label(quantization)
+    );
 
     if download_artifacts {
         let summary =
@@ -111,6 +114,10 @@ async fn main() -> Result<()> {
     support::print_startup_stats(&startup_stats);
     support::print_process_snapshot("process-after-start", &support::current_process_snapshot());
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
+    println!(
+        "resolved-quantization: {}",
+        quantization_label_gguf(handle.descriptor().resolved_quantization)
+    );
 
     let chat = handle
         .chat()
@@ -233,8 +240,9 @@ async fn main() -> Result<()> {
 fn parse_precision(value: Option<&str>) -> Result<Option<QuantizationBits>> {
     match value {
         Some("q4") => Ok(Some(QuantizationBits::Four)),
-        Some("q5") | None => Ok(Some(QuantizationBits::Five)),
+        Some("q5") => Ok(Some(QuantizationBits::Five)),
         Some("q8") => Ok(Some(QuantizationBits::Eight)),
+        None => Ok(None),
         Some("fp8") => bail!(
             "--precision=fp8 is reserved for CUDA builds once a curated FP8 GGUF artifact exists; current Qwen3.6 GGUF artifacts support q4, q5, and q8"
         ),
@@ -242,13 +250,13 @@ fn parse_precision(value: Option<&str>) -> Result<Option<QuantizationBits>> {
     }
 }
 
-fn quantization_label(quantization: Option<QuantizationBits>) -> &'static str {
+fn requested_precision_label(quantization: Option<QuantizationBits>) -> &'static str {
     match quantization {
-        Some(QuantizationBits::Four) => "GGUF Q4_K_M",
-        Some(QuantizationBits::Five) => "GGUF Q5_K_M (default)",
-        Some(QuantizationBits::Eight) => "GGUF Q8_0",
-        Some(QuantizationBits::FloatEight) => "GGUF FP8",
-        None => "GGUF F16/BF16 (no quantization)",
+        Some(QuantizationBits::Four) => "q4",
+        Some(QuantizationBits::Five) => "q5",
+        Some(QuantizationBits::Eight) => "q8",
+        Some(QuantizationBits::FloatEight) => "fp8",
+        None => "bundle recommended",
     }
 }
 

@@ -75,8 +75,9 @@ Existing llama.cpp backend:
 - `LlamaCppTextBundle` implements `ModelBundle`.
 - `LlamaCppTextHandle` implements `ChatModel` and `CompletionModel`.
 - `LLAMA_CPP_TEXT_FORMATS` is `[CheckpointFormat::Gguf]`.
-- Current GGUF filename selection maps only Q4, Q8, and F16-style default
-  through `Option<QuantizationBits>`.
+- Current GGUF filename selection maps Q4, Q5, Q8, reserved FP8, and
+  F16-style default through one centralized `Option<QuantizationBits>` suffix
+  helper after callers resolve support through the bundle spec.
 
 Existing multimodal example pattern:
 
