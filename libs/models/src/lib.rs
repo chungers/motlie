@@ -65,7 +65,7 @@ pub use motlie_model::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
     BundleRequirements, Capabilities, CapabilityDescriptor, CapabilityKind, CheckpointFormat,
     ContentKind, EvalTrack, InteractionStyle, ModelBundle, ModelCheckpoint, ModelIdentity,
-    PlatformConstraint, QuantizationSupport,
+    PlatformConstraint, QuantizationBits, QuantizationSupport,
 };
 pub use tts::TtsModels;
 
@@ -110,6 +110,27 @@ pub enum ModelsError {
 }
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
+
+pub fn quantization_label_isq(quantization: Option<QuantizationBits>) -> &'static str {
+    match quantization {
+        Some(QuantizationBits::Four) => "ISQ Q4",
+        Some(QuantizationBits::Eight) => "ISQ Q8",
+        Some(QuantizationBits::Five) | Some(QuantizationBits::FloatEight) => {
+            "unsupported ISQ precision"
+        }
+        None => "F32 (none)",
+    }
+}
+
+pub fn quantization_label_gguf(quantization: Option<QuantizationBits>) -> &'static str {
+    match quantization {
+        Some(QuantizationBits::Four) => "GGUF Q4_K_M",
+        Some(QuantizationBits::Five) => "GGUF Q5_K_M",
+        Some(QuantizationBits::Eight) => "GGUF Q8_0",
+        Some(QuantizationBits::FloatEight) => "GGUF FP8",
+        None => "GGUF F16 (no quantization)",
+    }
+}
 
 /// Resolve a Hugging Face cache root to the concrete snapshot directory for a model.
 ///

@@ -96,7 +96,8 @@ Current curated GGUF artifacts:
 
 | `--precision` | GGUF artifact | Status |
 |---------------|---------------|--------|
-| omitted / `q5` | `Qwen3.6-27B-Q5_K_M.gguf` | default |
+| omitted | bundle-recommended artifact, currently `Qwen3.6-27B-Q5_K_M.gguf` | default |
+| `q5` | `Qwen3.6-27B-Q5_K_M.gguf` | supported |
 | `q4` | `Qwen3.6-27B-Q4_K_M.gguf` | supported |
 | `q8` | `Qwen3.6-27B-Q8_0.gguf` | supported |
 | `fp8` | `Qwen3.6-27B-FP8.gguf` | reserved, not curated yet |
@@ -104,6 +105,8 @@ Current curated GGUF artifacts:
 The official Qwen FP8 release is currently a Transformers/safetensors artifact,
 not a GGUF artifact. The example accepts the documented `fp8` spelling but
 fails closed until a real curated FP8 GGUF is available.
+When `--precision` is omitted, the example passes no explicit precision and
+prints the bundle's resolved quantization after startup.
 
 ## Validation Status
 

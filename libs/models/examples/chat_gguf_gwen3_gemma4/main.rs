@@ -3,7 +3,9 @@ use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
     QuantizationBits, StartOptions,
 };
-use motlie_models::{ModelSelector, chat::ChatModels, default_artifact_root};
+use motlie_models::{
+    ModelSelector, chat::ChatModels, default_artifact_root, quantization_label_gguf,
+};
 use std::time::Instant;
 
 #[path = "../support.rs"]
@@ -80,17 +82,7 @@ async fn main() -> Result<()> {
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
     support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
-    println!(
-        "quantization: {}",
-        match quantization {
-            Some(QuantizationBits::Four) => "GGUF Q4_K_M",
-            Some(QuantizationBits::Eight) => "GGUF Q8_0",
-            Some(QuantizationBits::Five) | Some(QuantizationBits::FloatEight) => {
-                "unsupported by this example"
-            }
-            None => "GGUF F16 (no quantization)",
-        }
-    );
+    println!("quantization: {}", quantization_label_gguf(quantization));
 
     if download_artifacts {
         let catalog = motlie_models::Catalog::with_defaults();

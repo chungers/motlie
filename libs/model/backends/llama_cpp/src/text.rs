@@ -38,12 +38,18 @@ pub enum LlamaCppTextArch {
 /// ISQ at load time from safetensors). Each precision level maps to a specific
 /// GGUF file that must be downloaded separately.
 fn gguf_filename(model_prefix: &str, bits: Option<QuantizationBits>) -> String {
+    // INVARIANT: `bits` must already be resolved through the spec's
+    // `QuantizationSupport`; this mapper only names the curated GGUF artifact.
+    format!("{model_prefix}{}", gguf_quant_suffix(bits))
+}
+
+fn gguf_quant_suffix(bits: Option<QuantizationBits>) -> &'static str {
     match bits {
-        Some(QuantizationBits::Four) => format!("{model_prefix}-Q4_K_M.gguf"),
-        Some(QuantizationBits::Five) => format!("{model_prefix}-Q5_K_M.gguf"),
-        Some(QuantizationBits::Eight) => format!("{model_prefix}-Q8_0.gguf"),
-        Some(QuantizationBits::FloatEight) => format!("{model_prefix}-FP8.gguf"),
-        None => format!("{model_prefix}-f16.gguf"),
+        Some(QuantizationBits::Four) => "-Q4_K_M.gguf",
+        Some(QuantizationBits::Five) => "-Q5_K_M.gguf",
+        Some(QuantizationBits::Eight) => "-Q8_0.gguf",
+        Some(QuantizationBits::FloatEight) => "-FP8.gguf",
+        None => "-f16.gguf",
     }
 }
 
@@ -541,6 +547,8 @@ impl LlamaCppRuntime {
 fn format_chat_prompt(arch: LlamaCppTextArch, request: &ChatRequest) -> Result<String, ModelError> {
     match arch {
         LlamaCppTextArch::Qwen3 | LlamaCppTextArch::Qwen35 => {
+            // Qwen35 currently shares the Qwen3 ChatML template; split this arm
+            // if Qwen3.5 chat tokens or think-block handling diverge.
             format_qwen3_prompt(&request.messages)
         }
         LlamaCppTextArch::Gemma4 => format_gemma4_prompt(&request.messages),
@@ -779,7 +787,7 @@ fn resolve_checkpoint_model_path(
         )));
     }
 
-    let expected_suffix = gguf_filename_suffix(resolved_quantization);
+    let expected_suffix = gguf_quant_suffix(resolved_quantization);
     let path = &checkpoint.path;
 
     if path.is_file() {
@@ -831,16 +839,6 @@ fn resolve_checkpoint_model_path(
             "resolved GGUF checkpoint root `{}` has {count} files matching `{expected_suffix}`; expected exactly one",
             path.display()
         ))),
-    }
-}
-
-fn gguf_filename_suffix(bits: Option<QuantizationBits>) -> &'static str {
-    match bits {
-        Some(QuantizationBits::Four) => "-Q4_K_M.gguf",
-        Some(QuantizationBits::Five) => "-Q5_K_M.gguf",
-        Some(QuantizationBits::Eight) => "-Q8_0.gguf",
-        Some(QuantizationBits::FloatEight) => "-FP8.gguf",
-        None => "-f16.gguf",
     }
 }
 
