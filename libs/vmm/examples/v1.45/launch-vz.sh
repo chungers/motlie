@@ -522,12 +522,33 @@ kill_stale_runners() {
   printf '%s\n' "--- terminating stale Vz runners for $GUEST_NAME ---"
   kill "${unique_pids[@]}" >/dev/null 2>&1 || true
 
+  # @opus47-mac 2026-04-28 -- The survivor set must union both detection
+  # paths: kill -0 against unique_pids (catches PID-file-tracked PIDs the
+  # ps grep cannot see — debugger-wrapped or relocated runners — which
+  # is the entire reason the PID-file authority path exists), plus
+  # ps-grep matches (catches orphans whose PID file was already lost).
+  # Otherwise a debugger-wrapped runner gets SIGTERM, the loop sees no
+  # ps survivors, and the script proceeds to rm -rf RUN_VM_DIR while
+  # stopWithCompletionHandler is still flushing the disk.
   local attempts=0
   while [[ $attempts -lt 20 ]]; do
     local survivors=()
+    local seen_survivor=""
+    for stale_pid in "${unique_pids[@]}"; do
+      [[ -n "$stale_pid" ]] || continue
+      if kill -0 "$stale_pid" >/dev/null 2>&1; then
+        if [[ " $seen_survivor " != *" $stale_pid "* ]]; then
+          seen_survivor+=" $stale_pid"
+          survivors+=("$stale_pid")
+        fi
+      fi
+    done
     while read -r stale_pid; do
       [[ -n "$stale_pid" ]] || continue
-      survivors+=("$stale_pid")
+      if [[ " $seen_survivor " != *" $stale_pid "* ]]; then
+        seen_survivor+=" $stale_pid"
+        survivors+=("$stale_pid")
+      fi
     done < <(ps -Ao pid=,command= -ww | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
       /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print $1 }
     ')
@@ -543,6 +564,14 @@ kill_stale_runners() {
   done
 
   echo "failed to terminate stale Vz runners for $GUEST_NAME" >&2
+  # Diagnostic must also enumerate PID-file-tracked survivors that the ps
+  # grep cannot match (same union as the survivor loop above).
+  for stale_pid in "${unique_pids[@]}"; do
+    [[ -n "$stale_pid" ]] || continue
+    if kill -0 "$stale_pid" >/dev/null 2>&1; then
+      ps -p "$stale_pid" -o pid,etime,command >&2 2>/dev/null || true
+    fi
+  done
   ps -Ao pid,etime,command | awk -v mac="$NET_MAC" -v sock="$SOCKET_PATH" '
     /vz-vsock-runner/ && index($0, mac) && index($0, sock) { print }
   ' >&2 || true
