@@ -32,7 +32,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("qwen3_tts_cpp_0_6b"),
         display_name: "Qwen3-TTS CPP 0.6B".into(),
         family: BundleFamily::Qwen,
-        capabilities: motlie_model::Capabilities::speech_stream_only(),
+        capabilities: motlie_model::Capabilities::speech_buffered_with_voice_clone(),
         eval_tracks: vec![EvalTrack::Speech],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],

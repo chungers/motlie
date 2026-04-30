@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use motlie_model::typed::{
-    AudioBuf, CloneReference, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer,
-    SynthesisRequest, VoiceCloneSynthesizer,
+    AudioBuf, BufferedSpeechChunkStream, BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer,
+    CloneReference, Mono, SpeechSynthesizer, SynthesisRequest, VoiceCloneSynthesizer,
 };
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
@@ -28,6 +28,8 @@ const OUTPUT_CHUNK_DURATION_MS: u32 = 40;
 const DEFAULT_LANGUAGE_ID_EN: i32 = 2050;
 const REFERENCE_SAMPLE_RATE_HZ: u32 = 16_000;
 
+pub type Qwen3TtsCppSpeechStream = BufferedSpeechChunkStream<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>;
+
 #[derive(Clone, Debug)]
 pub struct Qwen3TtsCppSpeechSpec {
     pub id: BundleId,
@@ -43,7 +45,7 @@ impl Qwen3TtsCppSpeechSpec {
             id: BundleId::new("qwen3_tts_cpp_0_6b"),
             display_name: "Qwen3-TTS CPP 0.6B",
             hf_repo: "koboldcpp/tts",
-            capabilities: Capabilities::speech_stream_only(),
+            capabilities: Capabilities::speech_buffered_with_voice_clone(),
             quantization: QuantizationSupport::without_recommended([QuantizationBits::Eight]),
         }
     }
@@ -190,6 +192,45 @@ pub struct Qwen3TtsCppHandle {
 impl Qwen3TtsCppHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
         <Self as BundleHandle>::shutdown(self).await
+    }
+
+    async fn synthesize_pcm(
+        &self,
+        request: SynthesisRequest,
+    ) -> Result<AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>, ModelError> {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        let started_at = Instant::now();
+        let pcm = runtime.synthesize(&request)?;
+        let elapsed = started_at.elapsed();
+
+        {
+            let mut state = lock_metrics(&metrics, "qwen3-tts-cpp-typed-synthesize");
+            observe_latency(&mut state.runtime, elapsed);
+        }
+
+        Ok(AudioBuf::new(pcm))
+    }
+
+    async fn synthesize_pcm_with_reference(
+        &self,
+        request: SynthesisRequest,
+        reference: CloneReference<REFERENCE_SAMPLE_RATE_HZ, Mono>,
+    ) -> Result<AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>, ModelError> {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        let started_at = Instant::now();
+        let pcm = runtime.synthesize_with_reference(&request, &reference)?;
+        let elapsed = started_at.elapsed();
+
+        {
+            let mut state = lock_metrics(&metrics, "qwen3-tts-cpp-typed-clone");
+            observe_latency(&mut state.runtime, elapsed);
+        }
+
+        Ok(AudioBuf::new(pcm))
     }
 }
 
@@ -347,42 +388,15 @@ fn load_runtime(artifacts: &Qwen3TtsCppArtifactPaths) -> Result<Qwen3TtsCppRunti
     })
 }
 
-pub struct Qwen3TtsCppSpeechStream {
-    samples: Vec<f32>,
-    next_offset: usize,
-    chunk_len_samples: usize,
-}
+impl BufferedSpeechSynthesizer for Qwen3TtsCppHandle {
+    type Request = SynthesisRequest;
+    type Output = AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>;
 
-impl Qwen3TtsCppSpeechStream {
-    fn new(samples: Vec<f32>) -> Self {
-        Self {
-            samples,
-            next_offset: 0,
-            chunk_len_samples: ((DEFAULT_SAMPLE_RATE_HZ as usize
-                * OUTPUT_CHUNK_DURATION_MS as usize)
-                / 1000)
-                .max(1),
-        }
-    }
-}
-
-impl Qwen3TtsCppSpeechStream {
-    async fn next_audio_chunk(
-        &mut self,
-    ) -> Result<Option<AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>>, ModelError> {
-        if self.next_offset >= self.samples.len() {
-            return Ok(None);
-        }
-
-        let end = (self.next_offset + self.chunk_len_samples).min(self.samples.len());
-        let chunk = AudioBuf::new(self.samples[self.next_offset..end].to_vec());
-        self.next_offset = end;
-
-        Ok(Some(chunk))
-    }
-
-    async fn finish_stream(self) -> Result<(), ModelError> {
-        Ok(())
+    async fn synthesize_buffered(
+        &self,
+        request: Self::Request,
+    ) -> Result<Self::Output, ModelError> {
+        self.synthesize_pcm(request).await
     }
 }
 
@@ -392,19 +406,23 @@ impl SpeechSynthesizer for Qwen3TtsCppHandle {
     type Stream = Qwen3TtsCppSpeechStream;
 
     async fn synthesize(&self, request: Self::Request) -> Result<Self::Stream, ModelError> {
-        let runtime = Arc::clone(&self.runtime);
-        let metrics = Arc::clone(&self.metrics);
+        Ok(Qwen3TtsCppSpeechStream::new(
+            self.synthesize_pcm(request).await?,
+            OUTPUT_CHUNK_DURATION_MS,
+        ))
+    }
+}
 
-        let started_at = Instant::now();
-        let pcm = runtime.synthesize(&request)?;
-        let elapsed = started_at.elapsed();
+impl BufferedVoiceCloneSynthesizer<REFERENCE_SAMPLE_RATE_HZ, Mono> for Qwen3TtsCppHandle {
+    type Request = SynthesisRequest;
+    type Output = AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>;
 
-        {
-            let mut state = lock_metrics(&metrics, "qwen3-tts-cpp-typed-synthesize");
-            observe_latency(&mut state.runtime, elapsed);
-        }
-
-        Ok(Qwen3TtsCppSpeechStream::new(pcm))
+    async fn synthesize_with_reference_buffered(
+        &self,
+        request: Self::Request,
+        reference: CloneReference<REFERENCE_SAMPLE_RATE_HZ, Mono>,
+    ) -> Result<Self::Output, ModelError> {
+        self.synthesize_pcm_with_reference(request, reference).await
     }
 }
 
@@ -418,31 +436,11 @@ impl VoiceCloneSynthesizer<REFERENCE_SAMPLE_RATE_HZ, Mono> for Qwen3TtsCppHandle
         request: Self::Request,
         reference: CloneReference<REFERENCE_SAMPLE_RATE_HZ, Mono>,
     ) -> Result<Self::Stream, ModelError> {
-        let runtime = Arc::clone(&self.runtime);
-        let metrics = Arc::clone(&self.metrics);
-
-        let started_at = Instant::now();
-        let pcm = runtime.synthesize_with_reference(&request, &reference)?;
-        let elapsed = started_at.elapsed();
-
-        {
-            let mut state = lock_metrics(&metrics, "qwen3-tts-cpp-typed-clone");
-            observe_latency(&mut state.runtime, elapsed);
-        }
-
-        Ok(Qwen3TtsCppSpeechStream::new(pcm))
-    }
-}
-
-impl TypedSpeechStream for Qwen3TtsCppSpeechStream {
-    type Chunk = AudioBuf<f32, DEFAULT_SAMPLE_RATE_HZ, Mono>;
-
-    async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
-        self.next_audio_chunk().await
-    }
-
-    async fn finish(self) -> Result<(), ModelError> {
-        self.finish_stream().await
+        Ok(Qwen3TtsCppSpeechStream::new(
+            self.synthesize_pcm_with_reference(request, reference)
+                .await?,
+            OUTPUT_CHUNK_DURATION_MS,
+        ))
     }
 }
 

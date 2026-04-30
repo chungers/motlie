@@ -40,7 +40,9 @@ Agent decision rule:
 
 - discover runtime details progressively through the conversation with the human
 - if the user says `say with qwen3`, use `--tts-backend qwen3cpp`; otherwise default to `piper`
+- treat `piper` and `qwen3cpp` as buffered TTS backends; they produce complete audio before the runtime writes it to playback sinks
 - if the user says `listen with sherpa` or `listen with moonshine`, use that ASR backend; otherwise default to `whisper`
+- treat `whisper` as batch/final-only ASR and `sherpa`/`moonshine` as streaming ASR backends
 - for remote Mac push capture, keep ASR behavior consistent across `whisper`, `sherpa`, and `moonshine`: wait for EOF from Ctrl-C on the Mac and then print one final transcript for the listen half of the turn
 - if local playback/capture commands exist, try local first
 - ask the human whether speak/listen actually worked locally
@@ -89,4 +91,4 @@ Example:
   --seconds 8
 ```
 
-Use this skill for turn-based voice interactions, not full-duplex streaming.
+Use this skill for turn-based voice interactions, not full-duplex streaming. Even when `sherpa` or `moonshine` are selected, the default turn flow still waits for one final transcript before continuing.

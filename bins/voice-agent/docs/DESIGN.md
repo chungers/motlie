@@ -33,7 +33,7 @@ We need repo-local skills and helper scripts that let an agent:
 - Full-duplex live voice conversation
 - Telephony/RTP/WebSocket transport
 - New model backends
-- Changes to the typed TTS/ASR library contracts
+- Driving the typed TTS/ASR contract redesign itself
 
 ## Requirements
 
@@ -140,6 +140,7 @@ Within the typed runtime:
 The typed runtime also owns:
 
 - direct invocation of the typed Motlie TTS/ASR backends without shelling out to repo example binaries
+- explicit consumption of the common speech contracts: buffered TTS for Piper/qwen3-tts.cpp, batch ASR for Whisper, and streaming ASR for Sherpa/Moonshine
 - CUDA feature selection when available
 - qwen3-tts.cpp runtime sidecar handling for installed skill binaries; the current all-backends voice-agent binary links those sidecars eagerly at process startup
 - a shared curated artifact cache rooted at `.agents/skills/voice/artifacts/hf-cache/`
