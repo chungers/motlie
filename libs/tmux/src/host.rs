@@ -1234,6 +1234,62 @@ pub struct Target {
     address: TargetAddress,
 }
 
+/// Prefix-scoped session metadata API.
+///
+/// Construct with [`Target::tags`]. The helper validates the tag namespace once
+/// and dispatches all operations against the target's stable session id.
+pub struct SessionTags<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+    prefix: SessionTagPrefix,
+}
+
+impl<'a> SessionTags<'a> {
+    /// Namespace prefix for this metadata scope.
+    pub fn prefix(&self) -> &str {
+        self.prefix.as_str()
+    }
+
+    /// Set one metadata tag in this namespace.
+    pub async fn set(&self, key: &str, value: &str) -> Result<()> {
+        control::set_session_tag_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+            key,
+            value,
+        )
+        .await
+    }
+
+    /// Read one metadata tag from this namespace.
+    ///
+    /// Returns `Ok(None)` when the tag is not present.
+    pub async fn read(&self, key: &str) -> Result<Option<String>> {
+        control::read_session_tag_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+            key,
+        )
+        .await
+    }
+
+    /// List all metadata tags in this namespace.
+    pub async fn list(&self) -> Result<Vec<SessionTag>> {
+        control::list_session_tags_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+        )
+        .await
+    }
+}
+
 impl Target {
     /// Resolve the effective pane_id for exec lock keying (DC19).
     ///
@@ -1327,52 +1383,58 @@ impl Target {
         &self.address
     }
 
-    /// Set a namespaced metadata tag on this session.
+    /// Return a prefix-scoped session metadata helper.
     ///
     /// Session tags are stored as tmux user-defined session options. For
     /// `prefix = "mmux"` and `key = "role"`, the underlying option name is
     /// `@mmux/role`.
+    pub async fn tags(&self, prefix: &str) -> Result<SessionTags<'_>> {
+        self.tags_with_operation(prefix, "tags").await
+    }
+
+    /// Set a namespaced metadata tag on this session.
+    ///
+    /// This is a one-off convenience wrapper around [`tags`](Self::tags).
     pub async fn set_tag(&self, prefix: &str, key: &str, value: &str) -> Result<()> {
-        let session = self.session_for_tags("set_tag")?;
-        let tmux_prefix = self.inner.tmux_prefix().await;
-        control::set_session_tag_with_prefix(
-            &self.inner.transport,
-            &tmux_prefix,
-            session.id.as_str(),
-            prefix,
-            key,
-            value,
-        )
-        .await
+        self.tags_with_operation(prefix, "set_tag")
+            .await?
+            .set(key, value)
+            .await
     }
 
     /// Read a namespaced metadata tag from this session.
     ///
+    /// This is a one-off convenience wrapper around [`tags`](Self::tags).
     /// Returns `Ok(None)` when the tag is not present.
     pub async fn read_tag(&self, prefix: &str, key: &str) -> Result<Option<String>> {
-        let session = self.session_for_tags("read_tag")?;
-        let tmux_prefix = self.inner.tmux_prefix().await;
-        control::read_session_tag_with_prefix(
-            &self.inner.transport,
-            &tmux_prefix,
-            session.id.as_str(),
-            prefix,
-            key,
-        )
-        .await
+        self.tags_with_operation(prefix, "read_tag")
+            .await?
+            .read(key)
+            .await
     }
 
     /// List all metadata tags under `prefix` for this session.
     pub async fn list_tags(&self, prefix: &str) -> Result<Vec<SessionTag>> {
-        let session = self.session_for_tags("list_tags")?;
+        self.tags_with_operation(prefix, "list_tags")
+            .await?
+            .list()
+            .await
+    }
+
+    async fn tags_with_operation(
+        &self,
+        prefix: &str,
+        operation: &'static str,
+    ) -> Result<SessionTags<'_>> {
+        let session_id = self.session_for_tags(operation)?.id.as_str().to_string();
+        let prefix = SessionTagPrefix::new(prefix)?;
         let tmux_prefix = self.inner.tmux_prefix().await;
-        control::list_session_tags_with_prefix(
-            &self.inner.transport,
-            &tmux_prefix,
-            session.id.as_str(),
+        Ok(SessionTags {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
             prefix,
-        )
-        .await
+        })
     }
 
     fn session_for_tags(&self, operation: &'static str) -> Result<&SessionInfo> {
@@ -2724,23 +2786,19 @@ mod tests {
             );
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
+        let tags = target.tags("mmux").await.unwrap();
 
-        target.set_tag("mmux", "foo", "bar").await.unwrap();
-        let value = target.read_tag("mmux", "foo").await.unwrap();
-        let tags = target.list_tags("mmux").await.unwrap();
+        assert_eq!(tags.prefix(), "mmux");
+        tags.set("foo", "bar").await.unwrap();
+        let value = tags.read("foo").await.unwrap();
+        let listed = tags.list().await.unwrap();
 
         assert_eq!(value, Some("hello world".to_string()));
         assert_eq!(
-            tags,
+            listed,
             vec![
-                SessionTag {
-                    key: "foo".to_string(),
-                    value: "hello world".to_string(),
-                },
-                SessionTag {
-                    key: "empty".to_string(),
-                    value: String::new(),
-                },
+                SessionTag::new("mmux", "foo", "hello world").unwrap(),
+                SessionTag::new("mmux", "empty", "").unwrap(),
             ]
         );
     }
@@ -2789,7 +2847,7 @@ mod tests {
         assert!(target.read_tag("mmux", "foo/bar").await.is_err());
         assert!(target.list_tags("mmux/team").await.is_err());
 
-        let large = "x".repeat(control::SESSION_TAG_VALUE_MAX_BYTES + 1);
+        let large = "x".repeat(SESSION_TAG_VALUE_MAX_BYTES + 1);
         assert!(target.set_tag("mmux", "large", &large).await.is_err());
         assert!(target
             .set_tag("mmux", "newline", "line1\nline2")
@@ -2825,9 +2883,11 @@ mod tests {
         assert!(window_target.set_tag("mmux", "foo", "bar").await.is_err());
         assert!(window_target.read_tag("mmux", "foo").await.is_err());
         assert!(window_target.list_tags("mmux").await.is_err());
+        assert!(window_target.tags("mmux").await.is_err());
         assert!(pane_target.set_tag("mmux", "foo", "bar").await.is_err());
         assert!(pane_target.read_tag("mmux", "foo").await.is_err());
         assert!(pane_target.list_tags("mmux").await.is_err());
+        assert!(pane_target.tags("mmux").await.is_err());
     }
 
     #[tokio::test]

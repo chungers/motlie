@@ -22,7 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::set_tag()`, `read_tag()`, `list_tags()`, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
+| 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
 | 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
@@ -865,25 +865,31 @@ let session = host
     .await?
     .ok_or_else(|| motlie_tmux::Error::NotFound("build not found".into()))?;
 
-session.set_tag("mmux", "owner", "david").await?;
-session.set_tag("mmux", "role", "worker").await?;
+let tags = session.tags("mmux").await?;
+tags.set("owner", "david").await?;
+tags.set("role", "worker").await?;
 
 assert_eq!(
-    session.read_tag("mmux", "owner").await?,
+    tags.read("owner").await?,
     Some("david".to_string())
 );
 
-let tags = session.list_tags("mmux").await?;
+let all = tags.list().await?;
 ```
 
 For `prefix = "mmux"` and `key = "owner"`, the tmux option is stored as
-`@mmux/owner`. `SessionTag { key, value }` returns the key without the namespace
-prefix.
+`@mmux/owner`. `SessionTag` carries the namespace prefix, key, and value with
+validated private fields; use `prefix()`, `key()`, `value()`, and
+`option_name()` to inspect it.
 
 Contract:
-- `set_tag(prefix, key, value)` writes one tag.
-- `read_tag(prefix, key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
-- `list_tags(prefix)` returns every valid tag under that namespace.
+- `tags(prefix)` validates the namespace once, captures the stable session id,
+  and returns a scoped `SessionTags` helper.
+- `SessionTags::set(key, value)` writes one tag.
+- `SessionTags::read(key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
+- `SessionTags::list()` returns every valid tag under that namespace.
+- `set_tag(prefix, key, value)`, `read_tag(prefix, key)`, and
+  `list_tags(prefix)` are one-off wrappers around `tags(prefix)`.
 - Prefixes and keys must be non-empty ASCII letters, digits, `.`, `_`, or `-`.
 - Values are UTF-8 strings, may be empty, must not contain control characters,
   and are capped at 2 KiB.
@@ -2304,7 +2310,8 @@ assert!(issues.is_empty());
 |------|-----------|
 | `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
 | `SessionInfo` | name, id (`SessionId`), created, activity (aggregated `max(session_activity, max(window_activity))` per issue #237), attached_count, window_count, group |
-| `SessionTag` | key, value for one namespaced session metadata tag |
+| `SessionTags` | prefix-scoped session metadata helper returned by `Target::tags(prefix)` |
+| `SessionTag` | validated prefix, key, value for one namespaced session metadata tag |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |

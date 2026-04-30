@@ -4,7 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added `SessionTag`, `Target::set_tag()`, `read_tag()`, `list_tags()`, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
+| 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added scoped `SessionTags`, validated self-describing `SessionTag`, `Target::tags()`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
 | 2026-04-09 | @claude | Update Conventions section: library error handling migrated from `anyhow` to `thiserror`-based typed `Error` enum (PR #145). `anyhow` retained as dev-dependency only. |
 | 2026-03-22 | @claude | Implement Phase 5.1 and 5.2: split-screen TUI REPL mode (`tui on`/`tui off`) with binary-local `tui_mirror` consumer using `HistoryHandle` for bounded mirror frame. Restructured `examples/repl.rs` → `examples/repl/main.rs` + `examples/repl/tui_mirror.rs`. Added `ratatui`/`crossterm` dev-dependencies. |
 | 2026-03-22 | @codex | Expand Phase 5 into a concrete first TUI slice: split-screen REPL mirror mode (`tui on` / `tui off`) using a binary-local consumer on top of `Subscription` / `HistoryHandle`, followed later by deeper full terminal-state mirroring if needed. |
@@ -857,8 +857,9 @@ session options. For `prefix = "mmux"` and `key = "owner"`, the stored option is
 
 ### 1.16a — Public types and exports (`src/types.rs`, `src/lib.rs`)
 
-- [x] Add `SessionTag { key, value }`
-- [x] Re-export `SessionTag` from `motlie_tmux`
+- [x] Add validated self-describing `SessionTag` with private prefix/key/value fields
+- [x] Add root `SESSION_TAG_VALUE_MAX_BYTES` const
+- [x] Re-export `SessionTag`, `SessionTags`, and `SESSION_TAG_VALUE_MAX_BYTES`
 
 ### 1.16b — Control-layer option helpers (`src/control.rs`)
 
@@ -873,11 +874,16 @@ session options. For `prefix = "mmux"` and `key = "owner"`, the stored option is
 
 ### 1.16c — `Target` API wiring (`src/host.rs`)
 
-- [x] Add `Target::set_tag(prefix, key, value) -> Result<()>`
-- [x] Add `Target::read_tag(prefix, key) -> Result<Option<String>>`
-- [x] Add `Target::list_tags(prefix) -> Result<Vec<SessionTag>>`
+- [x] Add `Target::tags(prefix) -> Result<SessionTags<'_>>`
+- [x] Add `SessionTags::set(key, value) -> Result<()>`
+- [x] Add `SessionTags::read(key) -> Result<Option<String>>`
+- [x] Add `SessionTags::list() -> Result<Vec<SessionTag>>`
+- [x] Add one-off `Target::set_tag(prefix, key, value) -> Result<()>`
+- [x] Add one-off `Target::read_tag(prefix, key) -> Result<Option<String>>`
+- [x] Add one-off `Target::list_tags(prefix) -> Result<Vec<SessionTag>>`
 - [x] Restrict all tag methods to session targets with `UnsupportedTarget`
 - [x] Dispatch using stable `SessionInfo.id`, not mutable session display name
+- [x] Validate prefix once and capture tmux command prefix once in `SessionTags`
 
 ### 1.16d — Tests and docs
 

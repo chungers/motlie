@@ -26,8 +26,8 @@ pub use filter::{
 };
 pub use fleet::{Fleet, HostStatus, SessionMonitorStatus};
 pub use host::{
-    ExecHandle, HostEvent, HostEventStream, HostHandle, PaneTargetTree, SessionTargetTree,
-    SessionWatchHandle, SessionWatchOptions, Target, WindowTargetTree,
+    ExecHandle, HostEvent, HostEventStream, HostHandle, PaneTargetTree, SessionTags,
+    SessionTargetTree, SessionWatchHandle, SessionWatchOptions, Target, WindowTargetTree,
 };
 pub use keys::{KeySequence, SpecialKey};
 pub use monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitorHandle};
@@ -46,5 +46,5 @@ pub use types::{
     CreateWindowOptions, ExecId, ExecOutput, ExecState, FidelityIssue, GeometrySnapshot,
     HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery, SessionId,
     SessionInfo, SessionTag, SplitDirection, SplitPaneOptions, SplitSize, TargetAddress,
-    TargetLevel, TargetSpec, TmuxSocket, TransferOptions, WindowInfo,
+    TargetLevel, TargetSpec, TmuxSocket, TransferOptions, WindowInfo, SESSION_TAG_VALUE_MAX_BYTES,
 };
