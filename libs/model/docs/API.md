@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-24 | @codex-gpt55: Added `QuantizationBits::Five` and `QuantizationBits::FloatEight` so GGUF Q5 and FP8 can be represented without overloading Q8. | Core Types, Bundle API Sketch |
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/model` and `libs/model::eval`. Reflects the current scaffold and keeps the focus on stable contract shapes. | All |
 | 2026-04-07 | @codex-researcher: Updated the API sketch to reflect capability introspection helpers and the explicit separation between curated artifact staging and backend startup. | Overview, Bundle API Sketch, Notes |
 | 2026-04-08 | @codex-researcher: Clarified the contract-level error model and the library-versus-application error boundary. `ModelError` is now explicitly specified as a typed library error derived with `thiserror`. | Overview, Core Types, Notes |
@@ -198,6 +199,12 @@ let metadata = BundleMetadata {
     ),
 };
 ```
+
+`QuantizationBits` is intentionally coarse but distinct enough for current
+backends: `Four`, `Five`, `Eight`, and `FloatEight`. Backend adapters map these
+to native labels such as ISQ Q4/Q8 or GGUF Q4_K_M/Q5_K_M/Q8_0/FP8. A bundle
+must only advertise values that it can actually resolve to curated artifacts or
+runtime behavior.
 
 `Capabilities::new(...)` canonicalizes descriptors by `CapabilityKind`: the first descriptor for a kind wins, later duplicates are dropped, and `supports(...)` always reflects exactly the descriptor set stored in the struct.
 
