@@ -143,12 +143,29 @@ async fn refresh_sessions_preserving_with_status(
         app.status = build_status(app, &failures);
     }
     let selected_key = current_selection_key(app);
+    let mut monitor_just_closed = false;
     if let Some((host_id, id, name)) = closed_monitored {
         if let Some(name) = stop_monitor_if_closed(app, &host_id, &id, name).await {
             app.status = StatusBanner::info(format!("monitored session {name} closed"));
+            monitor_just_closed = true;
         }
     }
-    refresh_detail(fleet, app, force_detail || previous_key != selected_key).await?;
+    // Only re-render the detail pane when something the session-refresh
+    // path actually changed: the caller forced it (user-driven action),
+    // the highlighted row moved to a different (host, session), or the
+    // monitored session just closed and we need to repaint as Sample.
+    //
+    // Quiet refreshes that find nothing changed in detail must NOT call
+    // `refresh_detail`. In `Monitor` mode the inner render unconditionally
+    // recaptures the pane (no `force` check), and doing that on every
+    // session-refresh tick blocks the next draw — so updated `list-sessions`
+    // activity in the row list lands a tick or more late. The main loop
+    // owns the monitor refresh cadence (its 750 ms `refresh_detail` call);
+    // session refresh does not need to drive it.
+    let selection_changed = previous_key != selected_key;
+    if force_detail || selection_changed || monitor_just_closed {
+        refresh_detail(fleet, app, true).await?;
+    }
     Ok(())
 }
 
