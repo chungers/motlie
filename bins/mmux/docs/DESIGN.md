@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-29 | @opus47-macos-tmux | Swept stale DESIGN.md sections that still described removed contracts (`list_sessions_now()`, `SessionListing.now`, `host_clock_offset_secs`, `probe_host_clock()`, raw `SessionInfo.activity` sort): rewrote the recency-display section, transport/fan-out architecture, multi-host recency/resilience block, internal data-model snippet, refresh-loop pseudocode, and Live Session List section to match shipped behavior — `HostHandle::list_sessions()` plus binary-side `ActivityTracker`, `(host_id, session_id)` selection identity, and observer-relative sort. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `server_epoch` and the per-host clock-offset cache: there is no portable, side-effect-free way to read the host clock on tmux ≤ 3.6 (`run-shell 'date +%s'` corrupts the operator's attached pane on older tmux). Activity stays observer-relative; age now uses operator-side `local_now` under an explicit NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate "age" text but no functional regression. Net: zero new public methods on `HostHandle` for this PR. |
 | 2026-04-29 | @opus47-macos-tmux | Made `mod discovery` private and dropped the `_with_socket` shims (now unused after the privatization). Removed `list_sessions_now`, `SessionListing` from the public surface. External access to tmux is via `HostHandle::*` only. |
 | 2026-04-29 | @opus47-macos-tmux | Added §System Design → Clock Handling: activity is observer-relative via `ActivityTracker`; age is `local_now − session.created` under the NTP assumption. |
@@ -210,17 +211,20 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - The session-list pane title shows only the session count as `Sessions [n]`.
 - Each session row shows the display name, a `*` attached-client marker when
   one or more tmux clients are attached, and a right-aligned
-  `<active> / <age>` recency column with a small right margin. The left value is
-  computed from `SessionInfo.activity`, the right value from
-  `SessionInfo.created`, and both compare against the clock returned by
-  `list_sessions_now()`. That clock is the target tmux server clock when tmux
-  exposes one, otherwise a fallback local clock clamped to the listed session
-  timestamps. Durations use `now`, `m`, `h`, or `d`; day values keep at most one
-  decimal digit.
-- Session rows are sorted by `SessionInfo.activity` descending so the most
-  recently active session is at the top. Stable session id preservation keeps
-  the current highlight on the same session after refresh even if the row moves.
-  Window-level tmux alert/status flags such as `!`, `#`, and `~` are deferred.
+  `<active> / <age>` recency column with a small right margin. The left value
+  ("active") is **observer-relative** — `local_now − activity_observed_at_local`,
+  where `activity_observed_at_local` is the operator-side wall clock the last
+  time the binary saw `SessionInfo.activity` advance. The right value ("age")
+  is `local_now − SessionInfo.created` under an NTP-synced clock assumption.
+  See §System Design → Clock Handling for the rationale. Durations use `now`,
+  `m`, `h`, or `d`; day values keep at most one decimal digit.
+- Session rows are sorted by `activity_observed_at_local` descending so the
+  session whose activity most recently advanced is at the top. Sorting on the
+  observer-side mark instead of raw host `SessionInfo.activity` keeps order
+  stable across multi-host fleets even when host clocks drift. Stable
+  `(host_id, session_id)` preservation keeps the current highlight on the
+  same session after refresh even if the row moves. Window-level tmux
+  alert/status flags such as `!`, `#`, and `~` are deferred.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
@@ -339,21 +343,21 @@ attach, but it does not know how tmux commands are spelled.
 
 ### Transport and Latency Architecture
 
-The selector polls `list_sessions_now()` once per second, per host. The cost of
-that tick at the transport level matters — a naive "shell out to
-`ssh user@host tmux …`" implementation would pay one SSH handshake per host
-per refresh, which is visible latency on a multi-host fleet over a slow link.
-The actual transport architecture avoids this by amortizing connection setup
-once at startup.
+The selector polls `HostHandle::list_sessions()` once per second, per host.
+The cost of that tick at the transport level matters — a naive "shell out
+to `ssh user@host tmux …`" implementation would pay one SSH handshake per
+host per refresh, which is visible latency on a multi-host fleet over a
+slow link. The actual transport architecture avoids this by amortizing
+connection setup once at startup.
 
 #### Local target
 
-Each `tmux <args>` call is a fresh subprocess (`sh -c "tmux …"`) that connects
-to the long-lived **tmux server daemon** over its Unix socket
-(`/tmp/tmux-<uid>/default` by default, or a `-L`/`-S` socket). The subprocess
-is the tmux *client*; it exits after the command. Per refresh tick: **one**
-subprocess per host (the chained `display-message \; list-sessions \;
-list-windows` runs in a single tmux invocation — single fork+exec).
+Each `tmux <args>` call is a fresh subprocess (`sh -c "tmux …"`) that
+connects to the long-lived **tmux server daemon** over its Unix socket
+(`/tmp/tmux-<uid>/default` by default, or a `-L`/`-S` socket). The
+subprocess is the tmux *client*; it exits after the command. Per refresh
+tick: **one** subprocess per host (the chained `list-sessions \;
+list-windows -a` runs in a single tmux invocation — single fork+exec).
 
 `libs/tmux/src/transport.rs::LocalTransport::exec`.
 
@@ -388,10 +392,10 @@ configurable via the SSH URI's query params.
 
 #### Multi-host fan-out
 
-`controller::fetch_fleet_rows` runs `list_sessions_now()` against all hosts
-**in parallel** via `futures::join_all`. Each host runs on its own persistent
-connection; failures are isolated per host (one host's `Err` doesn't block
-the others — `join_all`, not `try_join_all`).
+`controller::fetch_fleet_rows` runs `HostHandle::list_sessions()` against
+all hosts **in parallel** via `futures::join_all`. Each host runs on its
+own persistent connection; failures are isolated per host (one host's
+`Err` doesn't block the others — `join_all`, not `try_join_all`).
 
 #### Per-tick cost summary
 
@@ -479,15 +483,16 @@ ago" stays correct.
 **First-sight seeding.** When mmux first observes a session, we have no
 previous `activity_ts` to compare against. Seeding `observed_at_local =
 local_now` would falsely display "now" for a session that's been idle for
-hours. Instead we seed with the host's reported staleness:
+hours. Instead we seed with the reported staleness:
 
 ```text
-observed_at_local = local_now - max(0, host_now - new_activity)
+observed_at_local = local_now - max(0, local_now - new_activity)
 ```
 
-where `host_now = local_now + host_clock_offset_secs`. The first displayed
-recency therefore reflects the host's view of activity age at first sight,
-and subsequent ticks track observer-relative movement from there.
+Under the NTP-synced clock assumption (see next section), `new_activity`
+and `local_now` come from the same wall clock, so the first displayed
+recency reflects the actual idle age at first sight. Subsequent ticks
+track observer-relative movement from there.
 
 #### Age uses operator-side `local_now` under an NTP-synced clock assumption
 
@@ -783,18 +788,18 @@ existing single-host mode unchanged.
 - Layout flags `-l/--landscape` and `-p/--portrait` still compose with
   multi-host. The auto-detect rule is unchanged.
 
-**Recency math** is split between activity (observer-relative) and age
-(host-grounded) — see §Clock Handling above. Each `SessionRow` carries its
-own `local_now` and `host_now` (from the row's host's cached
-`host_clock_offset_secs`), so multi-host rows render correctly even when
-hosts have different clock skews. Sorting uses `session.activity` directly
-across rows; that's a comparison of absolute Unix timestamps, which remains
-correct as long as host clocks are within typical NTP drift (seconds).
-Wildly skewed host clocks would mis-sort, but that's a host-config issue,
-not a selector issue. (Document this caveat in CLI.md.)
+**Recency math** is observer-relative for activity and operator-clock
+relative for age — see §Clock Handling above. Each `SessionRow` carries
+`local_now` and `activity_observed_at_local` from the binary's
+`ActivityTracker`. Sorting uses `activity_observed_at_local` descending so
+the row whose activity most recently advanced as observed by the binary
+sits at the top. Sorting on the observer-side mark instead of raw host
+`SessionInfo.activity` keeps order stable across multi-host fleets even
+when host clocks drift — a host minutes ahead of others can no longer
+pin its sessions to the top.
 
 **Resilience.** If one host is unreachable at refresh time, its
-`list_sessions_now()` errors but other hosts proceed; the failed host's rows
+`list_sessions()` errors but other hosts proceed; the failed host's rows
 disappear from the list until it recovers. A status-banner indicator shows
 the per-host failure count without blocking the rest of the UI.
 
@@ -839,7 +844,6 @@ pub(crate) struct SessionRow {
     pub(crate) host_id: HostId,
     pub(crate) host_label: String,    // pre-resolved for cheap render
     pub(crate) local_now: u64,        // operator wall clock at refresh time
-    pub(crate) host_now: u64,         // local_now + host_clock_offset_secs
     pub(crate) activity_observed_at_local: u64,  // ActivityTracker mark
     pub(crate) session: motlie_tmux::SessionInfo,
 }
@@ -863,7 +867,7 @@ workstream alias→`TargetSpec` bindings, and per-session health rollup
 (`HostStatus::Monitoring { sessions: Vec<SessionMonitorStatus> }`) — are
 orthogonal to what the selector does. The selector needs a flat list of hosts
 with per-host display metadata (label, ip) and 1 Hz fan-out polling via
-`list_sessions_now()`. Using `motlie_tmux::Fleet` would require:
+`HostHandle::list_sessions()`. Using `motlie_tmux::Fleet` would require:
 
 - Wrapping it to add display metadata on the side (the lib's `Fleet` stores
   only `HashMap<alias, HostHandle>` — no label/ip);
@@ -890,7 +894,7 @@ async fn refresh_listings(
     tracker: &mut ActivityTracker,
 ) -> Vec<SessionRow> {
     let futures = fleet.entries.iter().map(|entry| async move {
-        let listing = entry.handle.list_sessions_now().await;
+        let listing = entry.handle.list_sessions().await;
         (entry, listing)
     });
     let results = futures::future::join_all(futures).await;
@@ -901,17 +905,15 @@ async fn refresh_listings(
     let mut rows = Vec::new();
     for (entry, listing) in results {
         match listing {
-            Ok(listing) => {
-                let host_now = local_now + entry.host_clock_offset_secs;
-                for s in listing.sessions {
+            Ok(sessions) => {
+                for s in sessions {
                     let observed_at_local = tracker.observe(
-                        &entry.id, s.id.as_str(), s.activity, local_now, host_now,
+                        &entry.id, s.id.as_str(), s.activity, local_now,
                     );
                     rows.push(SessionRow {
                         host_id: entry.id.clone(),
                         host_label: entry.identity.label.clone(),
                         local_now,
-                        host_now,
                         activity_observed_at_local: observed_at_local,
                         session: s,
                     });
@@ -920,7 +922,7 @@ async fn refresh_listings(
             Err(_) => { /* surface to status banner; skip rows */ }
         }
     }
-    rows.sort_by_key(|r| std::cmp::Reverse(r.session.activity));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.activity_observed_at_local));
     rows
 }
 ```
@@ -949,10 +951,10 @@ from `HostFleet::host_label_width()`. The host-label column is omitted when
 #### Scope and impact analysis
 
 **Library (`libs/tmux/`):** *No new public API surface required.* The existing
-`HostHandle::list_sessions_now()`, `session_by_id()`, and
+`HostHandle::list_sessions()`, `session_by_id()`, and
 `Target::attach_current_pty()` cover everything per-host. Multi-host fan-out
 is a binary-side concern (orchestration, not protocol). Optionally, the
-existing `Fleet` type could grow a `list_sessions_now_all() -> Vec<(HostId, Result<SessionListing>)>`
+existing `Fleet` type could grow a `list_sessions_all() -> Vec<(HostId, Result<Vec<SessionInfo>>)>`
 convenience method, but this is purely sugar over `tokio::join_all` and is
 not required for v1.
 
@@ -1105,21 +1107,22 @@ The `LB` list must stay consistent with the target host's tmux state without
 user-driven refresh. Other clients may create, kill, or rename sessions;
 sessions may exit unexpectedly. The selector must reconcile.
 
-Shipped selector mechanism: `mmux` runs one quiet `list_sessions_now()` refresh
-per second. That single snapshot updates `SessionListState.now`, re-sorts rows
-by activity, reconciles structural session state by stable session id, preserves
-the highlight by stable id, and only forces detail resampling when the selected
-session id changes. If the monitored session disappears, the same refresh stops
-monitor mode and updates status. On transient refresh failure, the TUI keeps
+Shipped selector mechanism: `mmux` runs one quiet `list_sessions()` refresh
+per second per host. That snapshot reconciles structural session state by
+stable session id, runs the `ActivityTracker` to update each row's
+observer-side `activity_observed_at_local`, re-sorts rows by that mark
+descending across all hosts, preserves the highlight by `(host_id,
+session_id)`, and only triggers a detail re-render when the highlighted
+row moved, the caller forced it, or the monitored session just closed
+(see §Refresh path below). On transient refresh failure, the TUI keeps
 running and reports the error in the status bar.
 
-Issue #229 library support adds `SessionInfo.activity`,
-`SessionInfo.attached_count`, and `HostHandle::list_sessions_now()`. The
-selector uses `list_sessions_now()` for its rendered session rows; recency
-math is split between activity (observer-relative via `ActivityTracker`) and
-age (host-grounded via the cached `host_clock_offset_secs` from
-`HostHandle::probe_host_clock()`). See §System Design → Clock Handling for
-the full design and the rationale for retiring the per-poll `#{epoch}` query.
+Issue #229 library support adds `SessionInfo.activity` and
+`SessionInfo.attached_count`. Issue #237 folds `max(window_activity)` into
+`SessionInfo.activity` so the field reflects "any program output OR any
+client input" rather than only attached-client input. Recency math is
+binary-side: see §System Design → Clock Handling for the rationale, and the
+*Refresh path* immediately below for the loop shape.
 
 Future hardening target: tmux control-mode notifications. The library already
 parses `%`-prefixed control-mode lines as `ControlModeMessage::Notification`
@@ -1128,33 +1131,44 @@ parses `%`-prefixed control-mode lines as `ControlModeMessage::Notification`
 into either the library `HostEventStream` contract or the selector's single
 snapshot refresh path without changing the selector UI model.
 
-Single-poll reconcile loop:
+#### Refresh path
 
-1. On startup, call `list_sessions_now()` and merge into `LB` model by stable
-   session id (not name; `SessionInfo.id` is a non-empty `SessionId`).
-2. Every second, call `list_sessions_now()` again.
+Single-poll reconcile loop driven by the main TUI loop:
+
+1. On startup, call `connect_fleet(cli)` to build the `HostFleet` (rejects
+   duplicate SSH URIs up-front), then run an initial fan-out
+   `controller::fetch_fleet_rows(fleet, &mut tracker)` and merge into the
+   `SessionListState` by stable `(host_id, session_id)` key.
+2. Every second, call `refresh_sessions_quiet(...)` which re-runs the
+   fan-out and updates rows + tracker state.
 3. For each snapshot:
-   - store `SessionListing.now` for recency math
-   - sort sessions by `SessionInfo.activity` descending
-   - preserve highlighted session by stable id, falling back to the same row
-     index if the session disappeared
-   - if the monitored session id is absent, stop monitor mode and report that
-     the monitored session closed
-   - force detail resampling only when the selected session id changes
-   - on polling failure, show a status-bar error, keep the existing snapshot,
-     and retry on the next one-second tick
+   - feed each `SessionInfo.activity` through `ActivityTracker::observe`
+     to compute the row's `activity_observed_at_local`
+   - sort rows by `activity_observed_at_local` descending; tie-break by
+     name, session id, host id
+   - preserve highlight by `(host_id, session_id)`, falling back to the
+     clamped index if the session disappeared
+   - if the monitored session id is absent, stop monitor mode, switch the
+     detail source back to Sample, and report that the monitored session
+     closed
+   - call `refresh_detail` **only** when the caller forced it, the
+     selection actually moved, or monitor was just closed; quiet refreshes
+     that find nothing changed leave the detail pane alone (the main loop
+     owns the live-monitor recapture cadence on its own 750 ms tick)
+   - on per-host polling failure, surface the failed host's label in the
+     status banner; other hosts continue to populate the merged list
 4. Reconciliation must preserve the user's highlight when possible: if the
-   highlighted session id still exists, keep it highlighted; if it
-   disappeared, move highlight to the next valid row (or to the previous if
-   the highlighted row was the last).
+   highlighted `(host_id, session_id)` still exists, keep it highlighted;
+   otherwise clamp to the previous index.
 5. Empty-list state (zero sessions): see §Empty Session List below.
 6. In default attach/re-enter mode, the active TUI loop stops before attach.
-   On re-entry the selector takes a fresh `list_sessions_now()` snapshot before
-   the first redraw.
+   On re-entry the selector takes a fresh fan-out snapshot before the first
+   redraw.
 
-Polling semantics: the selector re-issues `list_sessions_now()` every 1s. The
-library `HostHandle::watch_host_events()` remains available for other
-consumers, but the selector TUI no longer starts it as a second polling loop.
+Polling semantics: the selector re-issues `list_sessions()` every 1 s per
+host. The library `HostHandle::watch_host_events()` remains available for
+other consumers, but the selector TUI no longer starts it as a second
+polling loop.
 
 ### Empty Session List
 
@@ -1340,7 +1354,7 @@ Required semantics:
 
 The library exposes a host-level event stream for consumers that want typed
 session-change events. The selector originally used this stream, but now keeps
-`LB` consistent through its single `list_sessions_now()` refresh loop (see
+`LB` consistent through its single `list_sessions()` refresh loop (see
 §Data Flow → Live Session List).
 
 Implemented v1 behavior: `watch_host_events()` is a polling-backed typed event
