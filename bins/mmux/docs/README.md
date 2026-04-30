@@ -40,7 +40,7 @@ In multi-host mode the MOTD pane is hidden in landscape too — the selector lis
 - `HostHandle::session_by_id()` + `SessionId(String)` newtype — id-based dispatch immune to display-name renames mid-flight.
 - `HostHandle::watch_host_events()` + `HostEvent` + `HostEventStream` — host-level event reconciliation.
 - `HostHandle::read_text_file(path, max_bytes)` — bounded host-text reads (e.g. `/etc/motd`).
-- `HostHandle::list_sessions_now() -> SessionListing` — bundled server-clock for skew-free recency math; `SessionInfo.activity` field.
+- `HostHandle::list_sessions() -> Vec<SessionInfo>` — sessions plus aggregated `window_activity` (issue #237) folded into `SessionInfo.activity`. Recency is computed binary-side via an observer-relative `ActivityTracker` keyed by `(HostId, SessionId)`; the lib no longer ships a server-clock companion.
 - `ScrollbackQuery::LinesRange { older_than_lines, count }` — windowed backwards-fetch for the detail pane.
 
 ## Issue tracker

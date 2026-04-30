@@ -373,12 +373,17 @@ pub(crate) struct SessionListState {
 impl SessionListState {
     /// Set the merged set of rows, sorted by activity descending across all
     /// hosts. Tie-breaks: name, then session id, then host id.
+    ///
+    /// Sort key is `activity_observed_at_local` (operator-side wall clock)
+    /// not the raw host `session.activity`. This keeps the merged-list order
+    /// consistent with the displayed activity column and is robust to host
+    /// clock skew across hosts in multi-host mode — a host whose clock is
+    /// minutes ahead of others doesn't pin its sessions to the top.
     pub(crate) fn set_rows_sorted_by_activity(&mut self, mut rows: Vec<SessionRow>) {
         rows.sort_by(|left, right| {
             right
-                .session
-                .activity
-                .cmp(&left.session.activity)
+                .activity_observed_at_local
+                .cmp(&left.activity_observed_at_local)
                 .then_with(|| left.session.name.cmp(&right.session.name))
                 .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
                 .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))

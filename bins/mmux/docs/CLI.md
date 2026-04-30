@@ -260,16 +260,18 @@ On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.
 
 The session list auto-refreshes through one selector-owned poll-backed path.
-Visible rows are quietly refreshed once per second with `list_sessions_now()`,
-which updates recency text, activity-descending ordering, and structural session
-state in the same snapshot. The selector no longer starts a separate
-`watch_host_events()` poller for its TUI list. Direct tmux control-mode host
-notifications remain future work.
+Visible rows are quietly refreshed once per second with `list_sessions()`,
+which updates recency text, activity-descending ordering, and structural
+session state in the same snapshot. The selector no longer starts a
+separate `watch_host_events()` poller for its TUI list. Direct tmux
+control-mode host notifications remain future work.
 
 Each session row includes the display name, an attached-client marker, and a
 right-aligned recency column. The attached marker is `*` when tmux reports one
 or more clients attached to the session. Rows are sorted by
-`SessionInfo.activity` descending so the most recently active session appears
+`activity_observed_at_local` (operator-side wall clock at last observed
+`session.activity` advance) descending so the most recently active session
+appears
 first. The recency column is formatted as `  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`
 advance — so it is immune to operator-vs-host clock skew. The right value
