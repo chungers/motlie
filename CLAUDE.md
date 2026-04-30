@@ -29,6 +29,20 @@ User will give instructions on when to create a PR or issue.
 NEVER stage any commits of harness files (:= CLAUDE.md, AGENTS.md, or SKILL.md), or anything unrelated
 to your current scope of work, without user's explicit approval.
 
+## Skills
+
+Skills are organized by namespace in `.agents/skills/`.
+Read the relevant `SKILL.md` before creating any file.
+
+### Voice
+
+| Skill | Path | When to use |
+|---|---|---|
+| `voice` | `.agents/skills/voice/README.md` | Voice skill namespace entrypoint and playbook |
+| `speak` | `.agents/skills/voice/speak/` | Speak text aloud with Piper or qwen3-tts.cpp |
+| `listen` | `.agents/skills/voice/listen/` | Capture and transcribe speech with Whisper, Sherpa, or Moonshine |
+| `turn` | `.agents/skills/voice/turn/` | Run one spoken turn: speak a prompt, then listen for a reply |
+
 ## Development Stages
 
 ### DESIGN (docs/DESIGN.mdi, docs/API.md, docs/CLI.md)
