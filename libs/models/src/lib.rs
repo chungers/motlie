@@ -110,6 +110,8 @@ pub enum ModelsError {
 
 pub type Result<T> = std::result::Result<T, ModelsError>;
 
+pub const LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX: &str = "artifact policy `LocalOnly`";
+
 /// Resolve a Hugging Face cache root to the concrete snapshot directory for a model.
 ///
 /// Validates that `config.json`, a tokenizer file, and at least one weight file
@@ -126,21 +128,21 @@ pub fn resolve_hf_snapshot(
 
     let config = repo.get("config.json").ok_or_else(|| {
         motlie_model::ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached `config.json` for `{model_id}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached `config.json` for `{model_id}` under `{}`",
             cache_root.display()
         ))
     })?;
 
     if repo.get("tokenizer.json").is_none() && repo.get("tokenizer.model").is_none() {
         return Err(motlie_model::ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached tokenizer files for `{model_id}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached tokenizer files for `{model_id}` under `{}`",
             cache_root.display()
         )));
     }
 
     let snapshot_dir = config.parent().ok_or_else(|| {
         motlie_model::ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` found invalid cache layout for `{model_id}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} found invalid cache layout for `{model_id}` under `{}`",
             cache_root.display()
         ))
     })?;
@@ -165,7 +167,7 @@ pub fn resolve_hf_snapshot(
 
     if !has_weights {
         return Err(motlie_model::ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached weight files for `{model_id}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached weight files for `{model_id}` under `{}`",
             cache_root.display()
         )));
     }
@@ -190,7 +192,7 @@ pub fn resolve_hf_gguf_snapshot(
     let main_ref = refs_dir.join("main");
     if !main_ref.exists() {
         return Err(motlie_model::ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached GGUF artifacts for `{model_id}` under `{}`; \
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached GGUF artifacts for `{model_id}` under `{}`; \
              no refs/main found — run the download step first",
             cache_root.display()
         )));
@@ -229,7 +231,7 @@ pub fn resolve_hf_gguf_snapshot(
 
     if !has_gguf {
         return Err(motlie_model::ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached .gguf files for `{model_id}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached .gguf files for `{model_id}` under `{}`",
             cache_root.display()
         )));
     }
@@ -1590,9 +1592,11 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1611,9 +1615,11 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Embeddings)
-                .any(|bundle| bundle.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Embeddings)
+                    .any(|bundle| bundle.id == bundle_id)
+            );
 
             let artifacts = catalog
                 .artifacts(&bundle_id)

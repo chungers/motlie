@@ -9,6 +9,7 @@ use motlie_model_qwen3_tts_cpp::{
     Qwen3TtsCppHandle, Qwen3TtsCppSpeechBundle, Qwen3TtsCppSpeechSpec,
 };
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -114,7 +115,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached GGUF artifacts for `{HF_REPO}` under `{}` or a direct model directory; no refs/main found",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached GGUF artifacts for `{HF_REPO}` under `{}` or a direct model directory; no refs/main found",
             root.display()
         )));
     }
@@ -135,7 +136,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !snapshot_dir.join(TOKENIZER_FILE_F16).is_file() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires `{TOKENIZER_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{TOKENIZER_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
             root.display()
         )));
     }
@@ -143,7 +144,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
     if !snapshot_dir.join(MODEL_FILE_Q8_0).is_file() && !snapshot_dir.join(MODEL_FILE_F16).is_file()
     {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires `{MODEL_FILE_Q8_0}` or `{MODEL_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{MODEL_FILE_Q8_0}` or `{MODEL_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
             root.display()
         )));
     }
