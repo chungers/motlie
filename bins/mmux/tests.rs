@@ -512,6 +512,57 @@ async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
     assert_eq!(app.detail.lines, vec!["replacement screen".to_string()]);
 }
 
+#[tokio::test]
+async fn quiet_refresh_in_monitor_mode_updates_rows_without_recapturing_detail() {
+    // Reviewer regression test: when monitor mode is active and a quiet
+    // session refresh sees newer `session_activity`, the row list must
+    // update without re-rendering the monitor detail. The previous
+    // behavior unconditionally called `refresh_detail` after every quiet
+    // refresh; in `Monitor` mode that recaptures the pane every tick,
+    // blocking the next draw and making the row activity look stale.
+    //
+    // Setup: monitor is active on the highlighted session $1. list-sessions
+    // returns a fresher `session_activity` for $1 (200 → 800). capture-pane
+    // is set with_error so any call triggered by refresh_detail would land
+    // a visible "monitor error" string in detail.lines.
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ live $1 10 1 1  800\n")
+        .with_error("capture-pane", "this should not be called");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    // Seed the row list with the older activity (200) and select $1.
+    app.session_list.rows = to_rows(vec![session_with_times("live", "$1", 10, 200)]);
+    app.session_list.selected = 0;
+    // Activate monitor mode on $1 with non-empty pre-existing detail lines.
+    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+        session_id: Some("$1".to_string()),
+        host_id: Some(local_host_id()),
+    }));
+    app.detail.lines = vec!["pre-existing live capture".to_string()];
+
+    let fleet = fleet_with(host);
+    refresh_sessions_quiet(&fleet, &mut app, false)
+        .await
+        .unwrap();
+
+    // Row activity reflects the newer list-sessions snapshot.
+    assert_eq!(app.session_list.rows.len(), 1);
+    assert_eq!(app.session_list.rows[0].session.activity, 800);
+    // Monitor mode is still active and the detail lines are untouched —
+    // refresh_detail was not called from the session-refresh path.
+    assert_eq!(app.detail.source.mode(), DetailMode::Monitor);
+    assert_eq!(
+        app.detail.lines,
+        vec!["pre-existing live capture".to_string()],
+        "monitor detail must not be recaptured by a quiet session refresh"
+    );
+}
+
 #[test]
 fn session_list_line_right_aligns_active_and_age() {
     let now = 7_200;
