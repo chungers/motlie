@@ -128,6 +128,14 @@ impl SessionInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionTag {
+    /// Tag name without the namespace prefix. For `@mmux/foo`, this is `foo`.
+    pub key: String,
+    /// Raw user-defined option value.
+    pub value: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WindowInfo {
     pub session_id: String,
