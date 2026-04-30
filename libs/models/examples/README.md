@@ -17,6 +17,7 @@ Current example groups:
   - [`chat_mistral_qwen3`](./chat_mistral_qwen3/README.md)
   - [`chat_multimodal_gemma4`](./chat_multimodal_gemma4/README.md)
   - [`chat_gguf_gwen3_gemma4`](./chat_gguf_gwen3_gemma4/README.md)
+  - [`chat_multimodal_qwen3_6_27b`](./chat_multimodal_qwen3_6_27b/README.md)
 
 The detailed 2x3 TTS-to-ASR validation matrix lives in
 [`../docs/VALIDATION_TTS_ASR_PIPELINES.md`](../docs/VALIDATION_TTS_ASR_PIPELINES.md).

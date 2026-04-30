@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-24 | @codex: Clarified that Qwen3.6 multimodal support should use the existing `ChatModel` / `ContentPart` contract; any extra work belongs in the llama.cpp backend execution path before the bundle can advertise vision. | Bundle Catalog Model, Backend Composition |
+| 2026-04-24 | @codex: Added the Qwen3.6 27B GGUF design reference for issue `#224`, including the llama.cpp backend boundary, platform-aware native GGUF quantization, and the dedicated example requirement. | Architecture, Bundle Catalog Model, Backend Composition |
 | 2026-04-18 | @codex-asr: Documented the post-`#201` strict typed audio boundary and the remaining reusable telephony-ingress work needed by issue `#198` and Telnyx PR `#186`. Also removed the outdated trait-object backend-factory note so the design matches the current static-dispatch implementation. | Architecture, Backend Composition, Testing Scope for PLAN, Open Concerns |
 | 2026-04-17 | @codex-asr: Renamed the shipped examples from versioned names to capability/model names and updated the documented example paths accordingly. | Architecture, API Sketch |
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/models` as the curated bundle catalog and composition crate over `libs/model`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
@@ -121,6 +123,9 @@ libs/models/
       mod.rs
       qwen3_4b.rs
       gemma4_e2b.rs
+      qwen3_4b_gguf.rs
+      gemma4_e2b_gguf.rs
+      qwen3_6_27b_gguf.rs
     embeddings/
       mod.rs
       google_gemma_300m.rs
@@ -318,9 +323,35 @@ libs/models/
       mod.rs
       qwen3_4b.rs
       gemma4_e2b.rs
+      qwen3_4b_gguf.rs
+      gemma4_e2b_gguf.rs
+      qwen3_6_27b_gguf.rs
     bin/
       download_artifacts.rs
 ```
+
+### Large GGUF Bundle Convention
+
+Large llama.cpp-backed GGUF bundles follow the same curated-bundle convention as
+the smaller chat slices, but they may need platform-aware artifact selection
+inside the bundle/backend boundary.
+
+The first planned large GGUF bundle is Qwen3.6 27B for issue `#224`:
+
+- selector: `qwen/qwen3_6_27b_gguf`
+- bundle id: `qwen3_6_27b_gguf`
+- backend: `BackendKind::LlamaCpp`
+- checkpoint format: `CheckpointFormat::Gguf`
+- feature: `model-qwen3-6-27b-gguf`
+- optional accelerator feature: `llama-cpp-cuda`
+
+The detailed design lives in
+[`DESIGN_QWEN3_6_27B_GGUF.md`](./DESIGN_QWEN3_6_27B_GGUF.md). That design is
+intentionally separate because it introduces native GGUF quant labels beyond
+the original `QuantizationBits::Four` / `QuantizationBits::Eight` abstraction
+and because multimodal execution depends on llama.cpp mmproj/image APIs. It
+does not require a new core chat interface; the existing `ChatModel` contract
+already accepts `ContentPart::Image` and `ContentPart::ImageUrl`.
 
 ### Bundle Family versus Bundle Identity
 
@@ -538,6 +569,8 @@ The current curated path is static-dispatch:
 The important boundary is structural:
 
 - `libs/model/backends/mistral` owns generic `mistral.rs` contract implementations
+- `libs/model/backends/llama_cpp` owns generic llama.cpp GGUF contract
+  implementations
 - `libs/model/backends/ort` owns generic ORT contract implementations
 - `libs/models` owns which curated bundle uses which backend implementation and with what artifacts or bundle-specific glue
 
