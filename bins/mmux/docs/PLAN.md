@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row hostname column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
 | 2026-04-28 | @gpt55-dgx | Opened and linked issue #232 for Phase 9.6 env-gated SSH/ForceCommand integration tests; clarified exact bypass value contract. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh to one `list_sessions_now()` poller for activity sorting, recency text, structural state, and monitored-session closure. |
 | 2026-04-28 | @gpt55-dgx | Tracked one-second quiet visible-row refreshes so activity sorting updates without structural host events. |
@@ -411,6 +412,134 @@ References: [Testing Strategy](./DESIGN.md#testing-strategy),
 pre-existing formatting drift outside this selector scope. The implementation
 keeps unrelated formatting churn out of this PR; `git diff --check`, targeted
 builds/tests/clippy, and `cargo build --bins --examples` passed.
+
+## Phase 11: Multi-host Support (issue #235)
+
+References: [DESIGN.md → Multi-host Mode](./DESIGN.md#multi-host-mode-issue-235),
+[CLI.md → Multi-host Mode](./CLI.md#multi-host-mode-issue-235), issue #235.
+
+Branch: `feature/mmux-multihost`. Off `feature/session-selector`.
+
+**Library scope:** none expected for v1. Existing `HostHandle::list_sessions_now()`,
+`session_by_id()`, and `Target::attach_current_pty()` cover everything per-host.
+If a `Fleet`-based convenience method emerges as cleaner during implementation,
+it lands as a follow-up.
+
+### 11.1 CLI parsing
+
+- [ ] 11.1a Change `Cli.ssh_uri: Option<String>` to `Cli.ssh_uris: Vec<String>` in
+  `bins/mmux/cli.rs`. Use `clap::Args` with `num_args = 0..` for the positional.
+- [ ] 11.1b Backward-compat: zero or one URI keeps existing single-host behavior.
+- [ ] 11.1c Reject malformed URIs at parse time using existing `SshConfig::parse`;
+  surface a single error listing all failed URIs.
+- [ ] 11.1d Tests: zero, one, two, many URIs; mixed valid + invalid.
+
+### 11.2 Connect fleet
+
+- [ ] 11.2a Rename `connect_host(cli) -> Result<(HostHandle, HostIdentity)>`
+  to `connect_fleet(cli) -> Result<HostFleet>`. Internally iterates and calls
+  the existing per-host connect logic.
+- [ ] 11.2b Connect concurrently via `tokio::try_join_all` to keep startup
+  latency O(slowest), not O(sum).
+- [ ] 11.2c Per-host connect failure surfaces in stderr but does not abort
+  startup if at least one host connects (operator can still use the rest).
+- [ ] 11.2d Tests: all-succeed, partial-fail, all-fail (the last exits non-zero).
+
+### 11.3 Internal data model
+
+- [ ] 11.3a Add `HostId(String)`, `HostEntry`, `HostFleet`, `SessionRow` types
+  in `bins/mmux/model.rs`.
+- [ ] 11.3b Replace `HostContext` with `HostFleet` on `AppState`.
+- [ ] 11.3c Change `SessionListState.sessions: Vec<SessionInfo>` to
+  `SessionListState.rows: Vec<SessionRow>`.
+- [ ] 11.3d Make `MotdState` an `Option` field on `AppState`: `motd: Option<MotdState>`.
+  `None` in multi-host mode.
+- [ ] 11.3e Selection identity is `(HostId, SessionId)` not just `SessionId`.
+  Update `RetainedUiState` to preserve both across re-entry.
+- [ ] 11.3f Tests: model construction; selection preservation across reorder;
+  selection drop when row's host disappears; recompose after host comes back.
+
+### 11.4 Fan-out refresh
+
+- [ ] 11.4a Implement `refresh_listings(fleet) -> Vec<SessionRow>` in
+  `controller.rs`. Use `tokio::join_all` (not `try_join_all`) so a single host
+  failure doesn't drop the others.
+- [ ] 11.4b Per-host result merge: `host_id`, `host_label`, `server_now`
+  carried into each `SessionRow`. Sort by `session.activity` descending across
+  the merged list.
+- [ ] 11.4c Per-host failure surfaces to a `StatusBanner::HostUnreachable { host_id, reason }`
+  variant; banner cycles through up to 3 unreachable hosts in the status line
+  if more fail.
+- [ ] 11.4d Confirm 1 Hz cadence (inherited from single-host) is sufficient
+  for `n` hosts; profile if needed.
+- [ ] 11.4e Tests: 2-host merge sort; 3-host with one failing; activity-tie
+  ordering stability; row hostname populated correctly.
+
+### 11.5 Render
+
+- [ ] 11.5a `draw_top_status` switches on `fleet.is_multi()`:
+  - Single: existing `<hostname> | <ip>     <time>` form.
+  - Multi: `mmux - multi-host mode (<n>)     <time>` form.
+- [ ] 11.5b `draw_sessions` row format: hostname column inserted between
+  attached marker and session name when `fleet.is_multi() == true`. Column
+  width = `fleet.host_label_width()` capped at a reasonable max
+  (e.g. 24 chars; longer labels truncated with `…`).
+- [ ] 11.5c MOTD pane: hide entirely when `app.motd.is_none()`. Layout reflows
+  the left column (landscape) or top region (portrait) to give the full area
+  to sessions.
+- [ ] 11.5d Status banner: render `HostUnreachable` indicator(s) without
+  blocking session listing.
+- [ ] 11.5e Snapshot tests for: multi-host top status; multi-host row format
+  (hostname column present, padded, truncated); MOTD-pane absence in
+  multi-host; layout reflow correctness.
+
+### 11.6 Input + dispatch routing
+
+- [ ] 11.6a Attach (`Enter` / `a`): use highlighted `SessionRow` to look up
+  `fleet.entry(row.host_id).handle` and dispatch
+  `handle.session_by_id(row.session.id).attach_current_pty()`.
+- [ ] 11.6b Monitor (`m`): same routing — detail-source `activate` takes the
+  row's host handle.
+- [ ] 11.6c New session (`n`): default v1 dispatches against the highlighted
+  row's host (no host-picker modal). Document so PLAN/DESIGN/CLI agree.
+- [ ] 11.6d Kill session (`k`): dispatches against the highlighted row's host.
+- [ ] 11.6e Tests: each command key dispatches against the right host; verify
+  via mock-host call recording.
+
+### 11.7 Resilience and recovery
+
+- [ ] 11.7a Per-host failure does not block other hosts (covered by 11.4a).
+- [ ] 11.7b Reconnect: if a host's `list_sessions_now()` succeeds again after
+  prior failure, its rows reappear automatically; status banner clears its
+  `HostUnreachable` entry on next refresh.
+- [ ] 11.7c Selection migration: if the highlighted row's host fails, drop
+  selection to the next valid row in the merged list.
+- [ ] 11.7d Tests: down/up cycle; selection migration on host failure;
+  selection restoration when row re-appears.
+
+### 11.8 Documentation final-pass
+
+- [ ] 11.8a Update `bins/mmux/docs/DESIGN.md` (Multi-host Mode section
+  already drafted; tighten after implementation lands).
+- [ ] 11.8b Update `bins/mmux/docs/CLI.md` (Multi-host Mode section already
+  drafted).
+- [ ] 11.8c Update `bins/mmux/docs/API.md` with new internal types
+  (`HostFleet`, `SessionRow`, `HostId`, `HostEntry`).
+- [ ] 11.8d Update `bins/mmux/docs/README.md` to remove "(planned)" qualifier.
+- [ ] 11.8e Update `bins/mmux/docs/mmux-mock.svg` with multi-host panel
+  variants (single-host top status + row format vs. multi-host equivalents).
+
+### 11.9 Validation
+
+- [ ] 11.9a `cargo fmt --all`
+- [ ] 11.9b `cargo test -p motlie-mmux` (existing 50 + new ~15 tests)
+- [ ] 11.9c `cargo clippy -p motlie-mmux -- -D warnings`
+- [ ] 11.9d Localhost smoke: `mmux ssh://localhost ssh://localhost` (two
+  connections to the same host) — verify multi-host UX activates and rows
+  list both connections' sessions.
+- [ ] 11.9e Two-host smoke: `mmux ssh://a ssh://b` against two real hosts —
+  verify activity-sort across hosts, attach to row routes correctly, host
+  failure resilience.
 
 ## Concrete Test Matrix
 

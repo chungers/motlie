@@ -1,11 +1,11 @@
 use crate::error::{Error, Result};
 use regex::Regex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
 
-use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
+use crate::transport::{shell_escape_arg, TransportKind};
 use crate::types::{
     ClientInfo, GeometrySnapshot, PaneAddress, PaneGeometry, PaneInfo, SessionId, SessionInfo,
-    SessionListing, TmuxSocket, WindowInfo,
+    WindowInfo,
 };
 
 /// Parse a line of tmux `q:`-escaped fields separated by spaces.
@@ -50,7 +50,22 @@ pub const PANE_GEOMETRY_FMT: &str =
 pub const LIST_SESSIONS_FMT: &str =
     "#{q:session_name} #{q:session_id} #{q:session_created} #{q:session_attached} #{q:session_windows} #{q:session_group} #{q:session_activity}";
 
-const SESSION_LISTING_EPOCH_PREFIX: &str = "__MOTLIE_EPOCH:";
+/// Sentinels prepended to each row of the merged `list-sessions \;
+/// list-windows -a` output so the parser can dispatch unambiguously.
+///
+/// Both row kinds carry an explicit tag rather than relying on "session
+/// rows are whatever doesn't match the window prefix" — a session whose
+/// `session_name` happened to start with the window prefix would otherwise
+/// be silently treated as a window-activity row. With both rows tagged,
+/// any line that lacks both prefixes is an unframed parse error and a
+/// session named `__MOTLIE_WIN__` parses correctly because its name
+/// arrives in a separate field after the `__MOTLIE_S__` tag.
+///
+/// See issue #237 for context on why we need to chain `list-windows -a`
+/// (tmux's `session_activity` only tracks attached-client input; program
+/// output advances `window_activity` per window).
+const SESSION_LISTING_S_PREFIX: &str = "__MOTLIE_S__";
+const SESSION_LISTING_WIN_PREFIX: &str = "__MOTLIE_WIN__";
 
 pub const LIST_WINDOWS_FMT: &str =
     "#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}";
@@ -58,20 +73,12 @@ pub const LIST_WINDOWS_FMT: &str =
 pub const LIST_PANES_FMT: &str =
     "#{q:pane_id} #{q:session_name} #{q:window_index} #{q:pane_index} #{q:pane_title} #{q:pane_current_command} #{q:pane_pid} #{q:pane_width} #{q:pane_height} #{q:pane_active}";
 
-/// List all tmux sessions (using bare "tmux" prefix).
-pub async fn list_sessions(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-) -> Result<Vec<SessionInfo>> {
-    list_sessions_with_prefix(transport, &tmux_prefix(socket)).await
-}
-
 /// List all tmux sessions using a caller-provided prefix (resolved binary + socket).
-pub async fn list_sessions_with_prefix(
+pub(crate) async fn list_sessions_with_prefix(
     transport: &TransportKind,
     prefix: &str,
 ) -> Result<Vec<SessionInfo>> {
-    let cmd = format!("{} list-sessions -F '{}'", prefix, LIST_SESSIONS_FMT);
+    let cmd = list_sessions_with_windows_command(prefix);
 
     let output = match transport.exec(&cmd).await {
         Ok(o) => o,
@@ -84,52 +91,11 @@ pub async fn list_sessions_with_prefix(
         }
     };
 
-    parse_sessions(&output)
-}
-
-/// List all tmux sessions and include a clock for recency calculations.
-pub async fn list_sessions_now(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-) -> Result<SessionListing> {
-    list_sessions_now_with_prefix(transport, &tmux_prefix(socket)).await
-}
-
-/// List all tmux sessions and include a clock using a caller-provided prefix.
-pub async fn list_sessions_now_with_prefix(
-    transport: &TransportKind,
-    prefix: &str,
-) -> Result<SessionListing> {
-    let cmd = list_sessions_now_command(prefix);
-
-    let output = match transport.exec(&cmd).await {
-        Ok(o) => o,
-        Err(e) => {
-            let msg = e.to_string();
-            if is_tmux_empty_state_error(&msg, &cmd, &["no server running", "no sessions"]) {
-                return Ok(SessionListing {
-                    now: local_epoch_seconds(),
-                    sessions: Vec::new(),
-                });
-            }
-            return Err(e);
-        }
-    };
-
-    parse_session_listing(&output)
-}
-
-/// List windows in a session (using bare "tmux" prefix).
-pub async fn list_windows(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-    session: &str,
-) -> Result<Vec<WindowInfo>> {
-    list_windows_with_prefix(transport, &tmux_prefix(socket), session).await
+    parse_session_block(&output)
 }
 
 /// List windows in a session using a caller-provided prefix.
-pub async fn list_windows_with_prefix(
+pub(crate) async fn list_windows_with_prefix(
     transport: &TransportKind,
     prefix: &str,
     session: &str,
@@ -145,37 +111,8 @@ pub async fn list_windows_with_prefix(
     parse_windows(&output)
 }
 
-/// List all panes, optionally filtered by regex (using bare "tmux" prefix).
-pub async fn list_panes(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-    filter: Option<&Regex>,
-) -> Result<Vec<PaneInfo>> {
-    list_panes_with_prefix(transport, &tmux_prefix(socket), filter).await
-}
-
-/// List all panes using a caller-provided prefix.
-pub async fn list_panes_with_prefix(
-    transport: &TransportKind,
-    prefix: &str,
-    filter: Option<&Regex>,
-) -> Result<Vec<PaneInfo>> {
-    let cmd = format!("{} list-panes -a -F '{}'", prefix, LIST_PANES_FMT);
-    let output = transport.exec(&cmd).await?;
-    parse_panes(&output, filter)
-}
-
-/// List panes in a specific session (using bare "tmux" prefix).
-pub async fn list_panes_in_session(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-    session: &str,
-) -> Result<Vec<PaneInfo>> {
-    list_panes_in_session_with_prefix(transport, &tmux_prefix(socket), session).await
-}
-
 /// List panes in a specific session using a caller-provided prefix.
-pub async fn list_panes_in_session_with_prefix(
+pub(crate) async fn list_panes_in_session_with_prefix(
     transport: &TransportKind,
     prefix: &str,
     session: &str,
@@ -190,16 +127,8 @@ pub async fn list_panes_in_session_with_prefix(
     parse_panes(&output, None)
 }
 
-/// List attached tmux clients (using bare "tmux" prefix).
-pub async fn list_clients(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-) -> Result<Vec<ClientInfo>> {
-    list_clients_with_prefix(transport, &tmux_prefix(socket)).await
-}
-
 /// List attached tmux clients using a caller-provided prefix (DC20, Phase 1.9b).
-pub async fn list_clients_with_prefix(
+pub(crate) async fn list_clients_with_prefix(
     transport: &TransportKind,
     prefix: &str,
 ) -> Result<Vec<ClientInfo>> {
@@ -219,17 +148,8 @@ pub async fn list_clients_with_prefix(
     parse_clients(&output)
 }
 
-/// Query pane geometry (using bare "tmux" prefix).
-pub async fn query_pane_geometry(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-    target: &str,
-) -> Result<PaneGeometry> {
-    query_pane_geometry_with_prefix(transport, &tmux_prefix(socket), target).await
-}
-
 /// Query pane geometry using a caller-provided prefix (DC20, Phase 1.9b).
-pub async fn query_pane_geometry_with_prefix(
+pub(crate) async fn query_pane_geometry_with_prefix(
     transport: &TransportKind,
     prefix: &str,
     target: &str,
@@ -245,20 +165,11 @@ pub async fn query_pane_geometry_with_prefix(
     parse_pane_geometry(&output)
 }
 
-/// Take a full geometry snapshot (using bare "tmux" prefix).
-pub async fn take_geometry_snapshot(
-    transport: &TransportKind,
-    socket: Option<&TmuxSocket>,
-    target: &str,
-) -> Result<GeometrySnapshot> {
-    take_geometry_snapshot_with_prefix(transport, &tmux_prefix(socket), target).await
-}
-
 /// Take a full geometry snapshot using a caller-provided prefix (DC20, Phase 1.9b).
 ///
 /// `target` is a tmux target string (e.g. "build:0.0"). The session name
 /// is extracted from the target to scope client filtering.
-pub async fn take_geometry_snapshot_with_prefix(
+pub(crate) async fn take_geometry_snapshot_with_prefix(
     transport: &TransportKind,
     prefix: &str,
     target: &str,
@@ -344,54 +255,115 @@ fn parse_u64_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u
     })
 }
 
-fn list_sessions_now_command(prefix: &str) -> String {
+fn list_sessions_with_windows_command(prefix: &str) -> String {
     format!(
-        "{} display-message -p '{}#{{epoch}}' \\; list-sessions -F '{}'",
-        prefix, SESSION_LISTING_EPOCH_PREFIX, LIST_SESSIONS_FMT
+        "{} list-sessions -F '{} {}' \\; \
+         list-windows -a -F '{} #{{q:session_id}} #{{q:window_activity}}'",
+        prefix, SESSION_LISTING_S_PREFIX, LIST_SESSIONS_FMT, SESSION_LISTING_WIN_PREFIX
     )
 }
 
-fn local_epoch_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
-pub(crate) fn parse_session_listing(output: &str) -> Result<SessionListing> {
-    let mut lines = output
-        .lines()
-        .map(|line| line.trim_end_matches('\r'))
-        .filter(|line| !line.is_empty());
-    let Some(epoch_line) = lines.next() else {
-        return Err(Error::Command(
-            "missing session listing epoch line".to_string(),
-        ));
-    };
-    let session_output = lines.collect::<Vec<_>>().join("\n");
-    let sessions = parse_sessions(&session_output)?;
-    let now = parse_session_listing_epoch(epoch_line)?
-        .unwrap_or_else(|| fallback_session_listing_now(local_epoch_seconds(), &sessions));
-    Ok(SessionListing { now, sessions })
-}
-
-fn parse_session_listing_epoch(line: &str) -> Result<Option<u64>> {
-    let Some(value) = line.strip_prefix(SESSION_LISTING_EPOCH_PREFIX) else {
-        return Err(Error::Command(format!(
-            "malformed session listing epoch line: {}",
-            line
-        )));
-    };
-    if value.is_empty() {
-        return Ok(None);
+/// Split the merged output of `list-sessions \; list-windows -a` into
+/// session lines and window-activity lines using the explicit
+/// `__MOTLIE_S__` / `__MOTLIE_WIN__` tags, then run the session parser
+/// and apply per-session window-activity aggregation.
+///
+/// Any non-empty line that carries neither tag is an unframed parse error
+/// — silent fallback would mask a real tmux/format regression.
+fn parse_session_block(output: &str) -> Result<Vec<SessionInfo>> {
+    let mut session_lines: Vec<&str> = Vec::new();
+    let mut window_lines: Vec<&str> = Vec::new();
+    for line in output.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(SESSION_LISTING_S_PREFIX) {
+            session_lines.push(rest.trim_start());
+        } else if line.starts_with(SESSION_LISTING_WIN_PREFIX) {
+            window_lines.push(line);
+        } else {
+            return Err(Error::Command(format!(
+                "unframed session-listing row (expected `{}` or `{}` prefix): {}",
+                SESSION_LISTING_S_PREFIX, SESSION_LISTING_WIN_PREFIX, line
+            )));
+        }
     }
-    parse_u64_field(value, "now", "session listing", line).map(Some)
+    let session_output = session_lines.join("\n");
+    let mut sessions = parse_sessions(&session_output)?;
+    let window_activity = parse_window_activity_block(&window_lines)?;
+    apply_window_activity_aggregation(&mut sessions, &window_activity);
+    Ok(sessions)
 }
 
-fn fallback_session_listing_now(local_now: u64, sessions: &[SessionInfo]) -> u64 {
-    sessions.iter().fold(local_now, |now, session| {
-        now.max(session.created).max(session.activity)
-    })
+/// Build a `HashMap<session_id, max(window_activity)>` from the trailing
+/// `__MOTLIE_WIN__ <session_id> <window_activity>` block. Tmux issues one row
+/// per window across the entire server; we fold to a per-session max.
+///
+/// Malformed rows return `Error::Command`. Silent fallback would make
+/// activity stale and hide parser/format regressions; if a tmux build
+/// emits an unparseable row, the lib reports it instead of papering over.
+fn parse_window_activity_block(lines: &[&str]) -> Result<HashMap<String, u64>> {
+    let mut map: HashMap<String, u64> = HashMap::new();
+    for line in lines {
+        let rest = line
+            .strip_prefix(SESSION_LISTING_WIN_PREFIX)
+            .ok_or_else(|| {
+                Error::Command(format!(
+                    "window-activity row missing `{}` prefix: {}",
+                    SESSION_LISTING_WIN_PREFIX, line
+                ))
+            })?;
+        let trimmed = rest.trim_start();
+        let fields = parse_escaped_fields(trimmed);
+        if fields.len() != 2 {
+            return Err(Error::Command(format!(
+                "malformed window-activity row (expected 2 fields, got {}): {}",
+                fields.len(),
+                line
+            )));
+        }
+        if fields[0].is_empty() {
+            return Err(Error::Command(format!(
+                "malformed window-activity row (empty session id): {}",
+                line
+            )));
+        }
+        let activity = fields[1].parse::<u64>().map_err(|err| {
+            Error::Parse(format!(
+                "invalid window_activity value '{}' in window row {:?}: {}",
+                fields[1], line, err
+            ))
+        })?;
+        map.entry(fields[0].clone())
+            .and_modify(|current| {
+                if activity > *current {
+                    *current = activity;
+                }
+            })
+            .or_insert(activity);
+    }
+    Ok(map)
+}
+
+/// Update each session's `activity` to `max(session_activity, max(window_activity))`.
+///
+/// `session_activity` from tmux only tracks attached-client input (see issue
+/// #237 for the empirical confirmation). Program output writes only advance
+/// `window_activity` per window. Aggregating to the session level here gives
+/// `SessionInfo.activity` the "any-program-output OR any-client-input" meaning
+/// that recency UIs actually want.
+fn apply_window_activity_aggregation(
+    sessions: &mut [SessionInfo],
+    window_activity: &HashMap<String, u64>,
+) {
+    for session in sessions.iter_mut() {
+        if let Some(&max_window) = window_activity.get(session.id.as_str()) {
+            if max_window > session.activity {
+                session.activity = max_window;
+            }
+        }
+    }
 }
 
 fn parse_bool_field(value: &str, field: &str, kind: &str, line: &str) -> Result<bool> {
@@ -570,10 +542,11 @@ mod tests {
     async fn list_sessions_parses_output() {
         let mock = MockTransport::new().with_response(
             "list-sessions",
-            "build $0 1709900000 1 3  1709900200\ntest $1 1709900100 0 1 group1 1709900300\n",
+            "__MOTLIE_S__ build $0 1709900000 1 3  1709900200\n\
+             __MOTLIE_S__ test $1 1709900100 0 1 group1 1709900300\n",
         );
         let transport = TransportKind::Mock(mock);
-        let sessions = list_sessions(&transport, None).await.unwrap();
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].name, "build");
         assert_eq!(sessions[0].id.as_str(), "$0");
@@ -593,108 +566,154 @@ mod tests {
     async fn list_sessions_empty() {
         let mock = MockTransport::new().with_response("list-sessions", "");
         let transport = TransportKind::Mock(mock);
-        let sessions = list_sessions(&transport, None).await.unwrap();
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
         assert!(sessions.is_empty());
     }
 
+    /// Issue #237: tmux's `session_activity` only tracks attached-client
+    /// input. Program output advances `window_activity` per window. Fold the
+    /// max window activity into `SessionInfo.activity` so the recency display
+    /// reflects "any-output OR any-input."
     #[tokio::test]
-    async fn list_sessions_now_parses_server_epoch_and_sessions() {
+    async fn session_activity_aggregates_max_window_activity() {
+        // Session $0 has session_activity=200, window_activity=500 (output is
+        // newer than the last input). Final activity should be 500.
+        // Session $1 has session_activity=900, window_activity=300 (input
+        // is newer than output). Final activity should stay at 900.
         let mock = MockTransport::new().with_response(
-            "display-message -p '__MOTLIE_EPOCH:",
-            "__MOTLIE_EPOCH:1709900400\nbuild $0 1709900000 1 3  1709900200\ntest $1 1709900100 0 1 group1 1709900300\n",
+            "list-sessions",
+            concat!(
+                "__MOTLIE_S__ build $0 100 0 1  200\n",
+                "__MOTLIE_S__ talky $1 100 0 1  900\n",
+                "__MOTLIE_WIN__ $0 500\n",
+                "__MOTLIE_WIN__ $1 300\n",
+            ),
         );
         let transport = TransportKind::Mock(mock);
 
-        let listing = list_sessions_now(&transport, None).await.unwrap();
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
 
-        assert_eq!(listing.now, 1709900400);
-        assert_eq!(listing.sessions.len(), 2);
-        assert_eq!(listing.sessions[0].name, "build");
-        assert_eq!(listing.sessions[0].activity, 1709900200);
-        assert_eq!(listing.sessions[1].group.as_deref(), Some("group1"));
-        assert_eq!(listing.sessions[1].activity, 1709900300);
+        assert_eq!(sessions.len(), 2);
+        let build = &sessions[0];
+        let talky = &sessions[1];
+        assert_eq!(build.name, "build");
+        assert_eq!(
+            build.activity, 500,
+            "window_activity (500) > session_activity (200): aggregator picks 500"
+        );
+        assert_eq!(talky.name, "talky");
+        assert_eq!(
+            talky.activity, 900,
+            "session_activity (900) > window_activity (300): aggregator preserves 900"
+        );
     }
 
     #[tokio::test]
-    async fn list_sessions_now_accepts_empty_listing_with_epoch() {
+    async fn session_activity_uses_max_across_multiple_windows() {
+        // A session with two windows: oldest, middle, newest. Aggregate to the
+        // newest. session_activity is older than both — final should be newest.
+        let mock = MockTransport::new().with_response(
+            "list-sessions",
+            concat!(
+                "__MOTLIE_S__ multi $7 100 0 2  200\n",
+                "__MOTLIE_WIN__ $7 300\n",
+                "__MOTLIE_WIN__ $7 700\n",
+                "__MOTLIE_WIN__ $7 500\n",
+            ),
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
+
+        assert_eq!(sessions[0].activity, 700);
+    }
+
+    #[tokio::test]
+    async fn session_activity_unchanged_when_no_window_rows_present() {
+        // Defensive: if the chained list-windows somehow returns nothing for
+        // a session id, the session falls back to its raw session_activity.
         let mock = MockTransport::new()
-            .with_response("display-message -p '__MOTLIE_EPOCH:", "__MOTLIE_EPOCH:42\n");
+            .with_response("list-sessions", "__MOTLIE_S__ lonely $9 100 0 1  250\n");
         let transport = TransportKind::Mock(mock);
 
-        let listing = list_sessions_now(&transport, None).await.unwrap();
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
 
-        assert_eq!(listing.now, 42);
-        assert!(listing.sessions.is_empty());
+        assert_eq!(sessions[0].activity, 250);
+    }
+
+    #[test]
+    fn parse_window_activity_block_clean_input_succeeds() {
+        let map = parse_window_activity_block(&[
+            "__MOTLIE_WIN__ $0 700",
+            "__MOTLIE_WIN__ $0 200",
+            "__MOTLIE_WIN__ $1 350",
+        ])
+        .unwrap();
+        assert_eq!(map.get("$0").copied(), Some(700));
+        assert_eq!(map.get("$1").copied(), Some(350));
+    }
+
+    #[test]
+    fn parse_window_activity_block_errors_on_unparseable_timestamp() {
+        // Stricter contract (reviewer feedback): lib refuses to silently
+        // drop unparseable rows because that would mask format regressions.
+        let err = parse_window_activity_block(&["__MOTLIE_WIN__ $0 not-a-number"]).unwrap_err();
+        assert!(err.to_string().contains("invalid window_activity value"));
+    }
+
+    #[test]
+    fn parse_window_activity_block_errors_on_missing_timestamp() {
+        let err = parse_window_activity_block(&["__MOTLIE_WIN__ $0"]).unwrap_err();
+        assert!(err.to_string().contains("malformed window-activity row"));
+    }
+
+    #[test]
+    fn parse_window_activity_block_errors_on_missing_session_id() {
+        // After stripping the prefix and trimming whitespace, a row with
+        // only a timestamp parses as one field — caught by the
+        // expected-two-fields check.
+        let err = parse_window_activity_block(&["__MOTLIE_WIN__  500"]).unwrap_err();
+        assert!(err.to_string().contains("malformed window-activity row"));
+    }
+
+    #[test]
+    fn parse_session_block_errors_on_unframed_row() {
+        // A line that lacks both __MOTLIE_S__ and __MOTLIE_WIN__ tags is
+        // an unframed parse error. This protects against the silent-drop
+        // failure mode where a session named __MOTLIE_WIN__ would be
+        // misclassified as a window-activity row.
+        let err = parse_session_block("build $0 100 0 1  200\n").unwrap_err();
+        assert!(err.to_string().contains("unframed session-listing row"));
+    }
+
+    #[test]
+    fn parse_session_block_handles_session_named_motlie_win() {
+        // Adversarial: a session whose tmux-reported name is literally
+        // `__MOTLIE_WIN__` parses correctly because the name field comes
+        // after the explicit `__MOTLIE_S__` framing tag. Pre-framing
+        // partition-by-prefix would have silently dropped this session.
+        let sessions =
+            parse_session_block("__MOTLIE_S__ __MOTLIE_WIN__ $5 100 0 1  300\n").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "__MOTLIE_WIN__");
+        assert_eq!(sessions[0].id.as_str(), "$5");
     }
 
     #[tokio::test]
-    async fn list_sessions_now_accepts_empty_epoch_from_tmux() {
+    async fn list_sessions_with_prefix_aggregates_window_activity() {
         let mock = MockTransport::new().with_response(
-            "display-message -p '__MOTLIE_EPOCH:",
-            "__MOTLIE_EPOCH:\nbuild $0 4 0 1  7\nidle $1 1 0 1  2\n",
+            "list-sessions",
+            concat!(
+                "__MOTLIE_S__ build $0 100 0 1  200\n",
+                "__MOTLIE_WIN__ $0 750\n",
+            ),
         );
         let transport = TransportKind::Mock(mock);
 
-        let listing = list_sessions_now(&transport, None).await.unwrap();
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
 
-        assert_eq!(listing.sessions.len(), 2);
-        assert!(listing.now >= 7);
-    }
-
-    #[test]
-    fn parse_session_listing_empty_epoch_clamps_to_session_timestamps() {
-        let listing =
-            parse_session_listing("__MOTLIE_EPOCH:\nbuild $0 4000000000 0 1  4000000300\n")
-                .unwrap();
-
-        assert_eq!(listing.now, 4000000300);
-        assert_eq!(listing.sessions[0].name, "build");
-    }
-
-    #[tokio::test]
-    async fn list_sessions_now_empty_state_falls_back_to_local_epoch() {
-        let cmd = list_sessions_now_command("tmux");
-        let before = local_epoch_seconds();
-        let mock = MockTransport::new().with_error(
-            "display-message -p '__MOTLIE_EPOCH:",
-            format!(
-                "command failed (exit 1): {}\nstderr: no server running on /tmp/tmux-1000/default",
-                cmd
-            )
-            .as_str(),
-        );
-        let transport = TransportKind::Mock(mock);
-
-        let listing = list_sessions_now(&transport, None).await.unwrap();
-        let after = local_epoch_seconds();
-
-        assert!(listing.sessions.is_empty());
-        assert!(listing.now >= before);
-        assert!(listing.now <= after);
-    }
-
-    #[test]
-    fn parse_session_listing_rejects_malformed_epoch_line() {
-        let err = parse_session_listing("not-epoch\nbuild $0 0 0 1  10\n").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("malformed session listing epoch line"));
-    }
-
-    #[test]
-    fn parse_session_listing_rejects_missing_epoch_line() {
-        let err = parse_session_listing("").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("missing session listing epoch line"));
-    }
-
-    #[test]
-    fn parse_session_listing_rejects_invalid_epoch_value() {
-        let err = parse_session_listing("__MOTLIE_EPOCH:not-a-number\n").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("invalid session listing now value"));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].activity, 750);
     }
 
     #[test]
@@ -705,15 +724,22 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_malformed_returns_error() {
-        let mock = MockTransport::new().with_response("list-sessions", "bad\nok $0 0 0 1 \n");
+        // Properly framed but with too-few-fields content surfaces as the
+        // session-line malformed error from the inner parse_sessions.
+        let mock = MockTransport::new().with_response(
+            "list-sessions",
+            "__MOTLIE_S__ bad\n__MOTLIE_S__ ok $0 0 0 1 \n",
+        );
         let transport = TransportKind::Mock(mock);
-        let err = list_sessions(&transport, None).await.unwrap_err();
+        let err = list_sessions_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("malformed session line"));
     }
 
     #[tokio::test]
     async fn list_sessions_true_empty_state_returns_empty() {
-        let cmd = format!("tmux list-sessions -F '{}'", LIST_SESSIONS_FMT);
+        let cmd = list_sessions_with_windows_command("tmux");
         let mock = MockTransport::new().with_error(
             "list-sessions",
             format!(
@@ -723,7 +749,7 @@ mod tests {
             .as_str(),
         );
         let transport = TransportKind::Mock(mock);
-        let sessions = list_sessions(&transport, None).await.unwrap();
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
         assert!(sessions.is_empty());
     }
 
@@ -734,7 +760,9 @@ mod tests {
             "SSH transport hiccup mentioning no sessions in passing",
         );
         let transport = TransportKind::Mock(mock);
-        let err = list_sessions(&transport, None).await.unwrap_err();
+        let err = list_sessions_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
         assert!(err
             .to_string()
             .contains("SSH transport hiccup mentioning no sessions in passing"));
@@ -742,9 +770,10 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_attached_count_above_one_is_true() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 2 1  10\n");
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ build $0 0 2 1  10\n");
         let transport = TransportKind::Mock(mock);
-        let sessions = list_sessions(&transport, None).await.unwrap();
+        let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].attached_count, 2);
         assert!(sessions[0].is_attached());
@@ -757,7 +786,9 @@ mod tests {
             "$0 build 0 main 1 2 even-horizontal\n$0 build 1 editor 0 1 even-vertical\n",
         );
         let transport = TransportKind::Mock(mock);
-        let windows = list_windows(&transport, None, "build").await.unwrap();
+        let windows = list_windows_with_prefix(&transport, "tmux", "build")
+            .await
+            .unwrap();
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].name, "main");
         assert!(windows[0].active);
@@ -766,46 +797,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_panes_parses() {
-        // Fields: pane_id session_name window_index pane_index pane_title pane_current_command pane_pid pane_width pane_height pane_active
-        let mock = MockTransport::new().with_response(
-            "list-panes",
-            "%0 build 0 0 title0 bash 1234 80 24 1\n%1 build 0 1 title1 vim 1235 80 24 0\n",
-        );
-        let transport = TransportKind::Mock(mock);
-        let panes = list_panes(&transport, None, None).await.unwrap();
-        assert_eq!(panes.len(), 2);
-        assert_eq!(panes[0].address.pane_id, "%0");
-        assert_eq!(panes[0].address.session, "build");
-        assert_eq!(panes[0].address.window, 0);
-        assert_eq!(panes[0].address.pane, 0);
-        assert_eq!(panes[0].current_command, "bash");
-        assert!(panes[0].active);
-        assert_eq!(panes[1].address.pane_id, "%1");
-        assert_eq!(panes[1].current_command, "vim");
-        assert!(!panes[1].active);
-    }
-
-    #[tokio::test]
-    async fn list_panes_with_filter() {
-        // Fields: pane_id session_name window_index pane_index pane_title pane_current_command pane_pid pane_width pane_height pane_active
-        let mock = MockTransport::new().with_response(
-            "list-panes",
-            "%0 build 0 0  bash 1234 80 24 1\n%1 test 0 0  sh 1235 80 24 1\n",
-        );
-        let transport = TransportKind::Mock(mock);
-        let filter = Regex::new("^build").unwrap();
-        let panes = list_panes(&transport, None, Some(&filter)).await.unwrap();
-        assert_eq!(panes.len(), 1);
-        assert_eq!(panes[0].address.session, "build");
-    }
-
-    #[tokio::test]
     async fn list_clients_parses() {
         let mock =
             MockTransport::new().with_response("list-clients", "200 50 build\n180 40 test\n");
         let transport = TransportKind::Mock(mock);
-        let clients = list_clients(&transport, None).await.unwrap();
+        let clients = list_clients_with_prefix(&transport, "tmux").await.unwrap();
         assert_eq!(clients.len(), 2);
         assert_eq!(clients[0].width, 200);
         assert_eq!(clients[0].height, 50);
@@ -818,7 +814,7 @@ mod tests {
     async fn list_clients_empty() {
         let mock = MockTransport::new().with_response("list-clients", "");
         let transport = TransportKind::Mock(mock);
-        let clients = list_clients(&transport, None).await.unwrap();
+        let clients = list_clients_with_prefix(&transport, "tmux").await.unwrap();
         assert!(clients.is_empty());
     }
 
@@ -826,7 +822,9 @@ mod tests {
     async fn list_clients_malformed_returns_error() {
         let mock = MockTransport::new().with_response("list-clients", "200 bad\n");
         let transport = TransportKind::Mock(mock);
-        let err = list_clients(&transport, None).await.unwrap_err();
+        let err = list_clients_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("malformed client line"));
     }
 
@@ -834,7 +832,7 @@ mod tests {
     async fn query_pane_geometry_parses() {
         let mock = MockTransport::new().with_response("display-message", "80 24 150 2000\n");
         let transport = TransportKind::Mock(mock);
-        let geo = query_pane_geometry(&transport, None, "build:0.0")
+        let geo = query_pane_geometry_with_prefix(&transport, "tmux", "build:0.0")
             .await
             .unwrap();
         assert_eq!(geo.pane_width, 80);
@@ -847,7 +845,7 @@ mod tests {
     async fn query_pane_geometry_invalid_number_returns_error() {
         let mock = MockTransport::new().with_response("display-message", "80 24 bad 2000\n");
         let transport = TransportKind::Mock(mock);
-        let err = query_pane_geometry(&transport, None, "build:0.0")
+        let err = query_pane_geometry_with_prefix(&transport, "tmux", "build:0.0")
             .await
             .unwrap_err();
         assert!(err
@@ -861,7 +859,7 @@ mod tests {
             .with_response("list-clients", "200 50 build\n")
             .with_response("display-message", "80 24 100 2000\n");
         let transport = TransportKind::Mock(mock);
-        let snap = take_geometry_snapshot(&transport, None, "build:0.0")
+        let snap = take_geometry_snapshot_with_prefix(&transport, "tmux", "build:0.0")
             .await
             .unwrap();
         assert_eq!(snap.clients.len(), 1);
@@ -875,17 +873,10 @@ mod tests {
         let mock = MockTransport::new()
             .with_response("list-windows", "$0 build 0 main maybe 2 even-horizontal\n");
         let transport = TransportKind::Mock(mock);
-        let err = list_windows(&transport, None, "build").await.unwrap_err();
+        let err = list_windows_with_prefix(&transport, "tmux", "build")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("invalid window active flag"));
-    }
-
-    #[tokio::test]
-    async fn list_panes_invalid_number_returns_error() {
-        let mock = MockTransport::new()
-            .with_response("list-panes", "%0 build 0 0 title0 bash bad 80 24 1\n");
-        let transport = TransportKind::Mock(mock);
-        let err = list_panes(&transport, None, None).await.unwrap_err();
-        assert!(err.to_string().contains("invalid pane pid value"));
     }
 
     #[tokio::test]
@@ -895,7 +886,7 @@ mod tests {
             .with_response("display-message", "80 24 100 2000\n")
             .with_error("#{session_name}", "lookup failed");
         let transport = TransportKind::Mock(mock);
-        let err = take_geometry_snapshot(&transport, None, "%5")
+        let err = take_geometry_snapshot_with_prefix(&transport, "tmux", "%5")
             .await
             .unwrap_err();
         assert!(err

@@ -1,7 +1,7 @@
 use std::cmp::{max, min};
 
 use ansi_to_tui::IntoText;
-use motlie_tmux::{strip_ansi, SessionInfo};
+use motlie_tmux::strip_ansi;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as TuiSpan, Text};
@@ -17,7 +17,9 @@ use crate::consts::{
     STATUS_BAR_BG,
 };
 use crate::detail::{DetailMode, SessionDetailSource};
-use crate::model::{AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView};
+use crate::model::{
+    AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, MotdState, SessionRow,
+};
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
     let area = frame.area();
@@ -50,14 +52,18 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         ])
         .split(area);
 
-    let upper = normal_motd_height(app, columns[0]);
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(upper), Constraint::Min(3)])
-        .split(columns[0]);
-
-    draw_motd(frame, left[0], app);
-    draw_sessions(frame, left[1], app);
+    if app.motd.is_some() {
+        let upper = normal_motd_height(app, columns[0]);
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(upper), Constraint::Min(3)])
+            .split(columns[0]);
+        draw_motd(frame, left[0], app);
+        draw_sessions(frame, left[1], app);
+    } else {
+        // Multi-host mode: MOTD is hidden; left column is fully sessions.
+        draw_sessions(frame, columns[0], app);
+    }
     draw_detail(frame, columns[1], app, " Detail ");
 }
 
@@ -65,14 +71,19 @@ pub(crate) fn normal_motd_height(app: &AppState, left_area: Rect) -> u16 {
     const MIN_WIDGET_HEIGHT: u16 = 3;
     const MIN_SESSION_LIST_HEIGHT: u16 = 3;
 
+    let Some(motd) = app.motd.as_ref() else {
+        return 0;
+    };
     if left_area.height <= MIN_SESSION_LIST_HEIGHT {
         return left_area.height;
     }
 
     let available = left_area.height.saturating_sub(MIN_SESSION_LIST_HEIGHT);
-    let compact_placeholder = use_compact_placeholder(app, left_area.width, available);
-    let desired = motd_render_line_count(app, compact_placeholder).saturating_add(2);
-    let capped = if app.motd.is_placeholder {
+    let compact_placeholder = motd.is_placeholder
+        && (left_area.width < full_placeholder_widget_width()
+            || available < full_placeholder_widget_height());
+    let desired = motd_render_line_count(motd, compact_placeholder).saturating_add(2);
+    let capped = if motd.is_placeholder {
         desired
     } else {
         min(
@@ -105,7 +116,10 @@ fn focused_style(app: &AppState, focus: Focus) -> Style {
 }
 
 pub(crate) fn use_compact_placeholder(app: &AppState, width: u16, height: u16) -> bool {
-    if !app.motd.is_placeholder {
+    let Some(motd) = app.motd.as_ref() else {
+        return false;
+    };
+    if !motd.is_placeholder {
         return false;
     }
     width < full_placeholder_widget_width() || height < full_placeholder_widget_height()
@@ -128,29 +142,35 @@ fn full_placeholder_widget_height() -> u16 {
         .saturating_add(2) as u16
 }
 
-fn motd_render_line_count(app: &AppState, compact_placeholder: bool) -> u16 {
-    if app.motd.is_placeholder && compact_placeholder {
+fn motd_render_line_count(motd: &MotdState, compact_placeholder: bool) -> u16 {
+    if motd.is_placeholder && compact_placeholder {
         COMPACT_MOTLIE_PLACEHOLDER.lines().count().saturating_add(1) as u16
-    } else if app.motd.is_placeholder {
-        app.motd.text.lines().count().saturating_add(1) as u16
+    } else if motd.is_placeholder {
+        motd.text.lines().count().saturating_add(1) as u16
     } else {
-        app.motd.text.lines().count() as u16
+        motd.text.lines().count() as u16
     }
 }
 
 pub(crate) fn motd_render_text(app: &AppState, area: Rect) -> String {
-    if !app.motd.is_placeholder {
-        return app.motd.text.clone();
+    let Some(motd) = app.motd.as_ref() else {
+        return String::new();
+    };
+    if !motd.is_placeholder {
+        return motd.text.clone();
     }
     if use_compact_placeholder(app, area.width, area.height) {
         format!("{COMPACT_MOTLIE_PLACEHOLDER}\n(no /etc/motd)")
     } else {
-        format!("{}\n(no /etc/motd)", app.motd.text)
+        format!("{}\n(no /etc/motd)", motd.text)
     }
 }
 
 fn draw_motd(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let text_style = if app.motd.is_placeholder {
+    let Some(motd) = app.motd.as_ref() else {
+        return;
+    };
+    let text_style = if motd.is_placeholder {
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD)
@@ -171,16 +191,17 @@ fn draw_motd(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 pub(crate) fn sessions_title(app: &AppState) -> String {
-    format!(" Sessions [{}] ", app.session_list.sessions.len())
+    format!(" Sessions [{}] ", app.session_list.rows.len())
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let row_width = area.width.saturating_sub(2) as usize;
+    let host_label_width = app.fleet.host_label_width();
     let mut lines = Vec::new();
-    if app.session_list.sessions.is_empty() {
+    if app.session_list.rows.is_empty() {
         lines.push(Line::from(TuiSpan::styled(
-            format!("(no sessions on {} - press n to create)", app.host.label),
+            empty_session_list_message(app),
             Style::default().fg(Color::DarkGray),
         )));
     } else {
@@ -188,9 +209,9 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             .session_list
             .selected
             .saturating_sub(height.saturating_sub(1));
-        for (idx, session) in app
+        for (idx, row) in app
             .session_list
-            .sessions
+            .rows
             .iter()
             .enumerate()
             .skip(start)
@@ -206,7 +227,7 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                 Style::default().fg(Color::White)
             };
             lines.push(Line::from(TuiSpan::styled(
-                session_list_line(session, selected, app.session_list.now, row_width),
+                session_list_line(row, selected, host_label_width, row_width),
                 style,
             )));
         }
@@ -219,10 +240,26 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+fn empty_session_list_message(app: &AppState) -> String {
+    if app.fleet.is_multi() {
+        let n = app.fleet.len();
+        format!("(no sessions across {n} hosts - press n to create)")
+    } else if let Some(entry) = app.fleet.first() {
+        format!("(no sessions on {} - press n to create)", entry.label)
+    } else {
+        "(no sessions - press n to create)".to_string()
+    }
+}
+
+/// Render a session row.
+///
+/// `host_label_width` is the width of the hostname column. Pass `0` for
+/// single-host (column omitted); pass the fleet's `host_label_width()` for
+/// multi-host (column included between attached marker and session name).
 pub(crate) fn session_list_line(
-    session: &SessionInfo,
+    row: &SessionRow,
     selected: bool,
-    now: u64,
+    host_label_width: usize,
     width: usize,
 ) -> String {
     const MIN_METADATA_GAP: usize = 2;
@@ -233,21 +270,27 @@ pub(crate) fn session_list_line(
     }
 
     let marker = if selected { ">" } else { " " };
-    let attached = if session.is_attached() { "*" } else { " " };
-    let prefix = format!("{marker}{attached} ");
-    let metadata = session_recency_text(session, now);
+    let attached = if row.session.is_attached() { "*" } else { " " };
+    let prefix = if host_label_width > 0 {
+        let host = truncate_chars(&row.host_label, host_label_width);
+        let host_padded = pad_to(&host, host_label_width);
+        format!("{marker}{attached} {host_padded} ")
+    } else {
+        format!("{marker}{attached} ")
+    };
+    let metadata = session_recency_text(row);
     let prefix_width = char_width(&prefix);
     let metadata_width = char_width(&metadata);
     let content_width = width.saturating_sub(RECENCY_RIGHT_MARGIN);
     if content_width < prefix_width + 1 + MIN_METADATA_GAP + metadata_width {
-        return pad_or_truncate(format!("{prefix}{}", session.name), width);
+        return pad_or_truncate(format!("{prefix}{}", row.session.name), width);
     }
 
     let name_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(metadata_width)
         .saturating_sub(MIN_METADATA_GAP);
-    let name = truncate_chars(&session.name, name_width);
+    let name = truncate_chars(&row.session.name, name_width);
     let left = format!("{prefix}{name}");
     let padding = content_width
         .saturating_sub(char_width(&left))
@@ -259,15 +302,30 @@ pub(crate) fn session_list_line(
     )
 }
 
-pub(crate) fn session_recency_text(session: &SessionInfo, now: u64) -> String {
+pub(crate) fn session_recency_text(row: &SessionRow) -> String {
     const RECENCY_FIELD_WIDTH: usize = 5;
 
-    let active = compact_elapsed(now, session.activity);
-    let age = compact_elapsed(now, session.created);
+    // Activity is observer-relative: time since the binary last saw the
+    // host's `session.activity` advance. Naturally insensitive to host/
+    // operator clock skew because both endpoints come from local time.
+    let active = compact_elapsed(row.local_now, row.activity_observed_at_local);
+    // Age is `local_now - session.created` under the NTP-synced clock
+    // assumption. Wildly skewed host clocks produce mildly inaccurate text
+    // but no functional regression.
+    let age = compact_elapsed(row.local_now, row.session.created);
     format!(
         "{active:>width$} / {age:>width$}",
         width = RECENCY_FIELD_WIDTH
     )
+}
+
+fn pad_to(text: &str, width: usize) -> String {
+    let text_width = char_width(text);
+    if text_width >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - text_width))
+    }
 }
 
 fn compact_elapsed(now: u64, then: u64) -> String {
@@ -317,7 +375,7 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &st
     let start = end.saturating_sub(height);
     let visible = if start < end {
         app.detail.lines[start..end].join("\n")
-    } else if app.session_list.sessions.is_empty() {
+    } else if app.session_list.rows.is_empty() {
         "press n to create a session".to_string()
     } else {
         String::new()
@@ -408,7 +466,13 @@ pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<
 }
 
 fn top_status_host_text(app: &AppState) -> String {
-    format!(" {} | {} ", app.host.label, app.host.ip_address)
+    if app.fleet.is_multi() {
+        format!(" mmux - multi-host mode [{}] ", app.fleet.len())
+    } else if let Some(entry) = app.fleet.first() {
+        format!(" {} | {} ", entry.label, entry.ip_address)
+    } else {
+        " mmux ".to_string()
+    }
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {

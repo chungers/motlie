@@ -8,6 +8,8 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-29 | @opus47-macos-tmux | Updated recency-display semantics: activity column is observer-relative ("time since mmux last saw `session.activity` advance"); age column is `local_now − session.created` under an NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate age text but no functional regression. (Earlier drafts probed the host clock at fleet-connect via `#{epoch}` / `run-shell 'date +%s'`; that approach was abandoned because `run-shell` on tmux ≤ 3.4 corrupts the operator's attached pane.) |
+| 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status reads `mmux - multi-host mode (n)`, session rows insert a hostname column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
 | 2026-04-28 | @gpt55-dgx | Clarified ForceCommand bypass requires exactly `MOTLIE_MMUX_BYPASS=1` and cross-referenced issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated session-list refresh to a single one-second `list_sessions_now()` poller for both activity ordering and structural reconciliation. |
 | 2026-04-28 | @gpt55-dgx | Added a one-second visible-row refresh using `list_sessions_now()` so activity-sorted rows reorder even when no structural tmux event occurs. |
@@ -46,20 +48,22 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 ## Synopsis
 
 ```text
-mmux [OPTIONS] [SSH_URI]
+mmux [OPTIONS] [SSH_URI]...
 ```
 
 Examples:
 
 ```bash
-mmux
+mmux                                              # local host
 mmux --portrait
 mmux -p
 mmux --landscape
 mmux -l
 mmux --script
-mmux ssh://user@host
+mmux ssh://user@host                              # single SSH host
 mmux 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
+mmux ssh://a.example.com ssh://b.example.com      # multi-host (issue #235)
+mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 ```
 
 ## Arguments and Options
@@ -155,6 +159,76 @@ when the character-cell aspect ratio is `columns / rows <= 4.0`. This treats
 Terminals wider than the 4.0 threshold use landscape layout. If the size cannot
 be read, startup defaults to landscape layout.
 
+## Multi-host Mode (issue #235)
+
+Pass two or more SSH URIs on the command line to enter multi-host mode:
+
+```bash
+mmux ssh://a.example.com ssh://b.example.com
+mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
+```
+
+**Activation rule:**
+
+| `len(ssh_uris)` | Mode |
+|---|---|
+| `0` | Single-host, target = localhost |
+| `1` | Single-host, target = the SSH host |
+| `≥ 2` | Multi-host, targets = all listed SSH hosts |
+
+**UX differences in multi-host mode:**
+
+- Top status bar reads `mmux - multi-host mode (n)` (where `n` is the host
+  count) instead of the usual `<hostname> | <ip>`.
+- Session list rows insert the host's label between the attached marker and
+  the session name:
+
+  ```
+  > * a.example.com  dev          1m / 12d
+    * b.example.com  jarvis       4h / 19d
+      a.example.com  build        2d / 5d
+      b.example.com  logs         3d / 7d
+  ```
+
+  Hostname column width is sized to the widest configured label (capped to
+  keep the row readable; longer labels truncated with `…`).
+- Sort is `SessionInfo.activity` descending, applied to the **merged** list
+  across all hosts.
+- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, `Enter`/`a`,
+  `m`, `n`, `k`, `Ctrl-C`/`q`, `l`, `p`, `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
+  same as single-host. Each applies to the **highlighted row** and dispatches
+  against that row's host.
+- Attach uses the highlighted row's host: an interactive
+  `ssh -t <host> tmux attach-session -t <name>` for SSH targets.
+- New session and kill modals act on the highlighted row's host.
+- MOTD pane is **hidden** in multi-host mode (per-host MOTD is not
+  meaningful when multiple hosts coexist). Layout reflows accordingly.
+- Layout flags (`-p`/`-l`) compose with multi-host as expected.
+
+**Resilience:** if one host goes unreachable at refresh time, its rows
+disappear from the list and a status banner indicator shows the failure;
+other hosts continue to refresh. The failing host re-appears automatically
+when it recovers.
+
+**Recency math.** The display has two columns separated by ` / `:
+
+* **Activity** (`active`, the left value) is **observer-relative**. Rather
+  than comparing host time to local time, mmux remembers the moment it last
+  saw the host's `session.activity` advance and renders "time since that
+  moment." Insensitive to operator-vs-host clock skew by construction.
+* **Age** (the right value) is `local_now − session.created` under the
+  NTP-synced clock assumption. We do not probe the host's clock — there is
+  no portable, side-effect-free way to do so on older tmux (`run-shell` on
+  tmux ≤ 3.4 corrupts the operator's attached pane). Wildly skewed host
+  clocks produce mildly inaccurate age text but no functional regression.
+
+Cross-host *sorting* uses absolute `SessionInfo.activity` timestamps
+directly; this is correct as long as host clocks are within typical NTP
+drift (seconds).
+
+**Empty case** is unchanged: zero SSH URIs uses localhost; single-host UX
+is identical to pre-multi-host behavior.
+
 ## TUI Keymap
 
 Normal mode main-view keys:
@@ -186,24 +260,25 @@ On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.
 
 The session list auto-refreshes through one selector-owned poll-backed path.
-Visible rows are quietly refreshed once per second with `list_sessions_now()`,
-which updates recency text, activity-descending ordering, and structural session
-state in the same snapshot. The selector no longer starts a separate
-`watch_host_events()` poller for its TUI list. Direct tmux control-mode host
-notifications remain future work.
+Visible rows are quietly refreshed once per second with `list_sessions()`,
+which updates recency text, activity-descending ordering, and structural
+session state in the same snapshot. The selector no longer starts a
+separate `watch_host_events()` poller for its TUI list. Direct tmux
+control-mode host notifications remain future work.
 
 Each session row includes the display name, an attached-client marker, and a
 right-aligned recency column. The attached marker is `*` when tmux reports one
 or more clients attached to the session. Rows are sorted by
-`SessionInfo.activity` descending so the most recently active session appears
-first. The recency column is formatted as `  32h / 14.2d`, where the left value
-is based on `SessionInfo.activity`, the right value is based on
-`SessionInfo.created`, and both are computed through `list_sessions_now()`.
-The recency block is right-aligned with a small right margin. When tmux exposes
-a current epoch, that uses the target tmux server clock; when tmux expands that
-value empty, the library falls back to a local clock clamped to the listed
-session timestamps. Durations use `now`, `m`, `h`, or `d`; days keep at most
-one decimal digit.
+`activity_observed_at_local` (operator-side wall clock at last observed
+`session.activity` advance) descending so the most recently active session
+appears
+first. The recency column is formatted as `  32h / 14.2d`. The left value
+("active") is observer-relative — time since mmux last saw `session.activity`
+advance — so it is immune to operator-vs-host clock skew. The right value
+("age") is `local_now − session.created` under the NTP-synced clock
+assumption — see §Recency math. The recency block is
+right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
+`d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
 The top status bar uses the same blue background as the bottom status bar. It
