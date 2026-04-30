@@ -2275,9 +2275,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_returns_target() {
-        let mock = MockTransport::new()
-            .with_default("")
-            .with_response("list-sessions", "test $0 1700000000 0 1  1700000005\n");
+        let mock = MockTransport::new().with_default("").with_response(
+            "list-sessions",
+            "__MOTLIE_S__ test $0 1700000000 0 1  1700000005\n",
+        );
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())
@@ -2290,7 +2291,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1  0\n");
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ other $0 0 0 1  0\n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -2298,7 +2300,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2  0\n");
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ build $0 0 1 2  0\n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -2309,8 +2312,10 @@ mod tests {
 
     #[tokio::test]
     async fn session_by_id_found() {
-        let mock = MockTransport::new()
-            .with_response("list-sessions", "build $7 0 1 2  0\nother $8 0 0 1  0\n");
+        let mock = MockTransport::new().with_response(
+            "list-sessions",
+            "__MOTLIE_S__ build $7 0 1 2  0\n__MOTLIE_S__ other $8 0 0 1  0\n",
+        );
         let host = mock_host(mock);
         let target = host.session_by_id("$7").await.unwrap();
         assert!(target.is_some());
@@ -2322,12 +2327,12 @@ mod tests {
 
     #[tokio::test]
     async fn session_by_id_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2  0\n");
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ build $0 0 1 2  0\n");
         let host = mock_host(mock);
         let target = host.session_by_id("$1").await.unwrap();
         assert!(target.is_none());
     }
-
 
     #[tokio::test]
     async fn read_text_file_reads_mock_transport_file() {
@@ -2528,7 +2533,8 @@ mod tests {
 
     #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1  0\n");
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ build $0 0 0 1  0\n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -2539,7 +2545,7 @@ mod tests {
     #[tokio::test]
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2  0\n")
+            .with_response("list-sessions", "__MOTLIE_S__ build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 1 1 layout\n$0 build 1 editor 0 1 layout\n",
@@ -2753,7 +2759,7 @@ mod tests {
         // Session with 2 windows: window 0 (inactive) and window 1 (active).
         // Both have pane 0. Session-level pane(0) should return window 1's pane.
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2  0\n")
+            .with_response("list-sessions", "__MOTLIE_S__ build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 0 1 layout\n$0 build 1 editor 1 1 layout\n",

@@ -67,8 +67,11 @@ fn local_host_id() -> HostId {
     HostId::local()
 }
 
+/// Build a row with `activity_observed_at_local = session.activity`, so
+/// helpers that don't care about wall-clock-anchored timing can compose
+/// rows that sort by their `session.activity` values.
 fn make_row(session: SessionInfo) -> SessionRow {
-    make_row_at(session, 0)
+    make_row_at(session, u64::MAX)
 }
 
 /// Build a row as if just observed at `now` (operator wall clock; under the
@@ -88,11 +91,12 @@ fn make_row_at(session: SessionInfo, now: u64) -> SessionRow {
 }
 
 fn make_row_for_host(session: SessionInfo, host_id: HostId, host_label: &str) -> SessionRow {
+    let activity_observed_at_local = session.activity;
     SessionRow {
         host_id,
         host_label: host_label.to_string(),
-        local_now: 0,
-        activity_observed_at_local: 0,
+        local_now: u64::MAX,
+        activity_observed_at_local,
         session,
     }
 }
@@ -415,12 +419,8 @@ fn activity_sort_preserves_selection_by_stable_id() {
 async fn quiet_refresh_reorders_by_activity_without_overwriting_status() {
     let mock = MockTransport::new()
         .with_response(
-            "display-message -p '__MOTLIE_EPOCH:",
-            "__MOTLIE_EPOCH:500\nolder $1 10 0 1  100\nfresh $2 20 0 1  400\n",
-        )
-        .with_response(
             "list-sessions",
-            "older $1 10 0 1  100\nfresh $2 20 0 1  400\n",
+            "__MOTLIE_S__ older $1 10 0 1  100\n__MOTLIE_S__ fresh $2 20 0 1  400\n",
         )
         .with_response("capture-pane -ep", "fresh screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
@@ -450,11 +450,7 @@ async fn quiet_refresh_reorders_by_activity_without_overwriting_status() {
 #[tokio::test]
 async fn refresh_forces_detail_when_selected_session_changes() {
     let mock = MockTransport::new()
-        .with_response(
-            "display-message -p '__MOTLIE_EPOCH:",
-            "__MOTLIE_EPOCH:500\nreplacement $2 20 0 1  400\n",
-        )
-        .with_response("list-sessions", "replacement $2 20 0 1  400\n")
+        .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let mut app = AppState::new(
@@ -487,11 +483,7 @@ async fn refresh_forces_detail_when_selected_session_changes() {
 #[tokio::test]
 async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
     let mock = MockTransport::new()
-        .with_response(
-            "display-message -p '__MOTLIE_EPOCH:",
-            "__MOTLIE_EPOCH:500\nreplacement $2 20 0 1  400\n",
-        )
-        .with_response("list-sessions", "replacement $2 20 0 1  400\n")
+        .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let mut app = AppState::new(
@@ -1280,7 +1272,7 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
 #[tokio::test]
 async fn sample_detail_preserves_ansi_color_for_detail_pane() {
     let mock = MockTransport::new()
-        .with_response("list-sessions", "dev $7 0 0 1  0\n")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $7 0 0 1  0\n")
         .with_response("capture-pane -ep", "\x1b[34mBLUE\x1b[0m\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let selected = make_selected(local_host_id(), "host", "$7", "dev");
@@ -1294,7 +1286,7 @@ async fn sample_detail_preserves_ansi_color_for_detail_pane() {
 #[tokio::test]
 async fn monitor_detail_captures_rendered_screen_with_ansi() {
     let mock = MockTransport::new()
-        .with_response("list-sessions", "dash $7 0 0 1  0\n")
+        .with_response("list-sessions", "__MOTLIE_S__ dash $7 0 0 1  0\n")
         .with_response("list-panes", "%0 dash 0 0 main bash 100 80 24 1\n")
         .with_response("capture-pane -ep", "\x1b[32mREADY\x1b[0m\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
@@ -1342,6 +1334,24 @@ fn cli_accepts_multiple_ssh_uris() {
 
     let none = Cli::try_parse_from(["mmux"]).unwrap();
     assert!(none.ssh_uris.is_empty());
+}
+
+#[tokio::test]
+async fn connect_fleet_rejects_duplicate_ssh_uris() {
+    use crate::target_host::connect_fleet;
+
+    let cli =
+        Cli::try_parse_from(["mmux", "ssh://dchung@localhost", "ssh://dchung@localhost"]).unwrap();
+
+    let err = match connect_fleet(&cli).await {
+        Ok(_) => panic!("expected duplicate SSH URI to be rejected"),
+        Err(err) => err,
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("duplicate SSH URI"),
+        "expected duplicate-URI rejection, got: {msg}"
+    );
 }
 
 #[test]
@@ -1676,8 +1686,8 @@ async fn fleet_fan_out_isolates_per_host_failure() {
 
     // Healthy host with one session. The post-#{epoch}-removal command shape
     // starts with `list-sessions`, so the mock matches on that prefix.
-    let healthy_mock =
-        MockTransport::new().with_response("list-sessions", "running $1 10 0 1  400\n");
+    let healthy_mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ running $1 10 0 1  400\n");
     let healthy = HostHandle::new(TransportKind::Mock(healthy_mock), None);
 
     // Failing host: mock returns a non-empty-state error, so list_sessions

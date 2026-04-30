@@ -63,8 +63,12 @@ pub(crate) async fn fetch_fleet_rows(
             Ok(sessions) => {
                 for session in sessions {
                     let key = (entry.id.clone(), session.id.as_str().to_string());
-                    let activity_observed_at_local =
-                        tracker.observe(&entry.id, session.id.as_str(), session.activity, local_now);
+                    let activity_observed_at_local = tracker.observe(
+                        &entry.id,
+                        session.id.as_str(),
+                        session.activity,
+                        local_now,
+                    );
                     keep_keys.insert(key);
                     rows.push(SessionRow {
                         host_id: entry.id.clone(),

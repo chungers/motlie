@@ -42,6 +42,11 @@ impl HostIdentity {
 /// the failures are surfaced via stderr but successful hosts proceed. (For
 /// v1 we keep startup strict: all-or-nothing for explicit URIs to avoid
 /// silently dropping hosts the operator named.)
+///
+/// Duplicate URIs are rejected up-front. `HostId` is derived from the URI
+/// string; two entries with the same id would collapse `HostFleet::entry`
+/// lookups, selection-preservation keys, and `ActivityTracker` keys onto
+/// each other. Reject explicitly rather than silently degrade.
 pub(crate) async fn connect_fleet(cli: &Cli) -> Result<HostFleet> {
     if cli.ssh_uris.is_empty() {
         let entry = HostEntry {
@@ -51,6 +56,15 @@ pub(crate) async fn connect_fleet(cli: &Cli) -> Result<HostFleet> {
             handle: HostHandle::local(),
         };
         return Ok(HostFleet::from_entries(vec![entry]));
+    }
+
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for uri in &cli.ssh_uris {
+        if !seen.insert(uri.as_str()) {
+            return Err(anyhow!(
+                "duplicate SSH URI '{uri}' on the command line; each host must appear once"
+            ));
+        }
     }
 
     // Connect concurrently. try_join_all so a single bad URI fails fast and

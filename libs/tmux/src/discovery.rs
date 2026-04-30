@@ -50,10 +50,21 @@ pub const PANE_GEOMETRY_FMT: &str =
 pub const LIST_SESSIONS_FMT: &str =
     "#{q:session_name} #{q:session_id} #{q:session_created} #{q:session_attached} #{q:session_windows} #{q:session_group} #{q:session_activity}";
 
-/// Sentinel used by the chained `list-windows -a -F` query to mark per-window
-/// activity rows in the merged listing output. We aggregate `window_activity`
-/// across each session's windows because tmux's `session_activity` only
-/// tracks input from attached clients, not program output. See issue #237.
+/// Sentinels prepended to each row of the merged `list-sessions \;
+/// list-windows -a` output so the parser can dispatch unambiguously.
+///
+/// Both row kinds carry an explicit tag rather than relying on "session
+/// rows are whatever doesn't match the window prefix" — a session whose
+/// `session_name` happened to start with the window prefix would otherwise
+/// be silently treated as a window-activity row. With both rows tagged,
+/// any line that lacks both prefixes is an unframed parse error and a
+/// session named `__MOTLIE_WIN__` parses correctly because its name
+/// arrives in a separate field after the `__MOTLIE_S__` tag.
+///
+/// See issue #237 for context on why we need to chain `list-windows -a`
+/// (tmux's `session_activity` only tracks attached-client input; program
+/// output advances `window_activity` per window).
+const SESSION_LISTING_S_PREFIX: &str = "__MOTLIE_S__";
 const SESSION_LISTING_WIN_PREFIX: &str = "__MOTLIE_WIN__";
 
 pub const LIST_WINDOWS_FMT: &str =
@@ -246,24 +257,41 @@ fn parse_u64_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u
 
 fn list_sessions_with_windows_command(prefix: &str) -> String {
     format!(
-        "{} list-sessions -F '{}' \\; \
+        "{} list-sessions -F '{} {}' \\; \
          list-windows -a -F '{} #{{q:session_id}} #{{q:window_activity}}'",
-        prefix, LIST_SESSIONS_FMT, SESSION_LISTING_WIN_PREFIX
+        prefix, SESSION_LISTING_S_PREFIX, LIST_SESSIONS_FMT, SESSION_LISTING_WIN_PREFIX
     )
 }
 
-/// Split the merged output of `list-sessions \; list-windows -a` (with our
-/// sentinel prefix) into session lines and window-activity lines, then run
-/// the session parser and apply per-session window-activity aggregation.
+/// Split the merged output of `list-sessions \; list-windows -a` into
+/// session lines and window-activity lines using the explicit
+/// `__MOTLIE_S__` / `__MOTLIE_WIN__` tags, then run the session parser
+/// and apply per-session window-activity aggregation.
+///
+/// Any non-empty line that carries neither tag is an unframed parse error
+/// — silent fallback would mask a real tmux/format regression.
 fn parse_session_block(output: &str) -> Result<Vec<SessionInfo>> {
-    let (window_lines, session_lines): (Vec<&str>, Vec<&str>) = output
-        .lines()
-        .map(|line| line.trim_end_matches('\r'))
-        .filter(|line| !line.is_empty())
-        .partition(|line| line.starts_with(SESSION_LISTING_WIN_PREFIX));
+    let mut session_lines: Vec<&str> = Vec::new();
+    let mut window_lines: Vec<&str> = Vec::new();
+    for line in output.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(SESSION_LISTING_S_PREFIX) {
+            session_lines.push(rest.trim_start());
+        } else if line.starts_with(SESSION_LISTING_WIN_PREFIX) {
+            window_lines.push(line);
+        } else {
+            return Err(Error::Command(format!(
+                "unframed session-listing row (expected `{}` or `{}` prefix): {}",
+                SESSION_LISTING_S_PREFIX, SESSION_LISTING_WIN_PREFIX, line
+            )));
+        }
+    }
     let session_output = session_lines.join("\n");
     let mut sessions = parse_sessions(&session_output)?;
-    let window_activity = parse_window_activity_block(&window_lines);
+    let window_activity = parse_window_activity_block(&window_lines)?;
     apply_window_activity_aggregation(&mut sessions, &window_activity);
     Ok(sessions)
 }
@@ -272,23 +300,41 @@ fn parse_session_block(output: &str) -> Result<Vec<SessionInfo>> {
 /// `__MOTLIE_WIN__ <session_id> <window_activity>` block. Tmux issues one row
 /// per window across the entire server; we fold to a per-session max.
 ///
-/// Lines that don't parse cleanly (corrupt timestamps, missing fields) are
-/// silently dropped — the worst case is that a session's window activity is
-/// treated as 0 and the session falls back to its `session_activity`.
-fn parse_window_activity_block(lines: &[&str]) -> HashMap<String, u64> {
+/// Malformed rows return `Error::Command`. Silent fallback would make
+/// activity stale and hide parser/format regressions; if a tmux build
+/// emits an unparseable row, the lib reports it instead of papering over.
+fn parse_window_activity_block(lines: &[&str]) -> Result<HashMap<String, u64>> {
     let mut map: HashMap<String, u64> = HashMap::new();
     for line in lines {
-        let Some(rest) = line.strip_prefix(SESSION_LISTING_WIN_PREFIX) else {
-            continue;
-        };
+        let rest = line
+            .strip_prefix(SESSION_LISTING_WIN_PREFIX)
+            .ok_or_else(|| {
+                Error::Command(format!(
+                    "window-activity row missing `{}` prefix: {}",
+                    SESSION_LISTING_WIN_PREFIX, line
+                ))
+            })?;
         let trimmed = rest.trim_start();
         let fields = parse_escaped_fields(trimmed);
-        if fields.len() != 2 || fields[0].is_empty() {
-            continue;
+        if fields.len() != 2 {
+            return Err(Error::Command(format!(
+                "malformed window-activity row (expected 2 fields, got {}): {}",
+                fields.len(),
+                line
+            )));
         }
-        let Ok(activity) = fields[1].parse::<u64>() else {
-            continue;
-        };
+        if fields[0].is_empty() {
+            return Err(Error::Command(format!(
+                "malformed window-activity row (empty session id): {}",
+                line
+            )));
+        }
+        let activity = fields[1].parse::<u64>().map_err(|err| {
+            Error::Parse(format!(
+                "invalid window_activity value '{}' in window row {:?}: {}",
+                fields[1], line, err
+            ))
+        })?;
         map.entry(fields[0].clone())
             .and_modify(|current| {
                 if activity > *current {
@@ -297,7 +343,7 @@ fn parse_window_activity_block(lines: &[&str]) -> HashMap<String, u64> {
             })
             .or_insert(activity);
     }
-    map
+    Ok(map)
 }
 
 /// Update each session's `activity` to `max(session_activity, max(window_activity))`.
@@ -496,7 +542,8 @@ mod tests {
     async fn list_sessions_parses_output() {
         let mock = MockTransport::new().with_response(
             "list-sessions",
-            "build $0 1709900000 1 3  1709900200\ntest $1 1709900100 0 1 group1 1709900300\n",
+            "__MOTLIE_S__ build $0 1709900000 1 3  1709900200\n\
+             __MOTLIE_S__ test $1 1709900100 0 1 group1 1709900300\n",
         );
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
@@ -536,8 +583,8 @@ mod tests {
         let mock = MockTransport::new().with_response(
             "list-sessions",
             concat!(
-                "build $0 100 0 1  200\n",
-                "talky $1 100 0 1  900\n",
+                "__MOTLIE_S__ build $0 100 0 1  200\n",
+                "__MOTLIE_S__ talky $1 100 0 1  900\n",
                 "__MOTLIE_WIN__ $0 500\n",
                 "__MOTLIE_WIN__ $1 300\n",
             ),
@@ -568,7 +615,7 @@ mod tests {
         let mock = MockTransport::new().with_response(
             "list-sessions",
             concat!(
-                "multi $7 100 0 2  200\n",
+                "__MOTLIE_S__ multi $7 100 0 2  200\n",
                 "__MOTLIE_WIN__ $7 300\n",
                 "__MOTLIE_WIN__ $7 700\n",
                 "__MOTLIE_WIN__ $7 500\n",
@@ -585,7 +632,8 @@ mod tests {
     async fn session_activity_unchanged_when_no_window_rows_present() {
         // Defensive: if the chained list-windows somehow returns nothing for
         // a session id, the session falls back to its raw session_activity.
-        let mock = MockTransport::new().with_response("list-sessions", "lonely $9 100 0 1  250\n");
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ lonely $9 100 0 1  250\n");
         let transport = TransportKind::Mock(mock);
 
         let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
@@ -594,30 +642,69 @@ mod tests {
     }
 
     #[test]
-    fn parse_window_activity_block_handles_corrupt_lines() {
-        // Lines that don't have exactly two fields, or whose timestamp doesn't
-        // parse, are silently dropped. The remaining valid rows still feed the
-        // aggregator. This protects against tmux version quirks that emit
-        // `__MOTLIE_WIN__ $0 ` (empty timestamp) or partial rows.
+    fn parse_window_activity_block_clean_input_succeeds() {
         let map = parse_window_activity_block(&[
             "__MOTLIE_WIN__ $0 700",
-            "__MOTLIE_WIN__ $0 not-a-number",
-            "__MOTLIE_WIN__ $0",
             "__MOTLIE_WIN__ $0 200",
-            "__MOTLIE_WIN__  500", // empty session id — dropped
-        ]);
+            "__MOTLIE_WIN__ $1 350",
+        ])
+        .unwrap();
         assert_eq!(map.get("$0").copied(), Some(700));
-        assert!(!map.contains_key(""));
+        assert_eq!(map.get("$1").copied(), Some(350));
+    }
+
+    #[test]
+    fn parse_window_activity_block_errors_on_unparseable_timestamp() {
+        // Stricter contract (reviewer feedback): lib refuses to silently
+        // drop unparseable rows because that would mask format regressions.
+        let err = parse_window_activity_block(&["__MOTLIE_WIN__ $0 not-a-number"]).unwrap_err();
+        assert!(err.to_string().contains("invalid window_activity value"));
+    }
+
+    #[test]
+    fn parse_window_activity_block_errors_on_missing_timestamp() {
+        let err = parse_window_activity_block(&["__MOTLIE_WIN__ $0"]).unwrap_err();
+        assert!(err.to_string().contains("malformed window-activity row"));
+    }
+
+    #[test]
+    fn parse_window_activity_block_errors_on_missing_session_id() {
+        // After stripping the prefix and trimming whitespace, a row with
+        // only a timestamp parses as one field — caught by the
+        // expected-two-fields check.
+        let err = parse_window_activity_block(&["__MOTLIE_WIN__  500"]).unwrap_err();
+        assert!(err.to_string().contains("malformed window-activity row"));
+    }
+
+    #[test]
+    fn parse_session_block_errors_on_unframed_row() {
+        // A line that lacks both __MOTLIE_S__ and __MOTLIE_WIN__ tags is
+        // an unframed parse error. This protects against the silent-drop
+        // failure mode where a session named __MOTLIE_WIN__ would be
+        // misclassified as a window-activity row.
+        let err = parse_session_block("build $0 100 0 1  200\n").unwrap_err();
+        assert!(err.to_string().contains("unframed session-listing row"));
+    }
+
+    #[test]
+    fn parse_session_block_handles_session_named_motlie_win() {
+        // Adversarial: a session whose tmux-reported name is literally
+        // `__MOTLIE_WIN__` parses correctly because the name field comes
+        // after the explicit `__MOTLIE_S__` framing tag. Pre-framing
+        // partition-by-prefix would have silently dropped this session.
+        let sessions =
+            parse_session_block("__MOTLIE_S__ __MOTLIE_WIN__ $5 100 0 1  300\n").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "__MOTLIE_WIN__");
+        assert_eq!(sessions[0].id.as_str(), "$5");
     }
 
     #[tokio::test]
     async fn list_sessions_with_prefix_aggregates_window_activity() {
-        // The non-`_now` variant also aggregates so all SessionInfo consumers
-        // see the same activity semantics regardless of which API they call.
         let mock = MockTransport::new().with_response(
             "list-sessions",
             concat!(
-                "build $0 100 0 1  200\n",
+                "__MOTLIE_S__ build $0 100 0 1  200\n",
                 "__MOTLIE_WIN__ $0 750\n",
             ),
         );
@@ -637,9 +724,16 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_malformed_returns_error() {
-        let mock = MockTransport::new().with_response("list-sessions", "bad\nok $0 0 0 1 \n");
+        // Properly framed but with too-few-fields content surfaces as the
+        // session-line malformed error from the inner parse_sessions.
+        let mock = MockTransport::new().with_response(
+            "list-sessions",
+            "__MOTLIE_S__ bad\n__MOTLIE_S__ ok $0 0 0 1 \n",
+        );
         let transport = TransportKind::Mock(mock);
-        let err = list_sessions_with_prefix(&transport, "tmux").await.unwrap_err();
+        let err = list_sessions_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("malformed session line"));
     }
 
@@ -666,7 +760,9 @@ mod tests {
             "SSH transport hiccup mentioning no sessions in passing",
         );
         let transport = TransportKind::Mock(mock);
-        let err = list_sessions_with_prefix(&transport, "tmux").await.unwrap_err();
+        let err = list_sessions_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
         assert!(err
             .to_string()
             .contains("SSH transport hiccup mentioning no sessions in passing"));
@@ -674,7 +770,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_attached_count_above_one_is_true() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 2 1  10\n");
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ build $0 0 2 1  10\n");
         let transport = TransportKind::Mock(mock);
         let sessions = list_sessions_with_prefix(&transport, "tmux").await.unwrap();
         assert_eq!(sessions.len(), 1);
@@ -689,14 +786,15 @@ mod tests {
             "$0 build 0 main 1 2 even-horizontal\n$0 build 1 editor 0 1 even-vertical\n",
         );
         let transport = TransportKind::Mock(mock);
-        let windows = list_windows_with_prefix(&transport, "tmux", "build").await.unwrap();
+        let windows = list_windows_with_prefix(&transport, "tmux", "build")
+            .await
+            .unwrap();
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].name, "main");
         assert!(windows[0].active);
         assert_eq!(windows[1].name, "editor");
         assert!(!windows[1].active);
     }
-
 
     #[tokio::test]
     async fn list_clients_parses() {
@@ -724,7 +822,9 @@ mod tests {
     async fn list_clients_malformed_returns_error() {
         let mock = MockTransport::new().with_response("list-clients", "200 bad\n");
         let transport = TransportKind::Mock(mock);
-        let err = list_clients_with_prefix(&transport, "tmux").await.unwrap_err();
+        let err = list_clients_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("malformed client line"));
     }
 
@@ -773,7 +873,9 @@ mod tests {
         let mock = MockTransport::new()
             .with_response("list-windows", "$0 build 0 main maybe 2 even-horizontal\n");
         let transport = TransportKind::Mock(mock);
-        let err = list_windows_with_prefix(&transport, "tmux", "build").await.unwrap_err();
+        let err = list_windows_with_prefix(&transport, "tmux", "build")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("invalid window active flag"));
     }
 
