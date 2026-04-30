@@ -56,7 +56,7 @@ impl MoonshineStreamingSpec {
             decoder_kv_filename: "onnx/small/decoder_kv.ort",
             streaming_config_filename: "onnx/small/streaming_config.json",
             tokenizer_json_filename: "onnx/small/tokenizer.json",
-            capabilities: Capabilities::transcription_stream_only(),
+            capabilities: Capabilities::transcription_stream_partial_only(),
             quantization: QuantizationSupport::none(),
         }
     }

@@ -72,7 +72,9 @@ What the human should install:
 
 - TTS default: `piper`
 - TTS override: if the human says `say with qwen3`, use `qwen3cpp`
+- TTS semantics: `piper` and `qwen3cpp` are buffered TTS backends; they synthesize full audio first and then the runtime writes that buffered audio to file or playback sinks
 - ASR default: `whisper`
+- ASR semantics: `whisper` is batch/final-only, while `sherpa` and `moonshine` are streaming ASR backends
 - ASR override: if the human says `listen with sherpa` or `listen with moonshine`, use that backend
 - for remote Mac push capture, all ASR backends use the same interaction contract: the human presses `Ctrl-C`, the stream closes, and the agent prints one final transcript after `EOF`
 
@@ -146,6 +148,7 @@ Agent interpretation:
 - use `voice/listen`
 - backend: `whisper`
 - endpoint: local
+- semantics: batch ASR with one final transcript
 
 Example agent response:
 
@@ -160,6 +163,7 @@ Agent interpretation:
 - use `voice/listen`
 - backend: `sherpa`
 - endpoint: local
+- semantics: streaming ASR, though the default skill path still returns one final transcript unless partials are requested
 
 Example agent response:
 
@@ -196,7 +200,9 @@ Agent interpretation:
 
 - use `voice/turn`
 - TTS backend: `piper`
+- TTS semantics: buffered speech synthesis
 - ASR backend: `whisper`
+- ASR semantics: batch final-only transcription
 - playback: local
 - capture: local
 
@@ -212,7 +218,9 @@ Agent interpretation:
 
 - use `voice/turn`
 - TTS backend: `qwen3cpp`
+- TTS semantics: buffered speech synthesis with optional voice cloning
 - ASR backend: `moonshine`
+- ASR semantics: streaming transcription
 
 Example agent response:
 
@@ -270,7 +278,7 @@ Agent-side helper:
 .agents/skills/voice/listen/scripts/prepare_remote_push.sh --ssh-target dchung@spark-2f6e
 ```
 
-That prepares a stable FIFO path, one agent-only listen command, one short human-facing Mac command that records locally until Ctrl-C and then streams the recorded WAV, and one longer fallback command. The agent should run the listen side itself in one live polled session, not as a detached background job, kill any stale listener still attached to the fixed FIFO before starting a new one, show the human the short command first, poll until EOF arrives, only emit commands for validated shell-safe SSH targets and FIFO paths, and only offer the fallback command if the short one fails. After the listen returns or fails, clean up the FIFO path before the next run. For `whisper`, `sherpa`, and `moonshine`, the remote-push behavior is the same: wait for EOF from Ctrl-C on the Mac and then print one final transcript.
+That prepares a stable FIFO path, one agent-only listen command, one short human-facing Mac command that records locally until Ctrl-C and then streams the recorded WAV, and one longer fallback command. Whisper remains batch/final-only in that flow; Sherpa and Moonshine remain streaming backends internally even when the remote-push interaction waits for EOF and prints one final transcript by default. The agent should run the listen side itself in one live polled session, not as a detached background job, kill any stale listener still attached to the fixed FIFO before starting a new one, show the human the short command first, poll until EOF arrives, only emit commands for validated shell-safe SSH targets and FIFO paths, and only offer the fallback command if the short one fails. After the listen returns or fails, clean up the FIFO path before the next run. For `whisper`, `sherpa`, and `moonshine`, the remote-push behavior is the same: wait for EOF from Ctrl-C on the Mac and then print one final transcript.
 
 ## Operational Questions
 

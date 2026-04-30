@@ -1895,6 +1895,70 @@ mod tests {
         ));
     }
 
+    #[cfg(any(
+        feature = "model-whisper-base-en",
+        feature = "model-moonshine-streaming",
+        feature = "model-sherpa-onnx-streaming",
+        feature = "model-piper-en-us-ljspeech-medium",
+        feature = "model-qwen3-tts-cpp",
+    ))]
+    #[test]
+    fn curated_speech_bundle_metadata_matches_execution_contracts() {
+        #[cfg(feature = "model-whisper-base-en")]
+        {
+            let descriptor = crate::asr::whisper_base_en::descriptor();
+            assert!(
+                descriptor
+                    .capabilities
+                    .supports(CapabilityKind::Transcription)
+            );
+            assert!(!descriptor.capabilities.supports(CapabilityKind::VoiceClone));
+            assert_eq!(
+                descriptor.capabilities.descriptors(),
+                &[CapabilityDescriptor::transcription_batch()]
+            );
+        }
+
+        #[cfg(feature = "model-moonshine-streaming")]
+        {
+            let descriptor = crate::asr::moonshine_streaming_en::descriptor();
+            assert_eq!(
+                descriptor.capabilities.descriptors(),
+                &[CapabilityDescriptor::transcription_stream_partial()]
+            );
+        }
+
+        #[cfg(feature = "model-sherpa-onnx-streaming")]
+        {
+            let descriptor = crate::asr::sherpa_onnx_streaming_en::descriptor();
+            assert_eq!(
+                descriptor.capabilities.descriptors(),
+                &[CapabilityDescriptor::transcription_stream_partial()]
+            );
+        }
+
+        #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
+        {
+            let descriptor = crate::tts::piper_en_us_ljspeech_medium::descriptor();
+            assert_eq!(
+                descriptor.capabilities.descriptors(),
+                &[CapabilityDescriptor::speech_buffered()]
+            );
+        }
+
+        #[cfg(feature = "model-qwen3-tts-cpp")]
+        {
+            let descriptor = crate::tts::qwen3_tts_cpp::descriptor();
+            assert_eq!(
+                descriptor.capabilities.descriptors(),
+                &[
+                    CapabilityDescriptor::speech_buffered(),
+                    CapabilityDescriptor::voice_clone(),
+                ]
+            );
+        }
+    }
+
     #[test]
     fn artifact_rules_match_expected_files() {
         let artifacts = BundleArtifacts {

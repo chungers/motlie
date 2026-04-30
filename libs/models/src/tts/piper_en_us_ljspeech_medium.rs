@@ -28,7 +28,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("piper_en_us_ljspeech_medium"),
         display_name: "Piper en_US ljspeech medium".into(),
         family: BundleFamily::Piper,
-        capabilities: motlie_model::Capabilities::speech_stream_only(),
+        capabilities: motlie_model::Capabilities::speech_buffered_only(),
         eval_tracks: vec![EvalTrack::Speech],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],

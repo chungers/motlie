@@ -39,6 +39,8 @@ Agent decision rule:
 - discover runtime details progressively through the conversation with the human
 - if the user says `listen with sherpa` or `listen with moonshine`, use that backend
 - otherwise default to `--backend whisper`
+- treat `whisper` as batch/final-only ASR
+- treat `sherpa` and `moonshine` as streaming ASR backends
 - for remote Mac push capture, keep backend behavior consistent across `whisper`, `sherpa`, and `moonshine`: wait for EOF from Ctrl-C on the Mac and then print one final transcript
 - if a local recording command exists, try local first
 - after local capture, ask the human whether the skill actually heard/captured them

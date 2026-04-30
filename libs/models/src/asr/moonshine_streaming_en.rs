@@ -34,7 +34,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("moonshine_streaming_en"),
         display_name: "Moonshine Streaming EN".into(),
         family: BundleFamily::Other("Moonshine".into()),
-        capabilities: motlie_model::Capabilities::transcription_stream_only(),
+        capabilities: motlie_model::Capabilities::transcription_stream_partial_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],

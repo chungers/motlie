@@ -9,8 +9,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use motlie_model::typed::{
-    AudioBuf, BatchTranscriber, CloneReference, Mono, SpeechStream, SpeechSynthesizer,
-    StreamingTranscriber, SynthesisRequest, TranscriptionSession, VoiceCloneSynthesizer,
+    AudioBuf, BatchTranscriber, BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer,
+    CloneReference, Mono, StreamingTranscriber, SynthesisRequest, TranscriptionSession,
 };
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ModelError, SpeechParams, StartOptions, TranscriptSegment,
@@ -424,25 +424,15 @@ async fn speak_with_piper(
 ) -> Result<()> {
     let handle = start_piper(config, quiet).await?;
     let body_result: Result<()> = async {
-        let mut stream = handle
-            .synthesize(SynthesisRequest {
+        let audio = handle
+            .synthesize_buffered(SynthesisRequest {
                 text,
                 params: SpeechParams::default(),
             })
             .await
-            .context("start Piper synthesis")?;
+            .context("run Piper buffered synthesis")?;
         let mut sink = OutputSink::<i16>::new(target, 22_050)?;
-        while let Some(chunk) = stream
-            .next_chunk()
-            .await
-            .context("read Piper speech chunk")?
-        {
-            sink.write_samples(chunk.samples())?;
-        }
-        stream
-            .finish()
-            .await
-            .context("finish Piper speech stream")?;
+        sink.write_samples(audio.samples())?;
         sink.finalize()
     }
     .await;
@@ -462,30 +452,20 @@ async fn speak_with_qwen(
             text,
             params: SpeechParams::default(),
         };
-        let mut stream = match reference {
+        let audio = match reference {
             Some(reference) => handle
-                .synthesize_with_reference(request, reference)
+                .synthesize_with_reference_buffered(request, reference)
                 .await
-                .context("start qwen3-tts.cpp voice-clone synthesis")?,
+                .context("run qwen3-tts.cpp buffered voice-clone synthesis")?,
             None => handle
-                .synthesize(request)
+                .synthesize_buffered(request)
                 .await
-                .context("start qwen3-tts.cpp synthesis")?,
+                .context("run qwen3-tts.cpp buffered synthesis")?,
         };
 
         let mut sink = OutputSink::<i16>::new(target, 24_000)?;
-        while let Some(chunk) = stream
-            .next_chunk()
-            .await
-            .context("read qwen3-tts.cpp speech chunk")?
-        {
-            let samples = f32_to_i16_clamped(chunk.samples());
-            sink.write_samples(&samples)?;
-        }
-        stream
-            .finish()
-            .await
-            .context("finish qwen3-tts.cpp speech stream")?;
+        let samples = f32_to_i16_clamped(audio.samples());
+        sink.write_samples(&samples)?;
         sink.finalize()
     }
     .await;
@@ -734,7 +714,7 @@ async fn start_piper(config: &VoiceConfig, quiet: bool) -> Result<PiperHandle> {
         quiet,
         TtsModels::PiperEnUsLjspeechMedium.bundle_id(),
         "Piper",
-        |options| piper_en_us_ljspeech_medium::start_typed(options),
+        piper_en_us_ljspeech_medium::start_typed,
     )
     .await
 }
@@ -745,7 +725,7 @@ async fn start_qwen(config: &VoiceConfig, quiet: bool) -> Result<Qwen3TtsCppHand
         quiet,
         TtsModels::Qwen3TtsCpp0_6B.bundle_id(),
         "qwen3-tts.cpp",
-        |options| qwen3_tts_cpp::start_typed(options),
+        qwen3_tts_cpp::start_typed,
     )
     .await
 }
@@ -756,7 +736,7 @@ async fn start_whisper(config: &VoiceConfig, quiet: bool) -> Result<WhisperCppHa
         quiet,
         AsrModels::WhisperBaseEn.bundle_id(),
         "Whisper",
-        |options| whisper_base_en::start_typed(options),
+        whisper_base_en::start_typed,
     )
     .await
 }
@@ -767,7 +747,7 @@ async fn start_sherpa(config: &VoiceConfig, quiet: bool) -> Result<SherpaOnnxHan
         quiet,
         AsrModels::SherpaOnnxStreamingEn.bundle_id(),
         "Sherpa",
-        |options| sherpa_onnx_streaming_en::start_typed(options),
+        sherpa_onnx_streaming_en::start_typed,
     )
     .await
 }
@@ -778,7 +758,7 @@ async fn start_moonshine(config: &VoiceConfig, quiet: bool) -> Result<MoonshineH
         quiet,
         AsrModels::MoonshineStreamingEn.bundle_id(),
         "Moonshine",
-        |options| moonshine_streaming_en::start_typed(options),
+        moonshine_streaming_en::start_typed,
     )
     .await
 }

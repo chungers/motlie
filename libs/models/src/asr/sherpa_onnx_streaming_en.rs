@@ -32,7 +32,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("sherpa_onnx_streaming_zipformer_en"),
         display_name: "Sherpa ONNX Streaming Zipformer EN".into(),
         family: BundleFamily::Other("SherpaOnnx".into()),
-        capabilities: motlie_model::Capabilities::transcription_stream_only(),
+        capabilities: motlie_model::Capabilities::transcription_stream_partial_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],

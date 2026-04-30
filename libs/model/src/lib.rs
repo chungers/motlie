@@ -29,8 +29,9 @@ pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGen
 pub use speech::SpeechParams;
 pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
 pub use typed::{
-    AudioBuf, AudioTransform, BatchTranscriber, CloneReference, Compose, I16MonoResampler,
-    I16ToF32, IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
+    AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
+    BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer, CloneReference, Compose,
+    I16MonoResampler, I16ToF32, IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
     SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber, SynthesisRequest,
     TranscriptionSession, VoiceCloneSynthesizer, stream_speech_into_asr,
 };
@@ -150,6 +151,7 @@ pub enum CapabilityKind {
     Speech,
     Transcription,
     Vision,
+    VoiceClone,
 }
 
 /// Normalized content kinds used in capability introspection.
@@ -248,23 +250,67 @@ impl CapabilityDescriptor {
         )
     }
 
-    pub fn transcription_stream() -> Self {
+    pub fn transcription_batch() -> Self {
         Self::new(
             CapabilityKind::Transcription,
-            "Streaming voice-to-text transcription from PCM audio chunks.",
+            "Batch voice-to-text transcription from complete audio input.",
+            vec![ContentKind::Audio],
+            vec![ContentKind::Text],
+            InteractionStyle::Batch,
+        )
+    }
+
+    pub fn transcription_stream_final_only() -> Self {
+        Self::new(
+            CapabilityKind::Transcription,
+            "Streaming voice-to-text transcription from PCM audio chunks with final transcript delivery on session completion.",
             vec![ContentKind::Audio],
             vec![ContentKind::Text],
             InteractionStyle::Streaming,
         )
     }
 
+    pub fn transcription_stream_partial() -> Self {
+        Self::new(
+            CapabilityKind::Transcription,
+            "Streaming voice-to-text transcription from PCM audio chunks with partial transcript updates.",
+            vec![ContentKind::Audio],
+            vec![ContentKind::Text],
+            InteractionStyle::Streaming,
+        )
+    }
+
+    pub fn transcription_stream() -> Self {
+        Self::transcription_stream_partial()
+    }
+
+    pub fn speech_buffered() -> Self {
+        Self::new(
+            CapabilityKind::Speech,
+            "Buffered text-to-speech synthesis that returns full audio before chunked consumption.",
+            vec![ContentKind::Text],
+            vec![ContentKind::Audio],
+            InteractionStyle::RequestResponse,
+        )
+    }
+
     pub fn speech_stream() -> Self {
         Self::new(
             CapabilityKind::Speech,
-            "Streaming text-to-speech synthesis with PCM audio output.",
+            "Streaming text-to-speech synthesis with incremental PCM audio output.",
             vec![ContentKind::Text],
             vec![ContentKind::Audio],
             InteractionStyle::Streaming,
+        )
+    }
+
+    pub fn voice_clone() -> Self {
+        Self::new(
+            CapabilityKind::VoiceClone,
+            "Reference-conditioned voice cloning on the speech synthesis surface.",
+            vec![ContentKind::Text, ContentKind::Audio],
+            vec![ContentKind::Audio],
+            InteractionStyle::RequestResponse,
         )
     }
 }
@@ -327,8 +373,31 @@ impl Capabilities {
         ])
     }
 
+    pub fn transcription_batch_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::transcription_batch()])
+    }
+
+    pub fn transcription_stream_final_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::transcription_stream_final_only()])
+    }
+
+    pub fn transcription_stream_partial_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::transcription_stream_partial()])
+    }
+
     pub fn transcription_stream_only() -> Self {
-        Self::new(vec![CapabilityDescriptor::transcription_stream()])
+        Self::transcription_stream_partial_only()
+    }
+
+    pub fn speech_buffered_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::speech_buffered()])
+    }
+
+    pub fn speech_buffered_with_voice_clone() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::speech_buffered(),
+            CapabilityDescriptor::voice_clone(),
+        ])
     }
 
     pub fn speech_stream_only() -> Self {
@@ -988,7 +1057,17 @@ mod tests {
     }
 
     #[test]
-    fn speech_descriptor_uses_text_input_and_audio_output() {
+    fn speech_buffered_descriptor_uses_text_input_and_audio_output() {
+        let descriptor = CapabilityDescriptor::speech_buffered();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Speech);
+        assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
+        assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
+    }
+
+    #[test]
+    fn speech_stream_descriptor_uses_streaming_interaction() {
         let descriptor = CapabilityDescriptor::speech_stream();
 
         assert_eq!(descriptor.kind, CapabilityKind::Speech);
@@ -998,8 +1077,18 @@ mod tests {
     }
 
     #[test]
-    fn transcription_descriptor_uses_audio_input_and_streaming_interaction() {
-        let descriptor = CapabilityDescriptor::transcription_stream();
+    fn transcription_batch_descriptor_uses_audio_input_and_batch_interaction() {
+        let descriptor = CapabilityDescriptor::transcription_batch();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Transcription);
+        assert_eq!(descriptor.inputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.outputs, vec![ContentKind::Text]);
+        assert_eq!(descriptor.interaction, InteractionStyle::Batch);
+    }
+
+    #[test]
+    fn transcription_stream_descriptor_uses_audio_input_and_streaming_interaction() {
+        let descriptor = CapabilityDescriptor::transcription_stream_partial();
 
         assert_eq!(descriptor.kind, CapabilityKind::Transcription);
         assert_eq!(descriptor.inputs, vec![ContentKind::Audio]);
@@ -1008,8 +1097,21 @@ mod tests {
     }
 
     #[test]
-    fn transcription_stream_only_capabilities_supports_transcription_but_not_chat() {
-        let capabilities = Capabilities::transcription_stream_only();
+    fn voice_clone_descriptor_is_separate_from_speech_transport() {
+        let descriptor = CapabilityDescriptor::voice_clone();
+
+        assert_eq!(descriptor.kind, CapabilityKind::VoiceClone);
+        assert_eq!(
+            descriptor.inputs,
+            vec![ContentKind::Text, ContentKind::Audio]
+        );
+        assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
+    }
+
+    #[test]
+    fn transcription_batch_only_capabilities_supports_transcription_but_not_chat() {
+        let capabilities = Capabilities::transcription_batch_only();
 
         assert!(capabilities.supports(CapabilityKind::Transcription));
         assert!(!capabilities.supports(CapabilityKind::Chat));
@@ -1017,10 +1119,29 @@ mod tests {
     }
 
     #[test]
+    fn transcription_stream_partial_only_capabilities_supports_transcription_but_not_chat() {
+        let capabilities = Capabilities::transcription_stream_partial_only();
+
+        assert!(capabilities.supports(CapabilityKind::Transcription));
+        assert!(!capabilities.supports(CapabilityKind::Chat));
+        assert!(!capabilities.supports(CapabilityKind::Embeddings));
+    }
+
+    #[test]
+    fn speech_buffered_with_voice_clone_supports_both_kinds() {
+        let capabilities = Capabilities::speech_buffered_with_voice_clone();
+
+        assert!(capabilities.supports(CapabilityKind::Speech));
+        assert!(capabilities.supports(CapabilityKind::VoiceClone));
+        assert!(!capabilities.supports(CapabilityKind::Chat));
+    }
+
+    #[test]
     fn speech_stream_only_capabilities_supports_speech_but_not_chat() {
         let capabilities = Capabilities::speech_stream_only();
 
         assert!(capabilities.supports(CapabilityKind::Speech));
+        assert!(!capabilities.supports(CapabilityKind::VoiceClone));
         assert!(!capabilities.supports(CapabilityKind::Chat));
         assert!(!capabilities.supports(CapabilityKind::Embeddings));
     }

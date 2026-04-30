@@ -214,6 +214,16 @@ pub trait TranscriptionSession: Send {
     fn finish(self) -> impl Future<Output = Result<TranscriptionUpdate, ModelError>> + Send;
 }
 
+pub trait BufferedSpeechSynthesizer: Send + Sync {
+    type Request;
+    type Output;
+
+    fn synthesize_buffered(
+        &self,
+        request: Self::Request,
+    ) -> impl Future<Output = Result<Self::Output, ModelError>> + Send;
+}
+
 pub trait SpeechSynthesizer: Send + Sync {
     type Request;
     type Output;
@@ -223,6 +233,17 @@ pub trait SpeechSynthesizer: Send + Sync {
         &self,
         request: Self::Request,
     ) -> impl Future<Output = Result<Self::Stream, ModelError>> + Send;
+}
+
+pub trait BufferedVoiceCloneSynthesizer<const RATE_HZ: u32, C: ChannelLayout>: Send + Sync {
+    type Request;
+    type Output;
+
+    fn synthesize_with_reference_buffered(
+        &self,
+        request: Self::Request,
+        reference: CloneReference<RATE_HZ, C>,
+    ) -> impl Future<Output = Result<Self::Output, ModelError>> + Send;
 }
 
 pub trait VoiceCloneSynthesizer<const RATE_HZ: u32, C: ChannelLayout>: Send + Sync {
@@ -244,6 +265,51 @@ pub trait SpeechStream: Send {
         &mut self,
     ) -> impl Future<Output = Result<Option<Self::Chunk>, ModelError>> + Send;
     fn finish(self) -> impl Future<Output = Result<(), ModelError>> + Send;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BufferedSpeechChunkStream<S, const RATE_HZ: u32, C: ChannelLayout> {
+    audio: AudioBuf<S, RATE_HZ, C>,
+    next_offset: usize,
+    chunk_len_samples: usize,
+}
+
+impl<S, const RATE_HZ: u32, C: ChannelLayout> BufferedSpeechChunkStream<S, RATE_HZ, C> {
+    pub fn new(audio: AudioBuf<S, RATE_HZ, C>, chunk_duration_ms: u32) -> Self {
+        let channels = C::COUNT.max(1) as usize;
+        let frames_per_chunk = (((RATE_HZ as u64) * (chunk_duration_ms as u64)) / 1000) as usize;
+        let chunk_len_samples = frames_per_chunk.max(1) * channels;
+
+        Self {
+            audio,
+            next_offset: 0,
+            chunk_len_samples,
+        }
+    }
+}
+
+impl<S, const RATE_HZ: u32, C: ChannelLayout> SpeechStream
+    for BufferedSpeechChunkStream<S, RATE_HZ, C>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    type Chunk = AudioBuf<S, RATE_HZ, C>;
+
+    async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
+        if self.next_offset >= self.audio.samples().len() {
+            return Ok(None);
+        }
+
+        let end = (self.next_offset + self.chunk_len_samples).min(self.audio.samples().len());
+        let chunk = AudioBuf::new(self.audio.samples()[self.next_offset..end].to_vec());
+        self.next_offset = end;
+
+        Ok(Some(chunk))
+    }
+
+    async fn finish(self) -> Result<(), ModelError> {
+        Ok(())
+    }
 }
 
 pub async fn stream_speech_into_asr<Tts, Xform, Asr>(

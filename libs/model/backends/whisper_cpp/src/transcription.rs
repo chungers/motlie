@@ -38,7 +38,7 @@ impl WhisperCppTranscriptionSpec {
             id: BundleId::new("whisper_base_en"),
             display_name: "Whisper Base.en",
             model_filename: "ggml-base.en.bin",
-            capabilities: Capabilities::transcription_stream_only(),
+            capabilities: Capabilities::transcription_batch_only(),
             quantization: QuantizationSupport::none(),
         }
     }
@@ -339,18 +339,27 @@ fn decode_samples(
         })?;
 
     let num_segments = state.full_n_segments() as usize;
+
     let mut segments = Vec::with_capacity(num_segments);
-    for segment in state.as_iter() {
+    for i in 0..num_segments as i32 {
+        let segment = state
+            .get_segment(i)
+            .ok_or_else(|| ModelError::BackendExecution {
+                backend: "whisper-cpp",
+                operation: "get_segment",
+                message: format!("segment {i} out of bounds"),
+            })?;
         let text = segment
-            .to_str_lossy()
+            .to_str()
             .map_err(|err| ModelError::BackendExecution {
                 backend: "whisper-cpp",
-                operation: "segment.to_str_lossy",
+                operation: "segment.to_str",
                 message: err.to_string(),
             })?
-            .into_owned();
+            .to_owned();
         let t0 = segment.start_timestamp();
         let t1 = segment.end_timestamp();
+
         segments.push(TranscriptSegment {
             start_ms: (t0 * 10) as u64,
             end_ms: (t1 * 10) as u64,

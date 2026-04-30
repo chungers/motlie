@@ -17,7 +17,9 @@ The typed implementation here provides the shared `voice-agent` binary that the
 voice skill wrappers invoke. At runtime it resolves the namespaced skill root,
 bootstraps curated model weights into `.agents/skills/voice/artifacts/hf-cache/`,
 and talks to the typed Motlie TTS/ASR backends directly without shelling out to
-repo example binaries.
+repo example binaries. On this branch it consumes the new speech-contract split explicitly:
+buffered TTS for Piper and qwen3-tts.cpp, batch ASR for Whisper, and streaming
+ASR for Sherpa/Moonshine.
 
 When the full `motlie` repo is present, one repo-based build should seed the three
 voice subskill `bin/` directories and repopulate the packaged runtime sidecars in

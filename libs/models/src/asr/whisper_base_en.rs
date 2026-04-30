@@ -26,7 +26,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("whisper_base_en"),
         display_name: "Whisper Base.en".into(),
         family: BundleFamily::Whisper,
-        capabilities: motlie_model::Capabilities::transcription_stream_only(),
+        capabilities: motlie_model::Capabilities::transcription_batch_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
