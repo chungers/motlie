@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-24 | @codex-gpt55 | Started Phase 9 implementation: Qwen3.6 GGUF bundle/catalog wiring, Q4/Q5/Q8 quant support, and the dedicated example are in progress; FP8 remains blocked until a curated FP8 GGUF artifact exists. |
+| 2026-04-24 | @codex-gpt55 | Clarified Phase 9 after reviewing `libs/model/src/chat.rs`: the core chat contract already accepts image content, so Qwen3.6 needs llama.cpp mmproj/image backend support before advertising vision, not a new core interface. |
+| 2026-04-24 | @codex-gpt55 | Added Phase 9 for issue `#224`, covering Qwen3.6 27B GGUF via the existing llama.cpp backend, platform-aware GGUF quant defaults, optional multimodal support, feature-gated catalog wiring, and the dedicated example. |
 | 2026-04-18 | @codex-asr | Added Phase 8 for the reusable strict audio-ingress follow-through required by issue `#198` and Telnyx PR `#186`. This phase keeps provider-agnostic decode/resample/chunking invariants out of the Telnyx adapter crate while making the first telephony vertical slice consume the typed model boundary explicitly. |
 | 2026-04-17 | @codex-asr | Renamed the curated example targets from versioned names to capability/model names and updated the plan references accordingly (`embeddings`, `chat_mistral_qwen3`, `chat_multimodal_gemma4`, `chat_gguf_gwen3_gemma4`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`). |
 | 2026-04-07 | @codex-researcher | Initial PLAN for `libs/models` vertical slice work. Covers the curated catalog, constructor registration, and the first `embeddinggemma_300m` bundle wired through the Mistral backend. |
@@ -214,3 +217,87 @@ provider-specific Telnyx adapter. This phase is derived from `DESIGN.md`:
   adaptation chain without any provider-specific network transport in the loop.
 - [ ] Add the corresponding script/CI hook once that path exists so the
   telephony-ingress contract does not regress back to byte-oriented plumbing.
+
+## Phase 9: Qwen3.6 27B GGUF via llama.cpp
+
+Add the large Qwen3.6 27B GGUF curated bundle for issue `#224`. The detailed
+design is in [`DESIGN_QWEN3_6_27B_GGUF.md`](./DESIGN_QWEN3_6_27B_GGUF.md).
+
+### 9.1 — Design, artifact validation, and interface boundary
+
+- [x] Add a dedicated design document under `libs/models/docs/` covering the
+  model identity, backend reuse, feature gates, quant policy, interfaces, and
+  planned files.
+- [x] Validate the selected GGUF artifact source and record exact filenames for
+  Q4-class, Q5-class, Q8, and optional mmproj artifacts.
+- [x] Record that FP8 is not currently available as a curated GGUF artifact;
+  the official FP8 release is safetensors/Transformers format.
+- [ ] Confirm whether the current `llama-cpp-2` binding can support mmproj/image
+  input for Qwen3.6 through the existing `ChatRequest` / `ContentPart` contract.
+  If not, keep the first runtime slice text-only and do not advertise vision
+  capability.
+- [x] Confirm the first implementation can reuse the existing Qwen3 formatter
+  for text-only chat while keeping the arch tracked separately as Qwen35.
+
+### 9.2 — llama.cpp backend support
+
+- [x] Extend `motlie-model-llama-cpp` with a Qwen3.6/Qwen35 spec that reuses the
+  existing GGUF load path and generation metrics.
+- [x] Add native GGUF quant selection support for Q4-class, Q5-class, Q8, and
+  reserved FP8 mapping. Do not overload `QuantizationBits::Eight` to mean both
+  Q8 and FP8.
+- [ ] Add platform-aware default quant resolution once FP8 GGUF exists:
+  macOS defaults to Q5-class; CUDA-enabled hosts default to FP8 with GPU offload;
+  CPU-only Linux fallback is explicit and documented.
+- [x] Reuse the existing CUDA gate `llama-cpp-cuda` and GPU-layer policy,
+  including `MOTLIE_MODEL_FORCE_CPU` and `MOTLIE_MODEL_GPU_LAYERS`.
+- [ ] If llama.cpp multimodal support is feasible through the Rust binding, add
+  backend runtime support that consumes the existing `ContentPart::Image` /
+  `ContentPart::ImageUrl` inputs rather than extending the text-only prompt
+  formatter with image stubs.
+
+### 9.3 — Curated catalog wiring
+
+- [x] Add `libs/models/src/chat/qwen3_6_27b_gguf.rs` with `descriptor()`,
+  `variant_descriptor()`, `bundle()`, and local GGUF snapshot resolution.
+- [x] Add selector `qwen/qwen3_6_27b_gguf` and bundle id
+  `qwen3_6_27b_gguf`.
+- [x] Wire `ChatModels`, `ModelSelector`, `CuratedBundle`, `Catalog::with_defaults`,
+  `bundle_from_id`, and `bundle_from_resolved` using the existing feature-gated
+  chat bundle pattern.
+- [x] Add `model-qwen3-6-27b-gguf = ["dep:motlie-model-llama-cpp"]` to
+  `libs/models/Cargo.toml`.
+- [x] Keep the bundle opt-in only unless catalog policy later approves a 27B
+  model in the default build.
+
+### 9.4 — Example and docs
+
+- [x] Add `libs/models/examples/chat_multimodal_qwen3_6_27b/main.rs`.
+- [x] Add `libs/models/examples/chat_multimodal_qwen3_6_27b/README.md`.
+- [x] Add the example target to `libs/models/Cargo.toml` with
+  `required-features = ["model-qwen3-6-27b-gguf"]`.
+- [x] Follow the shared example conventions: `--download-artifacts`, local-only
+  startup, shared `support.rs`, descriptor/capability printing, model metrics,
+  and single-bundle feature expectations.
+- [x] Expose `--precision=q4|q5|q8|fp8`; `fp8` fails closed until a curated FP8
+  GGUF artifact exists.
+- [x] Demonstrate image+text chat only if the loaded bundle advertises real
+  multimodal vision capability.
+- [x] Update `libs/models/examples/README.md` and
+  `libs/models/docs/BUILD_MODELS.md` with the new example and CUDA invocation.
+
+### 9.5 — Verification
+
+- [x] Add backend unit tests for Qwen3.6 spec metadata, quant label mapping, and
+  text-only capability shape.
+- [x] Add `motlie-models` catalog tests for descriptor contents, selector
+  parsing, disabled-feature `ModelUnavailable`, and local artifact validation.
+- [x] Run `cargo test -p motlie-model-llama-cpp --lib`.
+- [x] Run `cargo test -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf --lib`.
+- [ ] Run full default `cargo test -p motlie-models --lib`; current host fails before
+  Motlie tests in `gemm-f16` because the compiler rejects `fullfp16` inline
+  assembly.
+- [x] Run `cargo check -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf --example chat_multimodal_qwen3_6_27b`.
+- [x] Run `cargo check -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf,llama-cpp-cuda --example chat_multimodal_qwen3_6_27b`.
+- [ ] Add an env-gated smoke path for pre-downloaded Qwen3.6 GGUF artifacts once
+  artifact names and hardware requirements are validated.

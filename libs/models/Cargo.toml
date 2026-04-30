@@ -21,6 +21,7 @@ model-qwen3-4b = ["dep:motlie-model-mistral"]
 model-gemma4-e2b = ["dep:motlie-model-mistral"]
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
+model-qwen3-6-27b-gguf = ["dep:motlie-model-llama-cpp"]
 model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
 model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]
 model-moonshine-streaming = ["dep:motlie-model-moonshine"]
@@ -81,6 +82,11 @@ required-features = ["model-gemma4-e2b"]
 name = "chat_gguf_gwen3_gemma4"
 path = "examples/chat_gguf_gwen3_gemma4/main.rs"
 required-features = ["model-qwen3-4b-gguf"]
+
+[[example]]
+name = "chat_multimodal_qwen3_6_27b"
+path = "examples/chat_multimodal_qwen3_6_27b/main.rs"
+required-features = ["model-qwen3-6-27b-gguf"]
 
 [[example]]
 name = "asr_whisper"
