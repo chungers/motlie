@@ -513,7 +513,7 @@ async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
 }
 
 #[tokio::test]
-async fn quiet_refresh_in_monitor_mode_updates_rows_without_recapturing_detail() {
+async fn quiet_refresh_skips_monitor_recapture() {
     // Reviewer regression test: when monitor mode is active and a quiet
     // session refresh sees newer `session_activity`, the row list must
     // update without re-rendering the monitor detail. The previous
