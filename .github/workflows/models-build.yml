@@ -48,3 +48,9 @@ jobs:
 
       - name: Check curated model examples
         run: ./scripts/check_curated_model_examples.sh --mode check
+
+      - name: Strict clippy for curated model feature bundle
+        run: >-
+          cargo clippy --tests --release -p motlie-models
+          --features cuda,model-piper-en-us-ljspeech-medium,model-whisper-base-en,model-moonshine-streaming,model-sherpa-onnx-streaming,model-qwen3-tts-cpp
+          --no-deps -- -D warnings
