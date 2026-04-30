@@ -1,4 +1,5 @@
 use std::cmp::{max, min};
+use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};
 use ratatui::style::{Color, Style};
@@ -116,6 +117,13 @@ impl std::fmt::Display for HostId {
 }
 
 /// One configured host: stable id, display label, IP, and the connected handle.
+///
+/// Recency math (activity, age) is computed in the binary against the
+/// operator's wall clock. We assume host clocks are NTP-synced with the
+/// operator (typical for any production deployment); wildly skewed clocks
+/// will produce mildly inaccurate "age" text but the selector continues to
+/// function. There is no portable, side-effect-free way to ask older
+/// tmux for its server clock, so the lib does not expose one.
 #[derive(Clone)]
 pub(crate) struct HostEntry {
     pub(crate) id: HostId,
@@ -134,7 +142,7 @@ pub(crate) struct HostEntry {
 /// `TargetSpec` bindings, which are orthogonal to the selector's needs.
 /// `HostFleet` is the selector's *display-and-routing* fleet: a flat list of
 /// hosts with per-row metadata (label, ip) and 1 Hz fan-out polling via
-/// `HostHandle::list_sessions_now()`. See `docs/DESIGN.md` §Multi-host Mode →
+/// `HostHandle::list_sessions()`. See `docs/DESIGN.md` §Multi-host Mode →
 /// §Internal data model for the full rationale.
 #[derive(Clone, Default)]
 pub(crate) struct HostFleet {
@@ -191,16 +199,98 @@ pub(crate) struct SelectedSession {
     pub(crate) name: String,
 }
 
-/// One row in the merged session list. Carries the host id/label and the
-/// host's server clock at refresh time so recency math stays skew-free per
-/// host even in multi-host mode where rows from different hosts are
-/// interleaved.
+/// One row in the merged session list.
+///
+/// Activity vs age have different clock semantics (see DESIGN §Clock handling):
+/// * **Activity** ("recent change") is observer-relative —
+///   `local_now - activity_observed_at_local`, where
+///   `activity_observed_at_local` is the binary's wall clock the last time
+///   the activity timestamp moved forward. Insensitive to host/operator
+///   clock skew because we never compare host time to local time for it.
+/// * **Age** ("session lifetime") is `local_now - session.created` under
+///   the NTP-synced clock assumption. Wildly skewed host clocks produce
+///   mildly inaccurate "age" text but no functional regression.
 #[derive(Clone)]
 pub(crate) struct SessionRow {
     pub(crate) host_id: HostId,
     pub(crate) host_label: String,
-    pub(crate) server_now: u64,
+    pub(crate) local_now: u64,
+    pub(crate) activity_observed_at_local: u64,
     pub(crate) session: SessionInfo,
+}
+
+/// Per-session, per-host activity tracker.
+///
+/// At each refresh tick, for every observed `(host_id, session_id)`:
+/// 1. If we've seen this session before and `session.activity` advanced from
+///    the previous tick, record the move at `local_now`.
+/// 2. If we've seen it and the activity timestamp didn't move, leave the
+///    recorded "last observed change" alone — activity displays as the time
+///    since the recorded mark.
+/// 3. If we've never seen it (first sight), seed the recorded mark to
+///    `local_now − max(0, local_now − session.activity)` so the displayed
+///    recency immediately reflects how stale the activity timestamp is at
+///    first sight, rather than starting at "now". Under the NTP-synced
+///    clock assumption, host activity timestamps and `local_now` come from
+///    the same wall clock, so the seeding math compares them directly.
+///
+/// State is keyed by `(HostId, SessionId)` and pruned when sessions disappear
+/// from the merged listing.
+#[derive(Default, Clone)]
+pub(crate) struct ActivityTracker {
+    last_seen: HashMap<(HostId, String), ActivityState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActivityState {
+    activity_ts: u64,
+    observed_at_local: u64,
+}
+
+impl ActivityTracker {
+    /// Update tracker state for one observation and return the local-time
+    /// mark to display ("when did we last see activity move?").
+    pub(crate) fn observe(
+        &mut self,
+        host_id: &HostId,
+        session_id: &str,
+        activity_ts: u64,
+        local_now: u64,
+    ) -> u64 {
+        let key = (host_id.clone(), session_id.to_string());
+        match self.last_seen.get_mut(&key) {
+            Some(state) => {
+                if activity_ts > state.activity_ts {
+                    state.activity_ts = activity_ts;
+                    state.observed_at_local = local_now;
+                }
+                state.observed_at_local
+            }
+            None => {
+                let host_age = local_now.saturating_sub(activity_ts);
+                let observed_at_local = local_now.saturating_sub(host_age);
+                self.last_seen.insert(
+                    key,
+                    ActivityState {
+                        activity_ts,
+                        observed_at_local,
+                    },
+                );
+                observed_at_local
+            }
+        }
+    }
+
+    /// Drop tracker entries that aren't in `keep`. Bounds memory across
+    /// session create/destroy cycles.
+    pub(crate) fn retain(&mut self, keep: &std::collections::HashSet<(HostId, String)>) {
+        self.last_seen.retain(|key, _| keep.contains(key));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.last_seen.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -433,6 +523,7 @@ pub(crate) struct AppState {
     pub(crate) detail: DetailState,
     pub(crate) status: StatusBanner,
     pub(crate) modal: Option<ModalState>,
+    pub(crate) activity_tracker: ActivityTracker,
 }
 
 impl AppState {
@@ -501,6 +592,7 @@ impl AppState {
             },
             status: StatusBanner::loading("loading sessions"),
             modal: None,
+            activity_tracker: ActivityTracker::default(),
         }
     }
 

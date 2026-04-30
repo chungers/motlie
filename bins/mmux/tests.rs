@@ -71,11 +71,18 @@ fn make_row(session: SessionInfo) -> SessionRow {
     make_row_at(session, 0)
 }
 
-fn make_row_at(session: SessionInfo, server_now: u64) -> SessionRow {
+/// Build a row as if just observed at `now` (operator wall clock; under the
+/// NTP-synced clock assumption this is also effectively the host wall
+/// clock). The `activity_observed_at_local` field is seeded as a first-sight
+/// observation would be: `min(now, session.activity)`, so the displayed
+/// activity reproduces the pre-tracker `now - session.activity` arithmetic.
+fn make_row_at(session: SessionInfo, now: u64) -> SessionRow {
+    let activity_observed_at_local = now.min(session.activity);
     SessionRow {
         host_id: local_host_id(),
         host_label: "host".to_string(),
-        server_now,
+        local_now: now,
+        activity_observed_at_local,
         session,
     }
 }
@@ -84,7 +91,8 @@ fn make_row_for_host(session: SessionInfo, host_id: HostId, host_label: &str) ->
     SessionRow {
         host_id,
         host_label: host_label.to_string(),
-        server_now: 0,
+        local_now: 0,
+        activity_observed_at_local: 0,
         session,
     }
 }
@@ -1664,20 +1672,18 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
 #[tokio::test]
 async fn fleet_fan_out_isolates_per_host_failure() {
     use crate::controller::fetch_fleet_rows;
+    use crate::model::ActivityTracker;
 
-    // Healthy host with one session.
-    let healthy_mock = MockTransport::new().with_response(
-        "display-message -p '__MOTLIE_EPOCH:",
-        "__MOTLIE_EPOCH:500\nrunning $1 10 0 1  400\n",
-    );
+    // Healthy host with one session. The post-#{epoch}-removal command shape
+    // starts with `list-sessions`, so the mock matches on that prefix.
+    let healthy_mock =
+        MockTransport::new().with_response("list-sessions", "running $1 10 0 1  400\n");
     let healthy = HostHandle::new(TransportKind::Mock(healthy_mock), None);
 
-    // Failing host: mock returns a non-empty-state error, so list_sessions_now
+    // Failing host: mock returns a non-empty-state error, so list_sessions
     // surfaces the failure into the fan-out's failures vec rather than aborting.
-    let failing_mock = MockTransport::new().with_error(
-        "display-message -p '__MOTLIE_EPOCH:",
-        "transport: connection refused",
-    );
+    let failing_mock =
+        MockTransport::new().with_error("list-sessions", "transport: connection refused");
     let failing = HostHandle::new(TransportKind::Mock(failing_mock), None);
 
     let fleet = HostFleet::from_entries(vec![
@@ -1685,12 +1691,81 @@ async fn fleet_fan_out_isolates_per_host_failure() {
         ssh_host_entry("ssh://down", "down-host", "y", failing),
     ]);
 
-    let (rows, failures) = fetch_fleet_rows(&fleet).await;
+    let mut tracker = ActivityTracker::default();
+    let (rows, failures) = fetch_fleet_rows(&fleet, &mut tracker).await;
     assert_eq!(rows.len(), 1, "healthy host's row(s) still listed");
     assert_eq!(rows[0].host_label, "up-host");
     assert_eq!(rows[0].session.name, "running");
     assert_eq!(failures.len(), 1, "failing host surfaces one failure entry");
     assert!(failures[0].contains("down-host"));
+    assert_eq!(
+        tracker.len(),
+        1,
+        "tracker holds state only for sessions seen on healthy hosts"
+    );
+}
+
+#[test]
+fn activity_tracker_first_sight_seeds_with_reported_age() {
+    // First-sight semantics: when we observe a session for the first time,
+    // the tracker seeds `activity_observed_at_local` to reflect how stale the
+    // activity timestamp is *right now*, not "treat as fresh".
+    use crate::model::ActivityTracker;
+    let mut tracker = ActivityTracker::default();
+
+    // NTP-synced clocks: activity_ts is on the same scale as local_now.
+    let local_now = 1_000_000;
+    let activity_ts = local_now - 30;
+
+    let observed_at_local = tracker.observe(&local_host_id(), "$1", activity_ts, local_now);
+
+    // Recency = local_now - observed_at_local should equal 30s — exactly the
+    // reported staleness — not 0 ("now") just because we just saw it.
+    assert_eq!(
+        local_now - observed_at_local,
+        30,
+        "first-sight observed_at_local seeds with the reported age"
+    );
+}
+
+#[test]
+fn activity_tracker_advances_only_when_activity_moves_forward() {
+    // Stationary activity → observed_at_local stays put across polls.
+    // When activity advances, tracker resets to the new observation.
+    use crate::model::ActivityTracker;
+    let mut tracker = ActivityTracker::default();
+    let id = local_host_id();
+
+    let first = tracker.observe(&id, "$1", 100, 1_000);
+    let second = tracker.observe(&id, "$1", 100, 1_005);
+    assert_eq!(
+        first, second,
+        "activity_ts unchanged → observed_at_local unchanged across polls"
+    );
+
+    let third = tracker.observe(&id, "$1", 200, 1_010);
+    assert_eq!(
+        third, 1_010,
+        "activity_ts advanced → observed_at_local resets to current local_now"
+    );
+}
+
+#[test]
+fn activity_tracker_retain_drops_disappeared_sessions() {
+    use crate::model::ActivityTracker;
+    use std::collections::HashSet;
+    let mut tracker = ActivityTracker::default();
+    let id = local_host_id();
+
+    tracker.observe(&id, "$1", 100, 1_000);
+    tracker.observe(&id, "$2", 200, 1_000);
+    assert_eq!(tracker.len(), 2);
+
+    let mut keep = HashSet::new();
+    keep.insert((id.clone(), "$2".to_string()));
+    tracker.retain(&keep);
+
+    assert_eq!(tracker.len(), 1, "$1 dropped from tracker after retain");
 }
 
 #[test]

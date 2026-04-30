@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-29 | @opus47-macos-tmux | Updated recency-display semantics: activity column is observer-relative ("time since mmux last saw `session.activity` advance"); age column is `local_now − session.created` under an NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate age text but no functional regression. (Earlier drafts probed the host clock at fleet-connect via `#{epoch}` / `run-shell 'date +%s'`; that approach was abandoned because `run-shell` on tmux ≤ 3.4 corrupts the operator's attached pane.) |
 | 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status reads `mmux - multi-host mode (n)`, session rows insert a hostname column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
 | 2026-04-28 | @gpt55-dgx | Clarified ForceCommand bypass requires exactly `MOTLIE_MMUX_BYPASS=1` and cross-referenced issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated session-list refresh to a single one-second `list_sessions_now()` poller for both activity ordering and structural reconciliation. |
@@ -209,13 +210,21 @@ disappear from the list and a status banner indicator shows the failure;
 other hosts continue to refresh. The failing host re-appears automatically
 when it recovers.
 
-**Skew-free recency math** is preserved per host: each row's recency
-(`active <Nm/h/d>`) is computed against that host's tmux server clock, so
-SSH clock skew between local and remote does not distort the display.
-Cross-host *sorting* uses absolute Unix timestamps from each
-`SessionInfo.activity`; this is correct as long as host clocks are within
-typical NTP drift (seconds). Wildly skewed host clocks may misorder rows
-across hosts, but recency text per row remains correct.
+**Recency math.** The display has two columns separated by ` / `:
+
+* **Activity** (`active`, the left value) is **observer-relative**. Rather
+  than comparing host time to local time, mmux remembers the moment it last
+  saw the host's `session.activity` advance and renders "time since that
+  moment." Insensitive to operator-vs-host clock skew by construction.
+* **Age** (the right value) is `local_now − session.created` under the
+  NTP-synced clock assumption. We do not probe the host's clock — there is
+  no portable, side-effect-free way to do so on older tmux (`run-shell` on
+  tmux ≤ 3.4 corrupts the operator's attached pane). Wildly skewed host
+  clocks produce mildly inaccurate age text but no functional regression.
+
+Cross-host *sorting* uses absolute `SessionInfo.activity` timestamps
+directly; this is correct as long as host clocks are within typical NTP
+drift (seconds).
 
 **Empty case** is unchanged: zero SSH URIs uses localhost; single-host UX
 is identical to pre-multi-host behavior.
@@ -261,14 +270,13 @@ Each session row includes the display name, an attached-client marker, and a
 right-aligned recency column. The attached marker is `*` when tmux reports one
 or more clients attached to the session. Rows are sorted by
 `SessionInfo.activity` descending so the most recently active session appears
-first. The recency column is formatted as `  32h / 14.2d`, where the left value
-is based on `SessionInfo.activity`, the right value is based on
-`SessionInfo.created`, and both are computed through `list_sessions_now()`.
-The recency block is right-aligned with a small right margin. When tmux exposes
-a current epoch, that uses the target tmux server clock; when tmux expands that
-value empty, the library falls back to a local clock clamped to the listed
-session timestamps. Durations use `now`, `m`, `h`, or `d`; days keep at most
-one decimal digit.
+first. The recency column is formatted as `  32h / 14.2d`. The left value
+("active") is observer-relative — time since mmux last saw `session.activity`
+advance — so it is immune to operator-vs-host clock skew. The right value
+("age") is `local_now − session.created` under the NTP-synced clock
+assumption — see §Recency math. The recency block is
+right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
+`d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
 The top status bar uses the same blue background as the bottom status bar. It

@@ -305,8 +305,14 @@ pub(crate) fn session_list_line(
 pub(crate) fn session_recency_text(row: &SessionRow) -> String {
     const RECENCY_FIELD_WIDTH: usize = 5;
 
-    let active = compact_elapsed(row.server_now, row.session.activity);
-    let age = compact_elapsed(row.server_now, row.session.created);
+    // Activity is observer-relative: time since the binary last saw the
+    // host's `session.activity` advance. Naturally insensitive to host/
+    // operator clock skew because both endpoints come from local time.
+    let active = compact_elapsed(row.local_now, row.activity_observed_at_local);
+    // Age is `local_now - session.created` under the NTP-synced clock
+    // assumption. Wildly skewed host clocks produce mildly inaccurate text
+    // but no functional regression.
+    let age = compact_elapsed(row.local_now, row.session.created);
     format!(
         "{active:>width$} / {age:>width$}",
         width = RECENCY_FIELD_WIDTH

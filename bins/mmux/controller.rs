@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -10,8 +12,8 @@ use crate::consts::{
 };
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
-    AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState, SelectedSession,
-    SessionRow, StatusBanner,
+    ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
+    SelectedSession, SessionRow, StatusBanner,
 };
 
 pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
@@ -25,31 +27,50 @@ pub(crate) async fn load_motd_from(host: &HostHandle, path: &Path) -> (String, b
     }
 }
 
-/// Fan out `list_sessions_now()` across all configured hosts in parallel,
-/// merge into a flat `Vec<SessionRow>`, and sort by activity descending.
+/// Fan out `list_sessions()` across all configured hosts in parallel, merge
+/// into a flat `Vec<SessionRow>`, run the activity-tracker over the
+/// observations, and sort by activity descending.
 ///
 /// Per-host failures are tolerated: a failing host's rows simply do not
 /// appear in the merged list, and the failure surfaces in the status banner.
 /// One host failing does not block the others.
-pub(crate) async fn fetch_fleet_rows(fleet: &HostFleet) -> (Vec<SessionRow>, Vec<String>) {
+///
+/// Activity vs age clock semantics (see DESIGN §Clock handling): activity
+/// recency is observer-relative via `ActivityTracker`; age is computed
+/// against `local_now` under the NTP-synced clock assumption. Tracker
+/// state is pruned to drop entries for sessions that have disappeared from
+/// the merged listing.
+pub(crate) async fn fetch_fleet_rows(
+    fleet: &HostFleet,
+    tracker: &mut ActivityTracker,
+) -> (Vec<SessionRow>, Vec<String>) {
     let listings = futures::future::join_all(
         fleet
             .entries
             .iter()
-            .map(|entry| async move { (entry, entry.handle.list_sessions_now().await) }),
+            .map(|entry| async move { (entry, entry.handle.list_sessions().await) }),
     )
     .await;
 
+    // Capture local_now once per refresh so all rows in this tick agree on
+    // the operator-side observation time.
+    let local_now = local_epoch_seconds();
     let mut rows = Vec::new();
     let mut failures = Vec::new();
+    let mut keep_keys: HashSet<(HostId, String)> = HashSet::new();
     for (entry, listing) in listings {
         match listing {
-            Ok(listing) => {
-                for session in listing.sessions {
+            Ok(sessions) => {
+                for session in sessions {
+                    let key = (entry.id.clone(), session.id.as_str().to_string());
+                    let activity_observed_at_local =
+                        tracker.observe(&entry.id, session.id.as_str(), session.activity, local_now);
+                    keep_keys.insert(key);
                     rows.push(SessionRow {
                         host_id: entry.id.clone(),
                         host_label: entry.label.clone(),
-                        server_now: listing.now,
+                        local_now,
+                        activity_observed_at_local,
                         session,
                     });
                 }
@@ -59,7 +80,15 @@ pub(crate) async fn fetch_fleet_rows(fleet: &HostFleet) -> (Vec<SessionRow>, Vec
             }
         }
     }
+    tracker.retain(&keep_keys);
     (rows, failures)
+}
+
+fn local_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 pub(crate) async fn refresh_sessions(
@@ -101,7 +130,7 @@ async fn refresh_sessions_preserving_with_status(
     previous: Option<(HostId, String)>,
     update_status: bool,
 ) -> Result<()> {
-    let (rows, failures) = fetch_fleet_rows(fleet).await;
+    let (rows, failures) = fetch_fleet_rows(fleet, &mut app.activity_tracker).await;
     let closed_monitored = closed_monitored_session(app, &rows);
     let previous_key = previous.clone();
     app.session_list.set_rows_sorted_by_activity(rows);

@@ -1,7 +1,7 @@
 mod attach;
 pub mod capture;
 pub mod control;
-pub mod discovery;
+mod discovery;
 pub mod error;
 pub mod filter;
 pub mod fleet;
@@ -45,6 +45,6 @@ pub use types::{
     CaptureNormalizeMode, CaptureOptions, CaptureResult, ClientInfo, CreateSessionOptions,
     CreateWindowOptions, ExecId, ExecOutput, ExecState, FidelityIssue, GeometrySnapshot,
     HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery, SessionId,
-    SessionInfo, SessionListing, SplitDirection, SplitPaneOptions, SplitSize, TargetAddress,
-    TargetLevel, TargetSpec, TmuxSocket, TransferOptions, WindowInfo,
+    SessionInfo, SplitDirection, SplitPaneOptions, SplitSize, TargetAddress, TargetLevel,
+    TargetSpec, TmuxSocket, TransferOptions, WindowInfo,
 };

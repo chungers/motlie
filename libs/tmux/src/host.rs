@@ -467,12 +467,6 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
-    /// List all tmux sessions on this host with the host tmux server's epoch seconds.
-    pub async fn list_sessions_now(&self) -> Result<SessionListing> {
-        let prefix = self.inner.tmux_prefix().await;
-        discovery::list_sessions_now_with_prefix(&self.inner.transport, &prefix).await
-    }
-
     /// Read a UTF-8 text file from the host with a caller-provided size cap.
     ///
     /// This is intentionally narrower than arbitrary host command execution:
@@ -2334,21 +2328,6 @@ mod tests {
         assert!(target.is_none());
     }
 
-    #[tokio::test]
-    async fn list_sessions_now_returns_server_epoch_and_activity() {
-        let mock = MockTransport::new().with_response(
-            "display-message -p '__MOTLIE_EPOCH:",
-            "__MOTLIE_EPOCH:100\nbuild $0 10 0 1  80\n",
-        );
-        let host = mock_host(mock);
-
-        let listing = host.list_sessions_now().await.unwrap();
-
-        assert_eq!(listing.now, 100);
-        assert_eq!(listing.sessions.len(), 1);
-        assert_eq!(listing.sessions[0].name, "build");
-        assert_eq!(listing.sessions[0].activity, 80);
-    }
 
     #[tokio::test]
     async fn read_text_file_reads_mock_transport_file() {
