@@ -480,7 +480,9 @@ pub enum ArtifactPolicy {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum QuantizationBits {
     Four,
+    Five,
     Eight,
+    FloatEight,
 }
 
 /// Bundle-level declaration of which quantization precisions are supported
