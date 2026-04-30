@@ -28,6 +28,7 @@ const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LlamaCppTextArch {
     Qwen3,
+    Qwen35,
     Gemma4,
 }
 
@@ -37,10 +38,18 @@ pub enum LlamaCppTextArch {
 /// ISQ at load time from safetensors). Each precision level maps to a specific
 /// GGUF file that must be downloaded separately.
 fn gguf_filename(model_prefix: &str, bits: Option<QuantizationBits>) -> String {
+    // INVARIANT: `bits` must already be resolved through the spec's
+    // `QuantizationSupport`; this mapper only names the curated GGUF artifact.
+    format!("{model_prefix}{}", gguf_quant_suffix(bits))
+}
+
+fn gguf_quant_suffix(bits: Option<QuantizationBits>) -> &'static str {
     match bits {
-        Some(QuantizationBits::Four) => format!("{model_prefix}-Q4_K_M.gguf"),
-        Some(QuantizationBits::Eight) => format!("{model_prefix}-Q8_0.gguf"),
-        None => format!("{model_prefix}-f16.gguf"),
+        Some(QuantizationBits::Four) => "-Q4_K_M.gguf",
+        Some(QuantizationBits::Five) => "-Q5_K_M.gguf",
+        Some(QuantizationBits::Eight) => "-Q8_0.gguf",
+        Some(QuantizationBits::FloatEight) => "-FP8.gguf",
+        None => "-f16.gguf",
     }
 }
 
@@ -80,6 +89,18 @@ impl LlamaCppTextSpec {
             default_context_length: 4096,
         }
     }
+
+    pub fn qwen3_6_27b() -> Self {
+        Self {
+            id: BundleId::new("qwen3_6_27b_gguf"),
+            display_name: "Qwen3.6 27B (GGUF)",
+            model_prefix: "Qwen3.6-27B",
+            arch: LlamaCppTextArch::Qwen35,
+            capabilities: Capabilities::chat_and_completion(),
+            quantization: curated_qwen36_gguf_support(),
+            default_context_length: 32768,
+        }
+    }
 }
 
 /// Backend adapter for `llama.cpp` text-generation over GGUF checkpoints.
@@ -104,6 +125,16 @@ impl LlamaCppTextAdapter {
 
     pub fn gemma4() -> Self {
         let spec = LlamaCppTextSpec::gemma4_e2b();
+        Self {
+            arch: spec.arch,
+            capabilities: spec.capabilities,
+            quantization: spec.quantization,
+            default_context_length: spec.default_context_length,
+        }
+    }
+
+    pub fn qwen35() -> Self {
+        let spec = LlamaCppTextSpec::qwen3_6_27b();
         Self {
             arch: spec.arch,
             capabilities: spec.capabilities,
@@ -173,6 +204,27 @@ fn curated_q4_q8_support() -> QuantizationSupport {
     })
 }
 
+/// Qwen3.6 currently has validated GGUF Q4/Q5/Q8 artifacts in the curated repo.
+/// FP8 is intentionally not advertised until a real FP8 GGUF artifact is available.
+fn curated_qwen36_gguf_support() -> QuantizationSupport {
+    QuantizationSupport::with_recommended(
+        [
+            QuantizationBits::Four,
+            QuantizationBits::Five,
+            QuantizationBits::Eight,
+        ],
+        QuantizationBits::Five,
+    )
+    .unwrap_or_else(|e| {
+        tracing::error!("curated quantization construction failed (this is a bug): {e}");
+        QuantizationSupport::without_recommended([
+            QuantizationBits::Four,
+            QuantizationBits::Five,
+            QuantizationBits::Eight,
+        ])
+    })
+}
+
 /// Generic `ModelBundle` implementation backed by `llama-cpp-2`.
 #[derive(Clone, Debug)]
 pub struct LlamaCppTextBundle {
@@ -236,6 +288,33 @@ impl ModelBundle for LlamaCppTextBundle {
 // ---------------------------------------------------------------------------
 // Internal runtime abstraction (enables stub testing without real llama.cpp)
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+struct StubTextRuntime;
+
+#[cfg(test)]
+impl StubTextRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        let prompt = request
+            .messages
+            .last()
+            .and_then(|m| m.content.first())
+            .and_then(|part| match part {
+                motlie_model::ContentPart::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Ok(ChatResponse {
+            content: format!("llama-cpp stub response to: {prompt}"),
+        })
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        Ok(CompletionResponse {
+            content: format!("llama-cpp stub completion of: {}", request.prompt),
+        })
+    }
+}
 
 enum TextRuntime {
     Real(LlamaCppRuntime),
@@ -467,7 +546,11 @@ impl LlamaCppRuntime {
 /// llama.cpp text-only backends do not support multimodal input.
 fn format_chat_prompt(arch: LlamaCppTextArch, request: &ChatRequest) -> Result<String, ModelError> {
     match arch {
-        LlamaCppTextArch::Qwen3 => format_qwen3_prompt(&request.messages),
+        LlamaCppTextArch::Qwen3 | LlamaCppTextArch::Qwen35 => {
+            // Qwen35 currently shares the Qwen3 ChatML template; split this arm
+            // if Qwen3.5 chat tokens or think-block handling diverge.
+            format_qwen3_prompt(&request.messages)
+        }
         LlamaCppTextArch::Gemma4 => format_gemma4_prompt(&request.messages),
     }
 }
@@ -704,7 +787,7 @@ fn resolve_checkpoint_model_path(
         )));
     }
 
-    let expected_suffix = gguf_filename_suffix(resolved_quantization);
+    let expected_suffix = gguf_quant_suffix(resolved_quantization);
     let path = &checkpoint.path;
 
     if path.is_file() {
@@ -759,14 +842,6 @@ fn resolve_checkpoint_model_path(
     }
 }
 
-fn gguf_filename_suffix(bits: Option<QuantizationBits>) -> &'static str {
-    match bits {
-        Some(QuantizationBits::Four) => "-Q4_K_M.gguf",
-        Some(QuantizationBits::Eight) => "-Q8_0.gguf",
-        None => "-f16.gguf",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,34 +849,6 @@ mod tests {
         BackendAdapter, BackendKind, ChatMessage, ModelCheckpoint, QuantizationBits, StartOptions,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct StubTextRuntime;
-
-    impl StubTextRuntime {
-        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-            let prompt = request
-                .messages
-                .last()
-                .and_then(|m| m.content.first())
-                .and_then(|part| match part {
-                    motlie_model::ContentPart::Text(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            Ok(ChatResponse {
-                content: format!("llama-cpp stub response to: {prompt}"),
-            })
-        }
-
-        async fn complete(
-            &self,
-            request: CompletionRequest,
-        ) -> Result<CompletionResponse, ModelError> {
-            Ok(CompletionResponse {
-                content: format!("llama-cpp stub completion of: {}", request.prompt),
-            })
-        }
-    }
 
     #[test]
     fn qwen3_spec_has_expected_identity() {
@@ -827,6 +874,26 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_spec_has_expected_identity_and_quantization() {
+        let spec = LlamaCppTextSpec::qwen3_6_27b();
+
+        assert_eq!(spec.id.as_str(), "qwen3_6_27b_gguf");
+        assert_eq!(spec.display_name, "Qwen3.6 27B (GGUF)");
+        assert_eq!(spec.arch, LlamaCppTextArch::Qwen35);
+        assert_eq!(
+            spec.quantization.recommended(),
+            Some(QuantizationBits::Five)
+        );
+        assert!(spec.quantization.supports(QuantizationBits::Four));
+        assert!(spec.quantization.supports(QuantizationBits::Five));
+        assert!(spec.quantization.supports(QuantizationBits::Eight));
+        assert!(!spec.quantization.supports(QuantizationBits::FloatEight));
+        assert!(spec.capabilities.supports(CapabilityKind::Chat));
+        assert!(spec.capabilities.supports(CapabilityKind::Completion));
+        assert!(!spec.capabilities.supports(CapabilityKind::Vision));
+    }
+
+    #[test]
     fn qwen3_adapter_reports_backend_metadata() {
         let adapter = LlamaCppTextAdapter::qwen3();
 
@@ -848,6 +915,14 @@ mod tests {
         assert_eq!(
             gguf_filename("qwen3-4b", Some(QuantizationBits::Eight)),
             "qwen3-4b-Q8_0.gguf"
+        );
+        assert_eq!(
+            gguf_filename("qwen3-4b", Some(QuantizationBits::Five)),
+            "qwen3-4b-Q5_K_M.gguf"
+        );
+        assert_eq!(
+            gguf_filename("qwen3-4b", Some(QuantizationBits::FloatEight)),
+            "qwen3-4b-FP8.gguf"
         );
         assert_eq!(gguf_filename("qwen3-4b", None), "qwen3-4b-f16.gguf");
     }

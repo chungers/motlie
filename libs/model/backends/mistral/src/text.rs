@@ -429,7 +429,7 @@ async fn build_text_model(
     let mut builder = TextModelBuilder::new(model_target).with_loader_type(arch.loader_type());
 
     if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits));
+        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
     }
     if should_force_cpu() {
         builder = builder.with_force_cpu();
@@ -585,11 +585,16 @@ mod tests {
 
     #[test]
     fn quantization_bits_map_to_isq_bits() {
-        assert_eq!(map_quantization_bits(QuantizationBits::Four), IsqBits::Four);
         assert_eq!(
-            map_quantization_bits(QuantizationBits::Eight),
+            map_quantization_bits(QuantizationBits::Four).expect("q4 should map"),
+            IsqBits::Four
+        );
+        assert_eq!(
+            map_quantization_bits(QuantizationBits::Eight).expect("q8 should map"),
             IsqBits::Eight
         );
+        assert!(map_quantization_bits(QuantizationBits::Five).is_err());
+        assert!(map_quantization_bits(QuantizationBits::FloatEight).is_err());
     }
 
     #[test]
