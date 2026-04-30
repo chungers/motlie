@@ -1327,6 +1327,68 @@ impl Target {
         &self.address
     }
 
+    /// Set a namespaced metadata tag on this session.
+    ///
+    /// Session tags are stored as tmux user-defined session options. For
+    /// `prefix = "mmux"` and `key = "role"`, the underlying option name is
+    /// `@mmux/role`.
+    pub async fn set_tag(&self, prefix: &str, key: &str, value: &str) -> Result<()> {
+        let session = self.session_for_tags("set_tag")?;
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        control::set_session_tag_with_prefix(
+            &self.inner.transport,
+            &tmux_prefix,
+            session.id.as_str(),
+            prefix,
+            key,
+            value,
+        )
+        .await
+    }
+
+    /// Read a namespaced metadata tag from this session.
+    ///
+    /// Returns `Ok(None)` when the tag is not present.
+    pub async fn read_tag(&self, prefix: &str, key: &str) -> Result<Option<String>> {
+        let session = self.session_for_tags("read_tag")?;
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        control::read_session_tag_with_prefix(
+            &self.inner.transport,
+            &tmux_prefix,
+            session.id.as_str(),
+            prefix,
+            key,
+        )
+        .await
+    }
+
+    /// List all metadata tags under `prefix` for this session.
+    pub async fn list_tags(&self, prefix: &str) -> Result<Vec<SessionTag>> {
+        let session = self.session_for_tags("list_tags")?;
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        control::list_session_tags_with_prefix(
+            &self.inner.transport,
+            &tmux_prefix,
+            session.id.as_str(),
+            prefix,
+        )
+        .await
+    }
+
+    fn session_for_tags(&self, operation: &'static str) -> Result<&SessionInfo> {
+        match &self.address {
+            TargetAddress::Session(session) => Ok(session),
+            TargetAddress::Window(_) => Err(Error::UnsupportedTarget {
+                operation,
+                level: TargetLevel::Window,
+            }),
+            TargetAddress::Pane(_) => Err(Error::UnsupportedTarget {
+                operation,
+                level: TargetLevel::Pane,
+            }),
+        }
+    }
+
     // --- Navigation ---
 
     /// List children one level down.
@@ -2646,6 +2708,126 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("requires a window or pane"));
+    }
+
+    #[tokio::test]
+    async fn session_tags_set_read_and_list() {
+        let mock = MockTransport::new()
+            .with_response("set-option -t '$0' @mmux/foo 'bar'", "")
+            .with_response(
+                "show-option -q -t '$0' @mmux/foo",
+                "@mmux/foo \"hello world\"\n",
+            )
+            .with_response(
+                "show-options -t '$0'",
+                "@mmux/foo \"hello world\"\n@other/foo nope\n@mmux/empty ''\n",
+            );
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+
+        target.set_tag("mmux", "foo", "bar").await.unwrap();
+        let value = target.read_tag("mmux", "foo").await.unwrap();
+        let tags = target.list_tags("mmux").await.unwrap();
+
+        assert_eq!(value, Some("hello world".to_string()));
+        assert_eq!(
+            tags,
+            vec![
+                SessionTag {
+                    key: "foo".to_string(),
+                    value: "hello world".to_string(),
+                },
+                SessionTag {
+                    key: "empty".to_string(),
+                    value: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_tag_read_missing_returns_none() {
+        let mock = MockTransport::new().with_response("show-option -q -t '$0' @mmux/missing", "");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+
+        assert_eq!(target.read_tag("mmux", "missing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn session_tags_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("set-option -t '$7' @mmux/foo 'bar'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target.set_tag("mmux", "foo", "bar").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_tags_reject_invalid_inputs_before_exec() {
+        let mock = MockTransport::new()
+            .with_error("set-option", "validation should run before exec")
+            .with_error("show-option", "validation should run before exec");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+
+        assert!(target.set_tag("mmux/team", "foo", "bar").await.is_err());
+        assert!(target.set_tag("mmux", "foo/bar", "bar").await.is_err());
+        assert!(target.read_tag("mmux", "foo/bar").await.is_err());
+        assert!(target.list_tags("mmux/team").await.is_err());
+
+        let large = "x".repeat(control::SESSION_TAG_VALUE_MAX_BYTES + 1);
+        assert!(target.set_tag("mmux", "large", &large).await.is_err());
+        assert!(target
+            .set_tag("mmux", "newline", "line1\nline2")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn session_tags_reject_non_session_targets() {
+        let host = mock_host(MockTransport::new().with_default(""));
+        let window_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Window(WindowInfo {
+                session_id: "$0".to_string(),
+                session_name: "build".to_string(),
+                index: 0,
+                name: "main".to_string(),
+                active: true,
+                pane_count: 1,
+                layout: "layout".to_string(),
+            }),
+        };
+        let pane_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(PaneAddress {
+                pane_id: "%1".to_string(),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+        };
+
+        assert!(window_target.set_tag("mmux", "foo", "bar").await.is_err());
+        assert!(window_target.read_tag("mmux", "foo").await.is_err());
+        assert!(window_target.list_tags("mmux").await.is_err());
+        assert!(pane_target.set_tag("mmux", "foo", "bar").await.is_err());
+        assert!(pane_target.read_tag("mmux", "foo").await.is_err());
+        assert!(pane_target.list_tags("mmux").await.is_err());
     }
 
     #[tokio::test]

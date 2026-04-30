@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add `SessionTag`, `set_tag()`, `read_tag()`, and `list_tags()` with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
 | 2026-04-28 | @gpt55-dgx: PR #228 selector cleanup — document the implemented non-empty `SessionId` wrapper for `SessionInfo.id` so stable id dispatch cannot silently fall back to names. | Discovery Types |
 | 2026-04-09 | @claude: Note anyhow→thiserror migration in dependency table and prototype sections. Library now uses typed `Error` enum via `thiserror`; `anyhow` retained as dev-dependency only. Prototype code snippets are pre-migration and preserved as historical context. | Dependencies, Prototype |
 | 2026-03-25 | @claude: DC33 — per-source coherent history rendering. Coalesce same-source chunks, add `RenderMode::PerSource`, per-source budgets. See [`docs/HISTORY.md`](./HISTORY.md). | DC28, DC33, History |
@@ -3844,7 +3845,7 @@ mirrors this uniformity avoids three problems:
 | Component | Responsibility |
 |-----------|---------------|
 | `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring`, `start_monitoring_session`, `stop_monitoring_session` |
-| `Target` | Entity-level: creation (`new_window`, `split_pane`), I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
+| `Target` | Entity-level: session metadata (`set_tag`, `read_tag`, `list_tags`), creation (`new_window`, `split_pane`), I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
 | `SessionMonitorHandle` | Monitoring lifecycle + `Deref<Target=Target>` — adds `shutdown`, `is_active` |
 
 - **Cheap handles**: `Target` holds `Arc<HostHandleInner>` + `TargetAddress` enum.
@@ -3858,6 +3859,47 @@ mirrors this uniformity avoids three problems:
 `is_active()`. Everything else comes from `Target` via `Deref`. This means
 `monitor.capture()`, `monitor.children()`, `monitor.send_text("x")` etc. all work
 without any explicit delegation code.
+
+### DC34: Session Metadata Tags
+
+**Decision**: Session metadata is represented as tmux user-defined session options
+behind a small `Target` API:
+
+```rust
+pub struct SessionTag {
+    pub key: String,
+    pub value: String,
+}
+
+impl Target {
+    pub async fn set_tag(&self, prefix: &str, key: &str, value: &str) -> Result<()>;
+    pub async fn read_tag(&self, prefix: &str, key: &str) -> Result<Option<String>>;
+    pub async fn list_tags(&self, prefix: &str) -> Result<Vec<SessionTag>>;
+}
+```
+
+For `prefix = "mmux"` and `key = "role"`, the underlying tmux option is
+`@mmux/role`. The public key in `SessionTag` is the unprefixed key (`role`).
+
+**Scope**:
+- Session targets only. Window and pane targets return `UnsupportedTarget`.
+- Prefix and key are stable ASCII components: letters, digits, `.`, `_`, `-`.
+- Values are UTF-8 strings, may be empty, reject control characters, and are
+  capped at 2 KiB.
+- Dispatch uses the stable `SessionId` from `SessionInfo`, not the display name.
+
+**Rationale**: tmux user-defined options are the closest native mechanism to
+session metadata: they live in tmux state, survive for the session lifetime, and
+can be written by processes inside the session. Keeping this API session-only
+avoids a single method whose meaning changes across session/window/pane scopes.
+
+**Command boundary**: The implementation uses direct tmux option commands through
+the existing control module (`set-option`, `show-option -q`, `show-options`) and
+does not run shell pipelines such as `grep`. A persistent control-mode command
+client was not introduced for this slice because `tmux -C attach-session` creates
+an attached client and would perturb `attached_count`/client state for metadata
+polling. If the library later grows a non-attaching command channel, these helpers
+can move under it without changing the public contract.
 
 ### DC17: Type Safety via Target + TargetAddress
 

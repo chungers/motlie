@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::set_tag()`, `read_tag()`, `list_tags()`, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
 | 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
@@ -49,6 +50,7 @@ in [`examples/README.md`](../examples/README.md).
    - 7a. [Host Event Stream](#host-event-stream)
 8. [Target and Navigation](#8-target-and-navigation)
    - 8a. [Current PTY Attach](#current-pty-attach)
+   - 8b. [Session Tags](#session-tags)
 9. [Sending Input](#9-sending-input)
 10. [Capturing Output](#10-capturing-output)
 11. [Structured Command Execution](#11-structured-command-execution)
@@ -851,6 +853,46 @@ stopped-job state after `Ctrl-b d`.
 
 `AttachExit::shell_status()` maps normal exits to their exit code and Unix
 signal exits to `128 + signal`, which is the value CLI callers should return.
+
+### Session Tags
+
+Session tags store small metadata values on tmux sessions using user-defined
+session options. The API is session-target only:
+
+```rust
+let session = host
+    .session("build")
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("build not found".into()))?;
+
+session.set_tag("mmux", "owner", "david").await?;
+session.set_tag("mmux", "role", "worker").await?;
+
+assert_eq!(
+    session.read_tag("mmux", "owner").await?,
+    Some("david".to_string())
+);
+
+let tags = session.list_tags("mmux").await?;
+```
+
+For `prefix = "mmux"` and `key = "owner"`, the tmux option is stored as
+`@mmux/owner`. `SessionTag { key, value }` returns the key without the namespace
+prefix.
+
+Contract:
+- `set_tag(prefix, key, value)` writes one tag.
+- `read_tag(prefix, key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
+- `list_tags(prefix)` returns every valid tag under that namespace.
+- Prefixes and keys must be non-empty ASCII letters, digits, `.`, `_`, or `-`.
+- Values are UTF-8 strings, may be empty, must not contain control characters,
+  and are capped at 2 KiB.
+- These methods return `UnsupportedTarget` for window and pane targets.
+
+The implementation targets the stable tmux `SessionId` held by `SessionInfo`,
+not the mutable display name. Tag reads use `show-option -q` so missing and empty
+values remain distinct; listing uses `show-options` and filters for the requested
+namespace without shell pipelines.
 
 ### Create child windows and panes
 
@@ -2262,6 +2304,7 @@ assert!(issues.is_empty());
 |------|-----------|
 | `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
 | `SessionInfo` | name, id (`SessionId`), created, activity (aggregated `max(session_activity, max(window_activity))` per issue #237), attached_count, window_count, group |
+| `SessionTag` | key, value for one namespaced session metadata tag |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |
