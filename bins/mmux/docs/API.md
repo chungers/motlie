@@ -152,9 +152,11 @@ Direct tmux control-mode host notification wiring is reserved for a future
 event-driven implementation; the parser is documented as dormant plumbing.
 
 `mmux` keeps this library stream available but does not start it for the TUI
-session list. The selector uses one quiet `list_sessions_now()` refresh per
+session list. The selector uses one quiet `list_sessions()` refresh per
 second instead; that single snapshot updates recency text, activity-descending
 sort order, structural session state, and monitored-session closure handling.
+Recency is computed observer-side via an `ActivityTracker` rather than from
+a host-clock snapshot.
 
 ### Windowed Scrollback
 
@@ -253,16 +255,17 @@ from the live session list length: `Sessions [n]`. List rows show the display
 name, attached marker, and right-aligned `<active> / <age>` recency text with a
 small right margin; stable session ids stay internal for dispatch. The attached
 marker is `*` when `SessionInfo::is_attached()` is true. The list is sorted by
-`SessionInfo.activity` descending, with name/id tie-breakers only for stable
-display order; `preserve_selection()` re-finds the highlighted row by stable
-session id after each refresh. A single quiet one-second `list_sessions_now()`
-refresh keeps this activity ordering current and notices structural session
-changes. Recency uses `HostHandle::list_sessions_now()` so the session
-`activity` and `created`
-timestamps are compared against the target tmux server clock when tmux exposes
-one; tmux versions that expand `#{epoch}` as empty use the library fallback
-clock clamped to the listed session timestamps. Durations use `now`, `m`, `h`,
-or `d`; day values keep at most one decimal digit.
+`activity_observed_at_local` descending — operator-side wall clock at the
+moment mmux last saw the row's `session.activity` advance — with name/id
+tie-breakers for stable display order. `preserve_selection()` re-finds the
+highlighted row by stable session id after each refresh. A single quiet
+one-second `list_sessions()` refresh keeps this activity ordering current
+and notices structural session changes. Recency text is observer-relative
+for the activity column (`local_now − activity_observed_at_local`) and
+`local_now − session.created` for the age column under an NTP-synced
+clock assumption — see `DESIGN.md` §Clock Handling for the rationale.
+Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
+digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
 the bottom status start with `help`, then `pane`, `monitor`, `enter/attach`,

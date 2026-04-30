@@ -1,10 +1,11 @@
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use motlie_tmux::{HostHandle, SshConfig, SSH_DEFAULT_PORT};
 
 use crate::cli::Cli;
+use crate::model::{HostEntry, HostFleet, HostId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostIdentity {
@@ -32,16 +33,65 @@ impl HostIdentity {
     }
 }
 
-pub(crate) async fn connect_host(cli: &Cli) -> Result<(HostHandle, HostIdentity)> {
-    match &cli.ssh_uri {
-        Some(uri) => {
-            let config = SshConfig::parse(uri).context("parse ssh target")?;
-            let identity = HostIdentity::new(config.host().to_string(), config.port());
-            let host = config.connect().await.context("connect ssh target")?;
-            Ok((host, identity))
-        }
-        None => Ok((HostHandle::local(), HostIdentity::local())),
+/// Connect to all hosts named on the CLI. With zero URIs, returns a fleet
+/// containing only the local host. With one or more URIs, connects to each
+/// concurrently. A single-URI fleet stays in single-host UX; two or more
+/// URIs implicitly activate multi-host mode in the renderer.
+///
+/// Per-host connect failure aborts startup if no hosts succeed; otherwise
+/// the failures are surfaced via stderr but successful hosts proceed. (For
+/// v1 we keep startup strict: all-or-nothing for explicit URIs to avoid
+/// silently dropping hosts the operator named.)
+///
+/// Duplicate URIs are rejected up-front. `HostId` is derived from the URI
+/// string; two entries with the same id would collapse `HostFleet::entry`
+/// lookups, selection-preservation keys, and `ActivityTracker` keys onto
+/// each other. Reject explicitly rather than silently degrade.
+pub(crate) async fn connect_fleet(cli: &Cli) -> Result<HostFleet> {
+    if cli.ssh_uris.is_empty() {
+        let entry = HostEntry {
+            id: HostId::local(),
+            label: local_hostname(),
+            ip_address: HostIdentity::local().ip_address,
+            handle: HostHandle::local(),
+        };
+        return Ok(HostFleet::from_entries(vec![entry]));
     }
+
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for uri in &cli.ssh_uris {
+        if !seen.insert(uri.as_str()) {
+            return Err(anyhow!(
+                "duplicate SSH URI '{uri}' on the command line; each host must appear once"
+            ));
+        }
+    }
+
+    // Connect concurrently. try_join_all so a single bad URI fails fast and
+    // surfaces clearly rather than silently dropping hosts the operator
+    // named on the command line.
+    let futures = cli.ssh_uris.iter().map(|uri| async move {
+        connect_ssh_entry(uri)
+            .await
+            .with_context(|| format!("connect host '{uri}'"))
+    });
+    let entries = futures::future::try_join_all(futures).await?;
+    if entries.is_empty() {
+        return Err(anyhow!("no hosts configured"));
+    }
+    Ok(HostFleet::from_entries(entries))
+}
+
+async fn connect_ssh_entry(uri: &str) -> Result<HostEntry> {
+    let config = SshConfig::parse(uri).context("parse ssh target")?;
+    let identity = HostIdentity::new(config.host().to_string(), config.port());
+    let handle = config.connect().await.context("connect ssh target")?;
+    Ok(HostEntry {
+        id: HostId::from_ssh_uri(uri),
+        label: identity.hostname,
+        ip_address: identity.ip_address,
+        handle,
+    })
 }
 
 fn local_hostname() -> String {

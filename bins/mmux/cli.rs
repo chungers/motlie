@@ -16,8 +16,10 @@ pub(crate) struct Cli {
     /// Print the selected session name for shell-script integration instead of attaching.
     #[arg(long)]
     pub(crate) script: bool,
-    /// Optional SSH URI target. Omitted means local host.
-    pub(crate) ssh_uri: Option<String>,
+    /// Optional SSH URI target(s). Omitted means local host. Two or more URIs
+    /// activate multi-host mode (issue #235): aggregated activity-sorted list
+    /// across hosts; per-row hostname column; MOTD pane hidden.
+    pub(crate) ssh_uris: Vec<String>,
 }
 
 impl Cli {

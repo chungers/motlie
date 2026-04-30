@@ -14,6 +14,7 @@ path = "main.rs"
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
+futures = "0.3"
 motlie-tmux = { path = "../../libs/tmux" }
 clap = { version = "4.5.58", features = ["derive"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

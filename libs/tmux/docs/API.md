@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
 | 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
 | 2026-04-28 | @gpt55-dgx | Replaced the selector-oriented host shell hook note with bounded `HostHandle::read_text_file`, documented `SessionId` as the stable non-empty session id type, and clarified that host events are currently polling-backed. |
@@ -658,16 +659,22 @@ for s in &sessions {
 
 ### List sessions with recency data
 
-`list_sessions_now()` returns the same session rows plus a tmux-server clock
-snapshot. This avoids local/remote clock skew when a selector or dashboard
-renders "active N ago" or "age N" for an SSH target when the running tmux
-version exposes a current epoch format.
+`list_sessions()` returns rows whose `SessionInfo.activity` is the
+**aggregated** activity timestamp: `max(session_activity, max(window_activity
+across the session's windows))`. The chained `list-windows -a` query and
+aggregation are internal to the lib; callers see a single field. See issue
+#237 for why aggregation is necessary (tmux's `session_activity` only tracks
+attached-client input, not program output).
 
 ```rust
-let listing = host.list_sessions_now().await?;
-for session in &listing.sessions {
-    let active_secs = listing.now.saturating_sub(session.activity);
-    let age_secs = listing.now.saturating_sub(session.created);
+let sessions = host.list_sessions().await?;
+let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
+for session in &sessions {
+    let active_secs = now.saturating_sub(session.activity);
+    let age_secs = now.saturating_sub(session.created);
     println!(
         "{} active={}s age={}s",
         session.name, active_secs, age_secs
@@ -675,14 +682,14 @@ for session in &listing.sessions {
 }
 ```
 
-`SessionInfo.activity` is tmux `#{session_activity}` in epoch seconds.
-`SessionListing.now` is tmux `#{epoch}` from the same tmux invocation as the
-session list when tmux expands that format. tmux 3.4 and some other versions
-expand `#{epoch}` to an empty string; in that case `SessionListing.now` falls
-back to the local selector clock clamped to at least the maximum
-`session_created` / `session_activity` timestamp in the listing. If there is no
-tmux server or no sessions, the API returns
-`SessionListing { now: <local fallback epoch>, sessions: vec![] }`.
+The lib does not ship a host-clock probe. There is no portable,
+side-effect-free way to read the host's wall clock across tmux versions
+(`#{epoch}` is tmux 3.7+; `run-shell 'date +%s'` corrupts the operator's
+attached pane on tmux ≤ 3.4). Consumers that need true skew-free recency
+should keep an observer-relative tracker — see the mmux selector for an
+example. Under the typical NTP-synced clock assumption, comparing
+`session.activity` against an operator-side `time(NULL)` is correct to
+within sub-second drift.
 
 ### Find a session by name
 
@@ -2254,8 +2261,7 @@ assert!(issues.is_empty());
 | Type | Key fields |
 |------|-----------|
 | `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
-| `SessionInfo` | name, id (`SessionId`), created, activity, attached_count, window_count, group |
-| `SessionListing` | server-clock `now` epoch seconds plus `Vec<SessionInfo>` from `list_sessions_now()` |
+| `SessionInfo` | name, id (`SessionId`), created, activity (aggregated `max(session_activity, max(window_activity))` per issue #237), attached_count, window_count, group |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |

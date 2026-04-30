@@ -129,12 +129,6 @@ impl SessionInfo {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionListing {
-    pub now: u64,
-    pub sessions: Vec<SessionInfo>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WindowInfo {
     pub session_id: String,
     pub session_name: String,

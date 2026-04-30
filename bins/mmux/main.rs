@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
-use motlie_tmux::HostHandle;
 
 use cli::{select_layout, Cli};
 use controller::{
@@ -24,8 +23,8 @@ use controller::{
     stop_detail_source, KeyOutcome,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
-use model::{AppState, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
-use target_host::{connect_host, HostIdentity};
+use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
+use target_host::connect_fleet;
 use terminal::TerminalSession;
 
 #[derive(Debug)]
@@ -52,12 +51,12 @@ async fn run() -> Result<i32> {
     }
 
     let cli = Cli::parse();
-    let (host, identity) = connect_host(&cli).await?;
+    let fleet = connect_fleet(&cli).await?;
     let layout = select_layout(cli.forced_layout());
     let mut ui_state = RetainedUiState::new(layout);
 
     loop {
-        let outcome = run_selector_once(&host, &identity, layout, &mut ui_state).await?;
+        let outcome = run_selector_once(&fleet, layout, &mut ui_state).await?;
         let selected = match outcome {
             SelectorOutcome::Selected(selected) => selected,
             SelectorOutcome::Cancelled => return Ok(if cli.script { 1 } else { 0 }),
@@ -68,7 +67,14 @@ async fn run() -> Result<i32> {
             return Ok(0);
         }
 
-        let target = match host.session_by_id(&selected.id).await? {
+        let Some(host) = fleet.entry(&selected.host_id) else {
+            eprintln!(
+                "mmux: host {} no longer connected; returning to selector",
+                selected.host_label
+            );
+            continue;
+        };
+        let target = match host.handle.session_by_id(&selected.id).await? {
             Some(target) => target,
             None => {
                 eprintln!("mmux: selected session disappeared; returning to selector");
@@ -77,7 +83,7 @@ async fn run() -> Result<i32> {
         };
         let exit = target.attach_current_pty().await?;
         let code = exit.shell_status();
-        if should_reenter_after_attach(&host, &selected, &exit).await? {
+        if should_reenter_after_attach(&fleet, &selected, &exit).await? {
             continue;
         }
         return Ok(code);
@@ -85,33 +91,36 @@ async fn run() -> Result<i32> {
 }
 
 async fn should_reenter_after_attach(
-    host: &HostHandle,
+    fleet: &HostFleet,
     selected: &SelectedSession,
     exit: &motlie_tmux::AttachExit,
 ) -> Result<bool> {
     if exit.success() {
         return Ok(true);
     }
-    Ok(host.session_by_id(&selected.id).await?.is_some())
+    let Some(entry) = fleet.entry(&selected.host_id) else {
+        return Ok(false);
+    };
+    Ok(entry.handle.session_by_id(&selected.id).await?.is_some())
 }
 
 async fn run_selector_once(
-    host: &HostHandle,
-    identity: &HostIdentity,
+    fleet: &HostFleet,
     layout: LayoutMode,
     ui_state: &mut RetainedUiState,
 ) -> Result<SelectorOutcome> {
-    let (motd, placeholder) = load_motd(host).await;
-    let mut app = AppState::new_with_host_ip(
-        identity.hostname.clone(),
-        identity.ip_address.clone(),
-        layout,
-        motd,
-        placeholder,
-    );
+    // MOTD is per-host; only meaningful in single-host mode. Multi-host mode
+    // hides the MOTD pane entirely (issue #235).
+    let motd = if fleet.is_multi() {
+        None
+    } else {
+        let entry = fleet.first().expect("fleet has at least one entry");
+        Some(load_motd(&entry.handle).await)
+    };
+    let mut app = AppState::with_fleet(fleet.clone(), layout, motd);
     ui_state.apply_to(&mut app);
-    let previous_selection = ui_state.selected_session_id();
-    refresh_sessions_preserving(host, &mut app, true, previous_selection).await?;
+    let previous_selection = ui_state.selected_session_key();
+    refresh_sessions_preserving(fleet, &mut app, true, previous_selection).await?;
 
     let mut terminal = TerminalSession::enter()?;
     let mut last_detail_refresh = Instant::now();
@@ -119,13 +128,13 @@ async fn run_selector_once(
 
     loop {
         if last_session_refresh.elapsed() >= Duration::from_secs(1) {
-            if let Err(err) = refresh_sessions_quiet(host, &mut app, false).await {
+            if let Err(err) = refresh_sessions_quiet(fleet, &mut app, false).await {
                 app.status = StatusBanner::error(format!("session refresh failed: {err:#}"));
             }
             last_session_refresh = Instant::now();
         }
         if last_detail_refresh.elapsed() >= Duration::from_millis(750) {
-            refresh_detail(host, &mut app, false).await?;
+            refresh_detail(fleet, &mut app, false).await?;
             last_detail_refresh = Instant::now();
         }
         terminal.draw(&mut app)?;
@@ -137,7 +146,7 @@ async fn run_selector_once(
             if key.kind == KeyEventKind::Release {
                 continue;
             }
-            match handle_key(host, &mut app, key).await? {
+            match handle_key(fleet, &mut app, key).await? {
                 KeyOutcome::Continue => {}
                 KeyOutcome::Select(selected) => {
                     ui_state.update_from(&app);

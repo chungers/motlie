@@ -1,6 +1,7 @@
 use std::cmp::{max, min};
+use std::collections::HashMap;
 
-use motlie_tmux::SessionInfo;
+use motlie_tmux::{HostHandle, SessionInfo};
 use ratatui::style::{Color, Style};
 
 use crate::consts::{
@@ -36,6 +37,8 @@ pub(crate) enum ModalState {
         button: Button,
     },
     KillSession {
+        host_id: HostId,
+        host_label: String,
         id: String,
         name: String,
         button: Button,
@@ -88,16 +91,212 @@ pub(crate) enum ModalBody {
     NewSession { input: String },
 }
 
+/// Stable identity for a target host across the binary. Either a normalized
+/// SSH URI (for SSH targets) or the literal `"localhost"` (for the local host).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct HostId(String);
+
+impl HostId {
+    pub(crate) fn local() -> Self {
+        Self("localhost".to_string())
+    }
+
+    pub(crate) fn from_ssh_uri(uri: &str) -> Self {
+        Self(uri.to_string())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for HostId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// One configured host: stable id, display label, IP, and the connected handle.
+///
+/// Recency math (activity, age) is computed in the binary against the
+/// operator's wall clock. We assume host clocks are NTP-synced with the
+/// operator (typical for any production deployment); wildly skewed clocks
+/// will produce mildly inaccurate "age" text but the selector continues to
+/// function. There is no portable, side-effect-free way to ask older
+/// tmux for its server clock, so the lib does not expose one.
+#[derive(Clone)]
+pub(crate) struct HostEntry {
+    pub(crate) id: HostId,
+    pub(crate) label: String,
+    pub(crate) ip_address: String,
+    pub(crate) handle: HostHandle,
+}
+
+/// Collection of one or more configured hosts. Always has at least one entry
+/// (localhost when no SSH URIs are specified). Multi-host mode is implicit:
+/// `is_multi() == true` iff `len() > 1`.
+///
+/// This is **not** `motlie_tmux::Fleet` (`libs/tmux/src/fleet.rs`). That type
+/// is a monitoring/automation registry — it owns a shared `OutputBus`,
+/// manages per-host `MonitorHandle` lifecycle, and stores workstream alias→
+/// `TargetSpec` bindings, which are orthogonal to the selector's needs.
+/// `HostFleet` is the selector's *display-and-routing* fleet: a flat list of
+/// hosts with per-row metadata (label, ip) and 1 Hz fan-out polling via
+/// `HostHandle::list_sessions()`. See `docs/DESIGN.md` §Multi-host Mode →
+/// §Internal data model for the full rationale.
+#[derive(Clone, Default)]
+pub(crate) struct HostFleet {
+    pub(crate) entries: Vec<HostEntry>,
+}
+
+/// Cap for the hostname column width in multi-host row format. Longer labels
+/// are truncated with an ellipsis to keep rows readable.
+pub(crate) const HOST_LABEL_COLUMN_MAX: usize = 24;
+
+impl HostFleet {
+    pub(crate) fn from_entries(entries: Vec<HostEntry>) -> Self {
+        Self { entries }
+    }
+
+    pub(crate) fn is_multi(&self) -> bool {
+        self.entries.len() > 1
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn entry(&self, id: &HostId) -> Option<&HostEntry> {
+        self.entries.iter().find(|entry| &entry.id == id)
+    }
+
+    pub(crate) fn first(&self) -> Option<&HostEntry> {
+        self.entries.first()
+    }
+
+    /// Width of the hostname column when rendered in multi-host rows.
+    /// Returns 0 for single-host (column is omitted).
+    pub(crate) fn host_label_width(&self) -> usize {
+        if !self.is_multi() {
+            return 0;
+        }
+        self.entries
+            .iter()
+            .map(|entry| entry.label.chars().count().min(HOST_LABEL_COLUMN_MAX))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Identity of a session as returned to callers from the highlighted row.
+/// Carries the host id and label so dispatch (attach/kill/monitor) can route
+/// to the correct `HostHandle` and render messages with the host context.
 #[derive(Debug, Clone)]
 pub(crate) struct SelectedSession {
+    pub(crate) host_id: HostId,
+    pub(crate) host_label: String,
     pub(crate) id: String,
     pub(crate) name: String,
+}
+
+/// One row in the merged session list.
+///
+/// Activity vs age have different clock semantics (see DESIGN §Clock handling):
+/// * **Activity** ("recent change") is observer-relative —
+///   `local_now - activity_observed_at_local`, where
+///   `activity_observed_at_local` is the binary's wall clock the last time
+///   the activity timestamp moved forward. Insensitive to host/operator
+///   clock skew because we never compare host time to local time for it.
+/// * **Age** ("session lifetime") is `local_now - session.created` under
+///   the NTP-synced clock assumption. Wildly skewed host clocks produce
+///   mildly inaccurate "age" text but no functional regression.
+#[derive(Clone)]
+pub(crate) struct SessionRow {
+    pub(crate) host_id: HostId,
+    pub(crate) host_label: String,
+    pub(crate) local_now: u64,
+    pub(crate) activity_observed_at_local: u64,
+    pub(crate) session: SessionInfo,
+}
+
+/// Per-session, per-host activity tracker.
+///
+/// At each refresh tick, for every observed `(host_id, session_id)`:
+/// 1. If we've seen this session before and `session.activity` advanced from
+///    the previous tick, record the move at `local_now`.
+/// 2. If we've seen it and the activity timestamp didn't move, leave the
+///    recorded "last observed change" alone — activity displays as the time
+///    since the recorded mark.
+/// 3. If we've never seen it (first sight), seed the recorded mark to
+///    `local_now − max(0, local_now − session.activity)` so the displayed
+///    recency immediately reflects how stale the activity timestamp is at
+///    first sight, rather than starting at "now". Under the NTP-synced
+///    clock assumption, host activity timestamps and `local_now` come from
+///    the same wall clock, so the seeding math compares them directly.
+///
+/// State is keyed by `(HostId, SessionId)` and pruned when sessions disappear
+/// from the merged listing.
+#[derive(Default, Clone)]
+pub(crate) struct ActivityTracker {
+    last_seen: HashMap<(HostId, String), ActivityState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActivityState {
+    activity_ts: u64,
+    observed_at_local: u64,
+}
+
+impl ActivityTracker {
+    /// Update tracker state for one observation and return the local-time
+    /// mark to display ("when did we last see activity move?").
+    pub(crate) fn observe(
+        &mut self,
+        host_id: &HostId,
+        session_id: &str,
+        activity_ts: u64,
+        local_now: u64,
+    ) -> u64 {
+        let key = (host_id.clone(), session_id.to_string());
+        match self.last_seen.get_mut(&key) {
+            Some(state) => {
+                if activity_ts > state.activity_ts {
+                    state.activity_ts = activity_ts;
+                    state.observed_at_local = local_now;
+                }
+                state.observed_at_local
+            }
+            None => {
+                let host_age = local_now.saturating_sub(activity_ts);
+                let observed_at_local = local_now.saturating_sub(host_age);
+                self.last_seen.insert(
+                    key,
+                    ActivityState {
+                        activity_ts,
+                        observed_at_local,
+                    },
+                );
+                observed_at_local
+            }
+        }
+    }
+
+    /// Drop tracker entries that aren't in `keep`. Bounds memory across
+    /// session create/destroy cycles.
+    pub(crate) fn retain(&mut self, keep: &std::collections::HashSet<(HostId, String)>) {
+        self.last_seen.retain(|key, _| keep.contains(key));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.last_seen.len()
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RetainedUiState {
     layout_mode: LayoutMode,
-    selected_session_id: Option<String>,
+    selected_key: Option<(HostId, String)>,
     selected_index: usize,
     focus: Focus,
     left_percent: u16,
@@ -114,7 +313,7 @@ impl RetainedUiState {
     pub(crate) fn new(layout_mode: LayoutMode) -> Self {
         Self {
             layout_mode,
-            selected_session_id: None,
+            selected_key: None,
             selected_index: 0,
             focus: Focus::List,
             left_percent: DEFAULT_LEFT_PERCENT,
@@ -136,22 +335,18 @@ impl RetainedUiState {
 
     pub(crate) fn update_from(&mut self, app: &AppState) {
         self.layout_mode = app.layout.mode;
-        self.selected_session_id = app.selected_session().map(|session| session.id);
+        self.selected_key = app
+            .selected_session()
+            .map(|session| (session.host_id, session.id));
         self.selected_index = app.session_list.selected;
         self.focus = app.layout.focus;
         self.left_percent = app.layout.left_percent;
         self.top_percent = app.layout.top_percent;
     }
 
-    pub(crate) fn selected_session_id(&self) -> Option<String> {
-        self.selected_session_id.clone()
+    pub(crate) fn selected_session_key(&self) -> Option<(HostId, String)> {
+        self.selected_key.clone()
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct HostContext {
-    pub(crate) label: String,
-    pub(crate) ip_address: String,
 }
 
 #[derive(Debug, Clone)]
@@ -168,59 +363,71 @@ pub(crate) struct MotdState {
     pub(crate) is_placeholder: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Clone)]
 pub(crate) struct SessionListState {
-    pub(crate) sessions: Vec<SessionInfo>,
-    pub(crate) now: u64,
+    pub(crate) rows: Vec<SessionRow>,
     pub(crate) selected: usize,
     pub(crate) scroll: usize,
 }
 
 impl SessionListState {
-    pub(crate) fn set_sessions_sorted_by_activity(&mut self, mut sessions: Vec<SessionInfo>) {
-        sessions.sort_by(|left, right| {
+    /// Set the merged set of rows, sorted by activity descending across all
+    /// hosts. Tie-breaks: name, then session id, then host id.
+    ///
+    /// Sort key is `activity_observed_at_local` (operator-side wall clock)
+    /// not the raw host `session.activity`. This keeps the merged-list order
+    /// consistent with the displayed activity column and is robust to host
+    /// clock skew across hosts in multi-host mode — a host whose clock is
+    /// minutes ahead of others doesn't pin its sessions to the top.
+    pub(crate) fn set_rows_sorted_by_activity(&mut self, mut rows: Vec<SessionRow>) {
+        rows.sort_by(|left, right| {
             right
-                .activity
-                .cmp(&left.activity)
-                .then_with(|| left.name.cmp(&right.name))
-                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+                .activity_observed_at_local
+                .cmp(&left.activity_observed_at_local)
+                .then_with(|| left.session.name.cmp(&right.session.name))
+                .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
+                .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
         });
-        self.sessions = sessions;
+        self.rows = rows;
     }
 
     pub(crate) fn selected_session(&self) -> Option<SelectedSession> {
-        self.sessions
-            .get(self.selected)
-            .map(|session| SelectedSession {
-                id: session.id.as_str().to_string(),
-                name: session.name.clone(),
-            })
+        self.rows.get(self.selected).map(|row| SelectedSession {
+            host_id: row.host_id.clone(),
+            host_label: row.host_label.clone(),
+            id: row.session.id.as_str().to_string(),
+            name: row.session.name.clone(),
+        })
     }
 
-    pub(crate) fn preserve_selection(&mut self, previous_id: Option<String>) {
-        if self.sessions.is_empty() {
+    /// Try to keep the selection on the same `(host_id, session_id)` pair
+    /// across a refresh. Falls back to clamping the existing index.
+    pub(crate) fn preserve_selection(&mut self, previous_key: Option<(HostId, String)>) {
+        if self.rows.is_empty() {
             self.selected = 0;
             self.scroll = 0;
             return;
         }
 
-        if let Some(id) = previous_id {
-            if let Some(pos) = self.sessions.iter().position(|s| s.id.as_str() == id) {
+        if let Some((host_id, session_id)) = previous_key {
+            if let Some(pos) = self
+                .rows
+                .iter()
+                .position(|row| row.host_id == host_id && row.session.id.as_str() == session_id)
+            {
                 self.selected = pos;
-            } else {
-                self.selected = min(self.selected, self.sessions.len().saturating_sub(1));
+                return;
             }
-        } else {
-            self.selected = min(self.selected, self.sessions.len().saturating_sub(1));
         }
+        self.selected = min(self.selected, self.rows.len().saturating_sub(1));
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> bool {
-        if self.sessions.is_empty() {
+        if self.rows.is_empty() {
             return false;
         }
         let old = self.selected;
-        let max_index = self.sessions.len().saturating_sub(1) as isize;
+        let max_index = self.rows.len().saturating_sub(1) as isize;
         let next = (self.selected as isize + delta).clamp(0, max_index) as usize;
         self.selected = next;
         old != next
@@ -311,16 +518,22 @@ impl StatusBanner {
 }
 
 pub(crate) struct AppState {
-    pub(crate) host: HostContext,
+    pub(crate) fleet: HostFleet,
     pub(crate) layout: LayoutState,
-    pub(crate) motd: MotdState,
+    /// `None` in multi-host mode (MOTD pane is hidden when multiple hosts are
+    /// listed). `Some` in single-host mode with the host's `/etc/motd` text or
+    /// the motlie placeholder.
+    pub(crate) motd: Option<MotdState>,
     pub(crate) session_list: SessionListState,
     pub(crate) detail: DetailState,
     pub(crate) status: StatusBanner,
     pub(crate) modal: Option<ModalState>,
+    pub(crate) activity_tracker: ActivityTracker,
 }
 
 impl AppState {
+    /// Single-host test constructor. Builds a fleet with one entry from the
+    /// given label/IP and (optional) MOTD text.
     #[cfg(test)]
     pub(crate) fn new(
         host_label: String,
@@ -337,6 +550,7 @@ impl AppState {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_host_ip(
         host_label: String,
         host_ip_address: String,
@@ -344,27 +558,36 @@ impl AppState {
         motd: String,
         placeholder: bool,
     ) -> Self {
+        let entry = HostEntry {
+            id: HostId::local(),
+            label: host_label,
+            ip_address: host_ip_address,
+            handle: motlie_tmux::HostHandle::local(),
+        };
+        let fleet = HostFleet::from_entries(vec![entry]);
+        Self::with_fleet(fleet, layout_mode, Some((motd, placeholder)))
+    }
+
+    /// Production constructor. `motd` should be `Some` only in single-host
+    /// mode; multi-host mode passes `None` so the MOTD pane is hidden.
+    pub(crate) fn with_fleet(
+        fleet: HostFleet,
+        layout_mode: LayoutMode,
+        motd: Option<(String, bool)>,
+    ) -> Self {
         Self {
-            host: HostContext {
-                label: host_label,
-                ip_address: host_ip_address,
-            },
+            fleet,
             layout: LayoutState {
                 mode: layout_mode,
                 focus: Focus::List,
                 left_percent: DEFAULT_LEFT_PERCENT,
                 top_percent: DEFAULT_TOP_PERCENT,
             },
-            motd: MotdState {
-                text: motd,
-                is_placeholder: placeholder,
-            },
-            session_list: SessionListState {
-                sessions: Vec::new(),
-                now: 0,
-                selected: 0,
-                scroll: 0,
-            },
+            motd: motd.map(|(text, is_placeholder)| MotdState {
+                text,
+                is_placeholder,
+            }),
+            session_list: SessionListState::default(),
             detail: DetailState {
                 lines: Vec::new(),
                 scroll: 0,
@@ -374,6 +597,7 @@ impl AppState {
             },
             status: StatusBanner::loading("loading sessions"),
             modal: None,
+            activity_tracker: ActivityTracker::default(),
         }
     }
 
@@ -381,8 +605,8 @@ impl AppState {
         self.session_list.selected_session()
     }
 
-    pub(crate) fn preserve_selection(&mut self, previous_id: Option<String>) {
-        self.session_list.preserve_selection(previous_id);
+    pub(crate) fn preserve_selection(&mut self, previous: Option<(HostId, String)>) {
+        self.session_list.preserve_selection(previous);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> bool {
@@ -411,7 +635,9 @@ impl AppState {
         self.layout.focus = match (self.layout.mode, self.layout.focus) {
             (LayoutMode::Normal, Focus::Motd) => Focus::List,
             (LayoutMode::Normal, Focus::List) => Focus::Detail,
-            (LayoutMode::Normal, Focus::Detail) => Focus::Motd,
+            // In multi-host (no MOTD) Normal mode, skip the MOTD focus state.
+            (LayoutMode::Normal, Focus::Detail) if self.motd.is_some() => Focus::Motd,
+            (LayoutMode::Normal, Focus::Detail) => Focus::List,
             (LayoutMode::Portrait, Focus::List) => Focus::Detail,
             (LayoutMode::Portrait, Focus::Detail) => Focus::List,
             (LayoutMode::Portrait, Focus::Motd) => Focus::List,
