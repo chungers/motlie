@@ -883,8 +883,8 @@ validated private fields; use `prefix()`, `key()`, `value()`, and
 `option_name()` to inspect it.
 
 Contract:
-- `tags(prefix)` validates the namespace once, captures the stable session id,
-  and returns a scoped `SessionTags` helper.
+- `tags(prefix)` validates the namespace once, captures the stable session id
+  and tmux command prefix, and returns a scoped `SessionTags` helper.
 - `SessionTags::set(key, value)` writes one tag.
 - `SessionTags::read(key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
 - `SessionTags::list()` returns every valid tag under that namespace.

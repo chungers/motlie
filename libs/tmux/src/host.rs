@@ -1388,6 +1388,9 @@ impl Target {
     /// Session tags are stored as tmux user-defined session options. For
     /// `prefix = "mmux"` and `key = "role"`, the underlying option name is
     /// `@mmux/role`.
+    ///
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
     pub async fn tags(&self, prefix: &str) -> Result<SessionTags<'_>> {
         self.tags_with_operation(prefix, "tags").await
     }
