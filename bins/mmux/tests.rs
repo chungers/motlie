@@ -1108,7 +1108,7 @@ fn modal_content_separates_body_from_button_bar() {
         sort_key: Some("owner".to_string()),
         key_input: "phase".to_string(),
         value_input: "build".to_string(),
-        focus: SessionTagsFocus::Add,
+        focus: SessionTagsFocus::Value,
     });
     assert_eq!(tags.title, " Session Tags ");
     assert_eq!(tags.active_button, Button::Ok);
@@ -1136,7 +1136,7 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
         sort_key: Some("owner".to_string()),
         key_input: "phase".to_string(),
         value_input: "build".to_string(),
-        focus: SessionTagsFocus::Add,
+        focus: SessionTagsFocus::Value,
     });
 
     let screen = render_to_string(&mut app, 80, 24);
@@ -1145,7 +1145,7 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
     assert!(screen.contains("platform"));
     assert!(screen.contains("phase"));
     assert!(screen.contains("build"));
-    assert!(screen.contains("+"));
+    assert!(!screen.contains("+"));
     assert!(!screen.contains("┬"));
     assert!(!screen.contains("┼"));
     assert!(!screen.contains("┴"));
@@ -1317,7 +1317,7 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
 }
 
 #[tokio::test]
-async fn session_tags_modal_tab_cycles_edit_row_columns() {
+async fn session_tags_modal_tab_cycles_edit_row_fields() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("show-options -t '$1'", "");
@@ -1358,18 +1358,6 @@ async fn session_tags_modal_tab_cycles_edit_row_columns() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Add
-    ));
-
-    handle_key(
-        &fleet,
-        &mut app,
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-    )
-    .await
-    .unwrap();
-    assert!(matches!(
-        app.modal.as_ref(),
         Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Key
     ));
 
@@ -1382,7 +1370,7 @@ async fn session_tags_modal_tab_cycles_edit_row_columns() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Add
+        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Value
     ));
 }
 
@@ -1502,7 +1490,7 @@ async fn session_tags_modal_update_uses_bottom_fields() {
     }) = app.modal.as_mut()
     {
         *value_input = "new".to_string();
-        *focus = SessionTagsFocus::Add;
+        *focus = SessionTagsFocus::Key;
     } else {
         panic!("expected session tags modal");
     }
@@ -1549,7 +1537,7 @@ async fn session_tags_modal_empty_value_does_not_dispatch() {
     {
         *key_input = "owner".to_string();
         value_input.clear();
-        *focus = SessionTagsFocus::Add;
+        *focus = SessionTagsFocus::Value;
     } else {
         panic!("expected session tags modal");
     }
