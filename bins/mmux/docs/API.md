@@ -288,9 +288,9 @@ stripped key, and rendered without `@mmux/`. The modal keeps row focus and
 bottom field focus explicit with `SessionTagsFocus`; `x` deletes through
 `Target::unset_tag("mmux", key)`, `u` preloads the bottom fields, and focused
 `+` writes non-empty values through `Target::set_tag("mmux", key, value)`.
-Pressing `c` on a focused tag row records a modal-local sort marker and renders
-`✓` in that row's marker column; it does not write tmux metadata. `i` is not
-assigned by this feature.
+Pressing `c` on a focused tag row toggles a modal-local sort marker and renders
+`✓` in that row's marker column while selected; it does not write tmux
+metadata. `i` is not assigned by this feature.
 
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing

@@ -757,7 +757,11 @@ fn handle_session_tags_modal_key(
                 return ModalAction::None;
             };
             if let Some(tag) = tags.get(index) {
-                *sort_key = Some(tag.key.clone());
+                if sort_key.as_deref() == Some(tag.key.as_str()) {
+                    *sort_key = None;
+                } else {
+                    *sort_key = Some(tag.key.clone());
+                }
             }
             ModalAction::None
         }

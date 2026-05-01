@@ -1268,6 +1268,19 @@ async fn session_tags_modal_c_marks_focused_row_for_sort() {
     ));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert!(view.body_text().contains("a    beta [✓]"));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { sort_key, .. }) if sort_key.is_none()
+    ));
 }
 
 #[tokio::test]
