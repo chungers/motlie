@@ -1141,12 +1141,16 @@ fn session_tags_modal_renders_edit_controls_as_table_row() {
 
     let screen = render_to_string(&mut app, 80, 24);
 
-    assert!(screen.contains("owner"));
-    assert!(screen.contains("platform"));
-    assert!(screen.contains("phase"));
-    assert!(screen.contains("build"));
+    assert!(screen.contains("│owner"));
+    assert!(screen.contains("│platform"));
+    assert!(screen.contains("│phase"));
+    assert!(screen.contains("│build"));
+    assert!(screen.contains("+│"));
     assert!(screen.contains("┌"));
     assert!(screen.contains("┬"));
+    assert!(screen.contains("├"));
+    assert!(screen.contains("┼"));
+    assert!(screen.contains("┤"));
     assert!(screen.contains("┴"));
     assert!(screen.contains("┘"));
     assert!(!screen.contains("[✓]"));

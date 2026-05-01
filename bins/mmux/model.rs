@@ -11,8 +11,7 @@ use crate::consts::{
 };
 use crate::detail::DetailSource;
 
-const SESSION_TAGS_EDIT_ROW_HEIGHT: u16 = 3;
-const SESSION_TAGS_EDIT_BORDER_WIDTH: usize = 4;
+const SESSION_TAGS_TABLE_BORDER_WIDTH: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutMode {
@@ -132,7 +131,7 @@ impl ModalView {
             ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
             ModalBody::SessionTags { tags, .. } => {
                 let rows = max(1, tags.len()) as u16;
-                rows + SESSION_TAGS_EDIT_ROW_HEIGHT
+                session_tags_table_height(rows)
             }
         }
     }
@@ -161,20 +160,26 @@ impl ModalView {
                     tag.key.chars().count()
                         + 5
                         + tag.value.chars().count()
-                        + SESSION_TAGS_EDIT_BORDER_WIDTH
+                        + SESSION_TAGS_TABLE_BORDER_WIDTH
                 })
                 .chain([
-                    "No tags".chars().count() + SESSION_TAGS_EDIT_BORDER_WIDTH,
+                    "No tags".chars().count() + SESSION_TAGS_TABLE_BORDER_WIDTH,
                     key_input.chars().count()
                         + 5
                         + value_input.chars().count()
-                        + SESSION_TAGS_EDIT_BORDER_WIDTH,
+                        + SESSION_TAGS_TABLE_BORDER_WIDTH,
                 ])
                 .max()
                 .unwrap_or(0),
         };
         max(body_width, self.buttons.chars().count()) as u16
     }
+}
+
+fn session_tags_table_height(tag_rows: u16) -> u16 {
+    let edit_rows = 1;
+    let body_rows = tag_rows.saturating_add(edit_rows);
+    body_rows.saturating_mul(2).saturating_add(1)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
