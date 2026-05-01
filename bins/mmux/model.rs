@@ -11,7 +11,9 @@ use crate::consts::{
 };
 use crate::detail::DetailSource;
 
-const SESSION_TAGS_TABLE_BORDER_WIDTH: usize = 4;
+const SESSION_TAGS_INPUT_SECTION_HEIGHT: u16 = 2;
+const SESSION_TAGS_LIST_MAX_ROWS: u16 = 5;
+const SESSION_TAGS_ROW_OVERHEAD: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutMode {
@@ -131,7 +133,7 @@ impl ModalView {
             ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
             ModalBody::SessionTags { tags, .. } => {
                 let rows = max(1, tags.len()) as u16;
-                session_tags_table_height(rows)
+                min(rows, SESSION_TAGS_LIST_MAX_ROWS) + SESSION_TAGS_INPUT_SECTION_HEIGHT
             }
         }
     }
@@ -157,29 +159,19 @@ impl ModalView {
             } => tags
                 .iter()
                 .map(|tag| {
-                    tag.key.chars().count()
-                        + 5
-                        + tag.value.chars().count()
-                        + SESSION_TAGS_TABLE_BORDER_WIDTH
+                    tag.key.chars().count() + tag.value.chars().count() + SESSION_TAGS_ROW_OVERHEAD
                 })
                 .chain([
-                    "No tags".chars().count() + SESSION_TAGS_TABLE_BORDER_WIDTH,
+                    "No tags".chars().count() + SESSION_TAGS_ROW_OVERHEAD,
                     key_input.chars().count()
-                        + 5
                         + value_input.chars().count()
-                        + SESSION_TAGS_TABLE_BORDER_WIDTH,
+                        + SESSION_TAGS_ROW_OVERHEAD,
                 ])
                 .max()
                 .unwrap_or(0),
         };
         max(body_width, self.buttons.chars().count()) as u16
     }
-}
-
-fn session_tags_table_height(tag_rows: u16) -> u16 {
-    let edit_rows = 1;
-    let body_rows = tag_rows.saturating_add(edit_rows);
-    body_rows.saturating_mul(2).saturating_add(1)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

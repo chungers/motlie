@@ -1122,7 +1122,7 @@ fn modal_content_separates_body_from_button_bar() {
 }
 
 #[test]
-fn session_tags_modal_renders_edit_controls_as_table_row() {
+fn session_tags_modal_renders_list_and_distinct_input_row() {
     let mut app = app_with_session();
     app.modal = Some(ModalState::SessionTags {
         host_id: local_host_id(),
@@ -1141,22 +1141,62 @@ fn session_tags_modal_renders_edit_controls_as_table_row() {
 
     let screen = render_to_string(&mut app, 80, 24);
 
-    assert!(screen.contains("│owner"));
-    assert!(screen.contains("│platform"));
-    assert!(screen.contains("│phase"));
-    assert!(screen.contains("│build"));
-    assert!(screen.contains("+│"));
-    assert!(screen.contains("┌"));
-    assert!(screen.contains("┬"));
-    assert!(screen.contains("├"));
-    assert!(screen.contains("┼"));
-    assert!(screen.contains("┤"));
-    assert!(screen.contains("┴"));
-    assert!(screen.contains("┘"));
+    assert!(screen.contains("owner"));
+    assert!(screen.contains("platform"));
+    assert!(screen.contains("phase"));
+    assert!(screen.contains("build"));
+    assert!(screen.contains("+"));
+    assert!(!screen.contains("┬"));
+    assert!(!screen.contains("┼"));
+    assert!(!screen.contains("┴"));
     assert!(!screen.contains("[✓]"));
     assert!(!screen.contains("[+]"));
     assert!(!screen.contains("[phase]"));
     assert!(!screen.contains("[build]"));
+}
+
+#[test]
+fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
+    let tags = (0..7)
+        .map(|index| SessionTagRow {
+            key: format!("tag{index}"),
+            value: format!("value{index}"),
+        })
+        .collect::<Vec<_>>();
+    let mut app = app_with_session();
+    app.modal = Some(ModalState::SessionTags {
+        host_id: local_host_id(),
+        host_label: "host".to_string(),
+        id: "$1".to_string(),
+        name: "dev".to_string(),
+        tags: tags.clone(),
+        sort_key: None,
+        key_input: "new".to_string(),
+        value_input: "next".to_string(),
+        focus: SessionTagsFocus::TagRow(0),
+    });
+
+    let screen = render_to_string(&mut app, 80, 24);
+    assert!(screen.contains("> tag0"));
+    for index in 0..5 {
+        assert!(screen.contains(&format!("tag{index}")));
+    }
+    assert!(!screen.contains("tag5"));
+    assert!(!screen.contains("tag6"));
+
+    if let Some(ModalState::SessionTags { focus, .. }) = app.modal.as_mut() {
+        *focus = SessionTagsFocus::TagRow(6);
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    let screen = render_to_string(&mut app, 80, 24);
+    assert!(screen.contains("> tag6"));
+    assert!(!screen.contains("tag0"));
+    assert!(!screen.contains("tag1"));
+    for index in 2..7 {
+        assert!(screen.contains(&format!("tag{index}")));
+    }
 }
 
 #[tokio::test]
