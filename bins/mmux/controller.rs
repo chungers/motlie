@@ -506,11 +506,13 @@ enum ModalAction {
         session: ModalSessionRef,
         key: String,
         value: String,
+        sort_key: Option<String>,
     },
     UnsetTag {
         session: ModalSessionRef,
         key: String,
         index: usize,
+        sort_key: Option<String>,
     },
 }
 
@@ -618,6 +620,7 @@ async fn handle_modal_key(
             id,
             name,
             tags,
+            sort_key,
             key_input,
             value_input,
             focus,
@@ -630,6 +633,7 @@ async fn handle_modal_key(
                 name: name.clone(),
             },
             tags,
+            sort_key,
             key_input,
             value_input,
             focus,
@@ -672,15 +676,17 @@ async fn handle_modal_key(
             session,
             key,
             value,
+            sort_key,
         } => {
-            set_tag_from_modal(fleet, app, session, key, value).await?;
+            set_tag_from_modal(fleet, app, session, key, value, sort_key).await?;
         }
         ModalAction::UnsetTag {
             session,
             key,
             index,
+            sort_key,
         } => {
-            unset_tag_from_modal(fleet, app, session, key, index).await?;
+            unset_tag_from_modal(fleet, app, session, key, index, sort_key).await?;
         }
     }
     Ok(KeyOutcome::Continue)
@@ -690,6 +696,7 @@ fn handle_session_tags_modal_key(
     key: KeyEvent,
     session: ModalSessionRef,
     tags: &[SessionTagRow],
+    sort_key: &mut Option<String>,
     key_input: &mut String,
     value_input: &mut String,
     focus: &mut SessionTagsFocus,
@@ -740,10 +747,20 @@ fn handle_session_tags_modal_key(
                 session,
                 key: key_input.trim().to_string(),
                 value: value_input.clone(),
+                sort_key: sort_key.clone(),
             },
             SessionTagsFocus::Cancel => ModalAction::Close,
             _ => ModalAction::None,
         },
+        KeyCode::Char('c') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
+            let SessionTagsFocus::TagRow(index) = *focus else {
+                return ModalAction::None;
+            };
+            if let Some(tag) = tags.get(index) {
+                *sort_key = Some(tag.key.clone());
+            }
+            ModalAction::None
+        }
         KeyCode::Char('x') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
             let SessionTagsFocus::TagRow(index) = *focus else {
                 return ModalAction::None;
@@ -755,6 +772,7 @@ fn handle_session_tags_modal_key(
                 session,
                 key: tag.key.clone(),
                 index,
+                sort_key: sort_key.clone(),
             }
         }
         KeyCode::Char('u') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
@@ -932,6 +950,7 @@ async fn open_session_tags_modal(
                 id: selected.id,
                 name: selected.name,
                 tags,
+                sort_key: None,
                 key_input: String::new(),
                 value_input: String::new(),
                 focus,
@@ -954,6 +973,7 @@ async fn set_tag_from_modal(
     session: ModalSessionRef,
     key: String,
     value: String,
+    sort_key: Option<String>,
 ) -> Result<()> {
     if key.is_empty() {
         app.status = StatusBanner::info("tag key is empty");
@@ -979,7 +999,7 @@ async fn set_tag_from_modal(
                 } else {
                     format!("set tag {key} on {}", session.name)
                 });
-                reload_session_tags_modal(fleet, app, session, Some(key), None).await?;
+                reload_session_tags_modal(fleet, app, session, Some(key), None, sort_key).await?;
             }
             Err(err) => {
                 app.status = StatusBanner::error(format!("set tag failed: {err}"));
@@ -1003,6 +1023,7 @@ async fn unset_tag_from_modal(
     session: ModalSessionRef,
     key: String,
     index: usize,
+    sort_key: Option<String>,
 ) -> Result<()> {
     let Some(host) = fleet_host(fleet, &session.host_id) else {
         app.status =
@@ -1020,7 +1041,7 @@ async fn unset_tag_from_modal(
                 } else {
                     format!("deleted tag {key} on {}", session.name)
                 });
-                reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
+                reload_session_tags_modal(fleet, app, session, None, Some(index), sort_key).await?;
             }
             Err(err) => {
                 app.status = StatusBanner::error(format!("delete tag failed: {err}"));
@@ -1044,6 +1065,7 @@ async fn reload_session_tags_modal(
     session: ModalSessionRef,
     preferred_key: Option<String>,
     preferred_index: Option<usize>,
+    sort_key: Option<String>,
 ) -> Result<()> {
     match load_tag_rows(fleet, &session.host_id, &session.id).await? {
         Some(tags) => {
@@ -1061,12 +1083,14 @@ async fn reload_session_tags_modal(
             } else {
                 first_session_tags_focus(&tags)
             };
+            let sort_key = sort_key.filter(|key| tags.iter().any(|tag| tag.key == *key));
             app.modal = Some(ModalState::SessionTags {
                 host_id: session.host_id,
                 host_label: session.host_label,
                 id: session.id,
                 name: session.name,
                 tags,
+                sort_key,
                 key_input: String::new(),
                 value_input: String::new(),
                 focus,

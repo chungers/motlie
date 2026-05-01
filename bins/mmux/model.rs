@@ -72,6 +72,7 @@ pub(crate) enum ModalState {
         id: String,
         name: String,
         tags: Vec<SessionTagRow>,
+        sort_key: Option<String>,
         key_input: String,
         value_input: String,
         focus: SessionTagsFocus,
@@ -96,6 +97,7 @@ impl ModalView {
             ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
             ModalBody::SessionTags {
                 tags,
+                sort_key,
                 key_input,
                 value_input,
                 ..
@@ -104,11 +106,18 @@ impl ModalView {
                     "No tags".to_string()
                 } else {
                     tags.iter()
-                        .map(|tag| format!("{} = {}", tag.key, tag.value))
+                        .map(|tag| {
+                            let marker = if sort_key.as_deref() == Some(tag.key.as_str()) {
+                                "[✓]"
+                            } else {
+                                "[ ]"
+                            };
+                            format!("{}    {} {marker}", tag.key, tag.value)
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                format!("{rows}\nKey\n{key_input}\nValue\n{value_input}\n+")
+                format!("{rows}\n{key_input}\n{value_input}\n[+]")
             }
         }
     }
@@ -120,7 +129,7 @@ impl ModalView {
             ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
             ModalBody::SessionTags { tags, .. } => {
                 let rows = max(1, tags.len()) as u16;
-                rows + (1 + MODAL_TEXT_FIELD_HEIGHT) * 2 + 1
+                rows + MODAL_TEXT_FIELD_HEIGHT
             }
         }
     }
@@ -172,6 +181,7 @@ pub(crate) enum ModalBody {
     },
     SessionTags {
         tags: Vec<SessionTagRow>,
+        sort_key: Option<String>,
         key_input: String,
         value_input: String,
         focus: SessionTagsFocus,
