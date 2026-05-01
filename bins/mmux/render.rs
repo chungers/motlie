@@ -650,11 +650,12 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
         }
         ModalBody::SessionTags {
             tags,
+            sort_key,
             key_input,
             value_input,
             focus,
         } => {
-            draw_session_tags_body(frame, area, tags, key_input, value_input, *focus);
+            draw_session_tags_body(frame, area, tags, sort_key, key_input, value_input, *focus);
         }
     }
 }
@@ -663,14 +664,15 @@ fn draw_session_tags_body(
     frame: &mut Frame<'_>,
     area: Rect,
     tags: &[crate::model::SessionTagRow],
+    sort_key: &Option<String>,
     key_input: &str,
     value_input: &str,
     focus: SessionTagsFocus,
 ) {
-    const ADD_HEIGHT: u16 = 1;
-    let field_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
-    let controls_height = field_height.saturating_mul(2).saturating_add(ADD_HEIGHT);
-    let list_height = area.height.saturating_sub(controls_height);
+    let key_width = tag_key_column_width(area.width, tags, key_input);
+    let indicator_width = tag_indicator_column_width(area.width);
+    let value_width = area.width.saturating_sub(key_width + indicator_width);
+    let list_height = area.height.saturating_sub(MODAL_TEXT_FIELD_HEIGHT);
     let mut y = area.y;
 
     if list_height > 0 {
@@ -704,7 +706,7 @@ fn draw_session_tags_body(
                     Style::default().fg(Color::White)
                 };
                 lines.push(Line::from(TuiSpan::styled(
-                    format!("{} = {}", tag.key, tag.value),
+                    session_tag_line(tag, sort_key, key_width, value_width, indicator_width),
                     style,
                 )));
             }
@@ -719,39 +721,31 @@ fn draw_session_tags_body(
     let key_area = Rect::new(
         area.x,
         y,
-        area.width,
-        min(field_height, area.bottom().saturating_sub(y)),
+        key_width,
+        min(MODAL_TEXT_FIELD_HEIGHT, area.bottom().saturating_sub(y)),
     );
-    draw_labeled_text_field(
-        frame,
-        key_area,
-        "Key",
-        key_input,
-        focus == SessionTagsFocus::Key,
-    );
-    y = y.saturating_add(field_height);
+    draw_text_field(frame, key_area, key_input, focus == SessionTagsFocus::Key);
 
     let value_area = Rect::new(
-        area.x,
+        area.x.saturating_add(key_width),
         y,
-        area.width,
-        min(field_height, area.bottom().saturating_sub(y)),
+        value_width,
+        min(MODAL_TEXT_FIELD_HEIGHT, area.bottom().saturating_sub(y)),
     );
-    draw_labeled_text_field(
+    draw_text_field(
         frame,
         value_area,
-        "Value",
         value_input,
         focus == SessionTagsFocus::Value,
     );
-    y = y.saturating_add(field_height);
 
-    if y < area.bottom() {
-        let add_text = if focus == SessionTagsFocus::Add {
-            "[+]"
-        } else {
-            " + "
-        };
+    if indicator_width > 0 {
+        let indicator_area = Rect::new(
+            area.x.saturating_add(key_width).saturating_add(value_width),
+            y.saturating_add(1),
+            indicator_width,
+            1,
+        );
         let style = if focus == SessionTagsFocus::Add {
             Style::default()
                 .fg(Color::Black)
@@ -760,10 +754,63 @@ fn draw_session_tags_body(
         } else {
             Style::default().fg(Color::White)
         };
-        frame.render_widget(
-            Paragraph::new(add_text).style(style),
-            Rect::new(area.x, y, min(3, area.width), ADD_HEIGHT),
-        );
+        let add_text = pad_or_truncate_owned("[+]".to_string(), indicator_width as usize);
+        frame.render_widget(Paragraph::new(add_text).style(style), indicator_area);
+    }
+}
+
+fn tag_indicator_column_width(area_width: u16) -> u16 {
+    const WIDTH: u16 = 3;
+    min(WIDTH, area_width)
+}
+
+fn tag_key_column_width(
+    area_width: u16,
+    tags: &[crate::model::SessionTagRow],
+    key_input: &str,
+) -> u16 {
+    let indicator_width = tag_indicator_column_width(area_width);
+    let max_key_width = area_width.saturating_sub(indicator_width).saturating_sub(1);
+    if max_key_width == 0 {
+        return 0;
+    }
+    let longest_key = tags
+        .iter()
+        .map(|tag| tag.key.chars().count())
+        .chain(std::iter::once(key_input.chars().count()))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(4) as u16;
+    min(longest_key, max_key_width)
+}
+
+fn session_tag_line(
+    tag: &crate::model::SessionTagRow,
+    sort_key: &Option<String>,
+    key_width: u16,
+    value_width: u16,
+    indicator_width: u16,
+) -> String {
+    let indicator = if sort_key.as_deref() == Some(tag.key.as_str()) {
+        "[✓]"
+    } else {
+        "[ ]"
+    };
+    format!(
+        "{}{}{}",
+        pad_or_truncate_owned(tag.key.clone(), key_width as usize),
+        pad_or_truncate_owned(tag.value.clone(), value_width as usize),
+        pad_or_truncate_owned(indicator.to_string(), indicator_width as usize)
+    )
+}
+
+fn pad_or_truncate_owned(text: String, width: usize) -> String {
+    let truncated = truncate_chars(&text, width);
+    let text_width = char_width(&truncated);
+    if text_width >= width {
+        truncated
+    } else {
+        format!("{truncated}{}", " ".repeat(width - text_width))
     }
 }
 
@@ -802,6 +849,27 @@ fn draw_labeled_text_field(
         input_rect,
     );
     let input_inner = inset_rect(input_rect, 1, 1);
+    if input_inner.width > 0 && input_inner.height > 0 {
+        frame.render_widget(Paragraph::new(value), input_inner);
+    }
+}
+
+fn draw_text_field(frame: &mut Frame<'_>, area: Rect, value: &str, focused: bool) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let border = if focused {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border)),
+        area,
+    );
+    let input_inner = inset_rect(area, 1, 1);
     if input_inner.width > 0 && input_inner.height > 0 {
         frame.render_widget(Paragraph::new(value), input_inner);
     }
@@ -868,6 +936,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
         },
         ModalState::SessionTags {
             tags,
+            sort_key,
             key_input,
             value_input,
             focus,
@@ -882,6 +951,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                 title: " Session Tags ",
                 body: ModalBody::SessionTags {
                     tags: tags.clone(),
+                    sort_key: sort_key.clone(),
                     key_input: key_input.clone(),
                     value_input: value_input.clone(),
                     focus: *focus,

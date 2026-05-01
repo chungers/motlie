@@ -1105,6 +1105,7 @@ fn modal_content_separates_body_from_button_bar() {
             key: "owner".to_string(),
             value: "platform".to_string(),
         }],
+        sort_key: Some("owner".to_string()),
         key_input: "phase".to_string(),
         value_input: "build".to_string(),
         focus: SessionTagsFocus::Add,
@@ -1117,7 +1118,7 @@ fn modal_content_separates_body_from_button_bar() {
         ModalBody::SessionTags { ref key_input, ref value_input, .. }
             if key_input == "phase" && value_input == "build"
     ));
-    assert!(tags.body_text().contains("owner = platform"));
+    assert!(tags.body_text().contains("owner    platform [✓]"));
 }
 
 #[tokio::test]
@@ -1235,6 +1236,38 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
                 ]
                 && *focus == SessionTagsFocus::TagRow(0)
     ));
+}
+
+#[tokio::test]
+async fn session_tags_modal_c_marks_focused_row_for_sort() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { sort_key, .. }) if sort_key.as_deref() == Some("a")
+    ));
+    let view = modal_content(app.modal.as_ref().unwrap());
+    assert!(view.body_text().contains("a    beta [✓]"));
 }
 
 #[tokio::test]

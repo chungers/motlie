@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Added the Session Tags modal column model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, and the bottom edit boxes align to those columns. |
 | 2026-05-01 | @codex | Documented implemented session rename and tag-management modals: `r` captures host/session id and renames through `Target::rename`; `t` manages `@mmux/` tags through the `motlie-tmux` tag API, including add/update/delete. |
 | 2026-04-28 | @gpt55-dgx | Clarified exact `MOTLIE_MMUX_BYPASS=1` behavior and linked issue #232 for env-gated SSH integration coverage. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux session-list polling so one `list_sessions_now()` loop drives activity ordering and structural state. |
@@ -287,7 +288,9 @@ stripped key, and rendered without `@mmux/`. The modal keeps row focus and
 bottom field focus explicit with `SessionTagsFocus`; `x` deletes through
 `Target::unset_tag("mmux", key)`, `u` preloads the bottom fields, and focused
 `+` writes non-empty values through `Target::set_tag("mmux", key, value)`.
-`i` is not assigned by this feature.
+Pressing `c` on a focused tag row records a modal-local sort marker and renders
+`✓` in that row's marker column; it does not write tmux metadata. `i` is not
+assigned by this feature.
 
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing
