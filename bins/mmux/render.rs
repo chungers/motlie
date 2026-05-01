@@ -672,6 +672,11 @@ fn draw_session_tags_body(
     let key_width = tag_key_column_width(area.width, tags, key_input);
     let indicator_width = tag_indicator_column_width(area.width);
     let value_width = area.width.saturating_sub(key_width + indicator_width);
+    let columns = TagColumns {
+        key_width,
+        value_width,
+        indicator_width,
+    };
     let list_height = area.height.saturating_sub(1);
     let mut y = area.y;
 
@@ -718,49 +723,30 @@ fn draw_session_tags_body(
         y = y.saturating_add(list_height);
     }
 
-    let key_area = Rect::new(
-        area.x.saturating_sub(1),
-        y,
-        key_width.saturating_sub(1),
-        min(1, area.bottom().saturating_sub(y)),
-    );
-    draw_compact_text_field(frame, key_area, key_input, focus == SessionTagsFocus::Key);
-
-    let value_area = Rect::new(
-        area.x.saturating_add(key_width).saturating_sub(1),
-        y,
-        value_width.saturating_sub(1),
-        min(1, area.bottom().saturating_sub(y)),
-    );
-    draw_compact_text_field(
+    draw_session_tag_edit_row(
         frame,
-        value_area,
-        value_input,
-        focus == SessionTagsFocus::Value,
-    );
-
-    if indicator_width > 0 {
-        let indicator_area = Rect::new(
-            area.x.saturating_add(key_width).saturating_add(value_width),
+        Rect::new(
+            area.x,
             y,
-            indicator_width,
-            1,
-        );
-        let style = if focus == SessionTagsFocus::Add {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let add_text = pad_or_truncate_owned("[+]".to_string(), indicator_width as usize);
-        frame.render_widget(Paragraph::new(add_text).style(style), indicator_area);
-    }
+            area.width,
+            min(1, area.bottom().saturating_sub(y)),
+        ),
+        key_input,
+        value_input,
+        focus,
+        columns,
+    );
+}
+
+#[derive(Clone, Copy)]
+struct TagColumns {
+    key_width: u16,
+    value_width: u16,
+    indicator_width: u16,
 }
 
 fn tag_indicator_column_width(area_width: u16) -> u16 {
-    const WIDTH: u16 = 3;
+    const WIDTH: u16 = 1;
     min(WIDTH, area_width)
 }
 
@@ -792,9 +778,9 @@ fn session_tag_line(
     indicator_width: u16,
 ) -> String {
     let indicator = if sort_key.as_deref() == Some(tag.key.as_str()) {
-        "[✓]"
+        "✓"
     } else {
-        "[ ]"
+        " "
     };
     format!(
         "{}{}{}",
@@ -802,6 +788,50 @@ fn session_tag_line(
         pad_or_truncate_owned(tag.value.clone(), value_width as usize),
         pad_or_truncate_owned(indicator.to_string(), indicator_width as usize)
     )
+}
+
+fn draw_session_tag_edit_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    key_input: &str,
+    value_input: &str,
+    focus: SessionTagsFocus,
+    columns: TagColumns,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let base_style = Style::default().fg(Color::White);
+    let key_style = tag_edit_cell_style(focus == SessionTagsFocus::Key);
+    let value_style = tag_edit_cell_style(focus == SessionTagsFocus::Value);
+    let add_style = tag_edit_cell_style(focus == SessionTagsFocus::Add);
+    let line = Line::from(vec![
+        TuiSpan::styled(
+            pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
+            key_style,
+        ),
+        TuiSpan::styled(
+            pad_or_truncate_owned(value_input.to_string(), columns.value_width as usize),
+            value_style,
+        ),
+        TuiSpan::styled(
+            pad_or_truncate_owned("+".to_string(), columns.indicator_width as usize),
+            add_style,
+        ),
+    ])
+    .style(base_style);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn tag_edit_cell_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    }
 }
 
 fn pad_or_truncate_owned(text: String, width: usize) -> String {
@@ -852,26 +882,6 @@ fn draw_labeled_text_field(
     if input_inner.width > 0 && input_inner.height > 0 {
         frame.render_widget(Paragraph::new(value), input_inner);
     }
-}
-
-fn draw_compact_text_field(frame: &mut Frame<'_>, area: Rect, value: &str, focused: bool) {
-    if area.width < 2 || area.height == 0 {
-        return;
-    }
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let text = pad_or_truncate_owned(value.to_string(), inner_width);
-    let style = if focused {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    frame.render_widget(
-        Paragraph::new(format!("[{text}]")).style(style),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
 }
 
 fn draw_modal_buttons(frame: &mut Frame<'_>, area: Rect, buttons: &str) {

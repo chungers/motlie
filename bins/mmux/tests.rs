@@ -1118,7 +1118,35 @@ fn modal_content_separates_body_from_button_bar() {
         ModalBody::SessionTags { ref key_input, ref value_input, .. }
             if key_input == "phase" && value_input == "build"
     ));
-    assert!(tags.body_text().contains("owner    platform [✓]"));
+    assert!(tags.body_text().contains("owner    platform ✓"));
+}
+
+#[test]
+fn session_tags_modal_renders_edit_controls_as_table_row() {
+    let mut app = app_with_session();
+    app.modal = Some(ModalState::SessionTags {
+        host_id: local_host_id(),
+        host_label: "host".to_string(),
+        id: "$1".to_string(),
+        name: "dev".to_string(),
+        tags: vec![SessionTagRow {
+            key: "owner".to_string(),
+            value: "platform".to_string(),
+        }],
+        sort_key: Some("owner".to_string()),
+        key_input: "phase".to_string(),
+        value_input: "build".to_string(),
+        focus: SessionTagsFocus::Add,
+    });
+
+    let screen = render_to_string(&mut app, 80, 24);
+
+    assert!(screen.contains("owner    platform"));
+    assert!(screen.contains("phase    build"));
+    assert!(!screen.contains("[✓]"));
+    assert!(!screen.contains("[+]"));
+    assert!(!screen.contains("[phase]"));
+    assert!(!screen.contains("[build]"));
 }
 
 #[tokio::test]
@@ -1267,7 +1295,7 @@ async fn session_tags_modal_c_marks_focused_row_for_sort() {
         Some(ModalState::SessionTags { sort_key, .. }) if sort_key.as_deref() == Some("a")
     ));
     let view = modal_content(app.modal.as_ref().unwrap());
-    assert!(view.body_text().contains("a    beta [✓]"));
+    assert!(view.body_text().contains("a    beta ✓"));
 
     handle_key(
         &fleet,
