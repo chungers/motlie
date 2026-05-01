@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Added Phase 1.17 for issue #241 follow-up: expose session tag deletion via `SessionTags::unset(key)` / `Target::unset_tag(prefix, key)` backed by tmux `set-option -u`. |
 | 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added scoped `SessionTags`, validated self-describing `SessionTag`, `Target::tags()`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
 | 2026-04-09 | @claude | Update Conventions section: library error handling migrated from `anyhow` to `thiserror`-based typed `Error` enum (PR #145). `anyhow` retained as dev-dependency only. |
 | 2026-03-22 | @claude | Implement Phase 5.1 and 5.2: split-screen TUI REPL mode (`tui on`/`tui off`) with binary-local `tui_mirror` consumer using `HistoryHandle` for bounded mirror frame. Restructured `examples/repl.rs` → `examples/repl/main.rs` + `examples/repl/tui_mirror.rs`. Added `ratatui`/`crossterm` dev-dependencies. |
@@ -898,6 +899,38 @@ command boundary and avoids shell pipelines or pane-local shell execution. It
 does not add a persistent `tmux -C attach-session` command client because that
 would create an attached tmux client and perturb session client state for
 metadata polling.
+
+---
+
+## Phase 1.17: Session Metadata Tag Delete — issue #241
+
+Add explicit deletion for session metadata tags. tmux supports unsetting
+user-defined options with `set-option -u`; the library should expose that rather
+than making callers shell out or encode deletion as an empty value.
+
+### 1.17a — Control-layer unset helper (`src/control.rs`)
+
+- [ ] Add `unset_session_tag_with_prefix(...) -> Result<()>`
+- [ ] Build command as `set-option -u -t <stable-session-id> @<prefix>/<key>`
+  with no value argument
+- [ ] Reuse validated `SessionTagPrefix::option_name(key)` for key validation
+- [ ] Avoid shell pipelines and pane-local shell execution
+
+### 1.17b — `Target` API wiring (`src/host.rs`)
+
+- [ ] Add `SessionTags::unset(key) -> Result<()>`
+- [ ] Add one-off `Target::unset_tag(prefix, key) -> Result<()>`
+- [ ] Preserve session-only level gating with `UnsupportedTarget`
+- [ ] Dispatch by stable `SessionInfo.id`, not display name
+
+### 1.17c — Tests and docs
+
+- [ ] Unit tests for unset command construction
+- [ ] Unit tests for validation-before-exec
+- [ ] Unit tests for non-session target rejection
+- [ ] Update `docs/API.md` and `docs/DESIGN.md`
+- [ ] Validate with `cargo test -p motlie-tmux` and
+  `cargo clippy -p motlie-tmux -- -D warnings`
 
 ---
 
