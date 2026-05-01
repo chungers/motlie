@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)` plus one-off `Target::unset_tag(prefix, key)`. | Target, DC34 |
 | 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add scoped `SessionTags`, validated self-describing `SessionTag`, and one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
 | 2026-04-28 | @gpt55-dgx: PR #228 selector cleanup — document the implemented non-empty `SessionId` wrapper for `SessionInfo.id` so stable id dispatch cannot silently fall back to names. | Discovery Types |
 | 2026-04-09 | @claude: Note anyhow→thiserror migration in dependency table and prototype sections. Library now uses typed `Error` enum via `thiserror`; `anyhow` retained as dev-dependency only. Prototype code snippets are pre-migration and preserved as historical context. | Dependencies, Prototype |
@@ -3879,6 +3880,7 @@ impl Target {
     pub async fn set_tag(&self, prefix: &str, key: &str, value: &str) -> Result<()>;
     pub async fn read_tag(&self, prefix: &str, key: &str) -> Result<Option<String>>;
     pub async fn list_tags(&self, prefix: &str) -> Result<Vec<SessionTag>>;
+    pub async fn unset_tag(&self, prefix: &str, key: &str) -> Result<()>;
 }
 
 impl SessionTags<'_> {
@@ -3886,6 +3888,7 @@ impl SessionTags<'_> {
     pub async fn set(&self, key: &str, value: &str) -> Result<()>;
     pub async fn read(&self, key: &str) -> Result<Option<String>>;
     pub async fn list(&self) -> Result<Vec<SessionTag>>;
+    pub async fn unset(&self, key: &str) -> Result<()>;
 }
 ```
 
@@ -3902,6 +3905,9 @@ unprefixed key so listed tags are self-describing and round-trippable.
 - `Target::tags(prefix)` validates the prefix and captures the command prefix and
   stable session id once; the direct `set_tag` / `read_tag` / `list_tags` methods
   are one-off wrappers around that helper.
+- `SessionTags::unset(key)` and `Target::unset_tag(prefix, key)` remove the
+  session-local user option with tmux `set-option -u`; they do not encode
+  deletion as an empty string.
 - The helper constructor is async because resolving the command prefix can lazily
   probe the tmux binary on the underlying transport before it is cached.
 
@@ -3912,11 +3918,13 @@ avoids a single method whose meaning changes across session/window/pane scopes.
 
 **Command boundary**: The implementation uses direct tmux option commands through
 the existing control module (`set-option`, `show-option -q`, `show-options`) and
-does not run shell pipelines such as `grep`. A persistent control-mode command
-client was not introduced for this slice because `tmux -C attach-session` creates
-an attached client and would perturb `attached_count`/client state for metadata
-polling. If the library later grows a non-attaching command channel, these helpers
-can move under it without changing the public contract.
+does not run shell pipelines such as `grep`. Deletion uses `set-option -u -t
+<stable-session-id> @<prefix>/<key>` with no value argument. A persistent
+control-mode command client was not introduced for this slice because
+`tmux -C attach-session` creates an attached client and would perturb
+`attached_count`/client state for metadata polling. If the library later grows a
+non-attaching command channel, these helpers can move under it without changing
+the public contract.
 
 ### DC17: Type Safety via Target + TargetAddress
 
