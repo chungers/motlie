@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Started Phase 12 for issue #241: branch `feature/mmux-241-session-modals`. Plan covers list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add on `i`, modal-specific focus state, stable `(host_id, session_id)` dispatch, motlie-tmux tag API usage, and focused tests. |
 | 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row hostname column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
 | 2026-04-28 | @gpt55-dgx | Opened and linked issue #232 for Phase 9.6 env-gated SSH/ForceCommand integration tests; clarified exact bypass value contract. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh to one `list_sessions_now()` poller for activity sorting, recency text, structural state, and monitored-session closure. |
@@ -541,6 +542,96 @@ it lands as a follow-up.
   verify activity-sort across hosts, attach to row routes correctly, host
   failure resilience.
 
+## Phase 12: Session Rename and Tag Modals (issue #241)
+
+References: [DESIGN.md → Session Rename and Tags](./DESIGN.md#session-rename-and-tags-issue-241),
+issue #241.
+
+This phase is binary-side UI work. It must use existing `motlie-tmux` APIs:
+`HostHandle::session_by_id`, `Target::rename`, and
+`Target::tags("mmux")`. Do not add direct tmux shell commands to `mmux`, and
+do not add new library APIs unless implementation proves an actual contract
+gap.
+
+### 12.1 Modal model and rendering
+
+- [ ] 12.1a Extend `ModalState` with `RenameSession`, `EditSessionTag`, and
+  `SessionTagsInfo` variants that capture `(host_id, session_id)` at open.
+- [ ] 12.1b Add modal-specific focus enums for multi-field dialogs rather than
+  one global catch-all modal focus enum.
+- [ ] 12.1c Add render helpers for labeled bordered text fields that preserve
+  the existing modal padding, separator, and button styling.
+- [ ] 12.1d Add Tab / Shift-Tab focus movement for multi-field modals while
+  preserving Left / Right button selection where buttons are focused.
+- [ ] 12.1e Update Help/status key references for `r`, `t`, and `i` if the
+  existing status width budget allows; otherwise keep them in Help only.
+
+### 12.2 Rename modal (`r`)
+
+- [ ] 12.2a In main-view input, open rename only when `Focus::List` and a
+  session is selected; non-list focus is a no-op.
+- [ ] 12.2b Prepopulate `Session Name` with the selected session's current
+  display name.
+- [ ] 12.2c On `Ok`, trim using the New Session rule. Empty input reports a
+  status banner; unchanged input closes without tmux I/O.
+- [ ] 12.2d On changed input, resolve the captured stable session id through
+  the captured host and call `Target::rename`.
+- [ ] 12.2e Refresh sessions immediately after success and preserve selection
+  by `(host_id, session_id)`.
+- [ ] 12.2f Tests: list-focus gating, prepopulation, unchanged no-op, changed
+  rename dispatch by stable id, disappeared-session status.
+
+### 12.3 Tag edit modal (`t`)
+
+- [ ] 12.3a Open for the highlighted session from any pane focus; no selected
+  session reports the existing "no session selected" status.
+- [ ] 12.3b Render `Tag` and `Value` text fields plus standard `Cancel` /
+  `Ok` buttons.
+- [ ] 12.3c On valid non-empty tag key entry, prepopulate `Value` from
+  `target.tags("mmux").await?.read(key).await?` when present and the value
+  field has not been manually edited.
+- [ ] 12.3d On `Ok`, skip writes when `Value` is empty; otherwise call
+  `target.tags("mmux").await?.set(key, value).await?`.
+- [ ] 12.3e Keep value text exact, without trimming, while trimming only the
+  tag key. Let `motlie-tmux` enforce key/value validation.
+- [ ] 12.3f Tests: existing-value prefill, no prefill when missing, empty value
+  no-op, invalid key status, successful set through the tag API.
+
+### 12.4 Tag info/add modal (`i`)
+
+- [ ] 12.4a Open for the highlighted session from any pane focus.
+- [ ] 12.4b Load `target.tags("mmux").await?.list().await?`, sort by stripped
+  key lexicographically, and render keys without `mmux/` or `@mmux/` prefixes.
+- [ ] 12.4c Render bottom add controls: `Key` field, `Value` field, focusable
+  `+`, and a `Cancel` button.
+- [ ] 12.4d Enter on focused `+` applies the same non-empty-value add rule as
+  the `t` modal.
+- [ ] 12.4e After successful add, reload and resort the displayed list, clear
+  add fields, and keep the modal open.
+- [ ] 12.4f Escape or Enter on focused `Cancel` dismisses without writing.
+- [ ] 12.4g Tests: sorted display, stripped keys, add success reloads list,
+  empty value no-op, Cancel/Esc dismiss.
+
+### 12.5 Shared dispatch helpers
+
+- [ ] 12.5a Add a small helper for resolving captured modal session targets by
+  `(host_id, session_id)` to keep rename/tag apply paths consistent.
+- [ ] 12.5b Add a small helper for setting an `mmux` tag from UI text that
+  centralizes key trimming, empty-value no-op, and `Target::tags("mmux")`
+  usage.
+- [ ] 12.5c Keep these helpers binary-private; no new `motlie-tmux` public
+  API unless tests reveal a real missing contract.
+
+### 12.6 Documentation and validation
+
+- [ ] 12.6a Update `bins/mmux/docs/CLI.md` keymap and modal behavior after the
+  implementation is concrete.
+- [ ] 12.6b Update `bins/mmux/docs/API.md` internal `ModalState` notes after
+  the implementation is concrete.
+- [ ] 12.6c `cargo fmt --all`
+- [ ] 12.6d `cargo test -p motlie-mmux`
+- [ ] 12.6e `cargo clippy -p motlie-mmux -- -D warnings`
+
 ## Concrete Test Matrix
 
 | Area | Harness | Required coverage |
@@ -550,6 +641,7 @@ it lands as a follow-up.
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
 | Input model | Pure unit tests | cyclic focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, build date, and short build SHA display |
+| Session rename/tags | Pure unit + mock tmux | `r` focus gating, rename prefill/no-op/dispatch, tag prefill, sorted stripped tag display, add flow, empty-value no-op |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |
