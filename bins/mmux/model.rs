@@ -108,16 +108,16 @@ impl ModalView {
                     tags.iter()
                         .map(|tag| {
                             let marker = if sort_key.as_deref() == Some(tag.key.as_str()) {
-                                "[✓]"
+                                "✓"
                             } else {
-                                "[ ]"
+                                " "
                             };
                             format!("{}    {} {marker}", tag.key, tag.value)
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                format!("{rows}\n{key_input}\n{value_input}\n[+]")
+                format!("{rows}\n{key_input}    {value_input} +")
             }
         }
     }
@@ -154,14 +154,10 @@ impl ModalView {
                 ..
             } => tags
                 .iter()
-                .map(|tag| tag.key.chars().count() + 3 + tag.value.chars().count())
+                .map(|tag| tag.key.chars().count() + 5 + tag.value.chars().count())
                 .chain([
                     "No tags".chars().count(),
-                    "Key".chars().count(),
-                    key_input.chars().count(),
-                    "Value".chars().count(),
-                    value_input.chars().count(),
-                    3,
+                    key_input.chars().count() + 5 + value_input.chars().count(),
                 ])
                 .max()
                 .unwrap_or(0),

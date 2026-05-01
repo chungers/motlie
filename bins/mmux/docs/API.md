@@ -10,7 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-01 | @codex | Added the Session Tags modal column model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, and the bottom edit boxes align to those columns. |
+| 2026-05-01 | @codex | Added the Session Tags modal column model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, and the bottom edit controls use the same three-column table row. |
 | 2026-05-01 | @codex | Documented implemented session rename and tag-management modals: `r` captures host/session id and renames through `Target::rename`; `t` manages `@mmux/` tags through the `motlie-tmux` tag API, including add/update/delete. |
 | 2026-04-28 | @gpt55-dgx | Clarified exact `MOTLIE_MMUX_BYPASS=1` behavior and linked issue #232 for env-gated SSH integration coverage. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux session-list polling so one `list_sessions_now()` loop drives activity ordering and structural state. |
