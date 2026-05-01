@@ -838,15 +838,13 @@ fn draw_session_tag_input_row(
     }
     let key_style = tag_edit_cell_style(focus == SessionTagsFocus::Key);
     let value_style = tag_edit_cell_style(focus == SessionTagsFocus::Value);
-    let add_style = tag_edit_cell_style(focus == SessionTagsFocus::Add);
-    let line = tag_list_row_line(
+    let value_width = columns.value_width.saturating_add(columns.indicator_width);
+    let line = tag_input_row_line(
         pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
         pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
-        pad_or_truncate_owned(value_input.to_string(), columns.value_width as usize),
-        pad_or_truncate_owned("+".to_string(), columns.indicator_width as usize),
+        pad_or_truncate_owned(value_input.to_string(), value_width as usize),
         key_style,
         value_style,
-        add_style,
     );
     frame.render_widget(Paragraph::new(line).style(tag_input_row_style()), area);
 }
@@ -865,6 +863,20 @@ fn tag_list_row_line(
         TuiSpan::styled(key, key_style),
         TuiSpan::styled(value, value_style),
         TuiSpan::styled(indicator, indicator_style),
+    ])
+}
+
+fn tag_input_row_line(
+    prefix: String,
+    key: String,
+    value: String,
+    key_style: Style,
+    value_style: Style,
+) -> Line<'static> {
+    Line::from(vec![
+        TuiSpan::styled(prefix, key_style),
+        TuiSpan::styled(key, key_style),
+        TuiSpan::styled(value, value_style),
     ])
 }
 

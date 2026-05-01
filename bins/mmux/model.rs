@@ -13,7 +13,8 @@ use crate::detail::DetailSource;
 
 const SESSION_TAGS_INPUT_SECTION_HEIGHT: u16 = 2;
 const SESSION_TAGS_LIST_MAX_ROWS: u16 = 5;
-const SESSION_TAGS_ROW_OVERHEAD: usize = 7;
+const SESSION_TAGS_EDIT_ROW_OVERHEAD: usize = 6;
+const SESSION_TAGS_LIST_ROW_OVERHEAD: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutMode {
@@ -39,7 +40,6 @@ pub(crate) enum SessionTagsFocus {
     TagRow(usize),
     Key,
     Value,
-    Add,
     Cancel,
 }
 
@@ -121,7 +121,7 @@ impl ModalView {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                format!("{rows}\n{key_input}    {value_input} +")
+                format!("{rows}\n{key_input}    {value_input}")
             }
         }
     }
@@ -159,13 +159,15 @@ impl ModalView {
             } => tags
                 .iter()
                 .map(|tag| {
-                    tag.key.chars().count() + tag.value.chars().count() + SESSION_TAGS_ROW_OVERHEAD
+                    tag.key.chars().count()
+                        + tag.value.chars().count()
+                        + SESSION_TAGS_LIST_ROW_OVERHEAD
                 })
                 .chain([
-                    "No tags".chars().count() + SESSION_TAGS_ROW_OVERHEAD,
+                    "No tags".chars().count() + SESSION_TAGS_LIST_ROW_OVERHEAD,
                     key_input.chars().count()
                         + value_input.chars().count()
-                        + SESSION_TAGS_ROW_OVERHEAD,
+                        + SESSION_TAGS_EDIT_ROW_OVERHEAD,
                 ])
                 .max()
                 .unwrap_or(0),

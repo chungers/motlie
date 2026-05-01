@@ -743,7 +743,7 @@ fn handle_session_tags_modal_key(
             ModalAction::None
         }
         KeyCode::Enter => match *focus {
-            SessionTagsFocus::Add => ModalAction::SetTag {
+            SessionTagsFocus::Key | SessionTagsFocus::Value => ModalAction::SetTag {
                 session,
                 key: key_input.trim().to_string(),
                 value: value_input.clone(),
@@ -806,19 +806,17 @@ fn next_session_tags_focus(focus: SessionTagsFocus) -> SessionTagsFocus {
     match focus {
         SessionTagsFocus::TagRow(_) => SessionTagsFocus::Key,
         SessionTagsFocus::Key => SessionTagsFocus::Value,
-        SessionTagsFocus::Value => SessionTagsFocus::Add,
-        SessionTagsFocus::Add => SessionTagsFocus::Key,
+        SessionTagsFocus::Value => SessionTagsFocus::Key,
         SessionTagsFocus::Cancel => SessionTagsFocus::Key,
     }
 }
 
 fn previous_session_tags_focus(focus: SessionTagsFocus) -> SessionTagsFocus {
     match focus {
-        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Add,
-        SessionTagsFocus::Key => SessionTagsFocus::Add,
+        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Value,
+        SessionTagsFocus::Key => SessionTagsFocus::Value,
         SessionTagsFocus::Value => SessionTagsFocus::Key,
-        SessionTagsFocus::Add => SessionTagsFocus::Value,
-        SessionTagsFocus::Cancel => SessionTagsFocus::Add,
+        SessionTagsFocus::Cancel => SessionTagsFocus::Value,
     }
 }
 
