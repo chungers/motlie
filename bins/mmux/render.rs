@@ -673,16 +673,19 @@ fn draw_session_tags_body(
         return;
     }
 
-    let table_content_width = area.width.saturating_sub(TAG_TABLE_BORDER_WIDTH);
-    let key_width = tag_key_column_width(table_content_width, tags, key_input);
-    let indicator_width = tag_indicator_column_width(table_content_width);
-    let value_width = table_content_width.saturating_sub(key_width + indicator_width);
+    let key_width = tag_key_column_width(area.width, tags, key_input);
+    let indicator_width = tag_indicator_column_width(area.width);
+    let prefix_width = tag_prefix_column_width(area.width);
+    let value_width = area
+        .width
+        .saturating_sub(prefix_width + key_width + indicator_width);
     let columns = TagColumns {
+        prefix_width,
         key_width,
         value_width,
         indicator_width,
     };
-    let max_tag_rows = visible_session_tag_rows(area.height);
+    let max_tag_rows = visible_session_tag_rows(area.height, tags.len());
     let selected_row = match focus {
         SessionTagsFocus::TagRow(index) => Some(index),
         _ => None,
@@ -691,51 +694,65 @@ fn draw_session_tags_body(
         .map(|index| index.saturating_sub(max_tag_rows.saturating_sub(1)))
         .unwrap_or(0);
     let mut lines = Vec::new();
-    lines.push(tag_table_border_line(TagTableBorder::Top, columns));
 
     if tags.is_empty() && max_tag_rows > 0 {
         lines.push(no_session_tags_line(columns));
-        lines.push(tag_table_border_line(TagTableBorder::Middle, columns));
     } else {
         for (index, tag) in tags.iter().enumerate().skip(start).take(max_tag_rows) {
             let focused = matches!(focus, SessionTagsFocus::TagRow(row) if row == index);
             lines.push(session_tag_line(tag, sort_key, columns, focused));
-            lines.push(tag_table_border_line(TagTableBorder::Middle, columns));
         }
     }
 
-    lines.push(session_tag_edit_line(
-        key_input,
-        value_input,
-        focus,
-        columns,
-    ));
-    lines.push(tag_table_border_line(TagTableBorder::Bottom, columns));
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        Rect::new(area.x, area.y, area.width, area.height),
-    );
+    if max_tag_rows > 0 {
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Rect::new(area.x, area.y, area.width, max_tag_rows as u16),
+        );
+    }
+
+    let input_y = area.y.saturating_add(max_tag_rows as u16);
+    if input_y < area.bottom() {
+        let separator = "─".repeat(area.width as usize);
+        frame.render_widget(
+            Paragraph::new(separator).style(tag_input_separator_style()),
+            Rect::new(area.x, input_y, area.width, 1),
+        );
+    }
+    let row_y = input_y.saturating_add(1);
+    if row_y < area.bottom() {
+        draw_session_tag_input_row(
+            frame,
+            Rect::new(area.x, row_y, area.width, 1),
+            key_input,
+            value_input,
+            focus,
+            columns,
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
 struct TagColumns {
+    prefix_width: u16,
     key_width: u16,
     value_width: u16,
     indicator_width: u16,
 }
 
-const TAG_TABLE_MIN_HEIGHT: u16 = 3;
-const TAG_TABLE_BORDER_WIDTH: u16 = 4;
+const TAG_INPUT_SECTION_HEIGHT: u16 = 2;
+const TAG_LIST_MAX_ROWS: usize = 5;
+const TAG_LIST_PREFIX_WIDTH: u16 = 2;
+const TAG_KEY_COLUMN_PADDING: u16 = 4;
 
-#[derive(Clone, Copy)]
-enum TagTableBorder {
-    Top,
-    Middle,
-    Bottom,
+fn visible_session_tag_rows(area_height: u16, tag_count: usize) -> usize {
+    let available = area_height.saturating_sub(TAG_INPUT_SECTION_HEIGHT) as usize;
+    let row_count = max(1, tag_count);
+    min(TAG_LIST_MAX_ROWS, min(row_count, available))
 }
 
-fn visible_session_tag_rows(area_height: u16) -> usize {
-    area_height.saturating_sub(TAG_TABLE_MIN_HEIGHT) as usize / 2
+fn tag_prefix_column_width(area_width: u16) -> u16 {
+    min(TAG_LIST_PREFIX_WIDTH, area_width)
 }
 
 fn tag_indicator_column_width(area_width: u16) -> u16 {
@@ -748,8 +765,12 @@ fn tag_key_column_width(
     tags: &[crate::model::SessionTagRow],
     key_input: &str,
 ) -> u16 {
+    let prefix_width = tag_prefix_column_width(area_width);
     let indicator_width = tag_indicator_column_width(area_width);
-    let max_key_width = area_width.saturating_sub(indicator_width).saturating_sub(1);
+    let max_key_width = area_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(indicator_width)
+        .saturating_sub(1);
     if max_key_width == 0 {
         return 0;
     }
@@ -759,27 +780,13 @@ fn tag_key_column_width(
         .chain(std::iter::once(key_input.chars().count()))
         .max()
         .unwrap_or(0)
-        .saturating_add(4) as u16;
+        .saturating_add(TAG_KEY_COLUMN_PADDING as usize) as u16;
     min(longest_key, max_key_width)
 }
 
-fn tag_table_border_line(kind: TagTableBorder, columns: TagColumns) -> Line<'static> {
-    let (left, key_value, value_indicator, right) = match kind {
-        TagTableBorder::Top => ("┌", "┬", "┬", "┐"),
-        TagTableBorder::Middle => ("├", "┼", "┼", "┤"),
-        TagTableBorder::Bottom => ("└", "┴", "┴", "┘"),
-    };
-    let key_rule = "─".repeat(columns.key_width as usize);
-    let value_rule = "─".repeat(columns.value_width as usize);
-    let indicator_rule = "─".repeat(columns.indicator_width as usize);
-    Line::from(TuiSpan::styled(
-        format!("{left}{key_rule}{key_value}{value_rule}{value_indicator}{indicator_rule}{right}"),
-        tag_table_border_style(),
-    ))
-}
-
 fn no_session_tags_line(columns: TagColumns) -> Line<'static> {
-    tag_table_row_line(
+    tag_list_row_line(
+        pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
         pad_or_truncate_owned("No tags".to_string(), columns.key_width as usize),
         pad_or_truncate_owned(String::new(), columns.value_width as usize),
         pad_or_truncate_owned(String::new(), columns.indicator_width as usize),
@@ -801,11 +808,14 @@ fn session_tag_line(
         " "
     };
     let style = if focused {
-        tag_table_focused_cell_style()
+        selected_list_row_style()
     } else {
         Style::default().fg(Color::White)
     };
-    tag_table_row_line(
+    let marker = if focused { ">" } else { " " };
+    let prefix = format!("{marker} ");
+    tag_list_row_line(
+        pad_or_truncate_owned(prefix, columns.prefix_width as usize),
         pad_or_truncate_owned(tag.key.clone(), columns.key_width as usize),
         pad_or_truncate_owned(tag.value.clone(), columns.value_width as usize),
         pad_or_truncate_owned(indicator.to_string(), columns.indicator_width as usize),
@@ -815,26 +825,34 @@ fn session_tag_line(
     )
 }
 
-fn session_tag_edit_line(
+fn draw_session_tag_input_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
     key_input: &str,
     value_input: &str,
     focus: SessionTagsFocus,
     columns: TagColumns,
-) -> Line<'static> {
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let key_style = tag_edit_cell_style(focus == SessionTagsFocus::Key);
     let value_style = tag_edit_cell_style(focus == SessionTagsFocus::Value);
     let add_style = tag_edit_cell_style(focus == SessionTagsFocus::Add);
-    tag_table_row_line(
+    let line = tag_list_row_line(
+        pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
         pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
         pad_or_truncate_owned(value_input.to_string(), columns.value_width as usize),
         pad_or_truncate_owned("+".to_string(), columns.indicator_width as usize),
         key_style,
         value_style,
         add_style,
-    )
+    );
+    frame.render_widget(Paragraph::new(line).style(tag_input_row_style()), area);
 }
 
-fn tag_table_row_line(
+fn tag_list_row_line(
+    prefix: String,
     key: String,
     value: String,
     indicator: String,
@@ -842,37 +860,34 @@ fn tag_table_row_line(
     value_style: Style,
     indicator_style: Style,
 ) -> Line<'static> {
-    let border_style = tag_table_border_style();
     Line::from(vec![
-        TuiSpan::styled("│", border_style),
+        TuiSpan::styled(prefix, key_style),
         TuiSpan::styled(key, key_style),
-        TuiSpan::styled("│", border_style),
         TuiSpan::styled(value, value_style),
-        TuiSpan::styled("│", border_style),
         TuiSpan::styled(indicator, indicator_style),
-        TuiSpan::styled("│", border_style),
     ])
 }
 
-fn tag_table_border_style() -> Style {
+fn tag_input_separator_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-fn tag_table_focused_cell_style() -> Style {
+fn selected_list_row_style() -> Style {
     Style::default()
         .fg(Color::Black)
         .bg(Color::Green)
         .add_modifier(Modifier::BOLD)
 }
 
+fn tag_input_row_style() -> Style {
+    Style::default().fg(Color::White).bg(Color::DarkGray)
+}
+
 fn tag_edit_cell_style(focused: bool) -> Style {
     if focused {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD)
+        selected_list_row_style()
     } else {
-        Style::default().fg(Color::White)
+        tag_input_row_style()
     }
 }
 
