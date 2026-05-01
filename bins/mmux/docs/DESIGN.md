@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Started issue #241 design for session-list rename and mmux tag management modals: list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add modal on `i`, dispatch through the motlie-tmux session tag API, and stable `(host_id, session_id)` routing. |
 | 2026-04-29 | @opus47-macos-tmux | Swept stale DESIGN.md sections that still described removed contracts (`list_sessions_now()`, `SessionListing.now`, `host_clock_offset_secs`, `probe_host_clock()`, raw `SessionInfo.activity` sort): rewrote the recency-display section, transport/fan-out architecture, multi-host recency/resilience block, internal data-model snippet, refresh-loop pseudocode, and Live Session List section to match shipped behavior — `HostHandle::list_sessions()` plus binary-side `ActivityTracker`, `(host_id, session_id)` selection identity, and observer-relative sort. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `server_epoch` and the per-host clock-offset cache: there is no portable, side-effect-free way to read the host clock on tmux ≤ 3.6 (`run-shell 'date +%s'` corrupts the operator's attached pane on older tmux). Activity stays observer-relative; age now uses operator-side `local_now` under an explicit NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate "age" text but no functional regression. Net: zero new public methods on `HostHandle` for this PR. |
 | 2026-04-29 | @opus47-macos-tmux | Made `mod discovery` private and dropped the `_with_socket` shims (now unused after the privatization). Removed `list_sessions_now`, `SessionListing` from the public surface. External access to tmux is via `HostHandle::*` only. |
@@ -178,6 +179,23 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `k` opens a centered `Kill session <name>?` confirmation modal with
   padded content, a horizontal separator, and `Cancel` / `Ok` buttons in the
   button bar.
+- Pressing `r` opens a centered `Rename Session` modal only when the session
+  list pane has focus and a session is highlighted. The modal has a text field
+  labeled `Session Name`, prepopulated with the current session name, and the
+  same `Cancel` / `Ok` button styling and behavior as other action modals.
+  `Ok` renames only when the submitted value differs from the current name.
+- Pressing `t` opens a centered `Session Tag` modal for the highlighted
+  session. The modal has text fields labeled `Tag` and `Value`; `Tag = owner`
+  maps to tmux user option `@mmux/owner`. When a valid tag key is entered and
+  an existing value is present on the selected session, `Value` is prefilled.
+  `Ok` writes through the `motlie-tmux` session tag API only when `Value` is
+  non-empty.
+- Pressing `i` opens a centered `Session Info` modal for the highlighted
+  session. It lists all `@mmux/<tag>` options for that session sorted
+  lexicographically by stripped tag key, then shows `Key` and `Value` fields
+  plus a focusable `+` control for adding a tag. `+` writes through the same
+  tag API rule as the `t` modal. `Esc`, or Enter on focused `Cancel`, closes
+  without writing.
 - Pressing `h` opens a centered help modal with the built-in motlie logo,
   build date, current build git SHA, key-function reference text, a horizontal
   separator, and an `Ok` button. Build metadata renders below the logo and
@@ -669,6 +687,9 @@ Main-selector keymap (focus-aware):
 | `m` | Start/switch monitoring on highlight | Same | Same |
 | `n` | Open `New Session` modal | Same | Same |
 | `k` | Open kill-confirmation modal | Same | Same |
+| `r` | No-op | Open rename modal for highlight | No-op |
+| `t` | Open tag edit modal for highlight | Same | Same |
+| `i` | Open tag info/add modal for highlight | Same | Same |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same | Same |
 | Enter / `a` | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach | Exit selector without attach |
@@ -727,10 +748,11 @@ at smaller sizes but is tuned for this target.
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view |
 
 **All other keys and modal behavior:** identical to normal mode (see the
-focus-aware keymap above). `m`, `n`, `k`, `a`/Enter, `q`/`Ctrl-C` are
-focus-independent and behave the same. `q`/`Ctrl-C` exits without attaching.
-Modal keymap (Left/Right for button
-selection, Enter to apply, Esc to Cancel) is unchanged.
+focus-aware keymap above). `m`, `n`, `k`, `t`, `i`, `a`/Enter, and
+`q`/`Ctrl-C` are focus-independent and behave the same; `r` remains
+list-focus-only (`T` in portrait). `q`/`Ctrl-C` exits without attaching. Modal
+keymap (Left/Right for button selection, Enter to apply, Esc to Cancel) is
+unchanged.
 
 **Auto-detection and composition:** Without `--portrait` / `-p` or
 `--landscape` / `-l`, startup reads the current PTY size through
@@ -773,15 +795,19 @@ existing single-host mode unchanged.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
 - All command keys (`Up`/`Down`, `Enter`/`a` attach, `m` monitor, `n` new,
-  `k` kill, `Ctrl-C`/`q` exit, `l` toggle layout, `p` cycle panes,
-  `Ctrl-←/→` and `Ctrl-↑/↓` resize) behave the same as single-host. Each
-  applies to the highlighted row and dispatches against that row's host.
+  `k` kill, `r` rename, `t` tag edit, `i` tag info/add, `Ctrl-C`/`q` exit,
+  `l` toggle layout, `p` cycle panes, `Ctrl-←/→` and `Ctrl-↑/↓` resize) behave
+  the same as single-host. Each applies to the highlighted row and dispatches
+  against that row's host, with `r` still restricted to list-pane focus.
 - Attach routes to the highlighted row's host: spawn-and-wait
   `ssh -t <host> tmux attach-session -t <name>` for SSH targets (using each
   host's `SshConfig` carried by its `HostHandle`).
 - New session / kill modal dispatch to the highlighted row's host (the row
   whose host is currently selected). Default v1 policy: act on the highlighted
   row's host; no host-picker modal.
+- Rename and tag modals also dispatch to the highlighted row's host and capture
+  `(host_id, session_id)` when opened so refresh/reorder cannot retarget an
+  in-flight modal action.
 - MOTD pane is **hidden** in multi-host mode (per-host MOTD is not meaningful
   when multiple hosts coexist in the list). Layout reflows to give the entire
   left column to the session list (landscape) or the top region (portrait).
@@ -977,6 +1003,73 @@ not required for v1.
 
 **Estimated diff** (binary only): ~+700 / −200 lines. No library changes
 expected for v1.
+
+### Session Rename and Tags (issue #241)
+
+Session rename and tag editing are session-list affordances layered on the
+existing stable-id dispatch model.
+
+**Scope and routing**:
+
+- `r` is active only when the list pane is focused (`LB` in landscape, `T` in
+  portrait). This avoids stealing `r` from detail-pane scrolling or future
+  detail-pane commands.
+- `t` and `i` are selected-session actions like `m` and `k`; they operate on
+  the highlighted row regardless of pane focus.
+- Each modal captures `(host_id, session_id, current_session_name)` on open.
+  Apply paths re-resolve `HostFleet::entry(host_id)` and
+  `HostHandle::session_by_id(session_id)` before writing.
+- If the target session disappears before apply, close or refresh the modal as
+  appropriate and show a non-fatal status banner.
+
+**Rename modal**:
+
+- State shape: `RenameSession { host_id, id, current_name, input, button }`.
+- Render title `Rename Session`; render one bordered text field labeled
+  `Session Name`, prepopulated with `current_name`.
+- `Cancel`, `Esc`, or Enter on focused `Cancel` dismisses without action.
+- `Ok` trims the submitted name using the same rule as the New Session modal.
+  Empty input is rejected with a status banner. If the trimmed name equals
+  `current_name`, close without calling tmux. Otherwise call `Target::rename`
+  through `motlie-tmux`, then refresh sessions immediately.
+
+**Tag edit modal (`t`)**:
+
+- State shape: `EditSessionTag { host_id, id, name, tag, value, focus,
+  button, value_dirty }`, where `focus` is modal-local (`Tag`, `Value`,
+  `Button(Button)`) rather than a global cross-modal enum.
+- Render title `Session Tag`; render bordered fields labeled `Tag` and
+  `Value`, then the standard `Cancel` / `Ok` button row.
+- Normalize the tag key by trimming surrounding whitespace. Do not prepend
+  `mmux/` in state; pass the stripped key to `target.tags("mmux").await?`.
+- When the tag field changes to a non-empty valid key and `value_dirty` is
+  false, read `tags.read(key).await?`; if present, prepopulate `Value`.
+  Invalid or missing keys leave the current value untouched except for status
+  feedback.
+- On `Ok`, do nothing when `Value` is empty. Otherwise call
+  `tags.set(key, value).await?`; value text is not trimmed so intentional
+  leading/trailing spaces survive, while the library still rejects control
+  characters and overlarge values.
+
+**Tag info/add modal (`i`)**:
+
+- State shape: `SessionTagsInfo { host_id, id, name, tags, key_input,
+  value_input, focus }`, where `focus` is modal-local (`Key`, `Value`, `Add`,
+  `Cancel`).
+- On open, call `target.tags("mmux").await?.list().await?`, sort by
+  `SessionTag::key()`, and render stripped keys (for example `owner`, never
+  `mmux/owner` or `@mmux/owner`).
+- Render the key/value list in a scrollable body if it exceeds the modal's
+  available height. The add row stays visible at the bottom and contains
+  bordered `Key` and `Value` fields plus a focusable `+`.
+- Enter on focused `+` applies the same add rule as the `t` modal:
+  non-empty value only, stripped key, `mmux` namespace, motlie-tmux tag API.
+  On success, refresh the modal's tag list and clear the add fields.
+- Enter on focused `Cancel` or `Esc` dismisses without writing.
+
+This feature requires no new `motlie-tmux` public API; it depends on
+`Target::rename`, `HostHandle::session_by_id`, and the `Target::tags("mmux")`
+helper added for session metadata.
 
 ## SVG Mock
 
@@ -1242,6 +1335,39 @@ selector re-entry):
    tick as a backstop.
 7. Move highlight to the next valid row. If the killed session was the only
    one, transition to §Empty Session List state.
+
+### Rename Session
+
+1. Pressing `r` while the session list pane is focused opens the rename modal
+   for the highlighted session.
+2. The modal captures the highlighted row's host id, stable session id, and
+   current session name at open.
+3. On `Ok`, compare the trimmed input with the captured current name. If
+   unchanged, close without I/O. If changed, re-resolve the target by stable id
+   and call `Target::rename`.
+4. Refresh sessions immediately after a successful rename and preserve
+   selection by `(host_id, session_id)`.
+
+### Edit Session Tag
+
+1. Pressing `t` opens the tag edit modal for the highlighted session.
+2. As the user completes a valid tag key, use `Target::tags("mmux").await?`
+   and `SessionTags::read(key).await?` to prepopulate `Value` when the tag
+   already exists and the user has not manually edited the value field.
+3. On `Ok`, do not write empty values. Otherwise call
+   `SessionTags::set(key, value).await?`.
+4. Refresh sessions after a successful write so any future row metadata
+   derived from tags can update through the normal path.
+
+### Session Tags Info
+
+1. Pressing `i` opens the tag info/add modal for the highlighted session.
+2. Load `Target::tags("mmux").await?.list().await?`, sort by stripped key, and
+   display each key/value pair.
+3. Enter on the focused `+` applies the bottom key/value fields with the same
+   rules as the `t` modal.
+4. On successful add, reload the modal's list and keep the modal open for
+   additional edits. `Esc` or Enter on focused `Cancel` closes the modal.
 
 ### Attach
 
