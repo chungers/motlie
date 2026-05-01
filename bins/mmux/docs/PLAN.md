@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Simplified Phase 12 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal to `t`, and left `i` unassigned for this feature. |
 | 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`, `Target::unset_tag`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
 | 2026-05-01 | @codex | Started Phase 12 for issue #241: branch `feature/mmux-241-session-modals`. Plan covers list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add on `i`, modal-specific focus state, stable `(host_id, session_id)` dispatch, motlie-tmux tag API usage, and focused tests. |
 | 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row hostname column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
@@ -569,18 +570,19 @@ new unset methods below. Do not add direct tmux shell commands to `mmux`.
 
 ### 12.1 Modal model and rendering
 
-- [ ] 12.1a Extend `ModalState` with `RenameSession`, `EditSessionTag`, and
-  `SessionTagsInfo` variants that capture `(host_id, session_id)` at open.
+- [ ] 12.1a Extend `ModalState` with `RenameSession` and `SessionTagsModal`
+  variants that capture `(host_id, session_id)` at open.
 - [ ] 12.1b Add modal-specific focus enums for multi-field dialogs rather than
   one global catch-all modal focus enum.
-- [ ] 12.1c `SessionTagsInfo` focus must support existing tag rows
+- [ ] 12.1c `SessionTagsModal` focus must support existing tag rows
   (`TagRow(index)`) plus bottom controls (`Key`, `Value`, `Add`, `Cancel`).
 - [ ] 12.1d Add render helpers for labeled bordered text fields that preserve
   the existing modal padding, separator, and button styling.
 - [ ] 12.1e Add Tab / Shift-Tab focus movement for multi-field modals while
   preserving Left / Right button selection where buttons are focused.
-- [ ] 12.1f Update Help/status key references for `r`, `t`, and `i` if the
-  existing status width budget allows; otherwise keep them in Help only.
+- [ ] 12.1f Update Help/status key references for `r` and `t` if the existing
+  status width budget allows; otherwise keep them in Help only. Do not document
+  `i` as a command for this feature.
 
 ### 12.2 Rename modal (`r`)
 
@@ -597,68 +599,56 @@ new unset methods below. Do not add direct tmux shell commands to `mmux`.
 - [ ] 12.2f Tests: list-focus gating, prepopulation, unchanged no-op, changed
   rename dispatch by stable id, disappeared-session status.
 
-### 12.3 Tag edit modal (`t`)
+### 12.3 Session tags modal (`t`)
 
 - [ ] 12.3a Open for the highlighted session from any pane focus; no selected
-  session reports the existing "no session selected" status.
-- [ ] 12.3b Render `Tag` and `Value` text fields plus standard `Cancel` /
-  `Ok` buttons.
-- [ ] 12.3c On valid non-empty tag key entry, prepopulate `Value` from
-  `target.tags("mmux").await?.read(key).await?` when present and the value
-  field has not been manually edited.
-- [ ] 12.3d On `Ok`, skip writes when `Value` is empty; otherwise call
-  `target.tags("mmux").await?.set(key, value).await?`.
-- [ ] 12.3e Keep value text exact, without trimming, while trimming only the
-  tag key. Let `motlie-tmux` enforce key/value validation.
-- [ ] 12.3f Tests: existing-value prefill, no prefill when missing, empty value
-  no-op, invalid key status, successful set through the tag API.
-
-### 12.4 Tag info/add modal (`i`)
-
-- [ ] 12.4a Open for the highlighted session from any pane focus.
-- [ ] 12.4b Load `target.tags("mmux").await?.list().await?`, sort by stripped
+  session reports the existing "no session selected" status. `i` remains
+  unassigned.
+- [ ] 12.3b Load `target.tags("mmux").await?.list().await?`, sort by stripped
   key lexicographically, and render keys without `mmux/` or `@mmux/` prefixes.
-- [ ] 12.4c Initial focus is the first tag row when any tag exists, otherwise
+- [ ] 12.3c Initial focus is the first tag row when any tag exists, otherwise
   the bottom `Key` field.
-- [ ] 12.4d Render bottom add controls: `Key` field, `Value` field, focusable
+- [ ] 12.3d Render bottom add controls: `Key` field, `Value` field, focusable
   `+`, and a `Cancel` button.
-- [ ] 12.4e Up/Down move focus row-to-row through existing tag rows; Up from
+- [ ] 12.3e Up/Down move focus row-to-row through existing tag rows; Up from
   add controls returns to the last visible tag row when present.
-- [ ] 12.4f Pressing `x` on a focused tag row calls
+- [ ] 12.3f Pressing `x` on a focused tag row calls
   `target.tags("mmux").await?.unset(key).await?`, reloads the sorted list, and
   keeps the modal open.
-- [ ] 12.4g Pressing `u` on a focused tag row copies that key/value into the
+- [ ] 12.3g Pressing `u` on a focused tag row copies that key/value into the
   bottom `Key` and `Value` fields and focuses `Value`.
-- [ ] 12.4h Enter on focused `+` applies the same non-empty-value rule as the
-  `t` modal. Existing keys are updated through `set`; new keys are added.
-- [ ] 12.4i After successful add/update/delete, reload and resort the displayed
+- [ ] 12.3h Enter on focused `+` applies the non-empty-value rule. Existing
+  keys are updated through `set`; new keys are added.
+- [ ] 12.3i Keep value text exact, without trimming, while trimming only the
+  tag key. Let `motlie-tmux` enforce key/value validation.
+- [ ] 12.3j After successful add/update/delete, reload and resort the displayed
   list, clear add/update fields after add/update, and keep the modal open.
-- [ ] 12.4j Escape or Enter on focused `Cancel` dismisses without writing.
-- [ ] 12.4k Tests: sorted display, stripped keys, row focus movement, delete
+- [ ] 12.3k Escape or Enter on focused `Cancel` dismisses without writing.
+- [ ] 12.3l Tests: sorted display, stripped keys, row focus movement, delete
   via unset, update preload, update set, empty value no-op, Cancel/Esc dismiss.
 
-### 12.5 Shared dispatch helpers
+### 12.4 Shared dispatch helpers
 
-- [ ] 12.5a Add a small helper for resolving captured modal session targets by
+- [ ] 12.4a Add a small helper for resolving captured modal session targets by
   `(host_id, session_id)` to keep rename/tag apply paths consistent.
-- [ ] 12.5b Add a small helper for setting an `mmux` tag from UI text that
+- [ ] 12.4b Add a small helper for setting an `mmux` tag from UI text that
   centralizes key trimming, empty-value no-op, and `Target::tags("mmux")`
   usage.
-- [ ] 12.5c Add a small helper for deleting a focused `mmux` tag via the new
+- [ ] 12.4c Add a small helper for deleting a focused `mmux` tag via the new
   `SessionTags::unset` API.
-- [ ] 12.5d Keep these helpers binary-private.
+- [ ] 12.4d Keep these helpers binary-private.
 
-### 12.6 Documentation and validation
+### 12.5 Documentation and validation
 
-- [ ] 12.6a Update `bins/mmux/docs/CLI.md` keymap and modal behavior after the
+- [ ] 12.5a Update `bins/mmux/docs/CLI.md` keymap and modal behavior after the
   implementation is concrete.
-- [ ] 12.6b Update `bins/mmux/docs/API.md` internal `ModalState` notes after
+- [ ] 12.5b Update `bins/mmux/docs/API.md` internal `ModalState` notes after
   the implementation is concrete.
-- [ ] 12.6c `cargo fmt --all`
-- [ ] 12.6d `cargo test -p motlie-tmux`
-- [ ] 12.6e `cargo test -p motlie-mmux`
-- [ ] 12.6f `cargo clippy -p motlie-tmux -- -D warnings`
-- [ ] 12.6g `cargo clippy -p motlie-mmux -- -D warnings`
+- [ ] 12.5c `cargo fmt --all`
+- [ ] 12.5d `cargo test -p motlie-tmux`
+- [ ] 12.5e `cargo test -p motlie-mmux`
+- [ ] 12.5f `cargo clippy -p motlie-tmux -- -D warnings`
+- [ ] 12.5g `cargo clippy -p motlie-mmux -- -D warnings`
 
 ## Concrete Test Matrix
 

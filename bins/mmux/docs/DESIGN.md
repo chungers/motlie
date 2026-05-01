@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Simplified issue #241 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal from `i` to `t`, and left `i` unassigned for this feature. |
 | 2026-05-01 | @codex | Updated issue #241 design after tmux unset research: tag deletion requires a `motlie-tmux` unset API over `set-option -u`, and the `i` modal now supports row focus with Up/Down plus `x` delete and `u` update actions for focused tag rows. |
 | 2026-05-01 | @codex | Started issue #241 design for session-list rename and mmux tag management modals: list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add modal on `i`, dispatch through the motlie-tmux session tag API, and stable `(host_id, session_id)` routing. |
 | 2026-04-29 | @opus47-macos-tmux | Swept stale DESIGN.md sections that still described removed contracts (`list_sessions_now()`, `SessionListing.now`, `host_clock_offset_secs`, `probe_host_clock()`, raw `SessionInfo.activity` sort): rewrote the recency-display section, transport/fan-out architecture, multi-host recency/resilience block, internal data-model snippet, refresh-loop pseudocode, and Live Session List section to match shipped behavior — `HostHandle::list_sessions()` plus binary-side `ActivityTracker`, `(host_id, session_id)` selection identity, and observer-relative sort. |
@@ -185,20 +186,15 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   labeled `Session Name`, prepopulated with the current session name, and the
   same `Cancel` / `Ok` button styling and behavior as other action modals.
   `Ok` renames only when the submitted value differs from the current name.
-- Pressing `t` opens a centered `Session Tag` modal for the highlighted
-  session. The modal has text fields labeled `Tag` and `Value`; `Tag = owner`
-  maps to tmux user option `@mmux/owner`. When a valid tag key is entered and
-  an existing value is present on the selected session, `Value` is prefilled.
-  `Ok` writes through the `motlie-tmux` session tag API only when `Value` is
-  non-empty.
-- Pressing `i` opens a centered `Session Info` modal for the highlighted
+- Pressing `t` opens a centered `Session Tags` modal for the highlighted
   session. It lists all `@mmux/<tag>` options for that session sorted
   lexicographically by stripped tag key. Existing tag rows are focusable with
   Up/Down; `x` deletes the focused tag and `u` loads the focused tag into the
   update controls. The bottom of the modal shows `Key` and `Value` fields plus
   a focusable `+` control for adding or applying a tag value. `+` writes
-  through the same tag API rule as the `t` modal. `Esc`, or Enter on focused
-  `Cancel`, closes without writing.
+  through the `motlie-tmux` session tag API only when `Value` is non-empty.
+  `Esc`, or Enter on focused `Cancel`, closes without writing. There is no
+  separate tag-edit dialog; `i` is not assigned by this feature.
 - Pressing `h` opens a centered help modal with the built-in motlie logo,
   build date, current build git SHA, key-function reference text, a horizontal
   separator, and an `Ok` button. Build metadata renders below the logo and
@@ -691,8 +687,7 @@ Main-selector keymap (focus-aware):
 | `n` | Open `New Session` modal | Same | Same |
 | `k` | Open kill-confirmation modal | Same | Same |
 | `r` | No-op | Open rename modal for highlight | No-op |
-| `t` | Open tag edit modal for highlight | Same | Same |
-| `i` | Open tag info/add modal for highlight | Same | Same |
+| `t` | Open tag list/add/update/delete modal for highlight | Same | Same |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same | Same |
 | Enter / `a` | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach | Exit selector without attach |
@@ -751,8 +746,8 @@ at smaller sizes but is tuned for this target.
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view |
 
 **All other keys and modal behavior:** identical to normal mode (see the
-focus-aware keymap above). `m`, `n`, `k`, `t`, `i`, `a`/Enter, and
-`q`/`Ctrl-C` are focus-independent and behave the same; `r` remains
+focus-aware keymap above). `m`, `n`, `k`, `t`, `a`/Enter, and `q`/`Ctrl-C`
+are focus-independent and behave the same; `r` remains
 list-focus-only (`T` in portrait). `q`/`Ctrl-C` exits without attaching. Modal
 keymap (Left/Right for button selection, Enter to apply, Esc to Cancel) is
 unchanged.
@@ -798,7 +793,7 @@ existing single-host mode unchanged.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
 - All command keys (`Up`/`Down`, `Enter`/`a` attach, `m` monitor, `n` new,
-  `k` kill, `r` rename, `t` tag edit, `i` tag info/add, `Ctrl-C`/`q` exit,
+  `k` kill, `r` rename, `t` tag list/add/update/delete, `Ctrl-C`/`q` exit,
   `l` toggle layout, `p` cycle panes, `Ctrl-←/→` and `Ctrl-↑/↓` resize) behave
   the same as single-host. Each applies to the highlighted row and dispatches
   against that row's host, with `r` still restricted to list-pane focus.
@@ -1017,8 +1012,8 @@ existing stable-id dispatch model.
 - `r` is active only when the list pane is focused (`LB` in landscape, `T` in
   portrait). This avoids stealing `r` from detail-pane scrolling or future
   detail-pane commands.
-- `t` and `i` are selected-session actions like `m` and `k`; they operate on
-  the highlighted row regardless of pane focus.
+- `t` is a selected-session action like `m` and `k`; it operates on the
+  highlighted row regardless of pane focus. This feature does not bind `i`.
 - Each modal captures `(host_id, session_id, current_session_name)` on open.
   Apply paths re-resolve `HostFleet::entry(host_id)` and
   `HostHandle::session_by_id(session_id)` before writing.
@@ -1048,27 +1043,9 @@ existing stable-id dispatch model.
   `current_name`, close without calling tmux. Otherwise call `Target::rename`
   through `motlie-tmux`, then refresh sessions immediately.
 
-**Tag edit modal (`t`)**:
+**Session tags modal (`t`)**:
 
-- State shape: `EditSessionTag { host_id, id, name, tag, value, focus,
-  button, value_dirty }`, where `focus` is modal-local (`Tag`, `Value`,
-  `Button(Button)`) rather than a global cross-modal enum.
-- Render title `Session Tag`; render bordered fields labeled `Tag` and
-  `Value`, then the standard `Cancel` / `Ok` button row.
-- Normalize the tag key by trimming surrounding whitespace. Do not prepend
-  `mmux/` in state; pass the stripped key to `target.tags("mmux").await?`.
-- When the tag field changes to a non-empty valid key and `value_dirty` is
-  false, read `tags.read(key).await?`; if present, prepopulate `Value`.
-  Invalid or missing keys leave the current value untouched except for status
-  feedback.
-- On `Ok`, do nothing when `Value` is empty. Otherwise call
-  `tags.set(key, value).await?`; value text is not trimmed so intentional
-  leading/trailing spaces survive, while the library still rejects control
-  characters and overlarge values.
-
-**Tag info/add modal (`i`)**:
-
-- State shape: `SessionTagsInfo { host_id, id, name, tags, key_input,
+- State shape: `SessionTagsModal { host_id, id, name, tags, key_input,
   value_input, focus }`, where `focus` is modal-local (`TagRow(index)`, `Key`,
   `Value`, `Add`, `Cancel`).
 - On open, call `target.tags("mmux").await?.list().await?`, sort by
@@ -1088,10 +1065,10 @@ existing stable-id dispatch model.
 - `u` on a focused tag row copies that key/value into the bottom `Key` and
   `Value` fields and focuses `Value`. Pressing Enter on `+` then updates the
   same key by calling `tags.set(key, value).await?`.
-- Enter on focused `+` applies the same add rule as the `t` modal:
-  non-empty value only, stripped key, `mmux` namespace, motlie-tmux tag API.
-  On success, refresh the modal's tag list and clear the add fields. If the key
-  already existed, this is an update; otherwise it is an add.
+- Enter on focused `+` applies the bottom fields with this rule: non-empty
+  value only, stripped key, `mmux` namespace, motlie-tmux tag API. On success,
+  refresh the modal's tag list and clear the add fields. If the key already
+  existed, this is an update; otherwise it is an add.
 - Enter on focused `Cancel` or `Esc` dismisses without writing.
 
 This feature requires one small `motlie-tmux` public API addition for tag
@@ -1300,8 +1277,8 @@ selector re-entry):
    to create)`.
 2. `R` renders nothing (or an inline hint mirroring the same `n to create`
    message).
-3. Highlight is unset; `m`, `k`, `r`, `t`, `i`, `a`, and `Enter` are all
-   no-ops in this state.
+3. Highlight is unset; `m`, `k`, `r`, `t`, `a`, and `Enter` are all no-ops in
+   this state.
 4. `n` remains active and opens the New Session modal as usual.
 5. ForceCommand mode treats this as the normal first-run path: the user
    creates their first session via `n`, which then becomes the highlight,
@@ -1377,20 +1354,10 @@ selector re-entry):
 4. Refresh sessions immediately after a successful rename and preserve
    selection by `(host_id, session_id)`.
 
-### Edit Session Tag
+### Session Tags
 
-1. Pressing `t` opens the tag edit modal for the highlighted session.
-2. As the user completes a valid tag key, use `Target::tags("mmux").await?`
-   and `SessionTags::read(key).await?` to prepopulate `Value` when the tag
-   already exists and the user has not manually edited the value field.
-3. On `Ok`, do not write empty values. Otherwise call
-   `SessionTags::set(key, value).await?`.
-4. Refresh sessions after a successful write so any future row metadata
-   derived from tags can update through the normal path.
-
-### Session Tags Info
-
-1. Pressing `i` opens the tag info/add modal for the highlighted session.
+1. Pressing `t` opens the tag list/add/update/delete modal for the highlighted
+   session.
 2. Load `Target::tags("mmux").await?.list().await?`, sort by stripped key, and
    display each key/value pair. Focus the first row if present, otherwise focus
    the bottom `Key` field.
@@ -1400,8 +1367,8 @@ selector re-entry):
 4. Pressing `u` on a focused row copies that key/value into the bottom edit
    fields and focuses `Value`.
 5. Enter on the focused `+` applies the bottom key/value fields with the same
-   rules as the `t` modal. Existing keys are updated via `SessionTags::set`;
-   new keys are added.
+   non-empty-value rule. Existing keys are updated via `SessionTags::set`; new
+   keys are added.
 6. On successful add/update, reload the modal's list and keep the modal open
    for additional edits. `Esc` or Enter on focused `Cancel` closes the modal.
 
