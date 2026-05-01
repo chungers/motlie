@@ -1141,8 +1141,14 @@ fn session_tags_modal_renders_edit_controls_as_table_row() {
 
     let screen = render_to_string(&mut app, 80, 24);
 
-    assert!(screen.contains("owner    platform"));
-    assert!(screen.contains("phase    build"));
+    assert!(screen.contains("owner"));
+    assert!(screen.contains("platform"));
+    assert!(screen.contains("phase"));
+    assert!(screen.contains("build"));
+    assert!(screen.contains("┌"));
+    assert!(screen.contains("┬"));
+    assert!(screen.contains("┴"));
+    assert!(screen.contains("┘"));
     assert!(!screen.contains("[✓]"));
     assert!(!screen.contains("[+]"));
     assert!(!screen.contains("[phase]"));
@@ -1263,6 +1269,76 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
                     SessionTagRow { key: "b".to_string(), value: "alpha".to_string() },
                 ]
                 && *focus == SessionTagsFocus::TagRow(0)
+    ));
+}
+
+#[tokio::test]
+async fn session_tags_modal_tab_cycles_edit_row_columns() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Key
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Value
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Add
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Key
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Add
     ));
 }
 

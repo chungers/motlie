@@ -669,15 +669,16 @@ fn draw_session_tags_body(
     value_input: &str,
     focus: SessionTagsFocus,
 ) {
-    let key_width = tag_key_column_width(area.width, tags, key_input);
-    let indicator_width = tag_indicator_column_width(area.width);
-    let value_width = area.width.saturating_sub(key_width + indicator_width);
+    let table_content_width = area.width.saturating_sub(TAG_EDIT_TABLE_BORDER_WIDTH);
+    let key_width = tag_key_column_width(table_content_width, tags, key_input);
+    let indicator_width = tag_indicator_column_width(table_content_width);
+    let value_width = table_content_width.saturating_sub(key_width + indicator_width);
     let columns = TagColumns {
         key_width,
         value_width,
         indicator_width,
     };
-    let list_height = area.height.saturating_sub(1);
+    let list_height = area.height.saturating_sub(TAG_EDIT_ROW_HEIGHT);
     let mut y = area.y;
 
     if list_height > 0 {
@@ -729,7 +730,7 @@ fn draw_session_tags_body(
             area.x,
             y,
             area.width,
-            min(1, area.bottom().saturating_sub(y)),
+            min(TAG_EDIT_ROW_HEIGHT, area.bottom().saturating_sub(y)),
         ),
         key_input,
         value_input,
@@ -744,6 +745,9 @@ struct TagColumns {
     value_width: u16,
     indicator_width: u16,
 }
+
+const TAG_EDIT_ROW_HEIGHT: u16 = 3;
+const TAG_EDIT_TABLE_BORDER_WIDTH: u16 = 4;
 
 fn tag_indicator_column_width(area_width: u16) -> u16 {
     const WIDTH: u16 = 1;
@@ -783,7 +787,7 @@ fn session_tag_line(
         " "
     };
     format!(
-        "{}{}{}",
+        " {} {} {} ",
         pad_or_truncate_owned(tag.key.clone(), key_width as usize),
         pad_or_truncate_owned(tag.value.clone(), value_width as usize),
         pad_or_truncate_owned(indicator.to_string(), indicator_width as usize)
@@ -798,29 +802,43 @@ fn draw_session_tag_edit_row(
     focus: SessionTagsFocus,
     columns: TagColumns,
 ) {
-    if area.width == 0 || area.height == 0 {
+    if area.width == 0 || area.height < TAG_EDIT_ROW_HEIGHT {
         return;
     }
-    let base_style = Style::default().fg(Color::White);
+    let border_style = Style::default().fg(Color::DarkGray);
     let key_style = tag_edit_cell_style(focus == SessionTagsFocus::Key);
     let value_style = tag_edit_cell_style(focus == SessionTagsFocus::Value);
     let add_style = tag_edit_cell_style(focus == SessionTagsFocus::Add);
-    let line = Line::from(vec![
+    let key_rule = "─".repeat(columns.key_width as usize);
+    let value_rule = "─".repeat(columns.value_width as usize);
+    let indicator_rule = "─".repeat(columns.indicator_width as usize);
+    let top = Line::from(TuiSpan::styled(
+        format!("┌{key_rule}┬{value_rule}┬{indicator_rule}┐"),
+        border_style,
+    ));
+    let middle = Line::from(vec![
+        TuiSpan::styled("│", border_style),
         TuiSpan::styled(
             pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
             key_style,
         ),
+        TuiSpan::styled("│", border_style),
         TuiSpan::styled(
             pad_or_truncate_owned(value_input.to_string(), columns.value_width as usize),
             value_style,
         ),
+        TuiSpan::styled("│", border_style),
         TuiSpan::styled(
             pad_or_truncate_owned("+".to_string(), columns.indicator_width as usize),
             add_style,
         ),
-    ])
-    .style(base_style);
-    frame.render_widget(Paragraph::new(line), area);
+        TuiSpan::styled("│", border_style),
+    ]);
+    let bottom = Line::from(TuiSpan::styled(
+        format!("└{key_rule}┴{value_rule}┴{indicator_rule}┘"),
+        border_style,
+    ));
+    frame.render_widget(Paragraph::new(vec![top, middle, bottom]), area);
 }
 
 fn tag_edit_cell_style(focused: bool) -> Style {

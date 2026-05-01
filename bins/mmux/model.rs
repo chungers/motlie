@@ -11,6 +11,9 @@ use crate::consts::{
 };
 use crate::detail::DetailSource;
 
+const SESSION_TAGS_EDIT_ROW_HEIGHT: u16 = 3;
+const SESSION_TAGS_EDIT_BORDER_WIDTH: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutMode {
     Normal,
@@ -129,7 +132,7 @@ impl ModalView {
             ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
             ModalBody::SessionTags { tags, .. } => {
                 let rows = max(1, tags.len()) as u16;
-                rows + 1
+                rows + SESSION_TAGS_EDIT_ROW_HEIGHT
             }
         }
     }
@@ -154,10 +157,18 @@ impl ModalView {
                 ..
             } => tags
                 .iter()
-                .map(|tag| tag.key.chars().count() + 5 + tag.value.chars().count())
+                .map(|tag| {
+                    tag.key.chars().count()
+                        + 5
+                        + tag.value.chars().count()
+                        + SESSION_TAGS_EDIT_BORDER_WIDTH
+                })
                 .chain([
-                    "No tags".chars().count(),
-                    key_input.chars().count() + 5 + value_input.chars().count(),
+                    "No tags".chars().count() + SESSION_TAGS_EDIT_BORDER_WIDTH,
+                    key_input.chars().count()
+                        + 5
+                        + value_input.chars().count()
+                        + SESSION_TAGS_EDIT_BORDER_WIDTH,
                 ])
                 .max()
                 .unwrap_or(0),

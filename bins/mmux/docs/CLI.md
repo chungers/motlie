@@ -8,7 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-01 | @codex | Updated the Session Tags modal layout to use the same key/value/marker table columns for rows and bottom edit controls; `c` marks the focused row with `✓`, and the focused add cell renders `+` in the marker column. |
+| 2026-05-01 | @codex | Updated the Session Tags modal layout to use bordered key/value/marker edit cells; `Tab` cycles Key → Value → `+`, `Shift-Tab` reverses that cycle, and `c` marks the focused tag row with `✓`. |
 | 2026-05-01 | @codex | Added session rename and tag management modals: `r` renames the highlighted session from list focus, `t` opens the unified tag list/add/update/delete modal, and `i` remains unassigned. |
 | 2026-04-29 | @opus47-macos-tmux | Updated recency-display semantics: activity column is observer-relative ("time since mmux last saw `session.activity` advance"); age column is `local_now − session.created` under an NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate age text but no functional regression. (Earlier drafts probed the host clock at fleet-connect via `#{epoch}` / `run-shell 'date +%s'`; that approach was abandoned because `run-shell` on tmux ≤ 3.4 corrupts the operator's attached pane.) |
 | 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status reads `mmux - multi-host mode (n)`, session rows insert a hostname column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
@@ -302,7 +302,7 @@ Modal keys:
 | Key | Behavior |
 |-----|----------|
 | Left / Right | Choose Cancel or Ok in New Session, Kill Session, and Rename Session modals. No-op in Help and Session Tags. |
-| Tab / Shift-Tab | Move focus between Session Tags bottom controls and Cancel. |
+| Tab / Shift-Tab | Cycle Session Tags edit-row focus through Key, Value, and `+`; Shift-Tab reverses the cycle. |
 | Up / Down | Move focus row-to-row in Session Tags; Up from bottom controls returns to the last tag row when present. |
 | `u` | In Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, toggle the focused row as the sort key with `✓`. |
@@ -315,8 +315,9 @@ their text fields with their own borders. Session Tags lists `@mmux/<key>`
 values sorted by stripped key in key/value/sort-marker columns. The key column
 is sized to the longest key plus four characters, the marker column displays
 `✓` when toggled on by `c`, and the value column takes the remaining width. The
-bottom Key/Value edit cells use the same three-column table layout and place
-focused `+` in the marker column. Tag writes still require non-empty values. Help
+bottom Key/Value edit cells use the same three-column table layout with thin
+cell borders and place focused `+` in the marker column. Tag writes still
+require non-empty values. Help
 renders the built-in motlie logo, build date, last 8 characters of the build git
 SHA, key functions, and a single Ok button. All modal content areas are
 separated from the button bar by a horizontal line.
