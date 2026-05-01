@@ -30,6 +30,21 @@ pub(crate) enum Button {
     Ok,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionTagsFocus {
+    TagRow(usize),
+    Key,
+    Value,
+    Add,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionTagRow {
+    pub(crate) key: String,
+    pub(crate) value: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ModalState {
     NewSession {
@@ -42,6 +57,24 @@ pub(crate) enum ModalState {
         id: String,
         name: String,
         button: Button,
+    },
+    RenameSession {
+        host_id: HostId,
+        host_label: String,
+        id: String,
+        current_name: String,
+        input: String,
+        button: Button,
+    },
+    SessionTags {
+        host_id: HostId,
+        host_label: String,
+        id: String,
+        name: String,
+        tags: Vec<SessionTagRow>,
+        key_input: String,
+        value_input: String,
+        focus: SessionTagsFocus,
     },
     Help,
 }
@@ -60,6 +93,23 @@ impl ModalView {
         match &self.body {
             ModalBody::Text(text) => text.clone(),
             ModalBody::NewSession { input } => format!("Session name\n{input}"),
+            ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
+            ModalBody::SessionTags {
+                tags,
+                key_input,
+                value_input,
+                ..
+            } => {
+                let rows = if tags.is_empty() {
+                    "No tags".to_string()
+                } else {
+                    tags.iter()
+                        .map(|tag| format!("{} = {}", tag.key, tag.value))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                format!("{rows}\nKey\n{key_input}\nValue\n{value_input}\n+")
+            }
         }
     }
 
@@ -67,6 +117,11 @@ impl ModalView {
         match &self.body {
             ModalBody::Text(text) => max(1, text.lines().count()) as u16,
             ModalBody::NewSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
+            ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
+            ModalBody::SessionTags { tags, .. } => {
+                let rows = max(1, tags.len()) as u16;
+                rows + (1 + MODAL_TEXT_FIELD_HEIGHT) * 2 + 1
+            }
         }
     }
 
@@ -80,6 +135,27 @@ impl ModalView {
             ModalBody::NewSession { input } => {
                 max("Session name".chars().count(), input.chars().count())
             }
+            ModalBody::RenameSession { input } => {
+                max("Session Name".chars().count(), input.chars().count())
+            }
+            ModalBody::SessionTags {
+                tags,
+                key_input,
+                value_input,
+                ..
+            } => tags
+                .iter()
+                .map(|tag| tag.key.chars().count() + 3 + tag.value.chars().count())
+                .chain([
+                    "No tags".chars().count(),
+                    "Key".chars().count(),
+                    key_input.chars().count(),
+                    "Value".chars().count(),
+                    value_input.chars().count(),
+                    3,
+                ])
+                .max()
+                .unwrap_or(0),
         };
         max(body_width, self.buttons.chars().count()) as u16
     }
@@ -88,7 +164,18 @@ impl ModalView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModalBody {
     Text(String),
-    NewSession { input: String },
+    NewSession {
+        input: String,
+    },
+    RenameSession {
+        input: String,
+    },
+    SessionTags {
+        tags: Vec<SessionTagRow>,
+        key_input: String,
+        value_input: String,
+        focus: SessionTagsFocus,
+    },
 }
 
 /// Stable identity for a target host across the binary. Either a normalized

@@ -34,6 +34,8 @@ Home/End jump current pane
 m monitor highlighted session
 n create session
 k kill highlighted session
+r rename highlighted session (list pane)
+t manage highlighted session tags
 h help
 Enter/a attach highlighted session
 mod-←/→ resize L/R in landscape

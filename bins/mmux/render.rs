@@ -19,6 +19,7 @@ use crate::consts::{
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
     AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, MotdState, SessionRow,
+    SessionTagsFocus,
 };
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
@@ -503,6 +504,10 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "kill", 'k');
     push_status_separator(&mut spans);
+    push_status_command(&mut spans, "rename", 'r');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "tags", 't');
+    push_status_separator(&mut spans);
     push_status_command(&mut spans, "quit", 'q');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "layout", 'l');
@@ -638,30 +643,167 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
             );
         }
         ModalBody::NewSession { input } => {
-            frame.render_widget(
-                Paragraph::new("Session name"),
-                Rect::new(area.x, area.y, area.width, 1),
-            );
-            if area.height <= 1 {
-                return;
-            }
-            let input_rect = Rect::new(
-                area.x,
-                area.y.saturating_add(1),
-                area.width,
-                min(MODAL_TEXT_FIELD_HEIGHT, area.height.saturating_sub(1)),
-            );
-            frame.render_widget(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-                input_rect,
-            );
-            let input_inner = inset_rect(input_rect, 1, 1);
-            if input_inner.width > 0 && input_inner.height > 0 {
-                frame.render_widget(Paragraph::new(input.as_str()), input_inner);
+            draw_labeled_text_field(frame, area, "Session name", input, true);
+        }
+        ModalBody::RenameSession { input } => {
+            draw_labeled_text_field(frame, area, "Session Name", input, true);
+        }
+        ModalBody::SessionTags {
+            tags,
+            key_input,
+            value_input,
+            focus,
+        } => {
+            draw_session_tags_body(frame, area, tags, key_input, value_input, *focus);
+        }
+    }
+}
+
+fn draw_session_tags_body(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tags: &[crate::model::SessionTagRow],
+    key_input: &str,
+    value_input: &str,
+    focus: SessionTagsFocus,
+) {
+    const ADD_HEIGHT: u16 = 1;
+    let field_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
+    let controls_height = field_height.saturating_mul(2).saturating_add(ADD_HEIGHT);
+    let list_height = area.height.saturating_sub(controls_height);
+    let mut y = area.y;
+
+    if list_height > 0 {
+        let selected_row = match focus {
+            SessionTagsFocus::TagRow(index) => Some(index),
+            _ => None,
+        };
+        let start = selected_row
+            .map(|index| index.saturating_sub(list_height.saturating_sub(1) as usize))
+            .unwrap_or(0);
+        let mut lines = Vec::new();
+        if tags.is_empty() {
+            lines.push(Line::from(TuiSpan::styled(
+                "No tags",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for (index, tag) in tags
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(list_height as usize)
+            {
+                let focused = matches!(focus, SessionTagsFocus::TagRow(row) if row == index);
+                let style = if focused {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::from(TuiSpan::styled(
+                    format!("{} = {}", tag.key, tag.value),
+                    style,
+                )));
             }
         }
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            Rect::new(area.x, y, area.width, list_height),
+        );
+        y = y.saturating_add(list_height);
+    }
+
+    let key_area = Rect::new(
+        area.x,
+        y,
+        area.width,
+        min(field_height, area.bottom().saturating_sub(y)),
+    );
+    draw_labeled_text_field(
+        frame,
+        key_area,
+        "Key",
+        key_input,
+        focus == SessionTagsFocus::Key,
+    );
+    y = y.saturating_add(field_height);
+
+    let value_area = Rect::new(
+        area.x,
+        y,
+        area.width,
+        min(field_height, area.bottom().saturating_sub(y)),
+    );
+    draw_labeled_text_field(
+        frame,
+        value_area,
+        "Value",
+        value_input,
+        focus == SessionTagsFocus::Value,
+    );
+    y = y.saturating_add(field_height);
+
+    if y < area.bottom() {
+        let add_text = if focus == SessionTagsFocus::Add {
+            "[+]"
+        } else {
+            " + "
+        };
+        let style = if focus == SessionTagsFocus::Add {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        frame.render_widget(
+            Paragraph::new(add_text).style(style),
+            Rect::new(area.x, y, min(3, area.width), ADD_HEIGHT),
+        );
+    }
+}
+
+fn draw_labeled_text_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(label),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height <= 1 {
+        return;
+    }
+    let input_rect = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        min(MODAL_TEXT_FIELD_HEIGHT, area.height.saturating_sub(1)),
+    );
+    let border = if focused {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border)),
+        input_rect,
+    );
+    let input_inner = inset_rect(input_rect, 1, 1);
+    if input_inner.width > 0 && input_inner.height > 0 {
+        frame.render_widget(Paragraph::new(value), input_inner);
     }
 }
 
@@ -712,6 +854,42 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ),
             active_button: *button,
         },
+        ModalState::RenameSession { input, button, .. } => ModalView {
+            title: " Rename Session ",
+            body: ModalBody::RenameSession {
+                input: input.clone(),
+            },
+            buttons: format!(
+                "{}   {}",
+                button_text(*button, Button::Cancel),
+                button_text(*button, Button::Ok)
+            ),
+            active_button: *button,
+        },
+        ModalState::SessionTags {
+            tags,
+            key_input,
+            value_input,
+            focus,
+            ..
+        } => {
+            let active_button = if *focus == SessionTagsFocus::Cancel {
+                Button::Cancel
+            } else {
+                Button::Ok
+            };
+            ModalView {
+                title: " Session Tags ",
+                body: ModalBody::SessionTags {
+                    tags: tags.clone(),
+                    key_input: key_input.clone(),
+                    value_input: value_input.clone(),
+                    focus: *focus,
+                },
+                buttons: button_text(active_button, Button::Cancel),
+                active_button,
+            }
+        }
         ModalState::Help => ModalView {
             title: " Help ",
             body: ModalBody::Text(format!(

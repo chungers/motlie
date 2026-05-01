@@ -1,10 +1,11 @@
+use std::cmp::min;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use motlie_tmux::{CreateSessionOptions, HostHandle};
+use motlie_tmux::{CreateSessionOptions, HostHandle, SessionTag};
 
 use crate::consts::{
     DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
@@ -13,7 +14,7 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    SelectedSession, SessionRow, StatusBanner,
+    SelectedSession, SessionRow, SessionTagRow, SessionTagsFocus, StatusBanner,
 };
 
 pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
@@ -316,6 +317,27 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
+        (KeyCode::Char('r'), _) if app.layout.focus == Focus::List => {
+            if let Some(selected) = app.selected_session() {
+                app.modal = Some(ModalState::RenameSession {
+                    host_id: selected.host_id,
+                    host_label: selected.host_label,
+                    id: selected.id,
+                    current_name: selected.name.clone(),
+                    input: selected.name,
+                    button: Button::Ok,
+                });
+            } else {
+                app.status = StatusBanner::info("no session selected");
+            }
+        }
+        (KeyCode::Char('t'), _) => {
+            if let Some(selected) = app.selected_session() {
+                open_session_tags_modal(fleet, app, selected).await?;
+            } else {
+                app.status = StatusBanner::info("no session selected");
+            }
+        }
         (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
             if let Some(selected) = app.selected_session() {
                 return Ok(KeyOutcome::Select(selected));
@@ -461,119 +483,647 @@ async fn reset_to_sample_detail(fleet: &HostFleet, app: &mut AppState) -> Result
     refresh_detail(fleet, app, true).await
 }
 
+enum ModalAction {
+    None,
+    Close,
+    CreateSession {
+        input: String,
+    },
+    KillSession {
+        host_id: HostId,
+        host_label: String,
+        id: String,
+        name: String,
+    },
+    RenameSession {
+        host_id: HostId,
+        host_label: String,
+        id: String,
+        current_name: String,
+        input: String,
+    },
+    SetTag {
+        session: ModalSessionRef,
+        key: String,
+        value: String,
+    },
+    UnsetTag {
+        session: ModalSessionRef,
+        key: String,
+        index: usize,
+    },
+}
+
+#[derive(Clone)]
+struct ModalSessionRef {
+    host_id: HostId,
+    host_label: String,
+    id: String,
+    name: String,
+}
+
 async fn handle_modal_key(
     fleet: &HostFleet,
     app: &mut AppState,
     key: KeyEvent,
 ) -> Result<KeyOutcome> {
-    let mut close = false;
-    let mut apply = false;
-    match app.modal.as_mut() {
+    let action = match app.modal.as_mut() {
         Some(ModalState::NewSession { input, button }) => match key.code {
-            KeyCode::Esc => close = true,
-            KeyCode::Left => *button = Button::Cancel,
-            KeyCode::Right => *button = Button::Ok,
-            KeyCode::Enter => {
-                apply = *button == Button::Ok;
-                close = true;
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Left => {
+                *button = Button::Cancel;
+                ModalAction::None
             }
+            KeyCode::Right => {
+                *button = Button::Ok;
+                ModalAction::None
+            }
+            KeyCode::Enter if *button == Button::Ok => ModalAction::CreateSession {
+                input: input.clone(),
+            },
+            KeyCode::Enter => ModalAction::Close,
             KeyCode::Backspace => {
                 input.pop();
+                ModalAction::None
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 input.push(c);
+                ModalAction::None
             }
-            _ => {}
+            _ => ModalAction::None,
         },
-        Some(ModalState::KillSession { button, .. }) => match key.code {
-            KeyCode::Esc => close = true,
-            KeyCode::Left => *button = Button::Cancel,
-            KeyCode::Right => *button = Button::Ok,
-            KeyCode::Enter => {
-                apply = *button == Button::Ok;
-                close = true;
+        Some(ModalState::KillSession {
+            host_id,
+            host_label,
+            id,
+            name,
+            button,
+        }) => match key.code {
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Left => {
+                *button = Button::Cancel;
+                ModalAction::None
             }
-            _ => {}
+            KeyCode::Right => {
+                *button = Button::Ok;
+                ModalAction::None
+            }
+            KeyCode::Enter if *button == Button::Ok => ModalAction::KillSession {
+                host_id: host_id.clone(),
+                host_label: host_label.clone(),
+                id: id.clone(),
+                name: name.clone(),
+            },
+            KeyCode::Enter => ModalAction::Close,
+            _ => ModalAction::None,
         },
+        Some(ModalState::RenameSession {
+            host_id,
+            host_label,
+            id,
+            current_name,
+            input,
+            button,
+        }) => match key.code {
+            KeyCode::Esc => ModalAction::Close,
+            KeyCode::Left => {
+                *button = Button::Cancel;
+                ModalAction::None
+            }
+            KeyCode::Right => {
+                *button = Button::Ok;
+                ModalAction::None
+            }
+            KeyCode::Enter if *button == Button::Ok => ModalAction::RenameSession {
+                host_id: host_id.clone(),
+                host_label: host_label.clone(),
+                id: id.clone(),
+                current_name: current_name.clone(),
+                input: input.clone(),
+            },
+            KeyCode::Enter => ModalAction::Close,
+            KeyCode::Backspace => {
+                input.pop();
+                ModalAction::None
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.push(c);
+                ModalAction::None
+            }
+            _ => ModalAction::None,
+        },
+        Some(ModalState::SessionTags {
+            host_id,
+            host_label,
+            id,
+            name,
+            tags,
+            key_input,
+            value_input,
+            focus,
+        }) => handle_session_tags_modal_key(
+            key,
+            ModalSessionRef {
+                host_id: host_id.clone(),
+                host_label: host_label.clone(),
+                id: id.clone(),
+                name: name.clone(),
+            },
+            tags,
+            key_input,
+            value_input,
+            focus,
+        ),
         Some(ModalState::Help) => match key.code {
-            KeyCode::Esc | KeyCode::Enter => close = true,
-            _ => {}
+            KeyCode::Esc | KeyCode::Enter => ModalAction::Close,
+            _ => ModalAction::None,
         },
-        None => {}
-    }
+        None => ModalAction::None,
+    };
 
-    if close {
-        let modal = app.modal.take();
-        if apply {
-            match modal {
-                Some(ModalState::NewSession { input, .. }) => {
-                    let Some(target_host) = host_for_new_session(fleet, app) else {
-                        app.status = StatusBanner::error("no host available for new session");
-                        return Ok(KeyOutcome::Continue);
-                    };
-                    let name = input.trim();
-                    if name.is_empty() {
-                        app.status = StatusBanner::info("new session name is empty");
-                    } else {
-                        match target_host
-                            .handle
-                            .create_session(name, &CreateSessionOptions::default())
-                            .await
-                        {
-                            Ok(_) => {
-                                app.status = StatusBanner::info(if fleet.is_multi() {
-                                    format!("created session {name} on {}", target_host.label)
-                                } else {
-                                    format!("created session {name}")
-                                });
-                                refresh_sessions(fleet, app, true).await?;
-                            }
-                            Err(err) => {
-                                app.status = StatusBanner::error(format!("create failed: {err}"));
-                            }
-                        }
-                    }
-                }
-                Some(ModalState::KillSession {
-                    host_id,
-                    host_label,
-                    id,
-                    name,
-                    ..
-                }) => {
-                    let Some(host) = fleet_host(fleet, &host_id) else {
-                        app.status =
-                            StatusBanner::error(format!("host {host_label} no longer connected"));
-                        return Ok(KeyOutcome::Continue);
-                    };
-                    match host.session_by_id(&id).await? {
-                        Some(target) => match target.kill().await {
-                            Ok(()) => {
-                                app.status = StatusBanner::info(if fleet.is_multi() {
-                                    format!("killed session {name} on {host_label}")
-                                } else {
-                                    format!("killed session {name}")
-                                });
-                                refresh_sessions(fleet, app, true).await?;
-                            }
-                            Err(err) => {
-                                app.status = StatusBanner::error(format!("kill failed: {err}"));
-                            }
-                        },
-                        None => {
-                            app.status = StatusBanner::error(format!(
-                                "session {name} disappeared before kill"
-                            ));
-                            refresh_sessions(fleet, app, true).await?;
-                        }
-                    }
-                }
-                Some(ModalState::Help) => {}
-                None => {}
-            }
+    match action {
+        ModalAction::None => {}
+        ModalAction::Close => app.modal = None,
+        ModalAction::CreateSession { input } => {
+            app.modal = None;
+            create_session_from_modal(fleet, app, input).await?;
+        }
+        ModalAction::KillSession {
+            host_id,
+            host_label,
+            id,
+            name,
+        } => {
+            app.modal = None;
+            kill_session_from_modal(fleet, app, host_id, host_label, id, name).await?;
+        }
+        ModalAction::RenameSession {
+            host_id,
+            host_label,
+            id,
+            current_name,
+            input,
+        } => {
+            app.modal = None;
+            rename_session_from_modal(fleet, app, host_id, host_label, id, current_name, input)
+                .await?;
+        }
+        ModalAction::SetTag {
+            session,
+            key,
+            value,
+        } => {
+            set_tag_from_modal(fleet, app, session, key, value).await?;
+        }
+        ModalAction::UnsetTag {
+            session,
+            key,
+            index,
+        } => {
+            unset_tag_from_modal(fleet, app, session, key, index).await?;
         }
     }
     Ok(KeyOutcome::Continue)
+}
+
+fn handle_session_tags_modal_key(
+    key: KeyEvent,
+    session: ModalSessionRef,
+    tags: &[SessionTagRow],
+    key_input: &mut String,
+    value_input: &mut String,
+    focus: &mut SessionTagsFocus,
+) -> ModalAction {
+    match key.code {
+        KeyCode::Esc => ModalAction::Close,
+        KeyCode::Tab => {
+            *focus = next_session_tags_focus(*focus, tags.len());
+            ModalAction::None
+        }
+        KeyCode::BackTab => {
+            *focus = previous_session_tags_focus(*focus, tags.len());
+            ModalAction::None
+        }
+        KeyCode::Up => {
+            *focus = match *focus {
+                SessionTagsFocus::TagRow(index) => {
+                    SessionTagsFocus::TagRow(index.saturating_sub(1))
+                }
+                _ if !tags.is_empty() => SessionTagsFocus::TagRow(tags.len() - 1),
+                _ => *focus,
+            };
+            ModalAction::None
+        }
+        KeyCode::Down => {
+            *focus = match *focus {
+                SessionTagsFocus::TagRow(index) => {
+                    SessionTagsFocus::TagRow(min(index + 1, tags.len().saturating_sub(1)))
+                }
+                _ => *focus,
+            };
+            ModalAction::None
+        }
+        KeyCode::Backspace => {
+            match *focus {
+                SessionTagsFocus::Key => {
+                    key_input.pop();
+                }
+                SessionTagsFocus::Value => {
+                    value_input.pop();
+                }
+                _ => {}
+            }
+            ModalAction::None
+        }
+        KeyCode::Enter => match *focus {
+            SessionTagsFocus::Add => ModalAction::SetTag {
+                session,
+                key: key_input.trim().to_string(),
+                value: value_input.clone(),
+            },
+            SessionTagsFocus::Cancel => ModalAction::Close,
+            _ => ModalAction::None,
+        },
+        KeyCode::Char('x') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
+            let SessionTagsFocus::TagRow(index) = *focus else {
+                return ModalAction::None;
+            };
+            let Some(tag) = tags.get(index) else {
+                return ModalAction::None;
+            };
+            ModalAction::UnsetTag {
+                session,
+                key: tag.key.clone(),
+                index,
+            }
+        }
+        KeyCode::Char('u') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
+            let SessionTagsFocus::TagRow(index) = *focus else {
+                return ModalAction::None;
+            };
+            if let Some(tag) = tags.get(index) {
+                *key_input = tag.key.clone();
+                *value_input = tag.value.clone();
+                *focus = SessionTagsFocus::Value;
+            }
+            ModalAction::None
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match *focus {
+                SessionTagsFocus::Key => key_input.push(c),
+                SessionTagsFocus::Value => value_input.push(c),
+                _ => {}
+            }
+            ModalAction::None
+        }
+        _ => ModalAction::None,
+    }
+}
+
+fn next_session_tags_focus(focus: SessionTagsFocus, tag_count: usize) -> SessionTagsFocus {
+    match focus {
+        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Key,
+        SessionTagsFocus::Key => SessionTagsFocus::Value,
+        SessionTagsFocus::Value => SessionTagsFocus::Add,
+        SessionTagsFocus::Add => SessionTagsFocus::Cancel,
+        SessionTagsFocus::Cancel if tag_count > 0 => SessionTagsFocus::TagRow(0),
+        SessionTagsFocus::Cancel => SessionTagsFocus::Key,
+    }
+}
+
+fn previous_session_tags_focus(focus: SessionTagsFocus, tag_count: usize) -> SessionTagsFocus {
+    match focus {
+        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Cancel,
+        SessionTagsFocus::Key if tag_count > 0 => SessionTagsFocus::TagRow(tag_count - 1),
+        SessionTagsFocus::Key => SessionTagsFocus::Cancel,
+        SessionTagsFocus::Value => SessionTagsFocus::Key,
+        SessionTagsFocus::Add => SessionTagsFocus::Value,
+        SessionTagsFocus::Cancel => SessionTagsFocus::Add,
+    }
+}
+
+async fn create_session_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    input: String,
+) -> Result<()> {
+    let Some(target_host) = host_for_new_session(fleet, app) else {
+        app.status = StatusBanner::error("no host available for new session");
+        return Ok(());
+    };
+    let name = input.trim();
+    if name.is_empty() {
+        app.status = StatusBanner::info("new session name is empty");
+        return Ok(());
+    }
+    match target_host
+        .handle
+        .create_session(name, &CreateSessionOptions::default())
+        .await
+    {
+        Ok(_) => {
+            let status = if fleet.is_multi() {
+                format!("created session {name} on {}", target_host.label)
+            } else {
+                format!("created session {name}")
+            };
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::info(status);
+        }
+        Err(err) => {
+            app.status = StatusBanner::error(format!("create failed: {err}"));
+        }
+    }
+    Ok(())
+}
+
+async fn kill_session_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    host_id: HostId,
+    host_label: String,
+    id: String,
+    name: String,
+) -> Result<()> {
+    let Some(host) = fleet_host(fleet, &host_id) else {
+        app.status = StatusBanner::error(format!("host {host_label} no longer connected"));
+        return Ok(());
+    };
+    match host.session_by_id(&id).await? {
+        Some(target) => match target.kill().await {
+            Ok(()) => {
+                let status = if fleet.is_multi() {
+                    format!("killed session {name} on {host_label}")
+                } else {
+                    format!("killed session {name}")
+                };
+                refresh_sessions(fleet, app, true).await?;
+                app.status = StatusBanner::info(status);
+            }
+            Err(err) => {
+                app.status = StatusBanner::error(format!("kill failed: {err}"));
+            }
+        },
+        None => {
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!("session {name} disappeared before kill"));
+        }
+    }
+    Ok(())
+}
+
+async fn rename_session_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    host_id: HostId,
+    host_label: String,
+    id: String,
+    current_name: String,
+    input: String,
+) -> Result<()> {
+    let new_name = input.trim();
+    if new_name.is_empty() {
+        app.status = StatusBanner::info("session name is empty");
+        return Ok(());
+    }
+    if new_name == current_name {
+        app.status = StatusBanner::info("session name unchanged");
+        return Ok(());
+    }
+    let Some(host) = fleet_host(fleet, &host_id) else {
+        app.status = StatusBanner::error(format!("host {host_label} no longer connected"));
+        return Ok(());
+    };
+    match host.session_by_id(&id).await? {
+        Some(target) => match target.rename(new_name).await {
+            Ok(_) => {
+                let status = if fleet.is_multi() {
+                    format!("renamed session {current_name} to {new_name} on {host_label}")
+                } else {
+                    format!("renamed session {current_name} to {new_name}")
+                };
+                refresh_sessions(fleet, app, true).await?;
+                app.status = StatusBanner::info(status);
+            }
+            Err(err) => {
+                app.status = StatusBanner::error(format!("rename failed: {err}"));
+            }
+        },
+        None => {
+            refresh_sessions(fleet, app, true).await?;
+            app.status =
+                StatusBanner::error(format!("session {current_name} disappeared before rename"));
+        }
+    }
+    Ok(())
+}
+
+async fn open_session_tags_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    selected: SelectedSession,
+) -> Result<()> {
+    match load_tag_rows(fleet, &selected.host_id, &selected.id).await? {
+        Some(tags) => {
+            let focus = first_session_tags_focus(&tags);
+            app.modal = Some(ModalState::SessionTags {
+                host_id: selected.host_id,
+                host_label: selected.host_label,
+                id: selected.id,
+                name: selected.name,
+                tags,
+                key_input: String::new(),
+                value_input: String::new(),
+                focus,
+            });
+        }
+        None => {
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before tag edit",
+                selected.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn set_tag_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    session: ModalSessionRef,
+    key: String,
+    value: String,
+) -> Result<()> {
+    if key.is_empty() {
+        app.status = StatusBanner::info("tag key is empty");
+        return Ok(());
+    }
+    if value.is_empty() {
+        app.status = StatusBanner::info("tag value is empty");
+        return Ok(());
+    }
+    let Some(host) = fleet_host(fleet, &session.host_id) else {
+        app.status =
+            StatusBanner::error(format!("host {} no longer connected", session.host_label));
+        return Ok(());
+    };
+    match host.session_by_id(&session.id).await? {
+        Some(target) => match target.set_tag("mmux", &key, &value).await {
+            Ok(()) => {
+                app.status = StatusBanner::info(if fleet.is_multi() {
+                    format!(
+                        "set tag {key} on {} at {}",
+                        session.name, session.host_label
+                    )
+                } else {
+                    format!("set tag {key} on {}", session.name)
+                });
+                reload_session_tags_modal(fleet, app, session, Some(key), None).await?;
+            }
+            Err(err) => {
+                app.status = StatusBanner::error(format!("set tag failed: {err}"));
+            }
+        },
+        None => {
+            app.modal = None;
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before tag edit",
+                session.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn unset_tag_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    session: ModalSessionRef,
+    key: String,
+    index: usize,
+) -> Result<()> {
+    let Some(host) = fleet_host(fleet, &session.host_id) else {
+        app.status =
+            StatusBanner::error(format!("host {} no longer connected", session.host_label));
+        return Ok(());
+    };
+    match host.session_by_id(&session.id).await? {
+        Some(target) => match target.unset_tag("mmux", &key).await {
+            Ok(()) => {
+                app.status = StatusBanner::info(if fleet.is_multi() {
+                    format!(
+                        "deleted tag {key} on {} at {}",
+                        session.name, session.host_label
+                    )
+                } else {
+                    format!("deleted tag {key} on {}", session.name)
+                });
+                reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
+            }
+            Err(err) => {
+                app.status = StatusBanner::error(format!("delete tag failed: {err}"));
+            }
+        },
+        None => {
+            app.modal = None;
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before tag delete",
+                session.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn reload_session_tags_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    session: ModalSessionRef,
+    preferred_key: Option<String>,
+    preferred_index: Option<usize>,
+) -> Result<()> {
+    match load_tag_rows(fleet, &session.host_id, &session.id).await? {
+        Some(tags) => {
+            let focus = if let Some(key) = preferred_key {
+                tags.iter()
+                    .position(|tag| tag.key == key)
+                    .map(SessionTagsFocus::TagRow)
+                    .unwrap_or_else(|| first_session_tags_focus(&tags))
+            } else if let Some(index) = preferred_index {
+                if tags.is_empty() {
+                    SessionTagsFocus::Key
+                } else {
+                    SessionTagsFocus::TagRow(min(index, tags.len() - 1))
+                }
+            } else {
+                first_session_tags_focus(&tags)
+            };
+            app.modal = Some(ModalState::SessionTags {
+                host_id: session.host_id,
+                host_label: session.host_label,
+                id: session.id,
+                name: session.name,
+                tags,
+                key_input: String::new(),
+                value_input: String::new(),
+                focus,
+            });
+        }
+        None => {
+            app.modal = None;
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before tag reload",
+                session.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn load_tag_rows(
+    fleet: &HostFleet,
+    host_id: &HostId,
+    id: &str,
+) -> Result<Option<Vec<SessionTagRow>>> {
+    let Some(host) = fleet_host(fleet, host_id) else {
+        return Ok(None);
+    };
+    let Some(target) = host.session_by_id(id).await? else {
+        return Ok(None);
+    };
+    let mut rows = target
+        .tags("mmux")
+        .await?
+        .list()
+        .await?
+        .into_iter()
+        .map(session_tag_row)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    Ok(Some(rows))
+}
+
+fn session_tag_row(tag: SessionTag) -> SessionTagRow {
+    SessionTagRow {
+        key: tag.key().to_string(),
+        value: tag.value().to_string(),
+    }
+}
+
+fn first_session_tags_focus(tags: &[SessionTagRow]) -> SessionTagsFocus {
+    if tags.is_empty() {
+        SessionTagsFocus::Key
+    } else {
+        SessionTagsFocus::TagRow(0)
+    }
 }
 
 /// Pick the host for a new-session request: the host of the highlighted row

@@ -1264,6 +1264,18 @@ impl<'a> SessionTags<'a> {
         .await
     }
 
+    /// Remove one metadata tag from this namespace.
+    pub async fn unset(&self, key: &str) -> Result<()> {
+        control::unset_session_tag_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+            key,
+        )
+        .await
+    }
+
     /// Read one metadata tag from this namespace.
     ///
     /// Returns `Ok(None)` when the tag is not present.
@@ -1402,6 +1414,16 @@ impl Target {
         self.tags_with_operation(prefix, "set_tag")
             .await?
             .set(key, value)
+            .await
+    }
+
+    /// Remove a namespaced metadata tag from this session.
+    ///
+    /// This is a one-off convenience wrapper around [`tags`](Self::tags).
+    pub async fn unset_tag(&self, prefix: &str, key: &str) -> Result<()> {
+        self.tags_with_operation(prefix, "unset_tag")
+            .await?
+            .unset(key)
             .await
     }
 
@@ -2807,6 +2829,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_tags_unset() {
+        let mock = MockTransport::new().with_response("set-option -u -t '$0' @mmux/foo", "");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let tags = target.tags("mmux").await.unwrap();
+
+        tags.unset("foo").await.unwrap();
+        target.unset_tag("mmux", "foo").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn session_tag_read_missing_returns_none() {
         let mock = MockTransport::new().with_response("show-option -q -t '$0' @mmux/missing", "");
         let host = mock_host(mock);
@@ -2847,6 +2880,7 @@ mod tests {
 
         assert!(target.set_tag("mmux/team", "foo", "bar").await.is_err());
         assert!(target.set_tag("mmux", "foo/bar", "bar").await.is_err());
+        assert!(target.unset_tag("mmux", "foo/bar").await.is_err());
         assert!(target.read_tag("mmux", "foo/bar").await.is_err());
         assert!(target.list_tags("mmux/team").await.is_err());
 
@@ -2884,10 +2918,12 @@ mod tests {
         };
 
         assert!(window_target.set_tag("mmux", "foo", "bar").await.is_err());
+        assert!(window_target.unset_tag("mmux", "foo").await.is_err());
         assert!(window_target.read_tag("mmux", "foo").await.is_err());
         assert!(window_target.list_tags("mmux").await.is_err());
         assert!(window_target.tags("mmux").await.is_err());
         assert!(pane_target.set_tag("mmux", "foo", "bar").await.is_err());
+        assert!(pane_target.unset_tag("mmux", "foo").await.is_err());
         assert!(pane_target.read_tag("mmux", "foo").await.is_err());
         assert!(pane_target.list_tags("mmux").await.is_err());
         assert!(pane_target.tags("mmux").await.is_err());
