@@ -703,12 +703,12 @@ fn handle_session_tags_modal_key(
 ) -> ModalAction {
     match key.code {
         KeyCode::Esc => ModalAction::Close,
-        KeyCode::Tab => {
-            *focus = next_session_tags_focus(*focus, tags.len());
+        KeyCode::Tab | KeyCode::Char('\t') => {
+            *focus = next_session_tags_focus(*focus);
             ModalAction::None
         }
         KeyCode::BackTab => {
-            *focus = previous_session_tags_focus(*focus, tags.len());
+            *focus = previous_session_tags_focus(*focus);
             ModalAction::None
         }
         KeyCode::Up => {
@@ -802,22 +802,20 @@ fn handle_session_tags_modal_key(
     }
 }
 
-fn next_session_tags_focus(focus: SessionTagsFocus, tag_count: usize) -> SessionTagsFocus {
+fn next_session_tags_focus(focus: SessionTagsFocus) -> SessionTagsFocus {
     match focus {
         SessionTagsFocus::TagRow(_) => SessionTagsFocus::Key,
         SessionTagsFocus::Key => SessionTagsFocus::Value,
         SessionTagsFocus::Value => SessionTagsFocus::Add,
-        SessionTagsFocus::Add => SessionTagsFocus::Cancel,
-        SessionTagsFocus::Cancel if tag_count > 0 => SessionTagsFocus::TagRow(0),
+        SessionTagsFocus::Add => SessionTagsFocus::Key,
         SessionTagsFocus::Cancel => SessionTagsFocus::Key,
     }
 }
 
-fn previous_session_tags_focus(focus: SessionTagsFocus, tag_count: usize) -> SessionTagsFocus {
+fn previous_session_tags_focus(focus: SessionTagsFocus) -> SessionTagsFocus {
     match focus {
-        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Cancel,
-        SessionTagsFocus::Key if tag_count > 0 => SessionTagsFocus::TagRow(tag_count - 1),
-        SessionTagsFocus::Key => SessionTagsFocus::Cancel,
+        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Add,
+        SessionTagsFocus::Key => SessionTagsFocus::Add,
         SessionTagsFocus::Value => SessionTagsFocus::Key,
         SessionTagsFocus::Add => SessionTagsFocus::Value,
         SessionTagsFocus::Cancel => SessionTagsFocus::Add,

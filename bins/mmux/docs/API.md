@@ -10,7 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-01 | @codex | Added the Session Tags modal column model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, and the bottom edit controls use the same three-column table row. |
+| 2026-05-01 | @codex | Added the Session Tags modal column model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, and the bottom edit controls use bordered table cells with `Tab` cycling Key/Value/`+`. |
 | 2026-05-01 | @codex | Documented implemented session rename and tag-management modals: `r` captures host/session id and renames through `Target::rename`; `t` manages `@mmux/` tags through the `motlie-tmux` tag API, including add/update/delete. |
 | 2026-04-28 | @gpt55-dgx | Clarified exact `MOTLIE_MMUX_BYPASS=1` behavior and linked issue #232 for env-gated SSH integration coverage. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux session-list polling so one `list_sessions_now()` loop drives activity ordering and structural state. |
@@ -285,7 +285,8 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 `t` opens `SessionTags` for the highlighted session. Rows are loaded from
 `Target::tags("mmux").await?.list().await?`, sorted lexicographically by
 stripped key, and rendered without `@mmux/`. The modal keeps row focus and
-bottom field focus explicit with `SessionTagsFocus`; `x` deletes through
+bottom field focus explicit with `SessionTagsFocus`; `Tab` cycles the bottom
+Key/Value/`+` cells, `Shift-Tab` reverses that cycle, `x` deletes through
 `Target::unset_tag("mmux", key)`, `u` preloads the bottom fields, and focused
 `+` writes non-empty values through `Target::set_tag("mmux", key, value)`.
 Pressing `c` on a focused tag row toggles a modal-local sort marker and renders
