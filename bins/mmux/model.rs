@@ -129,7 +129,7 @@ impl ModalView {
             ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
             ModalBody::SessionTags { tags, .. } => {
                 let rows = max(1, tags.len()) as u16;
-                rows + MODAL_TEXT_FIELD_HEIGHT
+                rows + 1
             }
         }
     }

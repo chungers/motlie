@@ -672,7 +672,7 @@ fn draw_session_tags_body(
     let key_width = tag_key_column_width(area.width, tags, key_input);
     let indicator_width = tag_indicator_column_width(area.width);
     let value_width = area.width.saturating_sub(key_width + indicator_width);
-    let list_height = area.height.saturating_sub(MODAL_TEXT_FIELD_HEIGHT);
+    let list_height = area.height.saturating_sub(1);
     let mut y = area.y;
 
     if list_height > 0 {
@@ -719,20 +719,20 @@ fn draw_session_tags_body(
     }
 
     let key_area = Rect::new(
-        area.x,
+        area.x.saturating_sub(1),
         y,
-        key_width,
-        min(MODAL_TEXT_FIELD_HEIGHT, area.bottom().saturating_sub(y)),
+        key_width.saturating_sub(1),
+        min(1, area.bottom().saturating_sub(y)),
     );
-    draw_text_field(frame, key_area, key_input, focus == SessionTagsFocus::Key);
+    draw_compact_text_field(frame, key_area, key_input, focus == SessionTagsFocus::Key);
 
     let value_area = Rect::new(
-        area.x.saturating_add(key_width),
+        area.x.saturating_add(key_width).saturating_sub(1),
         y,
-        value_width,
-        min(MODAL_TEXT_FIELD_HEIGHT, area.bottom().saturating_sub(y)),
+        value_width.saturating_sub(1),
+        min(1, area.bottom().saturating_sub(y)),
     );
-    draw_text_field(
+    draw_compact_text_field(
         frame,
         value_area,
         value_input,
@@ -742,7 +742,7 @@ fn draw_session_tags_body(
     if indicator_width > 0 {
         let indicator_area = Rect::new(
             area.x.saturating_add(key_width).saturating_add(value_width),
-            y.saturating_add(1),
+            y,
             indicator_width,
             1,
         );
@@ -854,25 +854,24 @@ fn draw_labeled_text_field(
     }
 }
 
-fn draw_text_field(frame: &mut Frame<'_>, area: Rect, value: &str, focused: bool) {
-    if area.width == 0 || area.height == 0 {
+fn draw_compact_text_field(frame: &mut Frame<'_>, area: Rect, value: &str, focused: bool) {
+    if area.width < 2 || area.height == 0 {
         return;
     }
-    let border = if focused {
-        Color::Green
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let text = pad_or_truncate_owned(value.to_string(), inner_width);
+    let style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Color::DarkGray
+        Style::default().fg(Color::White)
     };
     frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border)),
-        area,
+        Paragraph::new(format!("[{text}]")).style(style),
+        Rect::new(area.x, area.y, area.width, 1),
     );
-    let input_inner = inset_rect(area, 1, 1);
-    if input_inner.width > 0 && input_inner.height > 0 {
-        frame.render_widget(Paragraph::new(value), input_inner);
-    }
 }
 
 fn draw_modal_buttons(frame: &mut Frame<'_>, area: Rect, buttons: &str) {

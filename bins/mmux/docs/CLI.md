@@ -305,7 +305,7 @@ Modal keys:
 | Tab / Shift-Tab | Move focus between Session Tags bottom controls and Cancel. |
 | Up / Down | Move focus row-to-row in Session Tags; Up from bottom controls returns to the last tag row when present. |
 | `u` | In Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
-| `c` | In Session Tags, mark the focused row as the sort key with `✓`. |
+| `c` | In Session Tags, toggle the focused row as the sort key with `✓`. |
 | `x` | In Session Tags, delete the focused row through the tmux tag API. |
 | Enter | Close modal. Applies Ok when selected in New Session, Kill Session, or Rename Session; applies the focused `+` in Session Tags; closes when Cancel is focused. |
 | Esc | Cancel action modals, close Session Tags, or close Help. |
@@ -314,7 +314,7 @@ Modal content is padded inside the border. New Session and Rename Session render
 their text fields with their own borders. Session Tags lists `@mmux/<key>`
 values sorted by stripped key in key/value/sort-marker columns. The key column
 is sized to the longest key plus four characters, the marker column displays
-`✓` when selected by `c`, and the value column takes the remaining width. The
+`✓` when toggled on by `c`, and the value column takes the remaining width. The
 bottom Key/Value edit boxes align with the displayed columns and place focused
 `[+]` in the marker column. Tag writes still require non-empty values. Help
 renders the built-in motlie logo, build date, last 8 characters of the build git
