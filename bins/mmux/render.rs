@@ -669,7 +669,11 @@ fn draw_session_tags_body(
     value_input: &str,
     focus: SessionTagsFocus,
 ) {
-    let table_content_width = area.width.saturating_sub(TAG_EDIT_TABLE_BORDER_WIDTH);
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let table_content_width = area.width.saturating_sub(TAG_TABLE_BORDER_WIDTH);
     let key_width = tag_key_column_width(table_content_width, tags, key_input);
     let indicator_width = tag_indicator_column_width(table_content_width);
     let value_width = table_content_width.saturating_sub(key_width + indicator_width);
@@ -678,64 +682,38 @@ fn draw_session_tags_body(
         value_width,
         indicator_width,
     };
-    let list_height = area.height.saturating_sub(TAG_EDIT_ROW_HEIGHT);
-    let mut y = area.y;
+    let max_tag_rows = visible_session_tag_rows(area.height);
+    let selected_row = match focus {
+        SessionTagsFocus::TagRow(index) => Some(index),
+        _ => None,
+    };
+    let start = selected_row
+        .map(|index| index.saturating_sub(max_tag_rows.saturating_sub(1)))
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    lines.push(tag_table_border_line(TagTableBorder::Top, columns));
 
-    if list_height > 0 {
-        let selected_row = match focus {
-            SessionTagsFocus::TagRow(index) => Some(index),
-            _ => None,
-        };
-        let start = selected_row
-            .map(|index| index.saturating_sub(list_height.saturating_sub(1) as usize))
-            .unwrap_or(0);
-        let mut lines = Vec::new();
-        if tags.is_empty() {
-            lines.push(Line::from(TuiSpan::styled(
-                "No tags",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            for (index, tag) in tags
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(list_height as usize)
-            {
-                let focused = matches!(focus, SessionTagsFocus::TagRow(row) if row == index);
-                let style = if focused {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Green)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                lines.push(Line::from(TuiSpan::styled(
-                    session_tag_line(tag, sort_key, key_width, value_width, indicator_width),
-                    style,
-                )));
-            }
+    if tags.is_empty() && max_tag_rows > 0 {
+        lines.push(no_session_tags_line(columns));
+        lines.push(tag_table_border_line(TagTableBorder::Middle, columns));
+    } else {
+        for (index, tag) in tags.iter().enumerate().skip(start).take(max_tag_rows) {
+            let focused = matches!(focus, SessionTagsFocus::TagRow(row) if row == index);
+            lines.push(session_tag_line(tag, sort_key, columns, focused));
+            lines.push(tag_table_border_line(TagTableBorder::Middle, columns));
         }
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            Rect::new(area.x, y, area.width, list_height),
-        );
-        y = y.saturating_add(list_height);
     }
 
-    draw_session_tag_edit_row(
-        frame,
-        Rect::new(
-            area.x,
-            y,
-            area.width,
-            min(TAG_EDIT_ROW_HEIGHT, area.bottom().saturating_sub(y)),
-        ),
+    lines.push(session_tag_edit_line(
         key_input,
         value_input,
         focus,
         columns,
+    ));
+    lines.push(tag_table_border_line(TagTableBorder::Bottom, columns));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect::new(area.x, area.y, area.width, area.height),
     );
 }
 
@@ -746,8 +724,19 @@ struct TagColumns {
     indicator_width: u16,
 }
 
-const TAG_EDIT_ROW_HEIGHT: u16 = 3;
-const TAG_EDIT_TABLE_BORDER_WIDTH: u16 = 4;
+const TAG_TABLE_MIN_HEIGHT: u16 = 3;
+const TAG_TABLE_BORDER_WIDTH: u16 = 4;
+
+#[derive(Clone, Copy)]
+enum TagTableBorder {
+    Top,
+    Middle,
+    Bottom,
+}
+
+fn visible_session_tag_rows(area_height: u16) -> usize {
+    area_height.saturating_sub(TAG_TABLE_MIN_HEIGHT) as usize / 2
+}
 
 fn tag_indicator_column_width(area_width: u16) -> u16 {
     const WIDTH: u16 = 1;
@@ -774,71 +763,106 @@ fn tag_key_column_width(
     min(longest_key, max_key_width)
 }
 
+fn tag_table_border_line(kind: TagTableBorder, columns: TagColumns) -> Line<'static> {
+    let (left, key_value, value_indicator, right) = match kind {
+        TagTableBorder::Top => ("┌", "┬", "┬", "┐"),
+        TagTableBorder::Middle => ("├", "┼", "┼", "┤"),
+        TagTableBorder::Bottom => ("└", "┴", "┴", "┘"),
+    };
+    let key_rule = "─".repeat(columns.key_width as usize);
+    let value_rule = "─".repeat(columns.value_width as usize);
+    let indicator_rule = "─".repeat(columns.indicator_width as usize);
+    Line::from(TuiSpan::styled(
+        format!("{left}{key_rule}{key_value}{value_rule}{value_indicator}{indicator_rule}{right}"),
+        tag_table_border_style(),
+    ))
+}
+
+fn no_session_tags_line(columns: TagColumns) -> Line<'static> {
+    tag_table_row_line(
+        pad_or_truncate_owned("No tags".to_string(), columns.key_width as usize),
+        pad_or_truncate_owned(String::new(), columns.value_width as usize),
+        pad_or_truncate_owned(String::new(), columns.indicator_width as usize),
+        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Color::DarkGray),
+    )
+}
+
 fn session_tag_line(
     tag: &crate::model::SessionTagRow,
     sort_key: &Option<String>,
-    key_width: u16,
-    value_width: u16,
-    indicator_width: u16,
-) -> String {
+    columns: TagColumns,
+    focused: bool,
+) -> Line<'static> {
     let indicator = if sort_key.as_deref() == Some(tag.key.as_str()) {
         "✓"
     } else {
         " "
     };
-    format!(
-        " {} {} {} ",
-        pad_or_truncate_owned(tag.key.clone(), key_width as usize),
-        pad_or_truncate_owned(tag.value.clone(), value_width as usize),
-        pad_or_truncate_owned(indicator.to_string(), indicator_width as usize)
+    let style = if focused {
+        tag_table_focused_cell_style()
+    } else {
+        Style::default().fg(Color::White)
+    };
+    tag_table_row_line(
+        pad_or_truncate_owned(tag.key.clone(), columns.key_width as usize),
+        pad_or_truncate_owned(tag.value.clone(), columns.value_width as usize),
+        pad_or_truncate_owned(indicator.to_string(), columns.indicator_width as usize),
+        style,
+        style,
+        style,
     )
 }
 
-fn draw_session_tag_edit_row(
-    frame: &mut Frame<'_>,
-    area: Rect,
+fn session_tag_edit_line(
     key_input: &str,
     value_input: &str,
     focus: SessionTagsFocus,
     columns: TagColumns,
-) {
-    if area.width == 0 || area.height < TAG_EDIT_ROW_HEIGHT {
-        return;
-    }
-    let border_style = Style::default().fg(Color::DarkGray);
+) -> Line<'static> {
     let key_style = tag_edit_cell_style(focus == SessionTagsFocus::Key);
     let value_style = tag_edit_cell_style(focus == SessionTagsFocus::Value);
     let add_style = tag_edit_cell_style(focus == SessionTagsFocus::Add);
-    let key_rule = "─".repeat(columns.key_width as usize);
-    let value_rule = "─".repeat(columns.value_width as usize);
-    let indicator_rule = "─".repeat(columns.indicator_width as usize);
-    let top = Line::from(TuiSpan::styled(
-        format!("┌{key_rule}┬{value_rule}┬{indicator_rule}┐"),
-        border_style,
-    ));
-    let middle = Line::from(vec![
+    tag_table_row_line(
+        pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
+        pad_or_truncate_owned(value_input.to_string(), columns.value_width as usize),
+        pad_or_truncate_owned("+".to_string(), columns.indicator_width as usize),
+        key_style,
+        value_style,
+        add_style,
+    )
+}
+
+fn tag_table_row_line(
+    key: String,
+    value: String,
+    indicator: String,
+    key_style: Style,
+    value_style: Style,
+    indicator_style: Style,
+) -> Line<'static> {
+    let border_style = tag_table_border_style();
+    Line::from(vec![
         TuiSpan::styled("│", border_style),
-        TuiSpan::styled(
-            pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
-            key_style,
-        ),
+        TuiSpan::styled(key, key_style),
         TuiSpan::styled("│", border_style),
-        TuiSpan::styled(
-            pad_or_truncate_owned(value_input.to_string(), columns.value_width as usize),
-            value_style,
-        ),
+        TuiSpan::styled(value, value_style),
         TuiSpan::styled("│", border_style),
-        TuiSpan::styled(
-            pad_or_truncate_owned("+".to_string(), columns.indicator_width as usize),
-            add_style,
-        ),
+        TuiSpan::styled(indicator, indicator_style),
         TuiSpan::styled("│", border_style),
-    ]);
-    let bottom = Line::from(TuiSpan::styled(
-        format!("└{key_rule}┴{value_rule}┴{indicator_rule}┘"),
-        border_style,
-    ));
-    frame.render_widget(Paragraph::new(vec![top, middle, bottom]), area);
+    ])
+}
+
+fn tag_table_border_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn tag_table_focused_cell_style() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Green)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn tag_edit_cell_style(focused: bool) -> Style {
