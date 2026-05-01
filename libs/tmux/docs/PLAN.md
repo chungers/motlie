@@ -910,26 +910,26 @@ than making callers shell out or encode deletion as an empty value.
 
 ### 1.17a — Control-layer unset helper (`src/control.rs`)
 
-- [ ] Add `unset_session_tag_with_prefix(...) -> Result<()>`
-- [ ] Build command as `set-option -u -t <stable-session-id> @<prefix>/<key>`
+- [x] Add `unset_session_tag_with_prefix(...) -> Result<()>`
+- [x] Build command as `set-option -u -t <stable-session-id> @<prefix>/<key>`
   with no value argument
-- [ ] Reuse validated `SessionTagPrefix::option_name(key)` for key validation
-- [ ] Avoid shell pipelines and pane-local shell execution
+- [x] Reuse validated `SessionTagPrefix::option_name(key)` for key validation
+- [x] Avoid shell pipelines and pane-local shell execution
 
 ### 1.17b — `Target` API wiring (`src/host.rs`)
 
-- [ ] Add `SessionTags::unset(key) -> Result<()>`
-- [ ] Add one-off `Target::unset_tag(prefix, key) -> Result<()>`
-- [ ] Preserve session-only level gating with `UnsupportedTarget`
-- [ ] Dispatch by stable `SessionInfo.id`, not display name
+- [x] Add `SessionTags::unset(key) -> Result<()>`
+- [x] Add one-off `Target::unset_tag(prefix, key) -> Result<()>`
+- [x] Preserve session-only level gating with `UnsupportedTarget`
+- [x] Dispatch by stable `SessionInfo.id`, not display name
 
 ### 1.17c — Tests and docs
 
-- [ ] Unit tests for unset command construction
-- [ ] Unit tests for validation-before-exec
-- [ ] Unit tests for non-session target rejection
-- [ ] Update `docs/API.md` and `docs/DESIGN.md`
-- [ ] Validate with `cargo test -p motlie-tmux` and
+- [x] Unit tests for unset command construction
+- [x] Unit tests for validation-before-exec
+- [x] Unit tests for non-session target rejection
+- [x] Update `docs/API.md` and `docs/DESIGN.md`
+- [x] Validate with `cargo test -p motlie-tmux` and
   `cargo clippy -p motlie-tmux -- -D warnings`
 
 ---

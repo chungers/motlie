@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` and one-off `Target::unset_tag(prefix, key)` remove a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
 | 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
 | 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
@@ -868,6 +869,7 @@ let session = host
 let tags = session.tags("mmux").await?;
 tags.set("owner", "david").await?;
 tags.set("role", "worker").await?;
+tags.unset("role").await?;
 
 assert_eq!(
     tags.read("owner").await?,
@@ -886,10 +888,12 @@ Contract:
 - `tags(prefix)` validates the namespace once, captures the stable session id
   and tmux command prefix, and returns a scoped `SessionTags` helper.
 - `SessionTags::set(key, value)` writes one tag.
+- `SessionTags::unset(key)` removes one tag from the namespace.
 - `SessionTags::read(key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
 - `SessionTags::list()` returns every valid tag under that namespace.
-- `set_tag(prefix, key, value)`, `read_tag(prefix, key)`, and
-  `list_tags(prefix)` are one-off wrappers around `tags(prefix)`.
+- `set_tag(prefix, key, value)`, `unset_tag(prefix, key)`,
+  `read_tag(prefix, key)`, and `list_tags(prefix)` are one-off wrappers around
+  `tags(prefix)`.
 - Prefixes and keys must be non-empty ASCII letters, digits, `.`, `_`, or `-`.
 - Values are UTF-8 strings, may be empty, must not contain control characters,
   and are capped at 2 KiB.
@@ -897,7 +901,8 @@ Contract:
 
 The implementation targets the stable tmux `SessionId` held by `SessionInfo`,
 not the mutable display name. Tag reads use `show-option -q` so missing and empty
-values remain distinct; listing uses `show-options` and filters for the requested
+values remain distinct; deletion uses `set-option -u -t <session-id>
+@<prefix>/<key>`. Listing uses `show-options` and filters for the requested
 namespace without shell pipelines.
 
 ### Create child windows and panes

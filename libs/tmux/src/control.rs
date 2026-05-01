@@ -508,6 +508,25 @@ pub(crate) async fn set_session_tag_with_prefix(
     Ok(())
 }
 
+/// Unset a namespaced session tag via tmux user-defined options.
+pub(crate) async fn unset_session_tag_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    tag_prefix: &SessionTagPrefix,
+    key: &str,
+) -> Result<()> {
+    let option_name = tag_prefix.option_name(key)?;
+    let cmd = format!(
+        "{} set-option -u -t {} {}",
+        prefix,
+        shell_escape(target),
+        option_name,
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
 /// Read one namespaced session tag. Missing tags return `Ok(None)`.
 pub(crate) async fn read_session_tag_with_prefix(
     transport: &TransportKind,
@@ -1036,6 +1055,18 @@ mod tests {
         let prefix = tag_prefix();
 
         set_session_tag_with_prefix(&transport, "tmux", "$7", &prefix, "foo", "bar baz")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unset_session_tag_builds_expected_command() {
+        let expected = "tmux set-option -u -t '$7' @mmux/foo";
+        let mock = MockTransport::new().with_response(expected, "");
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        unset_session_tag_with_prefix(&transport, "tmux", "$7", &prefix, "foo")
             .await
             .unwrap();
     }

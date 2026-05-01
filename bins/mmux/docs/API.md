@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Documented implemented session rename and tag-management modals: `r` captures host/session id and renames through `Target::rename`; `t` manages `@mmux/` tags through the `motlie-tmux` tag API, including add/update/delete. |
 | 2026-04-28 | @gpt55-dgx | Clarified exact `MOTLIE_MMUX_BYPASS=1` behavior and linked issue #232 for env-gated SSH integration coverage. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux session-list polling so one `list_sessions_now()` loop drives activity ordering and structural state. |
 | 2026-04-28 | @gpt55-dgx | Documented one-second quiet visible-row refreshes for activity sorting and recency text. |
@@ -230,6 +231,8 @@ enum Focus {
 enum ModalState {
     NewSession { input: String, button: Button },
     KillSession { id: String, name: String, button: Button },
+    RenameSession { id: String, current_name: String, input: String, button: Button },
+    SessionTags { id: String, tags: Vec<SessionTagRow>, focus: SessionTagsFocus },
     Help,
 }
 
@@ -269,9 +272,22 @@ digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
 the bottom status start with `help`, then `pane`, `monitor`, `enter/attach`,
-`new`, `kill`, `quit`, `layout`, and the mode-specific resize hint; the command
-shortcut letter is underlined in each rendered label. Direction hints render as
-`↑/↓ sel`.
+`new`, `kill`, `rename`, `tags`, `quit`, `layout`, and the mode-specific resize
+hint; the command shortcut letter is underlined in each rendered label.
+Direction hints render as `↑/↓ sel`.
+
+`r` opens `RenameSession` only when the session list has focus. The modal
+captures `(host_id, session_id)` plus the current display name, prepopulates the
+`Session Name` field, and dispatches changed names through
+`HostHandle::session_by_id()` and `Target::rename()`.
+
+`t` opens `SessionTags` for the highlighted session. Rows are loaded from
+`Target::tags("mmux").await?.list().await?`, sorted lexicographically by
+stripped key, and rendered without `@mmux/`. The modal keeps row focus and
+bottom field focus explicit with `SessionTagsFocus`; `x` deletes through
+`Target::unset_tag("mmux", key)`, `u` preloads the bottom fields, and focused
+`+` writes non-empty values through `Target::set_tag("mmux", key, value)`.
+`i` is not assigned by this feature.
 
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing

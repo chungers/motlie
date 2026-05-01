@@ -23,7 +23,7 @@ use crate::detail::{
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    SelectedSession, SessionRow,
+    SelectedSession, SessionRow, SessionTagRow, SessionTagsFocus,
 };
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
@@ -250,6 +250,8 @@ fn status_line_omits_layout_mode() {
             "enter/attach",
             "new",
             "kill",
+            "rename",
+            "tags",
             "quit",
             "layout",
             "mod-←/→ resize",
@@ -277,6 +279,8 @@ fn status_line_omits_layout_mode() {
             "enter/attach",
             "new",
             "kill",
+            "rename",
+            "tags",
             "quit",
             "layout",
             "mod-↑/↓ resize",
@@ -300,8 +304,8 @@ fn status_line_underlines_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(underlined, "hpmankql");
-    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | enter/attach | new | kill | quit | layout | mod-←/→ resize ");
+    assert_eq!(underlined, "hpmankrtql");
+    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | enter/attach | new | kill | rename | tags | quit | layout | mod-←/→ resize ");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -1074,6 +1078,298 @@ fn modal_content_separates_body_from_button_bar() {
     assert_eq!(kill.active_button, Button::Cancel);
     assert_eq!(kill.body_text(), "Kill session dev?");
     assert_eq!(kill.buttons, "[Cancel]    Ok ");
+
+    let rename = modal_content(&ModalState::RenameSession {
+        host_id: local_host_id(),
+        host_label: "host".to_string(),
+        id: "$1".to_string(),
+        current_name: "dev".to_string(),
+        input: "dev".to_string(),
+        button: Button::Ok,
+    });
+    assert_eq!(rename.title, " Rename Session ");
+    assert_eq!(rename.active_button, Button::Ok);
+    assert_eq!(rename.buttons, " Cancel    [Ok]");
+    assert!(matches!(
+        rename.body,
+        ModalBody::RenameSession { ref input } if input == "dev"
+    ));
+    assert!(!rename.body_text().contains("[Ok]"));
+
+    let tags = modal_content(&ModalState::SessionTags {
+        host_id: local_host_id(),
+        host_label: "host".to_string(),
+        id: "$1".to_string(),
+        name: "dev".to_string(),
+        tags: vec![SessionTagRow {
+            key: "owner".to_string(),
+            value: "platform".to_string(),
+        }],
+        key_input: "phase".to_string(),
+        value_input: "build".to_string(),
+        focus: SessionTagsFocus::Add,
+    });
+    assert_eq!(tags.title, " Session Tags ");
+    assert_eq!(tags.active_button, Button::Ok);
+    assert_eq!(tags.buttons, " Cancel ");
+    assert!(matches!(
+        tags.body,
+        ModalBody::SessionTags { ref key_input, ref value_input, .. }
+            if key_input == "phase" && value_input == "build"
+    ));
+    assert!(tags.body_text().contains("owner = platform"));
+}
+
+#[tokio::test]
+async fn r_opens_rename_only_from_session_list_focus() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(app.modal.is_none());
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::RenameSession {
+            id,
+            current_name,
+            input,
+            button,
+            ..
+        }) if id == "$1" && current_name == "dev" && input == "dev" && *button == Button::Ok
+    ));
+}
+
+#[tokio::test]
+async fn rename_modal_renames_changed_session_by_stable_id() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("list-sessions", "__MOTLIE_S__ renamed $1 10 0 1  200\n")
+        .with_response("rename-session -t '$1' 'renamed'", "")
+        .with_response("capture-pane -ep", "renamed screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::RenameSession { input, .. }) = app.modal.as_mut() {
+        *input = "renamed".to_string();
+    } else {
+        panic!("expected rename modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(
+        app.selected_session().map(|session| session.name),
+        Some("renamed".to_string())
+    );
+    assert_eq!(app.status.text(), "renamed session dev to renamed");
+}
+
+#[tokio::test]
+async fn t_opens_session_tags_modal_and_i_is_unassigned() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/b alpha\n@mmux/a beta\n@other/a skip\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(app.modal.is_none());
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { tags, focus, .. })
+            if tags
+                == &vec![
+                    SessionTagRow { key: "a".to_string(), value: "beta".to_string() },
+                    SessionTagRow { key: "b".to_string(), value: "alpha".to_string() },
+                ]
+                && *focus == SessionTagsFocus::TagRow(0)
+    ));
+}
+
+#[tokio::test]
+async fn session_tags_modal_delete_updates_list() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "@mmux/a one\n@mmux/b two\n")
+        .with_response("show-options -t '$1'", "@mmux/b two\n")
+        .with_response("set-option -u -t '$1' @mmux/a", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { tags, focus, .. })
+            if tags == &vec![SessionTagRow { key: "b".to_string(), value: "two".to_string() }]
+                && *focus == SessionTagsFocus::TagRow(0)
+    ));
+    assert_eq!(app.status.text(), "deleted tag a on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_update_uses_bottom_fields() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "@mmux/owner old\n")
+        .with_response("show-options -t '$1'", "@mmux/owner new\n")
+        .with_response("set-option -t '$1' @mmux/owner 'new'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { key_input, value_input, focus, .. })
+            if key_input == "owner" && value_input == "old" && *focus == SessionTagsFocus::Value
+    ));
+
+    if let Some(ModalState::SessionTags {
+        value_input, focus, ..
+    }) = app.modal.as_mut()
+    {
+        *value_input = "new".to_string();
+        *focus = SessionTagsFocus::Add;
+    } else {
+        panic!("expected session tags modal");
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionTags { tags, focus, .. })
+            if tags == &vec![SessionTagRow { key: "owner".to_string(), value: "new".to_string() }]
+                && *focus == SessionTagsFocus::TagRow(0)
+    ));
+    assert_eq!(app.status.text(), "set tag owner on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_empty_value_does_not_dispatch() {
+    let mock = MockTransport::new()
+        .with_error("set-option -t '$1'", "should not set empty tag values")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionTags {
+        key_input,
+        value_input,
+        focus,
+        ..
+    }) = app.modal.as_mut()
+    {
+        *key_input = "owner".to_string();
+        value_input.clear();
+        *focus = SessionTagsFocus::Add;
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(app.modal, Some(ModalState::SessionTags { .. })));
+    assert_eq!(app.status.text(), "tag value is empty");
 }
 
 #[tokio::test]
