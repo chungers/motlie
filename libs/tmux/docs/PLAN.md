@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added scoped `SessionTags`, validated self-describing `SessionTag`, `Target::tags()`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
 | 2026-04-09 | @claude | Update Conventions section: library error handling migrated from `anyhow` to `thiserror`-based typed `Error` enum (PR #145). `anyhow` retained as dev-dependency only. |
 | 2026-03-22 | @claude | Implement Phase 5.1 and 5.2: split-screen TUI REPL mode (`tui on`/`tui off`) with binary-local `tui_mirror` consumer using `HistoryHandle` for bounded mirror frame. Restructured `examples/repl.rs` → `examples/repl/main.rs` + `examples/repl/tui_mirror.rs`. Added `ratatui`/`crossterm` dev-dependencies. |
 | 2026-03-22 | @codex | Expand Phase 5 into a concrete first TUI slice: split-screen REPL mirror mode (`tui on` / `tui off`) using a binary-local consumer on top of `Subscription` / `HistoryHandle`, followed later by deeper full terminal-state mirroring if needed. |
@@ -845,6 +846,58 @@ and `handle.authenticate_publickey()` already in the crate's dependency tree.
   ```
 
 **Gates**: None — additive. Does not change behavior for any existing URI or code path.
+
+---
+
+## Phase 1.16: Session Metadata Tags — DC34
+
+Add a small session-only metadata API on `Target` backed by tmux user-defined
+session options. For `prefix = "mmux"` and `key = "owner"`, the stored option is
+`@mmux/owner`.
+
+### 1.16a — Public types and exports (`src/types.rs`, `src/lib.rs`)
+
+- [x] Add validated self-describing `SessionTag` with private prefix/key/value fields
+- [x] Add root `SESSION_TAG_VALUE_MAX_BYTES` const
+- [x] Re-export `SessionTag`, `SessionTags`, and `SESSION_TAG_VALUE_MAX_BYTES`
+
+### 1.16b — Control-layer option helpers (`src/control.rs`)
+
+- [x] Add `set_session_tag_with_prefix(...)`
+- [x] Add `read_session_tag_with_prefix(...) -> Result<Option<String>>`
+- [x] Add `list_session_tags_with_prefix(...) -> Result<Vec<SessionTag>>`
+- [x] Store as `@prefix/key`
+- [x] Use `show-option -q` for single reads so missing tags return `Ok(None)`
+- [x] Use `show-options` and prefix filtering for list calls; no shell pipelines
+- [x] Validate prefix/key as non-empty ASCII letters, digits, `.`, `_`, `-`
+- [x] Reject control characters and values over 2 KiB
+
+### 1.16c — `Target` API wiring (`src/host.rs`)
+
+- [x] Add async `Target::tags(prefix) -> Result<SessionTags<'_>>`
+- [x] Add `SessionTags::set(key, value) -> Result<()>`
+- [x] Add `SessionTags::read(key) -> Result<Option<String>>`
+- [x] Add `SessionTags::list() -> Result<Vec<SessionTag>>`
+- [x] Add one-off `Target::set_tag(prefix, key, value) -> Result<()>`
+- [x] Add one-off `Target::read_tag(prefix, key) -> Result<Option<String>>`
+- [x] Add one-off `Target::list_tags(prefix) -> Result<Vec<SessionTag>>`
+- [x] Restrict all tag methods to session targets with `UnsupportedTarget`
+- [x] Dispatch using stable `SessionInfo.id`, not mutable session display name
+- [x] Validate prefix once and capture tmux command prefix once in `SessionTags`
+
+### 1.16d — Tests and docs
+
+- [x] Unit tests for option-name validation and tmux option-output parsing
+- [x] Unit tests for set/read/list command construction and missing-tag behavior
+- [x] Unit tests for `Target` level gating, validation-before-exec, and stable-id dispatch
+- [x] Update `docs/API.md` with examples and contract
+- [x] Update `docs/DESIGN.md` with DC34 rationale
+
+**Command boundary**: This slice follows the existing `control.rs` transport
+command boundary and avoids shell pipelines or pane-local shell execution. It
+does not add a persistent `tmux -C attach-session` command client because that
+would create an attached tmux client and perturb session client state for
+metadata polling.
 
 ---
 

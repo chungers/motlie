@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
-    CreateSessionOptions, CreateWindowOptions, PaneAddress, SplitDirection, SplitPaneOptions,
-    SplitSize, TmuxSocket, WindowInfo,
+    validate_session_tag_value, CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionTag,
+    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, TmuxSocket, WindowInfo,
 };
 
 /// Shell-escape a string for safe interpolation into shell commands.
@@ -486,6 +486,174 @@ pub async fn get_history_limit_with_prefix(
     })
 }
 
+/// Set a namespaced session tag via tmux user-defined options.
+pub(crate) async fn set_session_tag_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    tag_prefix: &SessionTagPrefix,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    validate_session_tag_value(value)?;
+    let option_name = tag_prefix.option_name(key)?;
+    let cmd = format!(
+        "{} set-option -t {} {} {}",
+        prefix,
+        shell_escape(target),
+        option_name,
+        shell_escape(value)
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read one namespaced session tag. Missing tags return `Ok(None)`.
+pub(crate) async fn read_session_tag_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    tag_prefix: &SessionTagPrefix,
+    key: &str,
+) -> Result<Option<String>> {
+    let option_name = tag_prefix.option_name(key)?;
+    let cmd = format!(
+        "{} show-option -q -t {} {}",
+        prefix,
+        shell_escape(target),
+        option_name
+    );
+    let output = transport.exec(&cmd).await?;
+    let option_prefix = tag_prefix.option_prefix();
+    let Some(tag) = parse_session_tag_option_line(tag_prefix, &option_prefix, &output)? else {
+        return Ok(None);
+    };
+    if tag.key() != key {
+        return Err(Error::Parse(format!(
+            "show-option returned {} while reading {}",
+            tag.option_name(),
+            option_name
+        )));
+    }
+    Ok(Some(tag.into_value()))
+}
+
+/// List all tags under one namespace prefix for a session.
+pub(crate) async fn list_session_tags_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    tag_prefix: &SessionTagPrefix,
+) -> Result<Vec<SessionTag>> {
+    let cmd = format!("{} show-options -t {}", prefix, shell_escape(target));
+    let output = transport.exec(&cmd).await?;
+    let mut tags = Vec::new();
+    let option_prefix = tag_prefix.option_prefix();
+    for line in output.lines() {
+        if let Some(tag) = parse_session_tag_option_line(tag_prefix, &option_prefix, line)? {
+            tags.push(tag);
+        }
+    }
+    Ok(tags)
+}
+
+fn parse_session_tag_option_line(
+    prefix: &SessionTagPrefix,
+    option_prefix: &str,
+    line: &str,
+) -> Result<Option<SessionTag>> {
+    let line = line.trim_end_matches('\r').trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    if !line.starts_with(option_prefix) {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed session tag option without value: {line}"
+        )));
+    };
+    let Some(key) = option_name.strip_prefix(option_prefix) else {
+        return Ok(None);
+    };
+    if key.is_empty() {
+        return Err(Error::Parse(format!(
+            "malformed session tag option with empty key: {line}"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    Ok(Some(SessionTag::from_parts(prefix, key, value)?))
+}
+
+fn split_once_whitespace(input: &str) -> Option<(&str, &str)> {
+    let index = input
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index))?;
+    let (left, right) = input.split_at(index);
+    Some((left, right.trim_start()))
+}
+
+fn parse_tmux_option_value(input: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut chars = input.trim().chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => loop {
+                match chars.next() {
+                    Some('\'') => break,
+                    Some(inner) => out.push(inner),
+                    None => {
+                        return Err(Error::Parse(format!(
+                            "unterminated single-quoted option value: {input}"
+                        )));
+                    }
+                }
+            },
+            '"' => loop {
+                match chars.next() {
+                    Some('"') => break,
+                    Some('\\') => push_tmux_backslash_escape(&mut out, &mut chars),
+                    Some(inner) => out.push(inner),
+                    None => {
+                        return Err(Error::Parse(format!(
+                            "unterminated double-quoted option value: {input}"
+                        )));
+                    }
+                }
+            },
+            '\\' => {
+                push_tmux_backslash_escape(&mut out, &mut chars);
+            }
+            ch if ch.is_whitespace() => {
+                if chars.any(|rest| !rest.is_whitespace()) {
+                    return Err(Error::Parse(format!(
+                        "unexpected trailing tokens in option value: {input}"
+                    )));
+                }
+                break;
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+fn push_tmux_backslash_escape(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    match chars.next() {
+        Some('\\') => out.push('\\'),
+        Some('"') => out.push('"'),
+        Some(next) => {
+            out.push('\\');
+            out.push(next);
+        }
+        None => out.push('\\'),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,5 +952,149 @@ mod tests {
         let transport = TransportKind::Mock(mock);
         let limit = get_history_limit(&transport, None, None).await.unwrap();
         assert_eq!(limit, 2000);
+    }
+
+    fn tag_prefix() -> SessionTagPrefix {
+        SessionTagPrefix::new("mmux").unwrap()
+    }
+
+    #[test]
+    fn session_tag_prefix_validates_components() {
+        let prefix = tag_prefix();
+        assert_eq!(prefix.option_name("owner_1").unwrap(), "@mmux/owner_1");
+        assert!(SessionTagPrefix::new("").is_err());
+        assert!(SessionTagPrefix::new("mmux/team").is_err());
+        assert!(prefix.option_name("").is_err());
+        assert!(prefix.option_name("owner/team").is_err());
+    }
+
+    #[test]
+    fn session_tag_new_validates_and_is_self_describing() {
+        let tag = SessionTag::new("mmux", "owner", "david").unwrap();
+        assert_eq!(
+            (tag.prefix(), tag.key(), tag.value(), tag.option_name()),
+            ("mmux", "owner", "david", "@mmux/owner".to_string())
+        );
+        assert!(SessionTag::new("mmux/team", "owner", "david").is_err());
+        assert!(SessionTag::new("mmux", "owner/team", "david").is_err());
+        assert!(SessionTag::new("mmux", "owner", "line1\nline2").is_err());
+    }
+
+    #[test]
+    fn parse_session_tag_option_line_decodes_tmux_values() {
+        let prefix = tag_prefix();
+        let option_prefix = prefix.option_prefix();
+        assert_eq!(
+            parse_session_tag_option_line(&prefix, &option_prefix, r#"@mmux/foo "hello world""#)
+                .unwrap(),
+            Some(SessionTag::new("mmux", "foo", "hello world").unwrap())
+        );
+        assert_eq!(
+            parse_session_tag_option_line(&prefix, &option_prefix, "@mmux/empty ''").unwrap(),
+            Some(SessionTag::new("mmux", "empty", "").unwrap())
+        );
+        assert_eq!(
+            parse_session_tag_option_line(&prefix, &option_prefix, r#"@mmux/quote "say \"hi\"""#)
+                .unwrap(),
+            Some(SessionTag::new("mmux", "quote", "say \"hi\"").unwrap())
+        );
+        assert_eq!(
+            parse_session_tag_option_line(&prefix, &option_prefix, r#"@mmux/slash "a\nb""#)
+                .unwrap(),
+            Some(SessionTag::new("mmux", "slash", r"a\nb").unwrap())
+        );
+        assert_eq!(
+            parse_session_tag_option_line(&prefix, &option_prefix, r#"@mmux/bare a\nb"#).unwrap(),
+            Some(SessionTag::new("mmux", "bare", r"a\nb").unwrap())
+        );
+        assert_eq!(
+            parse_session_tag_option_line(&prefix, &option_prefix, "@other/foo value").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_session_tag_option_line_rejects_malformed_matching_tags() {
+        let prefix = tag_prefix();
+        let option_prefix = prefix.option_prefix();
+        assert!(parse_session_tag_option_line(&prefix, &option_prefix, "@mmux/foo").is_err());
+        assert!(parse_session_tag_option_line(&prefix, &option_prefix, "@mmux/ 'value'").is_err());
+        assert!(
+            parse_session_tag_option_line(&prefix, &option_prefix, "@mmux/foo/bar value").is_err()
+        );
+        assert!(
+            parse_session_tag_option_line(&prefix, &option_prefix, "@mmux/foo 'unterminated")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_tag_builds_expected_command() {
+        let expected = "tmux set-option -t '$7' @mmux/foo 'bar baz'";
+        let mock = MockTransport::new().with_response(expected, "");
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        set_session_tag_with_prefix(&transport, "tmux", "$7", &prefix, "foo", "bar baz")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_session_tag_returns_value_or_none() {
+        let mock = MockTransport::new()
+            .with_response(
+                "show-option -q -t '$7' @mmux/foo",
+                "@mmux/foo \"hello world\"\n",
+            )
+            .with_response("show-option -q -t '$7' @mmux/missing", "");
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        let value = read_session_tag_with_prefix(&transport, "tmux", "$7", &prefix, "foo")
+            .await
+            .unwrap();
+        let missing = read_session_tag_with_prefix(&transport, "tmux", "$7", &prefix, "missing")
+            .await
+            .unwrap();
+
+        assert_eq!(value, Some("hello world".to_string()));
+        assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn read_session_tag_rejects_unexpected_key() {
+        let mock = MockTransport::new()
+            .with_response("show-option -q -t '$7' @mmux/foo", "@mmux/other value\n");
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        let err = read_session_tag_with_prefix(&transport, "tmux", "$7", &prefix, "foo")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("@mmux/other"));
+    }
+
+    #[tokio::test]
+    async fn list_session_tags_filters_prefix() {
+        let mock = MockTransport::new().with_response(
+            "show-options -t '$7'",
+            "@mmux/foo \"hello world\"\n@other/foo nope\n@mmux/empty ''\n",
+        );
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        let tags = list_session_tags_with_prefix(&transport, "tmux", "$7", &prefix)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tags,
+            vec![
+                SessionTag::new("mmux", "foo", "hello world").unwrap(),
+                SessionTag::new("mmux", "empty", "").unwrap(),
+            ]
+        );
     }
 }

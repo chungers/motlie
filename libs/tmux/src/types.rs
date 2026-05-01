@@ -128,6 +128,129 @@ impl SessionInfo {
     }
 }
 
+/// Maximum supported value size for a session metadata tag.
+///
+/// tmux user-defined options can hold larger strings, but keeping the public
+/// helper capped makes tags safe to poll and avoids accidentally putting large
+/// blobs into option-format paths.
+pub const SESSION_TAG_VALUE_MAX_BYTES: usize = 2 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SessionTagPrefix(String);
+
+impl SessionTagPrefix {
+    pub(crate) fn new(prefix: impl Into<String>) -> Result<Self> {
+        let prefix = prefix.into();
+        validate_session_tag_component("tag prefix", &prefix)?;
+        Ok(Self(prefix))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn option_prefix(&self) -> String {
+        format!("@{}/", self.0)
+    }
+
+    pub(crate) fn option_name(&self, key: &str) -> Result<String> {
+        validate_session_tag_component("tag key", key)?;
+        Ok(format!("@{}/{key}", self.0))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionTag {
+    prefix: String,
+    key: String,
+    value: String,
+}
+
+impl SessionTag {
+    /// Create a validated session metadata tag.
+    ///
+    /// For `prefix = "mmux"` and `key = "role"`, the tmux option name is
+    /// `@mmux/role`.
+    pub fn new(
+        prefix: impl Into<String>,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self> {
+        let prefix = prefix.into();
+        let key = key.into();
+        let value = value.into();
+        validate_session_tag_component("tag prefix", &prefix)?;
+        validate_session_tag_component("tag key", &key)?;
+        validate_session_tag_value(&value)?;
+        Ok(Self { prefix, key, value })
+    }
+
+    pub(crate) fn from_parts(prefix: &SessionTagPrefix, key: &str, value: String) -> Result<Self> {
+        validate_session_tag_component("tag key", key)?;
+        validate_session_tag_value(&value)?;
+        Ok(Self {
+            prefix: prefix.as_str().to_string(),
+            key: key.to_string(),
+            value,
+        })
+    }
+
+    /// Namespace prefix, for example `mmux` in `@mmux/role`.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Tag key without the namespace prefix, for example `role` in `@mmux/role`.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Raw user-defined option value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Full tmux user-defined option name, for example `@mmux/role`.
+    pub fn option_name(&self) -> String {
+        format!("@{}/{}", self.prefix, self.key)
+    }
+
+    pub(crate) fn into_value(self) -> String {
+        self.value
+    }
+}
+
+pub(crate) fn validate_session_tag_component(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::Parse(format!("{kind} cannot be empty")));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(Error::Parse(format!(
+            "{kind} must contain only ASCII letters, digits, '.', '_' or '-': {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_session_tag_value(value: &str) -> Result<()> {
+    if value.len() > SESSION_TAG_VALUE_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "tag value is {} bytes, exceeding {} byte limit",
+            value.len(),
+            SESSION_TAG_VALUE_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "tag value cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WindowInfo {
     pub session_id: String,
