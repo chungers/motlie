@@ -583,7 +583,7 @@ fn parse_session_tag_option_line(
         )));
     }
     let value = parse_tmux_option_value(value)?;
-    Ok(Some(SessionTag::from_validated_prefix(prefix, key, value)?))
+    Ok(Some(SessionTag::from_parts(prefix, key, value)?))
 }
 
 fn split_once_whitespace(input: &str) -> Option<(&str, &str)> {
@@ -613,15 +613,7 @@ fn parse_tmux_option_value(input: &str) -> Result<String> {
             '"' => loop {
                 match chars.next() {
                     Some('"') => break,
-                    Some('\\') => match chars.next() {
-                        Some('\\') => out.push('\\'),
-                        Some('"') => out.push('"'),
-                        Some(next) => {
-                            out.push('\\');
-                            out.push(next);
-                        }
-                        None => out.push('\\'),
-                    },
+                    Some('\\') => push_tmux_backslash_escape(&mut out, &mut chars),
                     Some(inner) => out.push(inner),
                     None => {
                         return Err(Error::Parse(format!(
@@ -631,9 +623,7 @@ fn parse_tmux_option_value(input: &str) -> Result<String> {
                 }
             },
             '\\' => {
-                if let Some(next) = chars.next() {
-                    out.push(next);
-                }
+                push_tmux_backslash_escape(&mut out, &mut chars);
             }
             ch if ch.is_whitespace() => {
                 if chars.any(|rest| !rest.is_whitespace()) {
@@ -647,6 +637,21 @@ fn parse_tmux_option_value(input: &str) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+fn push_tmux_backslash_escape(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    match chars.next() {
+        Some('\\') => out.push('\\'),
+        Some('"') => out.push('"'),
+        Some(next) => {
+            out.push('\\');
+            out.push(next);
+        }
+        None => out.push('\\'),
+    }
 }
 
 #[cfg(test)]
@@ -997,6 +1002,10 @@ mod tests {
             parse_session_tag_option_line(&prefix, &option_prefix, r#"@mmux/slash "a\nb""#)
                 .unwrap(),
             Some(SessionTag::new("mmux", "slash", r"a\nb").unwrap())
+        );
+        assert_eq!(
+            parse_session_tag_option_line(&prefix, &option_prefix, r#"@mmux/bare a\nb"#).unwrap(),
+            Some(SessionTag::new("mmux", "bare", r"a\nb").unwrap())
         );
         assert_eq!(
             parse_session_tag_option_line(&prefix, &option_prefix, "@other/foo value").unwrap(),

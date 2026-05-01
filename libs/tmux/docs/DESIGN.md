@@ -3902,6 +3902,8 @@ unprefixed key so listed tags are self-describing and round-trippable.
 - `Target::tags(prefix)` validates the prefix and captures the command prefix and
   stable session id once; the direct `set_tag` / `read_tag` / `list_tags` methods
   are one-off wrappers around that helper.
+- The helper constructor is async because resolving the command prefix can lazily
+  probe the tmux binary on the underlying transport before it is cached.
 
 **Rationale**: tmux user-defined options are the closest native mechanism to
 session metadata: they live in tmux state, survive for the session lifetime, and

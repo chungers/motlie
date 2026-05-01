@@ -185,11 +185,7 @@ impl SessionTag {
         Ok(Self { prefix, key, value })
     }
 
-    pub(crate) fn from_validated_prefix(
-        prefix: &SessionTagPrefix,
-        key: &str,
-        value: String,
-    ) -> Result<Self> {
+    pub(crate) fn from_parts(prefix: &SessionTagPrefix, key: &str, value: String) -> Result<Self> {
         validate_session_tag_component("tag key", key)?;
         validate_session_tag_value(&value)?;
         Ok(Self {

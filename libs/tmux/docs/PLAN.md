@@ -874,7 +874,7 @@ session options. For `prefix = "mmux"` and `key = "owner"`, the stored option is
 
 ### 1.16c — `Target` API wiring (`src/host.rs`)
 
-- [x] Add `Target::tags(prefix) -> Result<SessionTags<'_>>`
+- [x] Add async `Target::tags(prefix) -> Result<SessionTags<'_>>`
 - [x] Add `SessionTags::set(key, value) -> Result<()>`
 - [x] Add `SessionTags::read(key) -> Result<Option<String>>`
 - [x] Add `SessionTags::list() -> Result<Vec<SessionTag>>`
