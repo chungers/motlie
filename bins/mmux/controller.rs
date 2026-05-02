@@ -1,11 +1,11 @@
 use std::cmp::min;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use motlie_tmux::{CreateSessionOptions, HostHandle, SessionTag};
+use motlie_tmux::{CreateSessionOptions, HostHandle, SessionId, SessionInfo, SessionTag};
 
 use crate::consts::{
     DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
@@ -14,11 +14,13 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    SelectedSession, SessionRow, SessionSelectedTag, SessionTagRow, SessionTagsFocus, StatusBanner,
+    SelectedSession, SessionRow, SessionSelectedTag, SessionTagRow, SessionTagsFocus,
+    SessionTagsModalUi, StatusBanner,
 };
 
 const TAG_PREFIX: &str = "mmux";
 const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
+const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
 
 pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
     load_motd_from(host, Path::new("/etc/motd")).await
@@ -65,6 +67,7 @@ pub(crate) async fn fetch_fleet_rows(
     for (entry, listing) in listings {
         match listing {
             Ok(sessions) => {
+                let selected_tags = load_selected_session_tags(&entry.handle, &sessions).await;
                 for session in sessions {
                     let key = (entry.id.clone(), session.id.as_str().to_string());
                     let activity_observed_at_local = tracker.observe(
@@ -73,7 +76,7 @@ pub(crate) async fn fetch_fleet_rows(
                         session.activity,
                         local_now,
                     );
-                    let selected_tag = load_selected_session_tag(&entry.handle, &session).await;
+                    let selected_tag = selected_tags.get(&session.id).cloned();
                     keep_keys.insert(key);
                     rows.push(SessionRow {
                         host_id: entry.id.clone(),
@@ -101,13 +104,17 @@ fn local_epoch_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-async fn load_selected_session_tag(
+async fn load_selected_session_tags(
     host: &HostHandle,
-    session: &motlie_tmux::SessionInfo,
-) -> Option<SessionSelectedTag> {
-    let target = host.target_for_session_info(session.clone());
-    let tags = target.list_tags(TAG_PREFIX).await.ok()?;
-    selected_session_tag_from_tags(&tags)
+    sessions: &[SessionInfo],
+) -> HashMap<SessionId, SessionSelectedTag> {
+    let Ok(tags_by_session) = host.list_tags_for_session_infos(TAG_PREFIX, sessions).await else {
+        return HashMap::new();
+    };
+    tags_by_session
+        .into_iter()
+        .filter_map(|(id, tags)| selected_session_tag_from_tags(&tags).map(|tag| (id, tag)))
+        .collect()
 }
 
 fn selected_session_tag_from_tags(tags: &[SessionTag]) -> Option<SessionSelectedTag> {
@@ -331,10 +338,7 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('k'), _) => {
             if let Some(selected) = app.selected_session() {
                 app.modal = Some(ModalState::KillSession {
-                    host_id: selected.host_id,
-                    host_label: selected.host_label,
-                    id: selected.id,
-                    name: selected.name,
+                    session: selected,
                     button: Button::Cancel,
                 });
             } else {
@@ -344,11 +348,8 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('r'), _) if app.layout.focus == Focus::List => {
             if let Some(selected) = app.selected_session() {
                 app.modal = Some(ModalState::RenameSession {
-                    host_id: selected.host_id,
-                    host_label: selected.host_label,
-                    id: selected.id,
-                    current_name: selected.name.clone(),
-                    input: selected.name,
+                    input: selected.name.clone(),
+                    session: selected,
                     button: Button::Ok,
                 });
             } else {
@@ -514,42 +515,28 @@ enum ModalAction {
         input: String,
     },
     KillSession {
-        host_id: HostId,
-        host_label: String,
-        id: String,
-        name: String,
+        session: SelectedSession,
     },
     RenameSession {
-        host_id: HostId,
-        host_label: String,
-        id: String,
-        current_name: String,
+        session: SelectedSession,
         input: String,
     },
     SetTag {
-        session: ModalSessionRef,
+        session: SelectedSession,
         key: String,
         value: String,
     },
     UnsetTag {
-        session: ModalSessionRef,
+        session: SelectedSession,
         key: String,
         index: usize,
         selected_key: Option<String>,
     },
     SelectTag {
-        session: ModalSessionRef,
+        session: SelectedSession,
         key: Option<String>,
         index: usize,
     },
-}
-
-#[derive(Clone)]
-struct ModalSessionRef {
-    host_id: HostId,
-    host_label: String,
-    id: String,
-    name: String,
 }
 
 async fn handle_modal_key(
@@ -582,13 +569,7 @@ async fn handle_modal_key(
             }
             _ => ModalAction::None,
         },
-        Some(ModalState::KillSession {
-            host_id,
-            host_label,
-            id,
-            name,
-            button,
-        }) => match key.code {
+        Some(ModalState::KillSession { session, button }) => match key.code {
             KeyCode::Esc => ModalAction::Close,
             KeyCode::Left => {
                 *button = Button::Cancel;
@@ -599,19 +580,13 @@ async fn handle_modal_key(
                 ModalAction::None
             }
             KeyCode::Enter if *button == Button::Ok => ModalAction::KillSession {
-                host_id: host_id.clone(),
-                host_label: host_label.clone(),
-                id: id.clone(),
-                name: name.clone(),
+                session: session.clone(),
             },
             KeyCode::Enter => ModalAction::Close,
             _ => ModalAction::None,
         },
         Some(ModalState::RenameSession {
-            host_id,
-            host_label,
-            id,
-            current_name,
+            session,
             input,
             button,
         }) => match key.code {
@@ -625,10 +600,7 @@ async fn handle_modal_key(
                 ModalAction::None
             }
             KeyCode::Enter if *button == Button::Ok => ModalAction::RenameSession {
-                host_id: host_id.clone(),
-                host_label: host_label.clone(),
-                id: id.clone(),
-                current_name: current_name.clone(),
+                session: session.clone(),
                 input: input.clone(),
             },
             KeyCode::Enter => ModalAction::Close,
@@ -642,30 +614,9 @@ async fn handle_modal_key(
             }
             _ => ModalAction::None,
         },
-        Some(ModalState::SessionTags {
-            host_id,
-            host_label,
-            id,
-            name,
-            tags,
-            selected_key,
-            key_input,
-            value_input,
-            focus,
-        }) => handle_session_tags_modal_key(
-            key,
-            ModalSessionRef {
-                host_id: host_id.clone(),
-                host_label: host_label.clone(),
-                id: id.clone(),
-                name: name.clone(),
-            },
-            tags,
-            selected_key,
-            key_input,
-            value_input,
-            focus,
-        ),
+        Some(ModalState::SessionTags { session, ui }) => {
+            handle_session_tags_modal_key(key, session.clone(), ui)
+        }
         Some(ModalState::Help) => match key.code {
             KeyCode::Esc | KeyCode::Enter => ModalAction::Close,
             _ => ModalAction::None,
@@ -680,25 +631,13 @@ async fn handle_modal_key(
             app.modal = None;
             create_session_from_modal(fleet, app, input).await?;
         }
-        ModalAction::KillSession {
-            host_id,
-            host_label,
-            id,
-            name,
-        } => {
+        ModalAction::KillSession { session } => {
             app.modal = None;
-            kill_session_from_modal(fleet, app, host_id, host_label, id, name).await?;
+            kill_session_from_modal(fleet, app, session).await?;
         }
-        ModalAction::RenameSession {
-            host_id,
-            host_label,
-            id,
-            current_name,
-            input,
-        } => {
+        ModalAction::RenameSession { session, input } => {
             app.modal = None;
-            rename_session_from_modal(fleet, app, host_id, host_label, id, current_name, input)
-                .await?;
+            rename_session_from_modal(fleet, app, session, input).await?;
         }
         ModalAction::SetTag {
             session,
@@ -728,22 +667,55 @@ async fn handle_modal_key(
 
 fn handle_session_tags_modal_key(
     key: KeyEvent,
-    session: ModalSessionRef,
-    tags: &[SessionTagRow],
-    selected_key: &mut Option<String>,
-    key_input: &mut String,
-    value_input: &mut String,
-    focus: &mut SessionTagsFocus,
+    session: SelectedSession,
+    ui: &mut SessionTagsModalUi,
 ) -> ModalAction {
+    if let Some(action) = handle_session_tags_submit(&key, &session, ui) {
+        return action;
+    }
+    if handle_session_tags_navigation(&key, &ui.tags, &mut ui.focus) {
+        return ModalAction::None;
+    }
+    if let Some(action) = handle_session_tags_row_action(&key, session, ui) {
+        return action;
+    }
+    handle_session_tags_edit(&key, &mut ui.key_input, &mut ui.value_input, ui.focus);
+    ModalAction::None
+}
+
+fn handle_session_tags_submit(
+    key: &KeyEvent,
+    session: &SelectedSession,
+    ui: &SessionTagsModalUi,
+) -> Option<ModalAction> {
     match key.code {
-        KeyCode::Esc => ModalAction::Close,
+        KeyCode::Esc => Some(ModalAction::Close),
+        KeyCode::Enter => match ui.focus {
+            SessionTagsFocus::Key | SessionTagsFocus::Value => Some(ModalAction::SetTag {
+                session: session.clone(),
+                key: ui.key_input.trim().to_string(),
+                value: ui.value_input.clone(),
+            }),
+            SessionTagsFocus::Cancel => Some(ModalAction::Close),
+            _ => Some(ModalAction::None),
+        },
+        _ => None,
+    }
+}
+
+fn handle_session_tags_navigation(
+    key: &KeyEvent,
+    tags: &[SessionTagRow],
+    focus: &mut SessionTagsFocus,
+) -> bool {
+    match key.code {
         KeyCode::Tab | KeyCode::Char('\t') => {
             *focus = next_session_tags_focus(*focus);
-            ModalAction::None
+            true
         }
         KeyCode::BackTab => {
             *focus = previous_session_tags_focus(*focus);
-            ModalAction::None
+            true
         }
         KeyCode::Up => {
             *focus = match *focus {
@@ -753,7 +725,7 @@ fn handle_session_tags_modal_key(
                 _ if !tags.is_empty() => SessionTagsFocus::TagRow(tags.len() - 1),
                 _ => *focus,
             };
-            ModalAction::None
+            true
         }
         KeyCode::Down => {
             *focus = match *focus {
@@ -762,10 +734,60 @@ fn handle_session_tags_modal_key(
                 }
                 _ => *focus,
             };
-            ModalAction::None
+            true
         }
+        _ => false,
+    }
+}
+
+fn handle_session_tags_row_action(
+    key: &KeyEvent,
+    session: SelectedSession,
+    ui: &mut SessionTagsModalUi,
+) -> Option<ModalAction> {
+    let SessionTagsFocus::TagRow(index) = ui.focus else {
+        return None;
+    };
+    match key.code {
+        KeyCode::Char('c') => ui.tags.get(index).map(|tag| {
+            let key = if ui.selected_key.as_deref() == Some(tag.key.as_str()) {
+                None
+            } else {
+                Some(tag.key.clone())
+            };
+            ModalAction::SelectTag {
+                session,
+                key,
+                index,
+            }
+        }),
+        KeyCode::Char('x') => ui.tags.get(index).map(|tag| ModalAction::UnsetTag {
+            session,
+            key: tag.key.clone(),
+            index,
+            selected_key: ui.selected_key.clone(),
+        }),
+        KeyCode::Char('u') => {
+            if let Some(tag) = ui.tags.get(index) {
+                ui.key_input = tag.key.clone();
+                ui.value_input = tag.value.clone();
+                ui.focus = SessionTagsFocus::Value;
+            }
+            Some(ModalAction::None)
+        }
+        _ => None,
+    }
+}
+
+fn handle_session_tags_edit(
+    key: &KeyEvent,
+    key_input: &mut String,
+    value_input: &mut String,
+    focus: SessionTagsFocus,
+) -> bool {
+    match key.code {
         KeyCode::Backspace => {
-            match *focus {
+            match focus {
                 SessionTagsFocus::Key => {
                     key_input.pop();
                 }
@@ -774,69 +796,17 @@ fn handle_session_tags_modal_key(
                 }
                 _ => {}
             }
-            ModalAction::None
-        }
-        KeyCode::Enter => match *focus {
-            SessionTagsFocus::Key | SessionTagsFocus::Value => ModalAction::SetTag {
-                session,
-                key: key_input.trim().to_string(),
-                value: value_input.clone(),
-            },
-            SessionTagsFocus::Cancel => ModalAction::Close,
-            _ => ModalAction::None,
-        },
-        KeyCode::Char('c') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
-            let SessionTagsFocus::TagRow(index) = *focus else {
-                return ModalAction::None;
-            };
-            if let Some(tag) = tags.get(index) {
-                let key = if selected_key.as_deref() == Some(tag.key.as_str()) {
-                    None
-                } else {
-                    Some(tag.key.clone())
-                };
-                return ModalAction::SelectTag {
-                    session,
-                    key,
-                    index,
-                };
-            }
-            ModalAction::None
-        }
-        KeyCode::Char('x') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
-            let SessionTagsFocus::TagRow(index) = *focus else {
-                return ModalAction::None;
-            };
-            let Some(tag) = tags.get(index) else {
-                return ModalAction::None;
-            };
-            ModalAction::UnsetTag {
-                session,
-                key: tag.key.clone(),
-                index,
-                selected_key: selected_key.clone(),
-            }
-        }
-        KeyCode::Char('u') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
-            let SessionTagsFocus::TagRow(index) = *focus else {
-                return ModalAction::None;
-            };
-            if let Some(tag) = tags.get(index) {
-                *key_input = tag.key.clone();
-                *value_input = tag.value.clone();
-                *focus = SessionTagsFocus::Value;
-            }
-            ModalAction::None
+            true
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            match *focus {
+            match focus {
                 SessionTagsFocus::Key => key_input.push(c),
                 SessionTagsFocus::Value => value_input.push(c),
                 _ => {}
             }
-            ModalAction::None
+            true
         }
-        _ => ModalAction::None,
+        _ => false,
     }
 }
 
@@ -844,15 +814,15 @@ fn next_session_tags_focus(focus: SessionTagsFocus) -> SessionTagsFocus {
     match focus {
         SessionTagsFocus::TagRow(_) => SessionTagsFocus::Key,
         SessionTagsFocus::Key => SessionTagsFocus::Value,
-        SessionTagsFocus::Value => SessionTagsFocus::Key,
+        SessionTagsFocus::Value => SessionTagsFocus::Cancel,
         SessionTagsFocus::Cancel => SessionTagsFocus::Key,
     }
 }
 
 fn previous_session_tags_focus(focus: SessionTagsFocus) -> SessionTagsFocus {
     match focus {
-        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Value,
-        SessionTagsFocus::Key => SessionTagsFocus::Value,
+        SessionTagsFocus::TagRow(_) => SessionTagsFocus::Cancel,
+        SessionTagsFocus::Key => SessionTagsFocus::Cancel,
         SessionTagsFocus::Value => SessionTagsFocus::Key,
         SessionTagsFocus::Cancel => SessionTagsFocus::Value,
     }
@@ -896,22 +866,20 @@ async fn create_session_from_modal(
 async fn kill_session_from_modal(
     fleet: &HostFleet,
     app: &mut AppState,
-    host_id: HostId,
-    host_label: String,
-    id: String,
-    name: String,
+    session: SelectedSession,
 ) -> Result<()> {
-    let Some(host) = fleet_host(fleet, &host_id) else {
-        app.status = StatusBanner::error(format!("host {host_label} no longer connected"));
+    let Some(host) = fleet_host(fleet, &session.host_id) else {
+        app.status =
+            StatusBanner::error(format!("host {} no longer connected", session.host_label));
         return Ok(());
     };
-    match host.session_by_id(&id).await? {
+    match host.session_by_id(&session.id).await? {
         Some(target) => match target.kill().await {
             Ok(()) => {
                 let status = if fleet.is_multi() {
-                    format!("killed session {name} on {host_label}")
+                    format!("killed session {} on {}", session.name, session.host_label)
                 } else {
-                    format!("killed session {name}")
+                    format!("killed session {}", session.name)
                 };
                 refresh_sessions(fleet, app, true).await?;
                 app.status = StatusBanner::info(status);
@@ -922,7 +890,8 @@ async fn kill_session_from_modal(
         },
         None => {
             refresh_sessions(fleet, app, true).await?;
-            app.status = StatusBanner::error(format!("session {name} disappeared before kill"));
+            app.status =
+                StatusBanner::error(format!("session {} disappeared before kill", session.name));
         }
     }
     Ok(())
@@ -931,10 +900,7 @@ async fn kill_session_from_modal(
 async fn rename_session_from_modal(
     fleet: &HostFleet,
     app: &mut AppState,
-    host_id: HostId,
-    host_label: String,
-    id: String,
-    current_name: String,
+    session: SelectedSession,
     input: String,
 ) -> Result<()> {
     let new_name = input.trim();
@@ -942,21 +908,25 @@ async fn rename_session_from_modal(
         app.status = StatusBanner::info("session name is empty");
         return Ok(());
     }
-    if new_name == current_name {
+    if new_name == session.name {
         app.status = StatusBanner::info("session name unchanged");
         return Ok(());
     }
-    let Some(host) = fleet_host(fleet, &host_id) else {
-        app.status = StatusBanner::error(format!("host {host_label} no longer connected"));
+    let Some(host) = fleet_host(fleet, &session.host_id) else {
+        app.status =
+            StatusBanner::error(format!("host {} no longer connected", session.host_label));
         return Ok(());
     };
-    match host.session_by_id(&id).await? {
+    match host.session_by_id(&session.id).await? {
         Some(target) => match target.rename(new_name).await {
             Ok(_) => {
                 let status = if fleet.is_multi() {
-                    format!("renamed session {current_name} to {new_name} on {host_label}")
+                    format!(
+                        "renamed session {} to {new_name} on {}",
+                        session.name, session.host_label
+                    )
                 } else {
-                    format!("renamed session {current_name} to {new_name}")
+                    format!("renamed session {} to {new_name}", session.name)
                 };
                 refresh_sessions(fleet, app, true).await?;
                 app.status = StatusBanner::info(status);
@@ -967,8 +937,10 @@ async fn rename_session_from_modal(
         },
         None => {
             refresh_sessions(fleet, app, true).await?;
-            app.status =
-                StatusBanner::error(format!("session {current_name} disappeared before rename"));
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before rename",
+                session.name
+            ));
         }
     }
     Ok(())
@@ -983,15 +955,14 @@ async fn open_session_tags_modal(
         Some(state) => {
             let focus = first_session_tags_focus(&state.rows);
             app.modal = Some(ModalState::SessionTags {
-                host_id: selected.host_id,
-                host_label: selected.host_label,
-                id: selected.id,
-                name: selected.name,
-                tags: state.rows,
-                selected_key: state.selected_key,
-                key_input: String::new(),
-                value_input: String::new(),
-                focus,
+                session: selected,
+                ui: SessionTagsModalUi {
+                    tags: state.rows,
+                    selected_key: state.selected_key,
+                    key_input: String::new(),
+                    value_input: String::new(),
+                    focus,
+                },
             });
         }
         None => {
@@ -1008,7 +979,7 @@ async fn open_session_tags_modal(
 async fn set_tag_from_modal(
     fleet: &HostFleet,
     app: &mut AppState,
-    session: ModalSessionRef,
+    session: SelectedSession,
     key: String,
     value: String,
 ) -> Result<()> {
@@ -1016,7 +987,7 @@ async fn set_tag_from_modal(
         app.status = StatusBanner::info("tag key is empty");
         return Ok(());
     }
-    if key == SELECTED_TAG_KEY_OPTION {
+    if is_reserved_tag_key(&key) {
         app.status = StatusBanner::info("tag key is reserved");
         return Ok(());
     }
@@ -1062,7 +1033,7 @@ async fn set_tag_from_modal(
 async fn unset_tag_from_modal(
     fleet: &HostFleet,
     app: &mut AppState,
-    session: ModalSessionRef,
+    session: SelectedSession,
     key: String,
     index: usize,
     selected_key: Option<String>,
@@ -1115,7 +1086,7 @@ async fn unset_tag_from_modal(
 async fn select_tag_from_modal(
     fleet: &HostFleet,
     app: &mut AppState,
-    session: ModalSessionRef,
+    session: SelectedSession,
     key: Option<String>,
     index: usize,
 ) -> Result<()> {
@@ -1185,7 +1156,7 @@ async fn select_tag_from_modal(
 async fn reload_session_tags_modal(
     fleet: &HostFleet,
     app: &mut AppState,
-    session: ModalSessionRef,
+    session: SelectedSession,
     preferred_key: Option<String>,
     preferred_index: Option<usize>,
 ) -> Result<()> {
@@ -1207,15 +1178,14 @@ async fn reload_session_tags_modal(
                 first_session_tags_focus(&tags)
             };
             app.modal = Some(ModalState::SessionTags {
-                host_id: session.host_id,
-                host_label: session.host_label,
-                id: session.id,
-                name: session.name,
-                tags,
-                selected_key: state.selected_key,
-                key_input: String::new(),
-                value_input: String::new(),
-                focus,
+                session,
+                ui: SessionTagsModalUi {
+                    tags,
+                    selected_key: state.selected_key,
+                    key_input: String::new(),
+                    value_input: String::new(),
+                    focus,
+                },
             });
         }
         None => {
@@ -1254,7 +1224,7 @@ fn tag_state_from_tags(tags: Vec<SessionTag>) -> SessionTagState {
     let selected_key = selected_key_from_tags(&tags);
     let mut rows = tags
         .into_iter()
-        .filter(|tag| tag.key() != SELECTED_TAG_KEY_OPTION)
+        .filter(|tag| !is_reserved_tag_key(tag.key()))
         .map(session_tag_row)
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
@@ -1271,11 +1241,15 @@ fn selected_key_from_tags(tags: &[SessionTag]) -> Option<String> {
         .iter()
         .find(|tag| tag.key() == SELECTED_TAG_KEY_OPTION)?
         .value();
-    if value.is_empty() || value == SELECTED_TAG_KEY_OPTION {
+    if value.is_empty() || is_reserved_tag_key(value) {
         None
     } else {
         Some(value.to_string())
     }
+}
+
+fn is_reserved_tag_key(key: &str) -> bool {
+    RESERVED_TAG_KEYS.contains(&key)
 }
 
 fn session_tag_row(tag: SessionTag) -> SessionTagRow {

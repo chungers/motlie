@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-02 | @codex: DC34 follow-up for mmux PR feedback — add a host-level batch session-tag read API so selector refreshes can enrich a fresh session listing without one round trip per session. | Target, DC34 |
 | 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)` plus one-off `Target::unset_tag(prefix, key)`. | Target, DC34 |
 | 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add scoped `SessionTags`, validated self-describing `SessionTag`, and one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
 | 2026-04-28 | @gpt55-dgx: PR #228 selector cleanup — document the implemented non-empty `SessionId` wrapper for `SessionInfo.id` so stable id dispatch cannot silently fall back to names. | Discovery Types |
@@ -3892,6 +3893,10 @@ impl SessionTags<'_> {
 }
 ```
 
+`HostHandle::list_tags_for_session_infos(prefix, sessions)` is the batch read
+companion for callers that already have a session listing and need to enrich it
+without one round trip per session.
+
 For `prefix = "mmux"` and `key = "role"`, the underlying tmux option is
 `@mmux/role`. `SessionTag` carries the namespace prefix as well as the
 unprefixed key so listed tags are self-describing and round-trippable.
@@ -3905,6 +3910,9 @@ unprefixed key so listed tags are self-describing and round-trippable.
 - `Target::tags(prefix)` validates the prefix and captures the command prefix and
   stable session id once; the direct `set_tag` / `read_tag` / `list_tags` methods
   are one-off wrappers around that helper.
+- `HostHandle::list_tags_for_session_infos(prefix, sessions)` returns tags by
+  stable `SessionId` and includes empty vectors for sessions without matching
+  tags.
 - `SessionTags::unset(key)` and `Target::unset_tag(prefix, key)` remove the
   session-local user option with tmux `set-option -u`; they do not encode
   deletion as an empty string.

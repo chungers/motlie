@@ -608,7 +608,7 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     let width = min(
         max(
             MODAL_MIN_WIDTH,
-            view.content_width()
+            modal_content_width(&view)
                 .saturating_add(MODAL_CONTENT_HORIZONTAL_PADDING.saturating_mul(2))
                 .saturating_add(2),
         ),
@@ -618,7 +618,7 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     let height = min(
         max(
             7,
-            view.content_height()
+            modal_content_height(&view)
                 .saturating_add(MODAL_CONTENT_VERTICAL_PADDING.saturating_mul(2))
                 .saturating_add(MODAL_SEPARATOR_HEIGHT)
                 .saturating_add(MODAL_BUTTON_HEIGHT)
@@ -677,6 +677,49 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
         ),
         &view.buttons,
     );
+}
+
+fn modal_content_height(view: &ModalView) -> u16 {
+    match &view.body {
+        ModalBody::Text(text) => max(1, text.lines().count()) as u16,
+        ModalBody::NewSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
+        ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
+        ModalBody::SessionTags { tags, .. } => {
+            let rows = max(1, tags.len()) as u16;
+            min(rows, TAG_LIST_MAX_ROWS as u16) + TAG_INPUT_SECTION_HEIGHT
+        }
+    }
+}
+
+fn modal_content_width(view: &ModalView) -> u16 {
+    let body_width = match &view.body {
+        ModalBody::Text(text) => text
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0),
+        ModalBody::NewSession { input } => {
+            max("Session name".chars().count(), input.chars().count())
+        }
+        ModalBody::RenameSession { input } => {
+            max("Session Name".chars().count(), input.chars().count())
+        }
+        ModalBody::SessionTags {
+            tags,
+            key_input,
+            value_input,
+            ..
+        } => tags
+            .iter()
+            .map(|tag| tag.key.chars().count() + tag.value.chars().count() + TAG_LIST_ROW_OVERHEAD)
+            .chain([
+                "No tags".chars().count() + TAG_LIST_ROW_OVERHEAD,
+                key_input.chars().count() + value_input.chars().count() + TAG_EDIT_ROW_OVERHEAD,
+            ])
+            .max()
+            .unwrap_or(0),
+    };
+    max(body_width, view.buttons.chars().count()) as u16
 }
 
 fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
@@ -801,6 +844,8 @@ const TAG_INPUT_SECTION_HEIGHT: u16 = 2;
 const TAG_LIST_MAX_ROWS: usize = 5;
 const TAG_LIST_PREFIX_WIDTH: u16 = 2;
 const TAG_KEY_COLUMN_PADDING: u16 = 4;
+const TAG_EDIT_ROW_OVERHEAD: usize = 6;
+const TAG_LIST_ROW_OVERHEAD: usize = 7;
 
 fn visible_session_tag_rows(area_height: u16, tag_count: usize) -> usize {
     let available = area_height.saturating_sub(TAG_INPUT_SECTION_HEIGHT) as usize;
@@ -1047,9 +1092,11 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ),
             active_button: *button,
         },
-        ModalState::KillSession { name, button, .. } => ModalView {
+        ModalState::KillSession {
+            session, button, ..
+        } => ModalView {
             title: " Kill Session ",
-            body: ModalBody::Text(format!("Kill session {name}?")),
+            body: ModalBody::Text(format!("Kill session {}?", session.name)),
             buttons: format!(
                 "{}   {}",
                 button_text(*button, Button::Cancel),
@@ -1069,15 +1116,8 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ),
             active_button: *button,
         },
-        ModalState::SessionTags {
-            tags,
-            selected_key,
-            key_input,
-            value_input,
-            focus,
-            ..
-        } => {
-            let active_button = if *focus == SessionTagsFocus::Cancel {
+        ModalState::SessionTags { ui, .. } => {
+            let active_button = if ui.focus == SessionTagsFocus::Cancel {
                 Button::Cancel
             } else {
                 Button::Ok
@@ -1085,11 +1125,11 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ModalView {
                 title: " Session Tags ",
                 body: ModalBody::SessionTags {
-                    tags: tags.clone(),
-                    selected_key: selected_key.clone(),
-                    key_input: key_input.clone(),
-                    value_input: value_input.clone(),
-                    focus: *focus,
+                    tags: ui.tags.clone(),
+                    selected_key: ui.selected_key.clone(),
+                    key_input: ui.key_input.clone(),
+                    value_input: ui.value_input.clone(),
+                    focus: ui.focus,
                 },
                 buttons: button_text(active_button, Button::Cancel),
                 active_button,

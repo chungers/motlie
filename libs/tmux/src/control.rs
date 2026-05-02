@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::keys::KeySequence;
@@ -576,6 +577,79 @@ pub(crate) async fn list_session_tags_with_prefix(
     Ok(tags)
 }
 
+/// List all tags under one namespace prefix for multiple sessions in one tmux call.
+pub(crate) async fn list_session_tags_for_targets_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    targets: &[&str],
+    tag_prefix: &SessionTagPrefix,
+) -> Result<HashMap<String, Vec<SessionTag>>> {
+    let mut tags_by_target = targets
+        .iter()
+        .map(|target| ((*target).to_string(), Vec::new()))
+        .collect::<HashMap<_, _>>();
+    if targets.is_empty() {
+        return Ok(tags_by_target);
+    }
+
+    let mut cmd = String::new();
+    cmd.push_str(prefix);
+    for (index, target) in targets.iter().enumerate() {
+        if index > 0 {
+            cmd.push_str(" \\; ");
+        } else {
+            cmd.push(' ');
+        }
+        cmd.push_str("display-message -p ");
+        cmd.push_str(&shell_escape(&session_tag_batch_marker(target)));
+        cmd.push_str(" \\; show-options -t ");
+        cmd.push_str(&shell_escape(target));
+    }
+
+    let output = transport.exec(&cmd).await?;
+    for (target, tags) in parse_session_tag_batch_output(tag_prefix, &output)? {
+        tags_by_target.insert(target, tags);
+    }
+    Ok(tags_by_target)
+}
+
+fn session_tag_batch_marker(target: &str) -> String {
+    format!("__MOTLIE_TAGS__ {target}")
+}
+
+fn parse_session_tag_batch_output(
+    prefix: &SessionTagPrefix,
+    output: &str,
+) -> Result<HashMap<String, Vec<SessionTag>>> {
+    let mut tags_by_target = HashMap::<String, Vec<SessionTag>>::new();
+    let mut current_target = None::<String>;
+    let option_prefix = prefix.option_prefix();
+
+    for line in output.lines() {
+        let line = line.trim_end_matches('\r').trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(target) = line.strip_prefix("__MOTLIE_TAGS__ ") {
+            let target = target.to_string();
+            tags_by_target.entry(target.clone()).or_default();
+            current_target = Some(target);
+            continue;
+        }
+
+        let Some(target) = current_target.as_ref() else {
+            return Err(Error::Parse(format!(
+                "session tag batch output before target marker: {line}"
+            )));
+        };
+        if let Some(tag) = parse_session_tag_option_line(prefix, &option_prefix, line)? {
+            tags_by_target.entry(target.clone()).or_default().push(tag);
+        }
+    }
+
+    Ok(tags_by_target)
+}
+
 fn parse_session_tag_option_line(
     prefix: &SessionTagPrefix,
     option_prefix: &str,
@@ -1126,6 +1200,30 @@ mod tests {
                 SessionTag::new("mmux", "foo", "hello world").unwrap(),
                 SessionTag::new("mmux", "empty", "").unwrap(),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_session_tags_for_targets_batches_prefix() {
+        let mock = MockTransport::new().with_response(
+            "__MOTLIE_TAGS__ $8",
+            "__MOTLIE_TAGS__ $7\n@mmux/foo one\n@other/foo nope\n__MOTLIE_TAGS__ $8\n@mmux/bar \"two words\"\n",
+        );
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        let tags =
+            list_session_tags_for_targets_with_prefix(&transport, "tmux", &["$7", "$8"], &prefix)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            tags.get("$7").unwrap(),
+            &vec![SessionTag::new("mmux", "foo", "one").unwrap()]
+        );
+        assert_eq!(
+            tags.get("$8").unwrap(),
+            &vec![SessionTag::new("mmux", "bar", "two words").unwrap()]
         );
     }
 }
