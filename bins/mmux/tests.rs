@@ -1,24 +1,25 @@
 use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    HostHandle, SSH_DEFAULT_PORT, SessionId, SessionInfo, StatusStyle, TransportKind,
-    transport::MockTransport,
+    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusStyle, TransportKind,
+    SSH_DEFAULT_PORT,
 };
-use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
+use ratatui::Terminal;
 
-use crate::cli::{Cli, is_portrait_pty, select_layout};
+use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
     HOST_COLOR_SQUARE, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    MMUX_ATTACH_STATUS_STYLE, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT,
-    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_MNEMONIC_FG,
+    MMUX_ATTACH_STATUS_STYLE, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH,
+    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
+    STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
-    KeyOutcome, handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
-    stop_monitor_if_closed,
+    handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
+    stop_monitor_if_closed, KeyOutcome,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
@@ -30,8 +31,9 @@ use crate::model::{
 };
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
-    session_list_line, session_recency_text, sessions_title, short_build_git_sha, status_line,
-    status_line_text, tag_key_column_width, top_status_line, use_compact_placeholder,
+    session_list_line, session_recency_text, session_tags_footer_line, sessions_title,
+    short_build_git_sha, status_line, status_line_text, tag_key_column_width, top_status_line,
+    use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
 use crate::{prepare_attach_status_style, restore_attach_status_style};
@@ -232,6 +234,14 @@ fn modal_border_width(lines: &[String], title: &str) -> usize {
     right - left + 1
 }
 
+fn modal_border_left(lines: &[String], title: &str) -> usize {
+    lines
+        .iter()
+        .find(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
+        .and_then(|line| line.chars().position(|ch| ch == '┌'))
+        .expect("expected modal left border")
+}
+
 #[test]
 fn cli_accepts_script_and_rejects_removed_mode_flags() {
     let script = Cli::try_parse_from(["mmux", "--script"]).unwrap();
@@ -388,6 +398,29 @@ fn status_line_styles_command_mnemonics() {
         status_line_text(&app),
         " ↑/↓ sel | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
     );
+}
+
+#[test]
+fn session_tags_footer_styles_tag_command_mnemonics() {
+    let line = session_tags_footer_line("[Cancel]");
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let styled_mnemonics = line
+        .spans
+        .iter()
+        .filter(|span| {
+            span.style.add_modifier.contains(Modifier::BOLD)
+                && span.style.fg == Some(STATUS_BAR_MNEMONIC_FG)
+                && span.style.bg == Some(STATUS_BAR_BG)
+        })
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(text, "[Cancel] | update | x unset | check");
+    assert_eq!(styled_mnemonics, "uxc");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -1722,15 +1755,34 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
 
     let screen_lines = render_to_lines(&mut app, 80, 24);
     let screen = screen_lines.join("");
+    let footer = screen_lines
+        .iter()
+        .find(|line| line.contains("Cancel") && line.contains("update"))
+        .expect("expected session tags footer");
 
     assert_eq!(
         modal_border_width(&screen_lines, "Session Tags"),
         MODAL_MIN_WIDTH as usize
     );
+    let cancel_start = footer
+        .find("Cancel")
+        .map(|byte_index| footer[..byte_index].chars().count());
+    assert_eq!(
+        cancel_start,
+        Some(
+            modal_border_left(&screen_lines, "Session Tags")
+                + 1
+                + MODAL_CONTENT_HORIZONTAL_PADDING as usize
+                + 1
+        )
+    );
     assert!(screen.contains("owner"));
     assert!(screen.contains("platform"));
     assert!(screen.contains("phase"));
     assert!(screen.contains("build"));
+    assert!(screen.contains("update"));
+    assert!(screen.contains("x unset"));
+    assert!(screen.contains("check"));
     assert!(!screen.contains("+"));
     assert!(!screen.contains("┬"));
     assert!(!screen.contains("┼"));
