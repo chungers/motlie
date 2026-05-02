@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip for sessions with no tags. |
 | 2026-05-02 | @codex | Tightened list-pane tag sort: only visible non-empty checked-tag values count as tagged, and pressing `s` selects the first row after sorting so the sorted top is shown. |
 | 2026-05-02 | @codex | Added the list-pane `s` sort toggle: activity sort remains the default, and tag sort groups checked-tag rows before unchecked rows before falling back to activity, host code, and session name. |
@@ -56,7 +57,7 @@ Draft.
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to the clean `columns / rows <= 2.0` rule and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, startup auto-detects portrait layout from PTY dimensions, the old `-s` flag is no longer accepted, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
-| 2026-04-26 | @gpt55-dgx | Updated implemented keymap and rendering details: attach is Enter/`a`, Right/Left move focus between list and detail/monitor panes, Shift-arrow resize is documented for macOS iTerm2, sample detail preserves ANSI color, session-list refresh is polling-backed snapshot reconciliation, and narrow MOTD fallback stays graphical. |
+| 2026-04-26 | @gpt55-dgx | Updated implemented keymap and rendering details: attach is Enter, Right/Left move focus between list and detail/monitor panes, Shift-arrow resize is documented for macOS iTerm2, sample detail preserves ANSI color, session-list refresh is polling-backed snapshot reconciliation, and narrow MOTD fallback stays graphical. |
 | 2026-04-26 | @gpt55-dgx | Initial DESIGN for GitHub issue #226: local/remote tmux session selector TUI, session detail sources, monitoring mode, modal create/kill flows, accepted current-PTY attach gap, host-wide SSH integration, and SVG mock. |
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 review additions from @opus47-macos-tmux: live session-list event stream via tmux control-mode notifications; focus model with `l` / `v` / `Esc` and visual focus borders; both panes scrollable with R-pane resample-backwards; bold-green motlie ASCII placeholder when MOTD absent (LT bypasses 30% cap to fit); PTY handoff non-functional requirement (no VTE-in-middle); spawn-and-wait attach with `setpgid`+`tcsetpgrp` signal hygiene; default-attach polarity with opt-in `--print-session` and opt-in `--dashboard` (re-enter on clean detach, bounded by `child.status.success()` AND list refresh AND user pick); two new accepted library gaps (`HostHandle::watch_host_events()`, `ScrollbackQuery::LinesRange`); alternatives B/C moved to appendix; testing-strategy additions; open-questions resolutions. |
 | 2026-04-26 | @gpt55-dgx | Accepted PR #227 short-mode review addition from @opus47-macos-tmux: short-mode layout via `-s` flag, optimized for 32×65 terminals (mobile SSH clients, IDE terminals, tmux pop-ups). Vertical T/B split at 40:60 (T = session list, B = detail), default focus T. MOTD/motlie omitted in short mode for density. Resize keys promoted to Ctrl-modifier: `Ctrl-Up`/`Ctrl-Down` resize T/B in short mode; `Ctrl-Left`/`Ctrl-Right` resize L/R in normal mode (replacing plain `Left`/`Right`, which become reserved in main view). All other keys (`l`/`v`/`Esc`/`m`/`n`/`k`/`g`/Enter/`Ctrl-C`) and modal behavior identical across modes. |
@@ -216,7 +217,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `l` toggles the current TUI between portrait and landscape layout.
   The toggle is runtime-only and is retained in memory across default
   attach/detach re-entry within the same `mmux` parent process.
-- Pressing `a` or Enter in the main selector exits the TUI and attaches the
+- Pressing Enter in the main selector exits the TUI and attaches the
   current user PTY to the highlighted session. (Focus-independent: attach
   always operates on the `Lb` highlight regardless of which pane has focus.)
 - Pressing `q` exits the selector without attach, equivalent to `Ctrl-C` in
@@ -256,9 +257,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
   `pane` for pane focus, with the shortcut letter underlined. Always-on
-  command hints are ordered as `help`, `pane`, `monitor`, `enter/attach`,
+  command hints are ordered as `help`, `pane`, `monitor`, `Enter attach`,
   `new`, `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
-  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are underlined in the TUI. The
+  letters `h`/`p`/`m`/`n`/`k`/`q`/`l` are underlined in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a blue background.
@@ -270,7 +271,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode host notifications remain a future hardening item; see
   §Data Flow → Live Session List and §Accepted motlie-tmux Library Gaps →
   Host Event Stream.
-- Default mode (no behavior flag): on `a` or Enter, leave the TUI cleanly and
+- Default mode (no behavior flag): on Enter, leave the TUI cleanly and
   spawn-and-wait attach (see §Data Flow → Attach). Default mode re-enters the
   TUI on clean child exit, or on non-zero child exit when the selected session
   still exists (see §Data Flow → Attach for the bounded re-entry rule). When
@@ -284,7 +285,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 30:70 ratio. MOTD and the
   motlie placeholder are omitted in portrait mode to maximize content density.
-  All command keys (`p` focus cycling, `l` layout toggle, `Esc`/`m`/`n`/`k`/`a`/Enter/`q`/`Ctrl-C`), modal
+  All command keys (`p` focus cycling, `l` layout toggle, `Esc`/`m`/`n`/`k`/Enter/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
   identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
   differ by mode: portrait mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
@@ -439,7 +440,7 @@ small channel-open + exec round-trips, not 5×3600 SSH handshakes.
 
 #### Attach is a separate path
 
-The attach handoff (Enter/`a` on a session) does **not** go through the russh
+The attach handoff (Enter on a session) does **not** go through the russh
 transport. It spawns an **external `ssh -t <host> tmux attach-session -t
 <name>`** subprocess with the user's stdio inherited from mmux. This satisfies
 the "clean PTY handoff, no VTE-in-the-middle" non-functional requirement: tmux
@@ -699,7 +700,7 @@ Main-selector keymap (focus-aware):
 | `r` | No-op | Open rename modal for highlight | No-op |
 | `t` | Open tag list/add/update/delete modal for highlight | Same | Same |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same | Same |
-| Enter / `a` | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
+| Enter | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach | Exit selector without attach |
 
 Resize keys use modified arrows so plain arrows stay available to terminals and
@@ -756,7 +757,7 @@ at smaller sizes but is tuned for this target.
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view |
 
 **All other keys and modal behavior:** identical to normal mode (see the
-focus-aware keymap above). `m`, `n`, `k`, `t`, `a`/Enter, and `q`/`Ctrl-C`
+focus-aware keymap above). `m`, `n`, `k`, `t`, Enter, and `q`/`Ctrl-C`
 are focus-independent and behave the same; `r` remains
 list-focus-only (`T` in portrait). `q`/`Ctrl-C` exits without attaching. Modal
 keymap (Left/Right for button selection, Enter to apply, Esc to Cancel) is
@@ -802,7 +803,7 @@ existing single-host mode unchanged.
   Host-code column width is the widest assigned code for the configured hosts.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, `Enter`/`a` attach, `m` monitor, `n` new,
+- All command keys (`Up`/`Down`, Enter attach, `m` monitor, `n` new,
   `k` kill, `r` rename, `t` tag list/add/update/delete, `Ctrl-C`/`q` exit,
   `l` toggle layout, `p` cycle panes, `Ctrl-←/→` and `Ctrl-↑/↓` resize) behave
   the same as single-host. Each applies to the highlighted row and dispatches
@@ -1297,7 +1298,7 @@ selector re-entry):
    to create)`.
 2. `R` renders nothing (or an inline hint mirroring the same `n to create`
    message).
-3. Highlight is unset; `m`, `k`, `r`, `t`, `a`, and `Enter` are all no-ops in
+3. Highlight is unset; `m`, `k`, `r`, `t`, and Enter are all no-ops in
    this state.
 4. `n` remains active and opens the New Session modal as usual.
 5. ForceCommand mode treats this as the normal first-run path: the user
@@ -1400,7 +1401,7 @@ selector re-entry):
 The attach handoff transfers the user's controlling terminal directly to
 the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 
-1. Pressing Enter or `a` in the main selector (any focus) records the
+1. Pressing Enter in the main selector (any focus) records the
    highlighted session id.
 2. Stop monitor/detail state. Drop the active host-event subscription; re-entry
    starts from a fresh session snapshot.
