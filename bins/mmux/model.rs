@@ -1,4 +1,4 @@
-use std::cmp::{min, Ordering};
+use std::cmp::{Ordering, min};
 use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};
@@ -479,7 +479,7 @@ pub(crate) struct SessionListState {
 pub(crate) enum SessionSortMode {
     #[default]
     Activity,
-    Tag,
+    TagGroup,
 }
 
 impl SessionListState {
@@ -499,19 +499,19 @@ impl SessionListState {
     pub(crate) fn set_rows_sorted(&mut self, rows: Vec<SessionRow>, fleet: &HostFleet) {
         match self.sort_mode {
             SessionSortMode::Activity => self.set_rows_sorted_by_activity(rows),
-            SessionSortMode::Tag => self.set_rows_sorted_by_tag(rows, fleet),
+            SessionSortMode::TagGroup => self.set_rows_grouped_by_tag(rows, fleet),
         }
     }
 
-    pub(crate) fn set_rows_sorted_by_tag(&mut self, mut rows: Vec<SessionRow>, fleet: &HostFleet) {
-        sort_rows_by_tag(&mut rows, fleet);
+    pub(crate) fn set_rows_grouped_by_tag(&mut self, mut rows: Vec<SessionRow>, fleet: &HostFleet) {
+        sort_rows_by_tag_group(&mut rows, fleet);
         self.rows = rows;
     }
 
     pub(crate) fn toggle_sort_mode(&mut self) -> SessionSortMode {
         self.sort_mode = match self.sort_mode {
-            SessionSortMode::Activity => SessionSortMode::Tag,
-            SessionSortMode::Tag => SessionSortMode::Activity,
+            SessionSortMode::Activity => SessionSortMode::TagGroup,
+            SessionSortMode::TagGroup => SessionSortMode::Activity,
         };
         self.sort_mode
     }
@@ -582,9 +582,10 @@ fn activity_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
         .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
 }
 
-fn sort_rows_by_tag(rows: &mut [SessionRow], fleet: &HostFleet) {
+fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
+    let group_activity = tag_group_activity(rows);
     rows.sort_by(|left, right| {
-        tag_sort_order(left, right)
+        tag_group_sort_order(left, right, &group_activity)
             .then_with(|| {
                 right
                     .activity_observed_at_local
@@ -602,9 +603,33 @@ fn sort_rows_by_tag(rows: &mut [SessionRow], fleet: &HostFleet) {
     });
 }
 
-fn tag_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
+fn tag_group_activity(rows: &[SessionRow]) -> HashMap<String, u64> {
+    let mut group_activity: HashMap<String, u64> = HashMap::new();
+    for row in rows {
+        let Some(value) = row.displayed_tag_value() else {
+            continue;
+        };
+        group_activity
+            .entry(value.to_string())
+            .and_modify(|activity| *activity = (*activity).max(row.activity_observed_at_local))
+            .or_insert(row.activity_observed_at_local);
+    }
+    group_activity
+}
+
+fn tag_group_sort_order(
+    left: &SessionRow,
+    right: &SessionRow,
+    group_activity: &HashMap<String, u64>,
+) -> Ordering {
     match (left.displayed_tag_value(), right.displayed_tag_value()) {
-        (Some(left_value), Some(right_value)) => left_value.cmp(right_value),
+        (Some(left_value), Some(right_value)) => {
+            let left_activity = group_activity.get(left_value).copied().unwrap_or(0);
+            let right_activity = group_activity.get(right_value).copied().unwrap_or(0);
+            right_activity
+                .cmp(&left_activity)
+                .then_with(|| left_value.cmp(right_value))
+        }
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
