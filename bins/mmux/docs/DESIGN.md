@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added the list-pane `s` sort toggle: activity sort remains the default, and tag sort groups checked-tag rows before unchecked rows before falling back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for issue #241: selected-tag refresh is batched per host, Session Tags Cancel is reachable by Tab, modal session identity and tag UI state are grouped, and modal sizing arithmetic moved to the render layer. |
 | 2026-05-01 | @codex | Simplified issue #241 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal from `i` to `t`, and left `i` unassigned for this feature. |
 | 2026-05-01 | @codex | Updated issue #241 design after tmux unset research: tag deletion requires a `motlie-tmux` unset API over `set-option -u`, and the `i` modal now supports row focus with Up/Down plus `x` delete and `u` update actions for focused tag rows. |
@@ -236,13 +237,17 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   is `local_now − SessionInfo.created` under an NTP-synced clock assumption.
   See §System Design → Clock Handling for the rationale. Durations use `now`,
   `m`, `h`, or `d`; day values keep at most one decimal digit.
-- Session rows are sorted by `activity_observed_at_local` descending so the
-  session whose activity most recently advanced is at the top. Sorting on the
-  observer-side mark instead of raw host `SessionInfo.activity` keeps order
-  stable across multi-host fleets even when host clocks drift. Stable
-  `(host_id, session_id)` preservation keeps the current highlight on the
-  same session after refresh even if the row moves. Window-level tmux
-  alert/status flags such as `!`, `#`, and `~` are deferred.
+- Session rows default to `activity_observed_at_local` descending so the
+  session whose activity most recently advanced is at the top. Pressing `s`
+  while the session list is focused toggles tag sort: rows with checked tags
+  appear before rows without checked tags, then sort by checked tag value,
+  activity time, host code, and session name. Pressing `s` again restores
+  activity sort. Sorting on the observer-side mark instead of raw host
+  `SessionInfo.activity` keeps activity order stable across multi-host fleets
+  even when host clocks drift. Stable `(host_id, session_id)` preservation
+  keeps the current highlight on the same session after refresh even if the row
+  moves. Window-level tmux alert/status flags such as `!`, `#`, and `~` are
+  deferred.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
@@ -615,8 +620,8 @@ Implemented selector state is split by concern:
 - `HostContext`: display hostname/IP.
 - `LayoutState`: mode, focus, and resize percentages.
 - `MotdState`: MOTD text and fallback marker.
-- `SessionListState`: live `SessionInfo` rows, target-server `now` timestamp,
-  selected index, and list scroll.
+- `SessionListState`: live `SessionRow` rows, selected index, list scroll, and
+  current sort mode.
 - `DetailState`: rendered lines, scroll state, source, and auto-tail behavior.
 - `StatusBanner`: typed loading/info/error status text for the bottom bar.
 
@@ -873,6 +878,7 @@ pub(crate) struct SessionRow {
     pub(crate) local_now: u64,        // operator wall clock at refresh time
     pub(crate) activity_observed_at_local: u64,  // ActivityTracker mark
     pub(crate) session: motlie_tmux::SessionInfo,
+    pub(crate) selected_tag: Option<SessionSelectedTag>,
 }
 
 // SessionListState becomes:
@@ -880,6 +886,7 @@ pub(crate) struct SessionListState {
     pub(crate) rows: Vec<SessionRow>,  // was: Vec<SessionInfo>
     pub(crate) selected: usize,
     pub(crate) scroll: usize,
+    pub(crate) sort_mode: SessionSortMode,
 }
 ```
 
@@ -1249,8 +1256,10 @@ Single-poll reconcile loop driven by the main TUI loop:
 3. For each snapshot:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
-   - sort rows by `activity_observed_at_local` descending; tie-break by
-     name, session id, host id
+   - sort rows using `SessionSortMode`: activity mode sorts by
+     `activity_observed_at_local` descending; tag mode puts rows with checked
+     tags before rows without checked tags, then sorts by checked tag value,
+     activity time, host code, and session name
    - preserve highlight by `(host_id, session_id)`, falling back to the
      clamped index if the session disappeared
    - if the monitored session id is absent, stop monitor mode, switch the
