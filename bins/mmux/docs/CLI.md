@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed host labels in the top status bar to use tmux `#{host}` rather than SSH URI hostnames; URI hostnames remain internal aliases. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
@@ -203,7 +204,8 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 **UX differences in multi-host mode:**
 
 - Top status bar shows a host-color legend after `mmux` instead of the usual
-  `<hostname> | <ip>`, for example `mmux ■ a.example.com ■ b.example.com`.
+  `<hostname> | <ip>`, for example `mmux ■ alpha ■ beta`. Host labels are
+  tmux's own `#{host}` values; SSH URI hostnames are retained only as aliases.
 - Session list rows insert the host's compact colored square between the
   attached marker and the session name:
 

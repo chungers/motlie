@@ -7,30 +7,10 @@ use motlie_tmux::{HostHandle, SshConfig, SSH_DEFAULT_PORT};
 use crate::cli::Cli;
 use crate::model::{HostEntry, HostFleet, HostId};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HostIdentity {
-    pub(crate) hostname: String,
-    pub(crate) ip_address: String,
-}
-
-impl HostIdentity {
-    fn new(hostname: String, port: u16) -> Self {
-        let ip_address = resolve_ip_address(&hostname, port);
-        Self {
-            hostname,
-            ip_address,
-        }
-    }
-
-    fn local() -> Self {
-        let hostname = local_hostname();
-        let ip_address = local_ip_address(&hostname)
-            .unwrap_or_else(|| resolve_ip_address(&hostname, SSH_DEFAULT_PORT));
-        Self {
-            hostname,
-            ip_address,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpAddressSource {
+    Local,
+    Alias { port: u16 },
 }
 
 /// Connect to all hosts named on the CLI. With zero URIs, returns a fleet
@@ -49,12 +29,17 @@ impl HostIdentity {
 /// each other. Reject explicitly rather than silently degrade.
 pub(crate) async fn connect_fleet(cli: &Cli) -> Result<HostFleet> {
     if cli.ssh_uris.is_empty() {
-        let entry = HostEntry {
-            id: HostId::local(),
-            label: local_hostname(),
-            ip_address: HostIdentity::local().ip_address,
-            handle: HostHandle::local(),
-        };
+        let handle = HostHandle::local();
+        let fallback_label = local_hostname();
+        let alias = handle.host_alias().to_string();
+        let entry = build_host_entry(
+            HostId::local(),
+            handle,
+            alias,
+            fallback_label,
+            IpAddressSource::Local,
+        )
+        .await;
         return Ok(HostFleet::from_entries(vec![entry]));
     }
 
@@ -84,14 +69,45 @@ pub(crate) async fn connect_fleet(cli: &Cli) -> Result<HostFleet> {
 
 async fn connect_ssh_entry(uri: &str) -> Result<HostEntry> {
     let config = SshConfig::parse(uri).context("parse ssh target")?;
-    let identity = HostIdentity::new(config.host().to_string(), config.port());
+    let port = config.port();
     let handle = config.connect().await.context("connect ssh target")?;
-    Ok(HostEntry {
-        id: HostId::from_ssh_uri(uri),
-        label: identity.hostname,
-        ip_address: identity.ip_address,
+    let alias = handle.host_alias().to_string();
+    Ok(build_host_entry(
+        HostId::from_ssh_uri(uri),
         handle,
-    })
+        alias.clone(),
+        alias,
+        IpAddressSource::Alias { port },
+    )
+    .await)
+}
+
+async fn build_host_entry(
+    id: HostId,
+    handle: HostHandle,
+    alias: String,
+    fallback_label: String,
+    ip_source: IpAddressSource,
+) -> HostEntry {
+    let label = handle
+        .tmux_hostname()
+        .await
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_label);
+    let ip_address = match ip_source {
+        IpAddressSource::Local => {
+            local_ip_address(&label).unwrap_or_else(|| resolve_ip_address(&label, SSH_DEFAULT_PORT))
+        }
+        IpAddressSource::Alias { port } => resolve_ip_address(&alias, port),
+    };
+    HostEntry {
+        id,
+        label,
+        alias,
+        ip_address,
+        handle,
+    }
 }
 
 fn local_hostname() -> String {

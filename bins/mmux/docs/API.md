@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added `HostHandle::tmux_hostname()` and changed mmux host display labels to use tmux `#{host}` while retaining SSH URI hosts as aliases. |
 | 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` and `status-left-length` to 50, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
@@ -293,7 +294,12 @@ live in `cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`,
 The top status bar is derived from the app host identity and current local
 clock: single-host mode renders `<hostname> | <ip address>` as bold
 left-justified text, while multi-host mode renders a compact host-color legend
-such as `mmux ■ alpha ■ beta`. The current time renders right-justified.
+such as `mmux ■ alpha ■ beta`. Host display names come from
+`HostHandle::tmux_hostname()`, which calls tmux
+`start-server ; display-message -p '#{host}'` over the configured
+transport/socket. For SSH targets, mmux separately stores the URI hostname as
+`HostEntry.alias` and resolves IPs from that alias. The current time renders
+right-justified.
 The Sessions pane title is derived only from the live session list length:
 `Sessions [n]`. List rows show the display name, attached marker, optional
 multi-host color-square column, and right-aligned `<active> / <age>` recency

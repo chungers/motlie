@@ -467,6 +467,16 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Return the hostname reported by the host's tmux server.
+    ///
+    /// This uses `start-server ; display-message -p '#{host}'` through the
+    /// configured transport/socket, so callers get the name tmux itself uses
+    /// rather than an SSH URI alias or shell-level hostname probe.
+    pub async fn tmux_hostname(&self) -> Result<String> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::tmux_hostname_with_prefix(&self.inner.transport, &prefix).await
+    }
+
     /// List namespaced metadata tags for several session infos in one tmux call.
     ///
     /// This is intended for callers that enrich an existing session listing and
@@ -2630,6 +2640,19 @@ mod tests {
         let host = HostHandle::new(TransportKind::Mock(mock), Some(socket));
         // Should succeed — the mock matches "start-server" in the command
         host.ensure_socket_server().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tmux_hostname_uses_tmux_host_format() {
+        let mock = MockTransport::new().with_response(
+            "tmux start-server \\; display-message -p '#{host}'",
+            "alpha\n",
+        );
+        let host = mock_host(mock);
+
+        let hostname = host.tmux_hostname().await.unwrap();
+
+        assert_eq!(hostname, "alpha");
     }
 
     #[tokio::test]

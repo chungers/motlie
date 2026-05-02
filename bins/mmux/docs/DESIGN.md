@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed mmux host labels to come from tmux `#{host}` via `HostHandle::tmux_hostname()`, while retaining the SSH URI hostname as `HostEntry.alias`. |
 | 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` with `status-left-length=50`, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
@@ -876,8 +877,10 @@ pub(crate) struct HostId(pub(crate) String);  // ssh URI or "localhost"
 
 pub(crate) struct HostEntry {
     pub(crate) id: HostId,
+    pub(crate) label: String,       // tmux #{host}, used for display
+    pub(crate) alias: String,       // SSH URI hostname, retained as operator alias
+    pub(crate) ip_address: String,  // resolved from alias for SSH targets
     pub(crate) handle: motlie_tmux::HostHandle,
-    pub(crate) identity: HostIdentity,  // hostname, ip_address, label
 }
 
 pub(crate) struct HostFleet {
@@ -908,6 +911,15 @@ pub(crate) struct SessionListState {
     pub(crate) sort_mode: SessionSortMode,
 }
 ```
+
+`target_host.rs` owns host identity probing. For SSH targets, it parses the URI
+hostname into `HostEntry.alias`, connects the `HostHandle`, then asks tmux for
+`start-server ; display-message -p '#{host}'` through
+`HostHandle::tmux_hostname()` and stores that value in `HostEntry.label`. The
+same tmux query is used for the local host. If the tmux query fails, mmux falls
+back to the local process hostname for localhost or the SSH URI alias for
+remote hosts. IP display/resolution remains based on the alias, because that is
+the operator-supplied routable name.
 
 `HostContext` is replaced by `HostFleet`; selection-by-id at the row level
 must compose `(host_id, session_id)` to remain stable across rename/reorder.

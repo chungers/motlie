@@ -488,6 +488,31 @@ pub async fn get_history_limit_with_prefix(
     })
 }
 
+/// Query the hostname reported by tmux's `#{host}` format.
+pub(crate) async fn tmux_hostname_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+) -> Result<String> {
+    let cmd = format!("{} start-server \\; display-message -p '#{{host}}'", prefix);
+    let output = transport.exec(&cmd).await?;
+    parse_tmux_hostname(&output)
+}
+
+fn parse_tmux_hostname(output: &str) -> Result<String> {
+    let hostname = output.trim();
+    if hostname.is_empty() {
+        return Err(Error::Parse(
+            "tmux #{host} returned an empty hostname".to_string(),
+        ));
+    }
+    if hostname.chars().any(char::is_control) {
+        return Err(Error::Parse(format!(
+            "tmux #{{host}} returned hostname with control characters: {hostname:?}"
+        )));
+    }
+    Ok(hostname.to_string())
+}
+
 /// Set a namespaced session tag via tmux user-defined options.
 pub(crate) async fn set_session_tag_with_prefix(
     transport: &TransportKind,
@@ -1476,6 +1501,32 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("status-left"));
+    }
+
+    #[tokio::test]
+    async fn tmux_hostname_reads_host_format() {
+        let mock = MockTransport::new().with_response(
+            "tmux start-server \\; display-message -p '#{host}'",
+            "alpha\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let hostname = tmux_hostname_with_prefix(&transport, "tmux").await.unwrap();
+
+        assert_eq!(hostname, "alpha");
+    }
+
+    #[tokio::test]
+    async fn tmux_hostname_rejects_empty_output() {
+        let mock = MockTransport::new()
+            .with_response("tmux start-server \\; display-message -p '#{host}'", "\n");
+        let transport = TransportKind::Mock(mock);
+
+        let err = tmux_hostname_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("empty hostname"));
     }
 
     #[tokio::test]

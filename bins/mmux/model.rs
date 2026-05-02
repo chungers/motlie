@@ -1,4 +1,4 @@
-use std::cmp::{Ordering, min};
+use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};
@@ -195,7 +195,8 @@ impl std::fmt::Display for HostId {
     }
 }
 
-/// One configured host: stable id, display label, IP, and the connected handle.
+/// One configured host: stable id, display label, URI alias, IP, and the
+/// connected handle.
 ///
 /// Recency math (activity, age) is computed in the binary against the
 /// operator's wall clock. We assume host clocks are NTP-synced with the
@@ -206,9 +207,22 @@ impl std::fmt::Display for HostId {
 #[derive(Clone)]
 pub(crate) struct HostEntry {
     pub(crate) id: HostId,
+    /// Host-local name probed after connection; used for display.
     pub(crate) label: String,
+    /// Hostname parsed from the SSH URI; used as the stable operator alias.
+    pub(crate) alias: String,
     pub(crate) ip_address: String,
     pub(crate) handle: HostHandle,
+}
+
+impl HostEntry {
+    pub(crate) fn diagnostic_label(&self) -> String {
+        if self.alias == self.label {
+            self.label.clone()
+        } else {
+            format!("{} ({})", self.label, self.alias)
+        }
+    }
 }
 
 /// Collection of one or more configured hosts. Always has at least one entry
@@ -794,6 +808,7 @@ impl AppState {
     ) -> Self {
         let entry = HostEntry {
             id: HostId::local(),
+            alias: host_label.clone(),
             label: host_label,
             ip_address: host_ip_address,
             handle: motlie_tmux::HostHandle::local(),
