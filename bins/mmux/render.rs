@@ -557,6 +557,8 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "tags", 't');
     push_status_separator(&mut spans);
+    push_status_command(&mut spans, "sort", 's');
+    push_status_separator(&mut spans);
     push_status_command(&mut spans, "quit", 'q');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "layout", 'l');

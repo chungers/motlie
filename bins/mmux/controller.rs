@@ -14,8 +14,8 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    SelectedSession, SessionRow, SessionSelectedTag, SessionTagRow, SessionTagsFocus,
-    SessionTagsModalUi, StatusBanner,
+    SelectedSession, SessionRow, SessionSelectedTag, SessionSortMode, SessionTagRow,
+    SessionTagsFocus, SessionTagsModalUi, StatusBanner,
 };
 
 const TAG_PREFIX: &str = "mmux";
@@ -35,7 +35,7 @@ pub(crate) async fn load_motd_from(host: &HostHandle, path: &Path) -> (String, b
 
 /// Fan out `list_sessions()` across all configured hosts in parallel, merge
 /// into a flat `Vec<SessionRow>`, run the activity-tracker over the
-/// observations, and sort by activity descending.
+/// observations, and return rows for the caller to sort.
 ///
 /// Per-host failures are tolerated: a failing host's rows simply do not
 /// appear in the merged list, and the failure surfaces in the status banner.
@@ -169,7 +169,7 @@ async fn refresh_sessions_preserving_with_status(
     let (rows, failures) = fetch_fleet_rows(fleet, &mut app.activity_tracker).await;
     let closed_monitored = closed_monitored_session(app, &rows);
     let previous_key = previous.clone();
-    app.session_list.set_rows_sorted_by_activity(rows);
+    app.session_list.set_rows_sorted(rows, fleet);
     app.preserve_selection(previous);
     if update_status {
         app.status = build_status(app, &failures);
@@ -329,6 +329,9 @@ pub(crate) async fn handle_key(
         (KeyCode::Esc, _) => app.layout.focus = Focus::List,
         (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
         (KeyCode::Char('m'), _) => start_monitor(fleet, app).await?,
+        (KeyCode::Char('s'), _) if app.layout.focus == Focus::List => {
+            toggle_session_sort(fleet, app);
+        }
         (KeyCode::Char('n'), _) => {
             app.modal = Some(ModalState::NewSession {
                 input: String::new(),
@@ -492,6 +495,17 @@ pub(crate) async fn handle_key(
 
 fn is_resize_modifier(modifiers: KeyModifiers) -> bool {
     modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
+}
+
+fn toggle_session_sort(fleet: &HostFleet, app: &mut AppState) {
+    let previous = current_selection_key(app);
+    let mode = app.session_list.toggle_sort_mode();
+    app.session_list.resort(fleet);
+    app.preserve_selection(previous);
+    app.status = StatusBanner::info(match mode {
+        SessionSortMode::Activity => "sort: activity",
+        SessionSortMode::Tag => "sort: tag",
+    });
 }
 
 fn is_word_left_resize(modifiers: KeyModifiers) -> bool {

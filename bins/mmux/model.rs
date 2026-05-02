@@ -1,4 +1,4 @@
-use std::cmp::min;
+use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};
@@ -251,6 +251,13 @@ impl HostFleet {
                 .join(" "),
         )
     }
+
+    pub(crate) fn host_sort_index(&self, id: &HostId) -> usize {
+        self.entries
+            .iter()
+            .position(|entry| entry.id == *id)
+            .unwrap_or(usize::MAX)
+    }
 }
 
 fn host_code_for_index(index: usize) -> String {
@@ -385,6 +392,7 @@ pub(crate) struct RetainedUiState {
     focus: Focus,
     left_percent: u16,
     top_percent: u16,
+    sort_mode: SessionSortMode,
 }
 
 impl Default for RetainedUiState {
@@ -402,6 +410,7 @@ impl RetainedUiState {
             focus: Focus::List,
             left_percent: DEFAULT_LEFT_PERCENT,
             top_percent: DEFAULT_TOP_PERCENT,
+            sort_mode: SessionSortMode::Activity,
         }
     }
 
@@ -415,6 +424,7 @@ impl RetainedUiState {
         app.layout.top_percent = self
             .top_percent
             .clamp(PORTRAIT_MIN_TOP_PERCENT, PORTRAIT_MAX_TOP_PERCENT);
+        app.session_list.sort_mode = self.sort_mode;
     }
 
     pub(crate) fn update_from(&mut self, app: &AppState) {
@@ -426,6 +436,7 @@ impl RetainedUiState {
         self.focus = app.layout.focus;
         self.left_percent = app.layout.left_percent;
         self.top_percent = app.layout.top_percent;
+        self.sort_mode = app.session_list.sort_mode;
     }
 
     pub(crate) fn selected_session_key(&self) -> Option<(HostId, String)> {
@@ -452,6 +463,14 @@ pub(crate) struct SessionListState {
     pub(crate) rows: Vec<SessionRow>,
     pub(crate) selected: usize,
     pub(crate) scroll: usize,
+    pub(crate) sort_mode: SessionSortMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSortMode {
+    #[default]
+    Activity,
+    Tag,
 }
 
 impl SessionListState {
@@ -464,15 +483,33 @@ impl SessionListState {
     /// clock skew across hosts in multi-host mode — a host whose clock is
     /// minutes ahead of others doesn't pin its sessions to the top.
     pub(crate) fn set_rows_sorted_by_activity(&mut self, mut rows: Vec<SessionRow>) {
-        rows.sort_by(|left, right| {
-            right
-                .activity_observed_at_local
-                .cmp(&left.activity_observed_at_local)
-                .then_with(|| left.session.name.cmp(&right.session.name))
-                .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
-                .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
-        });
+        sort_rows_by_activity(&mut rows);
         self.rows = rows;
+    }
+
+    pub(crate) fn set_rows_sorted(&mut self, rows: Vec<SessionRow>, fleet: &HostFleet) {
+        match self.sort_mode {
+            SessionSortMode::Activity => self.set_rows_sorted_by_activity(rows),
+            SessionSortMode::Tag => self.set_rows_sorted_by_tag(rows, fleet),
+        }
+    }
+
+    pub(crate) fn set_rows_sorted_by_tag(&mut self, mut rows: Vec<SessionRow>, fleet: &HostFleet) {
+        sort_rows_by_tag(&mut rows, fleet);
+        self.rows = rows;
+    }
+
+    pub(crate) fn toggle_sort_mode(&mut self) -> SessionSortMode {
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Activity => SessionSortMode::Tag,
+            SessionSortMode::Tag => SessionSortMode::Activity,
+        };
+        self.sort_mode
+    }
+
+    pub(crate) fn resort(&mut self, fleet: &HostFleet) {
+        let rows = std::mem::take(&mut self.rows);
+        self.set_rows_sorted(rows, fleet);
     }
 
     pub(crate) fn selected_session(&self) -> Option<SelectedSession> {
@@ -515,6 +552,48 @@ impl SessionListState {
         let next = (self.selected as isize + delta).clamp(0, max_index) as usize;
         self.selected = next;
         old != next
+    }
+}
+
+fn sort_rows_by_activity(rows: &mut [SessionRow]) {
+    rows.sort_by(activity_sort_order);
+}
+
+fn activity_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
+    right
+        .activity_observed_at_local
+        .cmp(&left.activity_observed_at_local)
+        .then_with(|| left.session.name.cmp(&right.session.name))
+        .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
+        .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+}
+
+fn sort_rows_by_tag(rows: &mut [SessionRow], fleet: &HostFleet) {
+    rows.sort_by(|left, right| {
+        tag_sort_order(left, right)
+            .then_with(|| {
+                right
+                    .activity_observed_at_local
+                    .cmp(&left.activity_observed_at_local)
+            })
+            .then_with(|| {
+                fleet
+                    .host_sort_index(&left.host_id)
+                    .cmp(&fleet.host_sort_index(&right.host_id))
+            })
+            .then_with(|| left.host_label.cmp(&right.host_label))
+            .then_with(|| left.session.name.cmp(&right.session.name))
+            .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
+            .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+    });
+}
+
+fn tag_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
+    match (&left.selected_tag, &right.selected_tag) {
+        (Some(left_tag), Some(right_tag)) => left_tag.value.cmp(&right_tag.value),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
 }
 

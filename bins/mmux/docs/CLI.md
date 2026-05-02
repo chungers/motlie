@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added list-pane `s` sort toggle: activity sort remains default; tag sort groups checked-tag rows first, orders them by checked tag value, then falls back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for Session Tags: `Tab` reaches Cancel and selected-tag values are loaded through one batched metadata read per host refresh. |
 | 2026-05-02 | @codex | Changed multi-host status and row rendering to use host-code legends: top status shows `mmux [A] <host> ...`, and session rows show compact codes such as `[A]` instead of full hostnames. |
 | 2026-05-01 | @codex | Reduced the modal minimum width by about 20% so Session Tags and other short modal content render in a narrower frame. |
@@ -255,6 +256,7 @@ Normal mode main-view keys:
 | `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
 | `r` | No-op | Open Rename Session modal | No-op |
 | `t` | Open Session Tags modal | Open Session Tags modal | Open Session Tags modal |
+| `s` | No-op | Toggle activity/tag sort | No-op |
 | `h` | Open Help modal | Open Help modal | Open Help modal |
 | Enter / `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
@@ -270,8 +272,8 @@ On macOS iTerm2, the resize keys observed during validation are
 
 The session list auto-refreshes through one selector-owned poll-backed path.
 Visible rows are quietly refreshed once per second with `list_sessions()`,
-which updates recency text, activity-descending ordering, and structural
-session state in the same snapshot. The selector no longer starts a
+which updates recency text, the active sort order, and structural session
+state in the same snapshot. The selector no longer starts a
 separate `watch_host_events()` poller for its TUI list. Direct tmux
 control-mode host notifications remain future work.
 
@@ -280,8 +282,11 @@ right-aligned recency column. The attached marker is `*` when tmux reports one
 or more clients attached to the session. Rows are sorted by
 `activity_observed_at_local` (operator-side wall clock at last observed
 `session.activity` advance) descending so the most recently active session
-appears
-first. The recency column is formatted as `  32h / 14.2d`. The left value
+appears first by default. Pressing `s` while the list pane is focused toggles
+tag sort: sessions with a checked tag are shown before sessions without one,
+then checked rows sort by tag value, then activity time, host code, and
+session name. Pressing `s` again restores activity sort. The recency column is
+formatted as `  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`
 advance — so it is immune to operator-vs-host clock skew. The right value
 ("age") is `local_now − session.created` under the NTP-synced clock
@@ -297,8 +302,8 @@ current session count. The bottom blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
 `pane` for pane focus, with the shortcut letter underlined. It orders command
 hints as `help`, `pane`, `monitor`, `enter/attach`, `new`, `kill`, `rename`,
-`tags`, `quit`, `layout`, then mode-specific resize; the command
-shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`q`/`l` are underlined in the
+`tags`, `sort`, `quit`, `layout`, then mode-specific resize; the command
+shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`s`/`q`/`l` are underlined in the
 TUI. It does not repeat the host/time, show focus/layout mode, or prefix the
 hints with a `keys` label.
 

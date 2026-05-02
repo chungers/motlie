@@ -23,8 +23,8 @@ use crate::detail::{
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    SelectedSession, SessionRow, SessionSelectedTag, SessionTagRow, SessionTagsFocus,
-    SessionTagsModalUi,
+    SelectedSession, SessionRow, SessionSelectedTag, SessionSortMode, SessionTagRow,
+    SessionTagsFocus, SessionTagsModalUi,
 };
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
@@ -102,6 +102,14 @@ fn make_row_for_host(session: SessionInfo, host_id: HostId, host_label: &str) ->
         session,
         selected_tag: None,
     }
+}
+
+fn with_selected_tag(mut row: SessionRow, value: &str) -> SessionRow {
+    row.selected_tag = Some(SessionSelectedTag {
+        key: "owner".to_string(),
+        value: value.to_string(),
+    });
+    row
 }
 
 fn to_rows(sessions: Vec<SessionInfo>) -> Vec<SessionRow> {
@@ -352,8 +360,8 @@ fn status_line_underlines_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(underlined, "hpmankrtql");
-    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | enter/attach | new | kill | rename | tags | quit | layout | mod-←/→ resize ");
+    assert_eq!(underlined, "hpmankrtsql");
+    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | enter/attach | new | kill | rename | tags | sort | quit | layout | mod-←/→ resize ");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -490,6 +498,84 @@ fn session_list_sorts_most_recent_activity_first() {
 }
 
 #[test]
+fn session_list_tag_sort_groups_checked_tags_before_missing_tags() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    let rows = vec![
+        make_row_for_host(
+            session_with_times("no-tag-fresh", "$1", 10, 900),
+            ssh_host_id("ssh://a"),
+            "alpha",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("b-alpha-low", "$2", 10, 100),
+                ssh_host_id("ssh://b"),
+                "beta",
+            ),
+            "alpha",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("a-alpha-high", "$3", 10, 300),
+                ssh_host_id("ssh://a"),
+                "alpha",
+            ),
+            "alpha",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("b-same", "$4", 10, 400),
+                ssh_host_id("ssh://b"),
+                "beta",
+            ),
+            "same",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("z-same", "$5", 10, 400),
+                ssh_host_id("ssh://a"),
+                "alpha",
+            ),
+            "same",
+        ),
+        make_row_for_host(
+            session_with_times("no-tag-old", "$6", 10, 100),
+            ssh_host_id("ssh://b"),
+            "beta",
+        ),
+    ];
+
+    app.session_list.set_rows_sorted_by_tag(rows, &fleet);
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "a-alpha-high",
+            "b-alpha-low",
+            "z-same",
+            "b-same",
+            "no-tag-fresh",
+            "no-tag-old"
+        ]
+    );
+}
+
+#[test]
 fn activity_sort_preserves_selection_by_stable_id() {
     let mut app = AppState::new(
         "host".to_string(),
@@ -515,6 +601,114 @@ fn activity_sort_preserves_selection_by_stable_id() {
     assert_eq!(
         app.selected_session().map(|session| session.name),
         Some("selected".to_string())
+    );
+}
+
+#[tokio::test]
+async fn s_toggles_tag_sort_from_list_focus_and_preserves_selection() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.session_list.rows = vec![
+        with_selected_tag(
+            make_row(session_with_times("selected", "$1", 10, 300)),
+            "zeta",
+        ),
+        with_selected_tag(
+            make_row(session_with_times("other", "$2", 10, 200)),
+            "alpha",
+        ),
+    ];
+    app.session_list.selected = 0;
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.session_list.selected, 0);
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Tag);
+    assert_eq!(app.status.text(), "sort: tag");
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["other", "selected"]
+    );
+    assert_eq!(
+        app.selected_session().map(|session| session.name),
+        Some("selected".to_string())
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.status.text(), "sort: activity");
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["selected", "other"]
+    );
+    assert_eq!(
+        app.selected_session().map(|session| session.name),
+        Some("selected".to_string())
+    );
+}
+
+#[tokio::test]
+async fn quiet_refresh_preserves_tag_sort_mode() {
+    let mock = MockTransport::new()
+        .with_response(
+            "list-sessions",
+            "__MOTLIE_S__ zed $1 10 0 1  500\n__MOTLIE_S__ alpha $2 10 0 1  400\n",
+        )
+        .with_response(
+            "display-message -p '__MOTLIE_TAGS__ $2'",
+            "__MOTLIE_TAGS__ $1\n@mmux/__selected-key owner\n@mmux/owner zeta\n__MOTLIE_TAGS__ $2\n@mmux/__selected-key owner\n@mmux/owner alpha\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.sort_mode = SessionSortMode::Tag;
+
+    refresh_sessions_quiet(&fleet, &mut app, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "zed"]
     );
 }
 
