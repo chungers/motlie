@@ -14,8 +14,11 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    SelectedSession, SessionRow, SessionTagRow, SessionTagsFocus, StatusBanner,
+    SelectedSession, SessionRow, SessionSelectedTag, SessionTagRow, SessionTagsFocus, StatusBanner,
 };
+
+const TAG_PREFIX: &str = "mmux";
+const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 
 pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
     load_motd_from(host, Path::new("/etc/motd")).await
@@ -70,6 +73,7 @@ pub(crate) async fn fetch_fleet_rows(
                         session.activity,
                         local_now,
                     );
+                    let selected_tag = load_selected_session_tag(&entry.handle, &session).await;
                     keep_keys.insert(key);
                     rows.push(SessionRow {
                         host_id: entry.id.clone(),
@@ -77,6 +81,7 @@ pub(crate) async fn fetch_fleet_rows(
                         local_now,
                         activity_observed_at_local,
                         session,
+                        selected_tag,
                     });
                 }
             }
@@ -94,6 +99,25 @@ fn local_epoch_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+async fn load_selected_session_tag(
+    host: &HostHandle,
+    session: &motlie_tmux::SessionInfo,
+) -> Option<SessionSelectedTag> {
+    let target = host.target_for_session_info(session.clone());
+    let tags = target.list_tags(TAG_PREFIX).await.ok()?;
+    selected_session_tag_from_tags(&tags)
+}
+
+fn selected_session_tag_from_tags(tags: &[SessionTag]) -> Option<SessionSelectedTag> {
+    let selected_key = selected_key_from_tags(tags)?;
+    tags.iter()
+        .find(|tag| tag.key() == selected_key.as_str())
+        .map(|tag| SessionSelectedTag {
+            key: tag.key().to_string(),
+            value: tag.value().to_string(),
+        })
 }
 
 pub(crate) async fn refresh_sessions(
@@ -506,13 +530,17 @@ enum ModalAction {
         session: ModalSessionRef,
         key: String,
         value: String,
-        sort_key: Option<String>,
     },
     UnsetTag {
         session: ModalSessionRef,
         key: String,
         index: usize,
-        sort_key: Option<String>,
+        selected_key: Option<String>,
+    },
+    SelectTag {
+        session: ModalSessionRef,
+        key: Option<String>,
+        index: usize,
     },
 }
 
@@ -620,7 +648,7 @@ async fn handle_modal_key(
             id,
             name,
             tags,
-            sort_key,
+            selected_key,
             key_input,
             value_input,
             focus,
@@ -633,7 +661,7 @@ async fn handle_modal_key(
                 name: name.clone(),
             },
             tags,
-            sort_key,
+            selected_key,
             key_input,
             value_input,
             focus,
@@ -676,17 +704,23 @@ async fn handle_modal_key(
             session,
             key,
             value,
-            sort_key,
         } => {
-            set_tag_from_modal(fleet, app, session, key, value, sort_key).await?;
+            set_tag_from_modal(fleet, app, session, key, value).await?;
         }
         ModalAction::UnsetTag {
             session,
             key,
             index,
-            sort_key,
+            selected_key,
         } => {
-            unset_tag_from_modal(fleet, app, session, key, index, sort_key).await?;
+            unset_tag_from_modal(fleet, app, session, key, index, selected_key).await?;
+        }
+        ModalAction::SelectTag {
+            session,
+            key,
+            index,
+        } => {
+            select_tag_from_modal(fleet, app, session, key, index).await?;
         }
     }
     Ok(KeyOutcome::Continue)
@@ -696,7 +730,7 @@ fn handle_session_tags_modal_key(
     key: KeyEvent,
     session: ModalSessionRef,
     tags: &[SessionTagRow],
-    sort_key: &mut Option<String>,
+    selected_key: &mut Option<String>,
     key_input: &mut String,
     value_input: &mut String,
     focus: &mut SessionTagsFocus,
@@ -747,7 +781,6 @@ fn handle_session_tags_modal_key(
                 session,
                 key: key_input.trim().to_string(),
                 value: value_input.clone(),
-                sort_key: sort_key.clone(),
             },
             SessionTagsFocus::Cancel => ModalAction::Close,
             _ => ModalAction::None,
@@ -757,11 +790,16 @@ fn handle_session_tags_modal_key(
                 return ModalAction::None;
             };
             if let Some(tag) = tags.get(index) {
-                if sort_key.as_deref() == Some(tag.key.as_str()) {
-                    *sort_key = None;
+                let key = if selected_key.as_deref() == Some(tag.key.as_str()) {
+                    None
                 } else {
-                    *sort_key = Some(tag.key.clone());
-                }
+                    Some(tag.key.clone())
+                };
+                return ModalAction::SelectTag {
+                    session,
+                    key,
+                    index,
+                };
             }
             ModalAction::None
         }
@@ -776,7 +814,7 @@ fn handle_session_tags_modal_key(
                 session,
                 key: tag.key.clone(),
                 index,
-                sort_key: sort_key.clone(),
+                selected_key: selected_key.clone(),
             }
         }
         KeyCode::Char('u') if matches!(*focus, SessionTagsFocus::TagRow(_)) => {
@@ -941,16 +979,16 @@ async fn open_session_tags_modal(
     app: &mut AppState,
     selected: SelectedSession,
 ) -> Result<()> {
-    match load_tag_rows(fleet, &selected.host_id, &selected.id).await? {
-        Some(tags) => {
-            let focus = first_session_tags_focus(&tags);
+    match load_tag_state(fleet, &selected.host_id, &selected.id).await? {
+        Some(state) => {
+            let focus = first_session_tags_focus(&state.rows);
             app.modal = Some(ModalState::SessionTags {
                 host_id: selected.host_id,
                 host_label: selected.host_label,
                 id: selected.id,
                 name: selected.name,
-                tags,
-                sort_key: None,
+                tags: state.rows,
+                selected_key: state.selected_key,
                 key_input: String::new(),
                 value_input: String::new(),
                 focus,
@@ -973,10 +1011,13 @@ async fn set_tag_from_modal(
     session: ModalSessionRef,
     key: String,
     value: String,
-    sort_key: Option<String>,
 ) -> Result<()> {
     if key.is_empty() {
         app.status = StatusBanner::info("tag key is empty");
+        return Ok(());
+    }
+    if key == SELECTED_TAG_KEY_OPTION {
+        app.status = StatusBanner::info("tag key is reserved");
         return Ok(());
     }
     if value.is_empty() {
@@ -989,7 +1030,7 @@ async fn set_tag_from_modal(
         return Ok(());
     };
     match host.session_by_id(&session.id).await? {
-        Some(target) => match target.set_tag("mmux", &key, &value).await {
+        Some(target) => match target.set_tag(TAG_PREFIX, &key, &value).await {
             Ok(()) => {
                 app.status = StatusBanner::info(if fleet.is_multi() {
                     format!(
@@ -999,7 +1040,8 @@ async fn set_tag_from_modal(
                 } else {
                     format!("set tag {key} on {}", session.name)
                 });
-                reload_session_tags_modal(fleet, app, session, Some(key), None, sort_key).await?;
+                reload_session_tags_modal(fleet, app, session, Some(key), None).await?;
+                refresh_sessions_quiet(fleet, app, false).await?;
             }
             Err(err) => {
                 app.status = StatusBanner::error(format!("set tag failed: {err}"));
@@ -1023,7 +1065,7 @@ async fn unset_tag_from_modal(
     session: ModalSessionRef,
     key: String,
     index: usize,
-    sort_key: Option<String>,
+    selected_key: Option<String>,
 ) -> Result<()> {
     let Some(host) = fleet_host(fleet, &session.host_id) else {
         app.status =
@@ -1031,8 +1073,18 @@ async fn unset_tag_from_modal(
         return Ok(());
     };
     match host.session_by_id(&session.id).await? {
-        Some(target) => match target.unset_tag("mmux", &key).await {
+        Some(target) => match target.unset_tag(TAG_PREFIX, &key).await {
             Ok(()) => {
+                if selected_key.as_deref() == Some(key.as_str()) {
+                    if let Err(err) = target.unset_tag(TAG_PREFIX, SELECTED_TAG_KEY_OPTION).await {
+                        app.status = StatusBanner::error(format!(
+                            "deleted tag {key}, but clearing selected tag failed: {err}"
+                        ));
+                        reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
+                        refresh_sessions_quiet(fleet, app, false).await?;
+                        return Ok(());
+                    }
+                }
                 app.status = StatusBanner::info(if fleet.is_multi() {
                     format!(
                         "deleted tag {key} on {} at {}",
@@ -1041,7 +1093,8 @@ async fn unset_tag_from_modal(
                 } else {
                     format!("deleted tag {key} on {}", session.name)
                 });
-                reload_session_tags_modal(fleet, app, session, None, Some(index), sort_key).await?;
+                reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
+                refresh_sessions_quiet(fleet, app, false).await?;
             }
             Err(err) => {
                 app.status = StatusBanner::error(format!("delete tag failed: {err}"));
@@ -1059,16 +1112,86 @@ async fn unset_tag_from_modal(
     Ok(())
 }
 
+async fn select_tag_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    session: ModalSessionRef,
+    key: Option<String>,
+    index: usize,
+) -> Result<()> {
+    let Some(host) = fleet_host(fleet, &session.host_id) else {
+        app.status =
+            StatusBanner::error(format!("host {} no longer connected", session.host_label));
+        return Ok(());
+    };
+    match host.session_by_id(&session.id).await? {
+        Some(target) => {
+            let result = match key.as_deref() {
+                Some(key) => {
+                    target
+                        .set_tag(TAG_PREFIX, SELECTED_TAG_KEY_OPTION, key)
+                        .await
+                }
+                None => target.unset_tag(TAG_PREFIX, SELECTED_TAG_KEY_OPTION).await,
+            };
+            match result {
+                Ok(()) => {
+                    if let Some(key) = key.as_deref() {
+                        app.status = StatusBanner::info(if fleet.is_multi() {
+                            format!(
+                                "selected tag {key} on {} at {}",
+                                session.name, session.host_label
+                            )
+                        } else {
+                            format!("selected tag {key} on {}", session.name)
+                        });
+                    } else {
+                        app.status = StatusBanner::info(if fleet.is_multi() {
+                            format!(
+                                "cleared selected tag on {} at {}",
+                                session.name, session.host_label
+                            )
+                        } else {
+                            format!("cleared selected tag on {}", session.name)
+                        });
+                    }
+                    reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
+                    refresh_sessions_quiet(fleet, app, false).await?;
+                }
+                Err(err) => {
+                    app.status = StatusBanner::error(if fleet.is_multi() {
+                        format!(
+                            "select tag failed on {} at {}: {err}",
+                            session.name, session.host_label
+                        )
+                    } else {
+                        format!("select tag failed on {}: {err}", session.name)
+                    });
+                }
+            }
+        }
+        None => {
+            app.modal = None;
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before tag selection",
+                session.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn reload_session_tags_modal(
     fleet: &HostFleet,
     app: &mut AppState,
     session: ModalSessionRef,
     preferred_key: Option<String>,
     preferred_index: Option<usize>,
-    sort_key: Option<String>,
 ) -> Result<()> {
-    match load_tag_rows(fleet, &session.host_id, &session.id).await? {
-        Some(tags) => {
+    match load_tag_state(fleet, &session.host_id, &session.id).await? {
+        Some(state) => {
+            let tags = state.rows;
             let focus = if let Some(key) = preferred_key {
                 tags.iter()
                     .position(|tag| tag.key == key)
@@ -1083,14 +1206,13 @@ async fn reload_session_tags_modal(
             } else {
                 first_session_tags_focus(&tags)
             };
-            let sort_key = sort_key.filter(|key| tags.iter().any(|tag| tag.key == *key));
             app.modal = Some(ModalState::SessionTags {
                 host_id: session.host_id,
                 host_label: session.host_label,
                 id: session.id,
                 name: session.name,
                 tags,
-                sort_key,
+                selected_key: state.selected_key,
                 key_input: String::new(),
                 value_input: String::new(),
                 focus,
@@ -1108,23 +1230,31 @@ async fn reload_session_tags_modal(
     Ok(())
 }
 
-async fn load_tag_rows(
+struct SessionTagState {
+    rows: Vec<SessionTagRow>,
+    selected_key: Option<String>,
+}
+
+async fn load_tag_state(
     fleet: &HostFleet,
     host_id: &HostId,
     id: &str,
-) -> Result<Option<Vec<SessionTagRow>>> {
+) -> Result<Option<SessionTagState>> {
     let Some(host) = fleet_host(fleet, host_id) else {
         return Ok(None);
     };
     let Some(target) = host.session_by_id(id).await? else {
         return Ok(None);
     };
-    let mut rows = target
-        .tags("mmux")
-        .await?
-        .list()
-        .await?
+    let tags = target.tags(TAG_PREFIX).await?.list().await?;
+    Ok(Some(tag_state_from_tags(tags)))
+}
+
+fn tag_state_from_tags(tags: Vec<SessionTag>) -> SessionTagState {
+    let selected_key = selected_key_from_tags(&tags);
+    let mut rows = tags
         .into_iter()
+        .filter(|tag| tag.key() != SELECTED_TAG_KEY_OPTION)
         .map(session_tag_row)
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
@@ -1132,7 +1262,20 @@ async fn load_tag_rows(
             .cmp(&right.key)
             .then_with(|| left.value.cmp(&right.value))
     });
-    Ok(Some(rows))
+    let selected_key = selected_key.filter(|key| rows.iter().any(|row| row.key == *key));
+    SessionTagState { rows, selected_key }
+}
+
+fn selected_key_from_tags(tags: &[SessionTag]) -> Option<String> {
+    let value = tags
+        .iter()
+        .find(|tag| tag.key() == SELECTED_TAG_KEY_OPTION)?
+        .value();
+    if value.is_empty() || value == SELECTED_TAG_KEY_OPTION {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn session_tag_row(tag: SessionTag) -> SessionTagRow {

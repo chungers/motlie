@@ -23,7 +23,7 @@ use crate::detail::{
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    SelectedSession, SessionRow, SessionTagRow, SessionTagsFocus,
+    SelectedSession, SessionRow, SessionSelectedTag, SessionTagRow, SessionTagsFocus,
 };
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
@@ -87,6 +87,7 @@ fn make_row_at(session: SessionInfo, now: u64) -> SessionRow {
         local_now: now,
         activity_observed_at_local,
         session,
+        selected_tag: None,
     }
 }
 
@@ -98,6 +99,7 @@ fn make_row_for_host(session: SessionInfo, host_id: HostId, host_label: &str) ->
         local_now: u64::MAX,
         activity_observed_at_local,
         session,
+        selected_tag: None,
     }
 }
 
@@ -363,6 +365,47 @@ fn session_list_line_hides_stable_id() {
     let line = session_list_line(&make_row(session("dev", "$42")), true, 0, 16);
     assert!(line.starts_with(">  dev"));
     assert!(!line.contains("$42"));
+}
+
+#[test]
+fn session_list_line_shows_selected_tag_value_after_name() {
+    let mut row = make_row_at(session_with_times("dev", "$42", 100, 110), 120);
+    row.selected_tag = Some(SessionSelectedTag {
+        key: "owner".to_string(),
+        value: "platform".to_string(),
+    });
+
+    let line = session_list_line(&row, true, 0, 48);
+
+    assert!(line.contains("dev platform"), "{line:?}");
+    assert!(!line.contains("owner"));
+}
+
+#[tokio::test]
+async fn refresh_sessions_loads_selected_tag_value_for_rows() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/__selected-key owner\n@mmux/owner platform\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+
+    refresh_sessions_quiet(&fleet, &mut app, false)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        app.session_list.rows.first().and_then(|row| row.selected_tag.as_ref()),
+        Some(SessionSelectedTag { key, value }) if key == "owner" && value == "platform"
+    ));
 }
 
 #[test]
@@ -1105,7 +1148,7 @@ fn modal_content_separates_body_from_button_bar() {
             key: "owner".to_string(),
             value: "platform".to_string(),
         }],
-        sort_key: Some("owner".to_string()),
+        selected_key: Some("owner".to_string()),
         key_input: "phase".to_string(),
         value_input: "build".to_string(),
         focus: SessionTagsFocus::Value,
@@ -1133,7 +1176,7 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
             key: "owner".to_string(),
             value: "platform".to_string(),
         }],
-        sort_key: Some("owner".to_string()),
+        selected_key: Some("owner".to_string()),
         key_input: "phase".to_string(),
         value_input: "build".to_string(),
         focus: SessionTagsFocus::Value,
@@ -1170,7 +1213,7 @@ fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
         id: "$1".to_string(),
         name: "dev".to_string(),
         tags: tags.clone(),
-        sort_key: None,
+        selected_key: None,
         key_input: "new".to_string(),
         value_input: "next".to_string(),
         focus: SessionTagsFocus::TagRow(0),
@@ -1281,7 +1324,7 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response(
             "show-options -t '$1'",
-            "@mmux/b alpha\n@mmux/a beta\n@other/a skip\n",
+            "@mmux/b alpha\n@mmux/__selected-key a\n@mmux/a beta\n@other/a skip\n",
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
@@ -1306,12 +1349,13 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { tags, focus, .. })
+        Some(ModalState::SessionTags { tags, selected_key, focus, .. })
             if tags
                 == &vec![
                     SessionTagRow { key: "a".to_string(), value: "beta".to_string() },
                     SessionTagRow { key: "b".to_string(), value: "alpha".to_string() },
                 ]
+                && selected_key.as_deref() == Some("a")
                 && *focus == SessionTagsFocus::TagRow(0)
     ));
 }
@@ -1375,10 +1419,21 @@ async fn session_tags_modal_tab_cycles_edit_row_fields() {
 }
 
 #[tokio::test]
-async fn session_tags_modal_c_marks_focused_row_for_sort() {
+async fn session_tags_modal_c_persists_selected_row() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n");
+        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/__selected-key a\n@mmux/a beta\n@mmux/b alpha\n",
+        )
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/__selected-key a\n@mmux/a beta\n@mmux/b alpha\n",
+        )
+        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n")
+        .with_response("set-option -t '$1' @mmux/__selected-key a", "")
+        .with_response("set-option -u -t '$1' @mmux/__selected-key", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -1400,7 +1455,7 @@ async fn session_tags_modal_c_marks_focused_row_for_sort() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { sort_key, .. }) if sort_key.as_deref() == Some("a")
+        Some(ModalState::SessionTags { selected_key, .. }) if selected_key.as_deref() == Some("a")
     ));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert!(view.body_text().contains("a    beta ✓"));
@@ -1415,7 +1470,7 @@ async fn session_tags_modal_c_marks_focused_row_for_sort() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { sort_key, .. }) if sort_key.is_none()
+        Some(ModalState::SessionTags { selected_key, .. }) if selected_key.is_none()
     ));
 }
 
@@ -1423,9 +1478,13 @@ async fn session_tags_modal_c_marks_focused_row_for_sort() {
 async fn session_tags_modal_delete_updates_list() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("show-options -t '$1'", "@mmux/a one\n@mmux/b two\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/__selected-key a\n@mmux/a one\n@mmux/b two\n",
+        )
         .with_response("show-options -t '$1'", "@mmux/b two\n")
-        .with_response("set-option -u -t '$1' @mmux/a", "");
+        .with_response("set-option -u -t '$1' @mmux/a", "")
+        .with_response("set-option -u -t '$1' @mmux/__selected-key", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -1447,8 +1506,9 @@ async fn session_tags_modal_delete_updates_list() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { tags, focus, .. })
+        Some(ModalState::SessionTags { tags, selected_key, focus, .. })
             if tags == &vec![SessionTagRow { key: "b".to_string(), value: "two".to_string() }]
+                && selected_key.is_none()
                 && *focus == SessionTagsFocus::TagRow(0)
     ));
     assert_eq!(app.status.text(), "deleted tag a on dev");
@@ -1552,6 +1612,52 @@ async fn session_tags_modal_empty_value_does_not_dispatch() {
 
     assert!(matches!(app.modal, Some(ModalState::SessionTags { .. })));
     assert_eq!(app.status.text(), "tag value is empty");
+}
+
+#[tokio::test]
+async fn session_tags_modal_rejects_reserved_selected_key() {
+    let mock = MockTransport::new()
+        .with_error(
+            "set-option -t '$1' @mmux/__selected-key",
+            "should not overwrite selected tag marker from edit row",
+        )
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionTags {
+        key_input,
+        value_input,
+        focus,
+        ..
+    }) = app.modal.as_mut()
+    {
+        *key_input = "__selected-key".to_string();
+        *value_input = "owner".to_string();
+        *focus = SessionTagsFocus::Key;
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(app.modal, Some(ModalState::SessionTags { .. })));
+    assert_eq!(app.status.text(), "tag key is reserved");
 }
 
 #[tokio::test]

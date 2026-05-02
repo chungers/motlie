@@ -605,6 +605,19 @@ impl HostHandle {
             }))
     }
 
+    /// Build a session-level target from a [`SessionInfo`] returned by
+    /// [`list_sessions`](Self::list_sessions).
+    ///
+    /// This does not revalidate that the session still exists; callers should
+    /// use it when they are enriching a just-fetched listing and want to avoid
+    /// a second session-list query.
+    pub fn target_for_session_info(&self, session: SessionInfo) -> Target {
+        Target {
+            inner: self.inner.clone(),
+            address: TargetAddress::Session(session),
+        }
+    }
+
     /// Get a Target from a TargetSpec. Verifies the entity exists.
     pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>> {
         let prefix = self.inner.tmux_prefix().await;

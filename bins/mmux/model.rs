@@ -76,7 +76,7 @@ pub(crate) enum ModalState {
         id: String,
         name: String,
         tags: Vec<SessionTagRow>,
-        sort_key: Option<String>,
+        selected_key: Option<String>,
         key_input: String,
         value_input: String,
         focus: SessionTagsFocus,
@@ -101,7 +101,7 @@ impl ModalView {
             ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
             ModalBody::SessionTags {
                 tags,
-                sort_key,
+                selected_key,
                 key_input,
                 value_input,
                 ..
@@ -111,7 +111,7 @@ impl ModalView {
                 } else {
                     tags.iter()
                         .map(|tag| {
-                            let marker = if sort_key.as_deref() == Some(tag.key.as_str()) {
+                            let marker = if selected_key.as_deref() == Some(tag.key.as_str()) {
                                 "✓"
                             } else {
                                 " "
@@ -187,7 +187,7 @@ pub(crate) enum ModalBody {
     },
     SessionTags {
         tags: Vec<SessionTagRow>,
-        sort_key: Option<String>,
+        selected_key: Option<String>,
         key_input: String,
         value_input: String,
         focus: SessionTagsFocus,
@@ -320,6 +320,13 @@ pub(crate) struct SessionRow {
     pub(crate) local_now: u64,
     pub(crate) activity_observed_at_local: u64,
     pub(crate) session: SessionInfo,
+    pub(crate) selected_tag: Option<SessionSelectedTag>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionSelectedTag {
+    pub(crate) key: String,
+    pub(crate) value: String,
 }
 
 /// Per-session, per-host activity tracker.

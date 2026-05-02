@@ -282,16 +282,17 @@ pub(crate) fn session_list_line(
     let metadata = session_recency_text(row);
     let prefix_width = char_width(&prefix);
     let metadata_width = char_width(&metadata);
+    let display_name = session_row_display_name(row);
     let content_width = width.saturating_sub(RECENCY_RIGHT_MARGIN);
     if content_width < prefix_width + 1 + MIN_METADATA_GAP + metadata_width {
-        return pad_or_truncate(format!("{prefix}{}", row.session.name), width);
+        return pad_or_truncate(format!("{prefix}{display_name}"), width);
     }
 
     let name_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(metadata_width)
         .saturating_sub(MIN_METADATA_GAP);
-    let name = truncate_chars(&row.session.name, name_width);
+    let name = truncate_chars(&display_name, name_width);
     let left = format!("{prefix}{name}");
     let padding = content_width
         .saturating_sub(char_width(&left))
@@ -301,6 +302,13 @@ pub(crate) fn session_list_line(
         " ".repeat(padding),
         " ".repeat(width.saturating_sub(content_width))
     )
+}
+
+fn session_row_display_name(row: &SessionRow) -> String {
+    match &row.selected_tag {
+        Some(tag) if !tag.value.is_empty() => format!("{} {}", row.session.name, tag.value),
+        _ => row.session.name.clone(),
+    }
 }
 
 pub(crate) fn session_recency_text(row: &SessionRow) -> String {
@@ -650,12 +658,20 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
         }
         ModalBody::SessionTags {
             tags,
-            sort_key,
+            selected_key,
             key_input,
             value_input,
             focus,
         } => {
-            draw_session_tags_body(frame, area, tags, sort_key, key_input, value_input, *focus);
+            draw_session_tags_body(
+                frame,
+                area,
+                tags,
+                selected_key,
+                key_input,
+                value_input,
+                *focus,
+            );
         }
     }
 }
@@ -664,7 +680,7 @@ fn draw_session_tags_body(
     frame: &mut Frame<'_>,
     area: Rect,
     tags: &[crate::model::SessionTagRow],
-    sort_key: &Option<String>,
+    selected_key: &Option<String>,
     key_input: &str,
     value_input: &str,
     focus: SessionTagsFocus,
@@ -700,7 +716,7 @@ fn draw_session_tags_body(
     } else {
         for (index, tag) in tags.iter().enumerate().skip(start).take(max_tag_rows) {
             let focused = matches!(focus, SessionTagsFocus::TagRow(row) if row == index);
-            lines.push(session_tag_line(tag, sort_key, columns, focused));
+            lines.push(session_tag_line(tag, selected_key, columns, focused));
         }
     }
 
@@ -798,11 +814,11 @@ fn no_session_tags_line(columns: TagColumns) -> Line<'static> {
 
 fn session_tag_line(
     tag: &crate::model::SessionTagRow,
-    sort_key: &Option<String>,
+    selected_key: &Option<String>,
     columns: TagColumns,
     focused: bool,
 ) -> Line<'static> {
-    let indicator = if sort_key.as_deref() == Some(tag.key.as_str()) {
+    let indicator = if selected_key.as_deref() == Some(tag.key.as_str()) {
         "✓"
     } else {
         " "
@@ -1014,7 +1030,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
         },
         ModalState::SessionTags {
             tags,
-            sort_key,
+            selected_key,
             key_input,
             value_input,
             focus,
@@ -1029,7 +1045,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                 title: " Session Tags ",
                 body: ModalBody::SessionTags {
                     tags: tags.clone(),
-                    sort_key: sort_key.clone(),
+                    selected_key: selected_key.clone(),
                     key_input: key_input.clone(),
                     value_input: value_input.clone(),
                     focus: *focus,
