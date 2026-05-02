@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Moved environment-variable entry into New Session and create sessions with staged `CreateSessionOptions::initial_environment` values; removed the `e` environment modal. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
@@ -328,7 +329,7 @@ References: [Functional Requirements](./DESIGN.md#functional),
   multi-host mode, include a Host dropdown above the session field and create
   on the selected host.
 - [x] 5.6 Implement kill confirmation modal with padded content, separated
-  button bar, and id captured at modal-open.
+  button bar, Tab-reachable Ok/Cancel buttons, and id captured at modal-open.
 - [x] 5.7 Implement Help modal opened by `h`, showing the built-in motlie
   logo, build date, last 8 characters of the build git SHA, key functions,
   and a separated single Ok button; Enter or Esc closes it.
@@ -587,12 +588,12 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 
 ### 12.1 Modal model and rendering
 
-- [x] 12.1a Extend `ModalState` with `RenameSession` and `SessionTagsModal`
+- [x] 12.1a Extend `ModalState` with `RenameSession` and `SessionKeyValues`
   variants that capture `(host_id, session_id)` at open.
 - [x] 12.1b Add modal-specific focus enums for multi-field dialogs rather than
   one global catch-all modal focus enum.
-- [x] 12.1c `SessionTagsModal` focus must support existing tag rows
-  (`TagRow(index)`) plus bottom controls (`Key`, `Value`, `Cancel`).
+- [x] 12.1c key/value modal focus must support existing rows (`Row(index)`)
+  plus bottom controls (`Key`, `Value`, `Cancel`).
 - [x] 12.1d Add render helpers for labeled bordered text fields that preserve
   the existing modal padding, separator, and button styling.
 - [x] 12.1e Add Tab / Shift-Tab focus movement for multi-field modals while
