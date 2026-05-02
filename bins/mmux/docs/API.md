@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Refactored attach status setup to use `Target::status()` with `SessionStatusSnapshot` / `SessionStatusOverrides` instead of app-owned status option plumbing. |
 | 2026-05-02 | @codex | Moved environment editing into the New Session modal and apply staged variables through `CreateSessionOptions::initial_environment`; removed the `e` post-creation environment shortcut. |
 | 2026-05-02 | @codex | Added `HostHandle::tmux_hostname()` and changed mmux host display labels to use tmux `#{host}` while retaining SSH URI hosts as aliases. |
 | 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` and `status-left-length` to 50, restoring prior local values after detach. |
@@ -487,34 +488,16 @@ Attach:
 
 ```rust
 let target = host.session_by_id(selected.id()).await?.ok_or(SessionVanished)?;
-let previous_style = target.read_local_status_style().await?;
-let previous_left = target.read_local_status_left().await?;
-let previous_len = target.read_local_status_left_length().await?;
-target
-    .set_status_style(&motlie_tmux::StatusStyle::new("bg=#002b55,fg=white")?)
-    .await
-    .ok();
-target
-    .set_status_left(&motlie_tmux::StatusLeft::new("#{=50:session_name}")?)
-    .await
-    .ok();
-target
-    .set_status_left_length(motlie_tmux::StatusLeftLength::new(50))
-    .await
-    .ok();
+let status = target.status().await?;
+let snapshot = status.snapshot().await?;
+let overrides = motlie_tmux::SessionStatusOverrides {
+    style: Some(motlie_tmux::StatusStyle::new("bg=#002b55,fg=white")?),
+    left: Some(motlie_tmux::StatusLeft::new("#{=50:session_name}")?),
+    left_length: Some(motlie_tmux::StatusLeftLength::new(50)?),
+};
+status.apply(&overrides).await.ok();
 let exit = target.attach_current_pty().await;
-let _ = match previous_style {
-    Some(style) => target.set_status_style(&style).await,
-    None => target.unset_status_style().await,
-};
-let _ = match previous_left {
-    Some(left) => target.set_status_left(&left).await,
-    None => target.unset_status_left().await,
-};
-let _ = match previous_len {
-    Some(length) => target.set_status_left_length(length).await,
-    None => target.unset_status_left_length().await,
-};
+let _ = status.restore(&snapshot).await;
 let exit = exit?;
 ```
 

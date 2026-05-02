@@ -148,6 +148,7 @@ pub const SESSION_ENV_VAR_VALUE_MAX_BYTES: usize = 8 * 1024;
 /// accidentally piping large content through command construction paths.
 pub const STATUS_STYLE_MAX_BYTES: usize = 512;
 pub const STATUS_LEFT_MAX_BYTES: usize = 512;
+pub const STATUS_LEFT_LENGTH_MAX: u32 = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StatusStyle(String);
@@ -155,6 +156,9 @@ pub struct StatusStyle(String);
 impl StatusStyle {
     /// Create a validated tmux status-style value, for example
     /// `bg=blue,fg=white`.
+    ///
+    /// Empty styles are rejected; use the session status API's unset operation
+    /// to remove a local style override.
     ///
     /// This intentionally validates only transport-safety properties and lets
     /// tmux validate style syntax.
@@ -180,6 +184,10 @@ pub struct StatusLeft(String);
 impl StatusLeft {
     /// Create a validated tmux status-left format string.
     ///
+    /// Empty values are accepted because tmux uses an empty `status-left` as a
+    /// valid "render no left status text" format. Use the session status API's
+    /// unset operation when the inherited/global format should apply instead.
+    ///
     /// This intentionally validates only transport-safety properties and lets
     /// tmux validate format syntax.
     pub fn new(value: impl Into<String>) -> Result<Self> {
@@ -202,8 +210,14 @@ impl StatusLeft {
 pub struct StatusLeftLength(u32);
 
 impl StatusLeftLength {
-    pub fn new(value: u32) -> Self {
-        Self(value)
+    /// Create a validated tmux `status-left-length` value.
+    ///
+    /// tmux accepts a numeric cell budget. This API allows `0` so callers can
+    /// intentionally hide the left status area, and caps values at
+    /// [`STATUS_LEFT_LENGTH_MAX`] to avoid pathological option values.
+    pub fn new(value: u32) -> Result<Self> {
+        validate_status_left_length(value)?;
+        Ok(Self(value))
     }
 
     pub fn as_u32(self) -> u32 {
@@ -435,6 +449,15 @@ pub(crate) fn validate_status_left(value: &str) -> Result<()> {
         return Err(Error::Parse(
             "status-left cannot contain control characters".to_string(),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_status_left_length(value: u32) -> Result<()> {
+    if value > STATUS_LEFT_LENGTH_MAX {
+        return Err(Error::Parse(format!(
+            "status-left-length {value} exceeds maximum {STATUS_LEFT_LENGTH_MAX}"
+        )));
     }
     Ok(())
 }
@@ -804,7 +827,9 @@ pub struct CreateSessionOptions {
     /// Environment variables passed to `tmux new-session -e`.
     ///
     /// These are applied before tmux starts the initial pane process, so they
-    /// are visible to the session's first shell or command.
+    /// are visible to the session's first shell or command. Values are emitted
+    /// in vector order; if the same variable name appears more than once, tmux
+    /// applies the last value.
     pub initial_environment: Vec<SessionEnvVar>,
 }
 
@@ -1088,11 +1113,13 @@ mod tests {
     fn status_left_validates_transport_safe_values() {
         let left = StatusLeft::new("#{=40:session_name}").unwrap();
         assert_eq!(left.as_str(), "#{=40:session_name}");
-        assert_eq!(StatusLeftLength::new(40).as_u32(), 40);
+        assert_eq!(StatusLeftLength::new(40).unwrap().as_u32(), 40);
 
         assert!(StatusLeft::new("").is_ok());
         assert!(StatusLeft::new("name\nbad").is_err());
         assert!(StatusLeft::new("x".repeat(STATUS_LEFT_MAX_BYTES + 1)).is_err());
+        assert!(StatusLeftLength::new(STATUS_LEFT_LENGTH_MAX).is_ok());
+        assert!(StatusLeftLength::new(STATUS_LEFT_LENGTH_MAX + 1).is_err());
     }
 
     #[test]
