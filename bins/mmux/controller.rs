@@ -329,8 +329,8 @@ pub(crate) async fn handle_key(
         (KeyCode::Esc, _) => app.layout.focus = Focus::List,
         (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
         (KeyCode::Char('m'), _) => start_monitor(fleet, app).await?,
-        (KeyCode::Char('s'), _) if app.layout.focus == Focus::List => {
-            toggle_session_sort(fleet, app).await?;
+        (KeyCode::Char('g'), _) if app.layout.focus == Focus::List => {
+            toggle_session_grouping(fleet, app).await?;
         }
         (KeyCode::Char('n'), _) => {
             app.modal = Some(ModalState::NewSession {
@@ -366,7 +366,7 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
-        (KeyCode::Enter, _) => {
+        (KeyCode::Char('a'), _) => {
             if let Some(selected) = app.selected_session() {
                 return Ok(KeyOutcome::Select(selected));
             }
@@ -497,7 +497,7 @@ fn is_resize_modifier(modifiers: KeyModifiers) -> bool {
     modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
 }
 
-async fn toggle_session_sort(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
+async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     let previous = current_selection_key(app);
     let mode = app.session_list.toggle_sort_mode();
     app.session_list.resort(fleet);
@@ -507,7 +507,7 @@ async fn toggle_session_sort(fleet: &HostFleet, app: &mut AppState) -> Result<()
     }
     app.status = StatusBanner::info(match mode {
         SessionSortMode::Activity => "sort: activity",
-        SessionSortMode::Tag => "sort: tag",
+        SessionSortMode::TagGroup => "group: tag",
     });
     Ok(())
 }

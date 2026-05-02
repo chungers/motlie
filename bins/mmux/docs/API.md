@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Restored `a` as the attach key and changed list-pane tag grouping to the `g` key with recency-ordered tag groups. |
 | 2026-05-02 | @codex | mmux attach now wraps `Target::attach_current_pty()` with best-effort temporary `status-style bg=blue,fg=white` setup and local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only key that selects a session for attach. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when there are no tag rows. |
@@ -281,12 +282,13 @@ dispatch. The attached marker is `*` when `SessionInfo::is_attached()` is true.
 The list is sorted by
 `activity_observed_at_local` descending — operator-side wall clock at the
 moment mmux last saw the row's `session.activity` advance — by default.
-When the operator presses `s` with the list focused, `SessionSortMode::Tag`
-groups rows with visible non-empty checked-tag values before rows without a
-displayed tag, then sorts by checked tag value, activity time, host code, and
-session name. Empty checked-tag values sort with rows that have no displayed
-tag. The `s` toggle selects the first row in the new order; pressing `s` again
-restores `SessionSortMode::Activity`. `preserve_selection()` re-finds
+When the operator presses `g` with the list focused,
+`SessionSortMode::TagGroup` groups rows with visible non-empty checked-tag
+values before rows without a displayed tag. Tag groups are ordered by the most
+recent activity in each group, and rows within a group then sort by activity
+time, host code, and session name. Empty checked-tag values sort with rows that
+have no displayed tag. The `g` toggle selects the first row in the new order;
+pressing `g` again restores `SessionSortMode::Activity`. `preserve_selection()` re-finds
 the highlighted row by stable session id after refreshes. A single quiet
 one-second `list_sessions()` refresh keeps the active ordering current and
 notices structural session changes. Recency text is observer-relative
@@ -297,9 +299,9 @@ Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with `help`, then `pane`, `monitor`, `Enter attach`,
-`new`, `kill`, `rename`, `tags`, `sort`, `quit`, `layout`, and the
-mode-specific resize hint. Enter attach is shown as a non-letter key hint; the
+the bottom status start with `help`, then `pane`, `monitor`, `attach`, `new`,
+`kill`, `rename`, `tags`, `group`, `quit`, `layout`, and the
+mode-specific resize hint. Attach uses the `a` shortcut; the
 command shortcut letter is underlined in each rendered command label.
 Direction hints render as `↑/↓ sel`.
 
@@ -524,7 +526,7 @@ Current implementation coverage:
 - `cargo test -p motlie-mmux`: CLI mutual exclusion, stable-id
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
-  auto-detection, `q` exit, Enter attach, detail scroll direction,
+  auto-detection, `q` exit, `a` attach, detail scroll direction,
   modified-arrow resize fallbacks, `p` pane focus transitions, `l` layout
   toggle behavior, compact status hint rendering, MOTD fallback/readability
   cases, full/compact placeholder rendering, landscape MOTD pane rendering,

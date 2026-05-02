@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Restored `a` as the attach key and moved list-pane tag grouping from `s` to `g`; grouped tag rows are ordered by most recent activity. |
 | 2026-05-02 | @codex | Attach now temporarily sets the selected tmux session's local `status-style` to blue and restores the previous local style after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when the session has no existing tags. |
@@ -96,7 +97,7 @@ The v1 target form is positional only. There is no `--target` flag in v1.
 mmux
 ```
 
-Default mode opens the TUI against the local host. Pressing Enter attaches the
+Default mode opens the TUI against the local host. Pressing `a` attaches the
 user's current PTY to the highlighted tmux session. After detach,
 the selector re-enters the TUI if the attach child exited successfully or the
 selected session still exists. If the child exits non-zero and the selected
@@ -265,9 +266,9 @@ Normal mode main-view keys:
 | `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
 | `r` | No-op | Open Rename Session modal | No-op |
 | `t` | Open Session Tags modal | Open Session Tags modal | Open Session Tags modal |
-| `s` | No-op | Toggle activity/tag sort | No-op |
+| `g` | No-op | Toggle activity/tag grouping | No-op |
 | `h` | Open Help modal | Open Help modal | Open Help modal |
-| Enter | Attach highlighted session | Attach highlighted session | Attach highlighted session |
+| `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
 
 Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, `p`
@@ -291,13 +292,14 @@ right-aligned recency column. The attached marker is `*` when tmux reports one
 or more clients attached to the session. Rows are sorted by
 `activity_observed_at_local` (operator-side wall clock at last observed
 `session.activity` advance) descending so the most recently active session
-appears first by default. Pressing `s` while the list pane is focused toggles
-tag sort: sessions with a checked tag are shown before sessions without one,
-then checked rows with non-empty displayed values sort by tag value, then
-activity time, host code, and session name. Empty checked-tag values are
-treated like no displayed tag. The toggle selects the first row in the new
-order so the sorted top is visible immediately. Pressing `s` again restores
-activity sort. The recency column is formatted as `  32h / 14.2d`. The left value
+appears first by default. Pressing `g` while the list pane is focused toggles
+tag grouping: sessions with a checked tag are shown before sessions without
+one, tag groups are ordered by the most recent activity in each group, and rows
+inside each group are ordered by activity time, host code, and session name.
+Empty checked-tag values are treated like no displayed tag. The toggle selects
+the first row in the new order so the grouped top is visible immediately.
+Pressing `g` again restores activity sort. The recency column is formatted as
+`  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`
 advance — so it is immune to operator-vs-host clock skew. The right value
 ("age") is `local_now − session.created` under the NTP-synced clock
@@ -312,9 +314,9 @@ right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
 `pane` for pane focus, with the shortcut letter underlined. It orders command
-hints as `help`, `pane`, `monitor`, `Enter attach`, `new`, `kill`, `rename`,
-`tags`, `sort`, `quit`, `layout`, then mode-specific resize; the command
-shortcut letters `h`/`p`/`m`/`n`/`k`/`r`/`t`/`s`/`q`/`l` are underlined in the
+hints as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `rename`,
+`tags`, `group`, `quit`, `layout`, then mode-specific resize; the command
+shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`g`/`q`/`l` are underlined in the
 TUI. It does not repeat the host/time, show focus/layout mode, or prefix the
 hints with a `keys` label.
 

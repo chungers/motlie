@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Restored `a` as the attach key and changed list-pane tag grouping to `g`, with tag groups ordered by most recent activity. |
 | 2026-05-02 | @codex | Wrapped attach with best-effort temporary blue tmux `status-style` setup and previous local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the empty Session Tags key edit column to 30% of the edit strip width. |
@@ -286,7 +287,7 @@ References: [Layout](./DESIGN.md#layout),
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the blue bottom status bar to
   compact direction hints (`↑/↓ sel`, underlined `p` in `pane`), command hints
-  ordered as `help`, `pane`, `monitor`, `Enter attach`, `new`, `kill`, `quit`,
+  ordered as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `quit`,
   `layout`, then resize, with shortcut letters underlined and app status with
   no `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
@@ -365,7 +366,7 @@ References: [Create Session](./DESIGN.md#create-session),
 
 References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
 
-- [x] 8.1 Implement default Enter attach path.
+- [x] 8.1 Implement default `a` attach path.
 - [x] 8.2 Restore alternate screen and terminal raw mode before attach.
 - [x] 8.3 Stop monitor state and drop the active host-event subscription before
   attach; selector re-entry starts from a fresh `list_sessions()` snapshot and

@@ -2,13 +2,13 @@ use std::cmp::{max, min};
 
 use ansi_to_tui::IntoText;
 use motlie_tmux::strip_ansi;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as TuiSpan, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 
 use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, MODAL_BUTTON_HEIGHT,
@@ -546,7 +546,7 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "monitor", 'm');
     push_status_separator(&mut spans);
-    spans.push(status_span("Enter attach"));
+    push_status_command(&mut spans, "attach", 'a');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "new", 'n');
     push_status_separator(&mut spans);
@@ -556,7 +556,7 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "tags", 't');
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "sort", 's');
+    push_status_command(&mut spans, "group", 'g');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "quit", 'q');
     push_status_separator(&mut spans);

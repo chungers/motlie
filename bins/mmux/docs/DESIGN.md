@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Restored `a` as the attach key and moved tag grouping to list-pane `g`; grouped tag rows are ordered by most recent activity. |
 | 2026-05-02 | @codex | Attach now temporarily sets the selected session's local tmux `status-style` to blue through the narrow motlie-tmux status-style API, then restores/unsets it after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip for sessions with no tags. |
@@ -218,7 +219,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `l` toggles the current TUI between portrait and landscape layout.
   The toggle is runtime-only and is retained in memory across default
   attach/detach re-entry within the same `mmux` parent process.
-- Pressing Enter in the main selector exits the TUI and attaches the
+- Pressing `a` in the main selector exits the TUI and attaches the
   current user PTY to the highlighted session. (Focus-independent: attach
   always operates on the `Lb` highlight regardless of which pane has focus.)
 - Pressing `q` exits the selector without attach, equivalent to `Ctrl-C` in
@@ -242,12 +243,13 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   See §System Design → Clock Handling for the rationale. Durations use `now`,
   `m`, `h`, or `d`; day values keep at most one decimal digit.
 - Session rows default to `activity_observed_at_local` descending so the
-  session whose activity most recently advanced is at the top. Pressing `s`
-  while the session list is focused toggles tag sort: rows with visible
-  non-empty checked-tag values appear before rows without displayed tags, then
-  sort by checked tag value, activity time, host code, and session name. Empty
-  checked-tag values sort with rows that have no displayed tag. Pressing `s`
-  selects the first row in the new order and pressing `s` again restores
+  session whose activity most recently advanced is at the top. Pressing `g`
+  while the session list is focused toggles tag grouping: rows with visible
+  non-empty checked-tag values appear before rows without displayed tags, tag
+  groups are ordered by the most recent activity in each group, and rows within
+  each group sort by activity time, host code, and session name. Empty
+  checked-tag values sort with rows that have no displayed tag. Pressing `g`
+  selects the first row in the new order and pressing `g` again restores
   activity sort. Sorting on the observer-side mark instead of raw host
   `SessionInfo.activity` keeps activity order stable across multi-host fleets
   even when host clocks drift. Stable `(host_id, session_id)` preservation
@@ -258,9 +260,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
   `pane` for pane focus, with the shortcut letter underlined. Always-on
-  command hints are ordered as `help`, `pane`, `monitor`, `Enter attach`,
-  `new`, `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
-  letters `h`/`p`/`m`/`n`/`k`/`q`/`l` are underlined in the TUI. The
+  command hints are ordered as `help`, `pane`, `monitor`, `attach`, `new`,
+  `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
+  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are underlined in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a blue background.
@@ -700,8 +702,9 @@ Main-selector keymap (focus-aware):
 | `k` | Open kill-confirmation modal | Same | Same |
 | `r` | No-op | Open rename modal for highlight | No-op |
 | `t` | Open tag list/add/update/delete modal for highlight | Same | Same |
+| `g` | No-op | Toggle activity/tag grouping | No-op |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same | Same |
-| Enter | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
+| `a` | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach | Exit selector without attach |
 
 Resize keys use modified arrows so plain arrows stay available to terminals and
@@ -804,7 +807,7 @@ existing single-host mode unchanged.
   Host-code column width is the widest assigned code for the configured hosts.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, Enter attach, `m` monitor, `n` new,
+- All command keys (`Up`/`Down`, `a` attach, `m` monitor, `n` new,
   `k` kill, `r` rename, `t` tag list/add/update/delete, `Ctrl-C`/`q` exit,
   `l` toggle layout, `p` cycle panes, `Ctrl-←/→` and `Ctrl-↑/↓` resize) behave
   the same as single-host. Each applies to the highlighted row and dispatches
@@ -1263,9 +1266,10 @@ Single-poll reconcile loop driven by the main TUI loop:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
    - sort rows using `SessionSortMode`: activity mode sorts by
-     `activity_observed_at_local` descending; tag mode puts rows with visible
-     non-empty checked-tag values before rows without displayed tags, then
-     sorts by checked tag value, activity time, host code, and session name
+     `activity_observed_at_local` descending; tag-group mode puts rows with
+     visible non-empty checked-tag values before rows without displayed tags,
+     orders tag groups by the most recent activity in each group, then sorts
+     rows within each group by activity time, host code, and session name
    - preserve highlight by `(host_id, session_id)`, falling back to the
      clamped index if the session disappeared
    - if the monitored session id is absent, stop monitor mode, switch the
@@ -1299,12 +1303,12 @@ selector re-entry):
    to create)`.
 2. `R` renders nothing (or an inline hint mirroring the same `n to create`
    message).
-3. Highlight is unset; `m`, `k`, `r`, `t`, and Enter are all no-ops in
+3. Highlight is unset; `m`, `k`, `r`, `t`, and `a` are all no-ops in
    this state.
 4. `n` remains active and opens the New Session modal as usual.
 5. ForceCommand mode treats this as the normal first-run path: the user
    creates their first session via `n`, which then becomes the highlight,
-   and `Enter` attaches.
+   and `a` attaches.
 
 ### Highlight Change
 
@@ -1402,7 +1406,7 @@ selector re-entry):
 The attach handoff transfers the user's controlling terminal directly to
 the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 
-1. Pressing Enter in the main selector (any focus) records the
+1. Pressing `a` in the main selector (any focus) records the
    highlighted session id.
 2. Stop monitor/detail state. Drop the active host-event subscription; re-entry
    starts from a fresh session snapshot.

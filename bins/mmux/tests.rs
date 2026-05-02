@@ -1,23 +1,23 @@
 use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusStyle, TransportKind,
-    SSH_DEFAULT_PORT,
+    HostHandle, SSH_DEFAULT_PORT, SessionId, SessionInfo, StatusStyle, TransportKind,
+    transport::MockTransport,
 };
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
-use ratatui::Terminal;
 
-use crate::cli::{is_portrait_pty, select_layout, Cli};
+use crate::cli::{Cli, is_portrait_pty, select_layout};
 use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS,
     LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
     PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
 use crate::controller::{
-    handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
-    stop_monitor_if_closed, KeyOutcome,
+    KeyOutcome, handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
+    stop_monitor_if_closed,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
@@ -305,12 +305,12 @@ fn status_line_omits_layout_mode() {
             "help",
             "pane",
             "monitor",
-            "Enter attach",
+            "attach",
             "new",
             "kill",
             "rename",
             "tags",
-            "sort",
+            "group",
             "quit",
             "layout",
             "mod-←/→ resize",
@@ -335,12 +335,12 @@ fn status_line_omits_layout_mode() {
             "help",
             "pane",
             "monitor",
-            "Enter attach",
+            "attach",
             "new",
             "kill",
             "rename",
             "tags",
-            "sort",
+            "group",
             "quit",
             "layout",
             "mod-↑/↓ resize",
@@ -364,8 +364,11 @@ fn status_line_underlines_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(underlined, "hpmnkrtsql");
-    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | Enter attach | new | kill | rename | tags | sort | quit | layout | mod-←/→ resize ");
+    assert_eq!(underlined, "hpmankrtgql");
+    assert_eq!(
+        status_line_text(&app),
+        " ↑/↓ sel | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
+    );
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -502,7 +505,7 @@ fn session_list_sorts_most_recent_activity_first() {
 }
 
 #[test]
-fn session_list_tag_sort_groups_checked_tags_before_missing_tags() {
+fn session_list_tag_group_orders_groups_by_recent_activity() {
     let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
@@ -566,7 +569,7 @@ fn session_list_tag_sort_groups_checked_tags_before_missing_tags() {
         ),
     ];
 
-    app.session_list.set_rows_sorted_by_tag(rows, &fleet);
+    app.session_list.set_rows_grouped_by_tag(rows, &fleet);
 
     let names = app
         .session_list
@@ -577,10 +580,10 @@ fn session_list_tag_sort_groups_checked_tags_before_missing_tags() {
     assert_eq!(
         names,
         vec![
-            "a-alpha-high",
-            "b-alpha-low",
             "z-same",
             "b-same",
+            "a-alpha-high",
+            "b-alpha-low",
             "no-tag-fresh",
             "empty-selected-tag",
             "no-tag-old"
@@ -618,7 +621,7 @@ fn activity_sort_preserves_selection_by_stable_id() {
 }
 
 #[tokio::test]
-async fn s_toggles_tag_sort_from_list_focus_and_selects_top_row() {
+async fn g_toggles_tag_grouping_from_list_focus_and_selects_top_row() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.session_list.rows = vec![
@@ -627,7 +630,7 @@ async fn s_toggles_tag_sort_from_list_focus_and_selects_top_row() {
             "zeta",
         ),
         with_selected_tag(
-            make_row(session_with_times("other", "$2", 10, 200)),
+            make_row(session_with_times("other", "$2", 10, 400)),
             "alpha",
         ),
     ];
@@ -637,7 +640,7 @@ async fn s_toggles_tag_sort_from_list_focus_and_selects_top_row() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -648,12 +651,12 @@ async fn s_toggles_tag_sort_from_list_focus_and_selects_top_row() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
-    assert_eq!(app.session_list.sort_mode, SessionSortMode::Tag);
-    assert_eq!(app.status.text(), "sort: tag");
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::TagGroup);
+    assert_eq!(app.status.text(), "group: tag");
     assert_eq!(app.session_list.selected, 0);
     assert_eq!(
         app.session_list
@@ -671,7 +674,7 @@ async fn s_toggles_tag_sort_from_list_focus_and_selects_top_row() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -684,16 +687,16 @@ async fn s_toggles_tag_sort_from_list_focus_and_selects_top_row() {
             .iter()
             .map(|row| row.session.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["selected", "other"]
+        vec!["other", "selected"]
     );
     assert_eq!(
         app.selected_session().map(|session| session.name),
-        Some("selected".to_string())
+        Some("other".to_string())
     );
 }
 
 #[tokio::test]
-async fn quiet_refresh_preserves_tag_sort_mode() {
+async fn quiet_refresh_preserves_tag_group_mode() {
     let mock = MockTransport::new()
         .with_response(
             "list-sessions",
@@ -711,7 +714,7 @@ async fn quiet_refresh_preserves_tag_sort_mode() {
         "motd".to_string(),
         false,
     );
-    app.session_list.sort_mode = SessionSortMode::Tag;
+    app.session_list.sort_mode = SessionSortMode::TagGroup;
 
     refresh_sessions_quiet(&fleet, &mut app, false)
         .await
@@ -723,7 +726,7 @@ async fn quiet_refresh_preserves_tag_sort_mode() {
             .iter()
             .map(|row| row.session.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["alpha", "zed"]
+        vec!["zed", "alpha"]
     );
 }
 
@@ -1264,14 +1267,14 @@ async fn q_exits_like_ctrl_c() {
 }
 
 #[tokio::test]
-async fn enter_attaches_selected_session() {
+async fn a_attaches_selected_session() {
     let fleet = local_fleet();
     let mut app = app_with_session();
 
     let outcome = handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -1283,14 +1286,14 @@ async fn enter_attaches_selected_session() {
 }
 
 #[tokio::test]
-async fn a_no_longer_attaches() {
+async fn enter_no_longer_attaches() {
     let fleet = local_fleet();
     let mut app = app_with_session();
 
     let outcome = handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -1335,19 +1338,21 @@ async fn attach_status_style_unsets_when_no_previous_local_style() {
 }
 
 #[tokio::test]
-async fn g_no_longer_attaches() {
+async fn s_no_longer_groups_sessions() {
     let fleet = local_fleet();
     let mut app = app_with_session();
+    app.layout.focus = Focus::List;
 
     let outcome = handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
 }
 
 #[tokio::test]
