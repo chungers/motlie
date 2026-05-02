@@ -8,12 +8,13 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed multi-host status and row rendering to use host-code legends: top status shows `mmux <host> [A] ...`, and session rows show compact codes such as `[A]` instead of full hostnames. |
 | 2026-05-01 | @codex | Reduced the modal minimum width by about 20% so Session Tags and other short modal content render in a narrower frame. |
 | 2026-05-01 | @codex | Persisted the Session Tags checked row in `@mmux/__selected-key`, filtered that internal option from the tag modal, and rendered the checked tag value as a right-aligned session-list column after the session name. |
 | 2026-05-01 | @codex | Updated the Session Tags modal layout to show up to five scrollable key/value rows styled like the session list, with a visually distinct edit row; `Tab` cycles Key ↔ Value, Enter submits from either edit field, and `c` marks the focused tag row with `✓`. |
 | 2026-05-01 | @codex | Added session rename and tag management modals: `r` renames the highlighted session from list focus, `t` opens the unified tag list/add/update/delete modal, and `i` remains unassigned. |
 | 2026-04-29 | @opus47-macos-tmux | Updated recency-display semantics: activity column is observer-relative ("time since mmux last saw `session.activity` advance"); age column is `local_now − session.created` under an NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate age text but no functional regression. (Earlier drafts probed the host clock at fleet-connect via `#{epoch}` / `run-shell 'date +%s'`; that approach was abandoned because `run-shell` on tmux ≤ 3.4 corrupts the operator's attached pane.) |
-| 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status reads `mmux - multi-host mode (n)`, session rows insert a hostname column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
+| 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status shows a compact host-code legend, session rows insert a host-code column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
 | 2026-04-28 | @gpt55-dgx | Clarified ForceCommand bypass requires exactly `MOTLIE_MMUX_BYPASS=1` and cross-referenced issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated session-list refresh to a single one-second `list_sessions_now()` poller for both activity ordering and structural reconciliation. |
 | 2026-04-28 | @gpt55-dgx | Added a one-second visible-row refresh using `list_sessions_now()` so activity-sorted rows reorder even when no structural tmux event occurs. |
@@ -182,20 +183,21 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 
 **UX differences in multi-host mode:**
 
-- Top status bar reads `mmux - multi-host mode (n)` (where `n` is the host
-  count) instead of the usual `<hostname> | <ip>`.
-- Session list rows insert the host's label between the attached marker and
-  the session name:
+- Top status bar shows a host-code legend after `mmux` instead of the usual
+  `<hostname> | <ip>`, for example `mmux a.example.com [A] b.example.com [B]`.
+- Session list rows insert the host's compact code between the attached marker
+  and the session name:
 
   ```
-  > * a.example.com  dev          1m / 12d
-    * b.example.com  jarvis       4h / 19d
-      a.example.com  build        2d / 5d
-      b.example.com  logs         3d / 7d
+  > * [A] dev          1m / 12d
+    * [B] jarvis       4h / 19d
+      [A] build        2d / 5d
+      [B] logs         3d / 7d
   ```
 
-  Hostname column width is sized to the widest configured label (capped to
-  keep the row readable; longer labels truncated with `…`).
+  Host codes are assigned from the configured host order (`[A]`, `[B]`, ...,
+  `[Z]`, `[AA]`, ...). The top status legend is the full host-name lookup for
+  those row codes.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
 - All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, `Enter`/`a`,

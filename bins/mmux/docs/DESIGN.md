@@ -16,7 +16,7 @@ Draft.
 | 2026-04-29 | @opus47-macos-tmux | Made `mod discovery` private and dropped the `_with_socket` shims (now unused after the privatization). Removed `list_sessions_now`, `SessionListing` from the public surface. External access to tmux is via `HostHandle::*` only. |
 | 2026-04-29 | @opus47-macos-tmux | Added §System Design → Clock Handling: activity is observer-relative via `ActivityTracker`; age is `local_now − session.created` under the NTP assumption. |
 | 2026-04-29 | @opus47-macos-tmux | Added §System Design → Transport and Latency Architecture: documents persistent russh connection per host, channel multiplexing, parallel fan-out (`futures::join_all`), per-tick cost table, attach via separate external `ssh` subprocess for clean PTY handoff, and zero-SSH-handshakes-per-refresh property. |
-| 2026-04-29 | @opus47-macos-tmux | Added Multi-host mode design (issue #235): CLI accepts multiple SSH hosts; aggregated activity-sorted session list across hosts; per-row hostname; per-host skew-free recency; MOTD hidden in multi-host; new internal `HostFleet` / `SessionRow` types; library-side fan-out left to the binary using existing `HostHandle::list_sessions_now()`. Outline of bin/lib impact added. |
+| 2026-04-29 | @opus47-macos-tmux | Added Multi-host mode design (issue #235): CLI accepts multiple SSH hosts; aggregated activity-sorted session list across hosts; per-row host code with a top-bar host legend; per-host skew-free recency; MOTD hidden in multi-host; new internal `HostFleet` / `SessionRow` types; library-side fan-out left to the binary using existing `HostHandle::list_sessions_now()`. Outline of bin/lib impact added. |
 | 2026-04-28 | @gpt55-dgx | Fixed ForceCommand bypass contract inconsistency: bypass requires exactly `MOTLIE_MMUX_BYPASS=1`; linked issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh from separate activity and structural pollers into one `list_sessions_now()` loop. |
 | 2026-04-28 | @gpt55-dgx | Added periodic visible-row refreshes because activity-only changes do not emit host events, but must reorder the activity-sorted session list. |
@@ -779,17 +779,17 @@ existing single-host mode unchanged.
 
 **Functional differences in multi-host mode:**
 
-- Top status bar reads `mmux - multi-host mode (n)` where `n` is the host count;
-  the single-host hostname/IP indicator is replaced.
-- Session list rows insert a hostname column between the attached marker and the
-  session name. Format becomes:
+- Top status bar shows a host-code legend after `mmux`, replacing the
+  single-host hostname/IP indicator. Codes are assigned from configured host
+  order (`[A]`, `[B]`, ..., `[Z]`, `[AA]`, ...).
+- Session list rows insert the compact host-code column between the attached
+  marker and the session name. Format becomes:
 
   ```
-  > * <hostname-padded> <session-name>          <active> / <age>
+  > * <host-code> <session-name>          <active> / <age>
   ```
 
-  Hostname column width is the max label width across the configured hosts,
-  truncated/elided at a sensible cap.
+  Host-code column width is the widest assigned code for the configured hosts.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
 - All command keys (`Up`/`Down`, `Enter`/`a` attach, `m` monitor, `n` new,
@@ -861,7 +861,9 @@ pub(crate) struct HostFleet {
 
 impl HostFleet {
     pub(crate) fn is_multi(&self) -> bool { self.entries.len() > 1 }
-    pub(crate) fn host_label_width(&self) -> usize { /* max label width */ }
+    pub(crate) fn host_code(&self, id: &HostId) -> Option<String> { /* [A], [B], ... */ }
+    pub(crate) fn host_code_width(&self) -> usize { /* max code width */ }
+    pub(crate) fn host_code_legend(&self) -> Option<String> { /* host [A] ... */ }
 }
 
 pub(crate) struct SessionRow {
@@ -961,8 +963,8 @@ different views" requirement.
 #### Render: row format
 
 `render::draw_sessions` shifts to a single render path that emits the
-hostname column **only when `fleet.is_multi()`**. The column width is taken
-from `HostFleet::host_label_width()`. The host-label column is omitted when
+host-code column **only when `fleet.is_multi()`**. The column width is taken
+from `HostFleet::host_code_width()`. The host-code column is omitted when
 `is_multi()` is false, so single-host rendering is unchanged.
 
 #### Top status bar
@@ -970,7 +972,7 @@ from `HostFleet::host_label_width()`. The host-label column is omitted when
 `render::draw_top_status` switches on `fleet.is_multi()`:
 
 - Single: `<hostname> | <ip>                                     <time>`
-- Multi:  `mmux - multi-host mode (<n>)                            <time>`
+- Multi:  `mmux <host-a> [A] <host-b> [B]                          <time>`
 
 #### Scope and impact analysis
 
@@ -990,11 +992,11 @@ not required for v1.
 | `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. Make `MotdState` an `Option<MotdState>` field on `AppState`. |
 | `target_host.rs` | Rename / split: `connect_host(cli) → connect_fleet(cli) -> Result<HostFleet>`. Internally calls existing single-host connect for each entry. |
 | `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. `load_motd` only called when `fleet.is_multi() == false`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
-| `render.rs` | Single render path. `draw_sessions` adds optional hostname column when `fleet.is_multi()`. `draw_top_status` switches text by mode. `draw_motd` is gated on `app.motd.is_some()` (already gated in portrait — generalize to multi-host). Status hint set unchanged. |
+| `render.rs` | Single render path. `draw_sessions` adds optional host-code column when `fleet.is_multi()`. `draw_top_status` switches text by mode. `draw_motd` is gated on `app.motd.is_some()` (already gated in portrait — generalize to multi-host). Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |
 | `main.rs` | Calls `connect_fleet` instead of `connect_host`. |
 | `forcecommand.rs` | No change (ForceCommand stays single-host; multi-host is operator-mode). |
-| `tests.rs` | New tests for: multi-host CLI parsing; fleet construction; merge-and-sort across hosts; row hostname column; top-status switching; per-host failure resilience; selection-by-(host_id, session_id) preservation across reorders. |
+| `tests.rs` | New tests for: multi-host CLI parsing; fleet construction; merge-and-sort across hosts; row host-code column; top-status legend switching; per-host failure resilience; selection-by-(host_id, session_id) preservation across reorders. |
 
 **No abstraction changes** to: `consts.rs`, `terminal.rs`, `forcecommand.rs`,
 `detail.rs` shape (only call-site changes inside `controller.rs`).

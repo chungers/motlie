@@ -254,12 +254,15 @@ live in `cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`,
 `detail.rs`, `controller.rs`, and `render.rs`.
 
 The top status bar is derived from the app host identity and current local
-clock: `<hostname> | <ip address>` renders as bold left-justified text, and the
-current time renders right-justified. The Sessions pane title is derived only
-from the live session list length: `Sessions [n]`. List rows show the display
-name, attached marker, and right-aligned `<active> / <age>` recency text with a
-small right margin; stable session ids stay internal for dispatch. The attached
-marker is `*` when `SessionInfo::is_attached()` is true. The list is sorted by
+clock: single-host mode renders `<hostname> | <ip address>` as bold
+left-justified text, while multi-host mode renders a compact host-code legend
+such as `mmux alpha [A] beta [B]`. The current time renders right-justified.
+The Sessions pane title is derived only from the live session list length:
+`Sessions [n]`. List rows show the display name, attached marker, optional
+multi-host code column such as `[A]`, and right-aligned `<active> / <age>`
+recency text with a small right margin; stable session ids stay internal for
+dispatch. The attached marker is `*` when `SessionInfo::is_attached()` is true.
+The list is sorted by
 `activity_observed_at_local` descending — operator-side wall clock at the
 moment mmux last saw the row's `session.activity` advance — with name/id
 tie-breakers for stable display order. `preserve_selection()` re-finds the
@@ -462,7 +465,8 @@ API tests must cover:
 - `l` key layout toggling and retained layout re-entry behavior
 - status hint arrow-symbol rendering
 - bottom status command hints with underlined shortcut-letter spans
-- top status rendering for bold hostname/IP and right-justified current time
+- top status rendering for bold hostname/IP or multi-host code legend and
+  right-justified current time
 - session count rendering in the Sessions pane title without hostname/IP
 - Help modal open/close behavior, key-function display, build date display,
   and last-8-character build SHA display

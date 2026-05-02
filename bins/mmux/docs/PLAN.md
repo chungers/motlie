@@ -12,10 +12,11 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux <host> [A] ...`) and session rows use compact host-code columns instead of hostname columns. |
 | 2026-05-01 | @codex | Simplified Phase 12 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal to `t`, and left `i` unassigned for this feature. |
 | 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`, `Target::unset_tag`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
 | 2026-05-01 | @codex | Started Phase 12 for issue #241: branch `feature/mmux-241-session-modals`. Plan covers list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add on `i`, modal-specific focus state, stable `(host_id, session_id)` dispatch, motlie-tmux tag API usage, and focused tests. |
-| 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row hostname column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
+| 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row host-code column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
 | 2026-04-28 | @gpt55-dgx | Opened and linked issue #232 for Phase 9.6 env-gated SSH/ForceCommand integration tests; clarified exact bypass value contract. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh to one `list_sessions_now()` poller for activity sorting, recency text, structural state, and monitored-session closure. |
 | 2026-04-28 | @gpt55-dgx | Tracked one-second quiet visible-row refreshes so activity sorting updates without structural host events. |
@@ -476,24 +477,23 @@ it lands as a follow-up.
 - [ ] 11.4d Confirm 1 Hz cadence (inherited from single-host) is sufficient
   for `n` hosts; profile if needed.
 - [ ] 11.4e Tests: 2-host merge sort; 3-host with one failing; activity-tie
-  ordering stability; row hostname populated correctly.
+  ordering stability; row host metadata populated correctly.
 
 ### 11.5 Render
 
 - [ ] 11.5a `draw_top_status` switches on `fleet.is_multi()`:
   - Single: existing `<hostname> | <ip>     <time>` form.
-  - Multi: `mmux - multi-host mode (<n>)     <time>` form.
-- [ ] 11.5b `draw_sessions` row format: hostname column inserted between
+  - Multi: `mmux <host-a> [A] <host-b> [B]     <time>` legend form.
+- [ ] 11.5b `draw_sessions` row format: host-code column inserted between
   attached marker and session name when `fleet.is_multi() == true`. Column
-  width = `fleet.host_label_width()` capped at a reasonable max
-  (e.g. 24 chars; longer labels truncated with `…`).
+  width = `fleet.host_code_width()`.
 - [ ] 11.5c MOTD pane: hide entirely when `app.motd.is_none()`. Layout reflows
   the left column (landscape) or top region (portrait) to give the full area
   to sessions.
 - [ ] 11.5d Status banner: render `HostUnreachable` indicator(s) without
   blocking session listing.
 - [ ] 11.5e Snapshot tests for: multi-host top status; multi-host row format
-  (hostname column present, padded, truncated); MOTD-pane absence in
+  (host-code column present and padded); MOTD-pane absence in
   multi-host; layout reflow correctness.
 
 ### 11.6 Input + dispatch routing
