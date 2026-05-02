@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=40:session_name}` and `status-left-length` to 40, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
@@ -457,27 +458,41 @@ Attach:
 
 ```rust
 let target = host.session_by_id(selected.id()).await?.ok_or(SessionVanished)?;
-let snapshot = match target.read_local_status_style().await {
-    Ok(previous) => {
-        let blue = motlie_tmux::StatusStyle::new("bg=#002b55,fg=white")?;
-        target.set_status_style(&blue).await.ok().map(|_| previous)
-    }
-    Err(_) => None,
-};
+let previous_style = target.read_local_status_style().await?;
+let previous_left = target.read_local_status_left().await?;
+let previous_len = target.read_local_status_left_length().await?;
+target
+    .set_status_style(&motlie_tmux::StatusStyle::new("bg=#002b55,fg=white")?)
+    .await
+    .ok();
+target
+    .set_status_left(&motlie_tmux::StatusLeft::new("#{=40:session_name}")?)
+    .await
+    .ok();
+target
+    .set_status_left_length(motlie_tmux::StatusLeftLength::new(40))
+    .await
+    .ok();
 let exit = target.attach_current_pty().await;
-if let Some(previous) = snapshot {
-    let _ = match previous {
-        Some(style) => target.set_status_style(&style).await,
-        None => target.unset_status_style().await,
-    };
-}
+let _ = match previous_style {
+    Some(style) => target.set_status_style(&style).await,
+    None => target.unset_status_style().await,
+};
+let _ = match previous_left {
+    Some(left) => target.set_status_left(&left).await,
+    None => target.unset_status_left().await,
+};
+let _ = match previous_len {
+    Some(length) => target.set_status_left_length(length).await,
+    None => target.unset_status_left_length().await,
+};
 let exit = exit?;
 ```
 
 The exact `SessionVanished` error type belongs to the binary unless `motlie-tmux`
 already has a suitable structured error when implementation starts. The
-status-style calls are best-effort in mmux: warnings go to stderr, but attach
-continues even if the remote tmux rejects style setup or restoration.
+status override calls are best-effort in mmux: warnings go to stderr, but attach
+continues even if the remote tmux rejects setup or restoration.
 
 ## CLI Boundary
 

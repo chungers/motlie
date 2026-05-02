@@ -1,8 +1,8 @@
 use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusStyle, TransportKind,
-    SSH_DEFAULT_PORT,
+    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
+    StatusStyle, TransportKind, SSH_DEFAULT_PORT,
 };
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -13,9 +13,9 @@ use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
     HOST_COLOR_SQUARE, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    MMUX_ATTACH_STATUS_STYLE, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH,
-    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
-    STATUS_BAR_MNEMONIC_FG,
+    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE,
+    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
+    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
     handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
@@ -36,7 +36,7 @@ use crate::render::{
     use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
-use crate::{prepare_attach_status_style, restore_attach_status_style};
+use crate::{prepare_attach_status, restore_attach_status};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id).unwrap()
@@ -1359,7 +1359,7 @@ async fn enter_no_longer_attaches() {
 }
 
 #[tokio::test]
-async fn attach_status_style_is_set_and_restored() {
+async fn attach_status_overrides_are_set_and_restored() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response(
@@ -1367,37 +1367,80 @@ async fn attach_status_style_is_set_and_restored() {
             "status-style bg=green,fg=black\n",
         )
         .with_response(
-            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
-            "",
+            "show-option -q -t '$1' status-left-length",
+            "status-left-length 32\n",
         )
-        .with_response("set-option -t '$1' status-style 'bg=green,fg=black'", "");
-    let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let target = host.session_by_id("$1").await.unwrap().unwrap();
-
-    let snapshot = prepare_attach_status_style(&target).await.unwrap();
-    assert_eq!(
-        snapshot.previous,
-        Some(StatusStyle::new("bg=green,fg=black").unwrap())
-    );
-    restore_attach_status_style(&target, Some(snapshot)).await;
-}
-
-#[tokio::test]
-async fn attach_status_style_unsets_when_no_previous_local_style() {
-    let mock = MockTransport::new()
-        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response(
+            "show-option -q -t '$1' status-left",
+            "status-left \"session: #{session_name}\"\n",
+        )
         .with_response(
             &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
             "",
         )
-        .with_response("set-option -u -t '$1' status-style", "");
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        )
+        .with_response("set-option -t '$1' status-style 'bg=green,fg=black'", "")
+        .with_response("set-option -t '$1' status-left-length 32", "")
+        .with_response(
+            "set-option -t '$1' status-left 'session: #{session_name}'",
+            "",
+        );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let target = host.session_by_id("$1").await.unwrap().unwrap();
 
-    let snapshot = prepare_attach_status_style(&target).await.unwrap();
-    assert_eq!(snapshot.previous, None);
-    restore_attach_status_style(&target, Some(snapshot)).await;
+    let snapshot = prepare_attach_status(&target).await.unwrap();
+    assert_eq!(
+        snapshot.previous_style,
+        Some(StatusStyle::new("bg=green,fg=black").unwrap())
+    );
+    assert_eq!(
+        snapshot.previous_left,
+        Some(StatusLeft::new("session: #{session_name}").unwrap())
+    );
+    assert_eq!(
+        snapshot.previous_left_length,
+        Some(StatusLeftLength::new(32))
+    );
+    restore_attach_status(&target, Some(snapshot)).await;
+}
+
+#[tokio::test]
+async fn attach_status_overrides_unset_when_no_previous_local_values() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response("show-option -q -t '$1' status-left-length", "")
+        .with_response("show-option -q -t '$1' status-left", "")
+        .with_response(
+            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        )
+        .with_response("set-option -u -t '$1' status-style", "")
+        .with_response("set-option -u -t '$1' status-left-length", "")
+        .with_response("set-option -u -t '$1' status-left", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+
+    let snapshot = prepare_attach_status(&target).await.unwrap();
+    assert_eq!(snapshot.previous_style, None);
+    assert_eq!(snapshot.previous_left, None);
+    assert_eq!(snapshot.previous_left_length, None);
+    restore_attach_status(&target, Some(snapshot)).await;
 }
 
 #[tokio::test]

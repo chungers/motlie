@@ -17,15 +17,15 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 
-use cli::{Cli, select_layout};
-use consts::MMUX_ATTACH_STATUS_STYLE;
+use cli::{select_layout, Cli};
+use consts::{MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE};
 use controller::{
-    KeyOutcome, handle_key, load_motd, refresh_detail, refresh_sessions_preserving,
-    refresh_sessions_quiet, stop_detail_source,
+    handle_key, load_motd, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
+    stop_detail_source, KeyOutcome,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
-use motlie_tmux::{AttachExit, StatusStyle, Target};
+use motlie_tmux::{AttachExit, StatusLeft, StatusLeftLength, StatusStyle, Target};
 use target_host::connect_fleet;
 use terminal::TerminalSession;
 
@@ -36,8 +36,10 @@ enum SelectorOutcome {
 }
 
 #[derive(Debug)]
-struct AttachStatusStyleSnapshot {
-    previous: Option<StatusStyle>,
+struct AttachStatusSnapshot {
+    previous_style: Option<StatusStyle>,
+    previous_left: Option<StatusLeft>,
+    previous_left_length: Option<StatusLeftLength>,
 }
 
 #[tokio::main]
@@ -88,7 +90,7 @@ async fn run() -> Result<i32> {
                 continue;
             }
         };
-        let exit = attach_current_pty_with_mmux_status_style(&target).await?;
+        let exit = attach_current_pty_with_mmux_status(&target).await?;
         let code = exit.shell_status();
         if should_reenter_after_attach(&fleet, &selected, &exit).await? {
             continue;
@@ -97,40 +99,84 @@ async fn run() -> Result<i32> {
     }
 }
 
-async fn attach_current_pty_with_mmux_status_style(target: &Target) -> Result<AttachExit> {
-    let snapshot = prepare_attach_status_style(target).await;
+async fn attach_current_pty_with_mmux_status(target: &Target) -> Result<AttachExit> {
+    let snapshot = prepare_attach_status(target).await;
     let exit = target.attach_current_pty().await;
-    restore_attach_status_style(target, snapshot).await;
+    restore_attach_status(target, snapshot).await;
     exit.map_err(Into::into)
 }
 
-async fn prepare_attach_status_style(target: &Target) -> Option<AttachStatusStyleSnapshot> {
-    let previous = match target.read_local_status_style().await {
+async fn prepare_attach_status(target: &Target) -> Option<AttachStatusSnapshot> {
+    let previous_style = match target.read_local_status_style().await {
         Ok(previous) => previous,
         Err(err) => {
             eprintln!("mmux: could not read tmux status style before attach: {err}");
             return None;
         }
     };
+    let previous_left = match target.read_local_status_left().await {
+        Ok(previous) => previous,
+        Err(err) => {
+            eprintln!("mmux: could not read tmux status-left before attach: {err}");
+            return None;
+        }
+    };
+    let previous_left_length = match target.read_local_status_left_length().await {
+        Ok(previous) => previous,
+        Err(err) => {
+            eprintln!("mmux: could not read tmux status-left-length before attach: {err}");
+            return None;
+        }
+    };
+
     let style = StatusStyle::new(MMUX_ATTACH_STATUS_STYLE)
         .expect("mmux attach status style is a valid static tmux style");
     if let Err(err) = target.set_status_style(&style).await {
         eprintln!("mmux: could not set tmux status style before attach: {err}");
-        return None;
     }
-    Some(AttachStatusStyleSnapshot { previous })
+    let left = StatusLeft::new(MMUX_ATTACH_STATUS_LEFT)
+        .expect("mmux attach status-left is a valid static tmux format");
+    if let Err(err) = target.set_status_left(&left).await {
+        eprintln!("mmux: could not set tmux status-left before attach: {err}");
+    }
+    if let Err(err) = target
+        .set_status_left_length(StatusLeftLength::new(MMUX_ATTACH_STATUS_LEFT_LENGTH))
+        .await
+    {
+        eprintln!("mmux: could not set tmux status-left-length before attach: {err}");
+    }
+
+    Some(AttachStatusSnapshot {
+        previous_style,
+        previous_left,
+        previous_left_length,
+    })
 }
 
-async fn restore_attach_status_style(target: &Target, snapshot: Option<AttachStatusStyleSnapshot>) {
+async fn restore_attach_status(target: &Target, snapshot: Option<AttachStatusSnapshot>) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    let result = match snapshot.previous {
+    let result = match snapshot.previous_style {
         Some(style) => target.set_status_style(&style).await,
         None => target.unset_status_style().await,
     };
     if let Err(err) = result {
         eprintln!("mmux: could not restore tmux status style after attach: {err}");
+    }
+    let result = match snapshot.previous_left {
+        Some(left) => target.set_status_left(&left).await,
+        None => target.unset_status_left().await,
+    };
+    if let Err(err) = result {
+        eprintln!("mmux: could not restore tmux status-left after attach: {err}");
+    }
+    let result = match snapshot.previous_left_length {
+        Some(length) => target.set_status_left_length(length).await,
+        None => target.unset_status_left_length().await,
+    };
+    if let Err(err) = result {
+        eprintln!("mmux: could not restore tmux status-left-length after attach: {err}");
     }
 }
 
