@@ -317,15 +317,15 @@ fn session_row_name_field(row: &SessionRow, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let Some(tag) = &row.selected_tag else {
+    let Some(value) = row.displayed_tag_value() else {
         return truncate_chars(&row.session.name, width);
     };
-    if tag.value.is_empty() || width < 3 {
+    if width < 3 {
         return truncate_chars(&row.session.name, width);
     }
 
     let value_budget = width.saturating_sub(2);
-    let value = truncate_chars(&tag.value, value_budget);
+    let value = truncate_chars(value, value_budget);
     let value_width = char_width(&value);
     if value_width == 0 {
         return truncate_chars(&row.session.name, width);
@@ -340,8 +340,8 @@ fn session_row_name_field(row: &SessionRow, width: usize) -> String {
 }
 
 fn session_row_metadata_gap(row: &SessionRow, metadata: &str, default_gap: usize) -> usize {
-    match &row.selected_tag {
-        Some(tag) if !tag.value.is_empty() => {
+    match row.displayed_tag_value() {
+        Some(_) => {
             let activity_left_pad = metadata.chars().take_while(|ch| *ch == ' ').count();
             default_gap.saturating_sub(activity_left_pad)
         }

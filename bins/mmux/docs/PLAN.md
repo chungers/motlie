@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Tightened list-pane tag sort: visible non-empty checked-tag values sort to the top, and `s` selects the first row in the new order. |
 | 2026-05-02 | @codex | Added list-pane `s` sort toggle with persistent activity/tag sort mode; tag sort groups checked-tag rows first, then orders by tag value, activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback: batched selected-tag metadata loads per host refresh, made Session Tags Cancel reachable, grouped modal session/tag UI state, moved modal sizing to render, and documented reserved tag keys. |
 | 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux [A] <host> ...`) and session rows use compact host-code columns instead of hostname columns. |

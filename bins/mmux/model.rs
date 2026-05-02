@@ -304,6 +304,15 @@ pub(crate) struct SessionRow {
     pub(crate) selected_tag: Option<SessionSelectedTag>,
 }
 
+impl SessionRow {
+    pub(crate) fn displayed_tag_value(&self) -> Option<&str> {
+        self.selected_tag
+            .as_ref()
+            .map(|tag| tag.value.as_str())
+            .filter(|value| !value.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionSelectedTag {
     pub(crate) key: String,
@@ -512,6 +521,11 @@ impl SessionListState {
         self.set_rows_sorted(rows, fleet);
     }
 
+    pub(crate) fn select_first(&mut self) {
+        self.selected = 0;
+        self.scroll = 0;
+    }
+
     pub(crate) fn selected_session(&self) -> Option<SelectedSession> {
         self.rows.get(self.selected).map(|row| SelectedSession {
             host_id: row.host_id.clone(),
@@ -589,8 +603,8 @@ fn sort_rows_by_tag(rows: &mut [SessionRow], fleet: &HostFleet) {
 }
 
 fn tag_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
-    match (&left.selected_tag, &right.selected_tag) {
-        (Some(left_tag), Some(right_tag)) => left_tag.value.cmp(&right_tag.value),
+    match (left.displayed_tag_value(), right.displayed_tag_value()) {
+        (Some(left_value), Some(right_value)) => left_value.cmp(right_value),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,

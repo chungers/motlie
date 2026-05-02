@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Tightened `SessionSortMode::Tag`: rows only count as tagged when they have a visible non-empty checked-tag value, and the `s` toggle selects the first row after sorting so the new top is visible. |
 | 2026-05-02 | @codex | Added `SessionSortMode` and list-pane `s` toggle: default activity sort, or tag sort that groups checked-tag rows first and orders by tag value, activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback: session refresh now batch-loads selected tag metadata once per host, Session Tags Cancel focus is reachable, modal session identity is grouped, tag UI state is grouped, and render sizing lives in `render.rs`. |
 | 2026-05-01 | @codex | Persisted the Session Tags checked key in the internal `@mmux/__selected-key` option, filtered it from modal tag rows, loaded it into `SessionRow`, and rendered the checked tag value as a right-aligned session-list column. |
@@ -278,10 +279,12 @@ The list is sorted by
 `activity_observed_at_local` descending — operator-side wall clock at the
 moment mmux last saw the row's `session.activity` advance — by default.
 When the operator presses `s` with the list focused, `SessionSortMode::Tag`
-groups rows with checked tags before rows without checked tags, then sorts by
-checked tag value, activity time, host code, and session name. Pressing `s`
-again restores `SessionSortMode::Activity`. `preserve_selection()` re-finds
-the highlighted row by stable session id after each refresh. A single quiet
+groups rows with visible non-empty checked-tag values before rows without a
+displayed tag, then sorts by checked tag value, activity time, host code, and
+session name. Empty checked-tag values sort with rows that have no displayed
+tag. The `s` toggle selects the first row in the new order; pressing `s` again
+restores `SessionSortMode::Activity`. `preserve_selection()` re-finds
+the highlighted row by stable session id after refreshes. A single quiet
 one-second `list_sessions()` refresh keeps the active ordering current and
 notices structural session changes. Recency text is observer-relative
 for the activity column (`local_now − activity_observed_at_local`) and
