@@ -1401,20 +1401,21 @@ async fn attach_status_overrides_are_set_and_restored() {
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let target = host.session_by_id("$1").await.unwrap().unwrap();
 
-    let snapshot = prepare_attach_status(&target).await.unwrap();
+    let status = target.status().await.unwrap();
+    let snapshot = prepare_attach_status(&status).await.unwrap();
     assert_eq!(
-        snapshot.previous_style,
+        snapshot.style,
         Some(StatusStyle::new("bg=green,fg=black").unwrap())
     );
     assert_eq!(
-        snapshot.previous_left,
+        snapshot.left,
         Some(StatusLeft::new("session: #{session_name}").unwrap())
     );
     assert_eq!(
-        snapshot.previous_left_length,
-        Some(StatusLeftLength::new(32))
+        snapshot.left_length,
+        Some(StatusLeftLength::new(32).unwrap())
     );
-    restore_attach_status(&target, Some(snapshot)).await;
+    restore_attach_status(&status, Some(snapshot)).await;
 }
 
 #[tokio::test]
@@ -1442,11 +1443,12 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let target = host.session_by_id("$1").await.unwrap().unwrap();
 
-    let snapshot = prepare_attach_status(&target).await.unwrap();
-    assert_eq!(snapshot.previous_style, None);
-    assert_eq!(snapshot.previous_left, None);
-    assert_eq!(snapshot.previous_left_length, None);
-    restore_attach_status(&target, Some(snapshot)).await;
+    let status = target.status().await.unwrap();
+    let snapshot = prepare_attach_status(&status).await.unwrap();
+    assert_eq!(snapshot.style, None);
+    assert_eq!(snapshot.left, None);
+    assert_eq!(snapshot.left_length, None);
+    restore_attach_status(&status, Some(snapshot)).await;
 }
 
 #[tokio::test]

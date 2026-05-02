@@ -7,10 +7,10 @@
 | Date | Change | Sections |
 |------|--------|----------|
 | 2026-05-02 | @codex: Added initial session environment values to `CreateSessionOptions` and documented that post-creation `SessionEnvironment` writes only affect future tmux-spawned processes. | HostHandle, Target, control.rs, types.rs |
-| 2026-05-02 | @codex: Add narrow session-local status-style API on `Target`, backed by tmux `set-option -t <session-id> status-style`, for consumers that need attach/session chrome styling without a generic arbitrary-option API. | Target |
+| 2026-05-02 | @codex: Reworked session status-bar control into `Target::status() -> SessionStatus`, with snapshot/apply/restore helpers and validated `StatusLeftLength`. | Target, SessionStatus |
 | 2026-05-02 | @codex: DC34 follow-up for mmux PR feedback — add a host-level batch session-tag read API so selector refreshes can enrich a fresh session listing without one round trip per session. | Target, DC34 |
-| 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)` plus one-off `Target::unset_tag(prefix, key)`. | Target, DC34 |
-| 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add scoped `SessionTags`, validated self-describing `SessionTag`, and one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
+| 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)`. | Target, DC34 |
+| 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add scoped `SessionTags` and validated self-describing `SessionTag` with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
 | 2026-04-28 | @gpt55-dgx: PR #228 selector cleanup — document the implemented non-empty `SessionId` wrapper for `SessionInfo.id` so stable id dispatch cannot silently fall back to names. | Discovery Types |
 | 2026-04-09 | @claude: Note anyhow→thiserror migration in dependency table and prototype sections. Library now uses typed `Error` enum via `thiserror`; `anyhow` retained as dev-dependency only. Prototype code snippets are pre-migration and preserved as historical context. | Dependencies, Prototype |
 | 2026-03-25 | @claude: DC33 — per-source coherent history rendering. Coalesce same-source chunks, add `RenderMode::PerSource`, per-source budgets. See [`docs/HISTORY.md`](./HISTORY.md). | DC28, DC33, History |
@@ -2537,6 +2537,9 @@ pub struct CreateSessionOptions {
 }
 ```
 
+`initial_environment` is emitted to `tmux new-session -e` in vector order. If a
+caller supplies duplicate variable names, tmux applies the last emitted value.
+
 `HostHandle::create_session` signature changes from:
 
 ```rust
@@ -3880,16 +3883,28 @@ pub struct SessionTags<'a> {
 }
 
 pub struct StatusStyle(String);
+pub struct StatusLeft(String);
+pub struct StatusLeftLength(u32);
+
+pub struct SessionStatus<'a> {
+    /* transport, tmux prefix, stable session id */
+}
+
+pub struct SessionStatusSnapshot {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+pub struct SessionStatusOverrides {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
 
 impl Target {
     pub async fn tags(&self, prefix: &str) -> Result<SessionTags<'_>>;
-    pub async fn set_tag(&self, prefix: &str, key: &str, value: &str) -> Result<()>;
-    pub async fn read_tag(&self, prefix: &str, key: &str) -> Result<Option<String>>;
-    pub async fn list_tags(&self, prefix: &str) -> Result<Vec<SessionTag>>;
-    pub async fn unset_tag(&self, prefix: &str, key: &str) -> Result<()>;
-    pub async fn set_status_style(&self, style: &StatusStyle) -> Result<()>;
-    pub async fn unset_status_style(&self) -> Result<()>;
-    pub async fn read_local_status_style(&self) -> Result<Option<StatusStyle>>;
+    pub async fn status(&self) -> Result<SessionStatus<'_>>;
 }
 
 impl SessionTags<'_> {
@@ -3898,6 +3913,21 @@ impl SessionTags<'_> {
     pub async fn read(&self, key: &str) -> Result<Option<String>>;
     pub async fn list(&self) -> Result<Vec<SessionTag>>;
     pub async fn unset(&self, key: &str) -> Result<()>;
+}
+
+impl SessionStatus<'_> {
+    pub async fn snapshot(&self) -> Result<SessionStatusSnapshot>;
+    pub async fn apply(&self, overrides: &SessionStatusOverrides) -> Result<()>;
+    pub async fn restore(&self, snapshot: &SessionStatusSnapshot) -> Result<()>;
+    pub async fn set_style(&self, style: &StatusStyle) -> Result<()>;
+    pub async fn unset_style(&self) -> Result<()>;
+    pub async fn read_local_style(&self) -> Result<Option<StatusStyle>>;
+    pub async fn set_left(&self, left: &StatusLeft) -> Result<()>;
+    pub async fn unset_left(&self) -> Result<()>;
+    pub async fn read_local_left(&self) -> Result<Option<StatusLeft>>;
+    pub async fn set_left_length(&self, length: StatusLeftLength) -> Result<()>;
+    pub async fn unset_left_length(&self) -> Result<()>;
+    pub async fn read_local_left_length(&self) -> Result<Option<StatusLeftLength>>;
 }
 ```
 
@@ -3916,20 +3946,19 @@ unprefixed key so listed tags are self-describing and round-trippable.
   capped at 2 KiB.
 - Dispatch uses the stable `SessionId` from `SessionInfo`, not the display name.
 - `Target::tags(prefix)` validates the prefix and captures the command prefix and
-  stable session id once; the direct `set_tag` / `read_tag` / `list_tags` methods
-  are one-off wrappers around that helper.
+  stable session id once. There are no direct one-shot tag methods on `Target`;
+  all tag work goes through the `SessionTags` scope.
 - `HostHandle::list_tags_for_session_infos(prefix, sessions)` returns tags by
   stable `SessionId` and includes empty vectors for sessions without matching
   tags.
-- `SessionTags::unset(key)` and `Target::unset_tag(prefix, key)` remove the
-  session-local user option with tmux `set-option -u`; they do not encode
-  deletion as an empty string.
-- `Target::set_status_style(style)`, `unset_status_style()`, and
-  `read_local_status_style()` are a separate narrow surface for the built-in
-  tmux `status-style` option. `StatusStyle` validates only value transport
-  safety (non-empty, no control characters, bounded length) and lets tmux
-  validate style syntax. Reads return only the session-local override, not
-  inherited/global style.
+- `SessionTags::unset(key)` removes the session-local user option with tmux
+  `set-option -u`; it does not encode deletion as an empty string.
+- `Target::status()` captures the same session identity and command prefix for
+  built-in status-bar options. `SessionStatus::snapshot/apply/restore` keep
+  attach-time temporary chrome semantics in the library. `StatusStyle` rejects
+  empty values; `StatusLeft` allows empty values to mean "render no left status
+  text"; `StatusLeftLength` is a fallible bounded numeric type. Reads return
+  only session-local overrides, not inherited/global values.
 - The helper constructor is async because resolving the command prefix can lazily
   probe the tmux binary on the underlying transport before it is cached.
 

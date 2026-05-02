@@ -472,6 +472,8 @@ impl HostHandle {
     /// This uses `start-server ; display-message -p '#{host}'` through the
     /// configured transport/socket, so callers get the name tmux itself uses
     /// rather than an SSH URI alias or shell-level hostname probe.
+    ///
+    /// Note: this starts the tmux server if it is not already running.
     pub async fn tmux_hostname(&self) -> Result<String> {
         let prefix = self.inner.tmux_prefix().await;
         control::tmux_hostname_with_prefix(&self.inner.transport, &prefix).await
@@ -1435,6 +1437,216 @@ impl<'a> SessionEnvironment<'a> {
     }
 }
 
+/// Local tmux status-bar override snapshot for one session.
+///
+/// This records only session-local values. `None` means the session did not
+/// have a local override and inherited a global/default value at snapshot time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatusSnapshot {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+/// Session-local tmux status-bar overrides to apply.
+///
+/// `None` means "leave this option unchanged"; use [`SessionStatus::restore`]
+/// with a [`SessionStatusSnapshot`] to unset options that were absent before a
+/// temporary override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionStatusOverrides {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+/// Session-local tmux status-bar API.
+///
+/// Construct with [`Target::status`]. The helper dispatches all operations
+/// against the target's stable session id and keeps snapshot/restore semantics
+/// in the library rather than in each application.
+pub struct SessionStatus<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+}
+
+impl<'a> SessionStatus<'a> {
+    /// Set this session's local tmux status bar style.
+    pub async fn set_style(&self, style: &StatusStyle) -> Result<()> {
+        control::set_session_status_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            style,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status bar style override.
+    ///
+    /// After this, inherited/global tmux status style applies.
+    pub async fn unset_style(&self) -> Result<()> {
+        control::unset_session_status_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Read this session's local status-style override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux style values.
+    pub async fn read_local_style(&self) -> Result<Option<StatusStyle>> {
+        control::read_local_session_status_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Set this session's local tmux status-left format.
+    pub async fn set_left(&self, status_left: &StatusLeft) -> Result<()> {
+        control::set_session_status_left_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            status_left,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status-left override.
+    pub async fn unset_left(&self) -> Result<()> {
+        control::unset_session_status_left_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Read this session's local status-left override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux status-left values.
+    pub async fn read_local_left(&self) -> Result<Option<StatusLeft>> {
+        control::read_local_session_status_left_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Set this session's local tmux status-left-length value.
+    pub async fn set_left_length(&self, length: StatusLeftLength) -> Result<()> {
+        control::set_session_status_left_length_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            length,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status-left-length override.
+    pub async fn unset_left_length(&self) -> Result<()> {
+        control::unset_session_status_left_length_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Read this session's local status-left-length override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux status-left-length values.
+    pub async fn read_local_left_length(&self) -> Result<Option<StatusLeftLength>> {
+        control::read_local_session_status_left_length_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Snapshot this session's local status-bar overrides.
+    pub async fn snapshot(&self) -> Result<SessionStatusSnapshot> {
+        Ok(SessionStatusSnapshot {
+            style: self.read_local_style().await?,
+            left_length: self.read_local_left_length().await?,
+            left: self.read_local_left().await?,
+        })
+    }
+
+    /// Apply the provided local status-bar overrides.
+    ///
+    /// Only fields set to `Some` are written; `None` leaves the corresponding
+    /// option unchanged. All requested writes are attempted and the first error,
+    /// if any, is returned.
+    pub async fn apply(&self, overrides: &SessionStatusOverrides) -> Result<()> {
+        let mut first_error = None;
+        if let Some(style) = &overrides.style {
+            remember_status_error(&mut first_error, self.set_style(style).await);
+        }
+        if let Some(length) = overrides.left_length {
+            remember_status_error(&mut first_error, self.set_left_length(length).await);
+        }
+        if let Some(left) = &overrides.left {
+            remember_status_error(&mut first_error, self.set_left(left).await);
+        }
+        status_result(first_error)
+    }
+
+    /// Restore a prior local status-bar snapshot.
+    ///
+    /// `Some` values are written back; `None` unsets the local option so the
+    /// inherited/global value applies again. All restore operations are
+    /// attempted and the first error, if any, is returned.
+    pub async fn restore(&self, snapshot: &SessionStatusSnapshot) -> Result<()> {
+        let mut first_error = None;
+        let style_result = match &snapshot.style {
+            Some(style) => self.set_style(style).await,
+            None => self.unset_style().await,
+        };
+        remember_status_error(&mut first_error, style_result);
+
+        let left_length_result = match snapshot.left_length {
+            Some(length) => self.set_left_length(length).await,
+            None => self.unset_left_length().await,
+        };
+        remember_status_error(&mut first_error, left_length_result);
+
+        let left_result = match &snapshot.left {
+            Some(left) => self.set_left(left).await,
+            None => self.unset_left().await,
+        };
+        remember_status_error(&mut first_error, left_result);
+        status_result(first_error)
+    }
+}
+
+fn remember_status_error(first_error: &mut Option<Error>, result: Result<()>) {
+    if let Err(err) = result {
+        if first_error.is_none() {
+            *first_error = Some(err);
+        }
+    }
+}
+
+fn status_result(first_error: Option<Error>) -> Result<()> {
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
 impl Target {
     /// Resolve the effective pane_id for exec lock keying (DC19).
     ///
@@ -1551,160 +1763,12 @@ impl Target {
         self.environment_with_operation("environment").await
     }
 
-    /// Set this session's local tmux status bar style.
+    /// Access this session's local tmux status-bar overrides.
     ///
-    /// This is intentionally narrow and session-target only. It dispatches
-    /// against the stable session id with `set-option -t <id> status-style`.
-    pub async fn set_status_style(&self, style: &StatusStyle) -> Result<()> {
-        let session_id = self
-            .session_for_operation("set_status_style")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::set_session_status_style_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_id,
-            style,
-        )
-        .await
-    }
-
-    /// Remove this session's local tmux status bar style override.
-    ///
-    /// After this, inherited/global tmux status style applies.
-    pub async fn unset_status_style(&self) -> Result<()> {
-        let session_id = self
-            .session_for_operation("unset_status_style")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::unset_session_status_style_with_prefix(&self.inner.transport, &prefix, &session_id)
-            .await
-    }
-
-    /// Read this session's local status-style override only.
-    ///
-    /// Returns `Ok(None)` when no session-local override is set; it does not
-    /// resolve inherited/global tmux style values.
-    pub async fn read_local_status_style(&self) -> Result<Option<StatusStyle>> {
-        let session_id = self
-            .session_for_operation("read_local_status_style")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::read_local_session_status_style_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_id,
-        )
-        .await
-    }
-
-    /// Set this session's local tmux status-left format.
-    ///
-    /// This is intentionally narrow and session-target only. It dispatches
-    /// against the stable session id with `set-option -t <id> status-left`.
-    pub async fn set_status_left(&self, status_left: &StatusLeft) -> Result<()> {
-        let session_id = self
-            .session_for_operation("set_status_left")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::set_session_status_left_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_id,
-            status_left,
-        )
-        .await
-    }
-
-    /// Remove this session's local tmux status-left override.
-    pub async fn unset_status_left(&self) -> Result<()> {
-        let session_id = self
-            .session_for_operation("unset_status_left")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::unset_session_status_left_with_prefix(&self.inner.transport, &prefix, &session_id)
-            .await
-    }
-
-    /// Read this session's local status-left override only.
-    ///
-    /// Returns `Ok(None)` when no session-local override is set; it does not
-    /// resolve inherited/global tmux status-left values.
-    pub async fn read_local_status_left(&self) -> Result<Option<StatusLeft>> {
-        let session_id = self
-            .session_for_operation("read_local_status_left")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::read_local_session_status_left_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_id,
-        )
-        .await
-    }
-
-    /// Set this session's local tmux status-left-length value.
-    pub async fn set_status_left_length(&self, length: StatusLeftLength) -> Result<()> {
-        let session_id = self
-            .session_for_operation("set_status_left_length")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::set_session_status_left_length_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_id,
-            length,
-        )
-        .await
-    }
-
-    /// Remove this session's local tmux status-left-length override.
-    pub async fn unset_status_left_length(&self) -> Result<()> {
-        let session_id = self
-            .session_for_operation("unset_status_left_length")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::unset_session_status_left_length_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_id,
-        )
-        .await
-    }
-
-    /// Read this session's local status-left-length override only.
-    ///
-    /// Returns `Ok(None)` when no session-local override is set; it does not
-    /// resolve inherited/global tmux status-left-length values.
-    pub async fn read_local_status_left_length(&self) -> Result<Option<StatusLeftLength>> {
-        let session_id = self
-            .session_for_operation("read_local_status_left_length")?
-            .id
-            .as_str()
-            .to_string();
-        let prefix = self.inner.tmux_prefix().await;
-        control::read_local_session_status_left_length_with_prefix(
-            &self.inner.transport,
-            &prefix,
-            &session_id,
-        )
-        .await
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
+    pub async fn status(&self) -> Result<SessionStatus<'_>> {
+        self.status_with_operation("status").await
     }
 
     async fn tags_with_operation(
@@ -1738,6 +1802,20 @@ impl Target {
             .to_string();
         let tmux_prefix = self.inner.tmux_prefix().await;
         Ok(SessionEnvironment {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
+        })
+    }
+
+    async fn status_with_operation(&self, operation: &'static str) -> Result<SessionStatus<'_>> {
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        Ok(SessionStatus {
             transport: &self.inner.transport,
             tmux_prefix,
             session_id,
@@ -3273,16 +3351,17 @@ mod tests {
                 activity: 0,
             }),
         };
+        let status = target.status().await.unwrap();
 
-        target
-            .set_status_style(&StatusStyle::new("bg=blue,fg=white").unwrap())
+        status
+            .set_style(&StatusStyle::new("bg=blue,fg=white").unwrap())
             .await
             .unwrap();
         assert_eq!(
-            target.read_local_status_style().await.unwrap(),
+            status.read_local_style().await.unwrap(),
             Some(StatusStyle::new("bg=green,fg=black").unwrap())
         );
-        target.unset_status_style().await.unwrap();
+        status.unset_style().await.unwrap();
     }
 
     #[tokio::test]
@@ -3314,25 +3393,82 @@ mod tests {
                 activity: 0,
             }),
         };
+        let status = target.status().await.unwrap();
 
-        target
-            .set_status_left(&StatusLeft::new("#{=40:session_name}").unwrap())
+        status
+            .set_left(&StatusLeft::new("#{=40:session_name}").unwrap())
             .await
             .unwrap();
         assert_eq!(
-            target.read_local_status_left().await.unwrap(),
+            status.read_local_left().await.unwrap(),
             Some(StatusLeft::new("#{session_name}").unwrap())
         );
-        target.unset_status_left().await.unwrap();
-        target
-            .set_status_left_length(StatusLeftLength::new(40))
+        status.unset_left().await.unwrap();
+        status
+            .set_left_length(StatusLeftLength::new(40).unwrap())
             .await
             .unwrap();
         assert_eq!(
-            target.read_local_status_left_length().await.unwrap(),
-            Some(StatusLeftLength::new(32))
+            status.read_local_left_length().await.unwrap(),
+            Some(StatusLeftLength::new(32).unwrap())
         );
-        target.unset_status_left_length().await.unwrap();
+        status.unset_left_length().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_status_snapshot_apply_and_restore_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response(
+                "show-option -q -t '$7' status-style",
+                "status-style bg=green,fg=black\n",
+            )
+            .with_response(
+                "show-option -q -t '$7' status-left-length",
+                "status-left-length 32\n",
+            )
+            .with_response(
+                "show-option -q -t '$7' status-left",
+                "status-left \"#{session_name}\"\n",
+            )
+            .with_response("set-option -t '$7' status-style 'bg=blue,fg=white'", "")
+            .with_response("set-option -t '$7' status-left-length 50", "")
+            .with_response("set-option -t '$7' status-left '#{=50:session_name}'", "")
+            .with_response("set-option -t '$7' status-style 'bg=green,fg=black'", "")
+            .with_response("set-option -t '$7' status-left-length 32", "")
+            .with_response("set-option -t '$7' status-left '#{session_name}'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+        let status = target.status().await.unwrap();
+
+        let snapshot = status.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot,
+            SessionStatusSnapshot {
+                style: Some(StatusStyle::new("bg=green,fg=black").unwrap()),
+                left: Some(StatusLeft::new("#{session_name}").unwrap()),
+                left_length: Some(StatusLeftLength::new(32).unwrap()),
+            }
+        );
+
+        let overrides = SessionStatusOverrides {
+            style: Some(StatusStyle::new("bg=blue,fg=white").unwrap()),
+            left: Some(StatusLeft::new("#{=50:session_name}").unwrap()),
+            left_length: Some(StatusLeftLength::new(50).unwrap()),
+        };
+        status.apply(&overrides).await.unwrap();
+        status.restore(&snapshot).await.unwrap();
     }
 
     #[tokio::test]
@@ -3392,20 +3528,10 @@ mod tests {
 
         assert!(window_target.tags("mmux").await.is_err());
         assert!(window_target.environment().await.is_err());
-        assert!(window_target
-            .set_status_style(&StatusStyle::new("bg=blue").unwrap())
-            .await
-            .is_err());
-        assert!(window_target.unset_status_style().await.is_err());
-        assert!(window_target.read_local_status_style().await.is_err());
+        assert!(window_target.status().await.is_err());
         assert!(pane_target.tags("mmux").await.is_err());
         assert!(pane_target.environment().await.is_err());
-        assert!(pane_target
-            .set_status_style(&StatusStyle::new("bg=blue").unwrap())
-            .await
-            .is_err());
-        assert!(pane_target.unset_status_style().await.is_err());
-        assert!(pane_target.read_local_status_style().await.is_err());
+        assert!(pane_target.status().await.is_err());
     }
 
     #[tokio::test]

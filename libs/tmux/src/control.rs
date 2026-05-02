@@ -898,7 +898,7 @@ pub(crate) async fn read_local_session_status_left_length_with_prefix(
             "failed to parse status-left-length {value:?}: {err}"
         ))
     })?;
-    Ok(Some(StatusLeftLength::new(length)))
+    StatusLeftLength::new(length).map(Some)
 }
 
 /// List all tags under one namespace prefix for multiple sessions in one tmux call.
@@ -1838,7 +1838,7 @@ mod tests {
             &transport,
             "tmux",
             "$7",
-            StatusLeftLength::new(40),
+            StatusLeftLength::new(40).unwrap(),
         )
         .await
         .unwrap();
@@ -1853,6 +1853,6 @@ mod tests {
             left,
             Some(StatusLeft::new("session: #{session_name}").unwrap())
         );
-        assert_eq!(length, Some(StatusLeftLength::new(32)));
+        assert_eq!(length, Some(StatusLeftLength::new(32).unwrap()));
     }
 }

@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment variables into the New Session modal and apply them through `CreateSessionOptions::initial_environment`; removed the post-creation `e` environment modal. |
 | 2026-05-02 | @codex | Changed mmux host labels to come from tmux `#{host}` via `HostHandle::tmux_hostname()`, while retaining the SSH URI hostname as `HostEntry.alias`. |
 | 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` with `status-left-length=50`, restoring prior local values after detach. |
@@ -19,7 +20,7 @@ Draft.
 | 2026-05-02 | @codex | Added a Host dropdown to the multi-host New Session modal, dispatching create to the selected host. |
 | 2026-05-02 | @codex | Changed the TUI status bars to dark blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved tag grouping to list-pane `g`; grouped tag rows are ordered by most recent activity. |
-| 2026-05-02 | @codex | Attach now temporarily sets the selected session's local tmux `status-style` to blue through the narrow motlie-tmux status-style API, then restores/unsets it after detach. |
+| 2026-05-02 | @codex | Attach now temporarily sets the selected session's local tmux `status-style` to blue through motlie-tmux status APIs, then restores/unsets it after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip for sessions with no tags. |
 | 2026-05-02 | @codex | Tightened list-pane tag sort: only visible non-empty checked-tag values count as tagged, and pressing `s` selects the first row after sorting so the sorted top is shown. |
@@ -1475,11 +1476,11 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 4. Resolve the highlighted session id to a `Target` via the stable-id
    library path. If the session vanished between selection and resolve
    (race), show stderr message and re-enter the TUI.
-5. Best-effort read the selected session's local `status-style`,
-   `status-left`, and `status-left-length`, then set `status-style
-   bg=#002b55,fg=white`, `status-left "#{=50:session_name}"`, and
-   `status-left-length 50` through narrow `Target` status APIs. Failures warn to
-   stderr but do not block attach.
+5. Best-effort call `Target::status()`, snapshot the selected session's local
+   `status-style`, `status-left`, and `status-left-length`, then apply
+   `SessionStatusOverrides` for `status-style bg=#002b55,fg=white`,
+   `status-left "#{=50:session_name}"`, and `status-left-length 50`. Failures
+   warn to stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited
@@ -1491,8 +1492,8 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
      group via `tcsetpgrp` so foreground signals (`SIGINT`, `SIGTSTP`,
      `SIGWINCH`) reach the child, not the parent.
 7. Call `wait()` (parent blocks while child holds the terminal).
-8. Restore previous local `status-style`, `status-left`, and
-   `status-left-length` values if they existed, otherwise unset the local
+8. Restore the previous local status values through `SessionStatus::restore()`.
+   Present snapshot values are written back; absent values unset the local
    overrides. Restore failures warn to stderr and do not change attach exit
    handling.
 9. On `wait()` return, branch on mode and child exit status:

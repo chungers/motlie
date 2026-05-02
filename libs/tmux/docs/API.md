@@ -24,8 +24,8 @@ in [`examples/README.md`](../examples/README.md).
 |------|-----|---------|
 | 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
 | 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
-| 2026-05-02 | @codex | Added narrow session-local status-left APIs: `StatusLeft`, `StatusLeftLength`, and `Target::{set,unset,read_local}_status_left*()` for temporary attach display overrides. |
-| 2026-05-02 | @codex | Added narrow session-local status bar styling API: `StatusStyle`, `Target::set_status_style()`, `unset_status_style()`, and `read_local_status_style()`. |
+| 2026-05-02 | @codex | Replaced direct `Target` status option methods with `Target::status() -> SessionStatus`, plus `SessionStatusSnapshot` / `SessionStatusOverrides` for attach-time snapshot/apply/restore flows. |
+| 2026-05-02 | @codex | Added narrow session-local status-left/status-style value types and scoped status APIs for temporary attach display overrides. |
 | 2026-05-02 | @codex | Added `HostHandle::list_tags_for_session_infos(prefix, sessions)` to batch-read session metadata tags for a fresh session listing in one tmux command. |
 | 2026-05-01 | @codex | Added `HostHandle::target_for_session_info()` so consumers enriching a fresh `list_sessions()` result can build a session `Target` without issuing a second session-discovery query. |
 | 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` removes a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
@@ -579,6 +579,16 @@ let host = HostHandle::new(
 let host2 = host.clone();
 ```
 
+### Hostname From Tmux
+
+```rust
+let tmux_host = host.tmux_hostname().await?;
+```
+
+`tmux_hostname()` returns the value tmux reports for `#{host}` on the
+configured transport/socket. It runs `start-server ; display-message -p
+'#{host}'`, so it starts the tmux server if one is not already running.
+
 ---
 
 ## 6. Session Lifecycle
@@ -620,6 +630,7 @@ let opts = CreateSessionOptions {
 let target = host.create_session("with-env", &opts).await?;
 // Emits tmux new-session -e MOTLIE=enabled -e BUILD_ID=42 before the command,
 // so the first pane process inherits those values.
+// Duplicate names are emitted in Vec order; tmux applies the last value.
 ```
 
 ### Kill
@@ -891,28 +902,39 @@ signal exits to `128 + signal`, which is the value CLI callers should return.
 ### Session Status Bar Overrides
 
 ```rust
-use motlie_tmux::{StatusLeft, StatusLeftLength, StatusStyle};
+use motlie_tmux::{
+    SessionStatusOverrides, StatusLeft, StatusLeftLength, StatusStyle,
+};
 
-let blue = StatusStyle::new("bg=blue,fg=white")?;
-target.set_status_style(&blue).await?;
-let previous = target.read_local_status_style().await?;
-target.unset_status_style().await?;
+let status = target.status().await?;
+let snapshot = status.snapshot().await?;
+let overrides = SessionStatusOverrides {
+    style: Some(StatusStyle::new("bg=blue,fg=white")?),
+    left: Some(StatusLeft::new("#{=40:session_name}")?),
+    left_length: Some(StatusLeftLength::new(40)?),
+};
+status.apply(&overrides).await?;
 
-let left = StatusLeft::new("#{=40:session_name}")?;
-target.set_status_left(&left).await?;
-target.set_status_left_length(StatusLeftLength::new(40)).await?;
-let previous_left = target.read_local_status_left().await?;
-let previous_len = target.read_local_status_left_length().await?;
-target.unset_status_left().await?;
-target.unset_status_left_length().await?;
+// ... attach or otherwise run with temporary status overrides ...
+
+status.restore(&snapshot).await?;
+
+// Low-level scoped operations are also available:
+status.set_style(&StatusStyle::new("bg=black,fg=white")?).await?;
+let local_style = status.read_local_style().await?;
+status.unset_style().await?;
 ```
 
-These methods are session-target only and use the stable session id with tmux
-`set-option -t <session-id> ...` / `set-option -u`. The read paths use
-`show-option -q -t <session-id> ...` and return only session-local overrides;
-inherited/global values return `Ok(None)`. `StatusStyle` and `StatusLeft`
-validate transport-safety properties only. tmux remains responsible for style
-and format syntax.
+`Target::status()` is session-target only and captures the stable session id.
+The scoped operations use tmux `set-option -t <session-id> ...` /
+`set-option -u`. The read paths use `show-option -q -t <session-id> ...` and
+return only session-local overrides; inherited/global values return `Ok(None)`.
+`SessionStatus::snapshot()` records local `status-style`, `status-left`, and
+`status-left-length`; `restore()` writes present values back and unsets absent
+ones. `StatusStyle` rejects empty strings; `StatusLeft` accepts empty strings
+because tmux treats an empty left format as "render nothing". `StatusLeftLength`
+is validated and capped at `STATUS_LEFT_LENGTH_MAX`. tmux remains responsible
+for style and format syntax.
 
 ### Session Tags
 
@@ -2421,7 +2443,8 @@ assert!(issues.is_empty());
 | `SessionInfo` | name, id (`SessionId`), created, activity (aggregated `max(session_activity, max(window_activity))` per issue #237), attached_count, window_count, group |
 | `SessionTags` | prefix-scoped session metadata helper returned by `Target::tags(prefix)` |
 | `SessionTag` | validated prefix, key, value for one namespaced session metadata tag |
-| `StatusStyle` / `StatusLeft` / `StatusLeftLength` | Session-local tmux status bar override values used by narrow `Target` status APIs |
+| `SessionStatus` / `SessionStatusSnapshot` / `SessionStatusOverrides` | Scoped session-local tmux status-bar API and temporary override state |
+| `StatusStyle` / `StatusLeft` / `StatusLeftLength` | Validated tmux status-bar override values used by `SessionStatus` |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |
