@@ -11,7 +11,7 @@ use ratatui::Terminal;
 use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS,
-    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MOTLIE_PLACEHOLDER,
+    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
     PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
 use crate::controller::{
@@ -148,6 +148,10 @@ async fn remove_test_file(path: &std::path::Path) {
 }
 
 fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
+    render_to_lines(app, width, height).join("")
+}
+
+fn render_to_lines(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
@@ -156,9 +160,27 @@ fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
         .backend()
         .buffer()
         .content()
+        .chunks(width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect()
+}
+
+fn modal_border_width(lines: &[String], title: &str) -> usize {
+    let border = lines
         .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>()
+        .find(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
+        .expect("expected modal top border");
+    let left = border
+        .chars()
+        .position(|ch| ch == '┌')
+        .expect("expected modal left corner");
+    let right = border
+        .chars()
+        .enumerate()
+        .filter_map(|(index, ch)| (ch == '┐').then_some(index))
+        .last()
+        .expect("expected modal right corner");
+    right - left + 1
 }
 
 #[test]
@@ -1192,8 +1214,13 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
         focus: SessionTagsFocus::Value,
     });
 
-    let screen = render_to_string(&mut app, 80, 24);
+    let screen_lines = render_to_lines(&mut app, 80, 24);
+    let screen = screen_lines.join("");
 
+    assert_eq!(
+        modal_border_width(&screen_lines, "Session Tags"),
+        MODAL_MIN_WIDTH as usize
+    );
     assert!(screen.contains("owner"));
     assert!(screen.contains("platform"));
     assert!(screen.contains("phase"));
