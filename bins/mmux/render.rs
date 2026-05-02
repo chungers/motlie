@@ -846,6 +846,7 @@ const TAG_INPUT_SECTION_HEIGHT: u16 = 2;
 const TAG_LIST_MAX_ROWS: usize = 5;
 const TAG_LIST_PREFIX_WIDTH: u16 = 2;
 const TAG_KEY_COLUMN_PADDING: u16 = 4;
+const TAG_EMPTY_KEY_COLUMN_PERCENT: u16 = 30;
 const TAG_EDIT_ROW_OVERHEAD: usize = 6;
 const TAG_LIST_ROW_OVERHEAD: usize = 7;
 
@@ -864,7 +865,7 @@ fn tag_indicator_column_width(area_width: u16) -> u16 {
     min(WIDTH, area_width)
 }
 
-fn tag_key_column_width(
+pub(crate) fn tag_key_column_width(
     area_width: u16,
     tags: &[crate::model::SessionTagRow],
     key_input: &str,
@@ -878,6 +879,11 @@ fn tag_key_column_width(
     if max_key_width == 0 {
         return 0;
     }
+    let empty_tags_default = if tags.is_empty() {
+        empty_session_tags_key_column_width(area_width, prefix_width)
+    } else {
+        0
+    };
     let longest_key = tags
         .iter()
         .map(|tag| tag.key.chars().count())
@@ -885,7 +891,18 @@ fn tag_key_column_width(
         .max()
         .unwrap_or(0)
         .saturating_add(TAG_KEY_COLUMN_PADDING as usize) as u16;
-    min(longest_key, max_key_width)
+    min(max(longest_key, empty_tags_default), max_key_width)
+}
+
+fn empty_session_tags_key_column_width(area_width: u16, prefix_width: u16) -> u16 {
+    let edit_strip_width = area_width.saturating_sub(prefix_width);
+    if edit_strip_width == 0 {
+        return 0;
+    }
+    max(
+        1,
+        ((edit_strip_width as u32 * TAG_EMPTY_KEY_COLUMN_PERCENT as u32) / 100) as u16,
+    )
 }
 
 fn no_session_tags_line(columns: TagColumns) -> Line<'static> {

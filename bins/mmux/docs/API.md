@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when there are no tag rows. |
 | 2026-05-02 | @codex | Tightened `SessionSortMode::Tag`: rows only count as tagged when they have a visible non-empty checked-tag value, and the `s` toggle selects the first row after sorting so the new top is visible. |
 | 2026-05-02 | @codex | Added `SessionSortMode` and list-pane `s` toggle: default activity sort, or tag sort that groups checked-tag rows first and orders by tag value, activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback: session refresh now batch-loads selected tag metadata once per host, Session Tags Cancel focus is reachable, modal session identity is grouped, tag UI state is grouped, and render sizing lives in `render.rs`. |
