@@ -135,6 +135,13 @@ impl SessionInfo {
 /// blobs into option-format paths.
 pub const SESSION_TAG_VALUE_MAX_BYTES: usize = 2 * 1024;
 
+/// Maximum supported value size for a session environment variable.
+///
+/// tmux environment values are regular command arguments in this API. Keeping
+/// them bounded avoids accidentally piping large blobs through command
+/// construction paths.
+pub const SESSION_ENV_VAR_VALUE_MAX_BYTES: usize = 8 * 1024;
+
 /// Maximum supported tmux status-style string size.
 ///
 /// The style is passed as one tmux option value. Keeping it bounded avoids
@@ -289,6 +296,46 @@ impl SessionTag {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionEnvVar {
+    name: String,
+    value: String,
+}
+
+impl SessionEnvVar {
+    /// Create a validated session environment variable.
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        let value = value.into();
+        validate_session_env_var_name(&name)?;
+        validate_session_env_var_value(&value)?;
+        Ok(Self { name, value })
+    }
+
+    pub(crate) fn from_parts(name: &str, value: String) -> Result<Self> {
+        validate_session_env_var_name(name)?;
+        validate_session_env_var_value(&value)?;
+        Ok(Self {
+            name: name.to_string(),
+            value,
+        })
+    }
+
+    /// Environment variable name, for example `PATH`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Raw environment variable value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub(crate) fn into_value(self) -> String {
+        self.value
+    }
+}
+
 pub(crate) fn validate_session_tag_component(kind: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::Parse(format!("{kind} cannot be empty")));
@@ -315,6 +362,43 @@ pub(crate) fn validate_session_tag_value(value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
         return Err(Error::Parse(
             "tag value cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_session_env_var_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::Parse(
+            "environment variable name cannot be empty".to_string(),
+        ));
+    }
+    let mut bytes = name.bytes();
+    let first = bytes.next().expect("name is not empty");
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return Err(Error::Parse(format!(
+            "environment variable name must start with an ASCII letter or '_': {name:?}"
+        )));
+    }
+    if !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        return Err(Error::Parse(format!(
+            "environment variable name must contain only ASCII letters, digits or '_': {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_session_env_var_value(value: &str) -> Result<()> {
+    if value.len() > SESSION_ENV_VAR_VALUE_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "environment variable value is {} bytes, exceeding {} byte limit",
+            value.len(),
+            SESSION_ENV_VAR_VALUE_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "environment variable value cannot contain control characters".to_string(),
         ));
     }
     Ok(())

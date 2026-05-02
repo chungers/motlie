@@ -1099,24 +1099,27 @@ async fn set_tag_from_modal(
         return Ok(());
     };
     match host.session_by_id(session.id()).await? {
-        Some(target) => match target.set_tag(TAG_PREFIX, &key, &value).await {
-            Ok(()) => {
-                app.status = StatusBanner::info(if fleet.is_multi() {
-                    format!(
-                        "set tag {key} on {} at {}",
-                        session.name(),
-                        session.host_label
-                    )
-                } else {
-                    format!("set tag {key} on {}", session.name())
-                });
-                reload_session_tags_modal(fleet, app, session, Some(key), None).await?;
-                refresh_sessions_quiet(fleet, app, false).await?;
+        Some(target) => {
+            let tags = target.tags(TAG_PREFIX).await?;
+            match tags.set(&key, &value).await {
+                Ok(()) => {
+                    app.status = StatusBanner::info(if fleet.is_multi() {
+                        format!(
+                            "set tag {key} on {} at {}",
+                            session.name(),
+                            session.host_label
+                        )
+                    } else {
+                        format!("set tag {key} on {}", session.name())
+                    });
+                    reload_session_tags_modal(fleet, app, session, Some(key), None).await?;
+                    refresh_sessions_quiet(fleet, app, false).await?;
+                }
+                Err(err) => {
+                    app.status = StatusBanner::error(format!("set tag failed: {err}"));
+                }
             }
-            Err(err) => {
-                app.status = StatusBanner::error(format!("set tag failed: {err}"));
-            }
-        },
+        }
         None => {
             app.modal = None;
             refresh_sessions(fleet, app, true).await?;
@@ -1143,34 +1146,38 @@ async fn unset_tag_from_modal(
         return Ok(());
     };
     match host.session_by_id(session.id()).await? {
-        Some(target) => match target.unset_tag(TAG_PREFIX, &key).await {
-            Ok(()) => {
-                if selected_key.as_deref() == Some(key.as_str()) {
-                    if let Err(err) = target.unset_tag(TAG_PREFIX, SELECTED_TAG_KEY_OPTION).await {
-                        app.status = StatusBanner::error(format!(
-                            "deleted tag {key}, but clearing selected tag failed: {err}"
-                        ));
-                        reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
-                        refresh_sessions_quiet(fleet, app, false).await?;
-                        return Ok(());
+        Some(target) => {
+            let tags = target.tags(TAG_PREFIX).await?;
+            match tags.unset(&key).await {
+                Ok(()) => {
+                    if selected_key.as_deref() == Some(key.as_str()) {
+                        if let Err(err) = tags.unset(SELECTED_TAG_KEY_OPTION).await {
+                            app.status = StatusBanner::error(format!(
+                                "deleted tag {key}, but clearing selected tag failed: {err}"
+                            ));
+                            reload_session_tags_modal(fleet, app, session, None, Some(index))
+                                .await?;
+                            refresh_sessions_quiet(fleet, app, false).await?;
+                            return Ok(());
+                        }
                     }
+                    app.status = StatusBanner::info(if fleet.is_multi() {
+                        format!(
+                            "deleted tag {key} on {} at {}",
+                            session.name(),
+                            session.host_label
+                        )
+                    } else {
+                        format!("deleted tag {key} on {}", session.name())
+                    });
+                    reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
+                    refresh_sessions_quiet(fleet, app, false).await?;
                 }
-                app.status = StatusBanner::info(if fleet.is_multi() {
-                    format!(
-                        "deleted tag {key} on {} at {}",
-                        session.name(),
-                        session.host_label
-                    )
-                } else {
-                    format!("deleted tag {key} on {}", session.name())
-                });
-                reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
-                refresh_sessions_quiet(fleet, app, false).await?;
+                Err(err) => {
+                    app.status = StatusBanner::error(format!("delete tag failed: {err}"));
+                }
             }
-            Err(err) => {
-                app.status = StatusBanner::error(format!("delete tag failed: {err}"));
-            }
-        },
+        }
         None => {
             app.modal = None;
             refresh_sessions(fleet, app, true).await?;
@@ -1197,13 +1204,10 @@ async fn select_tag_from_modal(
     };
     match host.session_by_id(session.id()).await? {
         Some(target) => {
+            let tags = target.tags(TAG_PREFIX).await?;
             let result = match key.as_deref() {
-                Some(key) => {
-                    target
-                        .set_tag(TAG_PREFIX, SELECTED_TAG_KEY_OPTION, key)
-                        .await
-                }
-                None => target.unset_tag(TAG_PREFIX, SELECTED_TAG_KEY_OPTION).await,
+                Some(key) => tags.set(SELECTED_TAG_KEY_OPTION, key).await,
+                None => tags.unset(SELECTED_TAG_KEY_OPTION).await,
             };
             match result {
                 Ok(()) => {
