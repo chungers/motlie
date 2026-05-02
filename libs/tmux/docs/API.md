@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added narrow session-local status-left APIs: `StatusLeft`, `StatusLeftLength`, and `Target::{set,unset,read_local}_status_left*()` for temporary attach display overrides. |
 | 2026-05-02 | @codex | Added narrow session-local status bar styling API: `StatusStyle`, `Target::set_status_style()`, `unset_status_style()`, and `read_local_status_style()`. |
 | 2026-05-02 | @codex | Added `HostHandle::list_tags_for_session_infos(prefix, sessions)` to batch-read session metadata tags for a fresh session listing in one tmux command. |
 | 2026-05-01 | @codex | Added `HostHandle::target_for_session_info()` so consumers enriching a fresh `list_sessions()` result can build a session `Target` without issuing a second session-discovery query. |
@@ -873,23 +874,31 @@ stopped-job state after `Ctrl-b d`.
 `AttachExit::shell_status()` maps normal exits to their exit code and Unix
 signal exits to `128 + signal`, which is the value CLI callers should return.
 
-### Session Status Style
+### Session Status Bar Overrides
 
 ```rust
-use motlie_tmux::StatusStyle;
+use motlie_tmux::{StatusLeft, StatusLeftLength, StatusStyle};
 
 let blue = StatusStyle::new("bg=blue,fg=white")?;
 target.set_status_style(&blue).await?;
 let previous = target.read_local_status_style().await?;
 target.unset_status_style().await?;
+
+let left = StatusLeft::new("#{=40:session_name}")?;
+target.set_status_left(&left).await?;
+target.set_status_left_length(StatusLeftLength::new(40)).await?;
+let previous_left = target.read_local_status_left().await?;
+let previous_len = target.read_local_status_left_length().await?;
+target.unset_status_left().await?;
+target.unset_status_left_length().await?;
 ```
 
 These methods are session-target only and use the stable session id with tmux
-`set-option -t <session-id> status-style ...` / `set-option -u`. The read path
-uses `show-option -q -t <session-id> status-style` and returns only a
-session-local override; inherited/global styles return `Ok(None)`.
-`StatusStyle` validates transport-safety properties only: non-empty, no control
-characters, and at most 512 bytes. tmux remains responsible for style syntax.
+`set-option -t <session-id> ...` / `set-option -u`. The read paths use
+`show-option -q -t <session-id> ...` and return only session-local overrides;
+inherited/global values return `Ok(None)`. `StatusStyle` and `StatusLeft`
+validate transport-safety properties only. tmux remains responsible for style
+and format syntax.
 
 ### Session Tags
 
@@ -2356,6 +2365,7 @@ assert!(issues.is_empty());
 | `SessionInfo` | name, id (`SessionId`), created, activity (aggregated `max(session_activity, max(window_activity))` per issue #237), attached_count, window_count, group |
 | `SessionTags` | prefix-scoped session metadata helper returned by `Target::tags(prefix)` |
 | `SessionTag` | validated prefix, key, value for one namespaced session metadata tag |
+| `StatusStyle` / `StatusLeft` / `StatusLeftLength` | Session-local tmux status bar override values used by narrow `Target` status APIs |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |

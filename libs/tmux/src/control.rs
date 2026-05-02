@@ -6,8 +6,8 @@ use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
     validate_session_tag_value, CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionTag,
-    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusStyle, TmuxSocket,
-    WindowInfo,
+    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength,
+    StatusStyle, TmuxSocket, WindowInfo,
 };
 
 /// Shell-escape a string for safe interpolation into shell commands.
@@ -641,6 +641,135 @@ pub(crate) async fn read_local_session_status_style_with_prefix(
     }
     let value = parse_tmux_option_value(value)?;
     StatusStyle::from_tmux_value(value).map(Some)
+}
+
+/// Set session-local tmux status-left format.
+pub(crate) async fn set_session_status_left_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    status_left: &StatusLeft,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} status-left {}",
+        prefix,
+        shell_escape(target),
+        shell_escape(status_left.as_str())
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset session-local tmux status-left format so inherited format applies.
+pub(crate) async fn unset_session_status_left_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} status-left",
+        prefix,
+        shell_escape(target),
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read only the session-local status-left override.
+pub(crate) async fn read_local_session_status_left_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<StatusLeft>> {
+    let cmd = format!(
+        "{} show-option -q -t {} status-left",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed status-left option without value: {line}"
+        )));
+    };
+    if option_name != "status-left" {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading status-left"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    StatusLeft::from_tmux_value(value).map(Some)
+}
+
+/// Set session-local tmux status-left-length.
+pub(crate) async fn set_session_status_left_length_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    length: StatusLeftLength,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} status-left-length {}",
+        prefix,
+        shell_escape(target),
+        length.as_u32()
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset session-local tmux status-left-length so inherited length applies.
+pub(crate) async fn unset_session_status_left_length_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} status-left-length",
+        prefix,
+        shell_escape(target),
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read only the session-local status-left-length override.
+pub(crate) async fn read_local_session_status_left_length_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<StatusLeftLength>> {
+    let cmd = format!(
+        "{} show-option -q -t {} status-left-length",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed status-left-length option without value: {line}"
+        )));
+    };
+    if option_name != "status-left-length" {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading status-left-length"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    let length = value.parse::<u32>().map_err(|err| {
+        Error::Parse(format!(
+            "failed to parse status-left-length {value:?}: {err}"
+        ))
+    })?;
+    Ok(Some(StatusLeftLength::new(length)))
 }
 
 /// List all tags under one namespace prefix for multiple sessions in one tmux call.
@@ -1347,5 +1476,61 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("status-left"));
+    }
+
+    #[tokio::test]
+    async fn status_left_commands_target_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_response(
+                "tmux set-option -t '$7' status-left '#{=40:session_name}'",
+                "",
+            )
+            .with_response("tmux set-option -t '$7' status-left-length 40", "")
+            .with_response(
+                "tmux show-option -q -t '$7' status-left-length",
+                "status-left-length 32\n",
+            )
+            .with_response("tmux set-option -u -t '$7' status-left-length", "")
+            .with_response(
+                "tmux show-option -q -t '$7' status-left",
+                "status-left \"session: #{session_name}\"\n",
+            )
+            .with_response("tmux set-option -u -t '$7' status-left", "");
+        let transport = TransportKind::Mock(mock);
+
+        set_session_status_left_with_prefix(
+            &transport,
+            "tmux",
+            "$7",
+            &StatusLeft::new("#{=40:session_name}").unwrap(),
+        )
+        .await
+        .unwrap();
+        let left = read_local_session_status_left_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        unset_session_status_left_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        set_session_status_left_length_with_prefix(
+            &transport,
+            "tmux",
+            "$7",
+            StatusLeftLength::new(40),
+        )
+        .await
+        .unwrap();
+        let length = read_local_session_status_left_length_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        unset_session_status_left_length_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            left,
+            Some(StatusLeft::new("session: #{session_name}").unwrap())
+        );
+        assert_eq!(length, Some(StatusLeftLength::new(32)));
     }
 }

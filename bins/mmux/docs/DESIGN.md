@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=40:session_name}` with `status-left-length=40`, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
@@ -1440,9 +1441,11 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 4. Resolve the highlighted session id to a `Target` via the stable-id
    library path. If the session vanished between selection and resolve
    (race), show stderr message and re-enter the TUI.
-5. Best-effort read the selected session's local `status-style`, then set
-   `status-style bg=#002b55,fg=white` through `Target::set_status_style()`. Style
-   failures warn to stderr but do not block attach.
+5. Best-effort read the selected session's local `status-style`,
+   `status-left`, and `status-left-length`, then set `status-style
+   bg=#002b55,fg=white`, `status-left "#{=40:session_name}"`, and
+   `status-left-length 40` through narrow `Target` status APIs. Failures warn to
+   stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited
@@ -1454,8 +1457,9 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
      group via `tcsetpgrp` so foreground signals (`SIGINT`, `SIGTSTP`,
      `SIGWINCH`) reach the child, not the parent.
 7. Call `wait()` (parent blocks while child holds the terminal).
-8. Restore the previous local `status-style` if one existed, otherwise unset the
-   local override. Restore failures warn to stderr and do not change attach exit
+8. Restore previous local `status-style`, `status-left`, and
+   `status-left-length` values if they existed, otherwise unset the local
+   overrides. Restore failures warn to stderr and do not change attach exit
    handling.
 9. On `wait()` return, branch on mode and child exit status:
 

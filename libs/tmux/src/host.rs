@@ -1549,6 +1549,109 @@ impl Target {
         .await
     }
 
+    /// Set this session's local tmux status-left format.
+    ///
+    /// This is intentionally narrow and session-target only. It dispatches
+    /// against the stable session id with `set-option -t <id> status-left`.
+    pub async fn set_status_left(&self, status_left: &StatusLeft) -> Result<()> {
+        let session_id = self
+            .session_for_operation("set_status_left")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::set_session_status_left_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &session_id,
+            status_left,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status-left override.
+    pub async fn unset_status_left(&self) -> Result<()> {
+        let session_id = self
+            .session_for_operation("unset_status_left")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::unset_session_status_left_with_prefix(&self.inner.transport, &prefix, &session_id)
+            .await
+    }
+
+    /// Read this session's local status-left override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux status-left values.
+    pub async fn read_local_status_left(&self) -> Result<Option<StatusLeft>> {
+        let session_id = self
+            .session_for_operation("read_local_status_left")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::read_local_session_status_left_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &session_id,
+        )
+        .await
+    }
+
+    /// Set this session's local tmux status-left-length value.
+    pub async fn set_status_left_length(&self, length: StatusLeftLength) -> Result<()> {
+        let session_id = self
+            .session_for_operation("set_status_left_length")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::set_session_status_left_length_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &session_id,
+            length,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status-left-length override.
+    pub async fn unset_status_left_length(&self) -> Result<()> {
+        let session_id = self
+            .session_for_operation("unset_status_left_length")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::unset_session_status_left_length_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &session_id,
+        )
+        .await
+    }
+
+    /// Read this session's local status-left-length override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux status-left-length values.
+    pub async fn read_local_status_left_length(&self) -> Result<Option<StatusLeftLength>> {
+        let session_id = self
+            .session_for_operation("read_local_status_left_length")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::read_local_session_status_left_length_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &session_id,
+        )
+        .await
+    }
+
     async fn tags_with_operation(
         &self,
         prefix: &str,
@@ -3013,6 +3116,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_status_left_set_read_and_unset_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("set-option -t '$7' status-left '#{=40:session_name}'", "")
+            .with_response("set-option -t '$7' status-left-length 40", "")
+            .with_response(
+                "show-option -q -t '$7' status-left-length",
+                "status-left-length 32\n",
+            )
+            .with_response("set-option -u -t '$7' status-left-length", "")
+            .with_response(
+                "show-option -q -t '$7' status-left",
+                "status-left \"#{session_name}\"\n",
+            )
+            .with_response("set-option -u -t '$7' status-left", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target
+            .set_status_left(&StatusLeft::new("#{=40:session_name}").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            target.read_local_status_left().await.unwrap(),
+            Some(StatusLeft::new("#{session_name}").unwrap())
+        );
+        target.unset_status_left().await.unwrap();
+        target
+            .set_status_left_length(StatusLeftLength::new(40))
+            .await
+            .unwrap();
+        assert_eq!(
+            target.read_local_status_left_length().await.unwrap(),
+            Some(StatusLeftLength::new(32))
+        );
+        target.unset_status_left_length().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn session_tags_reject_invalid_inputs_before_exec() {
         let mock = MockTransport::new()
             .with_error("set-option", "validation should run before exec")
@@ -3064,12 +3217,10 @@ mod tests {
         assert!(window_target.read_tag("mmux", "foo").await.is_err());
         assert!(window_target.list_tags("mmux").await.is_err());
         assert!(window_target.tags("mmux").await.is_err());
-        assert!(
-            window_target
-                .set_status_style(&StatusStyle::new("bg=blue").unwrap())
-                .await
-                .is_err()
-        );
+        assert!(window_target
+            .set_status_style(&StatusStyle::new("bg=blue").unwrap())
+            .await
+            .is_err());
         assert!(window_target.unset_status_style().await.is_err());
         assert!(window_target.read_local_status_style().await.is_err());
         assert!(pane_target.set_tag("mmux", "foo", "bar").await.is_err());
@@ -3077,12 +3228,10 @@ mod tests {
         assert!(pane_target.read_tag("mmux", "foo").await.is_err());
         assert!(pane_target.list_tags("mmux").await.is_err());
         assert!(pane_target.tags("mmux").await.is_err());
-        assert!(
-            pane_target
-                .set_status_style(&StatusStyle::new("bg=blue").unwrap())
-                .await
-                .is_err()
-        );
+        assert!(pane_target
+            .set_status_style(&StatusStyle::new("bg=blue").unwrap())
+            .await
+            .is_err());
         assert!(pane_target.unset_status_style().await.is_err());
         assert!(pane_target.read_local_status_style().await.is_err());
     }

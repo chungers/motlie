@@ -17,6 +17,8 @@ pub(crate) const MODAL_TEXT_FIELD_HEIGHT: u16 = 3;
 pub(crate) const STATUS_BAR_BG: Color = Color::Rgb(0, 43, 85);
 pub(crate) const STATUS_BAR_MNEMONIC_FG: Color = Color::Rgb(255, 111, 97);
 pub(crate) const MMUX_ATTACH_STATUS_STYLE: &str = "bg=#002b55,fg=white";
+pub(crate) const MMUX_ATTACH_STATUS_LEFT: &str = "#{=40:session_name}";
+pub(crate) const MMUX_ATTACH_STATUS_LEFT_LENGTH: u32 = 40;
 pub(crate) const HOST_COLOR_SQUARE: &str = "■";
 pub(crate) const HOST_COLOR_PALETTE: [Color; 5] = [
     Color::Rgb(38, 198, 218),

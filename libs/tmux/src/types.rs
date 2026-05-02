@@ -140,6 +140,7 @@ pub const SESSION_TAG_VALUE_MAX_BYTES: usize = 2 * 1024;
 /// The style is passed as one tmux option value. Keeping it bounded avoids
 /// accidentally piping large content through command construction paths.
 pub const STATUS_STYLE_MAX_BYTES: usize = 512;
+pub const STATUS_LEFT_MAX_BYTES: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StatusStyle(String);
@@ -163,6 +164,43 @@ impl StatusStyle {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusLeft(String);
+
+impl StatusLeft {
+    /// Create a validated tmux status-left format string.
+    ///
+    /// This intentionally validates only transport-safety properties and lets
+    /// tmux validate format syntax.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_status_left(&value)?;
+        Ok(Self(value))
+    }
+
+    pub(crate) fn from_tmux_value(value: String) -> Result<Self> {
+        validate_status_left(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusLeftLength(u32);
+
+impl StatusLeftLength {
+    pub fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub fn as_u32(self) -> u32 {
+        self.0
     }
 }
 
@@ -296,6 +334,22 @@ pub(crate) fn validate_status_style(value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
         return Err(Error::Parse(
             "status style cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_status_left(value: &str) -> Result<()> {
+    if value.len() > STATUS_LEFT_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "status-left is {} bytes, exceeding {} byte limit",
+            value.len(),
+            STATUS_LEFT_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "status-left cannot contain control characters".to_string(),
         ));
     }
     Ok(())
@@ -933,6 +987,17 @@ mod tests {
         assert!(StatusStyle::new("").is_err());
         assert!(StatusStyle::new("bg=blue\nfg=white").is_err());
         assert!(StatusStyle::new("x".repeat(STATUS_STYLE_MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn status_left_validates_transport_safe_values() {
+        let left = StatusLeft::new("#{=40:session_name}").unwrap();
+        assert_eq!(left.as_str(), "#{=40:session_name}");
+        assert_eq!(StatusLeftLength::new(40).as_u32(), 40);
+
+        assert!(StatusLeft::new("").is_ok());
+        assert!(StatusLeft::new("name\nbad").is_err());
+        assert!(StatusLeft::new("x".repeat(STATUS_LEFT_MAX_BYTES + 1)).is_err());
     }
 
     #[test]
