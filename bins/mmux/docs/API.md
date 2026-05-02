@@ -256,7 +256,7 @@ live in `cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`,
 The top status bar is derived from the app host identity and current local
 clock: single-host mode renders `<hostname> | <ip address>` as bold
 left-justified text, while multi-host mode renders a compact host-code legend
-such as `mmux alpha [A] beta [B]`. The current time renders right-justified.
+such as `mmux [A] alpha [B] beta`. The current time renders right-justified.
 The Sessions pane title is derived only from the live session list length:
 `Sessions [n]`. List rows show the display name, attached marker, optional
 multi-host code column such as `[A]`, and right-aligned `<active> / <age>`

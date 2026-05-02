@@ -8,7 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Changed multi-host status and row rendering to use host-code legends: top status shows `mmux <host> [A] ...`, and session rows show compact codes such as `[A]` instead of full hostnames. |
+| 2026-05-02 | @codex | Changed multi-host status and row rendering to use host-code legends: top status shows `mmux [A] <host> ...`, and session rows show compact codes such as `[A]` instead of full hostnames. |
 | 2026-05-01 | @codex | Reduced the modal minimum width by about 20% so Session Tags and other short modal content render in a narrower frame. |
 | 2026-05-01 | @codex | Persisted the Session Tags checked row in `@mmux/__selected-key`, filtered that internal option from the tag modal, and rendered the checked tag value as a right-aligned session-list column after the session name. |
 | 2026-05-01 | @codex | Updated the Session Tags modal layout to show up to five scrollable key/value rows styled like the session list, with a visually distinct edit row; `Tab` cycles Key ↔ Value, Enter submits from either edit field, and `c` marks the focused tag row with `✓`. |
@@ -184,7 +184,7 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 **UX differences in multi-host mode:**
 
 - Top status bar shows a host-code legend after `mmux` instead of the usual
-  `<hostname> | <ip>`, for example `mmux a.example.com [A] b.example.com [B]`.
+  `<hostname> | <ip>`, for example `mmux [A] a.example.com [B] b.example.com`.
 - Session list rows insert the host's compact code between the attached marker
   and the session name:
 

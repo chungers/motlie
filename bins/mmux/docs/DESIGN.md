@@ -863,7 +863,7 @@ impl HostFleet {
     pub(crate) fn is_multi(&self) -> bool { self.entries.len() > 1 }
     pub(crate) fn host_code(&self, id: &HostId) -> Option<String> { /* [A], [B], ... */ }
     pub(crate) fn host_code_width(&self) -> usize { /* max code width */ }
-    pub(crate) fn host_code_legend(&self) -> Option<String> { /* host [A] ... */ }
+    pub(crate) fn host_code_legend(&self) -> Option<String> { /* [A] host ... */ }
 }
 
 pub(crate) struct SessionRow {
@@ -972,7 +972,7 @@ from `HostFleet::host_code_width()`. The host-code column is omitted when
 `render::draw_top_status` switches on `fleet.is_multi()`:
 
 - Single: `<hostname> | <ip>                                     <time>`
-- Multi:  `mmux <host-a> [A] <host-b> [B]                          <time>`
+- Multi:  `mmux [A] <host-a> [B] <host-b>                          <time>`
 
 #### Scope and impact analysis
 
