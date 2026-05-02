@@ -366,7 +366,7 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
-        (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
+        (KeyCode::Enter, _) => {
             if let Some(selected) = app.selected_session() {
                 return Ok(KeyOutcome::Select(selected));
             }

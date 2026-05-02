@@ -303,11 +303,12 @@ fn status_line_omits_layout_mode() {
             "help",
             "pane",
             "monitor",
-            "enter/attach",
+            "Enter attach",
             "new",
             "kill",
             "rename",
             "tags",
+            "sort",
             "quit",
             "layout",
             "mod-←/→ resize",
@@ -332,11 +333,12 @@ fn status_line_omits_layout_mode() {
             "help",
             "pane",
             "monitor",
-            "enter/attach",
+            "Enter attach",
             "new",
             "kill",
             "rename",
             "tags",
+            "sort",
             "quit",
             "layout",
             "mod-↑/↓ resize",
@@ -360,8 +362,8 @@ fn status_line_underlines_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(underlined, "hpmankrtsql");
-    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | enter/attach | new | kill | rename | tags | sort | quit | layout | mod-←/→ resize ");
+    assert_eq!(underlined, "hpmnkrtsql");
+    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | Enter attach | new | kill | rename | tags | sort | quit | layout | mod-←/→ resize ");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -1260,7 +1262,26 @@ async fn q_exits_like_ctrl_c() {
 }
 
 #[tokio::test]
-async fn a_attaches_like_enter() {
+async fn enter_attaches_selected_session() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        outcome,
+        KeyOutcome::Select(SelectedSession { name, .. }) if name == "dev"
+    ));
+}
+
+#[tokio::test]
+async fn a_no_longer_attaches() {
     let fleet = local_fleet();
     let mut app = app_with_session();
 
@@ -1272,10 +1293,7 @@ async fn a_attaches_like_enter() {
     .await
     .unwrap();
 
-    assert!(matches!(
-        outcome,
-        KeyOutcome::Select(SelectedSession { name, .. }) if name == "dev"
-    ));
+    assert!(matches!(outcome, KeyOutcome::Continue));
 }
 
 #[tokio::test]

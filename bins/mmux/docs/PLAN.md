@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the empty Session Tags key edit column to 30% of the edit strip width. |
 | 2026-05-02 | @codex | Tightened list-pane tag sort: visible non-empty checked-tag values sort to the top, and `s` selects the first row in the new order. |
 | 2026-05-02 | @codex | Added list-pane `s` sort toggle with persistent activity/tag sort mode; tag sort groups checked-tag rows first, then orders by tag value, activity, host code, and session name. |
@@ -56,7 +57,7 @@ host event stream backed by stable-id snapshot reconciliation.
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0`, updated layout test targets, and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode tracking with portrait mode: `--portrait`, PTY aspect-ratio auto-detection, old `-s` rejection, updated layout/test references, and the requested Claude artifact ASCII logo. |
-| 2026-04-26 | @gpt55-dgx | Updated implementation tracking for validation changes: Enter/`a` attach, Left/Right focus transitions, macOS iTerm2 Shift-arrow resize documentation, ANSI-preserving sample detail, polling-backed session refresh, and compact graphical MOTD fallback. |
+| 2026-04-26 | @gpt55-dgx | Updated implementation tracking for validation changes: Enter attach, Left/Right focus transitions, macOS iTerm2 Shift-arrow resize documentation, ANSI-preserving sample detail, polling-backed session refresh, and compact graphical MOTD fallback. |
 | 2026-04-26 | @gpt55-dgx | Addressed second manual validation feedback: monitor mode now mirrors rendered screen snapshots with ANSI/VTE parsing, modified-arrow fallback resize is tested, and attach PTY restore uses a `SIGTTOU`-safe foreground-process-group path. |
 | 2026-04-26 | @gpt55-dgx | Addressed manual validation feedback: robust Ctrl-arrow resize matching, readable monitor-mode normalization, conventional detail scroll direction with scrollbar/range indicator, `q` quit key, and dashboard re-entry after detach when the selected session still exists. |
 | 2026-04-26 | @gpt55-dgx | Implemented the initial selector binary and remaining library support: workspace package, CLI modes, normal/short TUI layouts, MOTD fallback art, trait-backed sample/monitor detail sources, create/kill modals, stable-id attach/kill, ForceCommand bypass/reject handling, `ScrollbackQuery::LinesRange`, host event diff stream, and docs/API/CLI updates. |
@@ -284,7 +285,7 @@ References: [Layout](./DESIGN.md#layout),
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the blue bottom status bar to
   compact direction hints (`↑/↓ sel`, underlined `p` in `pane`), command hints
-  ordered as `help`, `pane`, `monitor`, `enter/attach`, `new`, `kill`, `quit`,
+  ordered as `help`, `pane`, `monitor`, `Enter attach`, `new`, `kill`, `quit`,
   `layout`, then resize, with shortcut letters underlined and app status with
   no `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
@@ -363,7 +364,7 @@ References: [Create Session](./DESIGN.md#create-session),
 
 References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
 
-- [x] 8.1 Implement default Enter/`a` attach path.
+- [x] 8.1 Implement default Enter attach path.
 - [x] 8.2 Restore alternate screen and terminal raw mode before attach.
 - [x] 8.3 Stop monitor state and drop the active host-event subscription before
   attach; selector re-entry starts from a fresh `list_sessions()` snapshot and
@@ -502,7 +503,7 @@ it lands as a follow-up.
 
 ### 11.6 Input + dispatch routing
 
-- [ ] 11.6a Attach (`Enter` / `a`): use highlighted `SessionRow` to look up
+- [ ] 11.6a Attach (Enter): use highlighted `SessionRow` to look up
   `fleet.entry(row.host_id).handle` and dispatch
   `handle.session_by_id(row.session.id).attach_current_pty()`.
 - [ ] 11.6b Monitor (`m`): same routing — detail-source `activate` takes the

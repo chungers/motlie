@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only key that selects a session for attach. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when there are no tag rows. |
 | 2026-05-02 | @codex | Tightened `SessionSortMode::Tag`: rows only count as tagged when they have a visible non-empty checked-tag value, and the `s` toggle selects the first row after sorting so the new top is visible. |
 | 2026-05-02 | @codex | Added `SessionSortMode` and list-pane `s` toggle: default activity sort, or tag sort that groups checked-tag rows first and orders by tag value, activity, host code, and session name. |
@@ -50,7 +51,7 @@ Implemented API contract for the initial `mmux` selector and the
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Updated selector API reality for portrait mode: `LayoutMode::Portrait`, `Cli::portrait`, PTY auto-detection, and old `-s` rejection. |
-| 2026-04-26 | @gpt55-dgx | Updated API notes for current selector behavior: Enter/`a` attach, Left/Right focus transitions, one-second polling-backed session refresh, and ANSI-preserving sample/detail rendering. |
+| 2026-04-26 | @gpt55-dgx | Updated API notes for current selector behavior: Enter attach, Left/Right focus transitions, one-second polling-backed session refresh, and ANSI-preserving sample/detail rendering. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for the second validation round: monitor detail now captures rendered screen snapshots with `ScreenStable` plus ANSI/VTE parsing, resize accepts modified-arrow fallbacks, and attach PTY restore is `SIGTTOU`-safe. |
 | 2026-04-26 | @gpt55-dgx | Updated implementation notes for validation fixes: monitor detail uses `CaptureNormalizeMode::PlainText`, `q` exits like `Ctrl-C`, and dashboard can re-enter after detach even when tmux returns a non-zero detach status. |
 | 2026-04-26 | @gpt55-dgx | Updated API reference to implemented reality: selector CLI config, trait-backed sample/monitor detail sources, stable-id create/kill/attach flows, `HostEventStream`, host MOTD read, and `LinesRange` scrollback. |
@@ -295,9 +296,10 @@ Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with `help`, then `pane`, `monitor`, `enter/attach`,
-`new`, `kill`, `rename`, `tags`, `quit`, `layout`, and the mode-specific resize
-hint; the command shortcut letter is underlined in each rendered label.
+the bottom status start with `help`, then `pane`, `monitor`, `Enter attach`,
+`new`, `kill`, `rename`, `tags`, `sort`, `quit`, `layout`, and the
+mode-specific resize hint. Enter attach is shown as a non-letter key hint; the
+command shortcut letter is underlined in each rendered command label.
 Direction hints render as `↑/↓ sel`.
 
 `r` opens `RenameSession` only when the session list has focus. The modal
@@ -505,7 +507,7 @@ Current implementation coverage:
 - `cargo test -p motlie-mmux`: CLI mutual exclusion, stable-id
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
-  auto-detection, `q` exit, Enter/`a` attach, detail scroll direction,
+  auto-detection, `q` exit, Enter attach, detail scroll direction,
   modified-arrow resize fallbacks, `p` pane focus transitions, `l` layout
   toggle behavior, compact status hint rendering, MOTD fallback/readability
   cases, full/compact placeholder rendering, landscape MOTD pane rendering,

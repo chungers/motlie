@@ -546,8 +546,7 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "monitor", 'm');
     push_status_separator(&mut spans);
-    spans.push(status_span("enter/"));
-    push_status_command(&mut spans, "attach", 'a');
+    spans.push(status_span("Enter attach"));
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "new", 'n');
     push_status_separator(&mut spans);

@@ -38,7 +38,7 @@ r rename highlighted session (list pane)
 t manage highlighted session tags
 s toggle activity/tag sort (list pane)
 h help
-Enter/a attach highlighted session
+Enter attach highlighted session
 mod-←/→ resize L/R in landscape
 mod-↑/↓ resize T/B in portrait
 q/Ctrl-C quit"#;

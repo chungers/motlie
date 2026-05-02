@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when the session has no existing tags. |
 | 2026-05-02 | @codex | Tightened list-pane `s` sort behavior: visible non-empty checked-tag values sort to the top, and the toggle selects the first row in the new order so the sorted top is shown immediately. |
 | 2026-05-02 | @codex | Added list-pane `s` sort toggle: activity sort remains default; tag sort groups checked-tag rows first, orders them by checked tag value, then falls back to activity, host code, and session name. |
@@ -48,7 +49,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, default startup auto-detects PTY aspect ratio, the old `-s` flag is rejected, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
-| 2026-04-26 | @gpt55-dgx | Updated selector keymap for attach on `a`, arrow-key pane focus, Shift-arrow resize behavior on macOS iTerm2, ANSI color in detail mode, polling-backed session refresh, and compact MOTD fallback graphics. |
+| 2026-04-26 | @gpt55-dgx | Updated selector keymap for attach behavior, arrow-key pane focus, Shift-arrow resize behavior on macOS iTerm2, ANSI color in detail mode, polling-backed session refresh, and compact MOTD fallback graphics. |
 | 2026-04-26 | @gpt55-dgx | Updated key and dashboard semantics after validation: resize accepts modified-arrow fallbacks when terminals remap Ctrl-arrow, monitor mode mirrors rendered screen content, and dashboard detach is protected against stopped selector jobs. |
 | 2026-04-26 | @gpt55-dgx | Updated CLI reference to match implemented binary behavior: `-s`, `--print-session`, `--dashboard`, optional SSH URI, ForceCommand rejection/bypass, stdout/stderr split, and exit semantics. |
 | 2026-04-26 | @gpt55-dgx | Initial CLI contract for issue #226 and PR #227: modes, arguments, keymap, stdout/stderr behavior, ForceCommand usage, and exit semantics. |
@@ -94,8 +95,8 @@ The v1 target form is positional only. There is no `--target` flag in v1.
 mmux
 ```
 
-Default mode opens the TUI against the local host. Pressing Enter or `a`
-attaches the user's current PTY to the highlighted tmux session. After detach,
+Default mode opens the TUI against the local host. Pressing Enter attaches the
+user's current PTY to the highlighted tmux session. After detach,
 the selector re-enters the TUI if the attach child exited successfully or the
 selected session still exists. If the child exits non-zero and the selected
 session is gone, the selector exits with the child status. `q` / `Ctrl-C` exits
@@ -204,7 +205,7 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   those row codes.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
-- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, `Enter`/`a`,
+- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, Enter,
   `m`, `n`, `k`, `Ctrl-C`/`q`, `l`, `p`, `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
@@ -260,7 +261,7 @@ Normal mode main-view keys:
 | `t` | Open Session Tags modal | Open Session Tags modal | Open Session Tags modal |
 | `s` | No-op | Toggle activity/tag sort | No-op |
 | `h` | Open Help modal | Open Help modal | Open Help modal |
-| Enter / `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
+| Enter | Attach highlighted session | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
 
 Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, `p`
@@ -305,9 +306,9 @@ right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
 `pane` for pane focus, with the shortcut letter underlined. It orders command
-hints as `help`, `pane`, `monitor`, `enter/attach`, `new`, `kill`, `rename`,
+hints as `help`, `pane`, `monitor`, `Enter attach`, `new`, `kill`, `rename`,
 `tags`, `sort`, `quit`, `layout`, then mode-specific resize; the command
-shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`s`/`q`/`l` are underlined in the
+shortcut letters `h`/`p`/`m`/`n`/`k`/`r`/`t`/`s`/`q`/`l` are underlined in the
 TUI. It does not repeat the host/time, show focus/layout mode, or prefix the
 hints with a `keys` label.
 
