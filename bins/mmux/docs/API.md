@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Persisted the Session Tags checked key in the internal `@mmux/__selected-key` option, filtered it from modal tag rows, loaded it into `SessionRow`, and rendered the checked tag value after the session name. |
 | 2026-05-01 | @codex | Added the Session Tags modal list model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, the visible list is capped at five scrollable rows, and `Tab` cycles Key/Value in a distinct edit row that submits with Enter. |
 | 2026-05-01 | @codex | Documented implemented session rename and tag-management modals: `r` captures host/session id and renames through `Target::rename`; `t` manages `@mmux/` tags through the `motlie-tmux` tag API, including add/update/delete. |
 | 2026-04-28 | @gpt55-dgx | Clarified exact `MOTLIE_MMUX_BYPASS=1` behavior and linked issue #232 for env-gated SSH integration coverage. |
@@ -284,15 +285,23 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 
 `t` opens `SessionTags` for the highlighted session. Rows are loaded from
 `Target::tags("mmux").await?.list().await?`, sorted lexicographically by
-stripped key, rendered without `@mmux/`, and shown in a five-row scroll window.
-The modal keeps row focus and bottom field focus explicit with
-`SessionTagsFocus`; `Tab` cycles the bottom Key/Value cells, `Shift-Tab`
-reverses that cycle, Enter on either edit field writes non-empty values through
-`Target::set_tag("mmux", key, value)`, `x` deletes through
-`Target::unset_tag("mmux", key)`, and `u` preloads the bottom fields.
-Pressing `c` on a focused tag row toggles a modal-local sort marker and renders
-`✓` in that row's marker column while selected; it does not write tmux
-metadata. `i` is not assigned by this feature.
+stripped key, rendered without `@mmux/`, filtered to hide the internal
+`@mmux/__selected-key` option, and shown in a five-row scroll window. The modal
+keeps row focus and bottom field focus explicit with `SessionTagsFocus`; `Tab`
+cycles the bottom Key/Value cells, `Shift-Tab` reverses that cycle, Enter on
+either edit field writes non-empty, non-reserved values through
+`Target::set_tag("mmux", key, value)`, where `__selected-key` is reserved for
+the internal marker. `x` deletes through
+`Target::unset_tag("mmux", key)`, and `u` preloads the bottom fields. Pressing
+`c` on a focused tag row toggles the checked key stored in
+`@mmux/__selected-key`, and renders `✓` in that row's marker column across
+different mmux processes.
+
+`fetch_fleet_rows()` enriches each `SessionRow` with the checked key/value by
+listing `@mmux/` options on each session, resolving `@mmux/__selected-key`, and
+copying the selected tag value into app state. `session_list_line()` renders
+that value immediately after the session name. `i` is not assigned by this
+feature.
 
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing

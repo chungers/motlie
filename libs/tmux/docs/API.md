@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-01 | @codex | Added `HostHandle::target_for_session_info()` so consumers enriching a fresh `list_sessions()` result can build a session `Target` without issuing a second session-discovery query. |
 | 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` and one-off `Target::unset_tag(prefix, key)` remove a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
 | 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
@@ -719,6 +720,21 @@ match host.session_by_id(&selected_id).await? {
 `session_by_id()` is useful when a UI stores that stable id at selection time
 and later needs to dispatch against the same tmux session after a display-name
 rename.
+
+### Build a target from a fresh session row
+
+```rust
+let sessions = host.list_sessions().await?;
+for session in sessions {
+    let target = host.target_for_session_info(session);
+    let tags = target.list_tags("mmux").await?;
+    println!("{} tags", tags.len());
+}
+```
+
+`target_for_session_info()` does not revalidate that the session still exists.
+It is intended for enrichment passes that already hold a just-fetched
+`SessionInfo` and want to avoid a second session-discovery query per row.
 
 ### Find by TargetSpec
 
