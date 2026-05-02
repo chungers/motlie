@@ -11,10 +11,10 @@ use ratatui::style::Modifier;
 
 use crate::cli::{Cli, is_portrait_pty, select_layout};
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS,
-    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_STYLE,
-    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
-    STATUS_BAR_MNEMONIC_FG,
+    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
+    HOST_COLOR_SQUARE, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
+    MMUX_ATTACH_STATUS_STYLE, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT,
+    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
     KeyOutcome, handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
@@ -2563,18 +2563,18 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
     assert!(multi.is_multi());
     assert_eq!(multi.len(), 2);
 
-    // host_code_width is 0 in single-host (column omitted) and the width of
-    // the largest assigned compact code in multi-host.
-    assert_eq!(single.host_code_width(), 0);
-    assert_eq!(single.host_code(&local_host_id()), None);
-    assert_eq!(multi.host_code_width(), "[A]".len());
+    // host_marker_width is 0 in single-host (column omitted) and the width of
+    // the compact square marker in multi-host.
+    assert_eq!(single.host_marker_width(), 0);
+    assert_eq!(single.host_color(&local_host_id()), None);
+    assert_eq!(multi.host_marker_width(), HOST_COLOR_SQUARE.chars().count());
     assert_eq!(
-        multi.host_code(&ssh_host_id("ssh://a")).as_deref(),
-        Some("[A]")
+        multi.host_color(&ssh_host_id("ssh://a")),
+        Some(HOST_COLOR_PALETTE[0])
     );
     assert_eq!(
-        multi.host_code(&ssh_host_id("ssh://b")).as_deref(),
-        Some("[B]")
+        multi.host_color(&ssh_host_id("ssh://b")),
+        Some(HOST_COLOR_PALETTE[1])
     );
 }
 
@@ -2605,7 +2605,7 @@ fn fleet_entry_lookup_by_host_id() {
 }
 
 #[test]
-fn multi_host_top_status_shows_host_code_legend() {
+fn multi_host_top_status_shows_host_color_legend() {
     let mut app = AppState::new(
         "host".to_string(),
         LayoutMode::Normal,
@@ -2623,7 +2623,21 @@ fn multi_host_top_status_shows_host_code_legend() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(rendered.starts_with("mmux [A] alpha [B] beta [C] gamma"));
+    assert!(rendered.starts_with("mmux ■ alpha ■ beta ■ gamma"));
+    let square_colors = line
+        .spans
+        .iter()
+        .filter(|span| span.content.as_ref() == HOST_COLOR_SQUARE)
+        .map(|span| span.style.fg)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        square_colors,
+        vec![
+            Some(HOST_COLOR_PALETTE[0]),
+            Some(HOST_COLOR_PALETTE[1]),
+            Some(HOST_COLOR_PALETTE[2]),
+        ]
+    );
     assert!(!rendered.contains("multi-host mode"));
     assert!(!rendered.contains("10.0.0"));
     assert!(rendered.ends_with(" 12:34:56 "));
@@ -2653,12 +2667,12 @@ fn multi_host_motd_pane_is_hidden() {
     let rendered = render_to_string(&mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-    assert!(rendered.contains("mmux [A] alpha [B] beta"));
+    assert!(rendered.contains("mmux ■ alpha ■ beta"));
     assert!(rendered.contains("Sessions [1]"));
 }
 
 #[test]
-fn host_code_width_pads_to_largest_host_code() {
+fn host_marker_width_aligns_multi_host_rows() {
     let fleet = HostFleet::from_entries(vec![
         HostEntry {
             id: ssh_host_id("ssh://a"),
@@ -2679,7 +2693,7 @@ fn host_code_width_pads_to_largest_host_code() {
             handle: HostHandle::local(),
         },
     ]);
-    assert_eq!(fleet.host_code_width(), "[A]".len());
+    assert_eq!(fleet.host_marker_width(), HOST_COLOR_SQUARE.chars().count());
 
     let alpha_row = make_row_for_host(session("dev", "$1"), ssh_host_id("ssh://a"), "alpha");
     let supercali_row = make_row_for_host(
@@ -2689,14 +2703,19 @@ fn host_code_width_pads_to_largest_host_code() {
     );
     let beta_row = make_row_for_host(session("dev", "$3"), ssh_host_id("ssh://c"), "beta");
 
-    let width = fleet.host_code_width();
-    let alpha_code = fleet.host_code(&alpha_row.host_id);
-    let supercali_code = fleet.host_code(&supercali_row.host_id);
-    let beta_code = fleet.host_code(&beta_row.host_id);
-    let alpha_line = session_list_line(&alpha_row, false, alpha_code.as_deref(), width, 80);
-    let supercali_line =
-        session_list_line(&supercali_row, false, supercali_code.as_deref(), width, 80);
-    let beta_line = session_list_line(&beta_row, false, beta_code.as_deref(), width, 80);
+    let width = fleet.host_marker_width();
+    let alpha_marker = fleet
+        .host_color(&alpha_row.host_id)
+        .map(|_| HOST_COLOR_SQUARE);
+    let supercali_marker = fleet
+        .host_color(&supercali_row.host_id)
+        .map(|_| HOST_COLOR_SQUARE);
+    let beta_marker = fleet
+        .host_color(&beta_row.host_id)
+        .map(|_| HOST_COLOR_SQUARE);
+    let alpha_line = session_list_line(&alpha_row, false, alpha_marker, width, 80);
+    let supercali_line = session_list_line(&supercali_row, false, supercali_marker, width, 80);
+    let beta_line = session_list_line(&beta_row, false, beta_marker, width, 80);
 
     // The session-name token "dev" appears at the same column index in every
     // row regardless of which host produced the row.
@@ -2714,8 +2733,8 @@ fn host_code_width_pads_to_largest_host_code() {
 }
 
 #[test]
-fn host_codes_extend_after_z() {
-    let entries = (0..27)
+fn host_colors_cycle_through_five_color_palette() {
+    let entries = (0..6)
         .map(|index| HostEntry {
             id: ssh_host_id(&format!("ssh://host{index}")),
             label: format!("host{index}"),
@@ -2725,35 +2744,41 @@ fn host_codes_extend_after_z() {
         .collect::<Vec<_>>();
     let fleet = HostFleet::from_entries(entries);
 
-    assert_eq!(fleet.host_code_width(), "[AA]".len());
+    assert_eq!(fleet.host_marker_width(), HOST_COLOR_SQUARE.chars().count());
     assert_eq!(
-        fleet.host_code(&ssh_host_id("ssh://host0")).as_deref(),
-        Some("[A]")
+        fleet.host_color(&ssh_host_id("ssh://host0")),
+        Some(HOST_COLOR_PALETTE[0])
     );
     assert_eq!(
-        fleet.host_code(&ssh_host_id("ssh://host25")).as_deref(),
-        Some("[Z]")
+        fleet.host_color(&ssh_host_id("ssh://host4")),
+        Some(HOST_COLOR_PALETTE[4])
     );
     assert_eq!(
-        fleet.host_code(&ssh_host_id("ssh://host26")).as_deref(),
-        Some("[AA]")
+        fleet.host_color(&ssh_host_id("ssh://host5")),
+        Some(HOST_COLOR_PALETTE[0])
     );
 }
 
 #[test]
-fn multi_host_session_row_inserts_host_code_column() {
+fn multi_host_session_row_inserts_host_color_marker_column() {
     let row = make_row_for_host(session("dev", "$1"), ssh_host_id("ssh://a"), "alpha");
-    let line = session_list_line(&row, false, Some("[A]"), "[A]".len(), 60);
-    // Format expected:  " * [A] dev"  (leading marker, attached, host code,
+    let line = session_list_line(
+        &row,
+        false,
+        Some(HOST_COLOR_SQUARE),
+        HOST_COLOR_SQUARE.chars().count(),
+        60,
+    );
+    // Format expected:  " * ■ dev"  (leading marker, attached, host square,
     // session name). The full hostname is reserved for the top legend.
-    assert!(line.contains("[A]"));
+    assert!(line.contains(HOST_COLOR_SQUARE));
     assert!(!line.contains("alpha"));
     assert!(line.contains("dev"));
-    let code_pos = line.find("[A]").expect("host code rendered");
+    let code_pos = line.find(HOST_COLOR_SQUARE).expect("host marker rendered");
     let dev_pos = line.find("dev").expect("session name rendered");
     assert!(
         code_pos < dev_pos,
-        "host code appears before session name: {line:?}"
+        "host marker appears before session name: {line:?}"
     );
 }
 
@@ -2761,9 +2786,9 @@ fn multi_host_session_row_inserts_host_code_column() {
 fn single_host_row_omits_hostname_column() {
     let row = make_row(session("dev", "$1"));
     let line = session_list_line(&row, false, None, 0, 30);
-    // No host-code column when host_code_width = 0 (single-host).
+    // No host-marker column when host_marker_width = 0 (single-host).
     assert!(line.contains("dev"));
-    assert!(!line.contains("[A]"));
+    assert!(!line.contains(HOST_COLOR_SQUARE));
 }
 
 #[test]

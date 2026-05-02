@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Tightened multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that selected row on the selected host. |
@@ -255,7 +256,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   while the session list is focused toggles tag grouping: rows with visible
   non-empty checked-tag values appear before rows without displayed tags, tag
   groups are ordered by the most recent activity in each group, and rows within
-  each group sort by activity time, host code, and session name. Empty
+  each group sort by activity time, host order, and session name. Empty
   checked-tag values sort with rows that have no displayed tag. Pressing `g`
   selects the first row in the new order and pressing `g` again restores
   activity sort. Sorting on the observer-side mark instead of raw host
@@ -802,17 +803,17 @@ existing single-host mode unchanged.
 
 **Functional differences in multi-host mode:**
 
-- Top status bar shows a host-code legend after `mmux`, replacing the
-  single-host hostname/IP indicator. Codes are assigned from configured host
-  order (`[A]`, `[B]`, ..., `[Z]`, `[AA]`, ...).
-- Session list rows insert the compact host-code column between the attached
-  marker and the session name. Format becomes:
+- Top status bar shows a host-color legend after `mmux`, replacing the
+  single-host hostname/IP indicator. Colors are assigned from configured host
+  order using a five-color palette and repeat after the fifth host.
+- Session list rows insert the compact host-color square column between the
+  attached marker and the session name. Format becomes:
 
   ```
-  > * <host-code> <session-name>          <active> / <age>
+  > * <host-square> <session-name>          <active> / <age>
   ```
 
-  Host-code column width is the widest assigned code for the configured hosts.
+  Host-square column width is one character.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
 - All command keys (`Up`/`Down`, `a` attach, `m` monitor, `n` new,
@@ -884,9 +885,9 @@ pub(crate) struct HostFleet {
 
 impl HostFleet {
     pub(crate) fn is_multi(&self) -> bool { self.entries.len() > 1 }
-    pub(crate) fn host_code(&self, id: &HostId) -> Option<String> { /* [A], [B], ... */ }
-    pub(crate) fn host_code_width(&self) -> usize { /* max code width */ }
-    pub(crate) fn host_code_legend(&self) -> Option<String> { /* [A] host ... */ }
+    pub(crate) fn host_color(&self, id: &HostId) -> Option<Color> { /* palette color */ }
+    pub(crate) fn host_marker_width(&self) -> usize { /* square width */ }
+    pub(crate) fn host_color_legend(&self) -> Option<Vec<(Color, String)>> { /* square + host */ }
 }
 
 pub(crate) struct SessionRow {
@@ -988,8 +989,8 @@ different views" requirement.
 #### Render: row format
 
 `render::draw_sessions` shifts to a single render path that emits the
-host-code column **only when `fleet.is_multi()`**. The column width is taken
-from `HostFleet::host_code_width()`. The host-code column is omitted when
+host-color square column **only when `fleet.is_multi()`**. The column width is taken
+from `HostFleet::host_marker_width()`. The host-color column is omitted when
 `is_multi()` is false, so single-host rendering is unchanged.
 
 #### Top status bar
@@ -997,7 +998,7 @@ from `HostFleet::host_code_width()`. The host-code column is omitted when
 `render::draw_top_status` switches on `fleet.is_multi()`:
 
 - Single: `<hostname> | <ip>                                     <time>`
-- Multi:  `mmux [A] <host-a> [B] <host-b>                          <time>`
+- Multi:  `mmux ■ <host-a> ■ <host-b>                          <time>`
 
 #### Scope and impact analysis
 
@@ -1017,11 +1018,11 @@ not required for v1.
 | `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. Make `MotdState` an `Option<MotdState>` field on `AppState`. |
 | `target_host.rs` | Rename / split: `connect_host(cli) → connect_fleet(cli) -> Result<HostFleet>`. Internally calls existing single-host connect for each entry. |
 | `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. `load_motd` only called when `fleet.is_multi() == false`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
-| `render.rs` | Single render path. `draw_sessions` adds optional host-code column when `fleet.is_multi()`. `draw_top_status` switches text by mode. `draw_motd` is gated on `app.motd.is_some()` (already gated in portrait — generalize to multi-host). Status hint set unchanged. |
+| `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. `draw_motd` is gated on `app.motd.is_some()` (already gated in portrait — generalize to multi-host). Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |
 | `main.rs` | Calls `connect_fleet` instead of `connect_host`. |
 | `forcecommand.rs` | No change (ForceCommand stays single-host; multi-host is operator-mode). |
-| `tests.rs` | New tests for: multi-host CLI parsing; fleet construction; merge-and-sort across hosts; row host-code column; top-status legend switching; per-host failure resilience; selection-by-(host_id, session_id) preservation across reorders. |
+| `tests.rs` | New tests for: multi-host CLI parsing; fleet construction; merge-and-sort across hosts; row host-color column; top-status legend switching; per-host failure resilience; selection-by-(host_id, session_id) preservation across reorders. |
 
 **No abstraction changes** to: `consts.rs`, `terminal.rs`, `forcecommand.rs`,
 `detail.rs` shape (only call-site changes inside `controller.rs`).
@@ -1283,7 +1284,7 @@ Single-poll reconcile loop driven by the main TUI loop:
      `activity_observed_at_local` descending; tag-group mode puts rows with
      visible non-empty checked-tag values before rows without displayed tags,
      orders tag groups by the most recent activity in each group, then sorts
-     rows within each group by activity time, host code, and session name
+     rows within each group by activity time, host order, and session name
    - preserve highlight by `(host_id, session_id)`, falling back to the
      clamped index if the session disappeared
    - if the monitored session id is absent, stop monitor mode, switch the
