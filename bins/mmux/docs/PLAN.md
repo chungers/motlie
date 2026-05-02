@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Fixed multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that target on the selected host. |
 | 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#002b55` and changed mnemonic letters to bold coral. |

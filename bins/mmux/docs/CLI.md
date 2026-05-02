@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Fixed multi-host kill dispatch so the kill modal acts on the selected row's captured host and stable session info. |
 | 2026-05-02 | @codex | Darkened status bars to `#002b55`, matched attach `status-style` to that shade, and changed mnemonic letters to bold coral. |

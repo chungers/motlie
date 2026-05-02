@@ -134,7 +134,7 @@ pub(crate) async fn refresh_sessions(
     force_detail: bool,
 ) -> Result<()> {
     let previous = current_selection_key(app);
-    refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, true).await
+    refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, true, None).await
 }
 
 pub(crate) async fn refresh_sessions_quiet(
@@ -143,7 +143,7 @@ pub(crate) async fn refresh_sessions_quiet(
     force_detail: bool,
 ) -> Result<()> {
     let previous = current_selection_key(app);
-    refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, false).await
+    refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, false, None).await
 }
 
 pub(crate) async fn refresh_sessions_preserving(
@@ -152,7 +152,25 @@ pub(crate) async fn refresh_sessions_preserving(
     force_detail: bool,
     previous: Option<(HostId, String)>,
 ) -> Result<()> {
-    refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, true).await
+    refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, true, None).await
+}
+
+async fn refresh_sessions_excluding(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    force_detail: bool,
+    excluded: (HostId, String),
+) -> Result<()> {
+    let previous = current_selection_key(app);
+    refresh_sessions_preserving_with_status(
+        fleet,
+        app,
+        force_detail,
+        previous,
+        true,
+        Some(excluded),
+    )
+    .await
 }
 
 fn current_selection_key(app: &AppState) -> Option<(HostId, String)> {
@@ -166,8 +184,12 @@ async fn refresh_sessions_preserving_with_status(
     force_detail: bool,
     previous: Option<(HostId, String)>,
     update_status: bool,
+    excluded: Option<(HostId, String)>,
 ) -> Result<()> {
-    let (rows, failures) = fetch_fleet_rows(fleet, &mut app.activity_tracker).await;
+    let (mut rows, failures) = fetch_fleet_rows(fleet, &mut app.activity_tracker).await;
+    if let Some((host_id, session_id)) = excluded.as_ref() {
+        rows.retain(|row| row.host_id != *host_id || row.session.id.as_str() != session_id);
+    }
     let closed_monitored = closed_monitored_session(app, &rows);
     let previous_key = previous.clone();
     app.session_list.set_rows_sorted(rows, fleet);
@@ -952,6 +974,7 @@ async fn kill_session_from_modal(
     let target = host.target_for_session_info(session.info.clone());
     match target.kill().await {
         Ok(()) => {
+            let killed_key = (session.host_id.clone(), session.id().to_string());
             let status = if fleet.is_multi() {
                 format!(
                     "killed session {} on {}",
@@ -961,7 +984,7 @@ async fn kill_session_from_modal(
             } else {
                 format!("killed session {}", session.name())
             };
-            refresh_sessions(fleet, app, true).await?;
+            refresh_sessions_excluding(fleet, app, true, killed_key).await?;
             app.status = StatusBanner::info(status);
         }
         Err(err) => {

@@ -1636,7 +1636,7 @@ async fn new_session_modal_creates_on_selected_multi_host() {
 }
 
 #[tokio::test]
-async fn kill_session_modal_kills_selected_multi_host() {
+async fn kill_session_modal_clears_selected_multi_host_row() {
     let alpha = HostHandle::new(
         TransportKind::Mock(
             MockTransport::new()
@@ -1649,7 +1649,11 @@ async fn kill_session_modal_kills_selected_multi_host() {
         TransportKind::Mock(
             MockTransport::new()
                 .with_response("kill-session -t '$7'", "")
-                .with_response("list-sessions", ""),
+                .with_response("list-sessions", "__MOTLIE_S__ build $7 10 0 1  100\n")
+                .with_response(
+                    "display-message -p '__MOTLIE_TAGS__ $7'",
+                    "__MOTLIE_TAGS__ $7\n",
+                ),
         ),
         None,
     );
