@@ -125,6 +125,7 @@ fn fleet_with(handle: HostHandle) -> HostFleet {
     HostFleet::from_entries(vec![HostEntry {
         id: local_host_id(),
         label: "host".to_string(),
+        alias: "host".to_string(),
         ip_address: "unknown".to_string(),
         handle,
     }])
@@ -2588,6 +2589,13 @@ fn ssh_host_entry(uri: &str, label: &str, ip: &str, handle: HostHandle) -> HostE
     HostEntry {
         id: ssh_host_id(uri),
         label: label.to_string(),
+        alias: uri
+            .strip_prefix("ssh://")
+            .unwrap_or(uri)
+            .split(['/', '?', ':'])
+            .next()
+            .unwrap_or(uri)
+            .to_string(),
         ip_address: ip.to_string(),
         handle,
     }
@@ -2635,6 +2643,7 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
     let single = HostFleet::from_entries(vec![HostEntry {
         id: local_host_id(),
         label: "h".to_string(),
+        alias: "h".to_string(),
         ip_address: "x".to_string(),
         handle: HostHandle::local(),
     }]);
@@ -2645,12 +2654,14 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
         HostEntry {
             id: ssh_host_id("ssh://a"),
             label: "alpha".to_string(),
+            alias: "a".to_string(),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://b"),
             label: "beta".to_string(),
+            alias: "b".to_string(),
             ip_address: "y".to_string(),
             handle: HostHandle::local(),
         },
@@ -2679,12 +2690,14 @@ fn fleet_entry_lookup_by_host_id() {
         HostEntry {
             id: ssh_host_id("ssh://a"),
             label: "alpha".to_string(),
+            alias: "a".to_string(),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://b"),
             label: "beta".to_string(),
+            alias: "b".to_string(),
             ip_address: "y".to_string(),
             handle: HostHandle::local(),
         },
@@ -2772,18 +2785,21 @@ fn host_marker_width_aligns_multi_host_rows() {
         HostEntry {
             id: ssh_host_id("ssh://a"),
             label: "alpha".to_string(),
+            alias: "a".to_string(),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://b"),
             label: "supercalifragilistic".to_string(),
+            alias: "b".to_string(),
             ip_address: "y".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://c"),
             label: "beta".to_string(),
+            alias: "c".to_string(),
             ip_address: "z".to_string(),
             handle: HostHandle::local(),
         },
@@ -2833,6 +2849,7 @@ fn host_colors_cycle_through_five_color_palette() {
         .map(|index| HostEntry {
             id: ssh_host_id(&format!("ssh://host{index}")),
             label: format!("host{index}"),
+            alias: format!("host{index}"),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         })

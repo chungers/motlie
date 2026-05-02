@@ -90,7 +90,7 @@ pub(crate) async fn fetch_fleet_rows(
                 }
             }
             Err(err) => {
-                failures.push(format!("{}: {err}", entry.label));
+                failures.push(format!("{}: {err}", entry.diagnostic_label()));
             }
         }
     }
