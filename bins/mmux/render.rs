@@ -282,17 +282,18 @@ pub(crate) fn session_list_line(
     let metadata = session_recency_text(row);
     let prefix_width = char_width(&prefix);
     let metadata_width = char_width(&metadata);
-    let display_name = session_row_display_name(row);
     let content_width = width.saturating_sub(RECENCY_RIGHT_MARGIN);
     if content_width < prefix_width + 1 + MIN_METADATA_GAP + metadata_width {
-        return pad_or_truncate(format!("{prefix}{display_name}"), width);
+        let name_width = width.saturating_sub(prefix_width);
+        let name = session_row_name_field(row, name_width);
+        return pad_or_truncate(format!("{prefix}{name}"), width);
     }
 
     let name_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(metadata_width)
         .saturating_sub(MIN_METADATA_GAP);
-    let name = truncate_chars(&display_name, name_width);
+    let name = session_row_name_field(row, name_width);
     let left = format!("{prefix}{name}");
     let padding = content_width
         .saturating_sub(char_width(&left))
@@ -304,11 +305,30 @@ pub(crate) fn session_list_line(
     )
 }
 
-fn session_row_display_name(row: &SessionRow) -> String {
-    match &row.selected_tag {
-        Some(tag) if !tag.value.is_empty() => format!("{} {}", row.session.name, tag.value),
-        _ => row.session.name.clone(),
+fn session_row_name_field(row: &SessionRow, width: usize) -> String {
+    if width == 0 {
+        return String::new();
     }
+    let Some(tag) = &row.selected_tag else {
+        return truncate_chars(&row.session.name, width);
+    };
+    if tag.value.is_empty() || width < 3 {
+        return truncate_chars(&row.session.name, width);
+    }
+
+    let value_budget = width.saturating_sub(2);
+    let value = truncate_chars(&tag.value, value_budget);
+    let value_width = char_width(&value);
+    if value_width == 0 {
+        return truncate_chars(&row.session.name, width);
+    }
+
+    let name_width = width.saturating_sub(value_width + 1);
+    let name = truncate_chars(&row.session.name, name_width);
+    let gap = width
+        .saturating_sub(char_width(&name))
+        .saturating_sub(value_width);
+    format!("{name}{}{value}", " ".repeat(gap))
 }
 
 pub(crate) fn session_recency_text(row: &SessionRow) -> String {

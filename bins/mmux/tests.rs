@@ -368,7 +368,7 @@ fn session_list_line_hides_stable_id() {
 }
 
 #[test]
-fn session_list_line_shows_selected_tag_value_after_name() {
+fn session_list_line_right_justifies_selected_tag_value() {
     let mut row = make_row_at(session_with_times("dev", "$42", 100, 110), 120);
     row.selected_tag = Some(SessionSelectedTag {
         key: "owner".to_string(),
@@ -376,8 +376,17 @@ fn session_list_line_shows_selected_tag_value_after_name() {
     });
 
     let line = session_list_line(&row, true, 0, 48);
+    let metadata = session_recency_text(&row);
+    let tag_start = line.find("platform").unwrap();
+    let metadata_start = line.find(&metadata).unwrap();
 
-    assert!(line.contains("dev platform"), "{line:?}");
+    assert!(line.contains("dev"), "{line:?}");
+    assert!(line.contains("platform"), "{line:?}");
+    assert!(!line.contains("dev platform"), "{line:?}");
+    assert_eq!(
+        metadata_start.saturating_sub(tag_start + "platform".len()),
+        2
+    );
     assert!(!line.contains("owner"));
 }
 

@@ -8,7 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-01 | @codex | Persisted the Session Tags checked row in `@mmux/__selected-key`, filtered that internal option from the tag modal, and rendered the checked tag value after the session name in the Sessions list. |
+| 2026-05-01 | @codex | Persisted the Session Tags checked row in `@mmux/__selected-key`, filtered that internal option from the tag modal, and rendered the checked tag value as a right-aligned session-list column after the session name. |
 | 2026-05-01 | @codex | Updated the Session Tags modal layout to show up to five scrollable key/value rows styled like the session list, with a visually distinct edit row; `Tab` cycles Key ↔ Value, Enter submits from either edit field, and `c` marks the focused tag row with `✓`. |
 | 2026-05-01 | @codex | Added session rename and tag management modals: `r` renames the highlighted session from list focus, `t` opens the unified tag list/add/update/delete modal, and `i` remains unassigned. |
 | 2026-04-29 | @opus47-macos-tmux | Updated recency-display semantics: activity column is observer-relative ("time since mmux last saw `session.activity` advance"); age column is `local_now − session.created` under an NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate age text but no functional regression. (Earlier drafts probed the host clock at fleet-connect via `#{epoch}` / `run-shell 'date +%s'`; that approach was abandoned because `run-shell` on tmux ≤ 3.4 corrupts the operator's attached pane.) |
@@ -321,8 +321,8 @@ value column takes the remaining width. The bottom Key/Value edit row is
 separated from the list, has no marker/add column, and submits with Enter. The
 internal `@mmux/__selected-key` option is filtered from this list, and
 `__selected-key` is reserved from edit-row writes. Tag writes still require
-non-empty values. Checked tag values render after session names in the Sessions
-list. Help
+non-empty values. Checked tag values render after session names as a
+right-aligned column in the Sessions list. Help
 renders the built-in motlie logo, build date, last 8 characters of the build git
 SHA, key functions, and a single Ok button. All modal content areas are
 separated from the button bar by a horizontal line.
