@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Attach now temporarily sets the selected tmux session's local `status-style` to blue and restores the previous local style after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when the session has no existing tags. |
 | 2026-05-02 | @codex | Tightened list-pane `s` sort behavior: visible non-empty checked-tag values sort to the top, and the toggle selects the first row in the new order so the sorted top is shown immediately. |
@@ -101,6 +102,11 @@ the selector re-enters the TUI if the attach child exited successfully or the
 selected session still exists. If the child exits non-zero and the selected
 session is gone, the selector exits with the child status. `q` / `Ctrl-C` exits
 without attach.
+
+Before attach, mmux best-effort sets the selected session's local tmux
+`status-style` to `bg=blue,fg=white`. After detach, it restores the previous
+local style or unsets the local override when none existed. If style setup or
+restore fails, mmux prints a warning and keeps the attach flow working.
 
 During default attach/re-entry, the parent `mmux` process keeps a small
 in-memory UI snapshot. On return from tmux detach, the selector restores the

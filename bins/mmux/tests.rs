@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    transport::MockTransport, HostHandle, SessionId, SessionInfo, TransportKind, SSH_DEFAULT_PORT,
+    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusStyle, TransportKind,
+    SSH_DEFAULT_PORT,
 };
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -32,6 +33,7 @@ use crate::render::{
     status_line_text, tag_key_column_width, top_status_line, use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
+use crate::{prepare_attach_status_style, restore_attach_status_style};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id).unwrap()
@@ -1294,6 +1296,42 @@ async fn a_no_longer_attaches() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
+}
+
+#[tokio::test]
+async fn attach_status_style_is_set_and_restored() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-option -q -t '$1' status-style",
+            "status-style bg=green,fg=black\n",
+        )
+        .with_response("set-option -t '$1' status-style 'bg=blue,fg=white'", "")
+        .with_response("set-option -t '$1' status-style 'bg=green,fg=black'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+
+    let snapshot = prepare_attach_status_style(&target).await.unwrap();
+    assert_eq!(
+        snapshot.previous,
+        Some(StatusStyle::new("bg=green,fg=black").unwrap())
+    );
+    restore_attach_status_style(&target, Some(snapshot)).await;
+}
+
+#[tokio::test]
+async fn attach_status_style_unsets_when_no_previous_local_style() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response("set-option -t '$1' status-style 'bg=blue,fg=white'", "")
+        .with_response("set-option -u -t '$1' status-style", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+
+    let snapshot = prepare_attach_status_style(&target).await.unwrap();
+    assert_eq!(snapshot.previous, None);
+    restore_attach_status_style(&target, Some(snapshot)).await;
 }
 
 #[tokio::test]

@@ -135,6 +135,37 @@ impl SessionInfo {
 /// blobs into option-format paths.
 pub const SESSION_TAG_VALUE_MAX_BYTES: usize = 2 * 1024;
 
+/// Maximum supported tmux status-style string size.
+///
+/// The style is passed as one tmux option value. Keeping it bounded avoids
+/// accidentally piping large content through command construction paths.
+pub const STATUS_STYLE_MAX_BYTES: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatusStyle(String);
+
+impl StatusStyle {
+    /// Create a validated tmux status-style value, for example
+    /// `bg=blue,fg=white`.
+    ///
+    /// This intentionally validates only transport-safety properties and lets
+    /// tmux validate style syntax.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_status_style(&value)?;
+        Ok(Self(value))
+    }
+
+    pub(crate) fn from_tmux_value(value: String) -> Result<Self> {
+        validate_status_style(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SessionTagPrefix(String);
 
@@ -246,6 +277,25 @@ pub(crate) fn validate_session_tag_value(value: &str) -> Result<()> {
     if value.chars().any(char::is_control) {
         return Err(Error::Parse(
             "tag value cannot contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_status_style(value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(Error::Parse("status style cannot be empty".to_string()));
+    }
+    if value.len() > STATUS_STYLE_MAX_BYTES {
+        return Err(Error::Parse(format!(
+            "status style is {} bytes, exceeding {} byte limit",
+            value.len(),
+            STATUS_STYLE_MAX_BYTES
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Parse(
+            "status style cannot contain control characters".to_string(),
         ));
     }
     Ok(())
@@ -873,6 +923,16 @@ mod tests {
         assert!(PaneAddress::parse("%1", "noseparator").is_err());
         assert!(PaneAddress::parse("%1", "session:nodot").is_err());
         assert!(PaneAddress::parse("%1", "session:abc.1").is_err());
+    }
+
+    #[test]
+    fn status_style_validates_transport_safe_values() {
+        let style = StatusStyle::new("bg=blue,fg=white").unwrap();
+        assert_eq!(style.as_str(), "bg=blue,fg=white");
+
+        assert!(StatusStyle::new("").is_err());
+        assert!(StatusStyle::new("bg=blue\nfg=white").is_err());
+        assert!(StatusStyle::new("x".repeat(STATUS_STYLE_MAX_BYTES + 1)).is_err());
     }
 
     #[test]

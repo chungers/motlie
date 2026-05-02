@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-02 | @codex: Add narrow session-local status-style API on `Target`, backed by tmux `set-option -t <session-id> status-style`, for consumers that need attach/session chrome styling without a generic arbitrary-option API. | Target |
 | 2026-05-02 | @codex: DC34 follow-up for mmux PR feedback — add a host-level batch session-tag read API so selector refreshes can enrich a fresh session listing without one round trip per session. | Target, DC34 |
 | 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)` plus one-off `Target::unset_tag(prefix, key)`. | Target, DC34 |
 | 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add scoped `SessionTags`, validated self-describing `SessionTag`, and one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
@@ -3876,12 +3877,17 @@ pub struct SessionTags<'a> {
     /* transport, tmux prefix, stable session id, validated tag prefix */
 }
 
+pub struct StatusStyle(String);
+
 impl Target {
     pub async fn tags(&self, prefix: &str) -> Result<SessionTags<'_>>;
     pub async fn set_tag(&self, prefix: &str, key: &str, value: &str) -> Result<()>;
     pub async fn read_tag(&self, prefix: &str, key: &str) -> Result<Option<String>>;
     pub async fn list_tags(&self, prefix: &str) -> Result<Vec<SessionTag>>;
     pub async fn unset_tag(&self, prefix: &str, key: &str) -> Result<()>;
+    pub async fn set_status_style(&self, style: &StatusStyle) -> Result<()>;
+    pub async fn unset_status_style(&self) -> Result<()>;
+    pub async fn read_local_status_style(&self) -> Result<Option<StatusStyle>>;
 }
 
 impl SessionTags<'_> {
@@ -3916,6 +3922,12 @@ unprefixed key so listed tags are self-describing and round-trippable.
 - `SessionTags::unset(key)` and `Target::unset_tag(prefix, key)` remove the
   session-local user option with tmux `set-option -u`; they do not encode
   deletion as an empty string.
+- `Target::set_status_style(style)`, `unset_status_style()`, and
+  `read_local_status_style()` are a separate narrow surface for the built-in
+  tmux `status-style` option. `StatusStyle` validates only value transport
+  safety (non-empty, no control characters, bounded length) and lets tmux
+  validate style syntax. Reads return only the session-local override, not
+  inherited/global style.
 - The helper constructor is async because resolving the command prefix can lazily
   probe the tmux binary on the underlying transport before it is cached.
 

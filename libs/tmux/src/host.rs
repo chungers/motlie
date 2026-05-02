@@ -1496,12 +1496,69 @@ impl Target {
             .await
     }
 
+    /// Set this session's local tmux status bar style.
+    ///
+    /// This is intentionally narrow and session-target only. It dispatches
+    /// against the stable session id with `set-option -t <id> status-style`.
+    pub async fn set_status_style(&self, style: &StatusStyle) -> Result<()> {
+        let session_id = self
+            .session_for_operation("set_status_style")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::set_session_status_style_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &session_id,
+            style,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status bar style override.
+    ///
+    /// After this, inherited/global tmux status style applies.
+    pub async fn unset_status_style(&self) -> Result<()> {
+        let session_id = self
+            .session_for_operation("unset_status_style")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::unset_session_status_style_with_prefix(&self.inner.transport, &prefix, &session_id)
+            .await
+    }
+
+    /// Read this session's local status-style override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux style values.
+    pub async fn read_local_status_style(&self) -> Result<Option<StatusStyle>> {
+        let session_id = self
+            .session_for_operation("read_local_status_style")?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = self.inner.tmux_prefix().await;
+        control::read_local_session_status_style_with_prefix(
+            &self.inner.transport,
+            &prefix,
+            &session_id,
+        )
+        .await
+    }
+
     async fn tags_with_operation(
         &self,
         prefix: &str,
         operation: &'static str,
     ) -> Result<SessionTags<'_>> {
-        let session_id = self.session_for_tags(operation)?.id.as_str().to_string();
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
         let prefix = SessionTagPrefix::new(prefix)?;
         let tmux_prefix = self.inner.tmux_prefix().await;
         Ok(SessionTags {
@@ -1512,7 +1569,7 @@ impl Target {
         })
     }
 
-    fn session_for_tags(&self, operation: &'static str) -> Result<&SessionInfo> {
+    fn session_for_operation(&self, operation: &'static str) -> Result<&SessionInfo> {
         match &self.address {
             TargetAddress::Session(session) => Ok(session),
             TargetAddress::Window(_) => Err(Error::UnsupportedTarget {
@@ -2921,6 +2978,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_status_style_set_read_and_unset_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("set-option -t '$7' status-style 'bg=blue,fg=white'", "")
+            .with_response(
+                "show-option -q -t '$7' status-style",
+                "status-style bg=green,fg=black\n",
+            )
+            .with_response("set-option -u -t '$7' status-style", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target
+            .set_status_style(&StatusStyle::new("bg=blue,fg=white").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            target.read_local_status_style().await.unwrap(),
+            Some(StatusStyle::new("bg=green,fg=black").unwrap())
+        );
+        target.unset_status_style().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn session_tags_reject_invalid_inputs_before_exec() {
         let mock = MockTransport::new()
             .with_error("set-option", "validation should run before exec")
@@ -2972,11 +3064,27 @@ mod tests {
         assert!(window_target.read_tag("mmux", "foo").await.is_err());
         assert!(window_target.list_tags("mmux").await.is_err());
         assert!(window_target.tags("mmux").await.is_err());
+        assert!(
+            window_target
+                .set_status_style(&StatusStyle::new("bg=blue").unwrap())
+                .await
+                .is_err()
+        );
+        assert!(window_target.unset_status_style().await.is_err());
+        assert!(window_target.read_local_status_style().await.is_err());
         assert!(pane_target.set_tag("mmux", "foo", "bar").await.is_err());
         assert!(pane_target.unset_tag("mmux", "foo").await.is_err());
         assert!(pane_target.read_tag("mmux", "foo").await.is_err());
         assert!(pane_target.list_tags("mmux").await.is_err());
         assert!(pane_target.tags("mmux").await.is_err());
+        assert!(
+            pane_target
+                .set_status_style(&StatusStyle::new("bg=blue").unwrap())
+                .await
+                .is_err()
+        );
+        assert!(pane_target.unset_status_style().await.is_err());
+        assert!(pane_target.read_local_status_style().await.is_err());
     }
 
     #[tokio::test]
