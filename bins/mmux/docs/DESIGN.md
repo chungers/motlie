@@ -8,8 +8,9 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Added a Host dropdown to the multi-host New Session modal, dispatching create to the selected host; mnemonic letters are now bold green while attach keeps the same `#003366` status blue as mmux. |
-| 2026-05-02 | @codex | Changed the TUI status bars to dark blue `#003366`, rendered command shortcut letters as bold green instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
+| 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#001f3f` and changed mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Added a Host dropdown to the multi-host New Session modal, dispatching create to the selected host. |
+| 2026-05-02 | @codex | Changed the TUI status bars to dark blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved tag grouping to list-pane `g`; grouped tag rows are ordered by most recent activity. |
 | 2026-05-02 | @codex | Attach now temporarily sets the selected session's local tmux `status-style` to blue through the narrow motlie-tmux status-style API, then restores/unsets it after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
@@ -263,10 +264,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
-  `pane` for pane focus, with shortcut letters rendered bold green. Always-on
+  `pane` for pane focus, with shortcut letters rendered bold coral. Always-on
   command hints are ordered as `help`, `pane`, `monitor`, `attach`, `new`,
   `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
-  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are bold green in the TUI. The
+  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are bold coral in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a dark blue background.
@@ -686,7 +687,7 @@ unfocused). The dark blue top status bar shows bold host/IP at left using `|` as
 the separator and
 right-justified time. The dark blue bottom status bar shows key hints and status
 text only; it does not duplicate host, time, focus, layout state, or a `keys`
-label. Command shortcut letters are rendered as bold green spans instead of
+label. Command shortcut letters are rendered as bold coral spans instead of
 parenthesized mnemonics. The Sessions pane title is count-only: `Sessions [n]`.
 
 Main-selector keymap (focus-aware):
@@ -1428,7 +1429,7 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    library path. If the session vanished between selection and resolve
    (race), show stderr message and re-enter the TUI.
 5. Best-effort read the selected session's local `status-style`, then set
-   `status-style bg=#003366,fg=white` through `Target::set_status_style()`. Style
+   `status-style bg=#001f3f,fg=white` through `Target::set_status_style()`. Style
    failures warn to stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /

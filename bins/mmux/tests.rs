@@ -7,13 +7,14 @@ use motlie_tmux::{
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Modifier;
 
 use crate::cli::{Cli, is_portrait_pty, select_layout};
 use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS,
-    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
-    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_STYLE,
+    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
     KeyOutcome, handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
@@ -377,7 +378,7 @@ fn status_line_styles_command_mnemonics() {
         .iter()
         .filter(|span| {
             span.style.add_modifier.contains(Modifier::BOLD)
-                && span.style.fg == Some(Color::Green)
+                && span.style.fg == Some(STATUS_BAR_MNEMONIC_FG)
                 && !span.style.add_modifier.contains(Modifier::UNDERLINED)
         })
         .map(|span| span.content.as_ref())
@@ -1328,7 +1329,10 @@ async fn attach_status_style_is_set_and_restored() {
             "show-option -q -t '$1' status-style",
             "status-style bg=green,fg=black\n",
         )
-        .with_response("set-option -t '$1' status-style 'bg=#003366,fg=white'", "")
+        .with_response(
+            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            "",
+        )
         .with_response("set-option -t '$1' status-style 'bg=green,fg=black'", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let target = host.session_by_id("$1").await.unwrap().unwrap();
@@ -1346,7 +1350,10 @@ async fn attach_status_style_unsets_when_no_previous_local_style() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("show-option -q -t '$1' status-style", "")
-        .with_response("set-option -t '$1' status-style 'bg=#003366,fg=white'", "")
+        .with_response(
+            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            "",
+        )
         .with_response("set-option -u -t '$1' status-style", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let target = host.session_by_id("$1").await.unwrap().unwrap();
