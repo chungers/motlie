@@ -10,7 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=40:session_name}` and `status-left-length` to 40, restoring prior local values after detach. |
+| 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` and `status-left-length` to 50, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
@@ -466,11 +466,11 @@ target
     .await
     .ok();
 target
-    .set_status_left(&motlie_tmux::StatusLeft::new("#{=40:session_name}")?)
+    .set_status_left(&motlie_tmux::StatusLeft::new("#{=50:session_name}")?)
     .await
     .ok();
 target
-    .set_status_left_length(motlie_tmux::StatusLeftLength::new(40))
+    .set_status_left_length(motlie_tmux::StatusLeftLength::new(50))
     .await
     .ok();
 let exit = target.attach_current_pty().await;

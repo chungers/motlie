@@ -8,7 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=40:session_name}` with `status-left-length=40`, restoring prior local values after detach. |
+| 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` with `status-left-length=50`, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
@@ -1443,8 +1443,8 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    (race), show stderr message and re-enter the TUI.
 5. Best-effort read the selected session's local `status-style`,
    `status-left`, and `status-left-length`, then set `status-style
-   bg=#002b55,fg=white`, `status-left "#{=40:session_name}"`, and
-   `status-left-length 40` through narrow `Target` status APIs. Failures warn to
+   bg=#002b55,fg=white`, `status-left "#{=50:session_name}"`, and
+   `status-left-length 50` through narrow `Target` status APIs. Failures warn to
    stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
