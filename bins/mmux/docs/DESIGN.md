@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Attach now temporarily sets the selected session's local tmux `status-style` to blue through the narrow motlie-tmux status-style API, then restores/unsets it after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip for sessions with no tags. |
 | 2026-05-02 | @codex | Tightened list-pane tag sort: only visible non-empty checked-tag values count as tagged, and pressing `s` selects the first row after sorting so the sorted top is shown. |
@@ -1414,7 +1415,10 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 4. Resolve the highlighted session id to a `Target` via the stable-id
    library path. If the session vanished between selection and resolve
    (race), show stderr message and re-enter the TUI.
-5. **Spawn-and-wait** with inherited stdio:
+5. Best-effort read the selected session's local `status-style`, then set
+   `status-style bg=blue,fg=white` through `Target::set_status_style()`. Style
+   failures warn to stderr but do not block attach.
+6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited
      stdin/stdout/stderr. No `pipe()`. No proxy.
@@ -1424,8 +1428,11 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
      fork (or via `Command::process_group(0)`). Set the foreground process
      group via `tcsetpgrp` so foreground signals (`SIGINT`, `SIGTSTP`,
      `SIGWINCH`) reach the child, not the parent.
-6. Call `wait()` (parent blocks while child holds the terminal).
-7. On `wait()` return, branch on mode and child exit status:
+7. Call `wait()` (parent blocks while child holds the terminal).
+8. Restore the previous local `status-style` if one existed, otherwise unset the
+   local override. Restore failures warn to stderr and do not change attach exit
+   handling.
+9. On `wait()` return, branch on mode and child exit status:
 
    ```text
    wait() returns

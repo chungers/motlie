@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | mmux attach now wraps `Target::attach_current_pty()` with best-effort temporary `status-style bg=blue,fg=white` setup and local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only key that selects a session for attach. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when there are no tag rows. |
 | 2026-05-02 | @codex | Tightened `SessionSortMode::Tag`: rows only count as tagged when they have a visible non-empty checked-tag value, and the `s` toggle selects the first row after sorting so the new top is visible. |
@@ -425,11 +426,27 @@ Attach:
 
 ```rust
 let target = host.session_by_id(&selected.id).await?.ok_or(SessionVanished)?;
-let exit = target.attach_current_pty().await?;
+let snapshot = match target.read_local_status_style().await {
+    Ok(previous) => {
+        let blue = motlie_tmux::StatusStyle::new("bg=blue,fg=white")?;
+        target.set_status_style(&blue).await.ok().map(|_| previous)
+    }
+    Err(_) => None,
+};
+let exit = target.attach_current_pty().await;
+if let Some(previous) = snapshot {
+    let _ = match previous {
+        Some(style) => target.set_status_style(&style).await,
+        None => target.unset_status_style().await,
+    };
+}
+let exit = exit?;
 ```
 
 The exact `SessionVanished` error type belongs to the binary unless `motlie-tmux`
-already has a suitable structured error when implementation starts.
+already has a suitable structured error when implementation starts. The
+status-style calls are best-effort in mmux: warnings go to stderr, but attach
+continues even if the remote tmux rejects style setup or restoration.
 
 ## CLI Boundary
 

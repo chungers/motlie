@@ -24,13 +24,21 @@ use controller::{
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
+use motlie_tmux::{AttachExit, StatusStyle, Target};
 use target_host::connect_fleet;
 use terminal::TerminalSession;
+
+const MMUX_ATTACH_STATUS_STYLE: &str = "bg=blue,fg=white";
 
 #[derive(Debug)]
 enum SelectorOutcome {
     Selected(SelectedSession),
     Cancelled,
+}
+
+#[derive(Debug)]
+struct AttachStatusStyleSnapshot {
+    previous: Option<StatusStyle>,
 }
 
 #[tokio::main]
@@ -81,7 +89,7 @@ async fn run() -> Result<i32> {
                 continue;
             }
         };
-        let exit = target.attach_current_pty().await?;
+        let exit = attach_current_pty_with_mmux_status_style(&target).await?;
         let code = exit.shell_status();
         if should_reenter_after_attach(&fleet, &selected, &exit).await? {
             continue;
@@ -90,10 +98,47 @@ async fn run() -> Result<i32> {
     }
 }
 
+async fn attach_current_pty_with_mmux_status_style(target: &Target) -> Result<AttachExit> {
+    let snapshot = prepare_attach_status_style(target).await;
+    let exit = target.attach_current_pty().await;
+    restore_attach_status_style(target, snapshot).await;
+    exit.map_err(Into::into)
+}
+
+async fn prepare_attach_status_style(target: &Target) -> Option<AttachStatusStyleSnapshot> {
+    let previous = match target.read_local_status_style().await {
+        Ok(previous) => previous,
+        Err(err) => {
+            eprintln!("mmux: could not read tmux status style before attach: {err}");
+            return None;
+        }
+    };
+    let style = StatusStyle::new(MMUX_ATTACH_STATUS_STYLE)
+        .expect("mmux attach status style is a valid static tmux style");
+    if let Err(err) = target.set_status_style(&style).await {
+        eprintln!("mmux: could not set tmux status style before attach: {err}");
+        return None;
+    }
+    Some(AttachStatusStyleSnapshot { previous })
+}
+
+async fn restore_attach_status_style(target: &Target, snapshot: Option<AttachStatusStyleSnapshot>) {
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    let result = match snapshot.previous {
+        Some(style) => target.set_status_style(&style).await,
+        None => target.unset_status_style().await,
+    };
+    if let Err(err) = result {
+        eprintln!("mmux: could not restore tmux status style after attach: {err}");
+    }
+}
+
 async fn should_reenter_after_attach(
     fleet: &HostFleet,
     selected: &SelectedSession,
-    exit: &motlie_tmux::AttachExit,
+    exit: &AttachExit,
 ) -> Result<bool> {
     if exit.success() {
         return Ok(true);

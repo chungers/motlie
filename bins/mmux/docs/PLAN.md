@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Wrapped attach with best-effort temporary blue tmux `status-style` setup and previous local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
 | 2026-05-02 | @codex | Defaulted the empty Session Tags key edit column to 30% of the edit strip width. |
 | 2026-05-02 | @codex | Tightened list-pane tag sort: visible non-empty checked-tag values sort to the top, and `s` selects the first row in the new order. |

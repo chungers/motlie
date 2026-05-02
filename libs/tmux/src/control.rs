@@ -6,7 +6,8 @@ use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
     validate_session_tag_value, CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionTag,
-    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, TmuxSocket, WindowInfo,
+    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusStyle, TmuxSocket,
+    WindowInfo,
 };
 
 /// Shell-escape a string for safe interpolation into shell commands.
@@ -575,6 +576,71 @@ pub(crate) async fn list_session_tags_with_prefix(
         }
     }
     Ok(tags)
+}
+
+/// Set session-local tmux status bar style.
+pub(crate) async fn set_session_status_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    style: &StatusStyle,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} status-style {}",
+        prefix,
+        shell_escape(target),
+        shell_escape(style.as_str())
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset session-local tmux status bar style so inherited style applies.
+pub(crate) async fn unset_session_status_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} status-style",
+        prefix,
+        shell_escape(target),
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read only the session-local status-style override.
+///
+/// Missing local overrides return `Ok(None)`; inherited/global values are not
+/// resolved here.
+pub(crate) async fn read_local_session_status_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<StatusStyle>> {
+    let cmd = format!(
+        "{} show-option -q -t {} status-style",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed status-style option without value: {line}"
+        )));
+    };
+    if option_name != "status-style" {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading status-style"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    StatusStyle::from_tmux_value(value).map(Some)
 }
 
 /// List all tags under one namespace prefix for multiple sessions in one tmux call.
@@ -1225,5 +1291,61 @@ mod tests {
             tags.get("$8").unwrap(),
             &vec![SessionTag::new("mmux", "bar", "two words").unwrap()]
         );
+    }
+
+    #[tokio::test]
+    async fn status_style_commands_target_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_response(
+                "tmux set-option -t '$7' status-style 'bg=blue,fg=white'",
+                "",
+            )
+            .with_response(
+                "tmux show-option -q -t '$7' status-style",
+                "status-style \"bg=green,fg=black\"\n",
+            )
+            .with_response("tmux set-option -u -t '$7' status-style", "");
+        let transport = TransportKind::Mock(mock);
+        let style = StatusStyle::new("bg=blue,fg=white").unwrap();
+
+        set_session_status_style_with_prefix(&transport, "tmux", "$7", &style)
+            .await
+            .unwrap();
+        let read = read_local_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        unset_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(read, Some(StatusStyle::new("bg=green,fg=black").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn status_style_read_missing_returns_none() {
+        let mock =
+            MockTransport::new().with_response("tmux show-option -q -t '$7' status-style", "");
+        let transport = TransportKind::Mock(mock);
+
+        let read = read_local_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(read, None);
+    }
+
+    #[tokio::test]
+    async fn status_style_read_rejects_unexpected_option() {
+        let mock = MockTransport::new().with_response(
+            "tmux show-option -q -t '$7' status-style",
+            "status-left nope\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let err = read_local_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("status-left"));
     }
 }
