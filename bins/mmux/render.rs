@@ -2,13 +2,13 @@ use std::cmp::{max, min};
 
 use ansi_to_tui::IntoText;
 use motlie_tmux::strip_ansi;
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as TuiSpan, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
+use ratatui::Frame;
 
 use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_SQUARE,
@@ -664,6 +664,22 @@ fn push_status_command(spans: &mut Vec<TuiSpan<'static>>, label: &'static str, m
     }
 }
 
+fn push_status_key_command(spans: &mut Vec<TuiSpan<'static>>, key: char, label: &'static str) {
+    spans.push(TuiSpan::styled(key.to_string(), status_mnemonic_style()));
+    spans.push(status_span(format!(" {label}")));
+}
+
+pub(crate) fn session_tags_footer_line(cancel_button: &str) -> Line<'static> {
+    let mut spans = vec![status_span(cancel_button.to_string())];
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "update", 'u');
+    push_status_separator(&mut spans);
+    push_status_key_command(&mut spans, 'x', "unset");
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "check", 'c');
+    Line::from(spans)
+}
+
 fn status_span(text: impl Into<std::borrow::Cow<'static, str>>) -> TuiSpan<'static> {
     TuiSpan::styled(text, status_base_style())
 }
@@ -744,15 +760,16 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
         Paragraph::new(separator).style(Style::default().fg(Color::DarkGray)),
         Rect::new(inner.x, separator_y, inner.width, MODAL_SEPARATOR_HEIGHT),
     );
-    draw_modal_buttons(
-        frame,
-        inset_rect(
-            Rect::new(inner.x, button_y, inner.width, MODAL_BUTTON_HEIGHT),
-            MODAL_CONTENT_HORIZONTAL_PADDING,
-            0,
-        ),
-        &view.buttons,
-    );
+    let button_area = Rect::new(inner.x, button_y, inner.width, MODAL_BUTTON_HEIGHT);
+    if matches!(&view.body, ModalBody::SessionTags { .. }) {
+        draw_session_tags_footer(frame, button_area, &view.buttons);
+    } else {
+        draw_modal_buttons(
+            frame,
+            inset_rect(button_area, MODAL_CONTENT_HORIZONTAL_PADDING, 0),
+            &view.buttons,
+        );
+    }
 }
 
 fn modal_content_height(view: &ModalView) -> u16 {
@@ -812,7 +829,22 @@ fn modal_content_width(view: &ModalView) -> u16 {
             .max()
             .unwrap_or(0),
     };
-    max(body_width, view.buttons.chars().count()) as u16
+    max(body_width, modal_footer_width(view)) as u16
+}
+
+fn modal_footer_width(view: &ModalView) -> usize {
+    if matches!(&view.body, ModalBody::SessionTags { .. }) {
+        line_char_width(&session_tags_footer_line(&view.buttons))
+    } else {
+        view.buttons.chars().count()
+    }
+}
+
+fn line_char_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref().chars().count())
+        .sum()
 }
 
 fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
@@ -1268,6 +1300,26 @@ fn draw_modal_buttons(frame: &mut Frame<'_>, area: Rect, buttons: &str) {
     frame.render_widget(
         Paragraph::new(buttons),
         Rect::new(x, area.y, button_width, area.height),
+    );
+}
+
+fn draw_session_tags_footer(frame: &mut Frame<'_>, area: Rect, cancel_button: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(" ".repeat(area.width as usize)).style(Style::default().bg(STATUS_BAR_BG)),
+        area,
+    );
+
+    let content_area = inset_rect(area, MODAL_CONTENT_HORIZONTAL_PADDING, 0);
+    if content_area.width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(session_tags_footer_line(cancel_button))
+            .style(Style::default().bg(STATUS_BAR_BG)),
+        content_area,
     );
 }
 
