@@ -8,7 +8,8 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Changed the TUI status bars to dark blue `#003366`, rendered command shortcut letters as bold yellow instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
+| 2026-05-02 | @codex | Added a Host dropdown to the multi-host New Session modal, dispatching create to the selected host; mnemonic letters are now bold green while attach keeps the same `#003366` status blue as mmux. |
+| 2026-05-02 | @codex | Changed the TUI status bars to dark blue `#003366`, rendered command shortcut letters as bold green instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved tag grouping to list-pane `g`; grouped tag rows are ordered by most recent activity. |
 | 2026-05-02 | @codex | Attach now temporarily sets the selected session's local tmux `status-style` to blue through the narrow motlie-tmux status-style API, then restores/unsets it after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
@@ -185,7 +186,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   highlighted session regardless of which pane has focus.)
 - Pressing `n` opens a centered `New Session` modal with padded content, a
   bordered session-name text field, a horizontal separator, and `Cancel` /
-  `Ok` buttons in the button bar.
+  `Ok` buttons in the button bar. In multi-host mode, the modal shows a Host
+  dropdown above the session-name field and creates the session on the selected
+  host.
 - Pressing `k` opens a centered `Kill session <name>?` confirmation modal with
   padded content, a horizontal separator, and `Cancel` / `Ok` buttons in the
   button bar.
@@ -260,10 +263,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
-  `pane` for pane focus, with shortcut letters rendered bold yellow. Always-on
+  `pane` for pane focus, with shortcut letters rendered bold green. Always-on
   command hints are ordered as `help`, `pane`, `monitor`, `attach`, `new`,
   `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
-  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are bold yellow in the TUI. The
+  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are bold green in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a dark blue background.
@@ -683,7 +686,7 @@ unfocused). The dark blue top status bar shows bold host/IP at left using `|` as
 the separator and
 right-justified time. The dark blue bottom status bar shows key hints and status
 text only; it does not duplicate host, time, focus, layout state, or a `keys`
-label. Command shortcut letters are rendered as bold yellow spans instead of
+label. Command shortcut letters are rendered as bold green spans instead of
 parenthesized mnemonics. The Sessions pane title is count-only: `Sessions [n]`.
 
 Main-selector keymap (focus-aware):
@@ -1341,13 +1344,17 @@ selector re-entry):
 ### New Session
 
 1. Pressing `n` opens the modal.
-2. User enters a name and selects `Ok`.
+2. In multi-host mode, the modal preselects the highlighted row's host and
+   shows a Host dropdown above the session-name field. Up/Down cycles the
+   selected host; Tab/Shift-Tab move focus between Host and Session name.
+3. User enters a name and selects `Ok`.
    The text field is bordered, and the button bar is separated from the
    padded content area by a horizontal rule.
-3. Call `HostHandle::create_session(name, &Default::default())`.
-4. Refresh session list.
-5. Highlight the created session.
-6. Refresh `R` detail.
+4. Call `HostHandle::create_session(name, &Default::default())` on the selected
+   host.
+5. Refresh session list.
+6. Highlight the created session.
+7. Refresh `R` detail.
 
 ### Kill Session
 

@@ -14,8 +14,9 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    SelectedSession, SessionRow, SessionSelectedTag, SessionSortMode, SessionTagRow,
-    SessionTagsFocus, SessionTagsModalUi, StatusBanner,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SessionRow,
+    SessionSelectedTag, SessionSortMode, SessionTagRow, SessionTagsFocus, SessionTagsModalUi,
+    StatusBanner,
 };
 
 const TAG_PREFIX: &str = "mmux";
@@ -333,10 +334,7 @@ pub(crate) async fn handle_key(
             toggle_session_grouping(fleet, app).await?;
         }
         (KeyCode::Char('n'), _) => {
-            app.modal = Some(ModalState::NewSession {
-                input: String::new(),
-                button: Button::Ok,
-            });
+            app.modal = Some(new_session_modal_state(fleet, app));
         }
         (KeyCode::Char('k'), _) => {
             if let Some(selected) = app.selected_session() {
@@ -520,6 +518,30 @@ fn is_word_right_resize(modifiers: KeyModifiers) -> bool {
     modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
 }
 
+fn new_session_modal_state(fleet: &HostFleet, app: &AppState) -> ModalState {
+    let selected_host_id = app.selected_session().map(|session| session.host_id);
+    let hosts = fleet
+        .entries
+        .iter()
+        .map(|entry| NewSessionHostChoice {
+            id: entry.id.clone(),
+            label: entry.label.clone(),
+        })
+        .collect::<Vec<_>>();
+    let host_index = selected_host_id
+        .and_then(|selected| hosts.iter().position(|host| host.id == selected))
+        .unwrap_or(0);
+    ModalState::NewSession {
+        ui: NewSessionModalUi {
+            input: String::new(),
+            hosts,
+            host_index,
+            focus: NewSessionFocus::Name,
+            button: Button::Ok,
+        },
+    }
+}
+
 async fn reset_to_sample_detail(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     stop_detail_source(app).await;
     app.detail.source = DetailSource::sample();
@@ -531,6 +553,7 @@ enum ModalAction {
     Close,
     CreateSession {
         input: String,
+        host_id: Option<HostId>,
     },
     KillSession {
         session: SelectedSession,
@@ -563,30 +586,7 @@ async fn handle_modal_key(
     key: KeyEvent,
 ) -> Result<KeyOutcome> {
     let action = match app.modal.as_mut() {
-        Some(ModalState::NewSession { input, button }) => match key.code {
-            KeyCode::Esc => ModalAction::Close,
-            KeyCode::Left => {
-                *button = Button::Cancel;
-                ModalAction::None
-            }
-            KeyCode::Right => {
-                *button = Button::Ok;
-                ModalAction::None
-            }
-            KeyCode::Enter if *button == Button::Ok => ModalAction::CreateSession {
-                input: input.clone(),
-            },
-            KeyCode::Enter => ModalAction::Close,
-            KeyCode::Backspace => {
-                input.pop();
-                ModalAction::None
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.push(c);
-                ModalAction::None
-            }
-            _ => ModalAction::None,
-        },
+        Some(ModalState::NewSession { ui }) => handle_new_session_modal_key(key, ui),
         Some(ModalState::KillSession { session, button }) => match key.code {
             KeyCode::Esc => ModalAction::Close,
             KeyCode::Left => {
@@ -645,9 +645,9 @@ async fn handle_modal_key(
     match action {
         ModalAction::None => {}
         ModalAction::Close => app.modal = None,
-        ModalAction::CreateSession { input } => {
+        ModalAction::CreateSession { input, host_id } => {
             app.modal = None;
-            create_session_from_modal(fleet, app, input).await?;
+            create_session_from_modal(fleet, app, host_id, input).await?;
         }
         ModalAction::KillSession { session } => {
             app.modal = None;
@@ -681,6 +681,59 @@ async fn handle_modal_key(
         }
     }
     Ok(KeyOutcome::Continue)
+}
+
+fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> ModalAction {
+    let multi_host = ui.hosts.len() > 1;
+    match key.code {
+        KeyCode::Esc => ModalAction::Close,
+        KeyCode::Tab | KeyCode::BackTab if multi_host => {
+            ui.focus = match ui.focus {
+                NewSessionFocus::Host => NewSessionFocus::Name,
+                NewSessionFocus::Name => NewSessionFocus::Host,
+            };
+            ModalAction::None
+        }
+        KeyCode::Up if multi_host => {
+            ui.focus = NewSessionFocus::Host;
+            if ui.host_index == 0 {
+                ui.host_index = ui.hosts.len().saturating_sub(1);
+            } else {
+                ui.host_index = ui.host_index.saturating_sub(1);
+            }
+            ModalAction::None
+        }
+        KeyCode::Down if multi_host => {
+            ui.focus = NewSessionFocus::Host;
+            ui.host_index = (ui.host_index + 1) % ui.hosts.len();
+            ModalAction::None
+        }
+        KeyCode::Left => {
+            ui.button = Button::Cancel;
+            ModalAction::None
+        }
+        KeyCode::Right => {
+            ui.button = Button::Ok;
+            ModalAction::None
+        }
+        KeyCode::Enter if ui.button == Button::Ok => ModalAction::CreateSession {
+            input: ui.input.clone(),
+            host_id: ui.selected_host().map(|host| host.id.clone()),
+        },
+        KeyCode::Enter => ModalAction::Close,
+        KeyCode::Backspace if ui.focus == NewSessionFocus::Name => {
+            ui.input.pop();
+            ModalAction::None
+        }
+        KeyCode::Char(c)
+            if ui.focus == NewSessionFocus::Name
+                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            ui.input.push(c);
+            ModalAction::None
+        }
+        _ => ModalAction::None,
+    }
 }
 
 fn handle_session_tags_modal_key(
@@ -849,9 +902,14 @@ fn previous_session_tags_focus(focus: SessionTagsFocus) -> SessionTagsFocus {
 async fn create_session_from_modal(
     fleet: &HostFleet,
     app: &mut AppState,
+    host_id: Option<HostId>,
     input: String,
 ) -> Result<()> {
-    let Some(target_host) = host_for_new_session(fleet, app) else {
+    let Some(target_host) = host_id
+        .as_ref()
+        .and_then(|id| fleet.entry(id))
+        .or_else(|| host_for_new_session(fleet, app))
+    else {
         app.status = StatusBanner::error("no host available for new session");
         return Ok(());
     };

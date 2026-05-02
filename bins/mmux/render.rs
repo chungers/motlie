@@ -18,8 +18,8 @@ use crate::consts::{
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
-    AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, MotdState, SessionRow,
-    SessionTagsFocus,
+    AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, MotdState,
+    NewSessionFocus, SessionRow, SessionTagsFocus,
 };
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
@@ -687,7 +687,14 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
 fn modal_content_height(view: &ModalView) -> u16 {
     match &view.body {
         ModalBody::Text(text) => max(1, text.lines().count()) as u16,
-        ModalBody::NewSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
+        ModalBody::NewSession { host_label, .. } => {
+            let session_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
+            if host_label.is_some() {
+                session_height * 2 + 1
+            } else {
+                session_height
+            }
+        }
         ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
         ModalBody::SessionTags { tags, .. } => {
             let rows = max(1, tags.len()) as u16;
@@ -703,9 +710,19 @@ fn modal_content_width(view: &ModalView) -> u16 {
             .map(|line| line.chars().count())
             .max()
             .unwrap_or(0),
-        ModalBody::NewSession { input } => {
-            max("Session name".chars().count(), input.chars().count())
-        }
+        ModalBody::NewSession {
+            input, host_label, ..
+        } => [
+            "Session name".chars().count(),
+            input.chars().count(),
+            host_label
+                .as_deref()
+                .map(|label| max("Host".chars().count(), label.chars().count() + 2))
+                .unwrap_or(0),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0),
         ModalBody::RenameSession { input } => {
             max("Session Name".chars().count(), input.chars().count())
         }
@@ -739,8 +756,13 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
                 area,
             );
         }
-        ModalBody::NewSession { input } => {
-            draw_labeled_text_field(frame, area, "Session name", input, true);
+        ModalBody::NewSession {
+            input,
+            host_label,
+            host_count,
+            focus,
+        } => {
+            draw_new_session_body(frame, area, input, host_label, *host_count, *focus);
         }
         ModalBody::RenameSession { input } => {
             draw_labeled_text_field(frame, area, "Session Name", input, true);
@@ -763,6 +785,49 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
             );
         }
     }
+}
+
+fn draw_new_session_body(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &str,
+    host_label: &Option<String>,
+    host_count: usize,
+    focus: NewSessionFocus,
+) {
+    let Some(host_label) = host_label else {
+        draw_labeled_text_field(frame, area, "Session name", input, true);
+        return;
+    };
+
+    let field_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
+    let host_area = Rect::new(area.x, area.y, area.width, min(field_height, area.height));
+    draw_labeled_select_field(
+        frame,
+        host_area,
+        "Host",
+        host_label,
+        host_count > 1,
+        focus == NewSessionFocus::Host,
+    );
+
+    let session_y = area.y.saturating_add(field_height + 1);
+    if session_y >= area.bottom() {
+        return;
+    }
+    let session_area = Rect::new(
+        area.x,
+        session_y,
+        area.width,
+        area.bottom().saturating_sub(session_y),
+    );
+    draw_labeled_text_field(
+        frame,
+        session_area,
+        "Session name",
+        input,
+        focus == NewSessionFocus::Name,
+    );
 }
 
 fn draw_session_tags_body(
@@ -1077,6 +1142,52 @@ fn draw_labeled_text_field(
     }
 }
 
+fn draw_labeled_select_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    show_arrow: bool,
+    focused: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(label),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height <= 1 {
+        return;
+    }
+    let input_rect = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        min(MODAL_TEXT_FIELD_HEIGHT, area.height.saturating_sub(1)),
+    );
+    let border = if focused {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border)),
+        input_rect,
+    );
+    let input_inner = inset_rect(input_rect, 1, 1);
+    if input_inner.width > 0 && input_inner.height > 0 {
+        let value = if show_arrow {
+            format!("{value} ▼")
+        } else {
+            value.to_string()
+        };
+        frame.render_widget(Paragraph::new(value), input_inner);
+    }
+}
+
 fn draw_modal_buttons(frame: &mut Frame<'_>, area: Rect, buttons: &str) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1102,17 +1213,24 @@ fn inset_rect(rect: Rect, horizontal: u16, vertical: u16) -> Rect {
 
 pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
     match modal {
-        ModalState::NewSession { input, button } => ModalView {
+        ModalState::NewSession { ui } => ModalView {
             title: " New Session ",
             body: ModalBody::NewSession {
-                input: input.clone(),
+                input: ui.input.clone(),
+                host_label: if ui.hosts.len() > 1 {
+                    ui.selected_host().map(|host| host.label.clone())
+                } else {
+                    None
+                },
+                host_count: ui.hosts.len(),
+                focus: ui.focus,
             },
             buttons: format!(
                 "{}   {}",
-                button_text(*button, Button::Cancel),
-                button_text(*button, Button::Ok)
+                button_text(ui.button, Button::Cancel),
+                button_text(ui.button, Button::Ok)
             ),
-            active_button: *button,
+            active_button: ui.button,
         },
         ModalState::KillSession {
             session, button, ..

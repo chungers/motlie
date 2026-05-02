@@ -37,6 +37,18 @@ pub(crate) enum SessionTagsFocus {
     Cancel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewSessionFocus {
+    Host,
+    Name,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewSessionHostChoice {
+    pub(crate) id: HostId,
+    pub(crate) label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionTagRow {
     pub(crate) key: String,
@@ -46,8 +58,7 @@ pub(crate) struct SessionTagRow {
 #[derive(Debug, Clone)]
 pub(crate) enum ModalState {
     NewSession {
-        input: String,
-        button: Button,
+        ui: NewSessionModalUi,
     },
     KillSession {
         session: SelectedSession,
@@ -63,6 +74,21 @@ pub(crate) enum ModalState {
         ui: SessionTagsModalUi,
     },
     Help,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NewSessionModalUi {
+    pub(crate) input: String,
+    pub(crate) hosts: Vec<NewSessionHostChoice>,
+    pub(crate) host_index: usize,
+    pub(crate) focus: NewSessionFocus,
+    pub(crate) button: Button,
+}
+
+impl NewSessionModalUi {
+    pub(crate) fn selected_host(&self) -> Option<&NewSessionHostChoice> {
+        self.hosts.get(self.host_index)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +113,12 @@ impl ModalView {
     pub(crate) fn body_text(&self) -> String {
         match &self.body {
             ModalBody::Text(text) => text.clone(),
-            ModalBody::NewSession { input } => format!("Session name\n{input}"),
+            ModalBody::NewSession {
+                input, host_label, ..
+            } => match host_label {
+                Some(host_label) => format!("Host\n{host_label}\nSession name\n{input}"),
+                None => format!("Session name\n{input}"),
+            },
             ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
             ModalBody::SessionTags {
                 tags,
@@ -122,6 +153,9 @@ pub(crate) enum ModalBody {
     Text(String),
     NewSession {
         input: String,
+        host_label: Option<String>,
+        host_count: usize,
+        focus: NewSessionFocus,
     },
     RenameSession {
         input: String,

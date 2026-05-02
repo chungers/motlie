@@ -24,8 +24,8 @@ use crate::detail::{
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    SelectedSession, SessionRow, SessionSelectedTag, SessionSortMode, SessionTagRow,
-    SessionTagsFocus, SessionTagsModalUi,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SessionRow,
+    SessionSelectedTag, SessionSortMode, SessionTagRow, SessionTagsFocus, SessionTagsModalUi,
 };
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
@@ -142,6 +142,21 @@ fn make_selected(host_id: HostId, host_label: &str, id: &str, name: &str) -> Sel
 
 fn test_selected_session() -> SelectedSession {
     make_selected(local_host_id(), "host", "$1", "dev")
+}
+
+fn test_new_session_modal(input: &str, button: Button) -> ModalState {
+    ModalState::NewSession {
+        ui: NewSessionModalUi {
+            input: input.to_string(),
+            hosts: vec![NewSessionHostChoice {
+                id: local_host_id(),
+                label: "host".to_string(),
+            }],
+            host_index: 0,
+            focus: NewSessionFocus::Name,
+            button,
+        },
+    }
 }
 
 fn test_session_tags_modal(
@@ -362,7 +377,7 @@ fn status_line_styles_command_mnemonics() {
         .iter()
         .filter(|span| {
             span.style.add_modifier.contains(Modifier::BOLD)
-                && span.style.fg == Some(Color::Yellow)
+                && span.style.fg == Some(Color::Green)
                 && !span.style.add_modifier.contains(Modifier::UNDERLINED)
         })
         .map(|span| span.content.as_ref())
@@ -1425,16 +1440,13 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
 
 #[test]
 fn modal_content_separates_body_from_button_bar() {
-    let new_session = modal_content(&ModalState::NewSession {
-        input: "dev".to_string(),
-        button: Button::Ok,
-    });
+    let new_session = modal_content(&test_new_session_modal("dev", Button::Ok));
     assert_eq!(new_session.title, " New Session ");
     assert_eq!(new_session.active_button, Button::Ok);
     assert_eq!(new_session.buttons, " Cancel    [Ok]");
     assert!(matches!(
         new_session.body,
-        ModalBody::NewSession { ref input } if input == "dev"
+        ModalBody::NewSession { ref input, host_label: None, .. } if input == "dev"
     ));
     assert!(!new_session.body_text().contains("[Ok]"));
 
@@ -1480,6 +1492,136 @@ fn modal_content_separates_body_from_button_bar() {
             if key_input == "phase" && value_input == "build"
     ));
     assert!(tags.body_text().contains("owner    platform ✓"));
+}
+
+#[tokio::test]
+async fn new_session_modal_selects_host_in_multi_host_mode() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.rows = vec![make_row_for_host(
+        session("dev", "$1"),
+        ssh_host_id("ssh://b"),
+        "beta",
+    )];
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    let modal = app.modal.as_ref().expect("new session modal opened");
+    let view = modal_content(modal);
+    assert!(matches!(
+        view.body,
+        ModalBody::NewSession {
+            ref host_label,
+            focus: NewSessionFocus::Name,
+            ..
+        } if host_label.as_deref() == Some("beta")
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    let modal = app.modal.as_ref().expect("new session modal remains open");
+    let view = modal_content(modal);
+    assert!(matches!(
+        view.body,
+        ModalBody::NewSession {
+            ref host_label,
+            focus: NewSessionFocus::Host,
+            ..
+        } if host_label.as_deref() == Some("alpha")
+    ));
+}
+
+#[tokio::test]
+async fn new_session_modal_creates_on_selected_multi_host() {
+    let alpha = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_error("new-session", "wrong host")
+                .with_response("list-sessions", ""),
+        ),
+        None,
+    );
+    let beta = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_response("new-session -d -s 'build'", "")
+                .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
+                .with_response(
+                    "display-message -p '__MOTLIE_TAGS__ $9'",
+                    "__MOTLIE_TAGS__ $9\n",
+                ),
+        ),
+        None,
+    );
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", alpha),
+        ssh_host_entry("ssh://b", "beta", "y", beta),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.rows = vec![make_row_for_host(
+        session("selected", "$1"),
+        ssh_host_id("ssh://b"),
+        "beta",
+    )];
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "build".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.status.text(), "created session build on beta");
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| (row.host_label.as_str(), row.session.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("beta", "build")]
+    );
 }
 
 #[test]
