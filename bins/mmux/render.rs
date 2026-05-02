@@ -14,7 +14,7 @@ use crate::consts::{
     BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, MODAL_BUTTON_HEIGHT,
     MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING, MODAL_MIN_WIDTH,
     MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT, MOTLIE_PLACEHOLDER,
-    STATUS_BAR_BG,
+    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
@@ -582,10 +582,7 @@ fn push_status_command(spans: &mut Vec<TuiSpan<'static>>, label: &'static str, m
                 spans.push(status_span(plain));
                 plain = String::new();
             }
-            spans.push(TuiSpan::styled(
-                ch.to_string(),
-                status_base_style().add_modifier(Modifier::UNDERLINED),
-            ));
+            spans.push(TuiSpan::styled(ch.to_string(), status_mnemonic_style()));
             found = true;
         } else {
             plain.push(ch);
@@ -602,6 +599,13 @@ fn status_span(text: impl Into<std::borrow::Cow<'static, str>>) -> TuiSpan<'stat
 
 fn status_base_style() -> Style {
     Style::default().fg(Color::White).bg(STATUS_BAR_BG)
+}
+
+fn status_mnemonic_style() -> Style {
+    Style::default()
+        .fg(STATUS_BAR_MNEMONIC_FG)
+        .bg(STATUS_BAR_BG)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
