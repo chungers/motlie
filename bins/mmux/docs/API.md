@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed Session Tags modal add/update/delete/check operations to stage in modal state and flush as a diff only on Ok; Cancel/Esc discard the draft. |
 | 2026-05-02 | @codex | Refactored attach status setup to use `Target::status()` with `SessionStatusSnapshot` / `SessionStatusOverrides` instead of app-owned status option plumbing. |
 | 2026-05-02 | @codex | Moved environment editing into the New Session modal and apply staged variables through `CreateSessionOptions::initial_environment`; removed the `e` post-creation environment shortcut. |
 | 2026-05-02 | @codex | Added `HostHandle::tmux_hostname()` and changed mmux host display labels to use tmux `#{host}` while retaining SSH URI hosts as aliases. |
@@ -282,6 +283,8 @@ struct SessionKeyValueModalUi {
     kind: SessionKeyValueKind,
     rows: Vec<SessionKeyValueRow>,
     selected_key: Option<String>,
+    original_rows: Vec<SessionKeyValueRow>,
+    original_selected_key: Option<String>,
     key_input: String,
     value_input: String,
     focus: SessionKeyValueFocus,
@@ -347,14 +350,15 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 stripped key, rendered without `@mmux/`, filtered to hide the internal
 `@mmux/__selected-key` option, and shown in a five-row scroll window. The modal
 keeps row focus and bottom field focus explicit with `SessionKeyValueFocus`; `Tab`
-cycles the bottom Key/Value cells and Cancel button, `Shift-Tab` reverses that
-cycle, Enter on either edit field writes non-empty, non-reserved values through
-`Target::tags("mmux").await?.set(key, value)`, where `__selected-key` is
-reserved for the internal marker. `x` deletes through
-`Target::tags("mmux").await?.unset(key)`, and `u` preloads the bottom fields.
-Pressing `c` on a focused tag row toggles the checked key stored in
-`@mmux/__selected-key`, and renders `✓` in that row's marker column across
-different mmux processes.
+cycles the bottom Key/Value cells, Ok, and Cancel button, `Shift-Tab` reverses
+that cycle. Enter on either edit field stages a non-empty, non-reserved key/value
+row in modal state; `x` stages deletion of the focused row; `u` preloads the
+bottom fields. Pressing `c` on a focused tag row stages the checked key and
+renders `✓` in that row's marker column. The modal keeps the original rows and
+selected key alongside the draft; Enter on focused Ok diffs the draft and writes
+only the resulting `SessionTags::set`, `SessionTags::unset`, and
+`@mmux/__selected-key` changes. Enter on Cancel or Esc discards the draft without
+tmux writes. `__selected-key` is reserved for the internal marker.
 
 `n` opens `NewSession`, which includes the same key/value list mechanics for
 initial environment variables. The modal stages variables locally, sorts them

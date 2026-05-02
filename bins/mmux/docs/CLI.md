@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply to tmux only when Ok closes the dialog; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Moved environment-variable entry into the New Session modal and apply staged variables at creation time through `CreateSessionOptions::initial_environment`; removed the `e` shortcut. |
 | 2026-05-02 | @codex | Changed host labels in the top status bar to use tmux `#{host}` rather than SSH URI hostnames; URI hostnames remain internal aliases. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
@@ -336,13 +337,13 @@ Modal keys:
 | Key | Behavior |
 |-----|----------|
 | Left / Right | Choose Cancel or Ok in New Session, Kill Session, and Rename Session modals. No-op in Help and Session Tags. |
-| Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Session Tags, cycle focus between Key, Value, and Cancel. |
+| Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
 | Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
 | `u` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
-| `c` | In Session Tags, toggle the focused row as the checked key with `✓`; persisted as `@mmux/__selected-key`. |
-| `x` | In New Session env rows, remove the staged variable; in Session Tags, unset the focused row through the tmux tag API. |
-| Enter | Close modal. Applies Ok when selected in New Session, Kill Session, or Rename Session; stages the New Session env edit row or submits the Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
-| Esc | Cancel action modals, close Session Tags, or close Help. |
+| `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
+| `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
+| Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, or Session Tags; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
+| Esc | Cancel action modals, discard staged Session Tags changes, close Session Tags, or close Help. |
 
 Modal content is padded inside the border. New Session and Rename Session render
 their text fields with their own borders. In multi-host mode, New Session also
@@ -351,9 +352,11 @@ session name are used for `HostHandle::create_session()`. The New Session modal
 also includes an initial environment key/value list; staged variables are sorted
 by key and passed through `CreateSessionOptions::initial_environment`, so tmux
 applies them to the first shell or command with `new-session -e`. Session Tags lists
-`@mmux/<key>` values sorted by stripped key in key/value/check-marker columns. The list shows
-up to five rows at a time, scrolls with row focus, and uses the same selected-row
-styling as the session list. The key column is sized to the longest key plus
+`@mmux/<key>` values sorted by stripped key in key/value/check-marker columns. Add,
+update, delete, and check-marker changes are staged locally while the modal is
+open; Ok applies the staged diff to tmux, while Cancel or Esc discards it. The
+list shows up to five rows at a time, scrolls with row focus, and uses the same
+selected-row styling as the session list. The key column is sized to the longest key plus
 four characters, or 30% of the edit strip when the session has no existing
 tags; the marker column displays `✓` when toggled on by `c`, and the value
 column takes the remaining width. The bottom Key/Value edit row is

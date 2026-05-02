@@ -671,9 +671,9 @@ fn push_status_key_command(spans: &mut Vec<TuiSpan<'static>>, key: char, label: 
 
 pub(crate) fn session_key_values_footer_line(
     kind: SessionKeyValueKind,
-    cancel_button: &str,
+    buttons: &str,
 ) -> Line<'static> {
-    let mut spans = vec![status_span(cancel_button.to_string())];
+    let mut spans = vec![status_span(buttons.to_string())];
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "update", 'u');
     push_status_separator(&mut spans);
@@ -1398,7 +1398,7 @@ fn draw_session_key_values_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     kind: SessionKeyValueKind,
-    cancel_button: &str,
+    buttons: &str,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1413,7 +1413,7 @@ fn draw_session_key_values_footer(
         return;
     }
     frame.render_widget(
-        Paragraph::new(session_key_values_footer_line(kind, cancel_button))
+        Paragraph::new(session_key_values_footer_line(kind, buttons))
             .style(Style::default().bg(STATUS_BAR_BG)),
         content_area,
     );
@@ -1479,10 +1479,9 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             active_button: *button,
         },
         ModalState::SessionKeyValues { ui, .. } => {
-            let active_button = if ui.focus == SessionKeyValueFocus::Cancel {
-                Button::Cancel
-            } else {
-                Button::Ok
+            let active_button = match ui.focus {
+                SessionKeyValueFocus::Cancel => Button::Cancel,
+                _ => Button::Ok,
             };
             ModalView {
                 title: ui.kind.title(),
@@ -1494,7 +1493,11 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                     value_input: ui.value_input.clone(),
                     focus: ui.focus,
                 },
-                buttons: button_text(active_button, Button::Cancel),
+                buttons: format!(
+                    "{}   {}",
+                    button_text(active_button, Button::Cancel),
+                    button_text(active_button, Button::Ok)
+                ),
                 active_button,
             }
         }

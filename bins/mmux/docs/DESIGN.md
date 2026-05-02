@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment variables into the New Session modal and apply them through `CreateSessionOptions::initial_environment`; removed the post-creation `e` environment modal. |
 | 2026-05-02 | @codex | Changed mmux host labels to come from tmux `#{host}` via `HostHandle::tmux_hostname()`, while retaining the SSH URI hostname as `HostEntry.alias`. |
@@ -1098,8 +1099,9 @@ existing stable-id dispatch model.
 
 - State shape: `SessionKeyValues { session: SelectedSession, ui:
   SessionKeyValueModalUi }`; the UI group carries `kind`, `rows`,
-  tag-only `selected_key`, `key_input`, `value_input`, and modal-local focus
-  (`Row(index)`, `Key`, `Value`, `Cancel`).
+  tag-only `selected_key`, `original_rows`, `original_selected_key`,
+  `key_input`, `value_input`, and modal-local focus (`Row(index)`, `Key`,
+  `Value`, `Ok`, `Cancel`).
 - On open, call `target.tags("mmux").await?.list().await?`, sort by
   `SessionTag::key()`, and render stripped keys (for example `owner`, never
   `mmux/owner` or `@mmux/owner`). Initial focus is the first tag row when any
@@ -1110,21 +1112,25 @@ existing stable-id dispatch model.
 - Up/Down move focus row-to-row through the visible tag list when a tag row is
   focused. If focus is in the edit controls, Up returns focus to the last
   visible tag row when one exists.
-- `x` on a focused tag row calls `tags.unset(key).await?`, reloads and resorts
-  the tag list, and keeps the modal open. If the deleted row was the last row,
-  focus moves to the previous row or to the `Key` field when the list becomes
-  empty.
+- `x` on a focused tag row removes the row from the modal draft and clears the
+  draft checked key if it referenced the deleted row. If the deleted row was the
+  last row, focus moves to the previous row or to the `Key` field when the list
+  becomes empty.
 - `u` on a focused tag row copies that key/value into the bottom `Key` and
   `Value` fields and focuses `Value`. Pressing Enter in either edit field then
-  updates the same key by calling `tags.set(key, value).await?`.
+  stages an update to the same key.
 - Enter in either edit field applies the bottom fields with this rule: non-empty
-  value only, stripped key, `mmux` namespace, motlie-tmux tag API. On success,
-  refresh the modal's tag list and clear the edit fields. If the key already
-  existed, this is an update; otherwise it is an add.
-- `c` on a focused tag row toggles the selected tag marker stored as the
-  internal `@mmux/__selected-key` user option; reserved keys are filtered from
-  the displayed tag list.
-- Enter on focused `Cancel` or `Esc` dismisses without writing.
+  value only, stripped key, `mmux` namespace, motlie-tmux tag API validation on
+  final write. The modal updates its draft rows and clears the edit fields. If
+  the key already existed, this is a staged update; otherwise it is a staged add.
+- `c` on a focused tag row toggles the draft selected tag marker. Reserved keys
+  are filtered from the displayed tag list.
+- Enter on focused `Ok` diffs draft rows/selected key against the original
+  loaded state, writes only the required `SessionTags::set`,
+  `SessionTags::unset`, and internal `@mmux/__selected-key` mutations, then
+  refreshes sessions and closes the modal.
+- Enter on focused `Cancel` or `Esc` dismisses without writing and discards the
+  draft.
 
 This feature requires one small `motlie-tmux` public API addition for tag
 delete. It otherwise depends on `Target::rename`,
@@ -1436,14 +1442,15 @@ selector re-entry):
    the modal list.
 4. Pressing `u` on a focused row copies that key/value into the bottom edit
    fields and focuses `Value`.
-5. Enter while either edit field is focused applies the bottom key/value fields
-   with the non-empty-value rule. Existing keys are updated via
-   `SessionTags::set`; new keys are added.
+5. Enter while either edit field is focused stages the bottom key/value fields
+   with the non-empty-value rule. Existing keys are updated in the draft; new
+   keys are added to the draft.
 6. Pressing `c` on a focused row toggles that key as the selected session tag,
-   stored in the internal `@mmux/__selected-key` option and hidden from the tag
+   staged for the internal `@mmux/__selected-key` option and hidden from the tag
    list.
-7. On successful add/update, reload the modal's list and keep the modal open
-   for additional edits. `Esc` or Enter on focused `Cancel` closes the modal.
+7. Enter on focused `Ok` writes the staged diff through `SessionTags` and closes
+   the modal. `Esc` or Enter on focused `Cancel` closes the modal without tmux
+   writes.
 
 ### New Session Environment
 
