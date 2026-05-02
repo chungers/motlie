@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Tightened list-pane `s` sort behavior: visible non-empty checked-tag values sort to the top, and the toggle selects the first row in the new order so the sorted top is shown immediately. |
 | 2026-05-02 | @codex | Added list-pane `s` sort toggle: activity sort remains default; tag sort groups checked-tag rows first, orders them by checked tag value, then falls back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for Session Tags: `Tab` reaches Cancel and selected-tag values are loaded through one batched metadata read per host refresh. |
 | 2026-05-02 | @codex | Changed multi-host status and row rendering to use host-code legends: top status shows `mmux [A] <host> ...`, and session rows show compact codes such as `[A]` instead of full hostnames. |
@@ -284,9 +285,11 @@ or more clients attached to the session. Rows are sorted by
 `session.activity` advance) descending so the most recently active session
 appears first by default. Pressing `s` while the list pane is focused toggles
 tag sort: sessions with a checked tag are shown before sessions without one,
-then checked rows sort by tag value, then activity time, host code, and
-session name. Pressing `s` again restores activity sort. The recency column is
-formatted as `  32h / 14.2d`. The left value
+then checked rows with non-empty displayed values sort by tag value, then
+activity time, host code, and session name. Empty checked-tag values are
+treated like no displayed tag. The toggle selects the first row in the new
+order so the sorted top is visible immediately. Pressing `s` again restores
+activity sort. The recency column is formatted as `  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`
 advance — so it is immune to operator-vs-host clock skew. The right value
 ("age") is `local_now − session.created` under the NTP-synced clock

@@ -547,6 +547,14 @@ fn session_list_tag_sort_groups_checked_tags_before_missing_tags() {
             ),
             "same",
         ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("empty-selected-tag", "$7", 10, 800),
+                ssh_host_id("ssh://a"),
+                "alpha",
+            ),
+            "",
+        ),
         make_row_for_host(
             session_with_times("no-tag-old", "$6", 10, 100),
             ssh_host_id("ssh://b"),
@@ -570,6 +578,7 @@ fn session_list_tag_sort_groups_checked_tags_before_missing_tags() {
             "z-same",
             "b-same",
             "no-tag-fresh",
+            "empty-selected-tag",
             "no-tag-old"
         ]
     );
@@ -605,7 +614,7 @@ fn activity_sort_preserves_selection_by_stable_id() {
 }
 
 #[tokio::test]
-async fn s_toggles_tag_sort_from_list_focus_and_preserves_selection() {
+async fn s_toggles_tag_sort_from_list_focus_and_selects_top_row() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.session_list.rows = vec![
@@ -641,6 +650,7 @@ async fn s_toggles_tag_sort_from_list_focus_and_preserves_selection() {
     .unwrap();
     assert_eq!(app.session_list.sort_mode, SessionSortMode::Tag);
     assert_eq!(app.status.text(), "sort: tag");
+    assert_eq!(app.session_list.selected, 0);
     assert_eq!(
         app.session_list
             .rows
@@ -651,7 +661,7 @@ async fn s_toggles_tag_sort_from_list_focus_and_preserves_selection() {
     );
     assert_eq!(
         app.selected_session().map(|session| session.name),
-        Some("selected".to_string())
+        Some("other".to_string())
     );
 
     handle_key(
@@ -663,6 +673,7 @@ async fn s_toggles_tag_sort_from_list_focus_and_preserves_selection() {
     .unwrap();
     assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
     assert_eq!(app.status.text(), "sort: activity");
+    assert_eq!(app.session_list.selected, 0);
     assert_eq!(
         app.session_list
             .rows

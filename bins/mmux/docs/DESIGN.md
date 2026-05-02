@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Tightened list-pane tag sort: only visible non-empty checked-tag values count as tagged, and pressing `s` selects the first row after sorting so the sorted top is shown. |
 | 2026-05-02 | @codex | Added the list-pane `s` sort toggle: activity sort remains the default, and tag sort groups checked-tag rows before unchecked rows before falling back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for issue #241: selected-tag refresh is batched per host, Session Tags Cancel is reachable by Tab, modal session identity and tag UI state are grouped, and modal sizing arithmetic moved to the render layer. |
 | 2026-05-01 | @codex | Simplified issue #241 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal from `i` to `t`, and left `i` unassigned for this feature. |
@@ -239,9 +240,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `m`, `h`, or `d`; day values keep at most one decimal digit.
 - Session rows default to `activity_observed_at_local` descending so the
   session whose activity most recently advanced is at the top. Pressing `s`
-  while the session list is focused toggles tag sort: rows with checked tags
-  appear before rows without checked tags, then sort by checked tag value,
-  activity time, host code, and session name. Pressing `s` again restores
+  while the session list is focused toggles tag sort: rows with visible
+  non-empty checked-tag values appear before rows without displayed tags, then
+  sort by checked tag value, activity time, host code, and session name. Empty
+  checked-tag values sort with rows that have no displayed tag. Pressing `s`
+  selects the first row in the new order and pressing `s` again restores
   activity sort. Sorting on the observer-side mark instead of raw host
   `SessionInfo.activity` keeps activity order stable across multi-host fleets
   even when host clocks drift. Stable `(host_id, session_id)` preservation
@@ -1257,9 +1260,9 @@ Single-poll reconcile loop driven by the main TUI loop:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
    - sort rows using `SessionSortMode`: activity mode sorts by
-     `activity_observed_at_local` descending; tag mode puts rows with checked
-     tags before rows without checked tags, then sorts by checked tag value,
-     activity time, host code, and session name
+     `activity_observed_at_local` descending; tag mode puts rows with visible
+     non-empty checked-tag values before rows without displayed tags, then
+     sorts by checked tag value, activity time, host code, and session name
    - preserve highlight by `(host_id, session_id)`, falling back to the
      clamped index if the session disappeared
    - if the monitored session id is absent, stop monitor mode, switch the

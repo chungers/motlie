@@ -330,7 +330,7 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
         (KeyCode::Char('m'), _) => start_monitor(fleet, app).await?,
         (KeyCode::Char('s'), _) if app.layout.focus == Focus::List => {
-            toggle_session_sort(fleet, app);
+            toggle_session_sort(fleet, app).await?;
         }
         (KeyCode::Char('n'), _) => {
             app.modal = Some(ModalState::NewSession {
@@ -497,15 +497,19 @@ fn is_resize_modifier(modifiers: KeyModifiers) -> bool {
     modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
 }
 
-fn toggle_session_sort(fleet: &HostFleet, app: &mut AppState) {
+async fn toggle_session_sort(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     let previous = current_selection_key(app);
     let mode = app.session_list.toggle_sort_mode();
     app.session_list.resort(fleet);
-    app.preserve_selection(previous);
+    app.session_list.select_first();
+    if previous != current_selection_key(app) {
+        reset_to_sample_detail(fleet, app).await?;
+    }
     app.status = StatusBanner::info(match mode {
         SessionSortMode::Activity => "sort: activity",
         SessionSortMode::Tag => "sort: tag",
     });
+    Ok(())
 }
 
 fn is_word_left_resize(modifiers: KeyModifiers) -> bool {
