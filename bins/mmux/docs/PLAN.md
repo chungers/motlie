@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment-variable entry into New Session and create sessions with staged `CreateSessionOptions::initial_environment` values; removed the `e` environment modal. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
@@ -594,7 +595,7 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 - [x] 12.1b Add modal-specific focus enums for multi-field dialogs rather than
   one global catch-all modal focus enum.
 - [x] 12.1c key/value modal focus must support existing rows (`Row(index)`)
-  plus bottom controls (`Key`, `Value`, `Cancel`).
+  plus bottom controls (`Key`, `Value`, `Ok`, `Cancel`).
 - [x] 12.1d Add render helpers for labeled bordered text fields that preserve
   the existing modal padding, separator, and button styling.
 - [x] 12.1e Add Tab / Shift-Tab focus movement for multi-field modals while
@@ -627,24 +628,26 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
   key lexicographically, and render keys without `mmux/` or `@mmux/` prefixes.
 - [x] 12.3c Initial focus is the first tag row when any tag exists, otherwise
   the bottom `Key` field.
-- [x] 12.3d Render bottom edit controls: key/value edit fields and a
-  `Cancel` button.
+- [x] 12.3d Render bottom edit controls: key/value edit fields and `Ok` /
+  `Cancel` buttons.
 - [x] 12.3e Up/Down move focus row-to-row through existing tag rows; Up from
   edit controls returns to the last visible tag row when present.
-- [x] 12.3f Pressing `x` on a focused tag row calls
-  `target.tags("mmux").await?.unset(key).await?`, reloads the sorted list, and
-  keeps the modal open.
+- [x] 12.3f Pressing `x` on a focused tag row stages deletion in the modal
+  draft and keeps the modal open.
 - [x] 12.3g Pressing `u` on a focused tag row copies that key/value into the
   bottom `Key` and `Value` fields and focuses `Value`.
-- [x] 12.3h Enter in either edit field applies the non-empty-value rule. Existing
-  keys are updated through `set`; new keys are added.
+- [x] 12.3h Enter in either edit field stages the non-empty-value rule. Existing
+  keys are updated in the draft; new keys are added to the draft.
 - [x] 12.3i Keep value text exact, without trimming, while trimming only the
   tag key. Let `motlie-tmux` enforce key/value validation.
-- [x] 12.3j After successful add/update/delete, reload and resort the displayed
-  list, clear add/update fields after add/update, and keep the modal open.
-- [x] 12.3k Escape or Enter on focused `Cancel` dismisses without writing.
-- [ ] 12.3l Tests: sorted display, stripped keys, row focus movement, delete
-  via unset, update preload, update set, empty value no-op, Cancel/Esc dismiss.
+- [x] 12.3j Enter on focused `Ok` diffs the draft against the original tag
+  state, writes required `set`/`unset`/selected-tag mutations, refreshes
+  sessions, and closes the modal.
+- [x] 12.3k Escape or Enter on focused `Cancel` dismisses without writing and
+  discards staged changes.
+- [x] 12.3l Tests: sorted display, stripped keys, row focus movement, staged
+  delete, update preload, staged update, Ok apply, empty value no-op, and
+  Cancel/Esc discard.
 
 ### 12.4 Shared dispatch helpers
 

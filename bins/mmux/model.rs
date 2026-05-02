@@ -35,6 +35,7 @@ pub(crate) enum SessionKeyValueFocus {
     Row(usize),
     Key,
     Value,
+    Ok,
     Cancel,
 }
 
@@ -138,6 +139,8 @@ pub(crate) struct SessionKeyValueModalUi {
     pub(crate) kind: SessionKeyValueKind,
     pub(crate) rows: Vec<SessionKeyValueRow>,
     pub(crate) selected_key: Option<String>,
+    pub(crate) original_rows: Vec<SessionKeyValueRow>,
+    pub(crate) original_selected_key: Option<String>,
     pub(crate) key_input: String,
     pub(crate) value_input: String,
     pub(crate) focus: SessionKeyValueFocus,

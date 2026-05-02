@@ -177,7 +177,9 @@ fn test_session_tags_modal(
         session: test_selected_session(),
         ui: SessionKeyValueModalUi {
             kind: SessionKeyValueKind::Tags,
+            original_rows: tags.clone(),
             rows: tags,
+            original_selected_key: selected_key.map(str::to_string),
             selected_key: selected_key.map(str::to_string),
             key_input: key_input.to_string(),
             value_input: value_input.to_string(),
@@ -408,7 +410,7 @@ fn status_line_styles_command_mnemonics() {
 
 #[test]
 fn session_tags_footer_styles_tag_command_mnemonics() {
-    let line = session_key_values_footer_line(SessionKeyValueKind::Tags, "[Cancel]");
+    let line = session_key_values_footer_line(SessionKeyValueKind::Tags, "[Cancel]   Ok ");
     let text = line
         .spans
         .iter()
@@ -425,7 +427,7 @@ fn session_tags_footer_styles_tag_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(text, "[Cancel] | update | x unset | check");
+    assert_eq!(text, "[Cancel]   Ok  | update | x unset | check");
     assert_eq!(styled_mnemonics, "uxc");
 }
 
@@ -1646,7 +1648,7 @@ fn modal_content_separates_body_from_button_bar() {
     ));
     assert_eq!(tags.title, " Session Tags ");
     assert_eq!(tags.active_button, Button::Ok);
-    assert_eq!(tags.buttons, " Cancel ");
+    assert_eq!(tags.buttons, " Cancel    [Ok]");
     assert!(matches!(
         tags.body,
         ModalBody::SessionKeyValues { ref key_input, ref value_input, .. }
@@ -2244,7 +2246,7 @@ async fn new_session_modal_applies_staged_initial_environment() {
 }
 
 #[tokio::test]
-async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
+async fn session_tags_modal_tab_cycles_edit_row_fields_ok_and_cancel() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("show-options -t '$1'", "");
@@ -2285,6 +2287,18 @@ async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Ok
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
         Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Cancel
     ));
 
@@ -2297,26 +2311,15 @@ async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Value
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Ok
     ));
 }
 
 #[tokio::test]
-async fn session_tags_modal_c_persists_selected_row() {
+async fn session_tags_modal_c_stages_selected_row() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n")
-        .with_response(
-            "show-options -t '$1'",
-            "@mmux/__selected-key a\n@mmux/a beta\n@mmux/b alpha\n",
-        )
-        .with_response(
-            "show-options -t '$1'",
-            "@mmux/__selected-key a\n@mmux/a beta\n@mmux/b alpha\n",
-        )
-        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n")
-        .with_response("set-option -t '$1' @mmux/__selected-key a", "")
-        .with_response("set-option -u -t '$1' @mmux/__selected-key", "");
+        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2364,10 +2367,7 @@ async fn session_tags_modal_delete_updates_list() {
         .with_response(
             "show-options -t '$1'",
             "@mmux/__selected-key a\n@mmux/a one\n@mmux/b two\n",
-        )
-        .with_response("show-options -t '$1'", "@mmux/b two\n")
-        .with_response("set-option -u -t '$1' @mmux/a", "")
-        .with_response("set-option -u -t '$1' @mmux/__selected-key", "");
+        );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2394,16 +2394,14 @@ async fn session_tags_modal_delete_updates_list() {
                 && ui.selected_key.is_none()
                 && ui.focus == SessionKeyValueFocus::Row(0)
     ));
-    assert_eq!(app.status.text(), "deleted tag a on dev");
+    assert_eq!(app.status.text(), "staged delete tag a on dev");
 }
 
 #[tokio::test]
 async fn session_tags_modal_update_uses_bottom_fields() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("show-options -t '$1'", "@mmux/owner old\n")
-        .with_response("show-options -t '$1'", "@mmux/owner new\n")
-        .with_response("set-option -t '$1' @mmux/owner 'new'", "");
+        .with_response("show-options -t '$1'", "@mmux/owner old\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2448,7 +2446,112 @@ async fn session_tags_modal_update_uses_bottom_fields() {
             if ui.rows == vec![SessionKeyValueRow { key: "owner".to_string(), value: "new".to_string() }]
                 && ui.focus == SessionKeyValueFocus::Row(0)
     ));
-    assert_eq!(app.status.text(), "set tag owner on dev");
+    assert_eq!(app.status.text(), "staged tag owner on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_cancel_discards_staged_changes() {
+    let mock = MockTransport::new()
+        .with_error("set-option -t '$1'", "cancel should not write tags")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.key_input = "owner".to_string();
+        ui.value_input = "platform".to_string();
+        ui.focus = SessionKeyValueFocus::Key;
+    } else {
+        panic!("expected session tags modal");
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.rows == vec![SessionKeyValueRow { key: "owner".to_string(), value: "platform".to_string() }]
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "discarded tag changes on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_ok_applies_staged_changes() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "display-message -p '__MOTLIE_TAGS__ $1'",
+            "__MOTLIE_TAGS__ $1\n@mmux/__selected-key added\n@mmux/added yes\n@mmux/owner new\n",
+        )
+        .with_response("show-options -t '$1'", "@mmux/keep yes\n@mmux/owner old\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.rows = vec![
+            SessionKeyValueRow {
+                key: "added".to_string(),
+                value: "yes".to_string(),
+            },
+            SessionKeyValueRow {
+                key: "owner".to_string(),
+                value: "new".to_string(),
+            },
+        ];
+        ui.selected_key = Some("added".to_string());
+        ui.focus = SessionKeyValueFocus::Ok;
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "applied tag changes on dev");
+    assert_eq!(
+        app.session_list.rows[0]
+            .selected_tag
+            .as_ref()
+            .map(|tag| (tag.key.as_str(), tag.value.as_str())),
+        Some(("added", "yes"))
+    );
 }
 
 #[tokio::test]
