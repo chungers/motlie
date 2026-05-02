@@ -70,7 +70,7 @@ async fn run() -> Result<i32> {
         };
 
         if cli.script {
-            println!("{}", selected.name);
+            println!("{}", selected.name());
             return Ok(0);
         }
 
@@ -81,7 +81,7 @@ async fn run() -> Result<i32> {
             );
             continue;
         };
-        let target = match host.handle.session_by_id(&selected.id).await? {
+        let target = match host.handle.session_by_id(selected.id()).await? {
             Some(target) => target,
             None => {
                 eprintln!("mmux: selected session disappeared; returning to selector");
@@ -145,7 +145,7 @@ async fn should_reenter_after_attach(
     let Some(entry) = fleet.entry(&selected.host_id) else {
         return Ok(false);
     };
-    Ok(entry.handle.session_by_id(&selected.id).await?.is_some())
+    Ok(entry.handle.session_by_id(selected.id()).await?.is_some())
 }
 
 async fn run_selector_once(

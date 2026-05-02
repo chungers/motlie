@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Tightened multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that selected row on the selected host. |
 | 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#001f3f` and changed mnemonic letters to bold coral. |
 | 2026-05-02 | @codex | Added a Host dropdown to the multi-host New Session modal, dispatching create to the selected host. |
 | 2026-05-02 | @codex | Changed the TUI status bars to dark blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
@@ -1060,11 +1061,11 @@ existing stable-id dispatch model.
 
 - State shape: `RenameSession { session: SelectedSession, input, button }`.
 - Render title `Rename Session`; render one bordered text field labeled
-  `Session Name`, prepopulated with `session.name`.
+  `Session Name`, prepopulated with `session.name()`.
 - `Cancel`, `Esc`, or Enter on focused `Cancel` dismisses without action.
 - `Ok` trims the submitted name using the same rule as the New Session modal.
   Empty input is rejected with a status banner. If the trimmed name equals
-  `session.name`, close without calling tmux. Otherwise call `Target::rename`
+  `session.name()`, close without calling tmux. Otherwise call `Target::rename`
   through `motlie-tmux`, then refresh sessions immediately.
 
 **Session tags modal (`t`)**:
@@ -1134,8 +1135,14 @@ implementation details.
 
 ```rust
 pub struct SelectedSession {
-    pub id: String,
-    pub name: String,
+    pub host_id: HostId,
+    pub host_label: String,
+    pub info: SessionInfo,
+}
+
+impl SelectedSession {
+    pub fn id(&self) -> &str;
+    pub fn name(&self) -> &str;
 }
 
 #[async_trait::async_trait]
@@ -1363,18 +1370,19 @@ selector re-entry):
 2. User selects `Ok`.
    The confirmation text is padded away from the modal border, and the button
    bar is separated from content by a horizontal rule.
-3. On kill-modal-open, capture the stable session id from the highlighted
-   `SessionInfo` and dispatch the kill against that id, not the display name.
-   If the session was killed by another client between list and resolve,
-   surface a brief inline status message ("session already gone") and let the
-   host-event subscription's reconciliation refresh `LB` — do not error out.
-4. Call `Target::kill()`. On error (connection dropped, permission), show
+3. On kill-modal-open, capture the highlighted row's `HostId`, host label, and
+   full `SessionInfo`.
+4. Resolve the captured host id through `HostFleet`, build the target with
+   `HostHandle::target_for_session_info(session.info.clone())`, and dispatch
+   the kill against the captured stable session id, not the display name.
+5. Call `Target::kill()`. On error (already gone, connection dropped,
+   permission), show
    inline error without corrupting terminal state.
-5. Stop monitor state if it was monitoring that session.
-6. Refresh immediately after a successful kill for responsive feedback; the
+6. Stop monitor state if it was monitoring that session.
+7. Refresh immediately after a successful kill for responsive feedback; the
    polling-backed host-event stream will reconcile the same state on its next
    tick as a backstop.
-7. Move highlight to the next valid row. If the killed session was the only
+8. Move highlight to the next valid row. If the killed session was the only
    one, transition to §Empty Session List state.
 
 ### Rename Session

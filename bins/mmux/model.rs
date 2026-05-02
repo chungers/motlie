@@ -313,8 +313,17 @@ fn host_code_for_index(index: usize) -> String {
 pub(crate) struct SelectedSession {
     pub(crate) host_id: HostId,
     pub(crate) host_label: String,
-    pub(crate) id: String,
-    pub(crate) name: String,
+    pub(crate) info: SessionInfo,
+}
+
+impl SelectedSession {
+    pub(crate) fn id(&self) -> &str {
+        self.info.id.as_str()
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.info.name
+    }
 }
 
 /// One row in the merged session list.
@@ -474,7 +483,7 @@ impl RetainedUiState {
         self.layout_mode = app.layout.mode;
         self.selected_key = app
             .selected_session()
-            .map(|session| (session.host_id, session.id));
+            .map(|session| (session.host_id.clone(), session.id().to_string()));
         self.selected_index = app.session_list.selected;
         self.focus = app.layout.focus;
         self.left_percent = app.layout.left_percent;
@@ -564,8 +573,7 @@ impl SessionListState {
         self.rows.get(self.selected).map(|row| SelectedSession {
             host_id: row.host_id.clone(),
             host_label: row.host_label.clone(),
-            id: row.session.id.as_str().to_string(),
-            name: row.session.name.clone(),
+            info: row.session.clone(),
         })
     }
 

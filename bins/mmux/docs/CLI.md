@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Fixed multi-host kill dispatch so the kill modal acts on the selected row's captured host and stable session info. |
 | 2026-05-02 | @codex | Darkened status bars to `#001f3f`, matched attach `status-style` to that shade, and changed mnemonic letters to bold coral. |
 | 2026-05-02 | @codex | Added a multi-host New Session host selector so `n` creates on the selected host. |
 | 2026-05-02 | @codex | Changed status bars to a darker blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched the temporary attach `status-style` background to the TUI status bar. |
@@ -221,7 +222,8 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   against that row's host.
 - Attach uses the highlighted row's host: an interactive
   `ssh -t <host> tmux attach-session -t <name>` for SSH targets.
-- New session and kill modals act on the highlighted row's host.
+- New session and kill modals act on the highlighted row's host. Kill captures
+  the selected row's stable session info when the modal opens.
 - MOTD pane is **hidden** in multi-host mode (per-host MOTD is not
   meaningful when multiple hosts coexist). Layout reflows accordingly.
 - Layout flags (`-p`/`-l`) compose with multi-host as expected.

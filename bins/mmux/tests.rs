@@ -136,8 +136,7 @@ fn make_selected(host_id: HostId, host_label: &str, id: &str, name: &str) -> Sel
     SelectedSession {
         host_id,
         host_label: host_label.to_string(),
-        id: id.to_string(),
-        name: name.to_string(),
+        info: session(name, id),
     }
 }
 
@@ -626,7 +625,7 @@ fn activity_sort_preserves_selection_by_stable_id() {
     app.session_list.selected = 0;
     let previous = app
         .selected_session()
-        .map(|session| (session.host_id, session.id));
+        .map(|session| (session.host_id.clone(), session.id().to_string()));
 
     app.session_list.set_rows_sorted_by_activity(to_rows(vec![
         session_with_times("selected", "$1", 10, 100),
@@ -635,7 +634,8 @@ fn activity_sort_preserves_selection_by_stable_id() {
     app.preserve_selection(previous);
 
     assert_eq!(
-        app.selected_session().map(|session| session.name),
+        app.selected_session()
+            .map(|session| session.name().to_string()),
         Some("selected".to_string())
     );
 }
@@ -687,7 +687,8 @@ async fn g_toggles_tag_grouping_from_list_focus_and_selects_top_row() {
         vec!["other", "selected"]
     );
     assert_eq!(
-        app.selected_session().map(|session| session.name),
+        app.selected_session()
+            .map(|session| session.name().to_string()),
         Some("other".to_string())
     );
 
@@ -710,7 +711,8 @@ async fn g_toggles_tag_grouping_from_list_focus_and_selects_top_row() {
         vec!["other", "selected"]
     );
     assert_eq!(
-        app.selected_session().map(|session| session.name),
+        app.selected_session()
+            .map(|session| session.name().to_string()),
         Some("other".to_string())
     );
 }
@@ -809,7 +811,8 @@ async fn refresh_forces_detail_when_selected_session_changes() {
     .unwrap();
 
     assert_eq!(
-        app.selected_session().map(|session| session.name),
+        app.selected_session()
+            .map(|session| session.name().to_string()),
         Some("replacement".to_string())
     );
     assert_eq!(app.detail.lines, vec!["replacement screen".to_string()]);
@@ -973,7 +976,7 @@ fn selection_preserves_stable_id_after_rename() {
     app.preserve_selection(Some((local_host_id(), "$1".to_string())));
     assert_eq!(app.session_list.selected, 0);
     assert_eq!(
-        app.selected_session().map(|s| s.name),
+        app.selected_session().map(|s| s.name().to_string()),
         Some("new".to_string())
     );
 }
@@ -1007,7 +1010,9 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
     reentered.preserve_selection(retained.selected_session_key());
 
     assert_eq!(
-        reentered.selected_session().map(|session| session.name),
+        reentered
+            .selected_session()
+            .map(|session| session.name().to_string()),
         Some("build".to_string())
     );
     assert_eq!(reentered.layout.mode, LayoutMode::Portrait);
@@ -1046,7 +1051,9 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
 
     assert_eq!(reentered.session_list.selected, 1);
     assert_eq!(
-        reentered.selected_session().map(|session| session.name),
+        reentered
+            .selected_session()
+            .map(|session| session.name().to_string()),
         Some("three".to_string())
     );
 }
@@ -1299,10 +1306,7 @@ async fn a_attaches_selected_session() {
     .await
     .unwrap();
 
-    assert!(matches!(
-        outcome,
-        KeyOutcome::Select(SelectedSession { name, .. }) if name == "dev"
-    ));
+    assert!(matches!(outcome, KeyOutcome::Select(selected) if selected.name() == "dev"));
 }
 
 #[tokio::test]
@@ -1631,6 +1635,73 @@ async fn new_session_modal_creates_on_selected_multi_host() {
     );
 }
 
+#[tokio::test]
+async fn kill_session_modal_kills_selected_multi_host() {
+    let alpha = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_response("list-sessions", "__MOTLIE_S__ shell $1 10 0 1  100\n")
+                .with_error("kill-session", "wrong host"),
+        ),
+        None,
+    );
+    let beta = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_response("kill-session -t '$7'", "")
+                .with_response("list-sessions", ""),
+        ),
+        None,
+    );
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", alpha),
+        ssh_host_entry("ssh://b", "beta", "y", beta),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.rows = vec![
+        make_row_for_host(session("shell", "$1"), ssh_host_id("ssh://a"), "alpha"),
+        make_row_for_host(session("build", "$7"), ssh_host_id("ssh://b"), "beta"),
+    ];
+    app.session_list.selected = 1;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.status.text(), "killed session build on beta");
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| (row.host_label.as_str(), row.session.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "shell")]
+    );
+}
+
 #[test]
 fn session_tags_modal_renders_list_and_distinct_input_row() {
     let mut app = app_with_session();
@@ -1759,7 +1830,7 @@ async fn r_opens_rename_only_from_session_list_focus() {
             input,
             button,
             ..
-        }) if session.id == "$1" && session.name == "dev" && input == "dev" && *button == Button::Ok
+        }) if session.id() == "$1" && session.name() == "dev" && input == "dev" && *button == Button::Ok
     ));
 }
 
@@ -1797,7 +1868,8 @@ async fn rename_modal_renames_changed_session_by_stable_id() {
 
     assert!(app.modal.is_none());
     assert_eq!(
-        app.selected_session().map(|session| session.name),
+        app.selected_session()
+            .map(|session| session.name().to_string()),
         Some("renamed".to_string())
     );
     assert_eq!(app.status.text(), "renamed session dev to renamed");
@@ -2742,7 +2814,7 @@ fn multi_host_sort_merges_rows_by_activity_across_hosts() {
     app.session_list.selected = 0;
     let selected = app.selected_session().unwrap();
     assert_eq!(selected.host_id, ssh_host_id("ssh://b"));
-    assert_eq!(selected.id, "$2");
+    assert_eq!(selected.id(), "$2");
 }
 
 #[test]
@@ -2771,7 +2843,10 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
     ]);
     // First row by activity is alpha/$1.
     app.session_list.selected = 0;
-    let key = app.selected_session().map(|s| (s.host_id, s.id)).unwrap();
+    let key = app
+        .selected_session()
+        .map(|s| (s.host_id.clone(), s.id().to_string()))
+        .unwrap();
     assert_eq!(key.0, ssh_host_id("ssh://a"));
 
     // Reorder: now bb is most active. Selection should preserve alpha/$1.
@@ -2790,7 +2865,7 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
     app.preserve_selection(Some(key));
     let still = app.selected_session().unwrap();
     assert_eq!(still.host_id, ssh_host_id("ssh://a"));
-    assert_eq!(still.id, "$1");
+    assert_eq!(still.id(), "$1");
     assert_eq!(app.session_list.selected, 1);
 }
 

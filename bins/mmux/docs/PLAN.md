@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Fixed multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that target on the selected host. |
 | 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#001f3f` and changed mnemonic letters to bold coral. |
 | 2026-05-02 | @codex | Added multi-host New Session host selection. |
 | 2026-05-02 | @codex | Updated status styling: TUI bars use dark blue, shortcut letters are bold colored spans instead of underlined, and attach applies the same blue to tmux `status-style`. |

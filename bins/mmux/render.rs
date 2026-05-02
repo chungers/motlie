@@ -1236,7 +1236,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             session, button, ..
         } => ModalView {
             title: " Kill Session ",
-            body: ModalBody::Text(format!("Kill session {}?", session.name)),
+            body: ModalBody::Text(format!("Kill session {}?", session.name())),
             buttons: format!(
                 "{}   {}",
                 button_text(*button, Button::Cancel),
