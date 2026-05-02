@@ -778,7 +778,13 @@ impl CaptureOptions {
 ///
 /// All fields are optional. `Default` produces the same behavior as the
 /// pre-DC22 `create_session(name, None, None)` — no size override, no
-/// history limit, tmux server defaults apply.
+/// history limit, no initial environment overrides, tmux server defaults apply.
+///
+/// `initial_environment` is the lifecycle hook for variables that must be
+/// visible to the first shell or command in the session. Post-creation
+/// [`SessionEnvironment`](crate::SessionEnvironment) writes update tmux's
+/// session environment for processes tmux starts later; they cannot mutate
+/// already-running pane processes.
 ///
 /// If `history_limit` is set, two `set-option` commands are issued after
 /// `new-session`: per-session (covers future panes) and per-pane (tmux 3.1+,
@@ -795,6 +801,11 @@ pub struct CreateSessionOptions {
     pub height: Option<u16>,
     /// Scrollback history limit for the session.
     pub history_limit: Option<u32>,
+    /// Environment variables passed to `tmux new-session -e`.
+    ///
+    /// These are applied before tmux starts the initial pane process, so they
+    /// are visible to the session's first shell or command.
+    pub initial_environment: Vec<SessionEnvVar>,
 }
 
 /// Options for creating a new tmux window as a child of a session (DC25).

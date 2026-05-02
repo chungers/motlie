@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-02 | @codex: Added initial session environment values to `CreateSessionOptions` and documented that post-creation `SessionEnvironment` writes only affect future tmux-spawned processes. | HostHandle, Target, control.rs, types.rs |
 | 2026-05-02 | @codex: Add narrow session-local status-style API on `Target`, backed by tmux `set-option -t <session-id> status-style`, for consumers that need attach/session chrome styling without a generic arbitrary-option API. | Target |
 | 2026-05-02 | @codex: DC34 follow-up for mmux PR feedback — add a host-level batch session-tag read API so selector refreshes can enrich a fresh session listing without one round trip per session. | Target, DC34 |
 | 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)` plus one-off `Target::unset_tag(prefix, key)`. | Target, DC34 |
@@ -2532,6 +2533,7 @@ pub struct CreateSessionOptions {
     pub width: Option<u16>,
     pub height: Option<u16>,
     pub history_limit: Option<u32>,
+    pub initial_environment: Vec<SessionEnvVar>,
 }
 ```
 
@@ -2554,7 +2556,7 @@ pub async fn create_session(
 `control::create_session` (internal) changes similarly. The generated tmux commands:
 
 ```
-tmux new-session -d -s <name> [-n <window_name>] [-x <W> -y <H>] [<command>]
+tmux new-session -d -s <name> [-n <window_name>] [-x <W> -y <H>] [-e KEY=VALUE ...] [<command>]
 tmux set-option -t <name> history-limit <N>        # if history_limit set
 tmux set-option -p -t <name> history-limit <N>     # if history_limit set (tmux 3.1+)
 ```

@@ -104,6 +104,10 @@ pub async fn create_session_with_prefix(
     if let Some(h) = opts.height {
         cmd.push_str(&format!(" -y {}", h));
     }
+    for var in &opts.initial_environment {
+        let assignment = format!("{}={}", var.name(), var.value());
+        cmd.push_str(&format!(" -e {}", shell_escape(&assignment)));
+    }
     if let Some(c) = &opts.command {
         cmd.push_str(&format!(" {}", shell_escape(c)));
     }
@@ -1199,6 +1203,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_session_with_initial_environment_builds_expected_command() {
+        let expected = "tmux new-session -d -s 'test' -e 'MOTLIE=enabled' -e 'BUILD_ID=42 42'";
+        let mock = MockTransport::new().with_response(expected, "");
+        let transport = TransportKind::Mock(mock);
+        let opts = CreateSessionOptions {
+            initial_environment: vec![
+                SessionEnvVar::new("MOTLIE", "enabled").unwrap(),
+                SessionEnvVar::new("BUILD_ID", "42 42").unwrap(),
+            ],
+            ..Default::default()
+        };
+        create_session(&transport, None, "test", &opts)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn create_session_with_all_options() {
         let mock = MockTransport::new().with_default("");
         let transport = TransportKind::Mock(mock);
@@ -1208,6 +1229,7 @@ mod tests {
             width: Some(200),
             height: Some(50),
             history_limit: Some(50000),
+            ..Default::default()
         };
         create_session(&transport, None, "test", &opts)
             .await
