@@ -12,7 +12,8 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Updated status styling: TUI bars use dark blue `#003366`, shortcut letters are bold yellow instead of underlined, and attach applies the same blue to tmux `status-style`. |
+| 2026-05-02 | @codex | Added multi-host New Session host selection and changed mnemonic letters to bold green while keeping attach `status-style` on the same `#003366` blue as the mmux status bar. |
+| 2026-05-02 | @codex | Updated status styling: TUI bars use dark blue `#003366`, shortcut letters are bold green instead of underlined, and attach applies the same blue to tmux `status-style`. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and changed list-pane tag grouping to `g`, with tag groups ordered by most recent activity. |
 | 2026-05-02 | @codex | Wrapped attach with best-effort temporary blue tmux `status-style` setup and previous local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
@@ -287,9 +288,9 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.6 Implement a dark blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
-  compact direction hints (`↑/↓ sel`, bold yellow `p` in `pane`), command hints
+  compact direction hints (`↑/↓ sel`, bold green `p` in `pane`), command hints
   ordered as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `quit`,
-  `layout`, then resize, with shortcut letters bold yellow and app status with
+  `layout`, then resize, with shortcut letters bold green and app status with
   no `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
@@ -318,7 +319,9 @@ References: [Functional Requirements](./DESIGN.md#functional),
   `Ctrl-Up`/`Ctrl-Down` for portrait mode. Accept modified-arrow and word-arrow
   fallback sequences for terminals that remap Ctrl-arrow.
 - [x] 5.5 Implement `New Session` modal with padded content, bordered text
-  input, separated Cancel/Ok button bar, Enter, and Esc handling.
+  input, separated Cancel/Ok button bar, Enter, and Esc handling. In
+  multi-host mode, include a Host dropdown above the session field and create
+  on the selected host.
 - [x] 5.6 Implement kill confirmation modal with padded content, separated
   button bar, and id captured at modal-open.
 - [x] 5.7 Implement Help modal opened by `h`, showing the built-in motlie

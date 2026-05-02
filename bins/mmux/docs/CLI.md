@@ -8,7 +8,8 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Changed status bars to a darker `#003366` blue, rendered command shortcut letters as bold yellow instead of underlined, and matched the temporary attach `status-style` background to the TUI status bar. |
+| 2026-05-02 | @codex | Added a multi-host New Session host selector so `n` creates on the selected host, changed mnemonic letters to bold green, and kept attach `status-style` blue matched to the lower mmux status bar. |
+| 2026-05-02 | @codex | Changed status bars to a darker `#003366` blue, rendered command shortcut letters as bold green instead of underlined, and matched the temporary attach `status-style` background to the TUI status bar. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved list-pane tag grouping from `s` to `g`; grouped tag rows are ordered by most recent activity. |
 | 2026-05-02 | @codex | Attach now temporarily sets the selected tmux session's local `status-style` to blue and restores the previous local style after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
@@ -314,10 +315,10 @@ shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom dark blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
-`pane` for pane focus, with shortcut letters bold yellow. It orders command
+`pane` for pane focus, with shortcut letters bold green. It orders command
 hints as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `rename`,
 `tags`, `group`, `quit`, `layout`, then mode-specific resize; the command
-shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`g`/`q`/`l` are bold yellow in the
+shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`g`/`q`/`l` are bold green in the
 TUI. It does not repeat the host/time, show focus/layout mode, or prefix the
 hints with a `keys` label.
 
@@ -326,8 +327,8 @@ Modal keys:
 | Key | Behavior |
 |-----|----------|
 | Left / Right | Choose Cancel or Ok in New Session, Kill Session, and Rename Session modals. No-op in Help and Session Tags. |
-| Tab / Shift-Tab | Cycle Session Tags focus between Key, Value, and Cancel. |
-| Up / Down | Move focus row-to-row in Session Tags; Up from bottom controls returns to the last tag row when present. |
+| Tab / Shift-Tab | In multi-host New Session, move focus between Host and Session name. In Session Tags, cycle focus between Key, Value, and Cancel. |
+| Up / Down | In multi-host New Session, cycle the Host dropdown. In Session Tags, move focus row-to-row; Up from bottom controls returns to the last tag row when present. |
 | `u` | In Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, toggle the focused row as the checked key with `✓`; persisted as `@mmux/__selected-key`. |
 | `x` | In Session Tags, delete the focused row through the tmux tag API. |
@@ -335,8 +336,10 @@ Modal keys:
 | Esc | Cancel action modals, close Session Tags, or close Help. |
 
 Modal content is padded inside the border. New Session and Rename Session render
-their text fields with their own borders. Session Tags lists `@mmux/<key>`
-values sorted by stripped key in key/value/check-marker columns. The list shows
+their text fields with their own borders. In multi-host mode, New Session also
+renders a Host dropdown above the session-name field; the selected host and
+session name are used for `HostHandle::create_session()`. Session Tags lists
+`@mmux/<key>` values sorted by stripped key in key/value/check-marker columns. The list shows
 up to five rows at a time, scrolls with row focus, and uses the same selected-row
 styling as the session list. The key column is sized to the longest key plus
 four characters, or 30% of the edit strip when the session has no existing
