@@ -28,7 +28,7 @@ host event stream backed by stable-id snapshot reconciliation.
 | 2026-05-02 | @codex | Addressed PR feedback: batched selected-tag metadata loads per host refresh, made Session Tags Cancel reachable, grouped modal session/tag UI state, moved modal sizing to render, and documented reserved tag keys. |
 | 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux [A] <host> ...`) and session rows use compact host-code columns instead of hostname columns. |
 | 2026-05-01 | @codex | Simplified Phase 12 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal to `t`, and left `i` unassigned for this feature. |
-| 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`, `Target::unset_tag`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
+| 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
 | 2026-05-01 | @codex | Started Phase 12 for issue #241: branch `feature/mmux-241-session-modals`. Plan covers list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add on `i`, modal-specific focus state, stable `(host_id, session_id)` dispatch, motlie-tmux tag API usage, and focused tests. |
 | 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row host-code column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
 | 2026-04-28 | @gpt55-dgx | Opened and linked issue #232 for Phase 9.6 env-gated SSH/ForceCommand integration tests; clarified exact bypass value contract. |
@@ -568,12 +568,13 @@ issue #241.
 This phase is primarily binary-side UI work, plus one small `motlie-tmux`
 contract addition for deleting tags. It must use `motlie-tmux` APIs:
 `HostHandle::session_by_id`, `Target::rename`, `Target::tags("mmux")`, and the
-new unset methods below. Do not add direct tmux shell commands to `mmux`.
+new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 
 ### 12.0 motlie-tmux tag delete API
 
 - [x] 12.0a Add `SessionTags::unset(key) -> Result<()>`.
-- [x] 12.0b Add one-off `Target::unset_tag(prefix, key) -> Result<()>`.
+- [x] 12.0b Keep tag mutation on the scoped `SessionTags` helper; do not add a
+  one-off `Target` wrapper for tag deletion.
 - [x] 12.0c Add control-layer helper using
   `set-option -u -t <stable-session-id> @<prefix>/<key>` with no value
   argument.
@@ -629,7 +630,7 @@ new unset methods below. Do not add direct tmux shell commands to `mmux`.
 - [x] 12.3e Up/Down move focus row-to-row through existing tag rows; Up from
   edit controls returns to the last visible tag row when present.
 - [x] 12.3f Pressing `x` on a focused tag row calls
-  `target.unset_tag("mmux", key).await?`, reloads the sorted list, and
+  `target.tags("mmux").await?.unset(key).await?`, reloads the sorted list, and
   keeps the modal open.
 - [x] 12.3g Pressing `u` on a focused tag row copies that key/value into the
   bottom `Key` and `Value` fields and focuses `Value`.
@@ -648,7 +649,7 @@ new unset methods below. Do not add direct tmux shell commands to `mmux`.
 - [ ] 12.4a Add a small helper for resolving captured modal session targets by
   `(host_id, session_id)` to keep rename/tag apply paths consistent.
 - [x] 12.4b Add a small helper for setting an `mmux` tag from UI text that
-  centralizes key trimming, empty-value no-op, and `Target::set_tag("mmux", ..)`
+  centralizes key trimming, empty-value no-op, and `SessionTags::set(..)`
   usage.
 - [x] 12.4c Add a small helper for deleting a focused `mmux` tag via the new
   `SessionTags::unset` API.

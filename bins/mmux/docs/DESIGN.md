@@ -1066,8 +1066,8 @@ existing stable-id dispatch model.
 - tmux supports unsetting user-defined options with
   `set-option -u -t <session-id> @mmux/<key>`. For this feature, `motlie-tmux`
   must expose that operation instead of making `mmux` shell out directly.
-- Add `SessionTags::unset(key) -> Result<()>` and a one-off
-  `Target::unset_tag(prefix, key) -> Result<()>`.
+- Add `SessionTags::unset(key) -> Result<()>` on the scoped
+  `Target::tags(prefix)` helper.
 - The library implementation should mirror the existing tag API contracts:
   session targets only, stable session-id dispatch, validated prefix/key, no
   value argument, and `set-option -u` under the existing control-layer command

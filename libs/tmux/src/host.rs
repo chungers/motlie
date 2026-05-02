@@ -1362,6 +1362,64 @@ impl<'a> SessionTags<'a> {
     }
 }
 
+/// Session environment variable API.
+///
+/// Construct with [`Target::environment`]. The helper dispatches all operations
+/// against the target's stable session id.
+pub struct SessionEnvironment<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+}
+
+impl<'a> SessionEnvironment<'a> {
+    /// Set one environment variable in this session.
+    pub async fn set(&self, name: &str, value: &str) -> Result<()> {
+        control::set_session_env_var_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            name,
+            value,
+        )
+        .await
+    }
+
+    /// Remove one environment variable from this session.
+    pub async fn unset(&self, name: &str) -> Result<()> {
+        control::unset_session_env_var_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            name,
+        )
+        .await
+    }
+
+    /// Read one environment variable from this session.
+    ///
+    /// Returns `Ok(None)` when the variable is not present.
+    pub async fn read(&self, name: &str) -> Result<Option<String>> {
+        control::read_session_env_var_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            name,
+        )
+        .await
+    }
+
+    /// List all environment variables in this session.
+    pub async fn list(&self) -> Result<Vec<SessionEnvVar>> {
+        control::list_session_env_vars_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+}
+
 impl Target {
     /// Resolve the effective pane_id for exec lock keying (DC19).
     ///
@@ -1467,43 +1525,12 @@ impl Target {
         self.tags_with_operation(prefix, "tags").await
     }
 
-    /// Set a namespaced metadata tag on this session.
+    /// Access this session's tmux environment.
     ///
-    /// This is a one-off convenience wrapper around [`tags`](Self::tags).
-    pub async fn set_tag(&self, prefix: &str, key: &str, value: &str) -> Result<()> {
-        self.tags_with_operation(prefix, "set_tag")
-            .await?
-            .set(key, value)
-            .await
-    }
-
-    /// Remove a namespaced metadata tag from this session.
-    ///
-    /// This is a one-off convenience wrapper around [`tags`](Self::tags).
-    pub async fn unset_tag(&self, prefix: &str, key: &str) -> Result<()> {
-        self.tags_with_operation(prefix, "unset_tag")
-            .await?
-            .unset(key)
-            .await
-    }
-
-    /// Read a namespaced metadata tag from this session.
-    ///
-    /// This is a one-off convenience wrapper around [`tags`](Self::tags).
-    /// Returns `Ok(None)` when the tag is not present.
-    pub async fn read_tag(&self, prefix: &str, key: &str) -> Result<Option<String>> {
-        self.tags_with_operation(prefix, "read_tag")
-            .await?
-            .read(key)
-            .await
-    }
-
-    /// List all metadata tags under `prefix` for this session.
-    pub async fn list_tags(&self, prefix: &str) -> Result<Vec<SessionTag>> {
-        self.tags_with_operation(prefix, "list_tags")
-            .await?
-            .list()
-            .await
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
+    pub async fn environment(&self) -> Result<SessionEnvironment<'_>> {
+        self.environment_with_operation("environment").await
     }
 
     /// Set this session's local tmux status bar style.
@@ -1679,6 +1706,23 @@ impl Target {
             tmux_prefix,
             session_id,
             prefix,
+        })
+    }
+
+    async fn environment_with_operation(
+        &self,
+        operation: &'static str,
+    ) -> Result<SessionEnvironment<'_>> {
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        Ok(SessionEnvironment {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
         })
     }
 
@@ -3069,7 +3113,6 @@ mod tests {
         let tags = target.tags("mmux").await.unwrap();
 
         tags.unset("foo").await.unwrap();
-        target.unset_tag("mmux", "foo").await.unwrap();
     }
 
     #[tokio::test]
@@ -3077,8 +3120,9 @@ mod tests {
         let mock = MockTransport::new().with_response("show-option -q -t '$0' @mmux/missing", "");
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
+        let tags = target.tags("mmux").await.unwrap();
 
-        assert_eq!(target.read_tag("mmux", "missing").await.unwrap(), None);
+        assert_eq!(tags.read("missing").await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -3100,7 +3144,92 @@ mod tests {
             }),
         };
 
-        target.set_tag("mmux", "foo", "bar").await.unwrap();
+        target
+            .tags("mmux")
+            .await
+            .unwrap()
+            .set("foo", "bar")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_environment_set_read_and_list() {
+        let mock = MockTransport::new()
+            .with_response("set-environment -t '$0' FOO 'bar'", "")
+            .with_response("show-environment -t '$0' FOO", "FOO=hello world\n")
+            .with_response(
+                "show-environment -t '$0'",
+                "FOO=hello world\n-REMOVED\nEMPTY=\nEQ=a=b\n",
+            );
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let env = target.environment().await.unwrap();
+
+        env.set("FOO", "bar").await.unwrap();
+        let value = env.read("FOO").await.unwrap();
+        let listed = env.list().await.unwrap();
+
+        assert_eq!(value, Some("hello world".to_string()));
+        assert_eq!(
+            listed,
+            vec![
+                SessionEnvVar::new("FOO", "hello world").unwrap(),
+                SessionEnvVar::new("EMPTY", "").unwrap(),
+                SessionEnvVar::new("EQ", "a=b").unwrap(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_environment_unset() {
+        let mock = MockTransport::new().with_response("set-environment -u -t '$0' FOO", "");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let env = target.environment().await.unwrap();
+
+        env.unset("FOO").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_environment_read_missing_returns_none() {
+        let mock = MockTransport::new().with_error(
+            "show-environment -t '$0' MISSING",
+            "unknown variable: MISSING",
+        );
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let env = target.environment().await.unwrap();
+
+        assert_eq!(env.read("MISSING").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn session_environment_uses_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-environment -t 'build'", "used display name")
+            .with_response("set-environment -t '$7' FOO 'bar'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target
+            .environment()
+            .await
+            .unwrap()
+            .set("FOO", "bar")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3192,22 +3321,30 @@ mod tests {
     async fn session_tags_reject_invalid_inputs_before_exec() {
         let mock = MockTransport::new()
             .with_error("set-option", "validation should run before exec")
-            .with_error("show-option", "validation should run before exec");
+            .with_error("show-option", "validation should run before exec")
+            .with_error("set-environment", "validation should run before exec")
+            .with_error("show-environment", "validation should run before exec");
         let host = mock_host(mock);
         let target = host.create_target_for_test("build");
 
-        assert!(target.set_tag("mmux/team", "foo", "bar").await.is_err());
-        assert!(target.set_tag("mmux", "foo/bar", "bar").await.is_err());
-        assert!(target.unset_tag("mmux", "foo/bar").await.is_err());
-        assert!(target.read_tag("mmux", "foo/bar").await.is_err());
-        assert!(target.list_tags("mmux/team").await.is_err());
+        assert!(target.tags("mmux/team").await.is_err());
+        let tags = target.tags("mmux").await.unwrap();
+        assert!(tags.set("foo/bar", "bar").await.is_err());
+        assert!(tags.unset("foo/bar").await.is_err());
+        assert!(tags.read("foo/bar").await.is_err());
 
         let large = "x".repeat(SESSION_TAG_VALUE_MAX_BYTES + 1);
-        assert!(target.set_tag("mmux", "large", &large).await.is_err());
-        assert!(target
-            .set_tag("mmux", "newline", "line1\nline2")
-            .await
-            .is_err());
+        assert!(tags.set("large", &large).await.is_err());
+        assert!(tags.set("newline", "line1\nline2").await.is_err());
+
+        let env = target.environment().await.unwrap();
+        assert!(env.set("1BAD", "value").await.is_err());
+        assert!(env.unset("BAD-NAME").await.is_err());
+        assert!(env.read("BAD-NAME").await.is_err());
+
+        let large_env = "x".repeat(SESSION_ENV_VAR_VALUE_MAX_BYTES + 1);
+        assert!(env.set("FOO", &large_env).await.is_err());
+        assert!(env.set("FOO", "line1\nline2").await.is_err());
     }
 
     #[tokio::test]
@@ -3235,22 +3372,16 @@ mod tests {
             }),
         };
 
-        assert!(window_target.set_tag("mmux", "foo", "bar").await.is_err());
-        assert!(window_target.unset_tag("mmux", "foo").await.is_err());
-        assert!(window_target.read_tag("mmux", "foo").await.is_err());
-        assert!(window_target.list_tags("mmux").await.is_err());
         assert!(window_target.tags("mmux").await.is_err());
+        assert!(window_target.environment().await.is_err());
         assert!(window_target
             .set_status_style(&StatusStyle::new("bg=blue").unwrap())
             .await
             .is_err());
         assert!(window_target.unset_status_style().await.is_err());
         assert!(window_target.read_local_status_style().await.is_err());
-        assert!(pane_target.set_tag("mmux", "foo", "bar").await.is_err());
-        assert!(pane_target.unset_tag("mmux", "foo").await.is_err());
-        assert!(pane_target.read_tag("mmux", "foo").await.is_err());
-        assert!(pane_target.list_tags("mmux").await.is_err());
         assert!(pane_target.tags("mmux").await.is_err());
+        assert!(pane_target.environment().await.is_err());
         assert!(pane_target
             .set_status_style(&StatusStyle::new("bg=blue").unwrap())
             .await

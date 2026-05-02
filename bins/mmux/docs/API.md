@@ -343,10 +343,10 @@ stripped key, rendered without `@mmux/`, filtered to hide the internal
 keeps row focus and bottom field focus explicit with `SessionTagsFocus`; `Tab`
 cycles the bottom Key/Value cells and Cancel button, `Shift-Tab` reverses that
 cycle, Enter on either edit field writes non-empty, non-reserved values through
-`Target::set_tag("mmux", key, value)`, where `__selected-key` is reserved for
-the internal marker. `x` deletes through
-`Target::unset_tag("mmux", key)`, and `u` preloads the bottom fields. Pressing
-`c` on a focused tag row toggles the checked key stored in
+`Target::tags("mmux").await?.set(key, value)`, where `__selected-key` is
+reserved for the internal marker. `x` deletes through
+`Target::tags("mmux").await?.unset(key)`, and `u` preloads the bottom fields.
+Pressing `c` on a focused tag row toggles the checked key stored in
 `@mmux/__selected-key`, and renders `✓` in that row's marker column across
 different mmux processes.
 

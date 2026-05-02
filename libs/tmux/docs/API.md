@@ -22,12 +22,13 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
 | 2026-05-02 | @codex | Added narrow session-local status-left APIs: `StatusLeft`, `StatusLeftLength`, and `Target::{set,unset,read_local}_status_left*()` for temporary attach display overrides. |
 | 2026-05-02 | @codex | Added narrow session-local status bar styling API: `StatusStyle`, `Target::set_status_style()`, `unset_status_style()`, and `read_local_status_style()`. |
 | 2026-05-02 | @codex | Added `HostHandle::list_tags_for_session_infos(prefix, sessions)` to batch-read session metadata tags for a fresh session listing in one tmux command. |
 | 2026-05-01 | @codex | Added `HostHandle::target_for_session_info()` so consumers enriching a fresh `list_sessions()` result can build a session `Target` without issuing a second session-discovery query. |
-| 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` and one-off `Target::unset_tag(prefix, key)` remove a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
-| 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
+| 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` removes a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
+| 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
 | 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
@@ -730,7 +731,7 @@ rename.
 let sessions = host.list_sessions().await?;
 for session in sessions {
     let target = host.target_for_session_info(session);
-    let tags = target.list_tags("mmux").await?;
+    let tags = target.tags("mmux").await?.list().await?;
     println!("{} tags", tags.len());
 }
 ```
@@ -936,15 +937,51 @@ Contract:
 - `SessionTags::unset(key)` removes one tag from the namespace.
 - `SessionTags::read(key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
 - `SessionTags::list()` returns every valid tag under that namespace.
-- `set_tag(prefix, key, value)`, `unset_tag(prefix, key)`,
-  `read_tag(prefix, key)`, and `list_tags(prefix)` are one-off wrappers around
-  `tags(prefix)`.
 - `HostHandle::list_tags_for_session_infos(prefix, sessions)` batch-lists tags
   for a session listing in one tmux command and returns an entry for every
   provided stable session id.
 - Prefixes and keys must be non-empty ASCII letters, digits, `.`, `_`, or `-`.
 - Values are UTF-8 strings, may be empty, must not contain control characters,
   and are capped at 2 KiB.
+- These methods return `UnsupportedTarget` for window and pane targets.
+
+## Session Environment Variables
+
+Session environment variables are session-target only and use tmux
+`set-environment` / `show-environment` under the same stable-session-id dispatch
+boundary as tags:
+
+```rust
+let session = host
+    .session("build")
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("build not found".into()))?;
+
+let env = session.environment().await?;
+env.set("BUILD_ID", "42").await?;
+
+assert_eq!(
+    env.read("BUILD_ID").await?,
+    Some("42".to_string())
+);
+
+let all = env.list().await?;
+env.unset("BUILD_ID").await?;
+```
+
+Contract:
+- `environment()` captures the stable session id and tmux command prefix, and
+  returns a scoped `SessionEnvironment` helper.
+- `SessionEnvironment::set(name, value)` writes one variable.
+- `SessionEnvironment::unset(name)` removes one variable.
+- `SessionEnvironment::read(name)` returns `Ok(Some(value))` or `Ok(None)` when
+  missing.
+- `SessionEnvironment::list()` returns valid set variables and skips tmux unset
+  markers such as `-NAME`.
+- Names must be ASCII environment identifiers: first byte letter or `_`, then
+  letters, digits, or `_`.
+- Values are UTF-8 strings, may be empty, must not contain control characters,
+  and are capped at 8 KiB.
 - These methods return `UnsupportedTarget` for window and pane targets.
 
 The implementation targets the stable tmux `SessionId` held by `SessionInfo`,

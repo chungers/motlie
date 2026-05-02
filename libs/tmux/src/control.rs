@@ -5,7 +5,8 @@ use std::path::Path;
 use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
-    validate_session_tag_value, CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionTag,
+    validate_session_env_var_name, validate_session_env_var_value, validate_session_tag_value,
+    CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionEnvVar, SessionTag,
     SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength,
     StatusStyle, TmuxSocket, WindowInfo,
 };
@@ -603,6 +604,105 @@ pub(crate) async fn list_session_tags_with_prefix(
     Ok(tags)
 }
 
+/// Set one session environment variable.
+pub(crate) async fn set_session_env_var_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    validate_session_env_var_name(name)?;
+    validate_session_env_var_value(value)?;
+    let cmd = format!(
+        "{} set-environment -t {} {} {}",
+        prefix,
+        shell_escape(target),
+        name,
+        shell_escape(value)
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset one session environment variable.
+pub(crate) async fn unset_session_env_var_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    name: &str,
+) -> Result<()> {
+    validate_session_env_var_name(name)?;
+    let cmd = format!(
+        "{} set-environment -u -t {} {}",
+        prefix,
+        shell_escape(target),
+        name,
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read one session environment variable. Missing variables return `Ok(None)`.
+pub(crate) async fn read_session_env_var_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    validate_session_env_var_name(name)?;
+    let cmd = format!(
+        "{} show-environment -t {} {}",
+        prefix,
+        shell_escape(target),
+        name
+    );
+    let output = match transport.exec(&cmd).await {
+        Ok(output) => output,
+        Err(err) if is_unknown_session_env_var_error(&err.to_string(), name) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let mut parsed = None;
+    for line in output.lines() {
+        let Some(var) = parse_session_env_var_line(line)? else {
+            continue;
+        };
+        if parsed.replace(var).is_some() {
+            return Err(Error::Parse(format!(
+                "show-environment returned multiple variables while reading {name}"
+            )));
+        }
+    }
+    let Some(var) = parsed else {
+        return Ok(None);
+    };
+    if var.name() != name {
+        return Err(Error::Parse(format!(
+            "show-environment returned {} while reading {}",
+            var.name(),
+            name
+        )));
+    }
+    Ok(Some(var.into_value()))
+}
+
+/// List all session environment variables.
+pub(crate) async fn list_session_env_vars_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Vec<SessionEnvVar>> {
+    let cmd = format!("{} show-environment -t {}", prefix, shell_escape(target));
+    let output = transport.exec(&cmd).await?;
+    let mut vars = Vec::new();
+    for line in output.lines() {
+        if let Some(var) = parse_session_env_var_line(line)? {
+            vars.push(var);
+        }
+    }
+    Ok(vars)
+}
+
 /// Set session-local tmux status bar style.
 pub(crate) async fn set_session_status_style_with_prefix(
     transport: &TransportKind,
@@ -897,6 +997,30 @@ fn parse_session_tag_option_line(
     }
     let value = parse_tmux_option_value(value)?;
     Ok(Some(SessionTag::from_parts(prefix, key, value)?))
+}
+
+fn parse_session_env_var_line(line: &str) -> Result<Option<SessionEnvVar>> {
+    let line = line.trim_end_matches('\r');
+    if line.is_empty() {
+        return Ok(None);
+    }
+    if line.starts_with('-') {
+        return Ok(None);
+    }
+    let Some((name, value)) = line.split_once('=') else {
+        return Err(Error::Parse(format!(
+            "malformed environment variable without '=': {line}"
+        )));
+    };
+    Ok(Some(SessionEnvVar::from_parts(name, value.to_string())?))
+}
+
+fn is_unknown_session_env_var_error(message: &str, name: &str) -> bool {
+    let unknown = format!("unknown variable: {name}");
+    message.lines().any(|line| {
+        let line = line.trim();
+        line == unknown || line == format!("stderr: {unknown}")
+    })
 }
 
 fn split_once_whitespace(input: &str) -> Option<(&str, &str)> {
@@ -1294,6 +1418,16 @@ mod tests {
     }
 
     #[test]
+    fn session_env_var_new_validates_and_is_self_describing() {
+        let var = SessionEnvVar::new("PATH", "/usr/bin").unwrap();
+        assert_eq!((var.name(), var.value()), ("PATH", "/usr/bin"));
+        assert!(SessionEnvVar::new("", "value").is_err());
+        assert!(SessionEnvVar::new("1BAD", "value").is_err());
+        assert!(SessionEnvVar::new("BAD-NAME", "value").is_err());
+        assert!(SessionEnvVar::new("GOOD_NAME", "line1\nline2").is_err());
+    }
+
+    #[test]
     fn parse_session_tag_option_line_decodes_tmux_values() {
         let prefix = tag_prefix();
         let option_prefix = prefix.option_prefix();
@@ -1444,6 +1578,121 @@ mod tests {
         assert_eq!(
             tags.get("$8").unwrap(),
             &vec![SessionTag::new("mmux", "bar", "two words").unwrap()]
+        );
+    }
+
+    #[test]
+    fn parse_session_env_var_line_decodes_values() {
+        assert_eq!(
+            parse_session_env_var_line("FOO=hello world").unwrap(),
+            Some(SessionEnvVar::new("FOO", "hello world").unwrap())
+        );
+        assert_eq!(
+            parse_session_env_var_line("EMPTY=").unwrap(),
+            Some(SessionEnvVar::new("EMPTY", "").unwrap())
+        );
+        assert_eq!(
+            parse_session_env_var_line("EQ=a=b").unwrap(),
+            Some(SessionEnvVar::new("EQ", "a=b").unwrap())
+        );
+        assert_eq!(
+            parse_session_env_var_line("SPACES= leading trailing ").unwrap(),
+            Some(SessionEnvVar::new("SPACES", " leading trailing ").unwrap())
+        );
+        assert_eq!(parse_session_env_var_line("-REMOVED").unwrap(), None);
+        assert_eq!(parse_session_env_var_line("").unwrap(), None);
+        assert!(parse_session_env_var_line("MALFORMED").is_err());
+    }
+
+    #[tokio::test]
+    async fn set_session_env_var_builds_expected_command() {
+        let mock =
+            MockTransport::new().with_response("tmux set-environment -t '$7' FOO 'bar baz'", "");
+        let transport = TransportKind::Mock(mock);
+
+        set_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO", "bar baz")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unset_session_env_var_builds_expected_command() {
+        let mock = MockTransport::new().with_response("tmux set-environment -u -t '$7' FOO", "");
+        let transport = TransportKind::Mock(mock);
+
+        unset_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_session_env_var_returns_value_or_none() {
+        let mock = MockTransport::new()
+            .with_response("tmux show-environment -t '$7' FOO", "FOO=hello world\n")
+            .with_error(
+                "tmux show-environment -t '$7' MISSING",
+                "unknown variable: MISSING",
+            );
+        let transport = TransportKind::Mock(mock);
+
+        let value = read_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap();
+        let missing = read_session_env_var_with_prefix(&transport, "tmux", "$7", "MISSING")
+            .await
+            .unwrap();
+
+        assert_eq!(value, Some("hello world".to_string()));
+        assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn read_session_env_var_does_not_fuzzy_match_missing_name() {
+        let mock = MockTransport::new().with_error(
+            "tmux show-environment -t '$7' FOO",
+            "unknown variable: FOO_BAR",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let err = read_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("FOO_BAR"));
+    }
+
+    #[tokio::test]
+    async fn read_session_env_var_rejects_unexpected_name() {
+        let mock =
+            MockTransport::new().with_response("tmux show-environment -t '$7' FOO", "BAR=value\n");
+        let transport = TransportKind::Mock(mock);
+
+        let err = read_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("BAR"));
+    }
+
+    #[tokio::test]
+    async fn list_session_env_vars_skips_unset_markers() {
+        let mock = MockTransport::new().with_response(
+            "tmux show-environment -t '$7'",
+            "FOO=hello world\n-REMOVED\nEMPTY=\nEQ=a=b\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let vars = list_session_env_vars_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vars,
+            vec![
+                SessionEnvVar::new("FOO", "hello world").unwrap(),
+                SessionEnvVar::new("EMPTY", "").unwrap(),
+                SessionEnvVar::new("EQ", "a=b").unwrap(),
+            ]
         );
     }
 
