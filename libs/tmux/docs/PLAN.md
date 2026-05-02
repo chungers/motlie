@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` as the lifecycle-correct API for env vars visible to the initial pane, and documented post-creation session env writes as future-process only. |
 | 2026-05-02 | @codex | Added narrow `StatusStyle` and session-local `Target` status-style APIs for tmux status bar styling without exposing a generic arbitrary-option API. |
 | 2026-05-02 | @codex | Added the host-level batch session tag read API used by mmux to avoid per-session metadata round trips during refresh. |
 | 2026-05-01 | @codex | Added Phase 1.17 for issue #241 follow-up: expose session tag deletion via `SessionTags::unset(key)` / `Target::unset_tag(prefix, key)` backed by tmux `set-option -u`. |

@@ -607,7 +607,8 @@ impl HostHandle {
 
     /// Create a new tmux session. Returns a Target at session level (DC22).
     ///
-    /// Use `CreateSessionOptions` to set window size, history limit, etc.
+    /// Use `CreateSessionOptions` to set window size, history limit, initial
+    /// environment, etc.
     /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
     pub async fn create_session(&self, name: &str, opts: &CreateSessionOptions) -> Result<Target> {
         let prefix = self.inner.tmux_prefix().await;
@@ -1362,10 +1363,16 @@ impl<'a> SessionTags<'a> {
     }
 }
 
-/// Session environment variable API.
+/// Post-creation session environment variable API.
 ///
 /// Construct with [`Target::environment`]. The helper dispatches all operations
 /// against the target's stable session id.
+///
+/// tmux uses this environment for processes it starts after the write, such as
+/// new panes or windows. It cannot mutate shell processes that are already
+/// running in existing panes. Use [`CreateSessionOptions::initial_environment`]
+/// for variables that must be visible to the first pane process created by
+/// `new-session`.
 pub struct SessionEnvironment<'a> {
     transport: &'a TransportKind,
     tmux_prefix: String,
@@ -1373,7 +1380,11 @@ pub struct SessionEnvironment<'a> {
 }
 
 impl<'a> SessionEnvironment<'a> {
-    /// Set one environment variable in this session.
+    /// Set one environment variable in this session for future tmux-spawned
+    /// processes.
+    ///
+    /// This updates tmux's session environment table. It does not modify
+    /// already-running pane processes.
     pub async fn set(&self, name: &str, value: &str) -> Result<()> {
         control::set_session_env_var_with_prefix(
             self.transport,
@@ -1385,7 +1396,11 @@ impl<'a> SessionEnvironment<'a> {
         .await
     }
 
-    /// Remove one environment variable from this session.
+    /// Remove one environment variable from this session for future
+    /// tmux-spawned processes.
+    ///
+    /// This updates tmux's session environment table. It does not modify
+    /// already-running pane processes.
     pub async fn unset(&self, name: &str) -> Result<()> {
         control::unset_session_env_var_with_prefix(
             self.transport,
@@ -1525,7 +1540,10 @@ impl Target {
         self.tags_with_operation(prefix, "tags").await
     }
 
-    /// Access this session's tmux environment.
+    /// Access this session's post-creation tmux environment.
+    ///
+    /// Writes affect processes tmux starts after the write. They do not mutate
+    /// shells already running in panes.
     ///
     /// This resolves and captures the tmux command prefix up front, so it is
     /// async when the host must discover the tmux binary for the transport.

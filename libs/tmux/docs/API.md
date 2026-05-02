@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
 | 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
 | 2026-05-02 | @codex | Added narrow session-local status-left APIs: `StatusLeft`, `StatusLeftLength`, and `Target::{set,unset,read_local}_status_left*()` for temporary attach display overrides. |
 | 2026-05-02 | @codex | Added narrow session-local status bar styling API: `StatusStyle`, `Target::set_status_style()`, `unset_status_style()`, and `read_local_status_style()`. |
@@ -607,6 +608,18 @@ let opts = CreateSessionOptions {
 let target = host.create_session("automation", &opts).await?;
 // Sets -x 200 -y 50 on new-session, then set-option history-limit 50000
 // on both the session (future panes) and initial pane (tmux 3.1+)
+
+// With variables visible to the initial shell or command
+let opts = CreateSessionOptions {
+    initial_environment: vec![
+        SessionEnvVar::new("MOTLIE", "enabled")?,
+        SessionEnvVar::new("BUILD_ID", "42")?,
+    ],
+    ..Default::default()
+};
+let target = host.create_session("with-env", &opts).await?;
+// Emits tmux new-session -e MOTLIE=enabled -e BUILD_ID=42 before the command,
+// so the first pane process inherits those values.
 ```
 
 ### Kill
@@ -949,7 +962,11 @@ Contract:
 
 Session environment variables are session-target only and use tmux
 `set-environment` / `show-environment` under the same stable-session-id dispatch
-boundary as tags:
+boundary as tags. This is a post-creation API: writes update tmux's session
+environment for processes tmux starts later, such as new panes or windows. They
+cannot mutate shell processes already running in existing panes. Use
+`CreateSessionOptions::initial_environment` for variables that must be visible to
+the first pane process created by `new-session`.
 
 ```rust
 let session = host
@@ -972,8 +989,10 @@ env.unset("BUILD_ID").await?;
 Contract:
 - `environment()` captures the stable session id and tmux command prefix, and
   returns a scoped `SessionEnvironment` helper.
-- `SessionEnvironment::set(name, value)` writes one variable.
-- `SessionEnvironment::unset(name)` removes one variable.
+- `SessionEnvironment::set(name, value)` writes one variable for future
+  tmux-spawned processes.
+- `SessionEnvironment::unset(name)` removes one variable for future
+  tmux-spawned processes.
 - `SessionEnvironment::read(name)` returns `Ok(Some(value))` or `Ok(None)` when
   missing.
 - `SessionEnvironment::list()` returns valid set variables and skips tmux unset
