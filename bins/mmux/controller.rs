@@ -157,7 +157,7 @@ pub(crate) async fn refresh_sessions_preserving(
 
 fn current_selection_key(app: &AppState) -> Option<(HostId, String)> {
     app.selected_session()
-        .map(|session| (session.host_id, session.id))
+        .map(|session| (session.host_id.clone(), session.id().to_string()))
 }
 
 async fn refresh_sessions_preserving_with_status(
@@ -349,7 +349,7 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('r'), _) if app.layout.focus == Focus::List => {
             if let Some(selected) = app.selected_session() {
                 app.modal = Some(ModalState::RenameSession {
-                    input: selected.name.clone(),
+                    input: selected.name().to_string(),
                     session: selected,
                     button: Button::Ok,
                 });
@@ -949,25 +949,23 @@ async fn kill_session_from_modal(
             StatusBanner::error(format!("host {} no longer connected", session.host_label));
         return Ok(());
     };
-    match host.session_by_id(&session.id).await? {
-        Some(target) => match target.kill().await {
-            Ok(()) => {
-                let status = if fleet.is_multi() {
-                    format!("killed session {} on {}", session.name, session.host_label)
-                } else {
-                    format!("killed session {}", session.name)
-                };
-                refresh_sessions(fleet, app, true).await?;
-                app.status = StatusBanner::info(status);
-            }
-            Err(err) => {
-                app.status = StatusBanner::error(format!("kill failed: {err}"));
-            }
-        },
-        None => {
+    let target = host.target_for_session_info(session.info.clone());
+    match target.kill().await {
+        Ok(()) => {
+            let status = if fleet.is_multi() {
+                format!(
+                    "killed session {} on {}",
+                    session.name(),
+                    session.host_label
+                )
+            } else {
+                format!("killed session {}", session.name())
+            };
             refresh_sessions(fleet, app, true).await?;
-            app.status =
-                StatusBanner::error(format!("session {} disappeared before kill", session.name));
+            app.status = StatusBanner::info(status);
+        }
+        Err(err) => {
+            app.status = StatusBanner::error(format!("kill failed: {err}"));
         }
     }
     Ok(())
@@ -984,7 +982,7 @@ async fn rename_session_from_modal(
         app.status = StatusBanner::info("session name is empty");
         return Ok(());
     }
-    if new_name == session.name {
+    if new_name == session.name() {
         app.status = StatusBanner::info("session name unchanged");
         return Ok(());
     }
@@ -993,16 +991,17 @@ async fn rename_session_from_modal(
             StatusBanner::error(format!("host {} no longer connected", session.host_label));
         return Ok(());
     };
-    match host.session_by_id(&session.id).await? {
+    match host.session_by_id(session.id()).await? {
         Some(target) => match target.rename(new_name).await {
             Ok(_) => {
                 let status = if fleet.is_multi() {
                     format!(
                         "renamed session {} to {new_name} on {}",
-                        session.name, session.host_label
+                        session.name(),
+                        session.host_label
                     )
                 } else {
-                    format!("renamed session {} to {new_name}", session.name)
+                    format!("renamed session {} to {new_name}", session.name())
                 };
                 refresh_sessions(fleet, app, true).await?;
                 app.status = StatusBanner::info(status);
@@ -1015,7 +1014,7 @@ async fn rename_session_from_modal(
             refresh_sessions(fleet, app, true).await?;
             app.status = StatusBanner::error(format!(
                 "session {} disappeared before rename",
-                session.name
+                session.name()
             ));
         }
     }
@@ -1027,7 +1026,7 @@ async fn open_session_tags_modal(
     app: &mut AppState,
     selected: SelectedSession,
 ) -> Result<()> {
-    match load_tag_state(fleet, &selected.host_id, &selected.id).await? {
+    match load_tag_state(fleet, &selected.host_id, selected.id()).await? {
         Some(state) => {
             let focus = first_session_tags_focus(&state.rows);
             app.modal = Some(ModalState::SessionTags {
@@ -1045,7 +1044,7 @@ async fn open_session_tags_modal(
             refresh_sessions(fleet, app, true).await?;
             app.status = StatusBanner::error(format!(
                 "session {} disappeared before tag edit",
-                selected.name
+                selected.name()
             ));
         }
     }
@@ -1076,16 +1075,17 @@ async fn set_tag_from_modal(
             StatusBanner::error(format!("host {} no longer connected", session.host_label));
         return Ok(());
     };
-    match host.session_by_id(&session.id).await? {
+    match host.session_by_id(session.id()).await? {
         Some(target) => match target.set_tag(TAG_PREFIX, &key, &value).await {
             Ok(()) => {
                 app.status = StatusBanner::info(if fleet.is_multi() {
                     format!(
                         "set tag {key} on {} at {}",
-                        session.name, session.host_label
+                        session.name(),
+                        session.host_label
                     )
                 } else {
-                    format!("set tag {key} on {}", session.name)
+                    format!("set tag {key} on {}", session.name())
                 });
                 reload_session_tags_modal(fleet, app, session, Some(key), None).await?;
                 refresh_sessions_quiet(fleet, app, false).await?;
@@ -1099,7 +1099,7 @@ async fn set_tag_from_modal(
             refresh_sessions(fleet, app, true).await?;
             app.status = StatusBanner::error(format!(
                 "session {} disappeared before tag edit",
-                session.name
+                session.name()
             ));
         }
     }
@@ -1119,7 +1119,7 @@ async fn unset_tag_from_modal(
             StatusBanner::error(format!("host {} no longer connected", session.host_label));
         return Ok(());
     };
-    match host.session_by_id(&session.id).await? {
+    match host.session_by_id(session.id()).await? {
         Some(target) => match target.unset_tag(TAG_PREFIX, &key).await {
             Ok(()) => {
                 if selected_key.as_deref() == Some(key.as_str()) {
@@ -1135,10 +1135,11 @@ async fn unset_tag_from_modal(
                 app.status = StatusBanner::info(if fleet.is_multi() {
                     format!(
                         "deleted tag {key} on {} at {}",
-                        session.name, session.host_label
+                        session.name(),
+                        session.host_label
                     )
                 } else {
-                    format!("deleted tag {key} on {}", session.name)
+                    format!("deleted tag {key} on {}", session.name())
                 });
                 reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
                 refresh_sessions_quiet(fleet, app, false).await?;
@@ -1152,7 +1153,7 @@ async fn unset_tag_from_modal(
             refresh_sessions(fleet, app, true).await?;
             app.status = StatusBanner::error(format!(
                 "session {} disappeared before tag delete",
-                session.name
+                session.name()
             ));
         }
     }
@@ -1171,7 +1172,7 @@ async fn select_tag_from_modal(
             StatusBanner::error(format!("host {} no longer connected", session.host_label));
         return Ok(());
     };
-    match host.session_by_id(&session.id).await? {
+    match host.session_by_id(session.id()).await? {
         Some(target) => {
             let result = match key.as_deref() {
                 Some(key) => {
@@ -1187,19 +1188,21 @@ async fn select_tag_from_modal(
                         app.status = StatusBanner::info(if fleet.is_multi() {
                             format!(
                                 "selected tag {key} on {} at {}",
-                                session.name, session.host_label
+                                session.name(),
+                                session.host_label
                             )
                         } else {
-                            format!("selected tag {key} on {}", session.name)
+                            format!("selected tag {key} on {}", session.name())
                         });
                     } else {
                         app.status = StatusBanner::info(if fleet.is_multi() {
                             format!(
                                 "cleared selected tag on {} at {}",
-                                session.name, session.host_label
+                                session.name(),
+                                session.host_label
                             )
                         } else {
-                            format!("cleared selected tag on {}", session.name)
+                            format!("cleared selected tag on {}", session.name())
                         });
                     }
                     reload_session_tags_modal(fleet, app, session, None, Some(index)).await?;
@@ -1209,10 +1212,11 @@ async fn select_tag_from_modal(
                     app.status = StatusBanner::error(if fleet.is_multi() {
                         format!(
                             "select tag failed on {} at {}: {err}",
-                            session.name, session.host_label
+                            session.name(),
+                            session.host_label
                         )
                     } else {
-                        format!("select tag failed on {}: {err}", session.name)
+                        format!("select tag failed on {}: {err}", session.name())
                     });
                 }
             }
@@ -1222,7 +1226,7 @@ async fn select_tag_from_modal(
             refresh_sessions(fleet, app, true).await?;
             app.status = StatusBanner::error(format!(
                 "session {} disappeared before tag selection",
-                session.name
+                session.name()
             ));
         }
     }
@@ -1236,7 +1240,7 @@ async fn reload_session_tags_modal(
     preferred_key: Option<String>,
     preferred_index: Option<usize>,
 ) -> Result<()> {
-    match load_tag_state(fleet, &session.host_id, &session.id).await? {
+    match load_tag_state(fleet, &session.host_id, session.id()).await? {
         Some(state) => {
             let tags = state.rows;
             let focus = if let Some(key) = preferred_key {
@@ -1269,7 +1273,7 @@ async fn reload_session_tags_modal(
             refresh_sessions(fleet, app, true).await?;
             app.status = StatusBanner::error(format!(
                 "session {} disappeared before tag reload",
-                session.name
+                session.name()
             ));
         }
     }
@@ -1371,7 +1375,7 @@ async fn start_monitor(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     match source.activate(host, &selected).await {
         Ok(()) => {
             app.detail.source = source;
-            app.status = StatusBanner::info(format!("monitoring {}", selected.name));
+            app.status = StatusBanner::info(format!("monitoring {}", selected.name()));
             app.detail.lines.clear();
         }
         Err(err) => {

@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Tightened multi-host kill dispatch: `SelectedSession` carries the captured `SessionInfo`, and kill builds a target from that selected row on the selected host. |
 | 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#001f3f` and changed status-bar mnemonic letters to bold coral. |
 | 2026-05-02 | @codex | Added multi-host New Session host selection. |
 | 2026-05-02 | @codex | Status bars now use dark blue; command shortcut letters render bold colored spans instead of underlined, and attach applies the same blue to tmux `status-style`. |
@@ -251,8 +252,12 @@ enum ModalState {
 struct SelectedSession {
     host_id: HostId,
     host_label: String,
-    id: String,
-    name: String,
+    info: SessionInfo,
+}
+
+impl SelectedSession {
+    fn id(&self) -> &str;
+    fn name(&self) -> &str;
 }
 
 struct NewSessionModalUi {
@@ -431,19 +436,18 @@ Kill:
 
 ```rust
 let selected = SelectedSession {
-    id: highlighted.id.clone(),
-    name: highlighted.name.clone(),
+    host_id: row.host_id.clone(),
+    host_label: row.host_label.clone(),
+    info: row.session.clone(),
 };
-let target = host.session_by_id(&selected.id).await?;
-if let Some(target) = target {
-    target.kill().await?;
-}
+let target = host.target_for_session_info(selected.info.clone());
+target.kill().await?;
 ```
 
 Attach:
 
 ```rust
-let target = host.session_by_id(&selected.id).await?.ok_or(SessionVanished)?;
+let target = host.session_by_id(selected.id()).await?.ok_or(SessionVanished)?;
 let snapshot = match target.read_local_status_style().await {
     Ok(previous) => {
         let blue = motlie_tmux::StatusStyle::new("bg=#001f3f,fg=white")?;
