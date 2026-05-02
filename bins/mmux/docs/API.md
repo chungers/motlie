@@ -10,12 +10,13 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Tightened multi-host kill dispatch: `SelectedSession` carries the captured `SessionInfo`, and kill builds a target from that selected row on the selected host. |
-| 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#001f3f` and changed status-bar mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#002b55` and changed status-bar mnemonic letters to bold coral. |
 | 2026-05-02 | @codex | Added multi-host New Session host selection. |
 | 2026-05-02 | @codex | Status bars now use dark blue; command shortcut letters render bold colored spans instead of underlined, and attach applies the same blue to tmux `status-style`. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and changed list-pane tag grouping to the `g` key with recency-ordered tag groups. |
-| 2026-05-02 | @codex | mmux attach now wraps `Target::attach_current_pty()` with best-effort temporary `status-style bg=#001f3f,fg=white` setup and local-style restoration after detach. |
+| 2026-05-02 | @codex | mmux attach now wraps `Target::attach_current_pty()` with best-effort temporary `status-style bg=#002b55,fg=white` setup and local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only key that selects a session for attach. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when there are no tag rows. |
 | 2026-05-02 | @codex | Tightened `SessionSortMode::Tag`: rows only count as tagged when they have a visible non-empty checked-tag value, and the `s` toggle selects the first row after sorting so the new top is visible. |
@@ -450,7 +451,7 @@ Attach:
 let target = host.session_by_id(selected.id()).await?.ok_or(SessionVanished)?;
 let snapshot = match target.read_local_status_style().await {
     Ok(previous) => {
-        let blue = motlie_tmux::StatusStyle::new("bg=#001f3f,fg=white")?;
+        let blue = motlie_tmux::StatusStyle::new("bg=#002b55,fg=white")?;
         target.set_status_style(&blue).await.ok().map(|_| previous)
     }
     Err(_) => None,

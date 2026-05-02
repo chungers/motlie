@@ -8,8 +8,9 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Fixed multi-host kill dispatch so the kill modal acts on the selected row's captured host and stable session info. |
-| 2026-05-02 | @codex | Darkened status bars to `#001f3f`, matched attach `status-style` to that shade, and changed mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Darkened status bars to `#002b55`, matched attach `status-style` to that shade, and changed mnemonic letters to bold coral. |
 | 2026-05-02 | @codex | Added a multi-host New Session host selector so `n` creates on the selected host. |
 | 2026-05-02 | @codex | Changed status bars to a darker blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched the temporary attach `status-style` background to the TUI status bar. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved list-pane tag grouping from `s` to `g`; grouped tag rows are ordered by most recent activity. |
@@ -109,7 +110,7 @@ session is gone, the selector exits with the child status. `q` / `Ctrl-C` exits
 without attach.
 
 Before attach, mmux best-effort sets the selected session's local tmux
-`status-style` to `bg=#001f3f,fg=white`. After detach, it restores the previous
+`status-style` to `bg=#002b55,fg=white`. After detach, it restores the previous
 local style or unsets the local override when none existed. If style setup or
 restore fails, mmux prints a warning and keeps the attach flow working.
 

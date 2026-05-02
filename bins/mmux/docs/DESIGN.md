@@ -8,8 +8,9 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Tightened multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that selected row on the selected host. |
-| 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#001f3f` and changed mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#002b55` and changed mnemonic letters to bold coral. |
 | 2026-05-02 | @codex | Added a Host dropdown to the multi-host New Session modal, dispatching create to the selected host. |
 | 2026-05-02 | @codex | Changed the TUI status bars to dark blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved tag grouping to list-pane `g`; grouped tag rows are ordered by most recent activity. |
@@ -1437,7 +1438,7 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    library path. If the session vanished between selection and resolve
    (race), show stderr message and re-enter the TUI.
 5. Best-effort read the selected session's local `status-style`, then set
-   `status-style bg=#001f3f,fg=white` through `Target::set_status_style()`. Style
+   `status-style bg=#002b55,fg=white` through `Target::set_status_style()`. Style
    failures warn to stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
