@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Tightened multi-host kill dispatch: `SelectedSession` carries the captured `SessionInfo`, and kill builds a target from that selected row on the selected host. |
@@ -290,13 +291,13 @@ live in `cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`,
 
 The top status bar is derived from the app host identity and current local
 clock: single-host mode renders `<hostname> | <ip address>` as bold
-left-justified text, while multi-host mode renders a compact host-code legend
-such as `mmux [A] alpha [B] beta`. The current time renders right-justified.
+left-justified text, while multi-host mode renders a compact host-color legend
+such as `mmux ■ alpha ■ beta`. The current time renders right-justified.
 The Sessions pane title is derived only from the live session list length:
 `Sessions [n]`. List rows show the display name, attached marker, optional
-multi-host code column such as `[A]`, and right-aligned `<active> / <age>`
-recency text with a small right margin; stable session ids stay internal for
-dispatch. The attached marker is `*` when `SessionInfo::is_attached()` is true.
+multi-host color-square column, and right-aligned `<active> / <age>` recency
+text with a small right margin; stable session ids stay internal for dispatch.
+The attached marker is `*` when `SessionInfo::is_attached()` is true.
 The list is sorted by
 `activity_observed_at_local` descending — operator-side wall clock at the
 moment mmux last saw the row's `session.activity` advance — by default.
@@ -304,7 +305,7 @@ When the operator presses `g` with the list focused,
 `SessionSortMode::TagGroup` groups rows with visible non-empty checked-tag
 values before rows without a displayed tag. Tag groups are ordered by the most
 recent activity in each group, and rows within a group then sort by activity
-time, host code, and session name. Empty checked-tag values sort with rows that
+time, host order, and session name. Empty checked-tag values sort with rows that
 have no displayed tag. The `g` toggle selects the first row in the new order;
 pressing `g` again restores `SessionSortMode::Activity`. `preserve_selection()` re-finds
 the highlighted row by stable session id after refreshes. A single quiet
@@ -534,7 +535,7 @@ API tests must cover:
 - `l` key layout toggling and retained layout re-entry behavior
 - status hint arrow-symbol rendering
 - bottom status command hints with bold coral shortcut-letter spans
-- top status rendering for bold hostname/IP or multi-host code legend and
+- top status rendering for bold hostname/IP or multi-host color legend and
   right-justified current time
 - session count rendering in the Sessions pane title without hostname/IP
 - Help modal open/close behavior, key-function display, build date display,

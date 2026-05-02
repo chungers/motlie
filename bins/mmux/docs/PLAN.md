@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Fixed multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that target on the selected host. |
@@ -498,17 +499,17 @@ it lands as a follow-up.
 
 - [ ] 11.5a `draw_top_status` switches on `fleet.is_multi()`:
   - Single: existing `<hostname> | <ip>     <time>` form.
-  - Multi: `mmux [A] <host-a> [B] <host-b>     <time>` legend form.
-- [ ] 11.5b `draw_sessions` row format: host-code column inserted between
+  - Multi: `mmux ■ <host-a> ■ <host-b>     <time>` legend form.
+- [ ] 11.5b `draw_sessions` row format: host-color square column inserted between
   attached marker and session name when `fleet.is_multi() == true`. Column
-  width = `fleet.host_code_width()`.
+  width = `fleet.host_marker_width()`.
 - [ ] 11.5c MOTD pane: hide entirely when `app.motd.is_none()`. Layout reflows
   the left column (landscape) or top region (portrait) to give the full area
   to sessions.
 - [ ] 11.5d Status banner: render `HostUnreachable` indicator(s) without
   blocking session listing.
 - [ ] 11.5e Snapshot tests for: multi-host top status; multi-host row format
-  (host-code column present and padded); MOTD-pane absence in
+  (host-color column present and padded); MOTD-pane absence in
   multi-host; layout reflow correctness.
 
 ### 11.6 Input + dispatch routing

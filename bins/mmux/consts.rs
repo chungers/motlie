@@ -17,6 +17,14 @@ pub(crate) const MODAL_TEXT_FIELD_HEIGHT: u16 = 3;
 pub(crate) const STATUS_BAR_BG: Color = Color::Rgb(0, 43, 85);
 pub(crate) const STATUS_BAR_MNEMONIC_FG: Color = Color::Rgb(255, 111, 97);
 pub(crate) const MMUX_ATTACH_STATUS_STYLE: &str = "bg=#002b55,fg=white";
+pub(crate) const HOST_COLOR_SQUARE: &str = "■";
+pub(crate) const HOST_COLOR_PALETTE: [Color; 5] = [
+    Color::Rgb(38, 198, 218),
+    Color::Rgb(255, 193, 7),
+    Color::Rgb(139, 195, 74),
+    Color::Rgb(236, 64, 122),
+    Color::Rgb(171, 71, 188),
+];
 
 pub(crate) const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
  _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱

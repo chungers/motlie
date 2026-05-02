@@ -5,8 +5,9 @@ use motlie_tmux::{HostHandle, SessionInfo};
 use ratatui::style::{Color, Style};
 
 use crate::consts::{
-    DEFAULT_LEFT_PERCENT, DEFAULT_TOP_PERCENT, LANDSCAPE_MAX_LEFT_PERCENT,
-    LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
+    DEFAULT_LEFT_PERCENT, DEFAULT_TOP_PERCENT, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
+    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT,
+    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
 };
 use crate::detail::DetailSource;
 
@@ -248,31 +249,29 @@ impl HostFleet {
         self.entries.first()
     }
 
-    /// Compact host code for the given host in multi-host rows.
+    /// Color assigned to the given host in multi-host rows and legends.
     /// Returns `None` for single-host mode or an unknown host id.
-    pub(crate) fn host_code(&self, id: &HostId) -> Option<String> {
+    pub(crate) fn host_color(&self, id: &HostId) -> Option<Color> {
         if !self.is_multi() {
             return None;
         }
         self.entries
             .iter()
             .position(|entry| &entry.id == id)
-            .map(host_code_for_index)
+            .map(host_color_for_index)
     }
 
-    /// Width of the compact host-code column when rendered in multi-host rows.
+    /// Width of the compact host marker column when rendered in multi-host rows.
     /// Returns 0 for single-host (column is omitted).
-    pub(crate) fn host_code_width(&self) -> usize {
+    pub(crate) fn host_marker_width(&self) -> usize {
         if !self.is_multi() {
             return 0;
         }
-        host_code_for_index(self.entries.len().saturating_sub(1))
-            .chars()
-            .count()
+        HOST_COLOR_SQUARE.chars().count()
     }
 
-    /// Host-code legend shown in the multi-host top status bar.
-    pub(crate) fn host_code_legend(&self) -> Option<String> {
+    /// Host-color legend shown in the multi-host top status bar.
+    pub(crate) fn host_color_legend(&self) -> Option<Vec<(Color, String)>> {
         if !self.is_multi() {
             return None;
         }
@@ -280,9 +279,8 @@ impl HostFleet {
             self.entries
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| format!("{} {}", host_code_for_index(index), entry.label))
-                .collect::<Vec<_>>()
-                .join(" "),
+                .map(|(index, entry)| (host_color_for_index(index), entry.label.clone()))
+                .collect(),
         )
     }
 
@@ -294,16 +292,8 @@ impl HostFleet {
     }
 }
 
-fn host_code_for_index(index: usize) -> String {
-    let mut n = index + 1;
-    let mut letters = Vec::new();
-    while n > 0 {
-        let rem = (n - 1) % 26;
-        letters.push((b'A' + rem as u8) as char);
-        n = (n - 1) / 26;
-    }
-    letters.reverse();
-    format!("[{}]", letters.into_iter().collect::<String>())
+fn host_color_for_index(index: usize) -> Color {
+    HOST_COLOR_PALETTE[index % HOST_COLOR_PALETTE.len()]
 }
 
 /// Identity of a session as returned to callers from the highlighted row.

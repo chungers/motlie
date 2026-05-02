@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
 | 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Fixed multi-host kill dispatch so the kill modal acts on the selected row's captured host and stable session info. |
@@ -201,21 +202,21 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 
 **UX differences in multi-host mode:**
 
-- Top status bar shows a host-code legend after `mmux` instead of the usual
-  `<hostname> | <ip>`, for example `mmux [A] a.example.com [B] b.example.com`.
-- Session list rows insert the host's compact code between the attached marker
-  and the session name:
+- Top status bar shows a host-color legend after `mmux` instead of the usual
+  `<hostname> | <ip>`, for example `mmux ■ a.example.com ■ b.example.com`.
+- Session list rows insert the host's compact colored square between the
+  attached marker and the session name:
 
   ```
-  > * [A] dev          1m / 12d
-    * [B] jarvis       4h / 19d
-      [A] build        2d / 5d
-      [B] logs         3d / 7d
+  > * ■ dev          1m / 12d
+    * ■ jarvis       4h / 19d
+      ■ build        2d / 5d
+      ■ logs         3d / 7d
   ```
 
-  Host codes are assigned from the configured host order (`[A]`, `[B]`, ...,
-  `[Z]`, `[AA]`, ...). The top status legend is the full host-name lookup for
-  those row codes.
+  Host colors are assigned from configured host order using a five-color
+  palette and repeat when more than five hosts are configured. The top status
+  legend is the full host-name lookup for those row colors.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
 - All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, Enter,
@@ -302,7 +303,7 @@ or more clients attached to the session. Rows are sorted by
 appears first by default. Pressing `g` while the list pane is focused toggles
 tag grouping: sessions with a checked tag are shown before sessions without
 one, tag groups are ordered by the most recent activity in each group, and rows
-inside each group are ordered by activity time, host code, and session name.
+inside each group are ordered by activity time, host order, and session name.
 Empty checked-tag values are treated like no displayed tag. The toggle selects
 the first row in the new order so the grouped top is visible immediately.
 Pressing `g` again restores activity sort. The recency column is formatted as

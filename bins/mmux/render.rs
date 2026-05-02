@@ -11,10 +11,10 @@ use ratatui::widgets::{
 };
 
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, MODAL_BUTTON_HEIGHT,
-    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING, MODAL_MIN_WIDTH,
-    MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT, MOTLIE_PLACEHOLDER,
-    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
+    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_SQUARE,
+    MODAL_BUTTON_HEIGHT, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING,
+    MODAL_MIN_WIDTH, MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT,
+    MOTLIE_PLACEHOLDER, STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
@@ -198,7 +198,7 @@ pub(crate) fn sessions_title(app: &AppState) -> String {
 fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let row_width = area.width.saturating_sub(2) as usize;
-    let host_code_width = app.fleet.host_code_width();
+    let host_marker_width = app.fleet.host_marker_width();
     let mut lines = Vec::new();
     if app.session_list.rows.is_empty() {
         lines.push(Line::from(TuiSpan::styled(
@@ -219,25 +219,18 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             .take(height)
         {
             let selected = idx == app.session_list.selected;
-            let host_code = app.fleet.host_code(&row.host_id);
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            lines.push(Line::from(TuiSpan::styled(
+            let host_color = app.fleet.host_color(&row.host_id);
+            lines.push(styled_session_list_line(
                 session_list_line(
                     row,
                     selected,
-                    host_code.as_deref(),
-                    host_code_width,
+                    host_color.map(|_| HOST_COLOR_SQUARE),
+                    host_marker_width,
                     row_width,
                 ),
-                style,
-            )));
+                selected,
+                host_color,
+            ));
         }
     }
 
@@ -261,13 +254,13 @@ fn empty_session_list_message(app: &AppState) -> String {
 
 /// Render a session row.
 ///
-/// `host_code` and `host_code_width` control the compact multi-host code
-/// column. Pass `None, 0` for single-host rows.
+/// `host_marker` and `host_marker_width` control the compact multi-host color
+/// marker column. Pass `None, 0` for single-host rows.
 pub(crate) fn session_list_line(
     row: &SessionRow,
     selected: bool,
-    host_code: Option<&str>,
-    host_code_width: usize,
+    host_marker: Option<&str>,
+    host_marker_width: usize,
     width: usize,
 ) -> String {
     const MIN_METADATA_GAP: usize = 2;
@@ -279,9 +272,9 @@ pub(crate) fn session_list_line(
 
     let marker = if selected { ">" } else { " " };
     let attached = if row.session.is_attached() { "*" } else { " " };
-    let prefix = if host_code_width > 0 {
-        let host = truncate_chars(host_code.unwrap_or(""), host_code_width);
-        let host_padded = pad_to(&host, host_code_width);
+    let prefix = if host_marker_width > 0 {
+        let host = truncate_chars(host_marker.unwrap_or(""), host_marker_width);
+        let host_padded = pad_to(&host, host_marker_width);
         format!("{marker}{attached} {host_padded} ")
     } else {
         format!("{marker}{attached} ")
@@ -311,6 +304,45 @@ pub(crate) fn session_list_line(
         " ".repeat(padding),
         " ".repeat(width.saturating_sub(content_width))
     )
+}
+
+fn styled_session_list_line(
+    line: String,
+    selected: bool,
+    host_color: Option<Color>,
+) -> Line<'static> {
+    let row_style = if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let Some(host_color) = host_color else {
+        return Line::from(TuiSpan::styled(line, row_style));
+    };
+    let Some(marker_pos) = line.find(HOST_COLOR_SQUARE) else {
+        return Line::from(TuiSpan::styled(line, row_style));
+    };
+
+    let marker_end = marker_pos + HOST_COLOR_SQUARE.len();
+    let before = line[..marker_pos].to_string();
+    let marker = line[marker_pos..marker_end].to_string();
+    let after = line[marker_end..].to_string();
+    let marker_style = if selected {
+        Style::default()
+            .fg(host_color)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(host_color)
+    };
+    Line::from(vec![
+        TuiSpan::styled(before, row_style),
+        TuiSpan::styled(marker, marker_style),
+        TuiSpan::styled(after, row_style),
+    ])
 }
 
 fn session_row_name_field(row: &SessionRow, width: usize) -> String {
@@ -487,42 +519,81 @@ pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<
     let time = format!(" {time} ");
     let time = truncate_chars(&time, min(time.chars().count(), width));
     let max_left_width = width.saturating_sub(time.chars().count());
-    let left = if max_left_width == 0 {
-        String::new()
-    } else {
-        truncate_chars(&top_status_host_text(app), max_left_width)
-    };
-    let left_width = left.chars().count();
+    let left_spans = top_status_left_spans(app, max_left_width);
+    let left_width = spans_width(&left_spans);
     let time_width = time.chars().count();
     let padding_width = width.saturating_sub(left_width + time_width);
 
-    Line::from(vec![
-        TuiSpan::styled(
-            left,
-            Style::default()
-                .fg(Color::White)
-                .bg(STATUS_BAR_BG)
-                .add_modifier(Modifier::BOLD),
-        ),
+    let mut spans = left_spans;
+    spans.extend([
         TuiSpan::styled(
             " ".repeat(padding_width),
             Style::default().bg(STATUS_BAR_BG),
         ),
         TuiSpan::styled(time, Style::default().fg(Color::White).bg(STATUS_BAR_BG)),
-    ])
+    ]);
+    Line::from(spans)
 }
 
-fn top_status_host_text(app: &AppState) -> String {
-    if app.fleet.is_multi() {
-        match app.fleet.host_code_legend() {
-            Some(legend) if !legend.is_empty() => format!("mmux {legend} "),
-            _ => "mmux ".to_string(),
-        }
-    } else if let Some(entry) = app.fleet.first() {
-        format!(" {} | {} ", entry.label, entry.ip_address)
-    } else {
-        " mmux ".to_string()
+fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'static>> {
+    if max_width == 0 {
+        return Vec::new();
     }
+    let base_style = Style::default()
+        .fg(Color::White)
+        .bg(STATUS_BAR_BG)
+        .add_modifier(Modifier::BOLD);
+    let spans = if app.fleet.is_multi() {
+        let mut spans = vec![TuiSpan::styled("mmux ".to_string(), base_style)];
+        if let Some(legend) = app.fleet.host_color_legend() {
+            for (color, label) in legend {
+                spans.push(TuiSpan::styled(
+                    HOST_COLOR_SQUARE.to_string(),
+                    Style::default()
+                        .fg(color)
+                        .bg(STATUS_BAR_BG)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(TuiSpan::styled(format!(" {label} "), base_style));
+            }
+        }
+        spans
+    } else if let Some(entry) = app.fleet.first() {
+        vec![TuiSpan::styled(
+            format!(" {} | {} ", entry.label, entry.ip_address),
+            base_style,
+        )]
+    } else {
+        vec![TuiSpan::styled(" mmux ".to_string(), base_style)]
+    };
+    truncate_spans(spans, max_width)
+}
+
+fn spans_width(spans: &[TuiSpan<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| span.content.as_ref().chars().count())
+        .sum()
+}
+
+fn truncate_spans(spans: Vec<TuiSpan<'static>>, max_chars: usize) -> Vec<TuiSpan<'static>> {
+    let mut remaining = max_chars;
+    let mut truncated = Vec::new();
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        let text = span.content.as_ref();
+        let width = text.chars().count();
+        if width <= remaining {
+            truncated.push(span);
+            remaining -= width;
+        } else {
+            truncated.push(TuiSpan::styled(truncate_chars(text, remaining), span.style));
+            break;
+        }
+    }
+    truncated
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
