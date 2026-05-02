@@ -24,6 +24,7 @@ use crate::detail::{
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
     SelectedSession, SessionRow, SessionSelectedTag, SessionTagRow, SessionTagsFocus,
+    SessionTagsModalUi,
 };
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
@@ -126,6 +127,29 @@ fn make_selected(host_id: HostId, host_label: &str, id: &str, name: &str) -> Sel
         host_label: host_label.to_string(),
         id: id.to_string(),
         name: name.to_string(),
+    }
+}
+
+fn test_selected_session() -> SelectedSession {
+    make_selected(local_host_id(), "host", "$1", "dev")
+}
+
+fn test_session_tags_modal(
+    tags: Vec<SessionTagRow>,
+    selected_key: Option<&str>,
+    key_input: &str,
+    value_input: &str,
+    focus: SessionTagsFocus,
+) -> ModalState {
+    ModalState::SessionTags {
+        session: test_selected_session(),
+        ui: SessionTagsModalUi {
+            tags,
+            selected_key: selected_key.map(str::to_string),
+            key_input: key_input.to_string(),
+            value_input: value_input.to_string(),
+            focus,
+        },
     }
 }
 
@@ -418,8 +442,8 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response(
-            "show-options -t '$1'",
-            "@mmux/__selected-key owner\n@mmux/owner platform\n",
+            "display-message -p '__MOTLIE_TAGS__ $1'",
+            "__MOTLIE_TAGS__ $1\n@mmux/__selected-key owner\n@mmux/owner platform\n",
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
@@ -1145,10 +1169,7 @@ fn modal_content_separates_body_from_button_bar() {
     assert!(!new_session.body_text().contains("[Ok]"));
 
     let kill = modal_content(&ModalState::KillSession {
-        host_id: local_host_id(),
-        host_label: "host".to_string(),
-        id: "$1".to_string(),
-        name: "dev".to_string(),
+        session: test_selected_session(),
         button: Button::Cancel,
     });
     assert_eq!(kill.title, " Kill Session ");
@@ -1157,10 +1178,7 @@ fn modal_content_separates_body_from_button_bar() {
     assert_eq!(kill.buttons, "[Cancel]    Ok ");
 
     let rename = modal_content(&ModalState::RenameSession {
-        host_id: local_host_id(),
-        host_label: "host".to_string(),
-        id: "$1".to_string(),
-        current_name: "dev".to_string(),
+        session: test_selected_session(),
         input: "dev".to_string(),
         button: Button::Ok,
     });
@@ -1173,20 +1191,16 @@ fn modal_content_separates_body_from_button_bar() {
     ));
     assert!(!rename.body_text().contains("[Ok]"));
 
-    let tags = modal_content(&ModalState::SessionTags {
-        host_id: local_host_id(),
-        host_label: "host".to_string(),
-        id: "$1".to_string(),
-        name: "dev".to_string(),
-        tags: vec![SessionTagRow {
+    let tags = modal_content(&test_session_tags_modal(
+        vec![SessionTagRow {
             key: "owner".to_string(),
             value: "platform".to_string(),
         }],
-        selected_key: Some("owner".to_string()),
-        key_input: "phase".to_string(),
-        value_input: "build".to_string(),
-        focus: SessionTagsFocus::Value,
-    });
+        Some("owner"),
+        "phase",
+        "build",
+        SessionTagsFocus::Value,
+    ));
     assert_eq!(tags.title, " Session Tags ");
     assert_eq!(tags.active_button, Button::Ok);
     assert_eq!(tags.buttons, " Cancel ");
@@ -1201,20 +1215,16 @@ fn modal_content_separates_body_from_button_bar() {
 #[test]
 fn session_tags_modal_renders_list_and_distinct_input_row() {
     let mut app = app_with_session();
-    app.modal = Some(ModalState::SessionTags {
-        host_id: local_host_id(),
-        host_label: "host".to_string(),
-        id: "$1".to_string(),
-        name: "dev".to_string(),
-        tags: vec![SessionTagRow {
+    app.modal = Some(test_session_tags_modal(
+        vec![SessionTagRow {
             key: "owner".to_string(),
             value: "platform".to_string(),
         }],
-        selected_key: Some("owner".to_string()),
-        key_input: "phase".to_string(),
-        value_input: "build".to_string(),
-        focus: SessionTagsFocus::Value,
-    });
+        Some("owner"),
+        "phase",
+        "build",
+        SessionTagsFocus::Value,
+    ));
 
     let screen_lines = render_to_lines(&mut app, 80, 24);
     let screen = screen_lines.join("");
@@ -1246,17 +1256,13 @@ fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
         })
         .collect::<Vec<_>>();
     let mut app = app_with_session();
-    app.modal = Some(ModalState::SessionTags {
-        host_id: local_host_id(),
-        host_label: "host".to_string(),
-        id: "$1".to_string(),
-        name: "dev".to_string(),
-        tags: tags.clone(),
-        selected_key: None,
-        key_input: "new".to_string(),
-        value_input: "next".to_string(),
-        focus: SessionTagsFocus::TagRow(0),
-    });
+    app.modal = Some(test_session_tags_modal(
+        tags.clone(),
+        None,
+        "new",
+        "next",
+        SessionTagsFocus::TagRow(0),
+    ));
 
     let screen = render_to_string(&mut app, 80, 24);
     assert!(screen.contains("> tag0"));
@@ -1266,8 +1272,8 @@ fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
     assert!(!screen.contains("tag5"));
     assert!(!screen.contains("tag6"));
 
-    if let Some(ModalState::SessionTags { focus, .. }) = app.modal.as_mut() {
-        *focus = SessionTagsFocus::TagRow(6);
+    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
+        ui.focus = SessionTagsFocus::TagRow(6);
     } else {
         panic!("expected session tags modal");
     }
@@ -1308,12 +1314,11 @@ async fn r_opens_rename_only_from_session_list_focus() {
     assert!(matches!(
         app.modal.as_ref(),
         Some(ModalState::RenameSession {
-            id,
-            current_name,
+            session,
             input,
             button,
             ..
-        }) if id == "$1" && current_name == "dev" && input == "dev" && *button == Button::Ok
+        }) if session.id == "$1" && session.name == "dev" && input == "dev" && *button == Button::Ok
     ));
 }
 
@@ -1388,19 +1393,19 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { tags, selected_key, focus, .. })
-            if tags
-                == &vec![
+        Some(ModalState::SessionTags { ui, .. })
+            if ui.tags
+                == vec![
                     SessionTagRow { key: "a".to_string(), value: "beta".to_string() },
                     SessionTagRow { key: "b".to_string(), value: "alpha".to_string() },
                 ]
-                && selected_key.as_deref() == Some("a")
-                && *focus == SessionTagsFocus::TagRow(0)
+                && ui.selected_key.as_deref() == Some("a")
+                && ui.focus == SessionTagsFocus::TagRow(0)
     ));
 }
 
 #[tokio::test]
-async fn session_tags_modal_tab_cycles_edit_row_fields() {
+async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("show-options -t '$1'", "");
@@ -1417,7 +1422,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Key
+        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Key
     ));
 
     handle_key(
@@ -1429,7 +1434,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Value
+        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Value
     ));
 
     handle_key(
@@ -1441,7 +1446,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Key
+        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Cancel
     ));
 
     handle_key(
@@ -1453,7 +1458,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { focus, .. }) if *focus == SessionTagsFocus::Value
+        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Value
     ));
 }
 
@@ -1494,7 +1499,7 @@ async fn session_tags_modal_c_persists_selected_row() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { selected_key, .. }) if selected_key.as_deref() == Some("a")
+        Some(ModalState::SessionTags { ui, .. }) if ui.selected_key.as_deref() == Some("a")
     ));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert!(view.body_text().contains("a    beta ✓"));
@@ -1509,7 +1514,7 @@ async fn session_tags_modal_c_persists_selected_row() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { selected_key, .. }) if selected_key.is_none()
+        Some(ModalState::SessionTags { ui, .. }) if ui.selected_key.is_none()
     ));
 }
 
@@ -1545,10 +1550,10 @@ async fn session_tags_modal_delete_updates_list() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { tags, selected_key, focus, .. })
-            if tags == &vec![SessionTagRow { key: "b".to_string(), value: "two".to_string() }]
-                && selected_key.is_none()
-                && *focus == SessionTagsFocus::TagRow(0)
+        Some(ModalState::SessionTags { ui, .. })
+            if ui.tags == vec![SessionTagRow { key: "b".to_string(), value: "two".to_string() }]
+                && ui.selected_key.is_none()
+                && ui.focus == SessionTagsFocus::TagRow(0)
     ));
     assert_eq!(app.status.text(), "deleted tag a on dev");
 }
@@ -1580,16 +1585,13 @@ async fn session_tags_modal_update_uses_bottom_fields() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { key_input, value_input, focus, .. })
-            if key_input == "owner" && value_input == "old" && *focus == SessionTagsFocus::Value
+        Some(ModalState::SessionTags { ui, .. })
+            if ui.key_input == "owner" && ui.value_input == "old" && ui.focus == SessionTagsFocus::Value
     ));
 
-    if let Some(ModalState::SessionTags {
-        value_input, focus, ..
-    }) = app.modal.as_mut()
-    {
-        *value_input = "new".to_string();
-        *focus = SessionTagsFocus::Key;
+    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
+        ui.value_input = "new".to_string();
+        ui.focus = SessionTagsFocus::Key;
     } else {
         panic!("expected session tags modal");
     }
@@ -1603,9 +1605,9 @@ async fn session_tags_modal_update_uses_bottom_fields() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { tags, focus, .. })
-            if tags == &vec![SessionTagRow { key: "owner".to_string(), value: "new".to_string() }]
-                && *focus == SessionTagsFocus::TagRow(0)
+        Some(ModalState::SessionTags { ui, .. })
+            if ui.tags == vec![SessionTagRow { key: "owner".to_string(), value: "new".to_string() }]
+                && ui.focus == SessionTagsFocus::TagRow(0)
     ));
     assert_eq!(app.status.text(), "set tag owner on dev");
 }
@@ -1627,16 +1629,10 @@ async fn session_tags_modal_empty_value_does_not_dispatch() {
     )
     .await
     .unwrap();
-    if let Some(ModalState::SessionTags {
-        key_input,
-        value_input,
-        focus,
-        ..
-    }) = app.modal.as_mut()
-    {
-        *key_input = "owner".to_string();
-        value_input.clear();
-        *focus = SessionTagsFocus::Value;
+    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
+        ui.key_input = "owner".to_string();
+        ui.value_input.clear();
+        ui.focus = SessionTagsFocus::Value;
     } else {
         panic!("expected session tags modal");
     }
@@ -1673,16 +1669,10 @@ async fn session_tags_modal_rejects_reserved_selected_key() {
     )
     .await
     .unwrap();
-    if let Some(ModalState::SessionTags {
-        key_input,
-        value_input,
-        focus,
-        ..
-    }) = app.modal.as_mut()
-    {
-        *key_input = "__selected-key".to_string();
-        *value_input = "owner".to_string();
-        *focus = SessionTagsFocus::Key;
+    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
+        ui.key_input = "__selected-key".to_string();
+        ui.value_input = "owner".to_string();
+        ui.focus = SessionTagsFocus::Key;
     } else {
         panic!("expected session tags modal");
     }
@@ -2467,10 +2457,7 @@ fn multi_host_kill_modal_carries_host_id() {
     // The kill modal must capture host_id at modal-open so dispatch routes
     // back to the correct host even if the highlighted row reorders later.
     let modal = ModalState::KillSession {
-        host_id: ssh_host_id("ssh://b"),
-        host_label: "beta".to_string(),
-        id: "$42".to_string(),
-        name: "build".to_string(),
+        session: make_selected(ssh_host_id("ssh://b"), "beta", "$42", "build"),
         button: Button::Cancel,
     };
     let view = modal_content(&modal);
@@ -2478,14 +2465,9 @@ fn multi_host_kill_modal_carries_host_id() {
     assert_eq!(view.body_text(), "Kill session build?");
     // Confirms the modal carries the host info even though the rendered
     // confirmation prompt uses the session name only.
-    if let ModalState::KillSession {
-        host_id,
-        host_label,
-        ..
-    } = modal
-    {
-        assert_eq!(host_id, ssh_host_id("ssh://b"));
-        assert_eq!(host_label, "beta");
+    if let ModalState::KillSession { session, .. } = modal {
+        assert_eq!(session.host_id, ssh_host_id("ssh://b"));
+        assert_eq!(session.host_label, "beta");
     } else {
         unreachable!();
     }

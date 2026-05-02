@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added `HostHandle::list_tags_for_session_infos(prefix, sessions)` to batch-read session metadata tags for a fresh session listing in one tmux command. |
 | 2026-05-01 | @codex | Added `HostHandle::target_for_session_info()` so consumers enriching a fresh `list_sessions()` result can build a session `Target` without issuing a second session-discovery query. |
 | 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` and one-off `Target::unset_tag(prefix, key)` remove a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
 | 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
@@ -910,6 +911,9 @@ Contract:
 - `set_tag(prefix, key, value)`, `unset_tag(prefix, key)`,
   `read_tag(prefix, key)`, and `list_tags(prefix)` are one-off wrappers around
   `tags(prefix)`.
+- `HostHandle::list_tags_for_session_infos(prefix, sessions)` batch-lists tags
+  for a session listing in one tmux command and returns an entry for every
+  provided stable session id.
 - Prefixes and keys must be non-empty ASCII letters, digits, `.`, `_`, or `-`.
 - Values are UTF-8 strings, may be empty, must not contain control characters,
   and are capped at 2 KiB.

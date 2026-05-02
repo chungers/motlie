@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Addressed PR feedback: batched selected-tag metadata loads per host refresh, made Session Tags Cancel reachable, grouped modal session/tag UI state, moved modal sizing to render, and documented reserved tag keys. |
 | 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux [A] <host> ...`) and session rows use compact host-code columns instead of hostname columns. |
 | 2026-05-01 | @codex | Simplified Phase 12 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal to `t`, and left `i` unassigned for this feature. |
 | 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`, `Target::unset_tag`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
@@ -575,7 +576,7 @@ new unset methods below. Do not add direct tmux shell commands to `mmux`.
 - [x] 12.1b Add modal-specific focus enums for multi-field dialogs rather than
   one global catch-all modal focus enum.
 - [x] 12.1c `SessionTagsModal` focus must support existing tag rows
-  (`TagRow(index)`) plus bottom controls (`Key`, `Value`, `Add`, `Cancel`).
+  (`TagRow(index)`) plus bottom controls (`Key`, `Value`, `Cancel`).
 - [x] 12.1d Add render helpers for labeled bordered text fields that preserve
   the existing modal padding, separator, and button styling.
 - [x] 12.1e Add Tab / Shift-Tab focus movement for multi-field modals while
@@ -608,16 +609,16 @@ new unset methods below. Do not add direct tmux shell commands to `mmux`.
   key lexicographically, and render keys without `mmux/` or `@mmux/` prefixes.
 - [x] 12.3c Initial focus is the first tag row when any tag exists, otherwise
   the bottom `Key` field.
-- [x] 12.3d Render bottom add controls: `Key` field, `Value` field, focusable
-  `+`, and a `Cancel` button.
+- [x] 12.3d Render bottom edit controls: key/value edit fields and a
+  `Cancel` button.
 - [x] 12.3e Up/Down move focus row-to-row through existing tag rows; Up from
-  add controls returns to the last visible tag row when present.
+  edit controls returns to the last visible tag row when present.
 - [x] 12.3f Pressing `x` on a focused tag row calls
   `target.unset_tag("mmux", key).await?`, reloads the sorted list, and
   keeps the modal open.
 - [x] 12.3g Pressing `u` on a focused tag row copies that key/value into the
   bottom `Key` and `Value` fields and focuses `Value`.
-- [x] 12.3h Enter on focused `+` applies the non-empty-value rule. Existing
+- [x] 12.3h Enter in either edit field applies the non-empty-value rule. Existing
   keys are updated through `set`; new keys are added.
 - [x] 12.3i Keep value text exact, without trimming, while trimming only the
   tag key. Let `motlie-tmux` enforce key/value validation.

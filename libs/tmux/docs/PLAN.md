@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added the host-level batch session tag read API used by mmux to avoid per-session metadata round trips during refresh. |
 | 2026-05-01 | @codex | Added Phase 1.17 for issue #241 follow-up: expose session tag deletion via `SessionTags::unset(key)` / `Target::unset_tag(prefix, key)` backed by tmux `set-option -u`. |
 | 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added scoped `SessionTags`, validated self-describing `SessionTag`, `Target::tags()`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
 | 2026-04-09 | @claude | Update Conventions section: library error handling migrated from `anyhow` to `thiserror`-based typed `Error` enum (PR #145). `anyhow` retained as dev-dependency only. |

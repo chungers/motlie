@@ -1,4 +1,4 @@
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};
@@ -6,15 +6,9 @@ use ratatui::style::{Color, Style};
 
 use crate::consts::{
     DEFAULT_LEFT_PERCENT, DEFAULT_TOP_PERCENT, LANDSCAPE_MAX_LEFT_PERCENT,
-    LANDSCAPE_MIN_LEFT_PERCENT, MODAL_TEXT_FIELD_HEIGHT, PORTRAIT_MAX_TOP_PERCENT,
-    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
+    LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
 };
 use crate::detail::DetailSource;
-
-const SESSION_TAGS_INPUT_SECTION_HEIGHT: u16 = 2;
-const SESSION_TAGS_LIST_MAX_ROWS: u16 = 5;
-const SESSION_TAGS_EDIT_ROW_OVERHEAD: usize = 6;
-const SESSION_TAGS_LIST_ROW_OVERHEAD: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutMode {
@@ -56,32 +50,28 @@ pub(crate) enum ModalState {
         button: Button,
     },
     KillSession {
-        host_id: HostId,
-        host_label: String,
-        id: String,
-        name: String,
+        session: SelectedSession,
         button: Button,
     },
     RenameSession {
-        host_id: HostId,
-        host_label: String,
-        id: String,
-        current_name: String,
+        session: SelectedSession,
         input: String,
         button: Button,
     },
     SessionTags {
-        host_id: HostId,
-        host_label: String,
-        id: String,
-        name: String,
-        tags: Vec<SessionTagRow>,
-        selected_key: Option<String>,
-        key_input: String,
-        value_input: String,
-        focus: SessionTagsFocus,
+        session: SelectedSession,
+        ui: SessionTagsModalUi,
     },
     Help,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionTagsModalUi {
+    pub(crate) tags: Vec<SessionTagRow>,
+    pub(crate) selected_key: Option<String>,
+    pub(crate) key_input: String,
+    pub(crate) value_input: String,
+    pub(crate) focus: SessionTagsFocus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,55 +114,6 @@ impl ModalView {
                 format!("{rows}\n{key_input}    {value_input}")
             }
         }
-    }
-
-    pub(crate) fn content_height(&self) -> u16 {
-        match &self.body {
-            ModalBody::Text(text) => max(1, text.lines().count()) as u16,
-            ModalBody::NewSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
-            ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
-            ModalBody::SessionTags { tags, .. } => {
-                let rows = max(1, tags.len()) as u16;
-                min(rows, SESSION_TAGS_LIST_MAX_ROWS) + SESSION_TAGS_INPUT_SECTION_HEIGHT
-            }
-        }
-    }
-
-    pub(crate) fn content_width(&self) -> u16 {
-        let body_width = match &self.body {
-            ModalBody::Text(text) => text
-                .lines()
-                .map(|line| line.chars().count())
-                .max()
-                .unwrap_or(0),
-            ModalBody::NewSession { input } => {
-                max("Session name".chars().count(), input.chars().count())
-            }
-            ModalBody::RenameSession { input } => {
-                max("Session Name".chars().count(), input.chars().count())
-            }
-            ModalBody::SessionTags {
-                tags,
-                key_input,
-                value_input,
-                ..
-            } => tags
-                .iter()
-                .map(|tag| {
-                    tag.key.chars().count()
-                        + tag.value.chars().count()
-                        + SESSION_TAGS_LIST_ROW_OVERHEAD
-                })
-                .chain([
-                    "No tags".chars().count() + SESSION_TAGS_LIST_ROW_OVERHEAD,
-                    key_input.chars().count()
-                        + value_input.chars().count()
-                        + SESSION_TAGS_EDIT_ROW_OVERHEAD,
-                ])
-                .max()
-                .unwrap_or(0),
-        };
-        max(body_width, self.buttons.chars().count()) as u16
     }
 }
 

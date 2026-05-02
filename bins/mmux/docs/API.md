@@ -10,8 +10,9 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Addressed PR feedback: session refresh now batch-loads selected tag metadata once per host, Session Tags Cancel focus is reachable, modal session identity is grouped, tag UI state is grouped, and render sizing lives in `render.rs`. |
 | 2026-05-01 | @codex | Persisted the Session Tags checked key in the internal `@mmux/__selected-key` option, filtered it from modal tag rows, loaded it into `SessionRow`, and rendered the checked tag value as a right-aligned session-list column. |
-| 2026-05-01 | @codex | Added the Session Tags modal list model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, the visible list is capped at five scrollable rows, and `Tab` cycles Key/Value in a distinct edit row that submits with Enter. |
+| 2026-05-01 | @codex | Added the Session Tags modal list model: key width is longest key plus four characters, value takes the remaining width, the marker column shows a `✓` selected by `c`, the visible list is capped at five scrollable rows, and `Tab` cycles Key/Value/Cancel while the edit row submits with Enter. |
 | 2026-05-01 | @codex | Documented implemented session rename and tag-management modals: `r` captures host/session id and renames through `Target::rename`; `t` manages `@mmux/` tags through the `motlie-tmux` tag API, including add/update/delete. |
 | 2026-04-28 | @gpt55-dgx | Clarified exact `MOTLIE_MMUX_BYPASS=1` behavior and linked issue #232 for env-gated SSH integration coverage. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux session-list polling so one `list_sessions_now()` loop drives activity ordering and structural state. |
@@ -232,15 +233,25 @@ enum Focus {
 
 enum ModalState {
     NewSession { input: String, button: Button },
-    KillSession { id: String, name: String, button: Button },
-    RenameSession { id: String, current_name: String, input: String, button: Button },
-    SessionTags { id: String, tags: Vec<SessionTagRow>, focus: SessionTagsFocus },
+    KillSession { session: SelectedSession, button: Button },
+    RenameSession { session: SelectedSession, input: String, button: Button },
+    SessionTags { session: SelectedSession, ui: SessionTagsModalUi },
     Help,
 }
 
 struct SelectedSession {
+    host_id: HostId,
+    host_label: String,
     id: String,
     name: String,
+}
+
+struct SessionTagsModalUi {
+    tags: Vec<SessionTagRow>,
+    selected_key: Option<String>,
+    key_input: String,
+    value_input: String,
+    focus: SessionTagsFocus,
 }
 ```
 
@@ -291,8 +302,8 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 stripped key, rendered without `@mmux/`, filtered to hide the internal
 `@mmux/__selected-key` option, and shown in a five-row scroll window. The modal
 keeps row focus and bottom field focus explicit with `SessionTagsFocus`; `Tab`
-cycles the bottom Key/Value cells, `Shift-Tab` reverses that cycle, Enter on
-either edit field writes non-empty, non-reserved values through
+cycles the bottom Key/Value cells and Cancel button, `Shift-Tab` reverses that
+cycle, Enter on either edit field writes non-empty, non-reserved values through
 `Target::set_tag("mmux", key, value)`, where `__selected-key` is reserved for
 the internal marker. `x` deletes through
 `Target::unset_tag("mmux", key)`, and `u` preloads the bottom fields. Pressing
@@ -301,8 +312,9 @@ the internal marker. `x` deletes through
 different mmux processes.
 
 `fetch_fleet_rows()` enriches each `SessionRow` with the checked key/value by
-listing `@mmux/` options on each session, resolving `@mmux/__selected-key`, and
-copying the selected tag value into app state. `session_list_line()` renders
+batch-listing `@mmux/` options once per host refresh, resolving
+`@mmux/__selected-key`, and copying the selected tag value into app state.
+`session_list_line()` renders
 that value in a right-aligned field after the session name. `i` is not assigned
 by this feature.
 

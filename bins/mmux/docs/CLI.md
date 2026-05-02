@@ -8,10 +8,11 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Addressed PR feedback for Session Tags: `Tab` reaches Cancel and selected-tag values are loaded through one batched metadata read per host refresh. |
 | 2026-05-02 | @codex | Changed multi-host status and row rendering to use host-code legends: top status shows `mmux [A] <host> ...`, and session rows show compact codes such as `[A]` instead of full hostnames. |
 | 2026-05-01 | @codex | Reduced the modal minimum width by about 20% so Session Tags and other short modal content render in a narrower frame. |
 | 2026-05-01 | @codex | Persisted the Session Tags checked row in `@mmux/__selected-key`, filtered that internal option from the tag modal, and rendered the checked tag value as a right-aligned session-list column after the session name. |
-| 2026-05-01 | @codex | Updated the Session Tags modal layout to show up to five scrollable key/value rows styled like the session list, with a visually distinct edit row; `Tab` cycles Key ↔ Value, Enter submits from either edit field, and `c` marks the focused tag row with `✓`. |
+| 2026-05-01 | @codex | Updated the Session Tags modal layout to show up to five scrollable key/value rows styled like the session list, with a visually distinct edit row; `Tab` cycles Key → Value → Cancel, Enter submits from either edit field, and `c` marks the focused tag row with `✓`. |
 | 2026-05-01 | @codex | Added session rename and tag management modals: `r` renames the highlighted session from list focus, `t` opens the unified tag list/add/update/delete modal, and `i` remains unassigned. |
 | 2026-04-29 | @opus47-macos-tmux | Updated recency-display semantics: activity column is observer-relative ("time since mmux last saw `session.activity` advance"); age column is `local_now − session.created` under an NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate age text but no functional regression. (Earlier drafts probed the host clock at fleet-connect via `#{epoch}` / `run-shell 'date +%s'`; that approach was abandoned because `run-shell` on tmux ≤ 3.4 corrupts the operator's attached pane.) |
 | 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status shows a compact host-code legend, session rows insert a host-code column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
@@ -306,7 +307,7 @@ Modal keys:
 | Key | Behavior |
 |-----|----------|
 | Left / Right | Choose Cancel or Ok in New Session, Kill Session, and Rename Session modals. No-op in Help and Session Tags. |
-| Tab / Shift-Tab | Cycle Session Tags edit-row focus between Key and Value. |
+| Tab / Shift-Tab | Cycle Session Tags focus between Key, Value, and Cancel. |
 | Up / Down | Move focus row-to-row in Session Tags; Up from bottom controls returns to the last tag row when present. |
 | `u` | In Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, toggle the focused row as the checked key with `✓`; persisted as `@mmux/__selected-key`. |

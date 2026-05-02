@@ -467,6 +467,43 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// List namespaced metadata tags for several session infos in one tmux call.
+    ///
+    /// This is intended for callers that enrich an existing session listing and
+    /// need to avoid per-session round trips. The returned map contains an entry
+    /// for every provided session id, with an empty vector when no matching tags
+    /// are set.
+    pub async fn list_tags_for_session_infos(
+        &self,
+        prefix: &str,
+        sessions: &[SessionInfo],
+    ) -> Result<HashMap<SessionId, Vec<SessionTag>>> {
+        let tag_prefix = SessionTagPrefix::new(prefix)?;
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        let targets = sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>();
+        let mut tags_by_target = control::list_session_tags_for_targets_with_prefix(
+            &self.inner.transport,
+            &tmux_prefix,
+            &targets,
+            &tag_prefix,
+        )
+        .await?;
+        Ok(sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.id.clone(),
+                    tags_by_target
+                        .remove(session.id.as_str())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
     /// Read a UTF-8 text file from the host with a caller-provided size cap.
     ///
     /// This is intentionally narrower than arbitrary host command execution:
