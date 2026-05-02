@@ -17,18 +17,17 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 
-use cli::{select_layout, Cli};
+use cli::{Cli, select_layout};
+use consts::MMUX_ATTACH_STATUS_STYLE;
 use controller::{
-    handle_key, load_motd, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
-    stop_detail_source, KeyOutcome,
+    KeyOutcome, handle_key, load_motd, refresh_detail, refresh_sessions_preserving,
+    refresh_sessions_quiet, stop_detail_source,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
 use motlie_tmux::{AttachExit, StatusStyle, Target};
 use target_host::connect_fleet;
 use terminal::TerminalSession;
-
-const MMUX_ATTACH_STATUS_STYLE: &str = "bg=blue,fg=white";
 
 #[derive(Debug)]
 enum SelectorOutcome {

@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Updated status styling: TUI bars use dark blue `#003366`, shortcut letters are bold yellow instead of underlined, and attach applies the same blue to tmux `status-style`. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and changed list-pane tag grouping to `g`, with tag groups ordered by most recent activity. |
 | 2026-05-02 | @codex | Wrapped attach with best-effort temporary blue tmux `status-style` setup and previous local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
@@ -283,12 +284,12 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
   omit MOTD; clamp portrait resize bounds at 15/85.
 - [x] 4.5 Implement focused/unfocused border styles.
-- [x] 4.6 Implement a blue top status bar with bold left-justified
+- [x] 4.6 Implement a dark blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
-  title count-only as `Sessions [n]`; keep the blue bottom status bar to
-  compact direction hints (`↑/↓ sel`, underlined `p` in `pane`), command hints
+  title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
+  compact direction hints (`↑/↓ sel`, bold yellow `p` in `pane`), command hints
   ordered as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `quit`,
-  `layout`, then resize, with shortcut letters underlined and app status with
+  `layout`, then resize, with shortcut letters bold yellow and app status with
   no `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar

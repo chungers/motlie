@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed the TUI status bars to dark blue `#003366`, rendered command shortcut letters as bold yellow instead of underlined, and matched attach-time tmux `status-style` to the same blue. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved tag grouping to list-pane `g`; grouped tag rows are ordered by most recent activity. |
 | 2026-05-02 | @codex | Attach now temporarily sets the selected session's local tmux `status-style` to blue through the narrow motlie-tmux status-style API, then restores/unsets it after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
@@ -231,7 +232,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   and attach that remote PTY to the selected remote tmux session.
 - A top status bar shows the target host as `<hostname> | <ip address>` in bold,
   left-justified text and the current time right-justified. It uses the same
-  blue background as the bottom status bar.
+  dark blue background as the bottom status bar.
 - The session-list pane title shows only the session count as `Sessions [n]`.
 - Each session row shows the display name, a `*` attached-client marker when
   one or more tmux clients are attached, and a right-aligned
@@ -259,13 +260,13 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
-  `pane` for pane focus, with the shortcut letter underlined. Always-on
+  `pane` for pane focus, with shortcut letters rendered bold yellow. Always-on
   command hints are ordered as `help`, `pane`, `monitor`, `attach`, `new`,
   `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
-  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are underlined in the TUI. The
+  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are bold yellow in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
-  `landscape`, or `normal`) and must render with a blue background.
+  `landscape`, or `normal`) and must render with a dark blue background.
 - The selector must keep `LB`
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
@@ -678,11 +679,11 @@ The body area is split horizontally into `L` and `R`.
 
 The currently focused pane must be visually distinguished from unfocused panes
 via border style (bright/colored or doubled for focused; dim/single for
-unfocused). The blue top status bar shows bold host/IP at left using `|` as
+unfocused). The dark blue top status bar shows bold host/IP at left using `|` as
 the separator and
-right-justified time. The blue bottom status bar shows key hints and status
+right-justified time. The dark blue bottom status bar shows key hints and status
 text only; it does not duplicate host, time, focus, layout state, or a `keys`
-label. Command shortcut letters are rendered with underline styling instead of
+label. Command shortcut letters are rendered as bold yellow spans instead of
 parenthesized mnemonics. The Sessions pane title is count-only: `Sessions [n]`.
 
 Main-selector keymap (focus-aware):
@@ -1420,7 +1421,7 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    library path. If the session vanished between selection and resolve
    (race), show stderr message and re-enter the TUI.
 5. Best-effort read the selected session's local `status-style`, then set
-   `status-style bg=blue,fg=white` through `Target::set_status_style()`. Style
+   `status-style bg=#003366,fg=white` through `Target::set_status_style()`. Style
    failures warn to stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /

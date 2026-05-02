@@ -7,7 +7,7 @@ use motlie_tmux::{
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 
 use crate::cli::{Cli, is_portrait_pty, select_layout};
 use crate::consts::{
@@ -349,7 +349,7 @@ fn status_line_omits_layout_mode() {
 }
 
 #[test]
-fn status_line_underlines_command_mnemonics() {
+fn status_line_styles_command_mnemonics() {
     let app = AppState::new(
         "host".to_string(),
         LayoutMode::Normal,
@@ -357,14 +357,18 @@ fn status_line_underlines_command_mnemonics() {
         false,
     );
     let line = status_line(&app);
-    let underlined = line
+    let styled_mnemonics = line
         .spans
         .iter()
-        .filter(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+        .filter(|span| {
+            span.style.add_modifier.contains(Modifier::BOLD)
+                && span.style.fg == Some(Color::Yellow)
+                && !span.style.add_modifier.contains(Modifier::UNDERLINED)
+        })
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(underlined, "hpmankrtgql");
+    assert_eq!(styled_mnemonics, "hpmankrtgql");
     assert_eq!(
         status_line_text(&app),
         " ↑/↓ sel | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
@@ -1309,7 +1313,7 @@ async fn attach_status_style_is_set_and_restored() {
             "show-option -q -t '$1' status-style",
             "status-style bg=green,fg=black\n",
         )
-        .with_response("set-option -t '$1' status-style 'bg=blue,fg=white'", "")
+        .with_response("set-option -t '$1' status-style 'bg=#003366,fg=white'", "")
         .with_response("set-option -t '$1' status-style 'bg=green,fg=black'", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let target = host.session_by_id("$1").await.unwrap().unwrap();
@@ -1327,7 +1331,7 @@ async fn attach_status_style_unsets_when_no_previous_local_style() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("show-option -q -t '$1' status-style", "")
-        .with_response("set-option -t '$1' status-style 'bg=blue,fg=white'", "")
+        .with_response("set-option -t '$1' status-style 'bg=#003366,fg=white'", "")
         .with_response("set-option -u -t '$1' status-style", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let target = host.session_by_id("$1").await.unwrap().unwrap();
