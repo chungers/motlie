@@ -378,13 +378,14 @@ fn session_list_line_right_justifies_selected_tag_value() {
     let line = session_list_line(&row, true, 0, 48);
     let metadata = session_recency_text(&row);
     let tag_start = line.find("platform").unwrap();
-    let metadata_start = line.find(&metadata).unwrap();
+    let activity = metadata.split(" / ").next().unwrap().trim();
+    let activity_start = line.find(activity).unwrap();
 
     assert!(line.contains("dev"), "{line:?}");
     assert!(line.contains("platform"), "{line:?}");
     assert!(!line.contains("dev platform"), "{line:?}");
     assert_eq!(
-        metadata_start.saturating_sub(tag_start + "platform".len()),
+        activity_start.saturating_sub(tag_start + "platform".len()),
         2
     );
     assert!(!line.contains("owner"));
