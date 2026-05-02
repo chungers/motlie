@@ -29,7 +29,7 @@ use crate::model::{
 use crate::render::{
     detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
     session_list_line, session_recency_text, sessions_title, short_build_git_sha, status_line,
-    status_line_text, top_status_line, use_compact_placeholder,
+    status_line_text, tag_key_column_width, top_status_line, use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
 
@@ -1450,6 +1450,28 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
     assert!(!screen.contains("[+]"));
     assert!(!screen.contains("[phase]"));
     assert!(!screen.contains("[build]"));
+}
+
+#[test]
+fn session_tags_empty_list_defaults_key_input_to_thirty_percent() {
+    let tags = Vec::<SessionTagRow>::new();
+
+    assert_eq!(tag_key_column_width(62, &tags, ""), 18);
+    assert_eq!(tag_key_column_width(62, &tags, "owner"), 18);
+    assert_eq!(
+        tag_key_column_width(62, &tags, "abcdefghijklmnopqrstuvwxyz"),
+        30
+    );
+}
+
+#[test]
+fn session_tags_key_column_uses_longest_existing_key_when_tags_exist() {
+    let tags = vec![SessionTagRow {
+        key: "owner".to_string(),
+        value: "platform".to_string(),
+    }];
+
+    assert_eq!(tag_key_column_width(62, &tags, ""), 9);
 }
 
 #[test]

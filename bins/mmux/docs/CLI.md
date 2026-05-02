@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when the session has no existing tags. |
 | 2026-05-02 | @codex | Tightened list-pane `s` sort behavior: visible non-empty checked-tag values sort to the top, and the toggle selects the first row in the new order so the sorted top is shown immediately. |
 | 2026-05-02 | @codex | Added list-pane `s` sort toggle: activity sort remains default; tag sort groups checked-tag rows first, orders them by checked tag value, then falls back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for Session Tags: `Tab` reaches Cancel and selected-tag values are loaded through one batched metadata read per host refresh. |
@@ -328,8 +329,9 @@ their text fields with their own borders. Session Tags lists `@mmux/<key>`
 values sorted by stripped key in key/value/check-marker columns. The list shows
 up to five rows at a time, scrolls with row focus, and uses the same selected-row
 styling as the session list. The key column is sized to the longest key plus
-four characters, the marker column displays `✓` when toggled on by `c`, and the
-value column takes the remaining width. The bottom Key/Value edit row is
+four characters, or 30% of the edit strip when the session has no existing
+tags; the marker column displays `✓` when toggled on by `c`, and the value
+column takes the remaining width. The bottom Key/Value edit row is
 separated from the list, has no marker/add column, and submits with Enter. The
 internal `@mmux/__selected-key` option is filtered from this list, and
 `__selected-key` is reserved from edit-row writes. Tag writes still require

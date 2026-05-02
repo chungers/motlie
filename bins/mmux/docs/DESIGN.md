@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip for sessions with no tags. |
 | 2026-05-02 | @codex | Tightened list-pane tag sort: only visible non-empty checked-tag values count as tagged, and pressing `s` selects the first row after sorting so the sorted top is shown. |
 | 2026-05-02 | @codex | Added the list-pane `s` sort toggle: activity sort remains the default, and tag sort groups checked-tag rows before unchecked rows before falling back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for issue #241: selected-tag refresh is batched per host, Session Tags Cancel is reachable by Tab, modal session identity and tag UI state are grouped, and modal sizing arithmetic moved to the render layer. |
