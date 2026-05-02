@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Tightened multi-host kill dispatch: `SelectedSession` carries the captured `SessionInfo`, and kill builds a target from that selected row on the selected host. |
 | 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#002b55` and changed status-bar mnemonic letters to bold coral. |
@@ -443,6 +444,12 @@ let selected = SelectedSession {
 };
 let target = host.target_for_session_info(selected.info.clone());
 target.kill().await?;
+refresh_sessions_excluding(
+    fleet,
+    app,
+    true,
+    (selected.host_id.clone(), selected.id().to_string()),
+).await?;
 ```
 
 Attach:

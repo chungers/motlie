@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Made kill refresh filter the killed `(host_id, session_id)` so the row is cleared immediately even if the next tmux listing is stale. |
 | 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
 | 2026-05-02 | @codex | Tightened multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that selected row on the selected host. |
 | 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#002b55` and changed mnemonic letters to bold coral. |
@@ -1380,9 +1381,10 @@ selector re-entry):
    permission), show
    inline error without corrupting terminal state.
 6. Stop monitor state if it was monitoring that session.
-7. Refresh immediately after a successful kill for responsive feedback; the
-   polling-backed host-event stream will reconcile the same state on its next
-   tick as a backstop.
+7. Refresh immediately after a successful kill for responsive feedback, while
+   filtering the killed `(host_id, session_id)` from that refresh so a stale
+   tmux listing cannot keep the row visible. The polling-backed host-event
+   stream will reconcile the same state on its next tick as a backstop.
 8. Move highlight to the next valid row. If the killed session was the only
    one, transition to §Empty Session List state.
 
