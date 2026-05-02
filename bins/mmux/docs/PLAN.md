@@ -12,7 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux <host> [A] ...`) and session rows use compact host-code columns instead of hostname columns. |
+| 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux [A] <host> ...`) and session rows use compact host-code columns instead of hostname columns. |
 | 2026-05-01 | @codex | Simplified Phase 12 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal to `t`, and left `i` unassigned for this feature. |
 | 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`, `Target::unset_tag`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
 | 2026-05-01 | @codex | Started Phase 12 for issue #241: branch `feature/mmux-241-session-modals`. Plan covers list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add on `i`, modal-specific focus state, stable `(host_id, session_id)` dispatch, motlie-tmux tag API usage, and focused tests. |
@@ -483,7 +483,7 @@ it lands as a follow-up.
 
 - [ ] 11.5a `draw_top_status` switches on `fleet.is_multi()`:
   - Single: existing `<hostname> | <ip>     <time>` form.
-  - Multi: `mmux <host-a> [A] <host-b> [B]     <time>` legend form.
+  - Multi: `mmux [A] <host-a> [B] <host-b>     <time>` legend form.
 - [ ] 11.5b `draw_sessions` row format: host-code column inserted between
   attached marker and session name when `fleet.is_multi() == true`. Column
   width = `fleet.host_code_width()`.

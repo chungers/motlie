@@ -305,7 +305,7 @@ impl HostFleet {
             self.entries
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| format!("{} {}", entry.label, host_code_for_index(index)))
+                .map(|(index, entry)| format!("{} {}", host_code_for_index(index), entry.label))
                 .collect::<Vec<_>>()
                 .join(" "),
         )

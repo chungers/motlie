@@ -2116,7 +2116,7 @@ fn multi_host_top_status_shows_host_code_legend() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(rendered.starts_with("mmux alpha [A] beta [B] gamma [C]"));
+    assert!(rendered.starts_with("mmux [A] alpha [B] beta [C] gamma"));
     assert!(!rendered.contains("multi-host mode"));
     assert!(!rendered.contains("10.0.0"));
     assert!(rendered.ends_with(" 12:34:56 "));
@@ -2146,7 +2146,7 @@ fn multi_host_motd_pane_is_hidden() {
     let rendered = render_to_string(&mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-    assert!(rendered.contains("mmux alpha [A] beta [B]"));
+    assert!(rendered.contains("mmux [A] alpha [B] beta"));
     assert!(rendered.contains("Sessions [1]"));
 }
 
