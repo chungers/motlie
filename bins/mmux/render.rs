@@ -282,8 +282,9 @@ pub(crate) fn session_list_line(
     let metadata = session_recency_text(row);
     let prefix_width = char_width(&prefix);
     let metadata_width = char_width(&metadata);
+    let metadata_gap = session_row_metadata_gap(row, &metadata, MIN_METADATA_GAP);
     let content_width = width.saturating_sub(RECENCY_RIGHT_MARGIN);
-    if content_width < prefix_width + 1 + MIN_METADATA_GAP + metadata_width {
+    if content_width < prefix_width + 1 + metadata_gap + metadata_width {
         let name_width = width.saturating_sub(prefix_width);
         let name = session_row_name_field(row, name_width);
         return pad_or_truncate(format!("{prefix}{name}"), width);
@@ -292,7 +293,7 @@ pub(crate) fn session_list_line(
     let name_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(metadata_width)
-        .saturating_sub(MIN_METADATA_GAP);
+        .saturating_sub(metadata_gap);
     let name = session_row_name_field(row, name_width);
     let left = format!("{prefix}{name}");
     let padding = content_width
@@ -329,6 +330,16 @@ fn session_row_name_field(row: &SessionRow, width: usize) -> String {
         .saturating_sub(char_width(&name))
         .saturating_sub(value_width);
     format!("{name}{}{value}", " ".repeat(gap))
+}
+
+fn session_row_metadata_gap(row: &SessionRow, metadata: &str, default_gap: usize) -> usize {
+    match &row.selected_tag {
+        Some(tag) if !tag.value.is_empty() => {
+            let activity_left_pad = metadata.chars().take_while(|ch| *ch == ' ').count();
+            default_gap.saturating_sub(activity_left_pad)
+        }
+        _ => default_gap,
+    }
 }
 
 pub(crate) fn session_recency_text(row: &SessionRow) -> String {
