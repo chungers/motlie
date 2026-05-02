@@ -252,10 +252,6 @@ pub(crate) struct HostFleet {
     pub(crate) entries: Vec<HostEntry>,
 }
 
-/// Cap for the hostname column width in multi-host row format. Longer labels
-/// are truncated with an ellipsis to keep rows readable.
-pub(crate) const HOST_LABEL_COLUMN_MAX: usize = 24;
-
 impl HostFleet {
     pub(crate) fn from_entries(entries: Vec<HostEntry>) -> Self {
         Self { entries }
@@ -277,18 +273,55 @@ impl HostFleet {
         self.entries.first()
     }
 
-    /// Width of the hostname column when rendered in multi-host rows.
-    /// Returns 0 for single-host (column is omitted).
-    pub(crate) fn host_label_width(&self) -> usize {
+    /// Compact host code for the given host in multi-host rows.
+    /// Returns `None` for single-host mode or an unknown host id.
+    pub(crate) fn host_code(&self, id: &HostId) -> Option<String> {
         if !self.is_multi() {
-            return 0;
+            return None;
         }
         self.entries
             .iter()
-            .map(|entry| entry.label.chars().count().min(HOST_LABEL_COLUMN_MAX))
-            .max()
-            .unwrap_or(0)
+            .position(|entry| &entry.id == id)
+            .map(host_code_for_index)
     }
+
+    /// Width of the compact host-code column when rendered in multi-host rows.
+    /// Returns 0 for single-host (column is omitted).
+    pub(crate) fn host_code_width(&self) -> usize {
+        if !self.is_multi() {
+            return 0;
+        }
+        host_code_for_index(self.entries.len().saturating_sub(1))
+            .chars()
+            .count()
+    }
+
+    /// Host-code legend shown in the multi-host top status bar.
+    pub(crate) fn host_code_legend(&self) -> Option<String> {
+        if !self.is_multi() {
+            return None;
+        }
+        Some(
+            self.entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| format!("{} {}", entry.label, host_code_for_index(index)))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
+}
+
+fn host_code_for_index(index: usize) -> String {
+    let mut n = index + 1;
+    let mut letters = Vec::new();
+    while n > 0 {
+        let rem = (n - 1) % 26;
+        letters.push((b'A' + rem as u8) as char);
+        n = (n - 1) / 26;
+    }
+    letters.reverse();
+    format!("[{}]", letters.into_iter().collect::<String>())
 }
 
 /// Identity of a session as returned to callers from the highlighted row.

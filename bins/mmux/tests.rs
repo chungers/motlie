@@ -384,7 +384,7 @@ fn sessions_title_only_includes_count() {
 
 #[test]
 fn session_list_line_hides_stable_id() {
-    let line = session_list_line(&make_row(session("dev", "$42")), true, 0, 16);
+    let line = session_list_line(&make_row(session("dev", "$42")), true, None, 0, 16);
     assert!(line.starts_with(">  dev"));
     assert!(!line.contains("$42"));
 }
@@ -397,7 +397,7 @@ fn session_list_line_right_justifies_selected_tag_value() {
         value: "platform".to_string(),
     });
 
-    let line = session_list_line(&row, true, 0, 48);
+    let line = session_list_line(&row, true, None, 0, 48);
     let metadata = session_recency_text(&row);
     let tag_start = line.find("platform").unwrap();
     let activity = metadata.split(" / ").next().unwrap().trim();
@@ -648,6 +648,7 @@ fn session_list_line_right_aligns_active_and_age() {
     let first = session_list_line(
         &make_row_at(session_with_times("dev", "$1", 0, 7_020), now),
         true,
+        None,
         0,
         42,
     );
@@ -657,6 +658,7 @@ fn session_list_line_right_aligns_active_and_age() {
             now,
         ),
         false,
+        None,
         0,
         42,
     );
@@ -2054,10 +2056,19 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
     assert!(multi.is_multi());
     assert_eq!(multi.len(), 2);
 
-    // host_label_width is 0 in single-host (column omitted) and the max of
-    // labels (capped) in multi-host.
-    assert_eq!(single.host_label_width(), 0);
-    assert_eq!(multi.host_label_width(), "alpha".len());
+    // host_code_width is 0 in single-host (column omitted) and the width of
+    // the largest assigned compact code in multi-host.
+    assert_eq!(single.host_code_width(), 0);
+    assert_eq!(single.host_code(&local_host_id()), None);
+    assert_eq!(multi.host_code_width(), "[A]".len());
+    assert_eq!(
+        multi.host_code(&ssh_host_id("ssh://a")).as_deref(),
+        Some("[A]")
+    );
+    assert_eq!(
+        multi.host_code(&ssh_host_id("ssh://b")).as_deref(),
+        Some("[B]")
+    );
 }
 
 #[test]
@@ -2087,7 +2098,7 @@ fn fleet_entry_lookup_by_host_id() {
 }
 
 #[test]
-fn multi_host_top_status_shows_mode_and_count() {
+fn multi_host_top_status_shows_host_code_legend() {
     let mut app = AppState::new(
         "host".to_string(),
         LayoutMode::Normal,
@@ -2105,8 +2116,8 @@ fn multi_host_top_status_shows_mode_and_count() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(rendered.contains("multi-host mode [3]"));
-    assert!(!rendered.contains("alpha"));
+    assert!(rendered.starts_with("mmux alpha [A] beta [B] gamma [C]"));
+    assert!(!rendered.contains("multi-host mode"));
     assert!(!rendered.contains("10.0.0"));
     assert!(rendered.ends_with(" 12:34:56 "));
 }
@@ -2135,42 +2146,34 @@ fn multi_host_motd_pane_is_hidden() {
     let rendered = render_to_string(&mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-    assert!(rendered.contains("multi-host mode [2]"));
+    assert!(rendered.contains("mmux alpha [A] beta [B]"));
     assert!(rendered.contains("Sessions [1]"));
 }
 
 #[test]
-fn host_label_width_pads_to_longest_host_label() {
-    // Mixed-length labels: shorter ones pad to the longest in the fleet.
+fn host_code_width_pads_to_largest_host_code() {
     let fleet = HostFleet::from_entries(vec![
         HostEntry {
             id: ssh_host_id("ssh://a"),
-            label: "alpha".to_string(), // 5 chars
+            label: "alpha".to_string(),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://b"),
-            label: "supercalifragilistic".to_string(), // 20 chars
+            label: "supercalifragilistic".to_string(),
             ip_address: "y".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://c"),
-            label: "beta".to_string(), // 4 chars
+            label: "beta".to_string(),
             ip_address: "z".to_string(),
             handle: HostHandle::local(),
         },
     ]);
-    assert_eq!(
-        fleet.host_label_width(),
-        "supercalifragilistic".len(),
-        "host_label_width returns the longest configured label"
-    );
+    assert_eq!(fleet.host_code_width(), "[A]".len());
 
-    // Rendering each host through session_list_line with that width pads
-    // shorter labels to the longest one — column is rectangular.
-    let width = fleet.host_label_width();
     let alpha_row = make_row_for_host(session("dev", "$1"), ssh_host_id("ssh://a"), "alpha");
     let supercali_row = make_row_for_host(
         session("dev", "$2"),
@@ -2179,13 +2182,17 @@ fn host_label_width_pads_to_longest_host_label() {
     );
     let beta_row = make_row_for_host(session("dev", "$3"), ssh_host_id("ssh://c"), "beta");
 
-    let alpha_line = session_list_line(&alpha_row, false, width, 80);
-    let supercali_line = session_list_line(&supercali_row, false, width, 80);
-    let beta_line = session_list_line(&beta_row, false, width, 80);
+    let width = fleet.host_code_width();
+    let alpha_code = fleet.host_code(&alpha_row.host_id);
+    let supercali_code = fleet.host_code(&supercali_row.host_id);
+    let beta_code = fleet.host_code(&beta_row.host_id);
+    let alpha_line = session_list_line(&alpha_row, false, alpha_code.as_deref(), width, 80);
+    let supercali_line =
+        session_list_line(&supercali_row, false, supercali_code.as_deref(), width, 80);
+    let beta_line = session_list_line(&beta_row, false, beta_code.as_deref(), width, 80);
 
     // The session-name token "dev" appears at the same column index in every
-    // row regardless of which host produced the row — that's what padding to
-    // the longest hostname guarantees visually.
+    // row regardless of which host produced the row.
     let alpha_dev_col = alpha_line.find("dev").unwrap();
     let supercali_dev_col = supercali_line.find("dev").unwrap();
     let beta_dev_col = beta_line.find("dev").unwrap();
@@ -2200,51 +2207,56 @@ fn host_label_width_pads_to_longest_host_label() {
 }
 
 #[test]
-fn host_label_width_caps_at_max() {
-    // Labels longer than HOST_LABEL_COLUMN_MAX (24) are clipped so an
-    // adversarial 200-char hostname does not steal the row width.
-    let huge_label: String = "x".repeat(200);
-    let fleet = HostFleet::from_entries(vec![
-        HostEntry {
-            id: ssh_host_id("ssh://a"),
-            label: "short".to_string(),
+fn host_codes_extend_after_z() {
+    let entries = (0..27)
+        .map(|index| HostEntry {
+            id: ssh_host_id(&format!("ssh://host{index}")),
+            label: format!("host{index}"),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
-        },
-        HostEntry {
-            id: ssh_host_id("ssh://b"),
-            label: huge_label,
-            ip_address: "y".to_string(),
-            handle: HostHandle::local(),
-        },
-    ]);
-    assert_eq!(fleet.host_label_width(), 24);
+        })
+        .collect::<Vec<_>>();
+    let fleet = HostFleet::from_entries(entries);
+
+    assert_eq!(fleet.host_code_width(), "[AA]".len());
+    assert_eq!(
+        fleet.host_code(&ssh_host_id("ssh://host0")).as_deref(),
+        Some("[A]")
+    );
+    assert_eq!(
+        fleet.host_code(&ssh_host_id("ssh://host25")).as_deref(),
+        Some("[Z]")
+    );
+    assert_eq!(
+        fleet.host_code(&ssh_host_id("ssh://host26")).as_deref(),
+        Some("[AA]")
+    );
 }
 
 #[test]
-fn multi_host_session_row_inserts_hostname_column() {
+fn multi_host_session_row_inserts_host_code_column() {
     let row = make_row_for_host(session("dev", "$1"), ssh_host_id("ssh://a"), "alpha");
-    let host_label_width = "alpha".len();
-    let line = session_list_line(&row, false, host_label_width, 60);
-    // Format expected:  " * alpha  dev"  (leading marker, attached, hostname,
-    // session name).
-    assert!(line.contains("alpha"));
+    let line = session_list_line(&row, false, Some("[A]"), "[A]".len(), 60);
+    // Format expected:  " * [A] dev"  (leading marker, attached, host code,
+    // session name). The full hostname is reserved for the top legend.
+    assert!(line.contains("[A]"));
+    assert!(!line.contains("alpha"));
     assert!(line.contains("dev"));
-    let alpha_pos = line.find("alpha").expect("hostname rendered");
+    let code_pos = line.find("[A]").expect("host code rendered");
     let dev_pos = line.find("dev").expect("session name rendered");
     assert!(
-        alpha_pos < dev_pos,
-        "hostname appears before session name: {line:?}"
+        code_pos < dev_pos,
+        "host code appears before session name: {line:?}"
     );
 }
 
 #[test]
 fn single_host_row_omits_hostname_column() {
     let row = make_row(session("dev", "$1"));
-    let line = session_list_line(&row, false, 0, 30);
-    // No hostname column when host_label_width = 0 (single-host).
+    let line = session_list_line(&row, false, None, 0, 30);
+    // No host-code column when host_code_width = 0 (single-host).
     assert!(line.contains("dev"));
-    assert!(!line.contains("host  dev"));
+    assert!(!line.contains("[A]"));
 }
 
 #[test]

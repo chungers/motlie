@@ -198,7 +198,7 @@ pub(crate) fn sessions_title(app: &AppState) -> String {
 fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let row_width = area.width.saturating_sub(2) as usize;
-    let host_label_width = app.fleet.host_label_width();
+    let host_code_width = app.fleet.host_code_width();
     let mut lines = Vec::new();
     if app.session_list.rows.is_empty() {
         lines.push(Line::from(TuiSpan::styled(
@@ -219,6 +219,7 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             .take(height)
         {
             let selected = idx == app.session_list.selected;
+            let host_code = app.fleet.host_code(&row.host_id);
             let style = if selected {
                 Style::default()
                     .fg(Color::Black)
@@ -228,7 +229,13 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                 Style::default().fg(Color::White)
             };
             lines.push(Line::from(TuiSpan::styled(
-                session_list_line(row, selected, host_label_width, row_width),
+                session_list_line(
+                    row,
+                    selected,
+                    host_code.as_deref(),
+                    host_code_width,
+                    row_width,
+                ),
                 style,
             )));
         }
@@ -254,13 +261,13 @@ fn empty_session_list_message(app: &AppState) -> String {
 
 /// Render a session row.
 ///
-/// `host_label_width` is the width of the hostname column. Pass `0` for
-/// single-host (column omitted); pass the fleet's `host_label_width()` for
-/// multi-host (column included between attached marker and session name).
+/// `host_code` and `host_code_width` control the compact multi-host code
+/// column. Pass `None, 0` for single-host rows.
 pub(crate) fn session_list_line(
     row: &SessionRow,
     selected: bool,
-    host_label_width: usize,
+    host_code: Option<&str>,
+    host_code_width: usize,
     width: usize,
 ) -> String {
     const MIN_METADATA_GAP: usize = 2;
@@ -272,9 +279,9 @@ pub(crate) fn session_list_line(
 
     let marker = if selected { ">" } else { " " };
     let attached = if row.session.is_attached() { "*" } else { " " };
-    let prefix = if host_label_width > 0 {
-        let host = truncate_chars(&row.host_label, host_label_width);
-        let host_padded = pad_to(&host, host_label_width);
+    let prefix = if host_code_width > 0 {
+        let host = truncate_chars(host_code.unwrap_or(""), host_code_width);
+        let host_padded = pad_to(&host, host_code_width);
         format!("{marker}{attached} {host_padded} ")
     } else {
         format!("{marker}{attached} ")
@@ -507,7 +514,10 @@ pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<
 
 fn top_status_host_text(app: &AppState) -> String {
     if app.fleet.is_multi() {
-        format!(" mmux - multi-host mode [{}] ", app.fleet.len())
+        match app.fleet.host_code_legend() {
+            Some(legend) if !legend.is_empty() => format!("mmux {legend} "),
+            _ => "mmux ".to_string(),
+        }
     } else if let Some(entry) = app.fleet.first() {
         format!(" {} | {} ", entry.label, entry.ip_address)
     } else {
