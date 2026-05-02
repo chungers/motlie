@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Moved environment editing into the New Session modal and apply staged variables through `CreateSessionOptions::initial_environment`; removed the `e` post-creation environment shortcut. |
 | 2026-05-02 | @codex | Added `HostHandle::tmux_hostname()` and changed mmux host display labels to use tmux `#{host}` while retaining SSH URI hosts as aliases. |
 | 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` and `status-left-length` to 50, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
@@ -250,7 +251,7 @@ enum ModalState {
     NewSession { ui: NewSessionModalUi },
     KillSession { session: SelectedSession, button: Button },
     RenameSession { session: SelectedSession, input: String, button: Button },
-    SessionTags { session: SelectedSession, ui: SessionTagsModalUi },
+    SessionKeyValues { session: SelectedSession, ui: SessionKeyValueModalUi },
     Help,
 }
 
@@ -269,16 +270,20 @@ struct NewSessionModalUi {
     input: String,
     hosts: Vec<NewSessionHostChoice>,
     host_index: usize,
+    env_rows: Vec<SessionKeyValueRow>,
+    env_key_input: String,
+    env_value_input: String,
     focus: NewSessionFocus,
     button: Button,
 }
 
-struct SessionTagsModalUi {
-    tags: Vec<SessionTagRow>,
+struct SessionKeyValueModalUi {
+    kind: SessionKeyValueKind,
+    rows: Vec<SessionKeyValueRow>,
     selected_key: Option<String>,
     key_input: String,
     value_input: String,
-    focus: SessionTagsFocus,
+    focus: SessionKeyValueFocus,
 }
 ```
 
@@ -336,11 +341,11 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 `Session Name` field, and dispatches changed names through
 `HostHandle::session_by_id()` and `Target::rename()`.
 
-`t` opens `SessionTags` for the highlighted session. Rows are loaded from
+`t` opens a `SessionKeyValues` modal in tag mode for the highlighted session. Rows are loaded from
 `Target::tags("mmux").await?.list().await?`, sorted lexicographically by
 stripped key, rendered without `@mmux/`, filtered to hide the internal
 `@mmux/__selected-key` option, and shown in a five-row scroll window. The modal
-keeps row focus and bottom field focus explicit with `SessionTagsFocus`; `Tab`
+keeps row focus and bottom field focus explicit with `SessionKeyValueFocus`; `Tab`
 cycles the bottom Key/Value cells and Cancel button, `Shift-Tab` reverses that
 cycle, Enter on either edit field writes non-empty, non-reserved values through
 `Target::tags("mmux").await?.set(key, value)`, where `__selected-key` is
@@ -349,6 +354,14 @@ reserved for the internal marker. `x` deletes through
 Pressing `c` on a focused tag row toggles the checked key stored in
 `@mmux/__selected-key`, and renders `✓` in that row's marker column across
 different mmux processes.
+
+`n` opens `NewSession`, which includes the same key/value list mechanics for
+initial environment variables. The modal stages variables locally, sorts them
+lexicographically by key, supports `u` to preload a staged row and `x` to remove
+one, and applies staged variables through
+`CreateSessionOptions::initial_environment` when the session is created. These
+values are passed to `tmux new-session -e` and are visible to the first shell or
+command in the new session.
 
 `fetch_fleet_rows()` enriches each `SessionRow` with the checked key/value by
 batch-listing `@mmux/` options once per host refresh, resolving
@@ -435,14 +448,24 @@ Create:
 
 ```rust
 let target = host
-    .create_session(&new_session_name, &motlie_tmux::CreateSessionOptions::default())
+    .create_session(
+        &new_session_name,
+        &motlie_tmux::CreateSessionOptions {
+            initial_environment,
+            ..Default::default()
+        },
+    )
     .await?;
 ```
 
 In multi-host mode, the binary picks the `HostHandle` from the New Session
-modal's selected host id before calling `create_session`.
+modal's selected host id before calling `create_session`. The staged
+environment rows are converted to `SessionEnvVar` values before dispatch.
 
 Kill:
+
+The `KillSession` modal starts on `Cancel`; Left/Right and `Tab` /
+`Shift-Tab` can move to `Ok`, and Enter dispatches only while `Ok` is active.
 
 ```rust
 let selected = SelectedSession {

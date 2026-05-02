@@ -19,7 +19,7 @@ use crate::consts::{
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
     AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, MotdState,
-    NewSessionFocus, SessionRow, SessionTagsFocus,
+    NewSessionFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionRow,
 };
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
@@ -669,14 +669,19 @@ fn push_status_key_command(spans: &mut Vec<TuiSpan<'static>>, key: char, label: 
     spans.push(status_span(format!(" {label}")));
 }
 
-pub(crate) fn session_tags_footer_line(cancel_button: &str) -> Line<'static> {
+pub(crate) fn session_key_values_footer_line(
+    kind: SessionKeyValueKind,
+    cancel_button: &str,
+) -> Line<'static> {
     let mut spans = vec![status_span(cancel_button.to_string())];
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "update", 'u');
     push_status_separator(&mut spans);
     push_status_key_command(&mut spans, 'x', "unset");
-    push_status_separator(&mut spans);
-    push_status_command(&mut spans, "check", 'c');
+    if kind.supports_checked_row() {
+        push_status_separator(&mut spans);
+        push_status_command(&mut spans, "check", 'c');
+    }
     Line::from(spans)
 }
 
@@ -761,8 +766,8 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
         Rect::new(inner.x, separator_y, inner.width, MODAL_SEPARATOR_HEIGHT),
     );
     let button_area = Rect::new(inner.x, button_y, inner.width, MODAL_BUTTON_HEIGHT);
-    if matches!(&view.body, ModalBody::SessionTags { .. }) {
-        draw_session_tags_footer(frame, button_area, &view.buttons);
+    if let ModalBody::SessionKeyValues { kind, .. } = &view.body {
+        draw_session_key_values_footer(frame, button_area, *kind, &view.buttons);
     } else {
         draw_modal_buttons(
             frame,
@@ -777,16 +782,25 @@ fn modal_content_height(view: &ModalView) -> u16 {
         ModalBody::Text(text) => max(1, text.lines().count()) as u16,
         ModalBody::NewSession { host_label, .. } => {
             let session_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
-            if host_label.is_some() {
+            let field_height = if host_label.is_some() {
                 session_height * 2 + 1
             } else {
                 session_height
-            }
+            };
+            let rows = if let ModalBody::NewSession { env_rows, .. } = &view.body {
+                max(1, env_rows.len()) as u16
+            } else {
+                1
+            };
+            field_height
+                .saturating_add(1)
+                .saturating_add(min(rows, KEY_VALUE_LIST_MAX_ROWS as u16))
+                .saturating_add(KEY_VALUE_INPUT_SECTION_HEIGHT)
         }
         ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
-        ModalBody::SessionTags { tags, .. } => {
-            let rows = max(1, tags.len()) as u16;
-            min(rows, TAG_LIST_MAX_ROWS as u16) + TAG_INPUT_SECTION_HEIGHT
+        ModalBody::SessionKeyValues { rows, .. } => {
+            let rows = max(1, rows.len()) as u16;
+            min(rows, KEY_VALUE_LIST_MAX_ROWS as u16) + KEY_VALUE_INPUT_SECTION_HEIGHT
         }
     }
 }
@@ -799,7 +813,12 @@ fn modal_content_width(view: &ModalView) -> u16 {
             .max()
             .unwrap_or(0),
         ModalBody::NewSession {
-            input, host_label, ..
+            input,
+            host_label,
+            env_rows,
+            env_key_input,
+            env_value_input,
+            ..
         } => [
             "Session name".chars().count(),
             input.chars().count(),
@@ -807,6 +826,12 @@ fn modal_content_width(view: &ModalView) -> u16 {
                 .as_deref()
                 .map(|label| max("Host".chars().count(), label.chars().count() + 2))
                 .unwrap_or(0),
+            key_value_content_width(
+                SessionKeyValueKind::Environment,
+                env_rows,
+                env_key_input,
+                env_value_input,
+            ),
         ]
         .into_iter()
         .max()
@@ -814,27 +839,20 @@ fn modal_content_width(view: &ModalView) -> u16 {
         ModalBody::RenameSession { input } => {
             max("Session Name".chars().count(), input.chars().count())
         }
-        ModalBody::SessionTags {
-            tags,
+        ModalBody::SessionKeyValues {
+            kind,
+            rows,
             key_input,
             value_input,
             ..
-        } => tags
-            .iter()
-            .map(|tag| tag.key.chars().count() + tag.value.chars().count() + TAG_LIST_ROW_OVERHEAD)
-            .chain([
-                "No tags".chars().count() + TAG_LIST_ROW_OVERHEAD,
-                key_input.chars().count() + value_input.chars().count() + TAG_EDIT_ROW_OVERHEAD,
-            ])
-            .max()
-            .unwrap_or(0),
+        } => key_value_content_width(*kind, rows, key_input, value_input),
     };
     max(body_width, modal_footer_width(view)) as u16
 }
 
 fn modal_footer_width(view: &ModalView) -> usize {
-    if matches!(&view.body, ModalBody::SessionTags { .. }) {
-        line_char_width(&session_tags_footer_line(&view.buttons))
+    if let ModalBody::SessionKeyValues { kind, .. } = &view.body {
+        line_char_width(&session_key_values_footer_line(*kind, &view.buttons))
     } else {
         view.buttons.chars().count()
     }
@@ -845,6 +863,24 @@ fn line_char_width(line: &Line<'_>) -> usize {
         .iter()
         .map(|span| span.content.as_ref().chars().count())
         .sum()
+}
+
+fn key_value_content_width(
+    kind: SessionKeyValueKind,
+    rows: &[crate::model::SessionKeyValueRow],
+    key_input: &str,
+    value_input: &str,
+) -> usize {
+    rows.iter()
+        .map(|row| {
+            row.key.chars().count() + row.value.chars().count() + KEY_VALUE_LIST_ROW_OVERHEAD
+        })
+        .chain([
+            kind.empty_label().chars().count() + KEY_VALUE_LIST_ROW_OVERHEAD,
+            key_input.chars().count() + value_input.chars().count() + KEY_VALUE_EDIT_ROW_OVERHEAD,
+        ])
+        .max()
+        .unwrap_or(0)
 }
 
 fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
@@ -863,24 +899,39 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
             input,
             host_label,
             host_count,
+            env_rows,
+            env_key_input,
+            env_value_input,
             focus,
         } => {
-            draw_new_session_body(frame, area, input, host_label, *host_count, *focus);
+            draw_new_session_body(
+                frame,
+                area,
+                input,
+                host_label,
+                *host_count,
+                env_rows,
+                env_key_input,
+                env_value_input,
+                *focus,
+            );
         }
         ModalBody::RenameSession { input } => {
             draw_labeled_text_field(frame, area, "Session Name", input, true);
         }
-        ModalBody::SessionTags {
-            tags,
+        ModalBody::SessionKeyValues {
+            kind,
+            rows,
             selected_key,
             key_input,
             value_input,
             focus,
         } => {
-            draw_session_tags_body(
+            draw_session_key_values_body(
                 frame,
                 area,
-                tags,
+                *kind,
+                rows,
                 selected_key,
                 key_input,
                 value_input,
@@ -896,25 +947,26 @@ fn draw_new_session_body(
     input: &str,
     host_label: &Option<String>,
     host_count: usize,
+    env_rows: &[crate::model::SessionKeyValueRow],
+    env_key_input: &str,
+    env_value_input: &str,
     focus: NewSessionFocus,
 ) {
-    let Some(host_label) = host_label else {
-        draw_labeled_text_field(frame, area, "Session name", input, true);
-        return;
-    };
-
     let field_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
-    let host_area = Rect::new(area.x, area.y, area.width, min(field_height, area.height));
-    draw_labeled_select_field(
-        frame,
-        host_area,
-        "Host",
-        host_label,
-        host_count > 1,
-        focus == NewSessionFocus::Host,
-    );
-
-    let session_y = area.y.saturating_add(field_height + 1);
+    let mut y = area.y;
+    if let Some(host_label) = host_label {
+        let host_area = Rect::new(area.x, y, area.width, min(field_height, area.height));
+        draw_labeled_select_field(
+            frame,
+            host_area,
+            "Host",
+            host_label,
+            host_count > 1,
+            focus == NewSessionFocus::Host,
+        );
+        y = y.saturating_add(field_height + 1);
+    }
+    let session_y = y;
     if session_y >= area.bottom() {
         return;
     }
@@ -931,70 +983,101 @@ fn draw_new_session_body(
         input,
         focus == NewSessionFocus::Name,
     );
+    y = session_y.saturating_add(field_height + 1);
+    if y >= area.bottom() {
+        return;
+    }
+    let env_focus = match focus {
+        NewSessionFocus::EnvRow(index) => SessionKeyValueFocus::Row(index),
+        NewSessionFocus::EnvKey => SessionKeyValueFocus::Key,
+        NewSessionFocus::EnvValue => SessionKeyValueFocus::Value,
+        _ => SessionKeyValueFocus::Cancel,
+    };
+    draw_session_key_values_body(
+        frame,
+        Rect::new(area.x, y, area.width, area.bottom().saturating_sub(y)),
+        SessionKeyValueKind::Environment,
+        env_rows,
+        &None,
+        env_key_input,
+        env_value_input,
+        env_focus,
+    );
 }
 
-fn draw_session_tags_body(
+fn draw_session_key_values_body(
     frame: &mut Frame<'_>,
     area: Rect,
-    tags: &[crate::model::SessionTagRow],
+    kind: SessionKeyValueKind,
+    rows: &[crate::model::SessionKeyValueRow],
     selected_key: &Option<String>,
     key_input: &str,
     value_input: &str,
-    focus: SessionTagsFocus,
+    focus: SessionKeyValueFocus,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    let key_width = tag_key_column_width(area.width, tags, key_input);
-    let indicator_width = tag_indicator_column_width(area.width);
-    let prefix_width = tag_prefix_column_width(area.width);
+    let key_width = key_value_key_column_width(area.width, rows, key_input);
+    let indicator_width = if kind.supports_checked_row() {
+        key_value_indicator_column_width(area.width)
+    } else {
+        0
+    };
+    let prefix_width = key_value_prefix_column_width(area.width);
     let value_width = area
         .width
         .saturating_sub(prefix_width + key_width + indicator_width);
-    let columns = TagColumns {
+    let columns = KeyValueColumns {
         prefix_width,
         key_width,
         value_width,
         indicator_width,
     };
-    let max_tag_rows = visible_session_tag_rows(area.height, tags.len());
+    let max_rows = visible_session_key_value_rows(area.height, rows.len());
     let selected_row = match focus {
-        SessionTagsFocus::TagRow(index) => Some(index),
+        SessionKeyValueFocus::Row(index) => Some(index),
         _ => None,
     };
     let start = selected_row
-        .map(|index| index.saturating_sub(max_tag_rows.saturating_sub(1)))
+        .map(|index| index.saturating_sub(max_rows.saturating_sub(1)))
         .unwrap_or(0);
     let mut lines = Vec::new();
 
-    if tags.is_empty() && max_tag_rows > 0 {
-        lines.push(no_session_tags_line(columns));
+    if rows.is_empty() && max_rows > 0 {
+        lines.push(no_session_key_values_line(kind, columns));
     } else {
-        for (index, tag) in tags.iter().enumerate().skip(start).take(max_tag_rows) {
-            let focused = matches!(focus, SessionTagsFocus::TagRow(row) if row == index);
-            lines.push(session_tag_line(tag, selected_key, columns, focused));
+        for (index, row) in rows.iter().enumerate().skip(start).take(max_rows) {
+            let focused = matches!(focus, SessionKeyValueFocus::Row(row) if row == index);
+            lines.push(session_key_value_line(
+                kind,
+                row,
+                selected_key,
+                columns,
+                focused,
+            ));
         }
     }
 
-    if max_tag_rows > 0 {
+    if max_rows > 0 {
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }),
-            Rect::new(area.x, area.y, area.width, max_tag_rows as u16),
+            Rect::new(area.x, area.y, area.width, max_rows as u16),
         );
     }
 
-    let input_y = area.y.saturating_add(max_tag_rows as u16);
+    let input_y = area.y.saturating_add(max_rows as u16);
     if input_y < area.bottom() {
         let separator = "─".repeat(area.width as usize);
         frame.render_widget(
-            Paragraph::new(separator).style(tag_input_separator_style()),
+            Paragraph::new(separator).style(key_value_input_separator_style()),
             Rect::new(area.x, input_y, area.width, 1),
         );
     }
     let row_y = input_y.saturating_add(1);
     if row_y < area.bottom() {
-        draw_session_tag_input_row(
+        draw_session_key_value_input_row(
             frame,
             Rect::new(area.x, row_y, area.width, 1),
             key_input,
@@ -1006,43 +1089,43 @@ fn draw_session_tags_body(
 }
 
 #[derive(Clone, Copy)]
-struct TagColumns {
+struct KeyValueColumns {
     prefix_width: u16,
     key_width: u16,
     value_width: u16,
     indicator_width: u16,
 }
 
-const TAG_INPUT_SECTION_HEIGHT: u16 = 2;
-const TAG_LIST_MAX_ROWS: usize = 5;
-const TAG_LIST_PREFIX_WIDTH: u16 = 2;
-const TAG_KEY_COLUMN_PADDING: u16 = 4;
-const TAG_EMPTY_KEY_COLUMN_PERCENT: u16 = 30;
-const TAG_EDIT_ROW_OVERHEAD: usize = 6;
-const TAG_LIST_ROW_OVERHEAD: usize = 7;
+const KEY_VALUE_INPUT_SECTION_HEIGHT: u16 = 2;
+const KEY_VALUE_LIST_MAX_ROWS: usize = 5;
+const KEY_VALUE_LIST_PREFIX_WIDTH: u16 = 2;
+const KEY_VALUE_KEY_COLUMN_PADDING: u16 = 4;
+const KEY_VALUE_EMPTY_KEY_COLUMN_PERCENT: u16 = 30;
+const KEY_VALUE_EDIT_ROW_OVERHEAD: usize = 6;
+const KEY_VALUE_LIST_ROW_OVERHEAD: usize = 7;
 
-fn visible_session_tag_rows(area_height: u16, tag_count: usize) -> usize {
-    let available = area_height.saturating_sub(TAG_INPUT_SECTION_HEIGHT) as usize;
-    let row_count = max(1, tag_count);
-    min(TAG_LIST_MAX_ROWS, min(row_count, available))
+fn visible_session_key_value_rows(area_height: u16, row_count: usize) -> usize {
+    let available = area_height.saturating_sub(KEY_VALUE_INPUT_SECTION_HEIGHT) as usize;
+    let row_count = max(1, row_count);
+    min(KEY_VALUE_LIST_MAX_ROWS, min(row_count, available))
 }
 
-fn tag_prefix_column_width(area_width: u16) -> u16 {
-    min(TAG_LIST_PREFIX_WIDTH, area_width)
+fn key_value_prefix_column_width(area_width: u16) -> u16 {
+    min(KEY_VALUE_LIST_PREFIX_WIDTH, area_width)
 }
 
-fn tag_indicator_column_width(area_width: u16) -> u16 {
+fn key_value_indicator_column_width(area_width: u16) -> u16 {
     const WIDTH: u16 = 1;
     min(WIDTH, area_width)
 }
 
-pub(crate) fn tag_key_column_width(
+pub(crate) fn key_value_key_column_width(
     area_width: u16,
-    tags: &[crate::model::SessionTagRow],
+    rows: &[crate::model::SessionKeyValueRow],
     key_input: &str,
 ) -> u16 {
-    let prefix_width = tag_prefix_column_width(area_width);
-    let indicator_width = tag_indicator_column_width(area_width);
+    let prefix_width = key_value_prefix_column_width(area_width);
+    let indicator_width = key_value_indicator_column_width(area_width);
     let max_key_width = area_width
         .saturating_sub(prefix_width)
         .saturating_sub(indicator_width)
@@ -1050,36 +1133,39 @@ pub(crate) fn tag_key_column_width(
     if max_key_width == 0 {
         return 0;
     }
-    let empty_tags_default = if tags.is_empty() {
-        empty_session_tags_key_column_width(area_width, prefix_width)
+    let empty_rows_default = if rows.is_empty() {
+        empty_session_key_values_key_column_width(area_width, prefix_width)
     } else {
         0
     };
-    let longest_key = tags
+    let longest_key = rows
         .iter()
-        .map(|tag| tag.key.chars().count())
+        .map(|row| row.key.chars().count())
         .chain(std::iter::once(key_input.chars().count()))
         .max()
         .unwrap_or(0)
-        .saturating_add(TAG_KEY_COLUMN_PADDING as usize) as u16;
-    min(max(longest_key, empty_tags_default), max_key_width)
+        .saturating_add(KEY_VALUE_KEY_COLUMN_PADDING as usize) as u16;
+    min(max(longest_key, empty_rows_default), max_key_width)
 }
 
-fn empty_session_tags_key_column_width(area_width: u16, prefix_width: u16) -> u16 {
+fn empty_session_key_values_key_column_width(area_width: u16, prefix_width: u16) -> u16 {
     let edit_strip_width = area_width.saturating_sub(prefix_width);
     if edit_strip_width == 0 {
         return 0;
     }
     max(
         1,
-        ((edit_strip_width as u32 * TAG_EMPTY_KEY_COLUMN_PERCENT as u32) / 100) as u16,
+        ((edit_strip_width as u32 * KEY_VALUE_EMPTY_KEY_COLUMN_PERCENT as u32) / 100) as u16,
     )
 }
 
-fn no_session_tags_line(columns: TagColumns) -> Line<'static> {
-    tag_list_row_line(
+fn no_session_key_values_line(
+    kind: SessionKeyValueKind,
+    columns: KeyValueColumns,
+) -> Line<'static> {
+    key_value_list_row_line(
         pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
-        pad_or_truncate_owned("No tags".to_string(), columns.key_width as usize),
+        pad_or_truncate_owned(kind.empty_label().to_string(), columns.key_width as usize),
         pad_or_truncate_owned(String::new(), columns.value_width as usize),
         pad_or_truncate_owned(String::new(), columns.indicator_width as usize),
         Style::default().fg(Color::DarkGray),
@@ -1088,17 +1174,19 @@ fn no_session_tags_line(columns: TagColumns) -> Line<'static> {
     )
 }
 
-fn session_tag_line(
-    tag: &crate::model::SessionTagRow,
+fn session_key_value_line(
+    kind: SessionKeyValueKind,
+    row: &crate::model::SessionKeyValueRow,
     selected_key: &Option<String>,
-    columns: TagColumns,
+    columns: KeyValueColumns,
     focused: bool,
 ) -> Line<'static> {
-    let indicator = if selected_key.as_deref() == Some(tag.key.as_str()) {
-        "✓"
-    } else {
-        " "
-    };
+    let indicator =
+        if kind.supports_checked_row() && selected_key.as_deref() == Some(row.key.as_str()) {
+            "✓"
+        } else {
+            " "
+        };
     let style = if focused {
         selected_list_row_style()
     } else {
@@ -1106,10 +1194,10 @@ fn session_tag_line(
     };
     let marker = if focused { ">" } else { " " };
     let prefix = format!("{marker} ");
-    tag_list_row_line(
+    key_value_list_row_line(
         pad_or_truncate_owned(prefix, columns.prefix_width as usize),
-        pad_or_truncate_owned(tag.key.clone(), columns.key_width as usize),
-        pad_or_truncate_owned(tag.value.clone(), columns.value_width as usize),
+        pad_or_truncate_owned(row.key.clone(), columns.key_width as usize),
+        pad_or_truncate_owned(row.value.clone(), columns.value_width as usize),
         pad_or_truncate_owned(indicator.to_string(), columns.indicator_width as usize),
         style,
         style,
@@ -1117,31 +1205,34 @@ fn session_tag_line(
     )
 }
 
-fn draw_session_tag_input_row(
+fn draw_session_key_value_input_row(
     frame: &mut Frame<'_>,
     area: Rect,
     key_input: &str,
     value_input: &str,
-    focus: SessionTagsFocus,
-    columns: TagColumns,
+    focus: SessionKeyValueFocus,
+    columns: KeyValueColumns,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let key_style = tag_edit_cell_style(focus == SessionTagsFocus::Key);
-    let value_style = tag_edit_cell_style(focus == SessionTagsFocus::Value);
+    let key_style = key_value_edit_cell_style(focus == SessionKeyValueFocus::Key);
+    let value_style = key_value_edit_cell_style(focus == SessionKeyValueFocus::Value);
     let value_width = columns.value_width.saturating_add(columns.indicator_width);
-    let line = tag_input_row_line(
+    let line = key_value_input_row_line(
         pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
         pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
         pad_or_truncate_owned(value_input.to_string(), value_width as usize),
         key_style,
         value_style,
     );
-    frame.render_widget(Paragraph::new(line).style(tag_input_row_style()), area);
+    frame.render_widget(
+        Paragraph::new(line).style(key_value_input_row_style()),
+        area,
+    );
 }
 
-fn tag_list_row_line(
+fn key_value_list_row_line(
     prefix: String,
     key: String,
     value: String,
@@ -1158,7 +1249,7 @@ fn tag_list_row_line(
     ])
 }
 
-fn tag_input_row_line(
+fn key_value_input_row_line(
     prefix: String,
     key: String,
     value: String,
@@ -1172,7 +1263,7 @@ fn tag_input_row_line(
     ])
 }
 
-fn tag_input_separator_style() -> Style {
+fn key_value_input_separator_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
@@ -1183,15 +1274,15 @@ fn selected_list_row_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn tag_input_row_style() -> Style {
+fn key_value_input_row_style() -> Style {
     Style::default().fg(Color::White).bg(Color::DarkGray)
 }
 
-fn tag_edit_cell_style(focused: bool) -> Style {
+fn key_value_edit_cell_style(focused: bool) -> Style {
     if focused {
         selected_list_row_style()
     } else {
-        tag_input_row_style()
+        key_value_input_row_style()
     }
 }
 
@@ -1303,7 +1394,12 @@ fn draw_modal_buttons(frame: &mut Frame<'_>, area: Rect, buttons: &str) {
     );
 }
 
-fn draw_session_tags_footer(frame: &mut Frame<'_>, area: Rect, cancel_button: &str) {
+fn draw_session_key_values_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    kind: SessionKeyValueKind,
+    cancel_button: &str,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1317,7 +1413,7 @@ fn draw_session_tags_footer(frame: &mut Frame<'_>, area: Rect, cancel_button: &s
         return;
     }
     frame.render_widget(
-        Paragraph::new(session_tags_footer_line(cancel_button))
+        Paragraph::new(session_key_values_footer_line(kind, cancel_button))
             .style(Style::default().bg(STATUS_BAR_BG)),
         content_area,
     );
@@ -1346,6 +1442,9 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                     None
                 },
                 host_count: ui.hosts.len(),
+                env_rows: ui.env_rows.clone(),
+                env_key_input: ui.env_key_input.clone(),
+                env_value_input: ui.env_value_input.clone(),
                 focus: ui.focus,
             },
             buttons: format!(
@@ -1379,16 +1478,17 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ),
             active_button: *button,
         },
-        ModalState::SessionTags { ui, .. } => {
-            let active_button = if ui.focus == SessionTagsFocus::Cancel {
+        ModalState::SessionKeyValues { ui, .. } => {
+            let active_button = if ui.focus == SessionKeyValueFocus::Cancel {
                 Button::Cancel
             } else {
                 Button::Ok
             };
             ModalView {
-                title: " Session Tags ",
-                body: ModalBody::SessionTags {
-                    tags: ui.tags.clone(),
+                title: ui.kind.title(),
+                body: ModalBody::SessionKeyValues {
+                    kind: ui.kind,
+                    rows: ui.rows.clone(),
                     selected_key: ui.selected_key.clone(),
                     key_input: ui.key_input.clone(),
                     value_input: ui.value_input.clone(),

@@ -31,17 +31,55 @@ pub(crate) enum Button {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionTagsFocus {
-    TagRow(usize),
+pub(crate) enum SessionKeyValueFocus {
+    Row(usize),
     Key,
     Value,
     Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionKeyValueKind {
+    Tags,
+    Environment,
+}
+
+impl SessionKeyValueKind {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Tags => " Session Tags ",
+            Self::Environment => " Initial Environment ",
+        }
+    }
+
+    pub(crate) fn empty_label(self) -> &'static str {
+        match self {
+            Self::Tags => "No tags",
+            Self::Environment => "No environment",
+        }
+    }
+
+    pub(crate) fn noun(self) -> &'static str {
+        match self {
+            Self::Tags => "tag",
+            Self::Environment => "env var",
+        }
+    }
+
+    pub(crate) fn supports_checked_row(self) -> bool {
+        matches!(self, Self::Tags)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NewSessionFocus {
     Host,
     Name,
+    EnvRow(usize),
+    EnvKey,
+    EnvValue,
+    Cancel,
+    Ok,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +89,7 @@ pub(crate) struct NewSessionHostChoice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SessionTagRow {
+pub(crate) struct SessionKeyValueRow {
     pub(crate) key: String,
     pub(crate) value: String,
 }
@@ -70,9 +108,9 @@ pub(crate) enum ModalState {
         input: String,
         button: Button,
     },
-    SessionTags {
+    SessionKeyValues {
         session: SelectedSession,
-        ui: SessionTagsModalUi,
+        ui: SessionKeyValueModalUi,
     },
     Help,
 }
@@ -82,6 +120,9 @@ pub(crate) struct NewSessionModalUi {
     pub(crate) input: String,
     pub(crate) hosts: Vec<NewSessionHostChoice>,
     pub(crate) host_index: usize,
+    pub(crate) env_rows: Vec<SessionKeyValueRow>,
+    pub(crate) env_key_input: String,
+    pub(crate) env_value_input: String,
     pub(crate) focus: NewSessionFocus,
     pub(crate) button: Button,
 }
@@ -93,12 +134,13 @@ impl NewSessionModalUi {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SessionTagsModalUi {
-    pub(crate) tags: Vec<SessionTagRow>,
+pub(crate) struct SessionKeyValueModalUi {
+    pub(crate) kind: SessionKeyValueKind,
+    pub(crate) rows: Vec<SessionKeyValueRow>,
     pub(crate) selected_key: Option<String>,
     pub(crate) key_input: String,
     pub(crate) value_input: String,
-    pub(crate) focus: SessionTagsFocus,
+    pub(crate) focus: SessionKeyValueFocus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,30 +157,50 @@ impl ModalView {
         match &self.body {
             ModalBody::Text(text) => text.clone(),
             ModalBody::NewSession {
-                input, host_label, ..
-            } => match host_label {
-                Some(host_label) => format!("Host\n{host_label}\nSession name\n{input}"),
-                None => format!("Session name\n{input}"),
-            },
+                input,
+                host_label,
+                env_rows,
+                env_key_input,
+                env_value_input,
+                ..
+            } => {
+                let fields = match host_label {
+                    Some(host_label) => format!("Host\n{host_label}\nSession name\n{input}"),
+                    None => format!("Session name\n{input}"),
+                };
+                let env = if env_rows.is_empty() {
+                    "No environment".to_string()
+                } else {
+                    env_rows
+                        .iter()
+                        .map(|row| format!("{}    {}", row.key, row.value))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                format!("{fields}\n{env}\n{env_key_input}    {env_value_input}")
+            }
             ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
-            ModalBody::SessionTags {
-                tags,
+            ModalBody::SessionKeyValues {
+                kind,
+                rows,
                 selected_key,
                 key_input,
                 value_input,
                 ..
             } => {
-                let rows = if tags.is_empty() {
-                    "No tags".to_string()
+                let rows = if rows.is_empty() {
+                    kind.empty_label().to_string()
                 } else {
-                    tags.iter()
-                        .map(|tag| {
-                            let marker = if selected_key.as_deref() == Some(tag.key.as_str()) {
+                    rows.iter()
+                        .map(|row| {
+                            let marker = if kind.supports_checked_row()
+                                && selected_key.as_deref() == Some(row.key.as_str())
+                            {
                                 "✓"
                             } else {
                                 " "
                             };
-                            format!("{}    {} {marker}", tag.key, tag.value)
+                            format!("{}    {} {marker}", row.key, row.value)
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -156,17 +218,21 @@ pub(crate) enum ModalBody {
         input: String,
         host_label: Option<String>,
         host_count: usize,
+        env_rows: Vec<SessionKeyValueRow>,
+        env_key_input: String,
+        env_value_input: String,
         focus: NewSessionFocus,
     },
     RenameSession {
         input: String,
     },
-    SessionTags {
-        tags: Vec<SessionTagRow>,
+    SessionKeyValues {
+        kind: SessionKeyValueKind,
+        rows: Vec<SessionKeyValueRow>,
         selected_key: Option<String>,
         key_input: String,
         value_input: String,
-        focus: SessionTagsFocus,
+        focus: SessionKeyValueFocus,
     },
 }
 

@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Moved environment variables into the New Session modal and apply them through `CreateSessionOptions::initial_environment`; removed the post-creation `e` environment modal. |
 | 2026-05-02 | @codex | Changed mmux host labels to come from tmux `#{host}` via `HostHandle::tmux_hostname()`, while retaining the SSH URI hostname as `HostEntry.alias`. |
 | 2026-05-02 | @codex | Attach now temporarily overrides session-local `status-left` to unbracketed `#{=50:session_name}` with `status-left-length=50`, restoring prior local values after detach. |
 | 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
@@ -213,13 +214,20 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   session tag API only when `Value` is non-empty.
   `Esc`, or Enter on focused `Cancel`, closes without writing. There is no
   separate tag-edit dialog; `i` is not assigned by this feature.
+- Pressing `n` opens the New Session modal. In addition to session name and the
+  multi-host selector, it includes a local key/value editor for initial
+  environment variables. Enter on the env edit row stages a variable, `u`
+  preloads a staged row, and `x` removes one. Staged variables are passed to
+  `CreateSessionOptions::initial_environment` so tmux applies them while
+  creating the initial pane process.
 - Pressing `h` opens a centered help modal with the built-in motlie logo,
   build date, current build git SHA, key-function reference text, a horizontal
   separator, and an `Ok` button. Build metadata renders below the logo and
   above the key-function reference.
 - In create/kill modal dialogs, Left and Right choose between `Cancel` and
-  `Ok`; Enter exits the modal and applies `Ok` when selected. `Esc` in a modal
-  is `Cancel` and closes without applying. In the help modal, Enter or `Esc`
+  `Ok`; the kill modal also lets `Tab` / `Shift-Tab` cycle those buttons.
+  Enter exits the modal and applies `Ok` when selected. `Esc` in a modal is
+  `Cancel` and closes without applying. In the help modal, Enter or `Esc`
   closes the modal without changing selector state.
 - Pressing `p` cycles focus through the landscape panes in this order:
   `LT -> Lb -> R -> LT`. Outside any modal, `Esc` returns focus to `Lb`
@@ -727,7 +735,8 @@ and accepts the same modifier family. Resize bounds are mode-specific:
 landscape L/R clamps at 25/75, while portrait T/B clamps at 15/85.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
-`Cancel` and `Ok`; `Enter` exits and applies `Ok` if selected; `Esc` is
+`Cancel` and `Ok`; kill confirmation also accepts `Tab` / `Shift-Tab` for the
+same two-button cycle; `Enter` exits and applies `Ok` if selected; `Esc` is
 `Cancel`.
 
 ### Portrait Mode
@@ -1084,12 +1093,12 @@ existing stable-id dispatch model.
   `session.name()`, close without calling tmux. Otherwise call `Target::rename`
   through `motlie-tmux`, then refresh sessions immediately.
 
-**Session tags modal (`t`)**:
+**Session tag key/value modal (`t`)**:
 
-- State shape: `SessionTags { session: SelectedSession, ui:
-  SessionTagsModalUi }`; the UI group carries `tags`, `selected_key`,
-  `key_input`, `value_input`, and modal-local focus (`TagRow(index)`, `Key`,
-  `Value`, `Cancel`).
+- State shape: `SessionKeyValues { session: SelectedSession, ui:
+  SessionKeyValueModalUi }`; the UI group carries `kind`, `rows`,
+  tag-only `selected_key`, `key_input`, `value_input`, and modal-local focus
+  (`Row(index)`, `Key`, `Value`, `Cancel`).
 - On open, call `target.tags("mmux").await?.list().await?`, sort by
   `SessionTag::key()`, and render stripped keys (for example `owner`, never
   `mmux/owner` or `@mmux/owner`). Initial focus is the first tag row when any
@@ -1383,7 +1392,7 @@ selector re-entry):
 ### Kill Session
 
 1. Pressing `k` opens confirmation for the highlighted session.
-2. User selects `Ok`.
+2. User selects `Ok` with Right or `Tab` / `Shift-Tab`.
    The confirmation text is padded away from the modal border, and the button
    bar is separated from content by a horizontal rule.
 3. On kill-modal-open, capture the highlighted row's `HostId`, host label, and
@@ -1434,6 +1443,19 @@ selector re-entry):
    list.
 7. On successful add/update, reload the modal's list and keep the modal open
    for additional edits. `Esc` or Enter on focused `Cancel` closes the modal.
+
+### New Session Environment
+
+1. The New Session modal owns a local list of staged environment variables.
+2. Env rows are sorted lexicographically by key. Up/Down focuses rows, `u`
+   copies the focused row into the edit fields, and `x` removes it from the
+   staged list.
+3. Enter on the env edit row validates the key/value as `SessionEnvVar` and
+   stages it locally. Enter on `Ok` creates the session.
+4. Creation passes the staged variables through
+   `CreateSessionOptions::initial_environment`, which maps to tmux
+   `new-session -e KEY=VALUE`. This makes variables visible to the initial shell
+   or command in the newly created session.
 
 ### Attach
 

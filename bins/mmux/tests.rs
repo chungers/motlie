@@ -26,13 +26,14 @@ use crate::detail::{
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SessionRow,
-    SessionSelectedTag, SessionSortMode, SessionTagRow, SessionTagsFocus, SessionTagsModalUi,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession,
+    SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow,
+    SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
-    detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
-    session_list_line, session_recency_text, session_tags_footer_line, sessions_title,
-    short_build_git_sha, status_line, status_line_text, tag_key_column_width, top_status_line,
+    detail_text_for_render, draw, key_value_key_column_width, modal_content, motd_render_text,
+    normal_motd_height, session_key_values_footer_line, session_list_line, session_recency_text,
+    sessions_title, short_build_git_sha, status_line, status_line_text, top_status_line,
     use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
@@ -156,6 +157,9 @@ fn test_new_session_modal(input: &str, button: Button) -> ModalState {
                 label: "host".to_string(),
             }],
             host_index: 0,
+            env_rows: Vec::new(),
+            env_key_input: String::new(),
+            env_value_input: String::new(),
             focus: NewSessionFocus::Name,
             button,
         },
@@ -163,16 +167,17 @@ fn test_new_session_modal(input: &str, button: Button) -> ModalState {
 }
 
 fn test_session_tags_modal(
-    tags: Vec<SessionTagRow>,
+    tags: Vec<SessionKeyValueRow>,
     selected_key: Option<&str>,
     key_input: &str,
     value_input: &str,
-    focus: SessionTagsFocus,
+    focus: SessionKeyValueFocus,
 ) -> ModalState {
-    ModalState::SessionTags {
+    ModalState::SessionKeyValues {
         session: test_selected_session(),
-        ui: SessionTagsModalUi {
-            tags,
+        ui: SessionKeyValueModalUi {
+            kind: SessionKeyValueKind::Tags,
+            rows: tags,
             selected_key: selected_key.map(str::to_string),
             key_input: key_input.to_string(),
             value_input: value_input.to_string(),
@@ -403,7 +408,7 @@ fn status_line_styles_command_mnemonics() {
 
 #[test]
 fn session_tags_footer_styles_tag_command_mnemonics() {
-    let line = session_tags_footer_line("[Cancel]");
+    let line = session_key_values_footer_line(SessionKeyValueKind::Tags, "[Cancel]");
     let text = line
         .spans
         .iter()
@@ -1526,6 +1531,72 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(app.modal.is_none());
 }
 
+#[tokio::test]
+async fn kill_modal_tab_cycles_cancel_and_ok() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Cancel,
+            ..
+        })
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Ok,
+            ..
+        })
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Cancel,
+            ..
+        })
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Ok,
+            ..
+        })
+    ));
+}
+
 #[test]
 fn modal_content_separates_body_from_button_bar() {
     let new_session = modal_content(&test_new_session_modal("dev", Button::Ok));
@@ -1562,21 +1633,21 @@ fn modal_content_separates_body_from_button_bar() {
     assert!(!rename.body_text().contains("[Ok]"));
 
     let tags = modal_content(&test_session_tags_modal(
-        vec![SessionTagRow {
+        vec![SessionKeyValueRow {
             key: "owner".to_string(),
             value: "platform".to_string(),
         }],
         Some("owner"),
         "phase",
         "build",
-        SessionTagsFocus::Value,
+        SessionKeyValueFocus::Value,
     ));
     assert_eq!(tags.title, " Session Tags ");
     assert_eq!(tags.active_button, Button::Ok);
     assert_eq!(tags.buttons, " Cancel ");
     assert!(matches!(
         tags.body,
-        ModalBody::SessionTags { ref key_input, ref value_input, .. }
+        ModalBody::SessionKeyValues { ref key_input, ref value_input, .. }
             if key_input == "phase" && value_input == "build"
     ));
     assert!(tags.body_text().contains("owner    platform ✓"));
@@ -1787,14 +1858,14 @@ async fn kill_session_modal_clears_selected_multi_host_row() {
 fn session_tags_modal_renders_list_and_distinct_input_row() {
     let mut app = app_with_session();
     app.modal = Some(test_session_tags_modal(
-        vec![SessionTagRow {
+        vec![SessionKeyValueRow {
             key: "owner".to_string(),
             value: "platform".to_string(),
         }],
         Some("owner"),
         "phase",
         "build",
-        SessionTagsFocus::Value,
+        SessionKeyValueFocus::Value,
     ));
 
     let screen_lines = render_to_lines(&mut app, 80, 24);
@@ -1838,31 +1909,31 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
 }
 
 #[test]
-fn session_tags_empty_list_defaults_key_input_to_thirty_percent() {
-    let tags = Vec::<SessionTagRow>::new();
+fn session_key_values_empty_list_defaults_key_input_to_thirty_percent() {
+    let rows = Vec::<SessionKeyValueRow>::new();
 
-    assert_eq!(tag_key_column_width(62, &tags, ""), 18);
-    assert_eq!(tag_key_column_width(62, &tags, "owner"), 18);
+    assert_eq!(key_value_key_column_width(62, &rows, ""), 18);
+    assert_eq!(key_value_key_column_width(62, &rows, "owner"), 18);
     assert_eq!(
-        tag_key_column_width(62, &tags, "abcdefghijklmnopqrstuvwxyz"),
+        key_value_key_column_width(62, &rows, "abcdefghijklmnopqrstuvwxyz"),
         30
     );
 }
 
 #[test]
-fn session_tags_key_column_uses_longest_existing_key_when_tags_exist() {
-    let tags = vec![SessionTagRow {
+fn session_key_values_key_column_uses_longest_existing_key_when_rows_exist() {
+    let tags = vec![SessionKeyValueRow {
         key: "owner".to_string(),
         value: "platform".to_string(),
     }];
 
-    assert_eq!(tag_key_column_width(62, &tags, ""), 9);
+    assert_eq!(key_value_key_column_width(62, &tags, ""), 9);
 }
 
 #[test]
 fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
     let tags = (0..7)
-        .map(|index| SessionTagRow {
+        .map(|index| SessionKeyValueRow {
             key: format!("tag{index}"),
             value: format!("value{index}"),
         })
@@ -1873,7 +1944,7 @@ fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
         None,
         "new",
         "next",
-        SessionTagsFocus::TagRow(0),
+        SessionKeyValueFocus::Row(0),
     ));
 
     let screen = render_to_string(&mut app, 80, 24);
@@ -1884,8 +1955,8 @@ fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
     assert!(!screen.contains("tag5"));
     assert!(!screen.contains("tag6"));
 
-    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
-        ui.focus = SessionTagsFocus::TagRow(6);
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.focus = SessionKeyValueFocus::Row(6);
     } else {
         panic!("expected session tags modal");
     }
@@ -2006,15 +2077,168 @@ async fn t_opens_session_tags_modal_and_i_is_unassigned() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. })
-            if ui.tags
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.kind == SessionKeyValueKind::Tags
+                && ui.rows
                 == vec![
-                    SessionTagRow { key: "a".to_string(), value: "beta".to_string() },
-                    SessionTagRow { key: "b".to_string(), value: "alpha".to_string() },
+                    SessionKeyValueRow { key: "a".to_string(), value: "beta".to_string() },
+                    SessionKeyValueRow { key: "b".to_string(), value: "alpha".to_string() },
                 ]
                 && ui.selected_key.as_deref() == Some("a")
-                && ui.focus == SessionTagsFocus::TagRow(0)
+                && ui.focus == SessionKeyValueFocus::Row(0)
     ));
+}
+
+#[tokio::test]
+async fn new_session_modal_applies_staged_initial_environment() {
+    let mock = MockTransport::new()
+        .with_response(
+            "new-session -d -s 'build' -e 'BUILD_ID=42' -e 'MOTLIE=enabled'",
+            "",
+        )
+        .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
+        .with_response(
+            "display-message -p '__MOTLIE_TAGS__ $9'",
+            "__MOTLIE_TAGS__ $9\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "build".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "MOTLIE".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "enabled".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.env_rows == vec![SessionKeyValueRow { key: "MOTLIE".to_string(), value: "enabled".to_string() }]
+                && ui.focus == NewSessionFocus::EnvRow(0)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "BUILD_ID".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "42".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.env_rows == vec![
+                SessionKeyValueRow { key: "BUILD_ID".to_string(), value: "42".to_string() },
+                SessionKeyValueRow { key: "MOTLIE".to_string(), value: "enabled".to_string() },
+            ]
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.status.text(), "created session build");
 }
 
 #[tokio::test]
@@ -2035,7 +2259,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Key
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Key
     ));
 
     handle_key(
@@ -2047,7 +2271,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Value
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Value
     ));
 
     handle_key(
@@ -2059,7 +2283,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Cancel
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Cancel
     ));
 
     handle_key(
@@ -2071,7 +2295,7 @@ async fn session_tags_modal_tab_cycles_edit_row_fields_and_cancel() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. }) if ui.focus == SessionTagsFocus::Value
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Value
     ));
 }
 
@@ -2112,7 +2336,7 @@ async fn session_tags_modal_c_persists_selected_row() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. }) if ui.selected_key.as_deref() == Some("a")
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.selected_key.as_deref() == Some("a")
     ));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert!(view.body_text().contains("a    beta ✓"));
@@ -2127,7 +2351,7 @@ async fn session_tags_modal_c_persists_selected_row() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. }) if ui.selected_key.is_none()
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.selected_key.is_none()
     ));
 }
 
@@ -2163,10 +2387,10 @@ async fn session_tags_modal_delete_updates_list() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. })
-            if ui.tags == vec![SessionTagRow { key: "b".to_string(), value: "two".to_string() }]
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.rows == vec![SessionKeyValueRow { key: "b".to_string(), value: "two".to_string() }]
                 && ui.selected_key.is_none()
-                && ui.focus == SessionTagsFocus::TagRow(0)
+                && ui.focus == SessionKeyValueFocus::Row(0)
     ));
     assert_eq!(app.status.text(), "deleted tag a on dev");
 }
@@ -2198,13 +2422,13 @@ async fn session_tags_modal_update_uses_bottom_fields() {
     .unwrap();
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. })
-            if ui.key_input == "owner" && ui.value_input == "old" && ui.focus == SessionTagsFocus::Value
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.key_input == "owner" && ui.value_input == "old" && ui.focus == SessionKeyValueFocus::Value
     ));
 
-    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
         ui.value_input = "new".to_string();
-        ui.focus = SessionTagsFocus::Key;
+        ui.focus = SessionKeyValueFocus::Key;
     } else {
         panic!("expected session tags modal");
     }
@@ -2218,9 +2442,9 @@ async fn session_tags_modal_update_uses_bottom_fields() {
 
     assert!(matches!(
         app.modal.as_ref(),
-        Some(ModalState::SessionTags { ui, .. })
-            if ui.tags == vec![SessionTagRow { key: "owner".to_string(), value: "new".to_string() }]
-                && ui.focus == SessionTagsFocus::TagRow(0)
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.rows == vec![SessionKeyValueRow { key: "owner".to_string(), value: "new".to_string() }]
+                && ui.focus == SessionKeyValueFocus::Row(0)
     ));
     assert_eq!(app.status.text(), "set tag owner on dev");
 }
@@ -2242,10 +2466,10 @@ async fn session_tags_modal_empty_value_does_not_dispatch() {
     )
     .await
     .unwrap();
-    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
         ui.key_input = "owner".to_string();
         ui.value_input.clear();
-        ui.focus = SessionTagsFocus::Value;
+        ui.focus = SessionKeyValueFocus::Value;
     } else {
         panic!("expected session tags modal");
     }
@@ -2258,7 +2482,10 @@ async fn session_tags_modal_empty_value_does_not_dispatch() {
     .await
     .unwrap();
 
-    assert!(matches!(app.modal, Some(ModalState::SessionTags { .. })));
+    assert!(matches!(
+        app.modal,
+        Some(ModalState::SessionKeyValues { .. })
+    ));
     assert_eq!(app.status.text(), "tag value is empty");
 }
 
@@ -2282,10 +2509,10 @@ async fn session_tags_modal_rejects_reserved_selected_key() {
     )
     .await
     .unwrap();
-    if let Some(ModalState::SessionTags { ui, .. }) = app.modal.as_mut() {
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
         ui.key_input = "__selected-key".to_string();
         ui.value_input = "owner".to_string();
-        ui.focus = SessionTagsFocus::Key;
+        ui.focus = SessionKeyValueFocus::Key;
     } else {
         panic!("expected session tags modal");
     }
@@ -2298,7 +2525,10 @@ async fn session_tags_modal_rejects_reserved_selected_key() {
     .await
     .unwrap();
 
-    assert!(matches!(app.modal, Some(ModalState::SessionTags { .. })));
+    assert!(matches!(
+        app.modal,
+        Some(ModalState::SessionKeyValues { .. })
+    ));
     assert_eq!(app.status.text(), "tag key is reserved");
 }
 
