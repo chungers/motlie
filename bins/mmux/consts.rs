@@ -14,9 +14,9 @@ pub(crate) const MODAL_CONTENT_VERTICAL_PADDING: u16 = 1;
 pub(crate) const MODAL_SEPARATOR_HEIGHT: u16 = 1;
 pub(crate) const MODAL_BUTTON_HEIGHT: u16 = 1;
 pub(crate) const MODAL_TEXT_FIELD_HEIGHT: u16 = 3;
-pub(crate) const STATUS_BAR_BG: Color = Color::Rgb(0, 51, 102);
-pub(crate) const STATUS_BAR_MNEMONIC_FG: Color = Color::Green;
-pub(crate) const MMUX_ATTACH_STATUS_STYLE: &str = "bg=#003366,fg=white";
+pub(crate) const STATUS_BAR_BG: Color = Color::Rgb(0, 31, 63);
+pub(crate) const STATUS_BAR_MNEMONIC_FG: Color = Color::Rgb(255, 111, 97);
+pub(crate) const MMUX_ATTACH_STATUS_STYLE: &str = "bg=#001f3f,fg=white";
 
 pub(crate) const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
  _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱

@@ -8,8 +8,9 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Added a multi-host New Session host selector so `n` creates on the selected host, changed mnemonic letters to bold green, and kept attach `status-style` blue matched to the lower mmux status bar. |
-| 2026-05-02 | @codex | Changed status bars to a darker `#003366` blue, rendered command shortcut letters as bold green instead of underlined, and matched the temporary attach `status-style` background to the TUI status bar. |
+| 2026-05-02 | @codex | Darkened status bars to `#001f3f`, matched attach `status-style` to that shade, and changed mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Added a multi-host New Session host selector so `n` creates on the selected host. |
+| 2026-05-02 | @codex | Changed status bars to a darker blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched the temporary attach `status-style` background to the TUI status bar. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and moved list-pane tag grouping from `s` to `g`; grouped tag rows are ordered by most recent activity. |
 | 2026-05-02 | @codex | Attach now temporarily sets the selected tmux session's local `status-style` to blue and restores the previous local style after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
@@ -107,7 +108,7 @@ session is gone, the selector exits with the child status. `q` / `Ctrl-C` exits
 without attach.
 
 Before attach, mmux best-effort sets the selected session's local tmux
-`status-style` to `bg=#003366,fg=white`. After detach, it restores the previous
+`status-style` to `bg=#001f3f,fg=white`. After detach, it restores the previous
 local style or unsets the local override when none existed. If style setup or
 restore fails, mmux prints a warning and keeps the attach flow working.
 
@@ -315,10 +316,10 @@ shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom dark blue status bar shows compact key hints and
 status text only. Its direction hints are `↑/↓ sel` for selection and
-`pane` for pane focus, with shortcut letters bold green. It orders command
+`pane` for pane focus, with shortcut letters bold coral. It orders command
 hints as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `rename`,
 `tags`, `group`, `quit`, `layout`, then mode-specific resize; the command
-shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`g`/`q`/`l` are bold green in the
+shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`g`/`q`/`l` are bold coral in the
 TUI. It does not repeat the host/time, show focus/layout mode, or prefix the
 hints with a `keys` label.
 

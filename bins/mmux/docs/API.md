@@ -10,10 +10,11 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-02 | @codex | Added multi-host New Session host selection and changed status-bar mnemonic letters to bold green while keeping attach `status-style` on the same `#003366` blue as the mmux status bar. |
-| 2026-05-02 | @codex | Status bars now use dark blue `#003366`; command shortcut letters render bold green instead of underlined, and attach applies the same blue to tmux `status-style`. |
+| 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#001f3f` and changed status-bar mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Added multi-host New Session host selection. |
+| 2026-05-02 | @codex | Status bars now use dark blue; command shortcut letters render bold colored spans instead of underlined, and attach applies the same blue to tmux `status-style`. |
 | 2026-05-02 | @codex | Restored `a` as the attach key and changed list-pane tag grouping to the `g` key with recency-ordered tag groups. |
-| 2026-05-02 | @codex | mmux attach now wraps `Target::attach_current_pty()` with best-effort temporary `status-style bg=#003366,fg=white` setup and local-style restoration after detach. |
+| 2026-05-02 | @codex | mmux attach now wraps `Target::attach_current_pty()` with best-effort temporary `status-style bg=#001f3f,fg=white` setup and local-style restoration after detach. |
 | 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only key that selects a session for attach. |
 | 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when there are no tag rows. |
 | 2026-05-02 | @codex | Tightened `SessionSortMode::Tag`: rows only count as tagged when they have a visible non-empty checked-tag value, and the `s` toggle selects the first row after sorting so the new top is visible. |
@@ -312,7 +313,7 @@ label, current time, layout/focus labels, or a `keys` prefix. Command hints in
 the bottom status start with `help`, then `pane`, `monitor`, `attach`, `new`,
 `kill`, `rename`, `tags`, `group`, `quit`, `layout`, and the
 mode-specific resize hint. Attach uses the `a` shortcut; the
-command shortcut letter is rendered bold green in each command label.
+command shortcut letter is rendered bold coral in each command label.
 Direction hints render as `↑/↓ sel`.
 
 `r` opens `RenameSession` only when the session list has focus. The modal
@@ -445,7 +446,7 @@ Attach:
 let target = host.session_by_id(&selected.id).await?.ok_or(SessionVanished)?;
 let snapshot = match target.read_local_status_style().await {
     Ok(previous) => {
-        let blue = motlie_tmux::StatusStyle::new("bg=#003366,fg=white")?;
+        let blue = motlie_tmux::StatusStyle::new("bg=#001f3f,fg=white")?;
         target.set_status_style(&blue).await.ok().map(|_| previous)
     }
     Err(_) => None,
@@ -520,7 +521,7 @@ API tests must cover:
 - `p` key focus-cycling behavior in landscape and portrait layouts
 - `l` key layout toggling and retained layout re-entry behavior
 - status hint arrow-symbol rendering
-- bottom status command hints with bold green shortcut-letter spans
+- bottom status command hints with bold coral shortcut-letter spans
 - top status rendering for bold hostname/IP or multi-host code legend and
   right-justified current time
 - session count rendering in the Sessions pane title without hostname/IP
