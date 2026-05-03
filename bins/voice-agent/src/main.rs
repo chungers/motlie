@@ -13,8 +13,9 @@ use motlie_model::typed::{
     CloneReference, Mono, StreamingTranscriber, SynthesisRequest, TranscriptionSession,
 };
 use motlie_model::{
-    ArtifactPolicy, BundleHandle, Capabilities, CapabilityDescriptor, CapabilityKind, ModelError,
-    SpeechParams, StartOptions, TranscriptSegment, TranscriptionParams,
+    ArtifactPolicy, BundleHandle, Capabilities, CapabilityKind, InteractionStyle, ModelError,
+    SpeechGeneration, SpeechParams, StartOptions, TranscriptDelivery, TranscriptSegment,
+    TranscriptionParams,
 };
 use motlie_model_moonshine::MoonshineHandle;
 use motlie_model_piper::PiperHandle;
@@ -201,25 +202,13 @@ struct QuietStderrGuard {
     _devnull: File,
 }
 
-enum StartedTtsHandle {
-    Buffered(BufferedTtsHandle),
-}
-
 enum BufferedTtsHandle {
     Piper(PiperHandle),
     Qwen3cpp(Qwen3TtsCppHandle),
 }
 
 enum StartedAsrHandle {
-    Batch(BatchAsrHandle),
-    Streaming(StreamingAsrHandle),
-}
-
-enum BatchAsrHandle {
     Whisper(WhisperCppHandle),
-}
-
-enum StreamingAsrHandle {
     Sherpa(SherpaOnnxHandle),
     Moonshine(MoonshineHandle),
 }
@@ -454,12 +443,24 @@ async fn run_speak(config: &VoiceConfig, args: &SpeakArgs) -> Result<()> {
         );
     }
 
+    let execution_mode = tts_execution_mode(&requested_model.descriptor().capabilities)
+        .with_context(|| {
+            format!(
+                "resolve TTS execution mode for '{}'",
+                requested_model.as_str()
+            )
+        })?;
     let _quiet_stderr =
         QuietStderrGuard::maybe_enable(args.quiet).context("failed to enable quiet stderr mode")?;
-    match start_selected_tts(config, args.quiet, requested_model).await? {
-        StartedTtsHandle::Buffered(handle) => {
+    match execution_mode {
+        TtsExecutionMode::Buffered => {
+            let handle = start_selected_tts(config, args.quiet, requested_model).await?;
             speak_with_buffered_tts(handle, text, target, reference).await
         }
+        TtsExecutionMode::Streaming => bail!(
+            "selected TTS model '{}' advertises streaming speech; voice-agent currently supports only buffered TTS composition",
+            requested_model.as_str()
+        ),
     }
 }
 
@@ -471,9 +472,6 @@ async fn speak_with_buffered_tts(
 ) -> Result<()> {
     match handle {
         BufferedTtsHandle::Piper(handle) => {
-            if reference.is_some() {
-                bail!("Piper does not implement buffered voice-clone synthesis");
-            }
             let body_result: Result<()> = async {
                 let audio = handle
                     .synthesize_buffered(SynthesisRequest {
@@ -535,7 +533,7 @@ async fn run_listen(config: &VoiceConfig, args: &ListenArgs) -> Result<String> {
 
     let _quiet_stderr =
         QuietStderrGuard::maybe_enable(args.quiet).context("failed to enable quiet stderr mode")?;
-    let started = start_selected_asr(config, args.quiet, requested_model).await?;
+    let started = start_selected_asr(config, args.quiet, requested_model, execution_mode).await?;
 
     if args.input_format == ListenInputFormat::RawS16le {
         let path = args
@@ -543,14 +541,14 @@ async fn run_listen(config: &VoiceConfig, args: &ListenArgs) -> Result<String> {
             .as_ref()
             .context("--input-format raw-s16le requires --wav <path-or-fifo>")?;
         return match started {
-            StartedAsrHandle::Batch(_) => bail!(
+            StartedAsrHandle::Whisper(_) => bail!(
                 "--input-format raw-s16le requires a streaming ASR model; selected '{}' is batch-only",
                 requested_model.as_str()
             ),
-            StartedAsrHandle::Streaming(StreamingAsrHandle::Sherpa(handle)) => {
+            StartedAsrHandle::Sherpa(handle) => {
                 transcribe_streaming_live_raw(handle, path, args.partials).await
             }
-            StartedAsrHandle::Streaming(StreamingAsrHandle::Moonshine(handle)) => {
+            StartedAsrHandle::Moonshine(handle) => {
                 transcribe_streaming_live_raw(handle, path, args.partials).await
             }
         };
@@ -565,15 +563,15 @@ async fn run_listen(config: &VoiceConfig, args: &ListenArgs) -> Result<String> {
     };
 
     match started {
-        StartedAsrHandle::Batch(BatchAsrHandle::Whisper(handle)) => {
+        StartedAsrHandle::Whisper(handle) => {
             let audio = decode_wav_bytes_to_f32_mono16k(&bytes)?;
             transcribe_batch(handle, audio).await
         }
-        StartedAsrHandle::Streaming(StreamingAsrHandle::Sherpa(handle)) => {
+        StartedAsrHandle::Sherpa(handle) => {
             let audio = decode_wav_bytes_to_i16_mono16k(&bytes)?;
             transcribe_streaming(handle, audio, args.partials).await
         }
-        StartedAsrHandle::Streaming(StreamingAsrHandle::Moonshine(handle)) => {
+        StartedAsrHandle::Moonshine(handle) => {
             let audio = decode_wav_bytes_to_i16_mono16k(&bytes)?;
             transcribe_streaming(handle, audio, args.partials).await
         }
@@ -784,36 +782,47 @@ fn selected_asr_model(backend: AsrBackend) -> AsrModels {
 }
 
 fn tts_execution_mode(capabilities: &Capabilities) -> Result<TtsExecutionMode> {
-    let descriptor = capabilities
-        .descriptor_for(CapabilityKind::Speech)
+    let interaction = capabilities
+        .interaction_for(CapabilityKind::Speech)
         .context("selected model does not advertise speech synthesis capability")?;
-    if descriptor == &CapabilityDescriptor::speech_buffered() {
-        Ok(TtsExecutionMode::Buffered)
-    } else if descriptor == &CapabilityDescriptor::speech_stream() {
-        Ok(TtsExecutionMode::Streaming)
-    } else {
-        bail!(
-            "unsupported speech capability descriptor for voice-agent: {:?}",
-            descriptor
-        );
+    let generation = capabilities
+        .speech_generation_for()
+        .context("selected model does not advertise typed speech generation semantics")?;
+
+    match (interaction, generation) {
+        (InteractionStyle::RequestResponse, SpeechGeneration::Buffered) => {
+            Ok(TtsExecutionMode::Buffered)
+        }
+        (InteractionStyle::Streaming, SpeechGeneration::Streaming) => {
+            Ok(TtsExecutionMode::Streaming)
+        }
+        other => bail!(
+            "inconsistent speech capability metadata for voice-agent: {:?}",
+            other
+        ),
     }
 }
 
 fn asr_execution_mode(capabilities: &Capabilities) -> Result<AsrExecutionMode> {
-    let descriptor = capabilities
-        .descriptor_for(CapabilityKind::Transcription)
+    let interaction = capabilities
+        .interaction_for(CapabilityKind::Transcription)
         .context("selected model does not advertise transcription capability")?;
-    if descriptor == &CapabilityDescriptor::transcription_batch() {
-        Ok(AsrExecutionMode::Batch)
-    } else if descriptor == &CapabilityDescriptor::transcription_stream_final_only() {
-        Ok(AsrExecutionMode::StreamingFinalOnly)
-    } else if descriptor == &CapabilityDescriptor::transcription_stream_partial() {
-        Ok(AsrExecutionMode::StreamingWithPartials)
-    } else {
-        bail!(
-            "unsupported transcription capability descriptor for voice-agent: {:?}",
-            descriptor
-        );
+    let delivery = capabilities
+        .transcription_delivery_for()
+        .context("selected model does not advertise typed transcription delivery semantics")?;
+
+    match (interaction, delivery) {
+        (InteractionStyle::Batch, TranscriptDelivery::Batch) => Ok(AsrExecutionMode::Batch),
+        (InteractionStyle::Streaming, TranscriptDelivery::StreamFinal) => {
+            Ok(AsrExecutionMode::StreamingFinalOnly)
+        }
+        (InteractionStyle::Streaming, TranscriptDelivery::StreamPartial) => {
+            Ok(AsrExecutionMode::StreamingWithPartials)
+        }
+        other => bail!(
+            "inconsistent transcription capability metadata for voice-agent: {:?}",
+            other
+        ),
     }
 }
 
@@ -821,22 +830,16 @@ async fn start_selected_tts(
     config: &VoiceConfig,
     quiet: bool,
     model: TtsModels,
-) -> Result<StartedTtsHandle> {
-    match tts_execution_mode(&model.descriptor().capabilities)? {
-        TtsExecutionMode::Buffered => match model {
-            TtsModels::PiperEnUsLjspeechMedium => Ok(StartedTtsHandle::Buffered(
-                BufferedTtsHandle::Piper(start_piper(config, quiet).await?),
-            )),
-            TtsModels::Qwen3TtsCpp0_6B => Ok(StartedTtsHandle::Buffered(
-                BufferedTtsHandle::Qwen3cpp(start_qwen(config, quiet).await?),
-            )),
-            _ => bail!(
-                "selected TTS model '{}' advertises buffered speech but has no buffered voice-agent adapter",
-                model.as_str()
-            ),
-        },
-        TtsExecutionMode::Streaming => bail!(
-            "selected TTS model '{}' advertises streaming speech; voice-agent currently supports only buffered TTS composition",
+) -> Result<BufferedTtsHandle> {
+    match model {
+        TtsModels::PiperEnUsLjspeechMedium => {
+            Ok(BufferedTtsHandle::Piper(start_piper(config, quiet).await?))
+        }
+        TtsModels::Qwen3TtsCpp0_6B => Ok(BufferedTtsHandle::Qwen3cpp(
+            start_qwen(config, quiet).await?,
+        )),
+        _ => bail!(
+            "voice-agent has no TTS adapter for selected curated model '{}'",
             model.as_str()
         ),
     }
@@ -846,31 +849,42 @@ async fn start_selected_asr(
     config: &VoiceConfig,
     quiet: bool,
     model: AsrModels,
+    mode: AsrExecutionMode,
 ) -> Result<StartedAsrHandle> {
-    match asr_execution_mode(&model.descriptor().capabilities)? {
-        AsrExecutionMode::Batch => match model {
-            AsrModels::WhisperBaseEn => Ok(StartedAsrHandle::Batch(BatchAsrHandle::Whisper(
-                start_whisper(config, quiet).await?,
-            ))),
-            _ => bail!(
-                "selected ASR model '{}' advertises batch transcription but has no batch voice-agent adapter",
-                model.as_str()
-            ),
-        },
-        AsrExecutionMode::StreamingFinalOnly | AsrExecutionMode::StreamingWithPartials => {
-            match model {
-                AsrModels::SherpaOnnxStreamingEn => Ok(StartedAsrHandle::Streaming(
-                    StreamingAsrHandle::Sherpa(start_sherpa(config, quiet).await?),
-                )),
-                AsrModels::MoonshineStreamingEn => Ok(StartedAsrHandle::Streaming(
-                    StreamingAsrHandle::Moonshine(start_moonshine(config, quiet).await?),
-                )),
-                _ => bail!(
-                    "selected ASR model '{}' advertises streaming transcription but has no streaming voice-agent adapter",
-                    model.as_str()
-                ),
-            }
-        }
+    match (model, mode) {
+        (AsrModels::WhisperBaseEn, AsrExecutionMode::Batch) => Ok(StartedAsrHandle::Whisper(
+            start_whisper(config, quiet).await?,
+        )),
+        (
+            AsrModels::WhisperBaseEn,
+            AsrExecutionMode::StreamingFinalOnly | AsrExecutionMode::StreamingWithPartials,
+        ) => bail!(
+            "selected ASR model '{}' resolved to a streaming transcription contract but only a batch voice-agent adapter exists",
+            model.as_str()
+        ),
+        (
+            AsrModels::SherpaOnnxStreamingEn,
+            AsrExecutionMode::StreamingFinalOnly | AsrExecutionMode::StreamingWithPartials,
+        ) => Ok(StartedAsrHandle::Sherpa(start_sherpa(config, quiet).await?)),
+        (AsrModels::SherpaOnnxStreamingEn, AsrExecutionMode::Batch) => bail!(
+            "selected ASR model '{}' resolved to a batch transcription contract but only a streaming voice-agent adapter exists",
+            model.as_str()
+        ),
+        (
+            AsrModels::MoonshineStreamingEn,
+            AsrExecutionMode::StreamingFinalOnly | AsrExecutionMode::StreamingWithPartials,
+        ) => Ok(StartedAsrHandle::Moonshine(
+            start_moonshine(config, quiet).await?,
+        )),
+        (AsrModels::MoonshineStreamingEn, AsrExecutionMode::Batch) => bail!(
+            "selected ASR model '{}' resolved to a batch transcription contract but only a streaming voice-agent adapter exists",
+            model.as_str()
+        ),
+        _ => bail!(
+            "voice-agent has no ASR adapter for selected curated model '{}' in execution mode {:?}",
+            model.as_str(),
+            mode
+        ),
     }
 }
 

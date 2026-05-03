@@ -173,6 +173,21 @@ pub enum InteractionStyle {
     Streaming,
 }
 
+/// Delivery shape for transcription capabilities.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TranscriptDelivery {
+    Batch,
+    StreamFinal,
+    StreamPartial,
+}
+
+/// Audio generation shape for speech-synthesis capabilities.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SpeechGeneration {
+    Buffered,
+    Streaming,
+}
+
 /// Introspective description of a supported capability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityDescriptor {
@@ -181,6 +196,8 @@ pub struct CapabilityDescriptor {
     pub inputs: Vec<ContentKind>,
     pub outputs: Vec<ContentKind>,
     pub interaction: InteractionStyle,
+    pub transcription_delivery: Option<TranscriptDelivery>,
+    pub speech_generation: Option<SpeechGeneration>,
 }
 
 impl CapabilityDescriptor {
@@ -197,6 +214,8 @@ impl CapabilityDescriptor {
             inputs,
             outputs,
             interaction,
+            transcription_delivery: None,
+            speech_generation: None,
         }
     }
 
@@ -258,6 +277,7 @@ impl CapabilityDescriptor {
             vec![ContentKind::Text],
             InteractionStyle::Batch,
         )
+        .with_transcription_delivery(TranscriptDelivery::Batch)
     }
 
     pub fn transcription_stream_final_only() -> Self {
@@ -268,6 +288,7 @@ impl CapabilityDescriptor {
             vec![ContentKind::Text],
             InteractionStyle::Streaming,
         )
+        .with_transcription_delivery(TranscriptDelivery::StreamFinal)
     }
 
     pub fn transcription_stream_partial() -> Self {
@@ -278,6 +299,7 @@ impl CapabilityDescriptor {
             vec![ContentKind::Text],
             InteractionStyle::Streaming,
         )
+        .with_transcription_delivery(TranscriptDelivery::StreamPartial)
     }
 
     pub fn transcription_stream() -> Self {
@@ -292,6 +314,7 @@ impl CapabilityDescriptor {
             vec![ContentKind::Audio],
             InteractionStyle::RequestResponse,
         )
+        .with_speech_generation(SpeechGeneration::Buffered)
     }
 
     pub fn speech_stream() -> Self {
@@ -302,6 +325,7 @@ impl CapabilityDescriptor {
             vec![ContentKind::Audio],
             InteractionStyle::Streaming,
         )
+        .with_speech_generation(SpeechGeneration::Streaming)
     }
 
     pub fn voice_clone() -> Self {
@@ -312,6 +336,16 @@ impl CapabilityDescriptor {
             vec![ContentKind::Audio],
             InteractionStyle::RequestResponse,
         )
+    }
+
+    fn with_transcription_delivery(mut self, delivery: TranscriptDelivery) -> Self {
+        self.transcription_delivery = Some(delivery);
+        self
+    }
+
+    fn with_speech_generation(mut self, generation: SpeechGeneration) -> Self {
+        self.speech_generation = Some(generation);
+        self
     }
 }
 
@@ -352,6 +386,16 @@ impl Capabilities {
     pub fn interaction_for(&self, capability: CapabilityKind) -> Option<InteractionStyle> {
         self.descriptor_for(capability)
             .map(|descriptor| descriptor.interaction)
+    }
+
+    pub fn transcription_delivery_for(&self) -> Option<TranscriptDelivery> {
+        self.descriptor_for(CapabilityKind::Transcription)
+            .and_then(|descriptor| descriptor.transcription_delivery)
+    }
+
+    pub fn speech_generation_for(&self) -> Option<SpeechGeneration> {
+        self.descriptor_for(CapabilityKind::Speech)
+            .and_then(|descriptor| descriptor.speech_generation)
     }
 
     pub fn supports(&self, capability: CapabilityKind) -> bool {
@@ -1069,6 +1113,10 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
+        assert_eq!(
+            descriptor.speech_generation,
+            Some(SpeechGeneration::Buffered)
+        );
     }
 
     #[test]
@@ -1079,6 +1127,10 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
+        assert_eq!(
+            descriptor.speech_generation,
+            Some(SpeechGeneration::Streaming)
+        );
     }
 
     #[test]
@@ -1089,6 +1141,10 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.interaction, InteractionStyle::Batch);
+        assert_eq!(
+            descriptor.transcription_delivery,
+            Some(TranscriptDelivery::Batch)
+        );
     }
 
     #[test]
@@ -1099,6 +1155,10 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
+        assert_eq!(
+            descriptor.transcription_delivery,
+            Some(TranscriptDelivery::StreamPartial)
+        );
     }
 
     #[test]
@@ -1167,6 +1227,11 @@ mod tests {
             capabilities.interaction_for(CapabilityKind::Speech),
             Some(InteractionStyle::RequestResponse)
         );
+        assert_eq!(
+            capabilities.speech_generation_for(),
+            Some(SpeechGeneration::Buffered)
+        );
+        assert_eq!(capabilities.transcription_delivery_for(), None);
         assert_eq!(
             capabilities.descriptor_for(CapabilityKind::Transcription),
             None
