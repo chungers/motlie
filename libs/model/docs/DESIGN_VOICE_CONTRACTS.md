@@ -4,6 +4,7 @@
 |---|---|---|
 | 2026-04-29 | @codex-tts | Initial design for tightening speech model contracts and curated metadata so batch vs streaming semantics are explicit, compiler-visible, and easier to compose in higher-level apps such as the voice skills. |
 | 2026-04-29 | @codex-tts | Implementation update: landed the brownfield compatibility pass in `libs/model` and `libs/models`, including buffered TTS traits, truthful curated metadata, and a shared buffered speech chunk stream. |
+| 2026-04-30 | @codex-tts | Imported the voice-agent skill layer onto the branch and completed the capability-driven composition pass so the voice runtime now derives buffered/batch/streaming behavior from curated metadata after model selection. |
 
 # Design: Voice Contracts
 
@@ -116,7 +117,7 @@ This design started as the target end state. The implementation landed in this r
 - metadata truth is expressed through richer `CapabilityDescriptor` / `Capabilities` constructors rather than a new standalone execution-mode enum
 - a shared `BufferedSpeechChunkStream` now carries the common buffered chunking path used by Piper and both Qwen3 TTS integrations
 
-That means the compiler can now distinguish buffered TTS backends from ASR streaming backends, while higher-level code can continue to consume chunked speech output during migration. A stricter dedicated `StreamingSpeechSynthesizer` split is still a possible follow-on, but it is not required for this brownfield correction.
+That means the compiler can now distinguish buffered TTS backends from ASR streaming backends, while higher-level code can continue to consume chunked speech output during migration. On this branch the imported `voice-agent` runtime now uses curated capability metadata to decide whether a selected model is batch ASR, streaming ASR, or buffered TTS instead of inferring those semantics from backend names. A stricter dedicated `StreamingSpeechSynthesizer` split is still a possible follow-on, but it is not required for this brownfield correction.
 
 ## Proposed Design
 

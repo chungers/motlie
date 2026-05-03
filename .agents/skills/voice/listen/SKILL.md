@@ -39,6 +39,7 @@ Agent decision rule:
 - discover runtime details progressively through the conversation with the human
 - if the user says `listen with sherpa` or `listen with moonshine`, use that backend
 - otherwise default to `--backend whisper`
+- after backend selection, rely on the curated capability metadata to determine whether the chosen model is batch or streaming ASR
 - treat `whisper` as batch/final-only ASR
 - treat `sherpa` and `moonshine` as streaming ASR backends
 - for remote Mac push capture, keep backend behavior consistent across `whisper`, `sherpa`, and `moonshine`: wait for EOF from Ctrl-C on the Mac and then print one final transcript

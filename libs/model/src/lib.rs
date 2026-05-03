@@ -343,6 +343,17 @@ impl Capabilities {
         &self.descriptors
     }
 
+    pub fn descriptor_for(&self, capability: CapabilityKind) -> Option<&CapabilityDescriptor> {
+        self.descriptors
+            .iter()
+            .find(|descriptor| descriptor.kind == capability)
+    }
+
+    pub fn interaction_for(&self, capability: CapabilityKind) -> Option<InteractionStyle> {
+        self.descriptor_for(capability)
+            .map(|descriptor| descriptor.interaction)
+    }
+
     pub fn supports(&self, capability: CapabilityKind) -> bool {
         self.kinds.contains(&capability)
     }
@@ -385,10 +396,6 @@ impl Capabilities {
         Self::new(vec![CapabilityDescriptor::transcription_stream_partial()])
     }
 
-    pub fn transcription_stream_only() -> Self {
-        Self::transcription_stream_partial_only()
-    }
-
     pub fn speech_buffered_only() -> Self {
         Self::new(vec![CapabilityDescriptor::speech_buffered()])
     }
@@ -398,10 +405,6 @@ impl Capabilities {
             CapabilityDescriptor::speech_buffered(),
             CapabilityDescriptor::voice_clone(),
         ])
-    }
-
-    pub fn speech_stream_only() -> Self {
-        Self::new(vec![CapabilityDescriptor::speech_stream()])
     }
 }
 
@@ -1139,13 +1142,35 @@ mod tests {
     }
 
     #[test]
-    fn speech_stream_only_capabilities_supports_speech_but_not_chat() {
-        let capabilities = Capabilities::speech_stream_only();
+    fn speech_stream_capabilities_supports_speech_but_not_chat() {
+        let capabilities = Capabilities::new(vec![CapabilityDescriptor::speech_stream()]);
 
         assert!(capabilities.supports(CapabilityKind::Speech));
         assert!(!capabilities.supports(CapabilityKind::VoiceClone));
         assert!(!capabilities.supports(CapabilityKind::Chat));
         assert!(!capabilities.supports(CapabilityKind::Embeddings));
+    }
+
+    #[test]
+    fn capabilities_can_query_descriptors_by_kind() {
+        let capabilities = Capabilities::speech_buffered_with_voice_clone();
+
+        assert_eq!(
+            capabilities.descriptor_for(CapabilityKind::Speech),
+            Some(&CapabilityDescriptor::speech_buffered())
+        );
+        assert_eq!(
+            capabilities.descriptor_for(CapabilityKind::VoiceClone),
+            Some(&CapabilityDescriptor::voice_clone())
+        );
+        assert_eq!(
+            capabilities.interaction_for(CapabilityKind::Speech),
+            Some(InteractionStyle::RequestResponse)
+        );
+        assert_eq!(
+            capabilities.descriptor_for(CapabilityKind::Transcription),
+            None
+        );
     }
 
     #[test]

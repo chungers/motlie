@@ -12,6 +12,7 @@
 | 2026-04-23 | @codex-tts | Clarified that the skill discovers runtime details progressively through the conversation with the human rather than loading a predeclared config upfront. |
 | 2026-04-23 | @codex-tts | Added a conversational playbook with example human prompts, example agent responses, and operational answer patterns for `voice/speak`, `voice/listen`, and `voice/turn`. |
 | 2026-04-24 | @codex-tts | Hardened the repo-present bootstrap path: generic Linux ORT discovery, no build-host path fallback in the binary, a single repo-present build now seeds all three subskill `bin/` directories, and Piper stays on CPU ORT to avoid the reproducible CUDA shutdown abort seen in live smoke validation. |
+| 2026-04-30 | @codex-tts | Migrated the voice runtime to the new speech contract split and made model execution semantics capability-driven after curated model selection, so batch/streaming ASR and buffered TTS behavior are no longer inferred from backend names. |
 
 ## Problem
 
