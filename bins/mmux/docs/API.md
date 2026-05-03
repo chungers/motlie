@@ -370,6 +370,9 @@ dispatches a second explicit `{Enter}` sequence through the same target.
 Submitted input ending in `$$` is normalized by stripping that suffix and using
 the same delayed Enter dispatch mode. If the suffix is the entire submitted
 input, mmux skips the initial key dispatch and sends only the delayed `{Enter}`.
+After a successful send, mmux forces `refresh_detail(..., true)` when the detail
+source is `Sample`; monitor mode keeps its existing cadence and is not
+recaptured from the send path.
 The modal accepts tmux key-name shorthand such as `{C-m}` for Enter because
 `KeySequence` passes valid raw key names through to tmux.
 Focused modal text inputs set the terminal cursor to the insertion point; the

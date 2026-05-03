@@ -334,7 +334,8 @@ pressed from the text field after text has been entered. Ctrl-Enter from the
 text field or focused `Ok` first sends the parsed input exactly, then waits
 500 ms and sends a separate `{Enter}` key. A trailing `$$` suffix is stripped
 from the input and uses that same delayed Enter behavior; when the input is only
-`$$`, mmux sends only the delayed `{Enter}` key. `Esc` or focused `Cancel`
+`$$`, mmux sends only the delayed `{Enter}` key. After a successful send, the
+detail pane refreshes when it is in snapshot mode. `Esc` or focused `Cancel`
 dismisses without sending.
 
 The top status bar uses the same dark blue background as the bottom status bar. It
