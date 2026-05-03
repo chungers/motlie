@@ -47,7 +47,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 | 2026-04-27 | @gpt55-dgx | Documented in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
-| 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
+| 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
 | 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
 | 2026-04-27 | @gpt55-dgx | Changed plain Left/Right from one-way list/detail focus movement to cyclic pane focus movement. |
@@ -324,7 +324,7 @@ The top status bar uses the same dark blue background as the bottom status bar. 
 shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom dark blue status bar shows compact key hints and
-status text only. Its direction hints are `↑/↓ sel` for selection and
+status text only. Its direction hints are `↑/↓` for selection and
 `pane` for pane focus, with shortcut letters bold coral. It orders command
 hints as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `rename`,
 `tags`, `group`, `quit`, `layout`, then mode-specific resize; the

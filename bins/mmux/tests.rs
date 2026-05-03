@@ -326,7 +326,8 @@ fn status_line_omits_layout_mode() {
         false,
     );
     let normal_status = status_line_text(&normal);
-    assert!(normal_status.contains(" ↑/↓ sel"));
+    assert!(normal_status.contains(" ↑/↓"));
+    assert!(!normal_status.contains(" ↑/↓ sel"));
     assert!(!normal_status.contains("keys"));
     assert!(!normal_status.contains("host"));
     assert!(!normal_status.contains("(h)elp"));
@@ -360,7 +361,8 @@ fn status_line_omits_layout_mode() {
         false,
     );
     let portrait_status = status_line_text(&portrait);
-    assert!(portrait_status.contains(" ↑/↓ sel"));
+    assert!(portrait_status.contains(" ↑/↓"));
+    assert!(!portrait_status.contains(" ↑/↓ sel"));
     assert!(portrait_status.contains("pane"));
     assert_status_order(
         &portrait_status,
@@ -404,7 +406,7 @@ fn status_line_styles_command_mnemonics() {
     assert_eq!(styled_mnemonics, "hpmankrtgql");
     assert_eq!(
         status_line_text(&app),
-        " ↑/↓ sel | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
+        " ↑/↓ | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
     );
 }
 
@@ -1488,7 +1490,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(matches!(app.modal.as_ref(), Some(ModalState::Help)));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert_eq!(view.title, " Help ");
-    assert_eq!(view.active_button, Button::Ok);
+    assert_eq!(view.active_button, Some(Button::Ok));
     assert_eq!(view.buttons, "[Ok]");
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
@@ -1605,7 +1607,7 @@ async fn kill_modal_tab_cycles_cancel_and_ok() {
 fn modal_content_separates_body_from_button_bar() {
     let new_session = modal_content(&test_new_session_modal("dev", Button::Ok));
     assert_eq!(new_session.title, " New Session ");
-    assert_eq!(new_session.active_button, Button::Ok);
+    assert_eq!(new_session.active_button, Some(Button::Ok));
     assert_eq!(new_session.buttons, " Cancel    [Ok]");
     assert!(matches!(
         new_session.body,
@@ -1618,7 +1620,7 @@ fn modal_content_separates_body_from_button_bar() {
         button: Button::Cancel,
     });
     assert_eq!(kill.title, " Kill Session ");
-    assert_eq!(kill.active_button, Button::Cancel);
+    assert_eq!(kill.active_button, Some(Button::Cancel));
     assert_eq!(kill.body_text(), "Kill session dev?");
     assert_eq!(kill.buttons, "[Cancel]    Ok ");
 
@@ -1628,7 +1630,7 @@ fn modal_content_separates_body_from_button_bar() {
         button: Button::Ok,
     });
     assert_eq!(rename.title, " Rename Session ");
-    assert_eq!(rename.active_button, Button::Ok);
+    assert_eq!(rename.active_button, Some(Button::Ok));
     assert_eq!(rename.buttons, " Cancel    [Ok]");
     assert!(matches!(
         rename.body,
@@ -1647,14 +1649,27 @@ fn modal_content_separates_body_from_button_bar() {
         SessionKeyValueFocus::Value,
     ));
     assert_eq!(tags.title, " Session Tags ");
-    assert_eq!(tags.active_button, Button::Ok);
-    assert_eq!(tags.buttons, " Cancel    [Ok]");
+    assert_eq!(tags.active_button, None);
+    assert_eq!(tags.buttons, " Cancel     Ok ");
     assert!(matches!(
         tags.body,
         ModalBody::SessionKeyValues { ref key_input, ref value_input, .. }
             if key_input == "phase" && value_input == "build"
     ));
     assert!(tags.body_text().contains("owner    platform ✓"));
+
+    let tags_ok = modal_content(&test_session_tags_modal(
+        vec![SessionKeyValueRow {
+            key: "owner".to_string(),
+            value: "platform".to_string(),
+        }],
+        Some("owner"),
+        "",
+        "",
+        SessionKeyValueFocus::Ok,
+    ));
+    assert_eq!(tags_ok.active_button, Some(Button::Ok));
+    assert_eq!(tags_ok.buttons, " Cancel    [Ok]");
 }
 
 #[tokio::test]
@@ -2313,6 +2328,53 @@ async fn session_tags_modal_tab_cycles_edit_row_fields_ok_and_cancel() {
         app.modal.as_ref(),
         Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Ok
     ));
+}
+
+#[tokio::test]
+async fn session_tags_modal_ok_from_keyboard_dismisses() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Ok
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "no tag changes on dev");
 }
 
 #[tokio::test]
