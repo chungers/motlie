@@ -60,7 +60,7 @@ Implemented API contract for the initial `mmux` selector and the
 | 2026-04-27 | @gpt55-dgx | Documented Sessions title count/hostname/IP format and removal of the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Documented moving the host label from status text into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Documented arrow-symbol status hints and Help modal key-function content. |
-| 2026-04-27 | @gpt55-dgx | Documented portrait mode's 30:70 default T/B split. |
+| 2026-05-03 | @codex | Documented portrait mode's 35:65 default T/B split. |
 | 2026-04-26 | @gpt55-dgx | Documented the About modal state and build-time git SHA metadata used by the `h` key. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
@@ -564,7 +564,7 @@ Validation rules:
   split, and focused pane in memory within the parent `mmux` process; this
   state is not persisted across binary runs
 - `--portrait` / `-p` forces portrait layout
-- portrait layout initializes the `T`/`B` split at 30:70
+- portrait layout initializes the `T`/`B` split at 35:65
 - `--landscape` / `-l` forces landscape layout
 - `--portrait` and `--landscape` are mutually exclusive
 - without a layout force flag, startup reads the connecting PTY dimensions and

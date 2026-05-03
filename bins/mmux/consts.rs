@@ -2,7 +2,7 @@ use ratatui::style::Color;
 
 pub(crate) const DEFAULT_DETAIL_LINES: usize = 80;
 pub(crate) const DEFAULT_LEFT_PERCENT: u16 = 42;
-pub(crate) const DEFAULT_TOP_PERCENT: u16 = 30;
+pub(crate) const DEFAULT_TOP_PERCENT: u16 = 35;
 pub(crate) const LANDSCAPE_MIN_LEFT_PERCENT: u16 = 25;
 pub(crate) const LANDSCAPE_MAX_LEFT_PERCENT: u16 = 75;
 pub(crate) const PORTRAIT_MIN_TOP_PERCENT: u16 = 15;

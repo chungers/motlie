@@ -349,7 +349,7 @@ fn layout_auto_detection_uses_pty_aspect_ratio() {
 }
 
 #[test]
-fn portrait_default_split_is_30_70() {
+fn portrait_default_split_is_35_65() {
     let app = AppState::new(
         "host".to_string(),
         LayoutMode::Portrait,
@@ -357,7 +357,7 @@ fn portrait_default_split_is_30_70() {
         false,
     );
 
-    assert_eq!(app.layout.top_percent, 30);
+    assert_eq!(app.layout.top_percent, 35);
 }
 
 #[test]
