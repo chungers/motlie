@@ -6,6 +6,11 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-02 | @codex: Added initial session environment values to `CreateSessionOptions` and documented that post-creation `SessionEnvironment` writes only affect future tmux-spawned processes. | HostHandle, Target, control.rs, types.rs |
+| 2026-05-02 | @codex: Reworked session status-bar control into `Target::status() -> SessionStatus`, with snapshot/apply/restore helpers and validated `StatusLeftLength`. | Target, SessionStatus |
+| 2026-05-02 | @codex: DC34 follow-up for mmux PR feedback — add a host-level batch session-tag read API so selector refreshes can enrich a fresh session listing without one round trip per session. | Target, DC34 |
+| 2026-05-01 | @codex: DC34 follow-up for issue #241 — add planned session tag deletion API using tmux `set-option -u`: scoped `SessionTags::unset(key)`. | Target, DC34 |
+| 2026-04-30 | @codex: DC34 — session metadata tags on `Target` via tmux user-defined session options. Add scoped `SessionTags` and validated self-describing `SessionTag` with strict session-only scope, stable-id dispatch, namespace/key validation, and small-value bounds. | Target, DC34 |
 | 2026-04-28 | @gpt55-dgx: PR #228 selector cleanup — document the implemented non-empty `SessionId` wrapper for `SessionInfo.id` so stable id dispatch cannot silently fall back to names. | Discovery Types |
 | 2026-04-09 | @claude: Note anyhow→thiserror migration in dependency table and prototype sections. Library now uses typed `Error` enum via `thiserror`; `anyhow` retained as dev-dependency only. Prototype code snippets are pre-migration and preserved as historical context. | Dependencies, Prototype |
 | 2026-03-25 | @claude: DC33 — per-source coherent history rendering. Coalesce same-source chunks, add `RenderMode::PerSource`, per-source budgets. See [`docs/HISTORY.md`](./HISTORY.md). | DC28, DC33, History |
@@ -2528,8 +2533,12 @@ pub struct CreateSessionOptions {
     pub width: Option<u16>,
     pub height: Option<u16>,
     pub history_limit: Option<u32>,
+    pub initial_environment: Vec<SessionEnvVar>,
 }
 ```
+
+`initial_environment` is emitted to `tmux new-session -e` in vector order. If a
+caller supplies duplicate variable names, tmux applies the last emitted value.
 
 `HostHandle::create_session` signature changes from:
 
@@ -2550,7 +2559,7 @@ pub async fn create_session(
 `control::create_session` (internal) changes similarly. The generated tmux commands:
 
 ```
-tmux new-session -d -s <name> [-n <window_name>] [-x <W> -y <H>] [<command>]
+tmux new-session -d -s <name> [-n <window_name>] [-x <W> -y <H>] [-e KEY=VALUE ...] [<command>]
 tmux set-option -t <name> history-limit <N>        # if history_limit set
 tmux set-option -p -t <name> history-limit <N>     # if history_limit set (tmux 3.1+)
 ```
@@ -3844,7 +3853,7 @@ mirrors this uniformity avoids three problems:
 | Component | Responsibility |
 |-----------|---------------|
 | `HostHandle` | Host-level: `list_sessions`, `create_session`, `session`, `target`, `start_monitoring`, `stop_monitoring`, `start_monitoring_session`, `stop_monitoring_session` |
-| `Target` | Entity-level: creation (`new_window`, `split_pane`), I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
+| `Target` | Entity-level: session metadata (`tags`, `set_tag`, `read_tag`, `list_tags`), creation (`new_window`, `split_pane`), I/O (`send_text`, `send_keys`, `capture`, `sample_text`), navigation (`children`, `window`, `pane`), lifecycle (`kill`, `rename`), monitoring (`start_monitoring`) |
 | `SessionMonitorHandle` | Monitoring lifecycle + `Deref<Target=Target>` — adds `shutdown`, `is_active` |
 
 - **Cheap handles**: `Target` holds `Arc<HostHandleInner>` + `TargetAddress` enum.
@@ -3858,6 +3867,115 @@ mirrors this uniformity avoids three problems:
 `is_active()`. Everything else comes from `Target` via `Deref`. This means
 `monitor.capture()`, `monitor.children()`, `monitor.send_text("x")` etc. all work
 without any explicit delegation code.
+
+### DC34: Session Metadata Tags
+
+**Decision**: Session metadata is represented as tmux user-defined session options
+behind a small `Target` API:
+
+```rust
+pub struct SessionTag {
+    /* private validated fields: prefix, key, value */
+}
+
+pub struct SessionTags<'a> {
+    /* transport, tmux prefix, stable session id, validated tag prefix */
+}
+
+pub struct StatusStyle(String);
+pub struct StatusLeft(String);
+pub struct StatusLeftLength(u32);
+
+pub struct SessionStatus<'a> {
+    /* transport, tmux prefix, stable session id */
+}
+
+pub struct SessionStatusSnapshot {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+pub struct SessionStatusOverrides {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+impl Target {
+    pub async fn tags(&self, prefix: &str) -> Result<SessionTags<'_>>;
+    pub async fn status(&self) -> Result<SessionStatus<'_>>;
+}
+
+impl SessionTags<'_> {
+    pub fn prefix(&self) -> &str;
+    pub async fn set(&self, key: &str, value: &str) -> Result<()>;
+    pub async fn read(&self, key: &str) -> Result<Option<String>>;
+    pub async fn list(&self) -> Result<Vec<SessionTag>>;
+    pub async fn unset(&self, key: &str) -> Result<()>;
+}
+
+impl SessionStatus<'_> {
+    pub async fn snapshot(&self) -> Result<SessionStatusSnapshot>;
+    pub async fn apply(&self, overrides: &SessionStatusOverrides) -> Result<()>;
+    pub async fn restore(&self, snapshot: &SessionStatusSnapshot) -> Result<()>;
+    pub async fn set_style(&self, style: &StatusStyle) -> Result<()>;
+    pub async fn unset_style(&self) -> Result<()>;
+    pub async fn read_local_style(&self) -> Result<Option<StatusStyle>>;
+    pub async fn set_left(&self, left: &StatusLeft) -> Result<()>;
+    pub async fn unset_left(&self) -> Result<()>;
+    pub async fn read_local_left(&self) -> Result<Option<StatusLeft>>;
+    pub async fn set_left_length(&self, length: StatusLeftLength) -> Result<()>;
+    pub async fn unset_left_length(&self) -> Result<()>;
+    pub async fn read_local_left_length(&self) -> Result<Option<StatusLeftLength>>;
+}
+```
+
+`HostHandle::list_tags_for_session_infos(prefix, sessions)` is the batch read
+companion for callers that already have a session listing and need to enrich it
+without one round trip per session.
+
+For `prefix = "mmux"` and `key = "role"`, the underlying tmux option is
+`@mmux/role`. `SessionTag` carries the namespace prefix as well as the
+unprefixed key so listed tags are self-describing and round-trippable.
+
+**Scope**:
+- Session targets only. Window and pane targets return `UnsupportedTarget`.
+- Prefix and key are stable ASCII components: letters, digits, `.`, `_`, `-`.
+- Values are UTF-8 strings, may be empty, reject control characters, and are
+  capped at 2 KiB.
+- Dispatch uses the stable `SessionId` from `SessionInfo`, not the display name.
+- `Target::tags(prefix)` validates the prefix and captures the command prefix and
+  stable session id once. There are no direct one-shot tag methods on `Target`;
+  all tag work goes through the `SessionTags` scope.
+- `HostHandle::list_tags_for_session_infos(prefix, sessions)` returns tags by
+  stable `SessionId` and includes empty vectors for sessions without matching
+  tags.
+- `SessionTags::unset(key)` removes the session-local user option with tmux
+  `set-option -u`; it does not encode deletion as an empty string.
+- `Target::status()` captures the same session identity and command prefix for
+  built-in status-bar options. `SessionStatus::snapshot/apply/restore` keep
+  attach-time temporary chrome semantics in the library. `StatusStyle` rejects
+  empty values; `StatusLeft` allows empty values to mean "render no left status
+  text"; `StatusLeftLength` is a fallible bounded numeric type. Reads return
+  only session-local overrides, not inherited/global values.
+- The helper constructor is async because resolving the command prefix can lazily
+  probe the tmux binary on the underlying transport before it is cached.
+
+**Rationale**: tmux user-defined options are the closest native mechanism to
+session metadata: they live in tmux state, survive for the session lifetime, and
+can be written by processes inside the session. Keeping this API session-only
+avoids a single method whose meaning changes across session/window/pane scopes.
+
+**Command boundary**: The implementation uses direct tmux option commands through
+the existing control module (`set-option`, `show-option -q`, `show-options`) and
+does not run shell pipelines such as `grep`. Deletion uses `set-option -u -t
+<stable-session-id> @<prefix>/<key>` with no value argument. A persistent
+control-mode command client was not introduced for this slice because
+`tmux -C attach-session` creates an attached client and would perturb
+`attached_count`/client state for metadata polling. If the library later grows a
+non-attaching command channel, these helpers can move under it without changing
+the public contract.
 
 ### DC17: Type Safety via Target + TargetAddress
 

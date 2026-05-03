@@ -22,6 +22,14 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
+| 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
+| 2026-05-02 | @codex | Replaced direct `Target` status option methods with `Target::status() -> SessionStatus`, plus `SessionStatusSnapshot` / `SessionStatusOverrides` for attach-time snapshot/apply/restore flows. |
+| 2026-05-02 | @codex | Added narrow session-local status-left/status-style value types and scoped status APIs for temporary attach display overrides. |
+| 2026-05-02 | @codex | Added `HostHandle::list_tags_for_session_infos(prefix, sessions)` to batch-read session metadata tags for a fresh session listing in one tmux command. |
+| 2026-05-01 | @codex | Added `HostHandle::target_for_session_info()` so consumers enriching a fresh `list_sessions()` result can build a session `Target` without issuing a second session-discovery query. |
+| 2026-05-01 | @codex | Added session metadata tag deletion: `SessionTags::unset(key)` removes a user-defined session option with tmux `set-option -u` while preserving session-only scope, stable-session-id dispatch, and prefix/key validation. |
+| 2026-04-30 | @codex | Added session metadata tags via tmux user-defined session options: `Target::tags(prefix)`, scoped `SessionTags`, and public `SessionTag`. Tags are session-target only, stored as `@prefix/key`, use stable session ids for dispatch, and validate prefix/key/value bounds for poller-safe metadata. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `HostHandle::list_sessions_now()` and `SessionListing`. There is no portable, side-effect-free way to read the host clock across tmux versions (`run-shell` corrupts the operator's attached pane on tmux ≤ 3.4). Recency math moves to the consumer: `list_sessions()` already aggregates `window_activity` into `SessionInfo.activity`, and binaries that need observer-relative recency keep their own per-session tracker. `mod discovery` is now private — all access flows through `HostHandle::*`. |
 | 2026-04-28 | @gpt55-dgx | Made `list_sessions_now()` tolerate tmux versions where `#{epoch}` expands empty by falling back to a local clock clamped to session timestamps. |
 | 2026-04-28 | @gpt55-dgx | Added `SessionInfo.activity`, non-lossy `attached_count`, and `HostHandle::list_sessions_now()` / `SessionListing` for skew-free session recency math. |
@@ -49,6 +57,7 @@ in [`examples/README.md`](../examples/README.md).
    - 7a. [Host Event Stream](#host-event-stream)
 8. [Target and Navigation](#8-target-and-navigation)
    - 8a. [Current PTY Attach](#current-pty-attach)
+   - 8b. [Session Tags](#session-tags)
 9. [Sending Input](#9-sending-input)
 10. [Capturing Output](#10-capturing-output)
 11. [Structured Command Execution](#11-structured-command-execution)
@@ -570,6 +579,16 @@ let host = HostHandle::new(
 let host2 = host.clone();
 ```
 
+### Hostname From Tmux
+
+```rust
+let tmux_host = host.tmux_hostname().await?;
+```
+
+`tmux_hostname()` returns the value tmux reports for `#{host}` on the
+configured transport/socket. It runs `start-server ; display-message -p
+'#{host}'`, so it starts the tmux server if one is not already running.
+
 ---
 
 ## 6. Session Lifecycle
@@ -599,6 +618,19 @@ let opts = CreateSessionOptions {
 let target = host.create_session("automation", &opts).await?;
 // Sets -x 200 -y 50 on new-session, then set-option history-limit 50000
 // on both the session (future panes) and initial pane (tmux 3.1+)
+
+// With variables visible to the initial shell or command
+let opts = CreateSessionOptions {
+    initial_environment: vec![
+        SessionEnvVar::new("MOTLIE", "enabled")?,
+        SessionEnvVar::new("BUILD_ID", "42")?,
+    ],
+    ..Default::default()
+};
+let target = host.create_session("with-env", &opts).await?;
+// Emits tmux new-session -e MOTLIE=enabled -e BUILD_ID=42 before the command,
+// so the first pane process inherits those values.
+// Duplicate names are emitted in Vec order; tmux applies the last value.
 ```
 
 ### Kill
@@ -716,6 +748,21 @@ match host.session_by_id(&selected_id).await? {
 `session_by_id()` is useful when a UI stores that stable id at selection time
 and later needs to dispatch against the same tmux session after a display-name
 rename.
+
+### Build a target from a fresh session row
+
+```rust
+let sessions = host.list_sessions().await?;
+for session in sessions {
+    let target = host.target_for_session_info(session);
+    let tags = target.tags("mmux").await?.list().await?;
+    println!("{} tags", tags.len());
+}
+```
+
+`target_for_session_info()` does not revalidate that the session still exists.
+It is intended for enrichment passes that already hold a just-fetched
+`SessionInfo` and want to avoid a second session-discovery query per row.
 
 ### Find by TargetSpec
 
@@ -851,6 +898,138 @@ stopped-job state after `Ctrl-b d`.
 
 `AttachExit::shell_status()` maps normal exits to their exit code and Unix
 signal exits to `128 + signal`, which is the value CLI callers should return.
+
+### Session Status Bar Overrides
+
+```rust
+use motlie_tmux::{
+    SessionStatusOverrides, StatusLeft, StatusLeftLength, StatusStyle,
+};
+
+let status = target.status().await?;
+let snapshot = status.snapshot().await?;
+let overrides = SessionStatusOverrides {
+    style: Some(StatusStyle::new("bg=blue,fg=white")?),
+    left: Some(StatusLeft::new("#{=40:session_name}")?),
+    left_length: Some(StatusLeftLength::new(40)?),
+};
+status.apply(&overrides).await?;
+
+// ... attach or otherwise run with temporary status overrides ...
+
+status.restore(&snapshot).await?;
+
+// Low-level scoped operations are also available:
+status.set_style(&StatusStyle::new("bg=black,fg=white")?).await?;
+let local_style = status.read_local_style().await?;
+status.unset_style().await?;
+```
+
+`Target::status()` is session-target only and captures the stable session id.
+The scoped operations use tmux `set-option -t <session-id> ...` /
+`set-option -u`. The read paths use `show-option -q -t <session-id> ...` and
+return only session-local overrides; inherited/global values return `Ok(None)`.
+`SessionStatus::snapshot()` records local `status-style`, `status-left`, and
+`status-left-length`; `restore()` writes present values back and unsets absent
+ones. `StatusStyle` rejects empty strings; `StatusLeft` accepts empty strings
+because tmux treats an empty left format as "render nothing". `StatusLeftLength`
+is validated and capped at `STATUS_LEFT_LENGTH_MAX`. tmux remains responsible
+for style and format syntax.
+
+### Session Tags
+
+Session tags store small metadata values on tmux sessions using user-defined
+session options. The API is session-target only:
+
+```rust
+let session = host
+    .session("build")
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("build not found".into()))?;
+
+let tags = session.tags("mmux").await?;
+tags.set("owner", "david").await?;
+tags.set("role", "worker").await?;
+tags.unset("role").await?;
+
+assert_eq!(
+    tags.read("owner").await?,
+    Some("david".to_string())
+);
+
+let all = tags.list().await?;
+```
+
+For `prefix = "mmux"` and `key = "owner"`, the tmux option is stored as
+`@mmux/owner`. `SessionTag` carries the namespace prefix, key, and value with
+validated private fields; use `prefix()`, `key()`, `value()`, and
+`option_name()` to inspect it.
+
+Contract:
+- `tags(prefix)` validates the namespace once, captures the stable session id
+  and tmux command prefix, and returns a scoped `SessionTags` helper.
+- `SessionTags::set(key, value)` writes one tag.
+- `SessionTags::unset(key)` removes one tag from the namespace.
+- `SessionTags::read(key)` returns `Ok(Some(value))` or `Ok(None)` when missing.
+- `SessionTags::list()` returns every valid tag under that namespace.
+- `HostHandle::list_tags_for_session_infos(prefix, sessions)` batch-lists tags
+  for a session listing in one tmux command and returns an entry for every
+  provided stable session id.
+- Prefixes and keys must be non-empty ASCII letters, digits, `.`, `_`, or `-`.
+- Values are UTF-8 strings, may be empty, must not contain control characters,
+  and are capped at 2 KiB.
+- These methods return `UnsupportedTarget` for window and pane targets.
+
+## Session Environment Variables
+
+Session environment variables are session-target only and use tmux
+`set-environment` / `show-environment` under the same stable-session-id dispatch
+boundary as tags. This is a post-creation API: writes update tmux's session
+environment for processes tmux starts later, such as new panes or windows. They
+cannot mutate shell processes already running in existing panes. Use
+`CreateSessionOptions::initial_environment` for variables that must be visible to
+the first pane process created by `new-session`.
+
+```rust
+let session = host
+    .session("build")
+    .await?
+    .ok_or_else(|| motlie_tmux::Error::NotFound("build not found".into()))?;
+
+let env = session.environment().await?;
+env.set("BUILD_ID", "42").await?;
+
+assert_eq!(
+    env.read("BUILD_ID").await?,
+    Some("42".to_string())
+);
+
+let all = env.list().await?;
+env.unset("BUILD_ID").await?;
+```
+
+Contract:
+- `environment()` captures the stable session id and tmux command prefix, and
+  returns a scoped `SessionEnvironment` helper.
+- `SessionEnvironment::set(name, value)` writes one variable for future
+  tmux-spawned processes.
+- `SessionEnvironment::unset(name)` removes one variable for future
+  tmux-spawned processes.
+- `SessionEnvironment::read(name)` returns `Ok(Some(value))` or `Ok(None)` when
+  missing.
+- `SessionEnvironment::list()` returns valid set variables and skips tmux unset
+  markers such as `-NAME`.
+- Names must be ASCII environment identifiers: first byte letter or `_`, then
+  letters, digits, or `_`.
+- Values are UTF-8 strings, may be empty, must not contain control characters,
+  and are capped at 8 KiB.
+- These methods return `UnsupportedTarget` for window and pane targets.
+
+The implementation targets the stable tmux `SessionId` held by `SessionInfo`,
+not the mutable display name. Tag reads use `show-option -q` so missing and empty
+values remain distinct; deletion uses `set-option -u -t <session-id>
+@<prefix>/<key>`. Listing uses `show-options` and filters for the requested
+namespace without shell pipelines.
 
 ### Create child windows and panes
 
@@ -2262,6 +2441,10 @@ assert!(issues.is_empty());
 |------|-----------|
 | `SessionId` | non-empty stable tmux `#{session_id}` string, e.g. `$7` |
 | `SessionInfo` | name, id (`SessionId`), created, activity (aggregated `max(session_activity, max(window_activity))` per issue #237), attached_count, window_count, group |
+| `SessionTags` | prefix-scoped session metadata helper returned by `Target::tags(prefix)` |
+| `SessionTag` | validated prefix, key, value for one namespaced session metadata tag |
+| `SessionStatus` / `SessionStatusSnapshot` / `SessionStatusOverrides` | Scoped session-local tmux status-bar API and temporary override state |
+| `StatusStyle` / `StatusLeft` / `StatusLeftLength` | Validated tmux status-bar override values used by `SessionStatus` |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
 | `ClientInfo` | width, height, session |
