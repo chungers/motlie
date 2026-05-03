@@ -688,6 +688,7 @@ Main-selector keymap (focus-aware):
 | Up / Down | Move highlight; session viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
 | PgUp / PgDn | Page through session list | Page through R buffer |
 | Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
+| Enter | Refresh one-shot sample detail for the highlighted session | No-op |
 | Tab | Focus → `R` | Focus → `L` |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus → `L` outside modal; `Cancel` inside modal | Focus → `L` outside modal; `Cancel` inside modal |
@@ -711,6 +712,8 @@ fallbacks; on macOS iTerm2 the observed fallback is `Shift-Left` /
 `Shift-Right`. Portrait mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
 and accepts the same modifier family. Resize bounds are mode-specific:
 landscape L/R clamps at 25/75, while portrait T/B clamps at 15/85.
+The detail-pane title renders the current source mode as a bold `snapshot` or
+bold `monitor` label next to the scroll position.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok` where applicable; kill confirmation also accepts `Tab` /

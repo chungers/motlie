@@ -31,7 +31,7 @@ use crate::model::{
     SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
-    detail_text_for_render, draw, key_value_key_column_width, modal_content,
+    detail_text_for_render, detail_title, draw, key_value_key_column_width, modal_content,
     session_key_values_footer_line, session_list_line, session_recency_text, sessions_title,
     short_build_git_sha, status_line, status_line_text, top_status_line,
 };
@@ -1115,9 +1115,18 @@ async fn a_attaches_selected_session() {
 }
 
 #[tokio::test]
-async fn enter_no_longer_attaches() {
-    let fleet = local_fleet();
+async fn enter_from_list_refreshes_sample_detail_without_attaching() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("capture-pane -ep", "current screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
     let mut app = app_with_session();
+    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+        session_id: Some("$1".to_string()),
+        host_id: Some(local_host_id()),
+    }));
+    app.set_detail_text("stale monitor screen".to_string());
 
     let outcome = handle_key(
         &fleet,
@@ -1128,6 +1137,8 @@ async fn enter_no_longer_attaches() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
+    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
+    assert_eq!(app.detail.lines, vec!["current screen".to_string()]);
 }
 
 #[tokio::test]
@@ -1262,6 +1273,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
+    assert!(body.contains("Enter sample highlighted session (list pane)"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
     assert!(body.contains("  u update focused tag"));
@@ -3171,6 +3183,34 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
     let text = detail_text_for_render("\x1b[31mred\x1b[0m");
     assert_eq!(text.lines[0].spans[0].content.as_ref(), "red");
     assert!(!text.lines[0].spans[0].content.contains('\x1b'));
+}
+
+#[test]
+fn detail_title_marks_snapshot_or_monitor_mode_in_bold() {
+    let snapshot = detail_title(DetailMode::Sample, "1-3/3");
+    assert_eq!(
+        snapshot
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        " Detail snapshot 1-3/3 "
+    );
+    assert!(snapshot.spans[1]
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD));
+
+    let monitor = detail_title(DetailMode::Monitor, "2-4/9");
+    assert_eq!(
+        monitor
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        " Detail monitor 2-4/9 "
+    );
+    assert!(monitor.spans[1].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[tokio::test]
