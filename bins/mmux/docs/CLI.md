@@ -269,6 +269,7 @@ Main-view keys:
 | Up / Down | Move highlighted session | Scroll detail one line |
 | PgUp / PgDn | Page session list | Page detail buffer |
 | Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
+| Enter | Refresh one-shot sample detail | No-op |
 | Tab | Focus detail pane | Focus session list |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus session list | Focus session list |
@@ -288,7 +289,8 @@ Main-view keys:
 
 Landscape mode uses the L/R split and clamps resize to 25/75. Portrait mode
 uses the T/B split and clamps resize to 15/85. Tab cycles between the two
-visible panes in both modes.
+visible panes in both modes. The detail pane title shows bold `snapshot` for
+one-shot samples and bold `monitor` for continuous monitoring.
 
 On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.

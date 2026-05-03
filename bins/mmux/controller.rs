@@ -398,6 +398,13 @@ pub(crate) async fn handle_key(
             }
             app.status = StatusBanner::info("no session selected");
         }
+        (KeyCode::Enter, _) if app.layout.focus == Focus::List => {
+            if app.selected_session().is_some() {
+                reset_to_sample_detail(fleet, app).await?;
+            } else {
+                app.status = StatusBanner::info("no session selected");
+            }
+        }
         (KeyCode::Up, modifiers)
             if app.layout.mode == LayoutMode::Portrait && is_resize_modifier(modifiers) =>
         {

@@ -54,7 +54,7 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         .split(area);
 
     draw_sessions(frame, columns[0], app);
-    draw_detail(frame, columns[1], app, " Detail ");
+    draw_detail(frame, columns[1], app);
 }
 
 fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
@@ -66,7 +66,7 @@ fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         ])
         .split(area);
     draw_sessions(frame, rows[0], app);
-    draw_detail(frame, rows[1], app, " Detail ");
+    draw_detail(frame, rows[1], app);
 }
 
 fn focused_style(app: &AppState, focus: Focus) -> Style {
@@ -331,7 +331,7 @@ fn char_width(text: &str) -> usize {
     text.chars().count()
 }
 
-fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &str) {
+fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let height = area.height.saturating_sub(2) as usize;
     app.detail.last_known_view_height = max(1, height);
     app.detail.scroll = app.detail.scroll.min(app.detail.max_scroll());
@@ -350,10 +350,7 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &st
     } else {
         format!("{}-{}/{}", start + 1, end, total)
     };
-    let title = match app.detail.source.mode() {
-        DetailMode::Sample => format!("{title} {position} "),
-        DetailMode::Monitor => format!(" Detail - monitor {position} "),
-    };
+    let title = detail_title(app.detail.source.mode(), &position);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -377,6 +374,18 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState, title: &st
             &mut scrollbar_state,
         );
     }
+}
+
+pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
+    let mode = match mode {
+        DetailMode::Sample => "snapshot",
+        DetailMode::Monitor => "monitor",
+    };
+    Line::from(vec![
+        TuiSpan::raw(" Detail "),
+        TuiSpan::styled(mode, Style::default().add_modifier(Modifier::BOLD)),
+        TuiSpan::raw(format!(" {position} ")),
+    ])
 }
 
 pub(crate) fn detail_text_for_render(text: &str) -> Text<'_> {

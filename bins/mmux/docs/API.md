@@ -347,6 +347,12 @@ mode-specific resize hint. Attach uses the `a` shortcut; command shortcut
 letters are rendered bold coral in command labels.
 Direction hints render as `↑/↓`.
 
+Plain Enter while the session list has focus resets the detail source to
+`Sample` and forces a one-shot capture for the highlighted session. This gives
+the operator a quick current-state refresh without entering continuous monitor
+mode; `m` remains the monitor command. The detail-pane title displays the
+active source mode as a bold `snapshot` or bold `monitor` label.
+
 `r` opens `RenameSession` only when the session list has focus. The modal
 captures `(host_id, session_id)` plus the current display name, prepopulates the
 `Session Name` field, and dispatches changed names through
