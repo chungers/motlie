@@ -4,7 +4,12 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added scoped `SessionTags`, validated self-describing `SessionTag`, `Target::tags()`, one-off `set_tag()` / `read_tag()` / `list_tags()` wrappers, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
+| 2026-05-02 | @codex | Addressed PR API feedback by replacing direct `Target` status methods with `Target::status() -> SessionStatus`, adding snapshot/apply/restore helpers, and making `StatusLeftLength` validated. |
+| 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` as the lifecycle-correct API for env vars visible to the initial pane, and documented post-creation session env writes as future-process only. |
+| 2026-05-02 | @codex | Added narrow `StatusStyle` and session-local status APIs for tmux status bar styling without exposing a generic arbitrary-option API. |
+| 2026-05-02 | @codex | Added the host-level batch session tag read API used by mmux to avoid per-session metadata round trips during refresh. |
+| 2026-05-01 | @codex | Added Phase 1.17 for issue #241 follow-up: expose session tag deletion via `SessionTags::unset(key)` backed by tmux `set-option -u`. |
+| 2026-04-30 | @codex | Implement Phase 1.16 / DC34: session metadata tags via tmux user-defined session options. Added scoped `SessionTags`, validated self-describing `SessionTag`, `Target::tags()`, session-only level gating, stable-session-id dispatch, namespace/key/value validation, parser coverage for tmux option output, and API/DESIGN docs. |
 | 2026-04-09 | @claude | Update Conventions section: library error handling migrated from `anyhow` to `thiserror`-based typed `Error` enum (PR #145). `anyhow` retained as dev-dependency only. |
 | 2026-03-22 | @claude | Implement Phase 5.1 and 5.2: split-screen TUI REPL mode (`tui on`/`tui off`) with binary-local `tui_mirror` consumer using `HistoryHandle` for bounded mirror frame. Restructured `examples/repl.rs` → `examples/repl/main.rs` + `examples/repl/tui_mirror.rs`. Added `ratatui`/`crossterm` dev-dependencies. |
 | 2026-03-22 | @codex | Expand Phase 5 into a concrete first TUI slice: split-screen REPL mirror mode (`tui on` / `tui off`) using a binary-local consumer on top of `Subscription` / `HistoryHandle`, followed later by deeper full terminal-state mirroring if needed. |
@@ -878,9 +883,6 @@ session options. For `prefix = "mmux"` and `key = "owner"`, the stored option is
 - [x] Add `SessionTags::set(key, value) -> Result<()>`
 - [x] Add `SessionTags::read(key) -> Result<Option<String>>`
 - [x] Add `SessionTags::list() -> Result<Vec<SessionTag>>`
-- [x] Add one-off `Target::set_tag(prefix, key, value) -> Result<()>`
-- [x] Add one-off `Target::read_tag(prefix, key) -> Result<Option<String>>`
-- [x] Add one-off `Target::list_tags(prefix) -> Result<Vec<SessionTag>>`
 - [x] Restrict all tag methods to session targets with `UnsupportedTarget`
 - [x] Dispatch using stable `SessionInfo.id`, not mutable session display name
 - [x] Validate prefix once and capture tmux command prefix once in `SessionTags`
@@ -898,6 +900,37 @@ command boundary and avoids shell pipelines or pane-local shell execution. It
 does not add a persistent `tmux -C attach-session` command client because that
 would create an attached tmux client and perturb session client state for
 metadata polling.
+
+---
+
+## Phase 1.17: Session Metadata Tag Delete — issue #241
+
+Add explicit deletion for session metadata tags. tmux supports unsetting
+user-defined options with `set-option -u`; the library should expose that rather
+than making callers shell out or encode deletion as an empty value.
+
+### 1.17a — Control-layer unset helper (`src/control.rs`)
+
+- [x] Add `unset_session_tag_with_prefix(...) -> Result<()>`
+- [x] Build command as `set-option -u -t <stable-session-id> @<prefix>/<key>`
+  with no value argument
+- [x] Reuse validated `SessionTagPrefix::option_name(key)` for key validation
+- [x] Avoid shell pipelines and pane-local shell execution
+
+### 1.17b — `Target` API wiring (`src/host.rs`)
+
+- [x] Add `SessionTags::unset(key) -> Result<()>`
+- [x] Preserve session-only level gating with `UnsupportedTarget`
+- [x] Dispatch by stable `SessionInfo.id`, not display name
+
+### 1.17c — Tests and docs
+
+- [x] Unit tests for unset command construction
+- [x] Unit tests for validation-before-exec
+- [x] Unit tests for non-session target rejection
+- [x] Update `docs/API.md` and `docs/DESIGN.md`
+- [x] Validate with `cargo test -p motlie-tmux` and
+  `cargo clippy -p motlie-tmux -- -D warnings`
 
 ---
 

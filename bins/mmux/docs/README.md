@@ -12,7 +12,7 @@ The selector is built on `motlie-tmux` and never embeds shell or tmux command co
 
 - **Local** — `mmux` (no arguments) targets the local host's tmux server.
 - **SSH single-host** — `mmux ssh://user@host` targets one remote host.
-- **Multi-host** ([issue #235](https://github.com/chungers/motlie/issues/235)) — `mmux ssh://a ssh://b ...` aggregates sessions across multiple hosts in a single activity-sorted list. Multi-host mode replaces the per-host MOTD pane and host/IP status with a `mmux - multi-host mode [n]` banner; row format gains a hostname column.
+- **Multi-host** ([issue #235](https://github.com/chungers/motlie/issues/235)) — `mmux ssh://a ssh://b ...` aggregates sessions across multiple hosts in a single activity-sorted list. Multi-host mode replaces the per-host MOTD pane and host/IP status with a top-bar host-code legend; row format gains a compact host-code column.
 - **Script** — `mmux --script` prints the selected session name to stdout instead of attaching, for shell composition (e.g. `tmux attach -t "$(mmux --script)"`).
 
 ## Layouts
