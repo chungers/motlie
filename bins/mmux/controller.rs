@@ -1484,6 +1484,9 @@ async fn send_keys_from_modal(
             } else {
                 format!("sent keys to {}", session.name())
             });
+            if app.detail.source.mode() == DetailMode::Sample {
+                refresh_detail(fleet, app, true).await?;
+            }
         }
         None => {
             refresh_sessions(fleet, app, true).await?;

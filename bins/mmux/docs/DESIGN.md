@@ -179,10 +179,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   waits 500 ms, and sends a separate `{Enter}` key. A trailing `$$` suffix is
   stripped from submitted input and uses the same delayed Enter mode. Otherwise,
   Enter must be written explicitly as `{Enter}` or `{C-m}` when needed. If `$$`
-  is the entire submitted input, mmux sends only the delayed `{Enter}`. `Esc` or
-  focused `Cancel` closes without sending. Focused text inputs in mmux set the
-  terminal cursor to the insertion point and use a blinking bar cursor while the
-  TUI owns the screen.
+  is the entire submitted input, mmux sends only the delayed `{Enter}`. A
+  successful send refreshes the detail pane only when it is in snapshot mode;
+  monitor mode keeps its own refresh cadence. `Esc` or focused `Cancel` closes
+  without sending. Focused text inputs in mmux set the terminal cursor to the
+  insertion point and use a blinking bar cursor while the TUI owns the screen.
 - Pressing `n` opens a centered `New Session` modal with padded content, a
   bordered session-name text field, a horizontal separator, and `Cancel` /
   `Ok` buttons in the button bar. In multi-host mode, the modal shows a Host
@@ -722,7 +723,8 @@ to cycle `Input -> Ok -> Cancel`; `Enter` exits and applies `Ok` if selected,
 or sends from non-empty Send Keys input; Send Keys Ctrl-Enter sends the input
 and follows with `{Enter}` after 500 ms; a trailing `$$` suffix on Send Keys
 input requests the same follow-up Enter; `$$` alone sends only the delayed
-Enter; `Esc` is `Cancel`.
+Enter; successful Send Keys submissions refresh snapshot detail but not monitor
+detail; `Esc` is `Cancel`.
 
 ### Portrait Mode
 

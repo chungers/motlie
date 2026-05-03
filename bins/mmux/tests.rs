@@ -2014,7 +2014,8 @@ async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("send-keys -l -t '$1' 1", "");
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("capture-pane -ep", "updated screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2057,6 +2058,7 @@ async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
 
     assert!(app.modal.is_none());
     assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.lines, vec!["updated screen".to_string()]);
 }
 
 #[tokio::test]
@@ -2064,7 +2066,8 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("send-keys -l -t '$1' 1", "");
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("capture-pane -ep", "updated screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2095,6 +2098,50 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
 
     assert!(app.modal.is_none());
     assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.lines, vec!["updated screen".to_string()]);
+}
+
+#[tokio::test]
+async fn send_keys_modal_does_not_force_refresh_in_monitor_mode() {
+    let mock = MockTransport::new()
+        .with_error("capture-pane -ep", "snapshot capture should not run")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+        session_id: Some("$1".to_string()),
+        host_id: Some(local_host_id()),
+    }));
+    app.set_detail_text("monitor screen".to_string());
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.source.mode(), DetailMode::Monitor);
+    assert_eq!(app.detail.lines, vec!["monitor screen".to_string()]);
 }
 
 #[tokio::test]
@@ -2102,7 +2149,8 @@ async fn send_keys_modal_ctrl_enter_sends_keys_then_enter_and_closes() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
-        .with_response("send-keys -t '$1' Enter", "");
+        .with_response("send-keys -t '$1' Enter", "")
+        .with_response("capture-pane -ep", "updated screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2141,7 +2189,8 @@ async fn send_keys_modal_suffix_shorthand_sends_keys_then_enter_and_closes() {
         .with_error("send-keys -l -t '$1' '1$$'", "should strip $$ suffix")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
-        .with_response("send-keys -t '$1' Enter", "");
+        .with_response("send-keys -t '$1' Enter", "")
+        .with_response("capture-pane -ep", "updated screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2179,7 +2228,8 @@ async fn send_keys_modal_suffix_only_sends_delayed_enter_and_closes() {
     let mock = MockTransport::new()
         .with_error("send-keys -l -t '$1'", "$$ should not send literal text")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("send-keys -t '$1' Enter", "");
+        .with_response("send-keys -t '$1' Enter", "")
+        .with_response("capture-pane -ep", "updated screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2217,7 +2267,8 @@ async fn send_keys_modal_suffix_shorthand_only_applies_at_end() {
     let mock = MockTransport::new()
         .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("1$$2", "");
+        .with_response("1$$2", "")
+        .with_response("capture-pane -ep", "updated screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2256,7 +2307,8 @@ async fn send_keys_modal_sends_explicit_special_key_sequence() {
         .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
-        .with_response("send-keys -t '$1' Tab", "");
+        .with_response("send-keys -t '$1' Tab", "")
+        .with_response("capture-pane -ep", "updated screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
