@@ -25,6 +25,7 @@ use crate::model::{
 const TAG_PREFIX: &str = "mmux";
 const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
+const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "@@";
 
 pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
     load_motd_from(host, Path::new("/etc/motd")).await
@@ -1448,6 +1449,7 @@ async fn send_keys_from_modal(
     input: String,
     mode: SendKeysSubmitMode,
 ) -> Result<bool> {
+    let (input, mode) = normalize_send_keys_input(input, mode);
     if input.is_empty() {
         app.status = StatusBanner::info("keys are empty");
         return Ok(false);
@@ -1498,6 +1500,17 @@ async fn send_keys_from_modal(
         }
     }
     Ok(true)
+}
+
+fn normalize_send_keys_input(
+    input: String,
+    mode: SendKeysSubmitMode,
+) -> (String, SendKeysSubmitMode) {
+    if let Some(input) = input.strip_suffix(SEND_KEYS_THEN_ENTER_SUFFIX) {
+        (input.to_string(), SendKeysSubmitMode::ThenEnterAfterDelay)
+    } else {
+        (input, mode)
+    }
 }
 
 async fn open_session_key_values_modal(
