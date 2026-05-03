@@ -56,7 +56,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` status-bar label. |
 | 2026-04-27 | @gpt55-dgx | Moved the host label from the status bar into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
-| 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
+| 2026-05-03 | @codex | Changed portrait mode default T/B split to 35:65 so the session list pane is taller. |
 | 2026-04-26 | @gpt55-dgx | Added the `h` key for an About modal showing the motlie logo and build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
@@ -172,7 +172,7 @@ vertical split:
 - `B`: detail pane
 - one-row top status bar and one-row bottom command/status bar
 
-The initial T/B ratio is 30:70, giving the detail pane more vertical space by
+The initial T/B ratio is 35:65, giving the session list more vertical space by
 default. `Ctrl-Up` / `Ctrl-Down` can resize the split after startup. Portrait
 mode clamps the split so both `T` and `B` keep at least 15% height.
 
