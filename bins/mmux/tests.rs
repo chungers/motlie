@@ -2411,6 +2411,45 @@ async fn send_keys_modal_ctrl_enter_sends_keys_then_enter_and_closes() {
 }
 
 #[tokio::test]
+async fn send_keys_modal_suffix_shorthand_sends_keys_then_enter_and_closes() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -l -t '$1' 1@@", "should strip @@ suffix")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' Enter", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1@@".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
 async fn send_keys_modal_sends_explicit_special_key_sequence() {
     let mock = MockTransport::new()
         .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
