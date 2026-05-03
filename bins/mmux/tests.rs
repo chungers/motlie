@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    transport::MockTransport, HostHandle, SessionId, SessionInfo, TransportKind, SSH_DEFAULT_PORT,
+    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
+    StatusStyle, TransportKind, SSH_DEFAULT_PORT,
 };
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -10,9 +11,11 @@ use ratatui::Terminal;
 
 use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS,
-    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MOTLIE_PLACEHOLDER,
-    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
+    HOST_COLOR_SQUARE, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
+    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE,
+    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
+    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
     handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
@@ -23,14 +26,18 @@ use crate::detail::{
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    SelectedSession, SessionRow,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession,
+    SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow,
+    SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
-    detail_text_for_render, draw, modal_content, motd_render_text, normal_motd_height,
-    session_list_line, session_recency_text, sessions_title, short_build_git_sha, status_line,
-    status_line_text, top_status_line, use_compact_placeholder,
+    detail_text_for_render, draw, key_value_key_column_width, modal_content, motd_render_text,
+    normal_motd_height, session_key_values_footer_line, session_list_line, session_recency_text,
+    sessions_title, short_build_git_sha, status_line, status_line_text, top_status_line,
+    use_compact_placeholder,
 };
 use crate::target_host::resolve_ip_address;
+use crate::{prepare_attach_status, restore_attach_status};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id).unwrap()
@@ -87,6 +94,7 @@ fn make_row_at(session: SessionInfo, now: u64) -> SessionRow {
         local_now: now,
         activity_observed_at_local,
         session,
+        selected_tag: None,
     }
 }
 
@@ -98,7 +106,16 @@ fn make_row_for_host(session: SessionInfo, host_id: HostId, host_label: &str) ->
         local_now: u64::MAX,
         activity_observed_at_local,
         session,
+        selected_tag: None,
     }
+}
+
+fn with_selected_tag(mut row: SessionRow, value: &str) -> SessionRow {
+    row.selected_tag = Some(SessionSelectedTag {
+        key: "owner".to_string(),
+        value: value.to_string(),
+    });
+    row
 }
 
 fn to_rows(sessions: Vec<SessionInfo>) -> Vec<SessionRow> {
@@ -109,6 +126,7 @@ fn fleet_with(handle: HostHandle) -> HostFleet {
     HostFleet::from_entries(vec![HostEntry {
         id: local_host_id(),
         label: "host".to_string(),
+        alias: "host".to_string(),
         ip_address: "unknown".to_string(),
         handle,
     }])
@@ -122,8 +140,51 @@ fn make_selected(host_id: HostId, host_label: &str, id: &str, name: &str) -> Sel
     SelectedSession {
         host_id,
         host_label: host_label.to_string(),
-        id: id.to_string(),
-        name: name.to_string(),
+        info: session(name, id),
+    }
+}
+
+fn test_selected_session() -> SelectedSession {
+    make_selected(local_host_id(), "host", "$1", "dev")
+}
+
+fn test_new_session_modal(input: &str, button: Button) -> ModalState {
+    ModalState::NewSession {
+        ui: NewSessionModalUi {
+            input: input.to_string(),
+            hosts: vec![NewSessionHostChoice {
+                id: local_host_id(),
+                label: "host".to_string(),
+            }],
+            host_index: 0,
+            env_rows: Vec::new(),
+            env_key_input: String::new(),
+            env_value_input: String::new(),
+            focus: NewSessionFocus::Name,
+            button,
+        },
+    }
+}
+
+fn test_session_tags_modal(
+    tags: Vec<SessionKeyValueRow>,
+    selected_key: Option<&str>,
+    key_input: &str,
+    value_input: &str,
+    focus: SessionKeyValueFocus,
+) -> ModalState {
+    ModalState::SessionKeyValues {
+        session: test_selected_session(),
+        ui: SessionKeyValueModalUi {
+            kind: SessionKeyValueKind::Tags,
+            original_rows: tags.clone(),
+            rows: tags,
+            original_selected_key: selected_key.map(str::to_string),
+            selected_key: selected_key.map(str::to_string),
+            key_input: key_input.to_string(),
+            value_input: value_input.to_string(),
+            focus,
+        },
     }
 }
 
@@ -146,6 +207,10 @@ async fn remove_test_file(path: &std::path::Path) {
 }
 
 fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
+    render_to_lines(app, width, height).join("")
+}
+
+fn render_to_lines(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
@@ -154,9 +219,35 @@ fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
         .backend()
         .buffer()
         .content()
+        .chunks(width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect()
+}
+
+fn modal_border_width(lines: &[String], title: &str) -> usize {
+    let border = lines
         .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>()
+        .find(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
+        .expect("expected modal top border");
+    let left = border
+        .chars()
+        .position(|ch| ch == '┌')
+        .expect("expected modal left corner");
+    let right = border
+        .chars()
+        .enumerate()
+        .filter_map(|(index, ch)| (ch == '┐').then_some(index))
+        .last()
+        .expect("expected modal right corner");
+    right - left + 1
+}
+
+fn modal_border_left(lines: &[String], title: &str) -> usize {
+    lines
+        .iter()
+        .find(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
+        .and_then(|line| line.chars().position(|ch| ch == '┌'))
+        .expect("expected modal left border")
 }
 
 #[test]
@@ -235,7 +326,8 @@ fn status_line_omits_layout_mode() {
         false,
     );
     let normal_status = status_line_text(&normal);
-    assert!(normal_status.contains(" ↑/↓ sel"));
+    assert!(normal_status.contains(" ↑/↓"));
+    assert!(!normal_status.contains(" ↑/↓ sel"));
     assert!(!normal_status.contains("keys"));
     assert!(!normal_status.contains("host"));
     assert!(!normal_status.contains("(h)elp"));
@@ -247,9 +339,12 @@ fn status_line_omits_layout_mode() {
             "help",
             "pane",
             "monitor",
-            "enter/attach",
+            "attach",
             "new",
             "kill",
+            "rename",
+            "tags",
+            "group",
             "quit",
             "layout",
             "mod-←/→ resize",
@@ -266,7 +361,8 @@ fn status_line_omits_layout_mode() {
         false,
     );
     let portrait_status = status_line_text(&portrait);
-    assert!(portrait_status.contains(" ↑/↓ sel"));
+    assert!(portrait_status.contains(" ↑/↓"));
+    assert!(!portrait_status.contains(" ↑/↓ sel"));
     assert!(portrait_status.contains("pane"));
     assert_status_order(
         &portrait_status,
@@ -274,9 +370,12 @@ fn status_line_omits_layout_mode() {
             "help",
             "pane",
             "monitor",
-            "enter/attach",
+            "attach",
             "new",
             "kill",
+            "rename",
+            "tags",
+            "group",
             "quit",
             "layout",
             "mod-↑/↓ resize",
@@ -285,7 +384,7 @@ fn status_line_omits_layout_mode() {
 }
 
 #[test]
-fn status_line_underlines_command_mnemonics() {
+fn status_line_styles_command_mnemonics() {
     let app = AppState::new(
         "host".to_string(),
         LayoutMode::Normal,
@@ -293,15 +392,45 @@ fn status_line_underlines_command_mnemonics() {
         false,
     );
     let line = status_line(&app);
-    let underlined = line
+    let styled_mnemonics = line
         .spans
         .iter()
-        .filter(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+        .filter(|span| {
+            span.style.add_modifier.contains(Modifier::BOLD)
+                && span.style.fg == Some(STATUS_BAR_MNEMONIC_FG)
+                && !span.style.add_modifier.contains(Modifier::UNDERLINED)
+        })
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(underlined, "hpmankql");
-    assert_eq!(status_line_text(&app), " ↑/↓ sel | help | pane | monitor | enter/attach | new | kill | quit | layout | mod-←/→ resize ");
+    assert_eq!(styled_mnemonics, "hpmankrtgql");
+    assert_eq!(
+        status_line_text(&app),
+        " ↑/↓ | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
+    );
+}
+
+#[test]
+fn session_tags_footer_styles_tag_command_mnemonics() {
+    let line = session_key_values_footer_line(SessionKeyValueKind::Tags, "[Cancel]   Ok ");
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let styled_mnemonics = line
+        .spans
+        .iter()
+        .filter(|span| {
+            span.style.add_modifier.contains(Modifier::BOLD)
+                && span.style.fg == Some(STATUS_BAR_MNEMONIC_FG)
+                && span.style.bg == Some(STATUS_BAR_BG)
+        })
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(text, "[Cancel]   Ok  | update | x unset | check");
+    assert_eq!(styled_mnemonics, "uxc");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -356,9 +485,60 @@ fn sessions_title_only_includes_count() {
 
 #[test]
 fn session_list_line_hides_stable_id() {
-    let line = session_list_line(&make_row(session("dev", "$42")), true, 0, 16);
+    let line = session_list_line(&make_row(session("dev", "$42")), true, None, 0, 16);
     assert!(line.starts_with(">  dev"));
     assert!(!line.contains("$42"));
+}
+
+#[test]
+fn session_list_line_right_justifies_selected_tag_value() {
+    let mut row = make_row_at(session_with_times("dev", "$42", 100, 110), 120);
+    row.selected_tag = Some(SessionSelectedTag {
+        key: "owner".to_string(),
+        value: "platform".to_string(),
+    });
+
+    let line = session_list_line(&row, true, None, 0, 48);
+    let metadata = session_recency_text(&row);
+    let tag_start = line.find("platform").unwrap();
+    let activity = metadata.split(" / ").next().unwrap().trim();
+    let activity_start = line.find(activity).unwrap();
+
+    assert!(line.contains("dev"), "{line:?}");
+    assert!(line.contains("platform"), "{line:?}");
+    assert!(!line.contains("dev platform"), "{line:?}");
+    assert_eq!(
+        activity_start.saturating_sub(tag_start + "platform".len()),
+        2
+    );
+    assert!(!line.contains("owner"));
+}
+
+#[tokio::test]
+async fn refresh_sessions_loads_selected_tag_value_for_rows() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "display-message -p '__MOTLIE_TAGS__ $1'",
+            "__MOTLIE_TAGS__ $1\n@mmux/__selected-key owner\n@mmux/owner platform\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+
+    refresh_sessions_quiet(&fleet, &mut app, false)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        app.session_list.rows.first().and_then(|row| row.selected_tag.as_ref()),
+        Some(SessionSelectedTag { key, value }) if key == "owner" && value == "platform"
+    ));
 }
 
 #[test]
@@ -387,6 +567,93 @@ fn session_list_sorts_most_recent_activity_first() {
 }
 
 #[test]
+fn session_list_tag_group_orders_groups_by_recent_activity() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    let rows = vec![
+        make_row_for_host(
+            session_with_times("no-tag-fresh", "$1", 10, 900),
+            ssh_host_id("ssh://a"),
+            "alpha",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("b-alpha-low", "$2", 10, 100),
+                ssh_host_id("ssh://b"),
+                "beta",
+            ),
+            "alpha",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("a-alpha-high", "$3", 10, 300),
+                ssh_host_id("ssh://a"),
+                "alpha",
+            ),
+            "alpha",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("b-same", "$4", 10, 400),
+                ssh_host_id("ssh://b"),
+                "beta",
+            ),
+            "same",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("z-same", "$5", 10, 400),
+                ssh_host_id("ssh://a"),
+                "alpha",
+            ),
+            "same",
+        ),
+        with_selected_tag(
+            make_row_for_host(
+                session_with_times("empty-selected-tag", "$7", 10, 800),
+                ssh_host_id("ssh://a"),
+                "alpha",
+            ),
+            "",
+        ),
+        make_row_for_host(
+            session_with_times("no-tag-old", "$6", 10, 100),
+            ssh_host_id("ssh://b"),
+            "beta",
+        ),
+    ];
+
+    app.session_list.set_rows_grouped_by_tag(rows, &fleet);
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "z-same",
+            "b-same",
+            "a-alpha-high",
+            "b-alpha-low",
+            "no-tag-fresh",
+            "empty-selected-tag",
+            "no-tag-old"
+        ]
+    );
+}
+
+#[test]
 fn activity_sort_preserves_selection_by_stable_id() {
     let mut app = AppState::new(
         "host".to_string(),
@@ -401,7 +668,7 @@ fn activity_sort_preserves_selection_by_stable_id() {
     app.session_list.selected = 0;
     let previous = app
         .selected_session()
-        .map(|session| (session.host_id, session.id));
+        .map(|session| (session.host_id.clone(), session.id().to_string()));
 
     app.session_list.set_rows_sorted_by_activity(to_rows(vec![
         session_with_times("selected", "$1", 10, 100),
@@ -410,8 +677,121 @@ fn activity_sort_preserves_selection_by_stable_id() {
     app.preserve_selection(previous);
 
     assert_eq!(
-        app.selected_session().map(|session| session.name),
+        app.selected_session()
+            .map(|session| session.name().to_string()),
         Some("selected".to_string())
+    );
+}
+
+#[tokio::test]
+async fn g_toggles_tag_grouping_from_list_focus_and_selects_top_row() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.session_list.rows = vec![
+        with_selected_tag(
+            make_row(session_with_times("selected", "$1", 10, 300)),
+            "zeta",
+        ),
+        with_selected_tag(
+            make_row(session_with_times("other", "$2", 10, 400)),
+            "alpha",
+        ),
+    ];
+    app.session_list.selected = 0;
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.session_list.selected, 0);
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::TagGroup);
+    assert_eq!(app.status.text(), "group: tag");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["other", "selected"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("other".to_string())
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert_eq!(app.status.text(), "sort: activity");
+    assert_eq!(app.session_list.selected, 0);
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["other", "selected"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("other".to_string())
+    );
+}
+
+#[tokio::test]
+async fn quiet_refresh_preserves_tag_group_mode() {
+    let mock = MockTransport::new()
+        .with_response(
+            "list-sessions",
+            "__MOTLIE_S__ zed $1 10 0 1  500\n__MOTLIE_S__ alpha $2 10 0 1  400\n",
+        )
+        .with_response(
+            "display-message -p '__MOTLIE_TAGS__ $2'",
+            "__MOTLIE_TAGS__ $1\n@mmux/__selected-key owner\n@mmux/owner zeta\n__MOTLIE_TAGS__ $2\n@mmux/__selected-key owner\n@mmux/owner alpha\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.sort_mode = SessionSortMode::TagGroup;
+
+    refresh_sessions_quiet(&fleet, &mut app, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zed", "alpha"]
     );
 }
 
@@ -474,7 +854,8 @@ async fn refresh_forces_detail_when_selected_session_changes() {
     .unwrap();
 
     assert_eq!(
-        app.selected_session().map(|session| session.name),
+        app.selected_session()
+            .map(|session| session.name().to_string()),
         Some("replacement".to_string())
     );
     assert_eq!(app.detail.lines, vec!["replacement screen".to_string()]);
@@ -569,6 +950,7 @@ fn session_list_line_right_aligns_active_and_age() {
     let first = session_list_line(
         &make_row_at(session_with_times("dev", "$1", 0, 7_020), now),
         true,
+        None,
         0,
         42,
     );
@@ -578,6 +960,7 @@ fn session_list_line_right_aligns_active_and_age() {
             now,
         ),
         false,
+        None,
         0,
         42,
     );
@@ -636,7 +1019,7 @@ fn selection_preserves_stable_id_after_rename() {
     app.preserve_selection(Some((local_host_id(), "$1".to_string())));
     assert_eq!(app.session_list.selected, 0);
     assert_eq!(
-        app.selected_session().map(|s| s.name),
+        app.selected_session().map(|s| s.name().to_string()),
         Some("new".to_string())
     );
 }
@@ -670,7 +1053,9 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
     reentered.preserve_selection(retained.selected_session_key());
 
     assert_eq!(
-        reentered.selected_session().map(|session| session.name),
+        reentered
+            .selected_session()
+            .map(|session| session.name().to_string()),
         Some("build".to_string())
     );
     assert_eq!(reentered.layout.mode, LayoutMode::Portrait);
@@ -709,7 +1094,9 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
 
     assert_eq!(reentered.session_list.selected, 1);
     assert_eq!(
-        reentered.selected_session().map(|session| session.name),
+        reentered
+            .selected_session()
+            .map(|session| session.name().to_string()),
         Some("three".to_string())
     );
 }
@@ -950,7 +1337,7 @@ async fn q_exits_like_ctrl_c() {
 }
 
 #[tokio::test]
-async fn a_attaches_like_enter() {
+async fn a_attaches_selected_session() {
     let fleet = local_fleet();
     let mut app = app_with_session();
 
@@ -962,26 +1349,128 @@ async fn a_attaches_like_enter() {
     .await
     .unwrap();
 
-    assert!(matches!(
-        outcome,
-        KeyOutcome::Select(SelectedSession { name, .. }) if name == "dev"
-    ));
+    assert!(matches!(outcome, KeyOutcome::Select(selected) if selected.name() == "dev"));
 }
 
 #[tokio::test]
-async fn g_no_longer_attaches() {
+async fn enter_no_longer_attaches() {
     let fleet = local_fleet();
     let mut app = app_with_session();
 
     let outcome = handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
     )
     .await
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
+}
+
+#[tokio::test]
+async fn attach_status_overrides_are_set_and_restored() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-option -q -t '$1' status-style",
+            "status-style bg=green,fg=black\n",
+        )
+        .with_response(
+            "show-option -q -t '$1' status-left-length",
+            "status-left-length 32\n",
+        )
+        .with_response(
+            "show-option -q -t '$1' status-left",
+            "status-left \"session: #{session_name}\"\n",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        )
+        .with_response("set-option -t '$1' status-style 'bg=green,fg=black'", "")
+        .with_response("set-option -t '$1' status-left-length 32", "")
+        .with_response(
+            "set-option -t '$1' status-left 'session: #{session_name}'",
+            "",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+
+    let status = target.status().await.unwrap();
+    let snapshot = prepare_attach_status(&status).await.unwrap();
+    assert_eq!(
+        snapshot.style,
+        Some(StatusStyle::new("bg=green,fg=black").unwrap())
+    );
+    assert_eq!(
+        snapshot.left,
+        Some(StatusLeft::new("session: #{session_name}").unwrap())
+    );
+    assert_eq!(
+        snapshot.left_length,
+        Some(StatusLeftLength::new(32).unwrap())
+    );
+    restore_attach_status(&status, Some(snapshot)).await;
+}
+
+#[tokio::test]
+async fn attach_status_overrides_unset_when_no_previous_local_values() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response("show-option -q -t '$1' status-left-length", "")
+        .with_response("show-option -q -t '$1' status-left", "")
+        .with_response(
+            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        )
+        .with_response("set-option -u -t '$1' status-style", "")
+        .with_response("set-option -u -t '$1' status-left-length", "")
+        .with_response("set-option -u -t '$1' status-left", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+
+    let status = target.status().await.unwrap();
+    let snapshot = prepare_attach_status(&status).await.unwrap();
+    assert_eq!(snapshot.style, None);
+    assert_eq!(snapshot.left, None);
+    assert_eq!(snapshot.left_length, None);
+    restore_attach_status(&status, Some(snapshot)).await;
+}
+
+#[tokio::test]
+async fn s_no_longer_groups_sessions() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::List;
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, KeyOutcome::Continue));
+    assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
 }
 
 #[tokio::test]
@@ -1001,7 +1490,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(matches!(app.modal.as_ref(), Some(ModalState::Help)));
     let view = modal_content(app.modal.as_ref().unwrap());
     assert_eq!(view.title, " Help ");
-    assert_eq!(view.active_button, Button::Ok);
+    assert_eq!(view.active_button, Some(Button::Ok));
     assert_eq!(view.buttons, "[Ok]");
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
@@ -1048,32 +1537,1166 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(app.modal.is_none());
 }
 
+#[tokio::test]
+async fn kill_modal_tab_cycles_cancel_and_ok() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Cancel,
+            ..
+        })
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Ok,
+            ..
+        })
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Cancel,
+            ..
+        })
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::KillSession {
+            button: Button::Ok,
+            ..
+        })
+    ));
+}
+
 #[test]
 fn modal_content_separates_body_from_button_bar() {
-    let new_session = modal_content(&ModalState::NewSession {
-        input: "dev".to_string(),
-        button: Button::Ok,
-    });
+    let new_session = modal_content(&test_new_session_modal("dev", Button::Ok));
     assert_eq!(new_session.title, " New Session ");
-    assert_eq!(new_session.active_button, Button::Ok);
+    assert_eq!(new_session.active_button, Some(Button::Ok));
     assert_eq!(new_session.buttons, " Cancel    [Ok]");
     assert!(matches!(
         new_session.body,
-        ModalBody::NewSession { ref input } if input == "dev"
+        ModalBody::NewSession { ref input, host_label: None, .. } if input == "dev"
     ));
     assert!(!new_session.body_text().contains("[Ok]"));
 
     let kill = modal_content(&ModalState::KillSession {
-        host_id: local_host_id(),
-        host_label: "host".to_string(),
-        id: "$1".to_string(),
-        name: "dev".to_string(),
+        session: test_selected_session(),
         button: Button::Cancel,
     });
     assert_eq!(kill.title, " Kill Session ");
-    assert_eq!(kill.active_button, Button::Cancel);
+    assert_eq!(kill.active_button, Some(Button::Cancel));
     assert_eq!(kill.body_text(), "Kill session dev?");
     assert_eq!(kill.buttons, "[Cancel]    Ok ");
+
+    let rename = modal_content(&ModalState::RenameSession {
+        session: test_selected_session(),
+        input: "dev".to_string(),
+        button: Button::Ok,
+    });
+    assert_eq!(rename.title, " Rename Session ");
+    assert_eq!(rename.active_button, Some(Button::Ok));
+    assert_eq!(rename.buttons, " Cancel    [Ok]");
+    assert!(matches!(
+        rename.body,
+        ModalBody::RenameSession { ref input } if input == "dev"
+    ));
+    assert!(!rename.body_text().contains("[Ok]"));
+
+    let tags = modal_content(&test_session_tags_modal(
+        vec![SessionKeyValueRow {
+            key: "owner".to_string(),
+            value: "platform".to_string(),
+        }],
+        Some("owner"),
+        "phase",
+        "build",
+        SessionKeyValueFocus::Value,
+    ));
+    assert_eq!(tags.title, " Session Tags ");
+    assert_eq!(tags.active_button, None);
+    assert_eq!(tags.buttons, " Cancel     Ok ");
+    assert!(matches!(
+        tags.body,
+        ModalBody::SessionKeyValues { ref key_input, ref value_input, .. }
+            if key_input == "phase" && value_input == "build"
+    ));
+    assert!(tags.body_text().contains("owner    platform ✓"));
+
+    let tags_ok = modal_content(&test_session_tags_modal(
+        vec![SessionKeyValueRow {
+            key: "owner".to_string(),
+            value: "platform".to_string(),
+        }],
+        Some("owner"),
+        "",
+        "",
+        SessionKeyValueFocus::Ok,
+    ));
+    assert_eq!(tags_ok.active_button, Some(Button::Ok));
+    assert_eq!(tags_ok.buttons, " Cancel    [Ok]");
+}
+
+#[tokio::test]
+async fn new_session_modal_selects_host_in_multi_host_mode() {
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
+        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.rows = vec![make_row_for_host(
+        session("dev", "$1"),
+        ssh_host_id("ssh://b"),
+        "beta",
+    )];
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    let modal = app.modal.as_ref().expect("new session modal opened");
+    let view = modal_content(modal);
+    assert!(matches!(
+        view.body,
+        ModalBody::NewSession {
+            ref host_label,
+            focus: NewSessionFocus::Name,
+            ..
+        } if host_label.as_deref() == Some("beta")
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    let modal = app.modal.as_ref().expect("new session modal remains open");
+    let view = modal_content(modal);
+    assert!(matches!(
+        view.body,
+        ModalBody::NewSession {
+            ref host_label,
+            focus: NewSessionFocus::Host,
+            ..
+        } if host_label.as_deref() == Some("alpha")
+    ));
+}
+
+#[tokio::test]
+async fn new_session_modal_creates_on_selected_multi_host() {
+    let alpha = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_error("new-session", "wrong host")
+                .with_response("list-sessions", ""),
+        ),
+        None,
+    );
+    let beta = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_response("new-session -d -s 'build'", "")
+                .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
+                .with_response(
+                    "display-message -p '__MOTLIE_TAGS__ $9'",
+                    "__MOTLIE_TAGS__ $9\n",
+                ),
+        ),
+        None,
+    );
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", alpha),
+        ssh_host_entry("ssh://b", "beta", "y", beta),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.rows = vec![make_row_for_host(
+        session("selected", "$1"),
+        ssh_host_id("ssh://b"),
+        "beta",
+    )];
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "build".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.status.text(), "created session build on beta");
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| (row.host_label.as_str(), row.session.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("beta", "build")]
+    );
+}
+
+#[tokio::test]
+async fn kill_session_modal_clears_selected_multi_host_row() {
+    let alpha = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_response("list-sessions", "__MOTLIE_S__ shell $1 10 0 1  100\n")
+                .with_error("kill-session", "wrong host"),
+        ),
+        None,
+    );
+    let beta = HostHandle::new(
+        TransportKind::Mock(
+            MockTransport::new()
+                .with_response("kill-session -t '$7'", "")
+                .with_response("list-sessions", "__MOTLIE_S__ build $7 10 0 1  100\n")
+                .with_response(
+                    "display-message -p '__MOTLIE_TAGS__ $7'",
+                    "__MOTLIE_TAGS__ $7\n",
+                ),
+        ),
+        None,
+    );
+    let fleet = HostFleet::from_entries(vec![
+        ssh_host_entry("ssh://a", "alpha", "x", alpha),
+        ssh_host_entry("ssh://b", "beta", "y", beta),
+    ]);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+    app.session_list.rows = vec![
+        make_row_for_host(session("shell", "$1"), ssh_host_id("ssh://a"), "alpha"),
+        make_row_for_host(session("build", "$7"), ssh_host_id("ssh://b"), "beta"),
+    ];
+    app.session_list.selected = 1;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.status.text(), "killed session build on beta");
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| (row.host_label.as_str(), row.session.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "shell")]
+    );
+}
+
+#[test]
+fn session_tags_modal_renders_list_and_distinct_input_row() {
+    let mut app = app_with_session();
+    app.modal = Some(test_session_tags_modal(
+        vec![SessionKeyValueRow {
+            key: "owner".to_string(),
+            value: "platform".to_string(),
+        }],
+        Some("owner"),
+        "phase",
+        "build",
+        SessionKeyValueFocus::Value,
+    ));
+
+    let screen_lines = render_to_lines(&mut app, 80, 24);
+    let screen = screen_lines.join("");
+    let footer = screen_lines
+        .iter()
+        .find(|line| line.contains("Cancel") && line.contains("update"))
+        .expect("expected session tags footer");
+
+    assert_eq!(
+        modal_border_width(&screen_lines, "Session Tags"),
+        MODAL_MIN_WIDTH as usize
+    );
+    let cancel_start = footer
+        .find("Cancel")
+        .map(|byte_index| footer[..byte_index].chars().count());
+    assert_eq!(
+        cancel_start,
+        Some(
+            modal_border_left(&screen_lines, "Session Tags")
+                + 1
+                + MODAL_CONTENT_HORIZONTAL_PADDING as usize
+                + 1
+        )
+    );
+    assert!(screen.contains("owner"));
+    assert!(screen.contains("platform"));
+    assert!(screen.contains("phase"));
+    assert!(screen.contains("build"));
+    assert!(screen.contains("update"));
+    assert!(screen.contains("x unset"));
+    assert!(screen.contains("check"));
+    assert!(!screen.contains("+"));
+    assert!(!screen.contains("┬"));
+    assert!(!screen.contains("┼"));
+    assert!(!screen.contains("┴"));
+    assert!(!screen.contains("[✓]"));
+    assert!(!screen.contains("[+]"));
+    assert!(!screen.contains("[phase]"));
+    assert!(!screen.contains("[build]"));
+}
+
+#[test]
+fn session_key_values_empty_list_defaults_key_input_to_thirty_percent() {
+    let rows = Vec::<SessionKeyValueRow>::new();
+
+    assert_eq!(key_value_key_column_width(62, &rows, ""), 18);
+    assert_eq!(key_value_key_column_width(62, &rows, "owner"), 18);
+    assert_eq!(
+        key_value_key_column_width(62, &rows, "abcdefghijklmnopqrstuvwxyz"),
+        30
+    );
+}
+
+#[test]
+fn session_key_values_key_column_uses_longest_existing_key_when_rows_exist() {
+    let tags = vec![SessionKeyValueRow {
+        key: "owner".to_string(),
+        value: "platform".to_string(),
+    }];
+
+    assert_eq!(key_value_key_column_width(62, &tags, ""), 9);
+}
+
+#[test]
+fn session_tags_modal_list_caps_at_five_rows_and_scrolls() {
+    let tags = (0..7)
+        .map(|index| SessionKeyValueRow {
+            key: format!("tag{index}"),
+            value: format!("value{index}"),
+        })
+        .collect::<Vec<_>>();
+    let mut app = app_with_session();
+    app.modal = Some(test_session_tags_modal(
+        tags.clone(),
+        None,
+        "new",
+        "next",
+        SessionKeyValueFocus::Row(0),
+    ));
+
+    let screen = render_to_string(&mut app, 80, 24);
+    assert!(screen.contains("> tag0"));
+    for index in 0..5 {
+        assert!(screen.contains(&format!("tag{index}")));
+    }
+    assert!(!screen.contains("tag5"));
+    assert!(!screen.contains("tag6"));
+
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.focus = SessionKeyValueFocus::Row(6);
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    let screen = render_to_string(&mut app, 80, 24);
+    assert!(screen.contains("> tag6"));
+    assert!(!screen.contains("tag0"));
+    assert!(!screen.contains("tag1"));
+    for index in 2..7 {
+        assert!(screen.contains(&format!("tag{index}")));
+    }
+}
+
+#[tokio::test]
+async fn r_opens_rename_only_from_session_list_focus() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(app.modal.is_none());
+
+    app.layout.focus = Focus::List;
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::RenameSession {
+            session,
+            input,
+            button,
+            ..
+        }) if session.id() == "$1" && session.name() == "dev" && input == "dev" && *button == Button::Ok
+    ));
+}
+
+#[tokio::test]
+async fn rename_modal_renames_changed_session_by_stable_id() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("list-sessions", "__MOTLIE_S__ renamed $1 10 0 1  200\n")
+        .with_response("rename-session -t '$1' 'renamed'", "")
+        .with_response("capture-pane -ep", "renamed screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::RenameSession { input, .. }) = app.modal.as_mut() {
+        *input = "renamed".to_string();
+    } else {
+        panic!("expected rename modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("renamed".to_string())
+    );
+    assert_eq!(app.status.text(), "renamed session dev to renamed");
+}
+
+#[tokio::test]
+async fn t_opens_session_tags_modal_and_i_is_unassigned() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/b alpha\n@mmux/__selected-key a\n@mmux/a beta\n@other/a skip\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(app.modal.is_none());
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.kind == SessionKeyValueKind::Tags
+                && ui.rows
+                == vec![
+                    SessionKeyValueRow { key: "a".to_string(), value: "beta".to_string() },
+                    SessionKeyValueRow { key: "b".to_string(), value: "alpha".to_string() },
+                ]
+                && ui.selected_key.as_deref() == Some("a")
+                && ui.focus == SessionKeyValueFocus::Row(0)
+    ));
+}
+
+#[tokio::test]
+async fn new_session_modal_applies_staged_initial_environment() {
+    let mock = MockTransport::new()
+        .with_response(
+            "new-session -d -s 'build' -e 'BUILD_ID=42' -e 'MOTLIE=enabled'",
+            "",
+        )
+        .with_response("list-sessions", "__MOTLIE_S__ build $9 10 0 1  100\n")
+        .with_response(
+            "display-message -p '__MOTLIE_TAGS__ $9'",
+            "__MOTLIE_TAGS__ $9\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = AppState::new(
+        "host".to_string(),
+        LayoutMode::Normal,
+        "motd".to_string(),
+        false,
+    );
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "build".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "MOTLIE".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "enabled".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.env_rows == vec![SessionKeyValueRow { key: "MOTLIE".to_string(), value: "enabled".to_string() }]
+                && ui.focus == NewSessionFocus::EnvRow(0)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "BUILD_ID".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "42".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.env_rows == vec![
+                SessionKeyValueRow { key: "BUILD_ID".to_string(), value: "42".to_string() },
+                SessionKeyValueRow { key: "MOTLIE".to_string(), value: "enabled".to_string() },
+            ]
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.status.text(), "created session build");
+}
+
+#[tokio::test]
+async fn session_tags_modal_tab_cycles_edit_row_fields_ok_and_cancel() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Key
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Value
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Ok
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Cancel
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Ok
+    ));
+}
+
+#[tokio::test]
+async fn session_tags_modal_ok_from_keyboard_dismisses() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Ok
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "no tag changes on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_c_stages_selected_row() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "@mmux/a beta\n@mmux/b alpha\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.selected_key.as_deref() == Some("a")
+    ));
+    let view = modal_content(app.modal.as_ref().unwrap());
+    assert!(view.body_text().contains("a    beta ✓"));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.selected_key.is_none()
+    ));
+}
+
+#[tokio::test]
+async fn session_tags_modal_delete_updates_list() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/__selected-key a\n@mmux/a one\n@mmux/b two\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.rows == vec![SessionKeyValueRow { key: "b".to_string(), value: "two".to_string() }]
+                && ui.selected_key.is_none()
+                && ui.focus == SessionKeyValueFocus::Row(0)
+    ));
+    assert_eq!(app.status.text(), "staged delete tag a on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_update_uses_bottom_fields() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "@mmux/owner old\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.key_input == "owner" && ui.value_input == "old" && ui.focus == SessionKeyValueFocus::Value
+    ));
+
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.value_input = "new".to_string();
+        ui.focus = SessionKeyValueFocus::Key;
+    } else {
+        panic!("expected session tags modal");
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.rows == vec![SessionKeyValueRow { key: "owner".to_string(), value: "new".to_string() }]
+                && ui.focus == SessionKeyValueFocus::Row(0)
+    ));
+    assert_eq!(app.status.text(), "staged tag owner on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_cancel_discards_staged_changes() {
+    let mock = MockTransport::new()
+        .with_error("set-option -t '$1'", "cancel should not write tags")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.key_input = "owner".to_string();
+        ui.value_input = "platform".to_string();
+        ui.focus = SessionKeyValueFocus::Key;
+    } else {
+        panic!("expected session tags modal");
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.rows == vec![SessionKeyValueRow { key: "owner".to_string(), value: "platform".to_string() }]
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "discarded tag changes on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_ok_applies_staged_changes() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "display-message -p '__MOTLIE_TAGS__ $1'",
+            "__MOTLIE_TAGS__ $1\n@mmux/__selected-key added\n@mmux/added yes\n@mmux/owner new\n",
+        )
+        .with_response("show-options -t '$1'", "@mmux/keep yes\n@mmux/owner old\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.rows = vec![
+            SessionKeyValueRow {
+                key: "added".to_string(),
+                value: "yes".to_string(),
+            },
+            SessionKeyValueRow {
+                key: "owner".to_string(),
+                value: "new".to_string(),
+            },
+        ];
+        ui.selected_key = Some("added".to_string());
+        ui.focus = SessionKeyValueFocus::Ok;
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "applied tag changes on dev");
+    assert_eq!(
+        app.session_list.rows[0]
+            .selected_tag
+            .as_ref()
+            .map(|tag| (tag.key.as_str(), tag.value.as_str())),
+        Some(("added", "yes"))
+    );
+}
+
+#[tokio::test]
+async fn session_tags_modal_empty_value_does_not_dispatch() {
+    let mock = MockTransport::new()
+        .with_error("set-option -t '$1'", "should not set empty tag values")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.key_input = "owner".to_string();
+        ui.value_input.clear();
+        ui.focus = SessionKeyValueFocus::Value;
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal,
+        Some(ModalState::SessionKeyValues { .. })
+    ));
+    assert_eq!(app.status.text(), "tag value is empty");
+}
+
+#[tokio::test]
+async fn session_tags_modal_rejects_reserved_selected_key() {
+    let mock = MockTransport::new()
+        .with_error(
+            "set-option -t '$1' @mmux/__selected-key",
+            "should not overwrite selected tag marker from edit row",
+        )
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-options -t '$1'", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    if let Some(ModalState::SessionKeyValues { ui, .. }) = app.modal.as_mut() {
+        ui.key_input = "__selected-key".to_string();
+        ui.value_input = "owner".to_string();
+        ui.focus = SessionKeyValueFocus::Key;
+    } else {
+        panic!("expected session tags modal");
+    }
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal,
+        Some(ModalState::SessionKeyValues { .. })
+    ));
+    assert_eq!(app.status.text(), "tag key is reserved");
 }
 
 #[tokio::test]
@@ -1363,6 +2986,13 @@ fn ssh_host_entry(uri: &str, label: &str, ip: &str, handle: HostHandle) -> HostE
     HostEntry {
         id: ssh_host_id(uri),
         label: label.to_string(),
+        alias: uri
+            .strip_prefix("ssh://")
+            .unwrap_or(uri)
+            .split(['/', '?', ':'])
+            .next()
+            .unwrap_or(uri)
+            .to_string(),
         ip_address: ip.to_string(),
         handle,
     }
@@ -1410,6 +3040,7 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
     let single = HostFleet::from_entries(vec![HostEntry {
         id: local_host_id(),
         label: "h".to_string(),
+        alias: "h".to_string(),
         ip_address: "x".to_string(),
         handle: HostHandle::local(),
     }]);
@@ -1420,12 +3051,14 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
         HostEntry {
             id: ssh_host_id("ssh://a"),
             label: "alpha".to_string(),
+            alias: "a".to_string(),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://b"),
             label: "beta".to_string(),
+            alias: "b".to_string(),
             ip_address: "y".to_string(),
             handle: HostHandle::local(),
         },
@@ -1433,10 +3066,19 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
     assert!(multi.is_multi());
     assert_eq!(multi.len(), 2);
 
-    // host_label_width is 0 in single-host (column omitted) and the max of
-    // labels (capped) in multi-host.
-    assert_eq!(single.host_label_width(), 0);
-    assert_eq!(multi.host_label_width(), "alpha".len());
+    // host_marker_width is 0 in single-host (column omitted) and the width of
+    // the compact square marker in multi-host.
+    assert_eq!(single.host_marker_width(), 0);
+    assert_eq!(single.host_color(&local_host_id()), None);
+    assert_eq!(multi.host_marker_width(), HOST_COLOR_SQUARE.chars().count());
+    assert_eq!(
+        multi.host_color(&ssh_host_id("ssh://a")),
+        Some(HOST_COLOR_PALETTE[0])
+    );
+    assert_eq!(
+        multi.host_color(&ssh_host_id("ssh://b")),
+        Some(HOST_COLOR_PALETTE[1])
+    );
 }
 
 #[test]
@@ -1445,12 +3087,14 @@ fn fleet_entry_lookup_by_host_id() {
         HostEntry {
             id: ssh_host_id("ssh://a"),
             label: "alpha".to_string(),
+            alias: "a".to_string(),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://b"),
             label: "beta".to_string(),
+            alias: "b".to_string(),
             ip_address: "y".to_string(),
             handle: HostHandle::local(),
         },
@@ -1466,7 +3110,7 @@ fn fleet_entry_lookup_by_host_id() {
 }
 
 #[test]
-fn multi_host_top_status_shows_mode_and_count() {
+fn multi_host_top_status_shows_host_color_legend() {
     let mut app = AppState::new(
         "host".to_string(),
         LayoutMode::Normal,
@@ -1484,8 +3128,22 @@ fn multi_host_top_status_shows_mode_and_count() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(rendered.contains("multi-host mode [3]"));
-    assert!(!rendered.contains("alpha"));
+    assert!(rendered.starts_with("mmux ■ alpha ■ beta ■ gamma"));
+    let square_colors = line
+        .spans
+        .iter()
+        .filter(|span| span.content.as_ref() == HOST_COLOR_SQUARE)
+        .map(|span| span.style.fg)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        square_colors,
+        vec![
+            Some(HOST_COLOR_PALETTE[0]),
+            Some(HOST_COLOR_PALETTE[1]),
+            Some(HOST_COLOR_PALETTE[2]),
+        ]
+    );
+    assert!(!rendered.contains("multi-host mode"));
     assert!(!rendered.contains("10.0.0"));
     assert!(rendered.ends_with(" 12:34:56 "));
 }
@@ -1514,42 +3172,37 @@ fn multi_host_motd_pane_is_hidden() {
     let rendered = render_to_string(&mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-    assert!(rendered.contains("multi-host mode [2]"));
+    assert!(rendered.contains("mmux ■ alpha ■ beta"));
     assert!(rendered.contains("Sessions [1]"));
 }
 
 #[test]
-fn host_label_width_pads_to_longest_host_label() {
-    // Mixed-length labels: shorter ones pad to the longest in the fleet.
+fn host_marker_width_aligns_multi_host_rows() {
     let fleet = HostFleet::from_entries(vec![
         HostEntry {
             id: ssh_host_id("ssh://a"),
-            label: "alpha".to_string(), // 5 chars
+            label: "alpha".to_string(),
+            alias: "a".to_string(),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://b"),
-            label: "supercalifragilistic".to_string(), // 20 chars
+            label: "supercalifragilistic".to_string(),
+            alias: "b".to_string(),
             ip_address: "y".to_string(),
             handle: HostHandle::local(),
         },
         HostEntry {
             id: ssh_host_id("ssh://c"),
-            label: "beta".to_string(), // 4 chars
+            label: "beta".to_string(),
+            alias: "c".to_string(),
             ip_address: "z".to_string(),
             handle: HostHandle::local(),
         },
     ]);
-    assert_eq!(
-        fleet.host_label_width(),
-        "supercalifragilistic".len(),
-        "host_label_width returns the longest configured label"
-    );
+    assert_eq!(fleet.host_marker_width(), HOST_COLOR_SQUARE.chars().count());
 
-    // Rendering each host through session_list_line with that width pads
-    // shorter labels to the longest one — column is rectangular.
-    let width = fleet.host_label_width();
     let alpha_row = make_row_for_host(session("dev", "$1"), ssh_host_id("ssh://a"), "alpha");
     let supercali_row = make_row_for_host(
         session("dev", "$2"),
@@ -1558,13 +3211,22 @@ fn host_label_width_pads_to_longest_host_label() {
     );
     let beta_row = make_row_for_host(session("dev", "$3"), ssh_host_id("ssh://c"), "beta");
 
-    let alpha_line = session_list_line(&alpha_row, false, width, 80);
-    let supercali_line = session_list_line(&supercali_row, false, width, 80);
-    let beta_line = session_list_line(&beta_row, false, width, 80);
+    let width = fleet.host_marker_width();
+    let alpha_marker = fleet
+        .host_color(&alpha_row.host_id)
+        .map(|_| HOST_COLOR_SQUARE);
+    let supercali_marker = fleet
+        .host_color(&supercali_row.host_id)
+        .map(|_| HOST_COLOR_SQUARE);
+    let beta_marker = fleet
+        .host_color(&beta_row.host_id)
+        .map(|_| HOST_COLOR_SQUARE);
+    let alpha_line = session_list_line(&alpha_row, false, alpha_marker, width, 80);
+    let supercali_line = session_list_line(&supercali_row, false, supercali_marker, width, 80);
+    let beta_line = session_list_line(&beta_row, false, beta_marker, width, 80);
 
     // The session-name token "dev" appears at the same column index in every
-    // row regardless of which host produced the row — that's what padding to
-    // the longest hostname guarantees visually.
+    // row regardless of which host produced the row.
     let alpha_dev_col = alpha_line.find("dev").unwrap();
     let supercali_dev_col = supercali_line.find("dev").unwrap();
     let beta_dev_col = beta_line.find("dev").unwrap();
@@ -1579,51 +3241,63 @@ fn host_label_width_pads_to_longest_host_label() {
 }
 
 #[test]
-fn host_label_width_caps_at_max() {
-    // Labels longer than HOST_LABEL_COLUMN_MAX (24) are clipped so an
-    // adversarial 200-char hostname does not steal the row width.
-    let huge_label: String = "x".repeat(200);
-    let fleet = HostFleet::from_entries(vec![
-        HostEntry {
-            id: ssh_host_id("ssh://a"),
-            label: "short".to_string(),
+fn host_colors_cycle_through_five_color_palette() {
+    let entries = (0..6)
+        .map(|index| HostEntry {
+            id: ssh_host_id(&format!("ssh://host{index}")),
+            label: format!("host{index}"),
+            alias: format!("host{index}"),
             ip_address: "x".to_string(),
             handle: HostHandle::local(),
-        },
-        HostEntry {
-            id: ssh_host_id("ssh://b"),
-            label: huge_label,
-            ip_address: "y".to_string(),
-            handle: HostHandle::local(),
-        },
-    ]);
-    assert_eq!(fleet.host_label_width(), 24);
+        })
+        .collect::<Vec<_>>();
+    let fleet = HostFleet::from_entries(entries);
+
+    assert_eq!(fleet.host_marker_width(), HOST_COLOR_SQUARE.chars().count());
+    assert_eq!(
+        fleet.host_color(&ssh_host_id("ssh://host0")),
+        Some(HOST_COLOR_PALETTE[0])
+    );
+    assert_eq!(
+        fleet.host_color(&ssh_host_id("ssh://host4")),
+        Some(HOST_COLOR_PALETTE[4])
+    );
+    assert_eq!(
+        fleet.host_color(&ssh_host_id("ssh://host5")),
+        Some(HOST_COLOR_PALETTE[0])
+    );
 }
 
 #[test]
-fn multi_host_session_row_inserts_hostname_column() {
+fn multi_host_session_row_inserts_host_color_marker_column() {
     let row = make_row_for_host(session("dev", "$1"), ssh_host_id("ssh://a"), "alpha");
-    let host_label_width = "alpha".len();
-    let line = session_list_line(&row, false, host_label_width, 60);
-    // Format expected:  " * alpha  dev"  (leading marker, attached, hostname,
-    // session name).
-    assert!(line.contains("alpha"));
+    let line = session_list_line(
+        &row,
+        false,
+        Some(HOST_COLOR_SQUARE),
+        HOST_COLOR_SQUARE.chars().count(),
+        60,
+    );
+    // Format expected:  " * ■ dev"  (leading marker, attached, host square,
+    // session name). The full hostname is reserved for the top legend.
+    assert!(line.contains(HOST_COLOR_SQUARE));
+    assert!(!line.contains("alpha"));
     assert!(line.contains("dev"));
-    let alpha_pos = line.find("alpha").expect("hostname rendered");
+    let code_pos = line.find(HOST_COLOR_SQUARE).expect("host marker rendered");
     let dev_pos = line.find("dev").expect("session name rendered");
     assert!(
-        alpha_pos < dev_pos,
-        "hostname appears before session name: {line:?}"
+        code_pos < dev_pos,
+        "host marker appears before session name: {line:?}"
     );
 }
 
 #[test]
 fn single_host_row_omits_hostname_column() {
     let row = make_row(session("dev", "$1"));
-    let line = session_list_line(&row, false, 0, 30);
-    // No hostname column when host_label_width = 0 (single-host).
+    let line = session_list_line(&row, false, None, 0, 30);
+    // No host-marker column when host_marker_width = 0 (single-host).
     assert!(line.contains("dev"));
-    assert!(!line.contains("host  dev"));
+    assert!(!line.contains(HOST_COLOR_SQUARE));
 }
 
 #[test]
@@ -1678,7 +3352,7 @@ fn multi_host_sort_merges_rows_by_activity_across_hosts() {
     app.session_list.selected = 0;
     let selected = app.selected_session().unwrap();
     assert_eq!(selected.host_id, ssh_host_id("ssh://b"));
-    assert_eq!(selected.id, "$2");
+    assert_eq!(selected.id(), "$2");
 }
 
 #[test]
@@ -1707,7 +3381,10 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
     ]);
     // First row by activity is alpha/$1.
     app.session_list.selected = 0;
-    let key = app.selected_session().map(|s| (s.host_id, s.id)).unwrap();
+    let key = app
+        .selected_session()
+        .map(|s| (s.host_id.clone(), s.id().to_string()))
+        .unwrap();
     assert_eq!(key.0, ssh_host_id("ssh://a"));
 
     // Reorder: now bb is most active. Selection should preserve alpha/$1.
@@ -1726,7 +3403,7 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
     app.preserve_selection(Some(key));
     let still = app.selected_session().unwrap();
     assert_eq!(still.host_id, ssh_host_id("ssh://a"));
-    assert_eq!(still.id, "$1");
+    assert_eq!(still.id(), "$1");
     assert_eq!(app.session_list.selected, 1);
 }
 
@@ -1834,10 +3511,7 @@ fn multi_host_kill_modal_carries_host_id() {
     // The kill modal must capture host_id at modal-open so dispatch routes
     // back to the correct host even if the highlighted row reorders later.
     let modal = ModalState::KillSession {
-        host_id: ssh_host_id("ssh://b"),
-        host_label: "beta".to_string(),
-        id: "$42".to_string(),
-        name: "build".to_string(),
+        session: make_selected(ssh_host_id("ssh://b"), "beta", "$42", "build"),
         button: Button::Cancel,
     };
     let view = modal_content(&modal);
@@ -1845,14 +3519,9 @@ fn multi_host_kill_modal_carries_host_id() {
     assert_eq!(view.body_text(), "Kill session build?");
     // Confirms the modal carries the host info even though the rendered
     // confirmation prompt uses the session name only.
-    if let ModalState::KillSession {
-        host_id,
-        host_label,
-        ..
-    } = modal
-    {
-        assert_eq!(host_id, ssh_host_id("ssh://b"));
-        assert_eq!(host_label, "beta");
+    if let ModalState::KillSession { session, .. } = modal {
+        assert_eq!(session.host_id, ssh_host_id("ssh://b"));
+        assert_eq!(session.host_label, "beta");
     } else {
         unreachable!();
     }

@@ -8,8 +8,30 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply to tmux only when Ok closes the dialog; Cancel/Esc discard staged edits. |
+| 2026-05-02 | @codex | Moved environment-variable entry into the New Session modal and apply staged variables at creation time through `CreateSessionOptions::initial_environment`; removed the `e` shortcut. |
+| 2026-05-02 | @codex | Changed host labels in the top status bar to use tmux `#{host}` rather than SSH URI hostnames; URI hostnames remain internal aliases. |
+| 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
+| 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
+| 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
+| 2026-05-02 | @codex | Fixed multi-host kill dispatch so the kill modal acts on the selected row's captured host and stable session info. |
+| 2026-05-02 | @codex | Darkened status bars to `#002b55`, matched attach `status-style` to that shade, and changed mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Added a multi-host New Session host selector so `n` creates on the selected host. |
+| 2026-05-02 | @codex | Changed status bars to a darker blue, rendered command shortcut letters as bold colored spans instead of underlined, and matched the temporary attach `status-style` background to the TUI status bar. |
+| 2026-05-02 | @codex | Restored `a` as the attach key and moved list-pane tag grouping from `s` to `g`; grouped tag rows are ordered by most recent activity. |
+| 2026-05-02 | @codex | Attach now temporarily sets the selected tmux session's local `status-style` to blue and restores the previous local style after detach. |
+| 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
+| 2026-05-02 | @codex | Defaulted the Session Tags key edit column to 30% of the edit strip when the session has no existing tags. |
+| 2026-05-02 | @codex | Tightened list-pane `s` sort behavior: visible non-empty checked-tag values sort to the top, and the toggle selects the first row in the new order so the sorted top is shown immediately. |
+| 2026-05-02 | @codex | Added list-pane `s` sort toggle: activity sort remains default; tag sort groups checked-tag rows first, orders them by checked tag value, then falls back to activity, host code, and session name. |
+| 2026-05-02 | @codex | Addressed PR feedback for Session Tags: `Tab` reaches Cancel and selected-tag values are loaded through one batched metadata read per host refresh. |
+| 2026-05-02 | @codex | Changed multi-host status and row rendering to use host-code legends: top status shows `mmux [A] <host> ...`, and session rows show compact codes such as `[A]` instead of full hostnames. |
+| 2026-05-01 | @codex | Reduced the modal minimum width by about 20% so Session Tags and other short modal content render in a narrower frame. |
+| 2026-05-01 | @codex | Persisted the Session Tags checked row in `@mmux/__selected-key`, filtered that internal option from the tag modal, and rendered the checked tag value as a right-aligned session-list column after the session name. |
+| 2026-05-01 | @codex | Updated the Session Tags modal layout to show up to five scrollable key/value rows styled like the session list, with a visually distinct edit row; `Tab` cycles Key → Value → Cancel, Enter submits from either edit field, and `c` marks the focused tag row with `✓`. |
+| 2026-05-01 | @codex | Added session rename and tag management modals: `r` renames the highlighted session from list focus, `t` opens the unified tag list/add/update/delete modal, and `i` remains unassigned. |
 | 2026-04-29 | @opus47-macos-tmux | Updated recency-display semantics: activity column is observer-relative ("time since mmux last saw `session.activity` advance"); age column is `local_now − session.created` under an NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate age text but no functional regression. (Earlier drafts probed the host clock at fleet-connect via `#{epoch}` / `run-shell 'date +%s'`; that approach was abandoned because `run-shell` on tmux ≤ 3.4 corrupts the operator's attached pane.) |
-| 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status reads `mmux - multi-host mode (n)`, session rows insert a hostname column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
+| 2026-04-29 | @opus47-macos-tmux | Added Multi-host Mode section (issue #235): synopsis accepts multiple SSH URIs, mode auto-activates when 2+ hosts are listed, top status shows a compact host-code legend, session rows insert a host-code column between attached marker and session name, sort is global by activity, all command keys dispatch by highlighted row's host, MOTD pane is hidden in multi-host. |
 | 2026-04-28 | @gpt55-dgx | Clarified ForceCommand bypass requires exactly `MOTLIE_MMUX_BYPASS=1` and cross-referenced issue #232 for env-gated SSH integration tests. |
 | 2026-04-28 | @gpt55-dgx | Consolidated session-list refresh to a single one-second `list_sessions_now()` poller for both activity ordering and structural reconciliation. |
 | 2026-04-28 | @gpt55-dgx | Added a one-second visible-row refresh using `list_sessions_now()` so activity-sorted rows reorder even when no structural tmux event occurs. |
@@ -25,7 +47,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 | 2026-04-27 | @gpt55-dgx | Documented in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
-| 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
+| 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
 | 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
 | 2026-04-27 | @gpt55-dgx | Changed plain Left/Right from one-way list/detail focus movement to cyclic pane focus movement. |
@@ -39,7 +61,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0` and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode with portrait mode: `--portrait` is the explicit override, default startup auto-detects PTY aspect ratio, the old `-s` flag is rejected, and the MOTD fallback logo uses the requested Claude artifact ASCII art. |
-| 2026-04-26 | @gpt55-dgx | Updated selector keymap for attach on `a`, arrow-key pane focus, Shift-arrow resize behavior on macOS iTerm2, ANSI color in detail mode, polling-backed session refresh, and compact MOTD fallback graphics. |
+| 2026-04-26 | @gpt55-dgx | Updated selector keymap for attach behavior, arrow-key pane focus, Shift-arrow resize behavior on macOS iTerm2, ANSI color in detail mode, polling-backed session refresh, and compact MOTD fallback graphics. |
 | 2026-04-26 | @gpt55-dgx | Updated key and dashboard semantics after validation: resize accepts modified-arrow fallbacks when terminals remap Ctrl-arrow, monitor mode mirrors rendered screen content, and dashboard detach is protected against stopped selector jobs. |
 | 2026-04-26 | @gpt55-dgx | Updated CLI reference to match implemented binary behavior: `-s`, `--print-session`, `--dashboard`, optional SSH URI, ForceCommand rejection/bypass, stdout/stderr split, and exit semantics. |
 | 2026-04-26 | @gpt55-dgx | Initial CLI contract for issue #226 and PR #227: modes, arguments, keymap, stdout/stderr behavior, ForceCommand usage, and exit semantics. |
@@ -85,12 +107,17 @@ The v1 target form is positional only. There is no `--target` flag in v1.
 mmux
 ```
 
-Default mode opens the TUI against the local host. Pressing Enter or `a`
-attaches the user's current PTY to the highlighted tmux session. After detach,
+Default mode opens the TUI against the local host. Pressing `a` attaches the
+user's current PTY to the highlighted tmux session. After detach,
 the selector re-enters the TUI if the attach child exited successfully or the
 selected session still exists. If the child exits non-zero and the selected
 session is gone, the selector exits with the child status. `q` / `Ctrl-C` exits
 without attach.
+
+Before attach, mmux best-effort sets the selected session's local tmux
+`status-style` to `bg=#002b55,fg=white`. After detach, it restores the previous
+local style or unsets the local override when none existed. If style setup or
+restore fails, mmux prints a warning and keeps the attach flow working.
 
 During default attach/re-entry, the parent `mmux` process keeps a small
 in-memory UI snapshot. On return from tmux detach, the selector restores the
@@ -178,29 +205,32 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 
 **UX differences in multi-host mode:**
 
-- Top status bar reads `mmux - multi-host mode (n)` (where `n` is the host
-  count) instead of the usual `<hostname> | <ip>`.
-- Session list rows insert the host's label between the attached marker and
-  the session name:
+- Top status bar shows a host-color legend after `mmux` instead of the usual
+  `<hostname> | <ip>`, for example `mmux ■ alpha ■ beta`. Host labels are
+  tmux's own `#{host}` values; SSH URI hostnames are retained only as aliases.
+- Session list rows insert the host's compact colored square between the
+  attached marker and the session name:
 
   ```
-  > * a.example.com  dev          1m / 12d
-    * b.example.com  jarvis       4h / 19d
-      a.example.com  build        2d / 5d
-      b.example.com  logs         3d / 7d
+  > * ■ dev          1m / 12d
+    * ■ jarvis       4h / 19d
+      ■ build        2d / 5d
+      ■ logs         3d / 7d
   ```
 
-  Hostname column width is sized to the widest configured label (capped to
-  keep the row readable; longer labels truncated with `…`).
+  Host colors are assigned from configured host order using a five-color
+  palette and repeat when more than five hosts are configured. The top status
+  legend is the full host-name lookup for those row colors.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
-- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, `Enter`/`a`,
+- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, Enter,
   `m`, `n`, `k`, `Ctrl-C`/`q`, `l`, `p`, `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
 - Attach uses the highlighted row's host: an interactive
   `ssh -t <host> tmux attach-session -t <name>` for SSH targets.
-- New session and kill modals act on the highlighted row's host.
+- New session and kill modals act on the highlighted row's host. Kill captures
+  the selected row's stable session info when the modal opens.
 - MOTD pane is **hidden** in multi-host mode (per-host MOTD is not
   meaningful when multiple hosts coexist). Layout reflows accordingly.
 - Layout flags (`-p`/`-l`) compose with multi-host as expected.
@@ -246,8 +276,11 @@ Normal mode main-view keys:
 | `m` | Monitor highlighted session | Monitor highlighted session | Monitor highlighted session |
 | `n` | Open New Session modal | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
+| `r` | No-op | Open Rename Session modal | No-op |
+| `t` | Open Session Tags modal | Open Session Tags modal | Open Session Tags modal |
+| `g` | No-op | Toggle activity/tag grouping | No-op |
 | `h` | Open Help modal | Open Help modal | Open Help modal |
-| Enter / `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
+| `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
 | `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
 
 Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, `p`
@@ -261,8 +294,8 @@ On macOS iTerm2, the resize keys observed during validation are
 
 The session list auto-refreshes through one selector-owned poll-backed path.
 Visible rows are quietly refreshed once per second with `list_sessions()`,
-which updates recency text, activity-descending ordering, and structural
-session state in the same snapshot. The selector no longer starts a
+which updates recency text, the active sort order, and structural session
+state in the same snapshot. The selector no longer starts a
 separate `watch_host_events()` poller for its TUI list. Direct tmux
 control-mode host notifications remain future work.
 
@@ -271,8 +304,14 @@ right-aligned recency column. The attached marker is `*` when tmux reports one
 or more clients attached to the session. Rows are sorted by
 `activity_observed_at_local` (operator-side wall clock at last observed
 `session.activity` advance) descending so the most recently active session
-appears
-first. The recency column is formatted as `  32h / 14.2d`. The left value
+appears first by default. Pressing `g` while the list pane is focused toggles
+tag grouping: sessions with a checked tag are shown before sessions without
+one, tag groups are ordered by the most recent activity in each group, and rows
+inside each group are ordered by activity time, host order, and session name.
+Empty checked-tag values are treated like no displayed tag. The toggle selects
+the first row in the new order so the grouped top is visible immediately.
+Pressing `g` again restores activity sort. The recency column is formatted as
+`  32h / 14.2d`. The left value
 ("active") is observer-relative — time since mmux last saw `session.activity`
 advance — so it is immune to operator-vs-host clock skew. The right value
 ("age") is `local_now − session.created` under the NTP-synced clock
@@ -281,29 +320,54 @@ right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
 `d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
-The top status bar uses the same blue background as the bottom status bar. It
+The top status bar uses the same dark blue background as the bottom status bar. It
 shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
-current session count. The bottom blue status bar shows compact key hints and
-status text only. Its direction hints are `↑/↓ sel` for selection and
-`pane` for pane focus, with the shortcut letter underlined. It orders command
-hints as `help`, `pane`, `monitor`, `enter/attach`, `new`, `kill`, `quit`,
-`layout`, then mode-specific resize; the command shortcut letters
-`h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are underlined in the TUI. It does not repeat
-the host/time, show focus/layout mode, or prefix the hints with a `keys` label.
+current session count. The bottom dark blue status bar shows compact key hints and
+status text only. Its direction hints are `↑/↓` for selection and
+`pane` for pane focus, with shortcut letters bold coral. It orders command
+hints as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `rename`,
+`tags`, `group`, `quit`, `layout`, then mode-specific resize; the
+command shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`g`/`q`/`l` are
+bold coral in the TUI. It does not repeat the host/time, show focus/layout
+mode, or prefix the hints with a `keys` label.
 
 Modal keys:
 
 | Key | Behavior |
 |-----|----------|
-| Left / Right | Choose Cancel or Ok in New Session and Kill Session modals. No-op in Help. |
-| Enter | Close modal. Applies Ok when selected in New Session or Kill Session. |
-| Esc | Cancel New Session / Kill Session, or close Help. |
+| Left / Right | Choose Cancel or Ok in New Session, Kill Session, and Rename Session modals. No-op in Help and Session Tags. |
+| Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
+| Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
+| `u` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
+| `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
+| `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
+| Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, or Session Tags; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
+| Esc | Cancel action modals, discard staged Session Tags changes, close Session Tags, or close Help. |
 
-Modal content is padded inside the border. New Session renders the session-name
-field with its own border. Help renders the built-in motlie logo, build date,
-last 8 characters of the build git SHA, key functions, and a single Ok button.
-All modal content areas are separated from the button bar by a horizontal line.
+Modal content is padded inside the border. New Session and Rename Session render
+their text fields with their own borders. In multi-host mode, New Session also
+renders a Host dropdown above the session-name field; the selected host and
+session name are used for `HostHandle::create_session()`. The New Session modal
+also includes an initial environment key/value list; staged variables are sorted
+by key and passed through `CreateSessionOptions::initial_environment`, so tmux
+applies them to the first shell or command with `new-session -e`. Session Tags lists
+`@mmux/<key>` values sorted by stripped key in key/value/check-marker columns. Add,
+update, delete, and check-marker changes are staged locally while the modal is
+open; Ok applies the staged diff to tmux, while Cancel or Esc discards it. The
+list shows up to five rows at a time, scrolls with row focus, and uses the same
+selected-row styling as the session list. The key column is sized to the longest key plus
+four characters, or 30% of the edit strip when the session has no existing
+tags; the marker column displays `✓` when toggled on by `c`, and the value
+column takes the remaining width. The bottom Key/Value edit row is
+separated from the list, has no marker/add column, and submits with Enter. The
+internal `@mmux/__selected-key` option is filtered from this list, and
+`__selected-key` is reserved from edit-row writes. Tag writes still require
+non-empty values. Checked tag values render after session names as a
+right-aligned column in the Sessions list. Help
+renders the built-in motlie logo, build date, last 8 characters of the build git
+SHA, key functions, and a single Ok button. All modal content areas are
+separated from the button bar by a horizontal line.
 
 ## ForceCommand
 
