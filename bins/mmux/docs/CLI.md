@@ -326,10 +326,12 @@ Pressing `s` opens the `Send Keys` modal for the highlighted session. The modal
 has a compact text field labeled `To: <session> on <host>`, accepts
 `motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, wraps long
 input by growing the text field vertically while keeping its width fixed,
-then sends the parsed input through the highlighted session target with a tmux
-`Enter` terminator appended to the same ordered key sequence. Sending
-happens when `Ok` is focused and Enter is pressed, or when Enter is pressed from
-the text field after text has been entered. `Esc` or focused `Cancel` dismisses
+then sends the parsed input exactly through the highlighted session target.
+Include `{Enter}` or `{C-m}` explicitly when the target should receive Enter.
+Sending happens when `Ok` is focused and Enter is pressed, or when Enter is
+pressed from the text field after text has been entered. Ctrl-Enter from the
+text field or focused `Ok` first sends the parsed input exactly, then waits
+500 ms and sends a separate `{Enter}` key. `Esc` or focused `Cancel` dismisses
 without sending.
 
 The top status bar uses the same dark blue background as the bottom status bar. It
@@ -355,6 +357,7 @@ Modal keys:
 | `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
 | `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
 | Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, Send Keys, or Session Tags; in Send Keys, also sends from the text field when it has content; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
+| Ctrl-Enter | In Send Keys, sends the current key sequence and then sends `{Enter}` after 500 ms. |
 | Esc | Cancel action modals, discard staged Session Tags changes, close Session Tags, or close Help. |
 
 Modal content is padded inside the border. Focused text inputs show a blinking

@@ -615,6 +615,7 @@ enum ModalAction {
     SendKeys {
         session: SelectedSession,
         input: String,
+        mode: SendKeysSubmitMode,
     },
     StageKeyValue {
         kind: SessionKeyValueKind,
@@ -635,6 +636,12 @@ enum ModalAction {
         session: SelectedSession,
         ui: SessionKeyValueModalUi,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendKeysSubmitMode {
+    Exact,
+    ThenEnterAfterDelay,
 }
 
 async fn handle_modal_key(
@@ -740,8 +747,12 @@ async fn handle_modal_key(
             app.modal = None;
             rename_session_from_modal(fleet, app, session, input).await?;
         }
-        ModalAction::SendKeys { session, input } => {
-            if send_keys_from_modal(fleet, app, session, input).await? {
+        ModalAction::SendKeys {
+            session,
+            input,
+            mode,
+        } => {
+            if send_keys_from_modal(fleet, app, session, input, mode).await? {
                 app.modal = None;
             }
         }
@@ -801,14 +812,36 @@ fn handle_send_keys_modal_key(
             ui.focus = SendKeysFocus::Ok;
             ModalAction::None
         }
+        KeyCode::Enter
+            if key.modifiers.contains(KeyModifiers::CONTROL) && ui.focus == SendKeysFocus::Ok =>
+        {
+            ModalAction::SendKeys {
+                session,
+                input: ui.input.clone(),
+                mode: SendKeysSubmitMode::ThenEnterAfterDelay,
+            }
+        }
+        KeyCode::Enter
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && ui.focus == SendKeysFocus::Input
+                && !ui.input.is_empty() =>
+        {
+            ModalAction::SendKeys {
+                session,
+                input: ui.input.clone(),
+                mode: SendKeysSubmitMode::ThenEnterAfterDelay,
+            }
+        }
         KeyCode::Enter if ui.focus == SendKeysFocus::Ok => ModalAction::SendKeys {
             session,
             input: ui.input.clone(),
+            mode: SendKeysSubmitMode::Exact,
         },
         KeyCode::Enter if ui.focus == SendKeysFocus::Input && !ui.input.is_empty() => {
             ModalAction::SendKeys {
                 session,
                 input: ui.input.clone(),
+                mode: SendKeysSubmitMode::Exact,
             }
         }
         KeyCode::Enter if ui.focus == SendKeysFocus::Cancel => ModalAction::Close,
@@ -1413,17 +1446,23 @@ async fn send_keys_from_modal(
     app: &mut AppState,
     session: SelectedSession,
     input: String,
+    mode: SendKeysSubmitMode,
 ) -> Result<bool> {
     if input.is_empty() {
         app.status = StatusBanner::info("keys are empty");
         return Ok(false);
     }
     let keys = match KeySequence::parse(&input) {
-        Ok(keys) => keys.then_enter(),
+        Ok(keys) => keys,
         Err(err) => {
             app.status = StatusBanner::error(format!("invalid keys: {err}"));
             return Ok(false);
         }
+    };
+    let enter_keys = if mode == SendKeysSubmitMode::ThenEnterAfterDelay {
+        Some(KeySequence::parse("{Enter}")?)
+    } else {
+        None
     };
     let Some(host) = fleet_host(fleet, &session.host_id) else {
         app.status =
@@ -1433,6 +1472,13 @@ async fn send_keys_from_modal(
     match host.session_by_id(session.id()).await? {
         Some(target) => match target.send_keys(&keys).await {
             Ok(()) => {
+                if let Some(enter_keys) = enter_keys.as_ref() {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Err(err) = target.send_keys(enter_keys).await {
+                        app.status = StatusBanner::error(format!("send Enter failed: {err}"));
+                        return Ok(true);
+                    }
+                }
                 app.status = StatusBanner::info(if fleet.is_multi() {
                     format!("sent keys to {} on {}", session.name(), session.host_label)
                 } else {
