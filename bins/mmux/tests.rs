@@ -5,21 +5,21 @@ use motlie_tmux::{
     StatusStyle, TransportKind, SSH_DEFAULT_PORT,
 };
 use ratatui::backend::{Backend, TestBackend};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Position;
 use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
-    HOST_COLOR_SQUARE, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE,
-    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
-    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
+    BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
+    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_LEFT,
+    MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE, MODAL_CONTENT_HORIZONTAL_PADDING,
+    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
-    handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
-    stop_monitor_if_closed, KeyOutcome,
+    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed,
+    KeyOutcome,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
@@ -31,10 +31,9 @@ use crate::model::{
     SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
-    detail_text_for_render, draw, key_value_key_column_width, modal_content, motd_render_text,
-    normal_motd_height, session_key_values_footer_line, session_list_line, session_recency_text,
-    sessions_title, short_build_git_sha, status_line, status_line_text, top_status_line,
-    use_compact_placeholder,
+    detail_text_for_render, draw, key_value_key_column_width, modal_content,
+    session_key_values_footer_line, session_list_line, session_recency_text, sessions_title,
+    short_build_git_sha, status_line, status_line_text, top_status_line,
 };
 use crate::target_host::resolve_ip_address;
 use crate::{prepare_attach_status, restore_attach_status};
@@ -60,12 +59,7 @@ fn session_with_times(name: &str, id: &str, created: u64, activity: u64) -> Sess
 }
 
 fn app_with_session() -> AppState {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
     app
 }
@@ -196,24 +190,6 @@ fn test_session_tags_modal(
             focus,
         },
     }
-}
-
-fn unique_test_path(name: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("mmux-{name}-{}-{nanos}", std::process::id()))
-}
-
-async fn write_test_file(name: &str, content: impl AsRef<[u8]>) -> std::path::PathBuf {
-    let path = unique_test_path(name);
-    tokio::fs::write(&path, content).await.unwrap();
-    path
-}
-
-async fn remove_test_file(path: &std::path::Path) {
-    let _ = tokio::fs::remove_file(path).await;
 }
 
 fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
@@ -350,24 +326,14 @@ fn layout_auto_detection_uses_pty_aspect_ratio() {
 
 #[test]
 fn portrait_default_split_is_35_65() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        "motd".to_string(),
-        false,
-    );
+    let app = AppState::new("host".to_string(), LayoutMode::Portrait);
 
     assert_eq!(app.layout.top_percent, 35);
 }
 
 #[test]
 fn status_line_omits_layout_mode() {
-    let normal = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let normal = AppState::new("host".to_string(), LayoutMode::Normal);
     let normal_status = status_line_text(&normal);
     assert!(normal_status.contains(" tab ↑/↓"));
     assert!(!normal_status.contains(" ↑/↓ sel"));
@@ -396,12 +362,7 @@ fn status_line_omits_layout_mode() {
     assert!(!normal_status.contains("landscape"));
     assert!(!normal_status.contains("portrait"));
 
-    let portrait = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        "motd".to_string(),
-        false,
-    );
+    let portrait = AppState::new("host".to_string(), LayoutMode::Portrait);
     let portrait_status = status_line_text(&portrait);
     assert!(portrait_status.contains(" tab ↑/↓"));
     assert!(!portrait_status.contains(" ↑/↓ sel"));
@@ -426,12 +387,7 @@ fn status_line_omits_layout_mode() {
 
 #[test]
 fn status_line_styles_command_mnemonics() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let app = AppState::new("host".to_string(), LayoutMode::Normal);
     let line = status_line(&app);
     let styled_mnemonics = line
         .spans
@@ -494,8 +450,6 @@ fn top_status_includes_bold_host_and_right_justified_time() {
         "target-host".to_string(),
         "192.0.2.10".to_string(),
         LayoutMode::Normal,
-        "motd".to_string(),
-        false,
     );
     let line = top_status_line(&app, "12:34:56", 40);
     let rendered = line
@@ -516,8 +470,6 @@ fn sessions_title_only_includes_count() {
         "target-host".to_string(),
         "192.0.2.10".to_string(),
         LayoutMode::Normal,
-        "motd".to_string(),
-        false,
     );
     app.session_list.rows = to_rows(vec![session("dev", "$1"), session("build", "$2")]);
 
@@ -565,12 +517,7 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     refresh_sessions_quiet(&fleet, &mut app, false)
         .await
@@ -584,12 +531,7 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
 
 #[test]
 fn session_list_sorts_most_recent_activity_first() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     app.session_list.set_rows_sorted_by_activity(to_rows(vec![
         session_with_times("older", "$1", 10, 100),
@@ -613,12 +555,7 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     let rows = vec![
         make_row_for_host(
             session_with_times("no-tag-fresh", "$1", 10, 900),
@@ -696,12 +633,7 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
 
 #[test]
 fn activity_sort_preserves_selection_by_stable_id() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session_with_times("selected", "$1", 10, 100),
         session_with_times("other", "$2", 20, 200),
@@ -814,12 +746,7 @@ async fn quiet_refresh_preserves_tag_group_mode() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.sort_mode = SessionSortMode::TagGroup;
 
     refresh_sessions_quiet(&fleet, &mut app, false)
@@ -845,12 +772,7 @@ async fn quiet_refresh_reorders_by_activity_without_overwriting_status() {
         )
         .with_response("capture-pane -ep", "fresh screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.status = crate::model::StatusBanner::info("keep this");
 
     let fleet = fleet_with(host);
@@ -874,12 +796,7 @@ async fn refresh_forces_detail_when_selected_session_changes() {
         .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![session_with_times("gone", "$1", 10, 300)]);
     app.session_list.selected = 0;
     app.set_detail_text("stale screen".to_string());
@@ -908,12 +825,7 @@ async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
         .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session_with_times("watched", "$1", 10, 300),
         session_with_times("replacement", "$2", 20, 200),
@@ -951,12 +863,7 @@ async fn quiet_refresh_skips_monitor_recapture() {
         .with_response("list-sessions", "__MOTLIE_S__ live $1 10 1 1  800\n")
         .with_error("capture-pane", "this should not be called");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     // Seed the row list with the older activity (200) and select $1.
     app.session_list.rows = to_rows(vec![session_with_times("live", "$1", 10, 200)]);
     app.session_list.selected = 0;
@@ -1048,12 +955,7 @@ fn resolve_ip_address_preserves_literal_ip() {
 
 #[test]
 fn selection_preserves_stable_id_after_rename() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("old", "$1"))];
     app.session_list.selected = 0;
     app.session_list.rows = vec![make_row(session("new", "$1"))];
@@ -1067,12 +969,7 @@ fn selection_preserves_stable_id_after_rename() {
 
 #[test]
 fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![session("shell", "$1"), session("build", "$2")]);
     app.session_list.selected = 1;
     app.layout.focus = Focus::Detail;
@@ -1083,12 +980,7 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
     let mut retained = crate::model::RetainedUiState::default();
     retained.update_from(&app);
 
-    let mut reentered = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut reentered = AppState::new("host".to_string(), LayoutMode::Normal);
     retained.apply_to(&mut reentered);
     reentered.session_list.rows = to_rows(vec![session("build", "$2"), session("shell", "$1")]);
     reentered.preserve_selection(retained.selected_session_key());
@@ -1107,12 +999,7 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
 
 #[test]
 fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session("one", "$1"),
         session("gone", "$2"),
@@ -1123,12 +1010,7 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
     let mut retained = crate::model::RetainedUiState::default();
     retained.update_from(&app);
 
-    let mut reentered = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut reentered = AppState::new("host".to_string(), LayoutMode::Normal);
     retained.apply_to(&mut reentered);
     reentered.session_list.rows = to_rows(vec![session("one", "$1"), session("three", "$3")]);
     reentered.preserve_selection(retained.selected_session_key());
@@ -1143,185 +1025,34 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
 }
 
 #[test]
-fn motd_placeholder_uses_compact_graphic_when_narrow() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-    let text = motd_render_text(&app, Rect::new(0, 0, 40, 5));
-    assert!(text.contains("motlie"));
-    assert!(text.contains("(no /etc/motd)"));
-}
-
-#[test]
-fn motd_placeholder_renders_full_logo_when_wide() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-
-    let text = motd_render_text(&app, Rect::new(0, 0, 100, 20));
-
-    assert!(text.contains(MOTLIE_PLACEHOLDER));
-    assert!(text.ends_with("(no /etc/motd)"));
-    assert!(!use_compact_placeholder(&app, 100, 20));
-}
-
-#[test]
-fn compact_placeholder_boundary_uses_embedded_logo_width() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-
-    assert!(use_compact_placeholder(&app, 40, 20));
-    assert!(!use_compact_placeholder(&app, 41, 20));
-
-    if let Some(motd) = app.motd.as_mut() {
-        motd.is_placeholder = false;
-    }
-    assert!(!use_compact_placeholder(&app, 30, 5));
-}
-
-#[test]
-fn landscape_layout_renders_motd_pane_with_placeholder() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
+fn landscape_layout_renders_sessions_and_detail_without_motd() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
 
     let rendered = render_to_string(&mut app, 120, 30);
 
-    assert!(rendered.contains("MOTD"));
-    assert!(rendered.contains("_ __ ___"));
-    assert!(!rendered.contains(COMPACT_MOTLIE_PLACEHOLDER));
-    assert!(rendered.contains("(no /etc/motd)"));
     assert!(rendered.contains("Sessions [1]"));
+    assert!(rendered.contains("Detail"));
+    assert!(!rendered.contains("MOTD"));
+    assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
 }
 
 #[test]
-fn landscape_layout_renders_motd_pane_with_host_content() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "Welcome to dev-host".to_string(),
-        false,
-    );
+fn portrait_layout_renders_sessions_and_detail_without_motd() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Portrait);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
 
-    let rendered = render_to_string(&mut app, 120, 30);
-
-    assert!(rendered.contains("MOTD"));
-    assert!(rendered.contains("Welcome to dev-host"));
-    assert!(rendered.contains("Sessions [1]"));
-}
-
-#[test]
-fn landscape_motd_height_preserves_visible_placeholder_before_sessions() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-
-    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 30)), 4);
-    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 41, 30)), 8);
-    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 6)), 3);
-}
-
-#[test]
-fn portrait_layout_does_not_render_motd_widget() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-    app.session_list.rows = vec![make_row(session("dev", "$1"))];
     let rendered = render_to_string(&mut app, 100, 30);
 
-    assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-    assert!(!rendered.contains(COMPACT_MOTLIE_PLACEHOLDER));
+    assert!(rendered.contains("Sessions [1]"));
+    assert!(rendered.contains("Detail"));
     assert!(!rendered.contains("MOTD"));
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_missing() {
-    let host = HostHandle::local();
-    let missing = unique_test_path("missing-motd");
-
-    let (text, is_placeholder) = load_motd_from(&host, &missing).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_empty() {
-    let host = HostHandle::local();
-    let path = write_test_file("empty-motd", b"").await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_whitespace_only() {
-    let host = HostHandle::local();
-    let path = write_test_file("whitespace-motd", b"  \n\t\n  ").await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_oversized() {
-    let host = HostHandle::local();
-    let path = write_test_file("oversized-motd", vec![b'x'; 70 * 1024]).await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_returns_content_when_readable() {
-    let host = HostHandle::local();
-    let path = write_test_file("normal-motd", b"Welcome to dev-host\n\n").await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(!is_placeholder);
-    assert_eq!(text, "Welcome to dev-host");
+    assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
 }
 
 #[tokio::test]
 async fn closed_monitored_session_resets_detail_source() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
         session_id: Some("$1".to_string()),
         host_id: Some(local_host_id()),
@@ -1338,12 +1069,7 @@ async fn closed_monitored_session_resets_detail_source() {
 
 #[test]
 fn detail_scroll_up_moves_toward_older_content() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.detail.lines = (0..100).map(|n| format!("line {n}")).collect();
     app.detail.last_known_view_height = 10;
 
@@ -1359,12 +1085,7 @@ fn detail_scroll_up_moves_toward_older_content() {
 #[tokio::test]
 async fn q_exits_like_ctrl_c() {
     let fleet = local_fleet();
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     let outcome = handle_key(
         &fleet,
@@ -1877,12 +1598,7 @@ async fn new_session_modal_selects_host_in_multi_host_mode() {
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row_for_host(
         session("dev", "$1"),
         ssh_host_id("ssh://b"),
@@ -1954,12 +1670,7 @@ async fn new_session_modal_creates_on_selected_multi_host() {
         ssh_host_entry("ssh://a", "alpha", "x", alpha),
         ssh_host_entry("ssh://b", "beta", "y", beta),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row_for_host(
         session("selected", "$1"),
         ssh_host_id("ssh://b"),
@@ -2027,12 +1738,7 @@ async fn kill_session_modal_clears_selected_multi_host_row() {
         ssh_host_entry("ssh://a", "alpha", "x", alpha),
         ssh_host_entry("ssh://b", "beta", "y", beta),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![
         make_row_for_host(session("shell", "$1"), ssh_host_id("ssh://a"), "alpha"),
         make_row_for_host(session("build", "$7"), ssh_host_id("ssh://b"), "beta"),
@@ -2699,12 +2405,7 @@ async fn new_session_modal_applies_staged_initial_environment() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     handle_key(
         &fleet,
@@ -3297,20 +2998,11 @@ async fn tab_cycles_landscape_panes() {
     )
     .await
     .unwrap();
-    assert_eq!(app.layout.focus, Focus::Motd);
-
-    handle_key(
-        &fleet,
-        &mut app,
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-    )
-    .await
-    .unwrap();
     assert_eq!(app.layout.focus, Focus::List);
 }
 
 #[tokio::test]
-async fn tab_cycles_portrait_panes_without_motd() {
+async fn tab_cycles_portrait_panes() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.mode = LayoutMode::Portrait;
@@ -3335,10 +3027,10 @@ async fn tab_cycles_portrait_panes_without_motd() {
 }
 
 #[tokio::test]
-async fn l_toggles_layout_and_normalizes_motd_focus_for_portrait() {
+async fn l_toggles_layout_and_preserves_focus() {
     let fleet = local_fleet();
     let mut app = app_with_session();
-    app.layout.focus = Focus::Motd;
+    app.layout.focus = Focus::Detail;
 
     let outcome = handle_key(
         &fleet,
@@ -3350,7 +3042,7 @@ async fn l_toggles_layout_and_normalizes_motd_focus_for_portrait() {
 
     assert!(matches!(outcome, KeyOutcome::Continue));
     assert_eq!(app.layout.mode, LayoutMode::Portrait);
-    assert_eq!(app.layout.focus, Focus::List);
+    assert_eq!(app.layout.focus, Focus::Detail);
     assert_eq!(app.status.text(), "layout toggled");
 
     handle_key(
@@ -3361,7 +3053,7 @@ async fn l_toggles_layout_and_normalizes_motd_focus_for_portrait() {
     .await
     .unwrap();
     assert_eq!(app.layout.mode, LayoutMode::Normal);
-    assert_eq!(app.layout.focus, Focus::List);
+    assert_eq!(app.layout.focus, Focus::Detail);
 }
 
 #[tokio::test]
@@ -3389,41 +3081,9 @@ async fn plain_left_and_right_do_not_cycle_panes() {
 }
 
 #[tokio::test]
-async fn motd_focus_does_not_scroll_or_change_selection() {
-    let fleet = local_fleet();
-    let mut app = app_with_session();
-    app.layout.focus = Focus::Motd;
-    app.detail.lines = (0..20).map(|idx| format!("line {idx}")).collect();
-    app.detail.last_known_view_height = 5;
-
-    handle_key(
-        &fleet,
-        &mut app,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-    )
-    .await
-    .unwrap();
-    handle_key(
-        &fleet,
-        &mut app,
-        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(app.session_list.selected, 0);
-    assert_eq!(app.detail.scroll, 0);
-}
-
-#[tokio::test]
 async fn modified_arrow_keys_resize_layouts() {
     let fleet = local_fleet();
-    let mut landscape = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut landscape = AppState::new("host".to_string(), LayoutMode::Normal);
     let initial = landscape.layout.left_percent;
 
     handle_key(
@@ -3455,12 +3115,7 @@ async fn modified_arrow_keys_resize_layouts() {
     .unwrap();
     assert_eq!(landscape.layout.left_percent, LANDSCAPE_MAX_LEFT_PERCENT);
 
-    let mut portrait = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        "motd".to_string(),
-        false,
-    );
+    let mut portrait = AppState::new("host".to_string(), LayoutMode::Portrait);
     portrait.layout.top_percent = 5;
     handle_key(
         &fleet,
@@ -3485,12 +3140,7 @@ async fn modified_arrow_keys_resize_layouts() {
 #[tokio::test]
 async fn word_arrow_fallback_sequences_resize_normal_layout() {
     let fleet = local_fleet();
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     let initial = app.layout.left_percent;
 
     handle_key(
@@ -3688,12 +3338,7 @@ fn fleet_entry_lookup_by_host_id() {
 
 #[test]
 fn multi_host_top_status_shows_host_color_legend() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "10.0.0.1", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "10.0.0.2", HostHandle::local()),
@@ -3726,25 +3371,13 @@ fn multi_host_top_status_shows_host_color_legend() {
 }
 
 #[test]
-fn multi_host_motd_pane_is_hidden() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-    app.motd = None; // multi-host mode discards MOTD
+fn multi_host_landscape_uses_same_sessions_detail_layout() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
-
-    assert_eq!(
-        normal_motd_height(&app, Rect::new(0, 0, 80, 20)),
-        0,
-        "MOTD region collapses to 0 in multi-host"
-    );
 
     let rendered = render_to_string(&mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
@@ -3879,12 +3512,7 @@ fn single_host_row_omits_hostname_column() {
 
 #[test]
 fn multi_host_sort_merges_rows_by_activity_across_hosts() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
@@ -3934,12 +3562,7 @@ fn multi_host_sort_merges_rows_by_activity_across_hosts() {
 
 #[test]
 fn selection_preserves_host_and_session_after_multi_host_reorder() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),

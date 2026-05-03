@@ -94,9 +94,9 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 | Form | Behavior |
 |------|----------|
 | no `ssh-uri` | Operate on the local host. |
-| `[ssh-uri]` | Operate on the remote SSH target for MOTD, session list, sampling, monitor, create, kill, and attach. |
-| `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. MOTD is omitted. Mutually exclusive with `--landscape` / `-l`. |
-| `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L`/`R`, with `L` split into MOTD and session list. Mutually exclusive with `--portrait` / `-p`. |
+| `[ssh-uri]` | Operate on the remote SSH target for session list, sampling, monitor, create, kill, and attach. |
+| `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. Mutually exclusive with `--landscape` / `-l`. |
+| `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L` session list and `R` detail pane. Mutually exclusive with `--portrait` / `-p`. |
 | `--script` | Select a session, print exactly `<name>\n` to stdout, and exit 0 without attaching. Cancel exits non-zero with empty stdout. |
 | `--portrait --landscape` | Invalid. Startup error. |
 
@@ -176,9 +176,8 @@ The initial T/B ratio is 35:65, giving the session list more vertical space by
 default. `Ctrl-Up` / `Ctrl-Down` can resize the split after startup. Portrait
 mode clamps the split so both `T` and `B` keep at least 15% height.
 
-MOTD and the motlie placeholder are omitted in portrait mode. Use
-`--landscape` / `-l` to force the normal `L`/`R` layout even when the PTY is
-auto-detected as portrait.
+Use `--landscape` / `-l` to force the normal `L`/`R` layout even when the PTY
+is auto-detected as portrait.
 
 Without `--portrait` / `-p` or `--landscape` / `-l`, startup calls
 `crossterm::terminal::size()` on the connecting PTY and chooses portrait layout
@@ -224,16 +223,17 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   legend is the full host-name lookup for those row colors.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
-- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, Enter,
-  `m`, `n`, `k`, `Ctrl-C`/`q`, `l`, `p`, `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
+- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`,
+  `a`, `m`, `s`, `n`, `k`, `r`, `t`, `g`, `Ctrl-C`/`q`, `l`,
+  `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
 - Attach uses the highlighted row's host: an interactive
   `ssh -t <host> tmux attach-session -t <name>` for SSH targets.
 - New session and kill modals act on the highlighted row's host. Kill captures
   the selected row's stable session info when the modal opens.
-- MOTD pane is **hidden** in multi-host mode (per-host MOTD is not
-  meaningful when multiple hosts coexist). Layout reflows accordingly.
+- Landscape and portrait layout behavior is shared with single-host mode; the
+  only presentation difference is the host marker column and top-bar legend.
 - Layout flags (`-p`/`-l`) compose with multi-host as expected.
 
 **Resilience:** if one host goes unreachable at refresh time, its rows
@@ -262,34 +262,33 @@ is identical to pre-multi-host behavior.
 
 ## TUI Keymap
 
-Normal mode main-view keys:
+Main-view keys:
 
-| Key | `MOTD` focused | `Lb` focused | `R` focused |
-|-----|----------------|--------------|-------------|
-| Up / Down | No-op | Move highlighted session | Scroll detail one line |
-| PgUp / PgDn | No-op | Page session list | Page detail buffer |
-| Home / End | No-op | First / last session | Top / bottom detail; End resumes monitor tail |
-| Tab | Focus session list | Focus detail pane | Focus MOTD pane |
-| Left / Right | No-op | No-op | No-op |
-| `Esc` | Focus session list | Focus session list | Focus session list |
-| `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
-| `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
-| `m` | Monitor highlighted session | Monitor highlighted session | Monitor highlighted session |
-| `s` | Open Send Keys modal | Open Send Keys modal | Open Send Keys modal |
-| `n` | Open New Session modal | Open New Session modal | Open New Session modal |
-| `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
-| `r` | No-op | Open Rename Session modal | No-op |
-| `t` | Open Session Tags modal | Open Session Tags modal | Open Session Tags modal |
-| `g` | No-op | Toggle activity/tag grouping | No-op |
-| `h` | Open Help modal | Open Help modal | Open Help modal |
-| `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
-| `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
+| Key | List focused | Detail focused |
+|-----|--------------|----------------|
+| Up / Down | Move highlighted session | Scroll detail one line |
+| PgUp / PgDn | Page session list | Page detail buffer |
+| Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
+| Tab | Focus detail pane | Focus session list |
+| Left / Right | No-op | No-op |
+| `Esc` | Focus session list | Focus session list |
+| `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (landscape only) | Resize L/R split (landscape only) |
+| `Ctrl-Up` / `Ctrl-Down`, `Shift-Up` / `Shift-Down`, Alt Up / Down | Resize T/B split (portrait only) | Resize T/B split (portrait only) |
+| `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
+| `m` | Monitor highlighted session | Monitor highlighted session |
+| `s` | Open Send Keys modal | Open Send Keys modal |
+| `n` | Open New Session modal | Open New Session modal |
+| `k` | Open Kill Session modal | Open Kill Session modal |
+| `r` | Open Rename Session modal | No-op |
+| `t` | Open Session Tags modal | Open Session Tags modal |
+| `g` | Toggle activity/tag grouping | No-op |
+| `h` | Open Help modal | Open Help modal |
+| `a` | Attach highlighted session | Attach highlighted session |
+| `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
-Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, Tab
-cycles between `T` and `B`. It uses
-`Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
-accepted as compatibility fallbacks. Normal mode L/R resize stays clamped to
-25/75; portrait T/B resize is clamped to 15/85.
+Landscape mode uses the L/R split and clamps resize to 25/75. Portrait mode
+uses the T/B split and clamps resize to 15/85. Tab cycles between the two
+visible panes in both modes.
 
 On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.

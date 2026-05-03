@@ -194,8 +194,7 @@ References: [Kill Session](./DESIGN.md#kill-session),
 
 ### 1.5 Review Cleanup: Host Metadata and Stable IDs
 
-References: [Remote MOTD](./DESIGN.md#remote-motd),
-[Live Session List](./DESIGN.md#live-session-list).
+References: [Live Session List](./DESIGN.md#live-session-list).
 
 - [x] 1.5a Replace the broad host shell helper with bounded
   `HostHandle::read_text_file(path, max_bytes)` for `/etc/motd`.
@@ -476,8 +475,8 @@ it lands as a follow-up.
 - [ ] 11.3b Replace `HostContext` with `HostFleet` on `AppState`.
 - [ ] 11.3c Change `SessionListState.sessions: Vec<SessionInfo>` to
   `SessionListState.rows: Vec<SessionRow>`.
-- [ ] 11.3d Make `MotdState` an `Option` field on `AppState`: `motd: Option<MotdState>`.
-  `None` in multi-host mode.
+- [x] 11.3d Remove `MotdState` from `AppState`; single-host and multi-host use
+  the same session-list/detail state model.
 - [ ] 11.3e Selection identity is `(HostId, SessionId)` not just `SessionId`.
   Update `RetainedUiState` to preserve both across re-entry.
 - [ ] 11.3f Tests: model construction; selection preservation across reorder;
@@ -507,14 +506,13 @@ it lands as a follow-up.
 - [ ] 11.5b `draw_sessions` row format: host-color square column inserted between
   attached marker and session name when `fleet.is_multi() == true`. Column
   width = `fleet.host_marker_width()`.
-- [ ] 11.5c MOTD pane: hide entirely when `app.motd.is_none()`. Layout reflows
-  the left column (landscape) or top region (portrait) to give the full area
-  to sessions.
+- [x] 11.5c Landscape layout always renders session list left and detail right;
+  no MOTD pane or multi-host-only reflow branch remains.
 - [ ] 11.5d Status banner: render `HostUnreachable` indicator(s) without
   blocking session listing.
 - [ ] 11.5e Snapshot tests for: multi-host top status; multi-host row format
-  (host-color column present and padded); MOTD-pane absence in
-  multi-host; layout reflow correctness.
+  (host-color column present and padded); shared session-list/detail layout in
+  single-host and multi-host.
 
 ### 11.6 Input + dispatch routing
 
@@ -709,12 +707,12 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 | Library attach | Unit + localhost smoke | command construction, process group handoff, exit status mapping, terminal restore |
 | Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
-| Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
+| Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, shared session-list/detail rendering, resize bounds |
 | Input model | Pure unit tests | cyclic focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, build date, and short build SHA display |
 | Session rename/tags | Pure unit + mock tmux | `r` focus gating, rename prefill/no-op/dispatch, tag prefill, sorted stripped tag display, add/update/delete flows, empty-value no-op |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
-| SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |
+| SSH integration | Env-gated SSH URI | remote list/sample/monitor/attach/bypass |
 | Terminal cleanup | PTY harness | raw mode restore, alternate-screen restore, panic-path cleanup |
 
 ## Done Criteria

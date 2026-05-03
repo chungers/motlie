@@ -34,7 +34,6 @@ pub(crate) const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 ┃ ┃ ┃ ┃ ┃ ┃ (_) ┃ ┃_┃ ┃ ┃  __╱  ╱╱ ║ ╲╲
 ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃"#;
 
-pub(crate) const COMPACT_MOTLIE_PLACEHOLDER: &str = "motlie  ══╬══";
 pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:

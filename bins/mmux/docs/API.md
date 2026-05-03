@@ -95,13 +95,7 @@ let host = SshConfig::parse("ssh://user@host?identity-file=/path/to/key")?
     .connect()
     .await?;
 let sessions = host.list_sessions().await?;
-let motd = host.read_text_file(std::path::Path::new("/etc/motd"), 64 * 1024).await?;
 ```
-
-`mmux` wraps that call in `load_motd_from(host, path)` so the default
-`/etc/motd` path and fallback policy can be tested separately. Missing, empty,
-whitespace-only, unreadable, and oversized files produce the embedded motlie
-placeholder; readable content is returned with trailing whitespace trimmed.
 
 For existing target operations:
 
@@ -304,8 +298,8 @@ struct SessionKeyValueModalUi {
 }
 ```
 
-Implemented state is decomposed by concern: `HostContext`, `LayoutState`,
-`MotdState`, `SessionListState`, `DetailState`, and `StatusBanner`. `AppState`
+Implemented state is decomposed by concern: `HostFleet`, `LayoutState`,
+`SessionListState`, `DetailState`, and `StatusBanner`. `AppState`
 now coordinates those structs rather than owning one flat collection of UI,
 host, selection, detail, layout, and status fields. `main.rs` contains the
 entry/run loop. CLI parsing, terminal lifecycle, ForceCommand handling,
@@ -412,9 +406,9 @@ by this feature.
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing
 keeps both panes at least 15% tall (`15/85` through `85/15`).
-The `l` key toggles `LayoutMode` at runtime and normalizes focus if the MOTD
-pane is focused while switching into portrait. Default attach/re-entry retains
-that layout choice in memory inside the parent `mmux` process.
+The `l` key toggles `LayoutMode` at runtime while preserving list/detail focus.
+Default attach/re-entry retains that layout choice in memory inside the parent
+`mmux` process.
 
 ## Build Metadata
 
@@ -605,25 +599,21 @@ API tests must cover:
 - session count rendering in the Sessions pane title without hostname/IP
 - Help modal open/close behavior, key-function display, build date display,
   and last-8-character build SHA display
-- MOTD fallback behavior for missing, empty, whitespace-only, oversized, and
-  readable files; embedded-logo width fit for full vs. compact placeholder
-  rendering; and landscape full-frame MOTD pane rendering vs. portrait-mode
-  MOTD omission
+- landscape and portrait layout rendering with session-list/detail panes and
+  no intro pane
 - default attach/re-enter and no-loop conditions
 
 Current implementation coverage:
 
 - `cargo test -p motlie-tmux`: attach command/status including the
   `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
-  stable-id kill coverage, and `read_text_file` local/mock behavior for
-  missing, empty, normal, oversized, and unreadable files.
+  stable-id kill coverage, and tmux status override snapshot/restore behavior.
 - `cargo test -p motlie-mmux`: CLI mutual exclusion, stable-id
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, `a` attach, detail scroll direction,
   modified-arrow resize fallbacks, Tab pane focus transitions, `l` layout
-  toggle behavior, compact status hint rendering, MOTD fallback/readability
-  cases, full/compact placeholder rendering, landscape MOTD pane rendering,
-  portrait MOTD omission, sample color preservation, Help modal
+  toggle behavior, compact status hint rendering, landscape/portrait
+  session-list/detail rendering, sample color preservation, Help modal
   key-function/display/close behavior, monitor screen capture, ANSI/VTE
   parsing, and monitored-session-close reset.

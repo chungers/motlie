@@ -12,17 +12,15 @@ The selector is built on `motlie-tmux` and never embeds shell or tmux command co
 
 - **Local** — `mmux` (no arguments) targets the local host's tmux server.
 - **SSH single-host** — `mmux ssh://user@host` targets one remote host.
-- **Multi-host** ([issue #235](https://github.com/chungers/motlie/issues/235)) — `mmux ssh://a ssh://b ...` aggregates sessions across multiple hosts in a single activity-sorted list. Multi-host mode replaces the per-host MOTD pane and host/IP status with a top-bar host-code legend; row format gains a compact host-code column.
+- **Multi-host** ([issue #235](https://github.com/chungers/motlie/issues/235)) — `mmux ssh://a ssh://b ...` aggregates sessions across multiple hosts in a single activity-sorted list. Multi-host mode replaces the host/IP status with a top-bar host-color legend; row format gains a compact host marker column.
 - **Script** — `mmux --script` prints the selected session name to stdout instead of attaching, for shell composition (e.g. `tmux attach -t "$(mmux --script)"`).
 
 ## Layouts
 
 Two layouts auto-detected from PTY aspect ratio (override with `-l/--landscape` or `-p/--portrait`):
 
-- **Landscape** — left column has MOTD over the session list; right column shows the detail pane.
-- **Portrait** — vertical T/B split (no MOTD pane); session list on top, detail below. Optimized for narrow terminals (mobile SSH, IDE panels, tmux popups).
-
-In multi-host mode the MOTD pane is hidden in landscape too — the selector lists sessions across hosts, not host-specific motd.
+- **Landscape** — left column shows the session list; right column shows the detail pane.
+- **Portrait** — vertical T/B split; session list on top, detail below. Optimized for narrow terminals (mobile SSH, IDE panels, tmux popups).
 
 ## Documentation
 
@@ -39,7 +37,6 @@ In multi-host mode the MOTD pane is hidden in landscape too — the selector lis
 - `Target::attach_current_pty()` + `AttachExit` — spawn-and-wait PTY handoff with `setpgid` + `tcsetpgrp` signal hygiene.
 - `HostHandle::session_by_id()` + `SessionId(String)` newtype — id-based dispatch immune to display-name renames mid-flight.
 - `HostHandle::watch_host_events()` + `HostEvent` + `HostEventStream` — host-level event reconciliation.
-- `HostHandle::read_text_file(path, max_bytes)` — bounded host-text reads (e.g. `/etc/motd`).
 - `HostHandle::list_sessions() -> Vec<SessionInfo>` — sessions plus aggregated `window_activity` (issue #237) folded into `SessionInfo.activity`. Recency is computed binary-side via an observer-relative `ActivityTracker` keyed by `(HostId, SessionId)`; the lib no longer ships a server-clock companion.
 - `ScrollbackQuery::LinesRange { older_than_lines, count }` — windowed backwards-fetch for the detail pane.
 

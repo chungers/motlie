@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -12,7 +11,7 @@ use motlie_tmux::{
 
 use crate::consts::{
     DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
@@ -26,17 +25,6 @@ const TAG_PREFIX: &str = "mmux";
 const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
 const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
-
-pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
-    load_motd_from(host, Path::new("/etc/motd")).await
-}
-
-pub(crate) async fn load_motd_from(host: &HostHandle, path: &Path) -> (String, bool) {
-    match host.read_text_file(path, 64 * 1024).await {
-        Ok(text) if !text.trim().is_empty() => (text.trim_end().to_string(), false),
-        _ => (MOTLIE_PLACEHOLDER.to_string(), true),
-    }
-}
 
 /// Fan out `list_sessions()` across all configured hosts in parallel, merge
 /// into a flat `Vec<SessionRow>`, run the activity-tracker over the
@@ -473,7 +461,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.scroll_detail(1),
-            Focus::Motd => {}
         },
         (KeyCode::Down, _) => match app.layout.focus {
             Focus::List => {
@@ -482,7 +469,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.scroll_detail(-1),
-            Focus::Motd => {}
         },
         (KeyCode::PageUp, _) => match app.layout.focus {
             Focus::List => {
@@ -494,7 +480,6 @@ pub(crate) async fn handle_key(
                 fetch_older_detail(fleet, app).await?;
                 app.scroll_detail(10);
             }
-            Focus::Motd => {}
         },
         (KeyCode::PageDown, _) => match app.layout.focus {
             Focus::List => {
@@ -503,7 +488,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.scroll_detail(-10),
-            Focus::Motd => {}
         },
         (KeyCode::Home, _) => match app.layout.focus {
             Focus::List => {
@@ -513,7 +497,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.detail_home(),
-            Focus::Motd => {}
         },
         (KeyCode::End, _) => match app.layout.focus {
             Focus::List => {
@@ -523,7 +506,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.detail_end(),
-            Focus::Motd => {}
         },
         _ => {}
     }
