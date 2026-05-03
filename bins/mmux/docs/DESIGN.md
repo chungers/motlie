@@ -108,7 +108,7 @@ machine.
 
 Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 
-- it does not provide target-host context such as `/etc/motd`
+- it does not provide a unified selector across local and remote targets
 - it does not preview or monitor a highlighted session before attach
 - it cannot be installed as a complete host-wide selector without shell glue
 - ad hoc shell glue would duplicate tmux/SSH command construction already owned
@@ -130,51 +130,24 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 ### Functional
 
 - The TUI body is split into a left pane `L` and right pane `R`.
-- `L` is split into upper `LT` and lower `LB`.
-- `LT` displays the target host `/etc/motd`.
-- `LT` height is dynamic: enough lines to show MOTD content, capped at 30% of
-  the left-pane height. `LB` receives the remaining height.
-- When `/etc/motd` is missing,
-  empty, or unreadable, `LT` renders a built-in bold-green motlie glyph
-  placeholder followed by a `(no /etc/motd)` caption (or
-  `(motd unavailable: <reason>)` on read failure). In this case `LT` height
-  bypasses the 30% cap and expands to exactly fit
-  `glyph_rows + caption_row + chrome` when space allows. When `L_width < 63`
-  columns or there is not enough vertical room to expand, render the compact
-  built-in glyph `motlie  ══╬══` plus `(no /etc/motd)` caption (still
-  bold-green), not a text-only placeholder. The glyph assets are baked into
-  the binary as `&'static str` values (no inline ANSI
-  escapes); styling is applied at render time via ratatui
-  `Style { fg: Color::Green, add_modifier: Modifier::BOLD }`. Asset glyphs
-  (use exactly):
-
-  ```text
-                   _   _ _
-   _ __ ___   ___ ┃ ┃_┃ (_) ___   ╲╲ ║ ╱╱
-  ┃ '▄ ` ▄ ╲ ╱ ▄ ╲┃ ▄▄┃ ┃ ┃╱ ▄ ╲  ══ ╬ ══
-  ┃ ┃ ┃ ┃ ┃ ┃ (_) ┃ ┃_┃ ┃ ┃  __╱  ╱╱ ║ ╲╲
-  ┃▄┃ ┃▄┃ ┃▄┃╲▄▄▄╱ ╲▄▄┃▄┃▄┃╲▄▄▄┃
-  ```
-- `LB` lists tmux sessions on the target host and has default focus.
-- `LT`, `LB`, and `R` all participate in pane focus cycling in landscape mode.
-  `LT` is focusable for visual orientation but is not scrollable in the initial
-  implementation.
-- `LB` and `R` are both scrollable.
-  `LB` viewport scrolls automatically to keep the highlighted row visible when
-  `len(sessions) > visible_rows`. A position indicator (e.g., `5/12`) is shown
-  in `LB` chrome or in the status bar.
-- Up and Down move the highlighted session in `LB` *when focus is `Lb`*.
-  When focus is `LT`, scrolling keys are no-ops. When focus is `R`, Up/Down scroll
-  the `R` content one line; `PgUp`/`PgDn` page through; `Home`/`End` jump to
-  top/bottom of the buffer. When focus is `Lb`, `PgUp`/`PgDn` page through the
-  session list and `Home`/`End` jump to first/last session.
+- `L` lists tmux sessions on the target host and has default focus.
+- `R` shows sampled or monitored detail for the highlighted session.
+- `L` and `R` participate in pane focus cycling in landscape mode.
+- `L` and `R` are both scrollable. The `L` viewport scrolls automatically to
+  keep the highlighted row visible when `len(sessions) > visible_rows`. A
+  position indicator (e.g., `5/12`) is shown in the session-list chrome.
+- Up and Down move the highlighted session when focus is `L`. When focus is
+  `R`, Up/Down scroll the `R` content one line; `PgUp`/`PgDn` page through;
+  `Home`/`End` jump to top/bottom of the buffer. When focus is `L`,
+  `PgUp`/`PgDn` page through the session list and `Home`/`End` jump to
+  first/last session.
 - `Ctrl-Left` and `Ctrl-Right` resize the `L` / `R` split in the normal main
   selector view. The implementation also accepts terminal fallback
   modified-arrow sequences such as Alt/Shift arrows and word-left/word-right
   when a client does not report Ctrl-arrow distinctly. On macOS iTerm2, manual
   validation observed `Shift-Left` and `Shift-Right` for L/R resize. Plain
   Left/Right do not change pane focus in the main view.
-- Pressing Tab cycles focus `LT -> Lb -> R -> LT` in landscape mode.
+- Pressing Tab cycles focus `L -> R -> L` in landscape mode.
 - `R` initially shows sampled detail for the highlighted session.
 - `R` detail is supplied through a trait so future view models can summarize or
   otherwise transform session content.
@@ -248,7 +221,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `Cancel` and closes without applying. In the help modal, Enter or `Esc`
   closes the modal without changing selector state.
 - Pressing Tab cycles focus through the landscape panes in this order:
-  `LT -> Lb -> R -> LT`. Outside any modal, `Esc` returns focus to `Lb`
+  `L -> R -> L`. Outside any modal, `Esc` returns focus to `L`
   (use `q` or `Ctrl-C` to exit). The currently
   focused pane must be visually distinguished from the unfocused panes via
   border style — a bright/colored or doubled border for the focused pane,
@@ -258,11 +231,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   attach/detach re-entry within the same `mmux` parent process.
 - Pressing `a` in the main selector exits the TUI and attaches the
   current user PTY to the highlighted session. (Focus-independent: attach
-  always operates on the `Lb` highlight regardless of which pane has focus.)
+  always operates on the list highlight regardless of which pane has focus.)
 - Pressing `q` exits the selector without attach, equivalent to `Ctrl-C` in
   the main selector view.
 - The binary accepts an optional SSH URI / host target. Omitted means local host.
-- For SSH targets, listing, MOTD, sampling, create, kill, monitor, and attach
+- For SSH targets, listing, sampling, create, kill, monitor, and attach
   all operate against the SSH target.
 - For SSH targets, attach must open an interactive SSH PTY to the target host
   and attach that remote PTY to the selected remote tmux session.
@@ -302,9 +275,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   resize. The shortcut letters `h`/`m`/`s`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
   bold coral in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
-  focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
+  focus (`list`, `detail`, `L`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a dark blue background.
-- The selector must keep `LB`
+- The selector must keep the session list
   consistent with the target host's tmux state without user-driven refresh,
   by subscribing at startup to a host-level event stream. In the current
   implementation that stream polls `list_sessions()` once per second and
@@ -324,11 +297,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   `--landscape` / `-l`. The flags are mutually exclusive. Portrait mode
   renders a compact layout optimized for 32 rows x ~64
   columns: the body splits vertically into Top (`T`, default focus, lists
-  sessions) and Bottom (`B`, detail pane) at a 35:65 ratio. MOTD and the
-  motlie placeholder are omitted in portrait mode to maximize content density.
-  All command keys (`p` focus cycling, `l` layout toggle, `Esc`/`m`/`n`/`k`/Enter/`q`/`Ctrl-C`), modal
+  sessions) and Bottom (`B`, detail pane) at a 35:65 ratio.
+  All command keys (`Tab` focus cycling, `l` layout toggle, `Esc`/`m`/`s`/`n`/`k`/`a`/`q`/`Ctrl-C`), modal
   behavior, focus model semantics, and detail-source trait usage are
-  identical to normal mode (mapping `T` ↔ `Lb` and `B` ↔ `R`). Resize keys
+  identical to normal mode (mapping `T` ↔ `L` and `B` ↔ `R`). Resize keys
   differ by mode: portrait mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
   normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`, with
   modified-arrow fallback sequences accepted for terminal compatibility. Plain
@@ -394,9 +366,6 @@ mmux binary
         |      +-- HostHandle::session_by_id(id).await?       // -> Option<Target>
         |          .ok_or(SessionVanished)?                   // race: see below
         |          .kill().await?
-        |
-        +-- MotdSource
-        |      +-- HostHandle::read_text_file(/etc/motd, 64 KiB)
         |
         +-- DetailPane
         |      +-- SampleDetailSource
@@ -645,8 +614,8 @@ Additional flags:
 |------|----------|
 | (none) | Default. TUI → select → spawn-and-wait attach (see §Data Flow → Attach). On clean child exit, re-enter the TUI; on non-zero child exit, re-enter only if the selected session still exists, otherwise exit with the child's status. `q`/`Ctrl-C` from the re-entered TUI exits 0 (user-initiated clean exit). |
 | `--script` | TUI → select → leave alt-screen → print `<name>\n` to stdout → exit 0. Cancellation exits non-zero with empty stdout. All UI/diagnostics on stderr. Composable: `tmux attach -t "$(mmux --script)"`. |
-| `--portrait` / `-p` | Force portrait layout: vertical T/B split (35:65) optimized for 32x64 terminals. MOTD omitted. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--script` and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
-| `--landscape` / `-l` | Force landscape/normal layout: `L`/`R` split with `LT` MOTD and `LB` session list. Composes with `--script` and SSH targets. Mutually exclusive with `--portrait` / `-p`. |
+| `--portrait` / `-p` | Force portrait layout: vertical T/B split (35:65) optimized for 32x64 terminals. Same command keys, modal behavior, focus model, and detail sources as normal mode. Resize via `Ctrl-Up`/`Ctrl-Down`. Composes with `--script` and SSH targets. Without a layout force flag, layout is auto-detected from PTY dimensions. See §Layout → Portrait Mode. |
+| `--landscape` / `-l` | Force landscape/normal layout: `L`/`R` split with `L` as the session list and `R` as detail. Composes with `--script` and SSH targets. Mutually exclusive with `--portrait` / `-p`. |
 | `--portrait` + `--landscape` | Mutually exclusive — startup error. |
 
 Polarity rationale (default attach/re-enter): the binary's primary product is a
@@ -665,7 +634,6 @@ Implemented selector state is split by concern:
 
 - `HostContext`: display hostname/IP.
 - `LayoutState`: mode, focus, and resize percentages.
-- `MotdState`: MOTD text and fallback marker.
 - `SessionListState`: live `SessionRow` rows, selected index, list scroll, and
   current sort mode.
 - `DetailState`: rendered lines, scroll state, source, and auto-tail behavior.
@@ -691,27 +659,17 @@ The terminal is split into:
 
 The body area is split horizontally into `L` and `R`.
 
-`L` is split vertically:
+- `L`: session list. The viewport scrolls to keep the highlighted row visible.
+  Rows render display names, attachment markers, optional checked-tag values,
+  and optional multi-host markers; stable tmux session ids are retained in state
+  for dispatch but not shown.
+- `R`: detail pane for sampled or monitored session output.
 
-- `LT`: MOTD, height `min(rendered_motd_lines + chrome, 30% of L height)`
-  when MOTD is present. When MOTD
-  is absent/empty/unreadable, `LT` height = `glyph_rows + caption + chrome`
-  (bypasses the 30% cap so the motlie placeholder fully renders when there is
-  room). The height calculation uses the post-split `L` area and preserves
-  space for `LB`; when the full placeholder does not fit, `LT` falls back to
-  the compact motlie placeholder plus caption instead of disappearing. The
-  compact/full decision is based on the embedded placeholder's actual line
-  count and maximum line width, not a fixed terminal-width threshold. See
-  §Functional Requirements for the placeholder rendering rule.
-- `LB`: session list, remaining height. The viewport scrolls to keep the
-  highlighted row visible. Rows render display names and attachment markers;
-  stable tmux session ids are retained in state for dispatch but not shown.
+**Focus model.** The landscape main view has two focus states: `L` (default)
+and `R`. Focus transitions are explicit:
 
-**Focus model.** The landscape main view has three focus states: `LT`, `Lb`
-(default), and `R`. Focus transitions are explicit:
-
-- `p` → cycle `LT -> Lb -> R -> LT`
-- `Esc` outside any modal: return focus to `Lb` (use `q` or `Ctrl-C` to
+- Tab → cycle `L -> R -> L`.
+- `Esc` outside any modal: return focus to `L` (use `q` or `Ctrl-C` to
   exit). `Esc` inside any modal is equivalent to that modal's `Cancel` button.
 
 The currently focused pane must be visually distinguished from unfocused panes
@@ -725,26 +683,26 @@ parenthesized mnemonics. The Sessions pane title is count-only: `Sessions [n]`.
 
 Main-selector keymap (focus-aware):
 
-| Key | `LT`-focused | `Lb`-focused | `R`-focused |
-|-----|--------------|--------------|-------------|
-| Up / Down | No-op | Move highlight; LB viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
-| PgUp / PgDn | No-op | Page through session list | Page through R buffer |
-| Home / End | No-op | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
-| Tab | Focus → `Lb` | Focus → `R` | Focus → `LT` |
-| Left / Right | No-op | No-op | No-op |
-| `Esc` | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal |
-| Modified Left / Right | Resize `L`/`R` split (normal mode only; `Ctrl`, Alt, Shift, and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) | Resize `L`/`R` split (normal mode only; focus-independent) |
-| `l` | Toggle portrait/landscape layout | Same | Same |
-| `m` | Start/switch monitoring on highlight | Same | Same |
-| `n` | Open `New Session` modal | Same | Same |
-| `k` | Open kill-confirmation modal | Same | Same |
-| `r` | No-op | Open rename modal for highlight | No-op |
-| `s` | Open Send Keys modal for highlight | Same | Same |
-| `t` | Open tag list/add/update/delete modal for highlight | Same | Same |
-| `g` | No-op | Toggle activity/tag grouping | No-op |
-| `h` | Open help modal with logo, key functions, and build git SHA | Same | Same |
-| `a` | Attach highlight | Attach highlight (focus-independent) | Attach highlight (focus-independent) |
-| `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach | Exit selector without attach |
+| Key | `L` focused | `R` focused |
+|-----|-------------|-------------|
+| Up / Down | Move highlight; session viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
+| PgUp / PgDn | Page through session list | Page through R buffer |
+| Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
+| Tab | Focus → `R` | Focus → `L` |
+| Left / Right | No-op | No-op |
+| `Esc` | Focus → `L` outside modal; `Cancel` inside modal | Focus → `L` outside modal; `Cancel` inside modal |
+| Modified Left / Right | Resize `L`/`R` split (normal mode only; `Ctrl`, Alt, Shift, and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) |
+| `l` | Toggle portrait/landscape layout | Same |
+| `m` | Start/switch monitoring on highlight | Same |
+| `n` | Open `New Session` modal | Same |
+| `k` | Open kill-confirmation modal | Same |
+| `r` | Open rename modal for highlight | No-op |
+| `s` | Open Send Keys modal for highlight | Same |
+| `t` | Open tag list/add/update/delete modal for highlight | Same |
+| `g` | Toggle activity/tag grouping | No-op |
+| `h` | Open help modal with logo, key functions, and build git SHA | Same |
+| `a` | Attach highlight | Attach highlight (focus-independent) |
+| `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach |
 
 Resize keys use modified arrows so plain arrows stay available to terminals and
 modal button selection while Tab owns main-view pane cycling. Normal mode advertises
@@ -777,18 +735,17 @@ at smaller sizes but is tuned for this target.
 - Body area: 30 rows (32 total minus 1 top status row and 1 bottom status row).
 - Body splits *vertically* into Top (`T`) and Bottom (`B`) at a 35:65 ratio
   (T ≈ 9 rows, B ≈ 21 rows for a 32-row terminal).
-- `T` = session list. Equivalent to `LB` in normal mode (same scrolling,
+- `T` = session list. Equivalent to `L` in landscape mode (same scrolling,
   same position indicator, same auto-scroll-to-keep-highlight-visible
   behavior). Default focus.
-- `B` = detail pane. Equivalent to `R` in normal mode (same trait-backed
+- `B` = detail pane. Equivalent to `R` in landscape mode (same trait-backed
   sample/monitor sources, same scroll-back-on-up, same monitor tail-pause).
-- MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
-  maximize content density. Status-bar key hints remain, but key hints must be
-  terser to fit ~64 cols. Use compact symbol labels for directional keys,
+- Status-bar key hints remain compact enough to fit ~64 cols. Use compact
+  symbol labels for directional keys,
   e.g., `tab ↑/↓ | (h)elp | (m)onitor | (s)end | (a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout`.
 
-**Focus model:** Same semantics as normal mode, except MOTD is not present, so
-Tab cycles between `T` and `B`:
+**Focus model:** Same semantics as landscape mode; Tab cycles between `T` and
+`B`:
 
 - Default focus is `T`.
 - Tab → cycle `T -> B -> T`.
@@ -805,7 +762,7 @@ Tab cycles between `T` and `B`:
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view |
 
 **All other keys and modal behavior:** identical to normal mode (see the
-focus-aware keymap above). `m`, `n`, `k`, `t`, Enter, and `q`/`Ctrl-C`
+focus-aware keymap above). `m`, `n`, `k`, `t`, `a`, and `q`/`Ctrl-C`
 are focus-independent and behave the same; `r` remains
 list-focus-only (`T` in portrait). `q`/`Ctrl-C` exits without attaching. Modal
 keymap (Left/Right for button selection, Enter to apply, Esc to Cancel) is
@@ -866,9 +823,9 @@ existing single-host mode unchanged.
 - Rename and tag modals also dispatch to the highlighted row's host and capture
   `(host_id, session_id)` when opened so refresh/reorder cannot retarget an
   in-flight modal action.
-- MOTD pane is **hidden** in multi-host mode (per-host MOTD is not meaningful
-  when multiple hosts coexist in the list). Layout reflows to give the entire
-  left column to the session list (landscape) or the top region (portrait).
+- Landscape and portrait layout behavior is shared with single-host mode; the
+  only multi-host presentation differences are the host-color legend and row
+  marker column.
 - Layout flags `-l/--landscape` and `-p/--portrait` still compose with
   multi-host. The auto-detect rule is unchanged.
 
@@ -886,10 +843,6 @@ pin its sessions to the top.
 `list_sessions()` errors but other hosts proceed; the failed host's rows
 disappear from the list until it recovers. A status-banner indicator shows
 the per-host failure count without blocking the rest of the UI.
-
-**MotdState** is replaced by an `Option<MotdState>`-style construct in
-multi-host: `None` in multi-host mode (no MOTD pane), `Some(motd)` in
-single-host mode.
 
 **Detail pane (R / B)** continues to operate on the highlighted row's session,
 with the dispatch routed through `row.host_id → fleet.entries[id].handle`.
@@ -1062,10 +1015,10 @@ not required for v1.
 | File | Change |
 |---|---|
 | `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`). |
-| `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. Make `MotdState` an `Option<MotdState>` field on `AppState`. |
+| `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. |
 | `target_host.rs` | Rename / split: `connect_host(cli) → connect_fleet(cli) -> Result<HostFleet>`. Internally calls existing single-host connect for each entry. |
-| `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. `load_motd` only called when `fleet.is_multi() == false`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
-| `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. `draw_motd` is gated on `app.motd.is_some()` (already gated in portrait — generalize to multi-host). Status hint set unchanged. |
+| `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
+| `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. Landscape always renders session list left and detail right. Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |
 | `main.rs` | Calls `connect_fleet` instead of `connect_host`. |
 | `forcecommand.rs` | No change (ForceCommand stays single-host; multi-host is operator-mode). |
@@ -1171,17 +1124,16 @@ should be attached or linked from issue #226 after the branch is pushed.
 
 The SVG mock includes the following panels:
 
-1. Main selector view, `Lb`-focused.
+1. Main selector view, `L`-focused.
 2. Main selector view, `R`-focused.
 3. Monitor mode with `R` scrolled up and auto-tail paused.
 4. `New Session` modal.
 5. Kill confirmation modal with title `Kill session <name>?`.
-6. MOTD-absent state with bold-green motlie glyph placeholder.
-7. Portrait mode main view with focused `T`.
-8. Portrait mode focused-`B` variant.
+6. Portrait mode main view with focused `T`.
+7. Portrait mode focused-`B` variant.
 
-The mock is conceptual; current implementation uses `p` to cycle focus through
-`LT`, `Lb`, and `R` in landscape mode.
+The mock is conceptual; current implementation uses Tab to cycle focus through
+`L` and `R` in landscape mode.
 
 ## R Pane Detail Source
 
@@ -1281,17 +1233,17 @@ initial hot path.
    `--script`; `--portrait` and `--landscape` are mutually exclusive — error
    on both).
 2. Connect to local or SSH target with `motlie-tmux`.
-3. Load target host MOTD (or render the motlie placeholder when absent).
-4. List sessions.
-5. Subscribe to the host-level event stream (see §Live Session List). The v1
+3. List sessions.
+4. Subscribe to the host-level event stream (see §Live Session List). The v1
    stream itself is polling-backed snapshot reconciliation; on stream failure,
    keep the current snapshot and show an inline error status.
-6. Initialize UI state with `LB` focused and first session highlighted.
-7. Render sample detail for the highlighted session, if any.
+5. Initialize UI state with the session list focused and first session
+   highlighted.
+6. Render sample detail for the highlighted session, if any.
 
 ### Live Session List
 
-The `LB` list must stay consistent with the target host's tmux state without
+The session list must stay consistent with the target host's tmux state without
 user-driven refresh. Other clients may create, kill, or rename sessions;
 sessions may exit unexpectedly. The selector must reconcile.
 
@@ -1379,7 +1331,7 @@ selector re-entry):
 
 ### Highlight Change
 
-1. Up/Down (when focus is `Lb`) updates selected session index. The `LB`
+1. Up/Down (when focus is the session list) updates selected session index. The list
    viewport scrolls to keep the highlighted row visible.
 2. If `R` is in sample mode, refresh sample detail for the new session
    (replace buffer).
@@ -1387,7 +1339,7 @@ selector re-entry):
    until the user presses `m` again. This avoids implicit monitor teardown when
    the user is only browsing.
 4. When focus is `R`, Up/Down
-   scroll the `R` content (no LB highlight movement). See §Layout keymap
+   scroll the `R` content (no list highlight movement). See §Layout keymap
    table.
 
 ### Monitoring Mode
@@ -1707,30 +1659,6 @@ tmux discovery or command construction. If tmux cannot address a session by id
 directly for a needed operation, the library must perform the safe lookup and
 race handling internally before returning `Target`.
 
-### Remote MOTD
-
-The binary uses `HostHandle::read_text_file()` to retrieve `/etc/motd` from
-local, mock, or SSH targets without embedding shell syntax in the selector.
-The API requires a byte cap so a misconfigured MOTD cannot trigger an
-unbounded read:
-
-```rust
-impl HostHandle {
-    pub async fn read_text_file(
-        &self,
-        path: &std::path::Path,
-        max_bytes: usize,
-    ) -> Result<String>;
-}
-```
-
-For v1, `mmux` calls `read_text_file(Path::new("/etc/motd"), 64 * 1024)` and
-uses the embedded motlie placeholder when the read fails or returns only
-whitespace. The implementation exposes the same policy internally as
-`load_motd_from(host, path)` so tests can exercise missing, empty,
-whitespace-only, oversized, and readable files without mutating the host's real
-`/etc/motd`.
-
 ## Host-Wide SSH Integration
 
 The local-host deployment target is `ForceCommand`.
@@ -1833,29 +1761,25 @@ detail.
 | `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
 | `ansi-to-tui` | ANSI/VTE rendering for captured/monitored pane content | Adopted for sample and monitor modes so ANSI-preserving captures render color/style without leaking escape bytes into ratatui text. |
 | `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
-| `tempfile` | none in `mmux` | Not needed by the selector binary because MOTD reads go through `HostHandle::read_text_file()`. |
 
 ## Testing Strategy
 
 DESIGN identifies the test surfaces; PLAN must make these concrete.
 
 - Unit tests for layout calculations:
-  - MOTD height cap (present case)
-  - MOTD-absent placeholder
-    expansion: `LT` height = `glyph_rows + caption + chrome`, bypasses 30%
-    cap; narrow-terminal fallback still renders compact glyph art
+  - landscape L/R split
   - status bar reservation
   - `L` / `R` resize bounds: landscape clamps at 25/75
   - Portrait mode layout at
     64x32 viewport: body = 31 rows; T/B split at 35:65 yields T ≈ 10 rows
-    and B ≈ 22 rows; MOTD/motlie omitted; status bar present
+    and B ≈ 22 rows; status bar present
   - Portrait mode modified Up/Down resize bounds: portrait clamps at 15/85
   - PTY aspect-ratio auto-detection: 64x32, 66x30, 80x24, 100x30, 160x40,
     and square-ish PTYs select portrait; 161x40 and wider-than-4.0 PTYs select
     landscape; `--portrait` forces portrait; `--landscape` forces landscape
   - Tab cycles pane focus in the main view; modal use of Left/Right for button
     selection is unchanged
-  - `l` toggles layout mode and normalizes focus when switching to portrait
+  - `l` toggles layout mode while preserving list/detail focus
 - Unit tests for state transitions:
   - highlight movement
   - sample vs monitor mode
@@ -1863,8 +1787,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - create/kill success and error paths
   - Help modal opens on `h`, shows the logo, build date, last 8 characters of
     the build git SHA, key functions, and closes on Enter or `Esc`
-  - focus cycling: Tab cycles `LT`→`Lb`→`R`→`LT`; `Esc` outside modal returns
-    focus to `Lb`
+  - focus cycling: Tab cycles `L`→`R`→`L`; `Esc` outside modal returns
+    focus to `L`
   - `Esc` inside modal = `Cancel`
 - Style/snapshot tests:
   - motlie glyph placeholder spans carry `Modifier::BOLD` and `Color::Green`
@@ -1918,7 +1842,6 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     fail at re-entry; assert selector exits with that error
 - SSH integration:
   - target an SSH URI
-  - read remote MOTD
   - list remote sessions
   - monitor remote session
   - attach to remote selected session through an interactive PTY
@@ -1944,8 +1867,8 @@ that remain speculative stay explicitly open.
   flags). Future enhancement.
 - **Remote targets in ForceCommand** — Local-only ForceCommand initially.
   Operator-invoked CLI mode may pass an SSH URI.
-- **Main-view pane key** — Tab cycles landscape focus `LT -> Lb -> R -> LT`.
-  Portrait mode cycles `T <-> B` because MOTD is omitted. Plain Left/Right are
+- **Main-view pane key** — Tab cycles landscape focus `L -> R -> L`.
+  Portrait mode cycles `T <-> B`. Plain Left/Right are
   no-ops in main view, modified arrows own resize, and modal Left/Right keeps
   button selection behavior.
 - **Runtime layout toggle** — `l` toggles between portrait and landscape

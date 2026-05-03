@@ -20,7 +20,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 use cli::{select_layout, Cli};
 use consts::{MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE};
 use controller::{
-    handle_key, load_motd, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
+    handle_key, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
     stop_detail_source, KeyOutcome,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
@@ -170,15 +170,7 @@ async fn run_selector_once(
     layout: LayoutMode,
     ui_state: &mut RetainedUiState,
 ) -> Result<SelectorOutcome> {
-    // MOTD is per-host; only meaningful in single-host mode. Multi-host mode
-    // hides the MOTD pane entirely (issue #235).
-    let motd = if fleet.is_multi() {
-        None
-    } else {
-        let entry = fleet.first().expect("fleet has at least one entry");
-        Some(load_motd(&entry.handle).await)
-    };
-    let mut app = AppState::with_fleet(fleet.clone(), layout, motd);
+    let mut app = AppState::with_fleet(fleet.clone(), layout);
     ui_state.apply_to(&mut app);
     let previous_selection = ui_state.selected_session_key();
     refresh_sessions_preserving(fleet, &mut app, true, previous_selection).await?;
