@@ -41,10 +41,10 @@ pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
 tab cycle panes
 l toggle layout
-PgUp/PgDn page current pane
-Home/End jump current pane
 m monitor highlighted session
 s send keys to highlighted session
+  Ctrl-Enter send keys, wait, Enter
+  $$ suffix same delayed Enter
 n create session
 k kill highlighted session
 r rename highlighted session (list pane)

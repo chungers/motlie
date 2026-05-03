@@ -691,8 +691,9 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
   `{Enter}` or `{C-m}` is explicit in the input.
 - [x] 13.5a Ctrl-Enter in Send Keys dispatches the same parsed user input,
   waits 500 ms, then dispatches a separate `{Enter}` key sequence.
-- [x] 13.5b A trailing `@@` suffix in Send Keys input is stripped and uses the
-  same delayed follow-up `{Enter}` behavior.
+- [x] 13.5b A trailing `$$` suffix in Send Keys input is stripped and uses the
+  same delayed follow-up `{Enter}` behavior; `$$` alone sends only delayed
+  `{Enter}`.
 - [x] 13.6 `Esc` and focused `Cancel` close without sending; invalid key syntax
   keeps the modal open for correction.
 - [x] 13.7 Add modal rendering, open/cancel/send/invalid-sequence tests and

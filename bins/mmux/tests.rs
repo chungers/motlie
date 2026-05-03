@@ -1541,6 +1541,10 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
+    assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
+    assert!(body.contains("  $$ suffix same delayed Enter"));
+    assert!(!body.contains("PgUp/PgDn page current pane"));
+    assert!(!body.contains("Home/End jump current pane"));
     assert!(body.contains(BUILD_DATE));
     assert!(body.contains(&format!("Git SHA: {}", short_build_git_sha())));
     if BUILD_GIT_SHA.chars().count() > 8 {
@@ -2413,7 +2417,7 @@ async fn send_keys_modal_ctrl_enter_sends_keys_then_enter_and_closes() {
 #[tokio::test]
 async fn send_keys_modal_suffix_shorthand_sends_keys_then_enter_and_closes() {
     let mock = MockTransport::new()
-        .with_error("send-keys -l -t '$1' 1@@", "should strip @@ suffix")
+        .with_error("send-keys -l -t '$1' '1$$'", "should strip $$ suffix")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
         .with_response("send-keys -t '$1' Enter", "");
@@ -2428,7 +2432,83 @@ async fn send_keys_modal_suffix_shorthand_sends_keys_then_enter_and_closes() {
     )
     .await
     .unwrap();
-    for ch in "1@@".chars() {
+    for ch in "1$$".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_suffix_only_sends_delayed_enter_and_closes() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -l -t '$1'", "$$ should not send literal text")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -t '$1' Enter", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "$$".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_suffix_shorthand_only_applies_at_end() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("1$$2", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1$$2".chars() {
         handle_key(
             &fleet,
             &mut app,

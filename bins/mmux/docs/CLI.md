@@ -331,9 +331,10 @@ Include `{Enter}` or `{C-m}` explicitly when the target should receive Enter.
 Sending happens when `Ok` is focused and Enter is pressed, or when Enter is
 pressed from the text field after text has been entered. Ctrl-Enter from the
 text field or focused `Ok` first sends the parsed input exactly, then waits
-500 ms and sends a separate `{Enter}` key. A trailing `@@` suffix is stripped
-from the input and uses that same delayed Enter behavior. `Esc` or focused
-`Cancel` dismisses without sending.
+500 ms and sends a separate `{Enter}` key. A trailing `$$` suffix is stripped
+from the input and uses that same delayed Enter behavior; when the input is only
+`$$`, mmux sends only the delayed `{Enter}` key. `Esc` or focused `Cancel`
+dismisses without sending.
 
 The top status bar uses the same dark blue background as the bottom status bar. It
 shows `<hostname> | <ip address>` in bold at the left and the current time
@@ -359,7 +360,7 @@ Modal keys:
 | `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
 | Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, Send Keys, or Session Tags; in Send Keys, also sends from the text field when it has content; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
 | Ctrl-Enter | In Send Keys, sends the current key sequence and then sends `{Enter}` after 500 ms. |
-| `@@` suffix | In Send Keys, stripped from the end of submitted input and treated like Ctrl-Enter. |
+| `$$` suffix | In Send Keys, stripped from the end of submitted input and treated like Ctrl-Enter; by itself, sends only the delayed `{Enter}`. |
 | Esc | Cancel action modals, discard staged Session Tags changes, close Session Tags, or close Help. |
 
 Modal content is padded inside the border. Focused text inputs show a blinking

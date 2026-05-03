@@ -203,9 +203,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   been entered, parses the field as a `KeySequence`, and sends that sequence
   exactly to the captured stable session target through `Target::send_keys`.
   Ctrl-Enter from the text field or focused `Ok` sends the same exact sequence,
-  waits 500 ms, and sends a separate `{Enter}` key. A trailing `@@` suffix is
+  waits 500 ms, and sends a separate `{Enter}` key. A trailing `$$` suffix is
   stripped from submitted input and uses the same delayed Enter mode. Otherwise,
-  Enter must be written explicitly as `{Enter}` or `{C-m}` when needed. `Esc` or
+  Enter must be written explicitly as `{Enter}` or `{C-m}` when needed. If `$$`
+  is the entire submitted input, mmux sends only the delayed `{Enter}`. `Esc` or
   focused `Cancel` closes without sending. Focused text inputs in mmux set the
   terminal cursor to the insertion point and use a blinking bar cursor while the
   TUI owns the screen.
@@ -758,8 +759,9 @@ Modal keymaps override the main keymap. In modals: Left/Right move between
 `Shift-Tab` for the same two-button cycle; Send Keys uses `Tab` / `Shift-Tab`
 to cycle `Input -> Ok -> Cancel`; `Enter` exits and applies `Ok` if selected,
 or sends from non-empty Send Keys input; Send Keys Ctrl-Enter sends the input
-and follows with `{Enter}` after 500 ms; a trailing `@@` suffix on Send Keys
-input requests the same follow-up Enter; `Esc` is `Cancel`.
+and follows with `{Enter}` after 500 ms; a trailing `$$` suffix on Send Keys
+input requests the same follow-up Enter; `$$` alone sends only the delayed
+Enter; `Esc` is `Cancel`.
 
 ### Portrait Mode
 
