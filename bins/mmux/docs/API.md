@@ -360,9 +360,9 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 
 `s` opens `SendKeys` for the highlighted session from any pane focus. The modal
 keeps focus explicit (`Input`, `Ok`, `Cancel`), renders a compact text field
-with `Keys to send to <session> on <host>`, sends from either focused `Ok` or
-non-empty `Input` Enter, parses the submitted text with `KeySequence::parse`,
-resolves the captured stable session id with
+with `To: <session> on <host>`, sends from either focused `Ok` or non-empty
+`Input` Enter, parses the submitted text with `KeySequence::parse`, appends a
+tmux `C-m` terminator, resolves the captured stable session id with
 `HostHandle::session_by_id()`, and dispatches through `Target::send_keys`.
 The modal accepts tmux key-name shorthand such as `{C-m}` for Enter because
 `KeySequence` passes valid raw key names through to tmux.

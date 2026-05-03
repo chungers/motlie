@@ -1561,11 +1561,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ModalView {
                 title: " Send keys ",
                 body: ModalBody::SendKeys {
-                    label: format!(
-                        "Keys to send to {} on {}",
-                        session.name(),
-                        session.host_label
-                    ),
+                    label: format!("To: {} on {}", session.name(), session.host_label),
                     input: ui.input.clone(),
                     focused: ui.focus == SendKeysFocus::Input,
                 },

@@ -680,12 +680,12 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
   pane focus; preserve pane focus cycling by moving the main-view cycle key to
   Tab.
 - [x] 13.4 Render title `Send keys`, label
-  `Keys to send to <session> on <host>`, a compact text field, and the standard
+  `To: <session> on <host>`, a compact text field, and the standard
   `Cancel` / `Ok` button strip.
 - [x] 13.5 On focused `Ok`, parse the input with `KeySequence::parse`, resolve
   the captured session with `HostHandle::session_by_id`, and call
   `Target::send_keys`; non-empty Enter from the input follows the same send
-  path.
+  path; append a tmux `C-m` terminator before dispatch.
 - [x] 13.6 `Esc` and focused `Cancel` close without sending; invalid key syntax
   keeps the modal open for correction.
 - [x] 13.7 Add modal rendering, open/cancel/send/invalid-sequence tests and

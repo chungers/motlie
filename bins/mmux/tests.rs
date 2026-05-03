@@ -1651,21 +1651,18 @@ fn modal_content_separates_body_from_button_bar() {
     ));
     assert!(!rename.body_text().contains("[Ok]"));
 
-    let send_keys = modal_content(&test_send_keys_modal(
-        "echo hi{Enter}",
-        SendKeysFocus::Input,
-    ));
+    let send_keys = modal_content(&test_send_keys_modal("echo hi", SendKeysFocus::Input));
     assert_eq!(send_keys.title, " Send keys ");
     assert_eq!(send_keys.active_button, None);
     assert_eq!(send_keys.buttons, " Cancel     Ok ");
     assert!(matches!(
         send_keys.body,
         ModalBody::SendKeys { ref label, ref input, focused }
-            if label == "Keys to send to dev on host" && input == "echo hi{Enter}" && focused
+            if label == "To: dev on host" && input == "echo hi" && focused
     ));
     assert!(!send_keys.body_text().contains("[Ok]"));
 
-    let send_keys_ok = modal_content(&test_send_keys_modal("echo hi{Enter}", SendKeysFocus::Ok));
+    let send_keys_ok = modal_content(&test_send_keys_modal("echo hi", SendKeysFocus::Ok));
     assert_eq!(send_keys_ok.active_button, Some(Button::Ok));
     assert_eq!(send_keys_ok.buttons, " Cancel    [Ok]");
 
@@ -2125,7 +2122,7 @@ async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
-        .with_response("send-keys -t '$1' Enter", "");
+        .with_response("send-keys -t '$1' C-m", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2137,7 +2134,7 @@ async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     )
     .await
     .unwrap();
-    for ch in "1{Enter}".chars() {
+    for ch in "1".chars() {
         handle_key(
             &fleet,
             &mut app,
@@ -2175,7 +2172,7 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
-        .with_response("send-keys -t '$1' Enter", "");
+        .with_response("send-keys -t '$1' C-m", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2187,7 +2184,7 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
     )
     .await
     .unwrap();
-    for ch in "1{Enter}".chars() {
+    for ch in "1".chars() {
         handle_key(
             &fleet,
             &mut app,
@@ -2209,10 +2206,11 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
 }
 
 #[tokio::test]
-async fn send_keys_modal_accepts_ctrl_m_enter_shorthand() {
+async fn send_keys_modal_appends_terminator_after_special_key_sequence() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' Tab", "")
         .with_response("send-keys -t '$1' C-m", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
@@ -2225,7 +2223,7 @@ async fn send_keys_modal_accepts_ctrl_m_enter_shorthand() {
     )
     .await
     .unwrap();
-    for ch in "1{C-m}".chars() {
+    for ch in "1{Tab}".chars() {
         handle_key(
             &fleet,
             &mut app,
