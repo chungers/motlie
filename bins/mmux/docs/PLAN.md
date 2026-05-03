@@ -12,7 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-03 | @codex | Added Phase 13 for the `s` Send keys modal and moved pane cycling to Tab. |
+| 2026-05-03 | @codex | Added Phase 13 for the `s` Send Keys modal and moved pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment-variable entry into New Session and create sessions with staged `CreateSessionOptions::initial_environment` values; removed the `e` environment modal. |
@@ -670,22 +670,25 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 - [ ] 12.5c `cargo fmt --all`
 - [x] 12.5d `cargo test -p motlie-tmux`
 
-## Phase 13: Send keys modal (`s`)
+## Phase 13: Send Keys modal (`s`)
 
 - [x] 13.1 Start branch `feature/mmux-send-keys` from local `feature/mmux` in
   worktree `motlie-mmux-send-keys`.
 - [x] 13.2 Add `ModalState::SendKeys` with explicit `Input`, `Ok`, and
   `Cancel` focus.
-- [x] 13.3 Bind `s` to open `Send keys` for the highlighted session from any
+- [x] 13.3 Bind `s` to open `Send Keys` for the highlighted session from any
   pane focus; preserve pane focus cycling by moving the main-view cycle key to
   Tab.
-- [x] 13.4 Render title `Send keys`, label
-  `To: <session> on <host>`, a compact text field, and the standard
-  `Cancel` / `Ok` button strip.
+- [x] 13.4 Render title `Send Keys`, label
+  `To: <session> on <host>`, a compact fixed-width text field that grows
+  vertically for wrapped long input, and the standard `Cancel` / `Ok` button
+  strip; focused input fields place a blinking terminal cursor at the insertion
+  point.
 - [x] 13.5 On focused `Ok`, parse the input with `KeySequence::parse`, resolve
   the captured session with `HostHandle::session_by_id`, and call
   `Target::send_keys`; non-empty Enter from the input follows the same send
-  path; append a tmux `C-m` terminator before dispatch.
+  path; append the tmux `Enter` terminator to the parsed `KeySequence` before
+  dispatch.
 - [x] 13.6 `Esc` and focused `Cancel` close without sending; invalid key syntax
   keeps the modal open for correction.
 - [x] 13.7 Add modal rendering, open/cancel/send/invalid-sequence tests and

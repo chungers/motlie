@@ -8,7 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-03 | @codex | Added the `s` Send keys modal and moved main-view pane cycling to Tab. |
+| 2026-05-03 | @codex | Added the `s` Send Keys modal and moved main-view pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment variables into the New Session modal and apply them through `CreateSessionOptions::initial_environment`; removed the post-creation `e` environment modal. |
@@ -195,13 +195,17 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode `%output` replay, because TUI programs rely on cursor movement,
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
-- Pressing `s` opens a centered `Send keys` modal for the highlighted session.
+- Pressing `s` opens a centered `Send Keys` modal for the highlighted session.
   The modal shows a label `To: <session> on <host>` above a compact text field
-  and has `Cancel` / `Ok` buttons. `Tab` cycles the text field and buttons;
-  Enter on focused `Ok`, or Enter from the text field after text has been
-  entered, parses the field as a `KeySequence`, appends a tmux `C-m`
-  terminator, and sends it to the captured stable session target through
-  `Target::send_keys`. `Esc` or focused `Cancel` closes without sending.
+  and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
+  vertically while the input width stays fixed. `Tab` cycles the text field and
+  buttons; Enter on focused `Ok`, or Enter from the text field after text has
+  been entered, parses the field as a `KeySequence`, appends a tmux `Enter`
+  segment to that sequence, and sends it to the captured stable session target
+  through `Target::send_keys`. `Esc` or focused
+  `Cancel` closes without sending. Focused text inputs in mmux set the terminal
+  cursor to the insertion point and use a blinking bar cursor while the TUI
+  owns the screen.
 - Pressing `n` opens a centered `New Session` modal with padded content, a
   bordered session-name text field, a horizontal separator, and `Cancel` /
   `Ok` buttons in the button bar. In multi-host mode, the modal shows a Host
@@ -731,7 +735,7 @@ Main-selector keymap (focus-aware):
 | `n` | Open `New Session` modal | Same | Same |
 | `k` | Open kill-confirmation modal | Same | Same |
 | `r` | No-op | Open rename modal for highlight | No-op |
-| `s` | Open Send keys modal for highlight | Same | Same |
+| `s` | Open Send Keys modal for highlight | Same | Same |
 | `t` | Open tag list/add/update/delete modal for highlight | Same | Same |
 | `g` | No-op | Toggle activity/tag grouping | No-op |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same | Same |
@@ -748,9 +752,9 @@ landscape L/R clamps at 25/75, while portrait T/B clamps at 15/85.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok` where applicable; kill confirmation also accepts `Tab` /
-`Shift-Tab` for the same two-button cycle; Send keys uses `Tab` / `Shift-Tab`
+`Shift-Tab` for the same two-button cycle; Send Keys uses `Tab` / `Shift-Tab`
 to cycle `Input -> Ok -> Cancel`; `Enter` exits and applies `Ok` if selected,
-or sends from non-empty Send keys input; `Esc` is `Cancel`.
+or sends from non-empty Send Keys input; `Esc` is `Cancel`.
 
 ### Portrait Mode
 

@@ -8,7 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-03 | @codex | Added the `s` Send keys modal for highlighted sessions and moved main-view pane cycling to `Tab`. |
+| 2026-05-03 | @codex | Added the `s` Send Keys modal for highlighted sessions and moved main-view pane cycling to `Tab`. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply to tmux only when Ok closes the dialog; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Moved environment-variable entry into the New Session modal and apply staged variables at creation time through `CreateSessionOptions::initial_environment`; removed the `e` shortcut. |
 | 2026-05-02 | @codex | Changed host labels in the top status bar to use tmux `#{host}` rather than SSH URI hostnames; URI hostnames remain internal aliases. |
@@ -275,7 +275,7 @@ Normal mode main-view keys:
 | `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
 | `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
 | `m` | Monitor highlighted session | Monitor highlighted session | Monitor highlighted session |
-| `s` | Open Send keys modal | Open Send keys modal | Open Send keys modal |
+| `s` | Open Send Keys modal | Open Send Keys modal | Open Send Keys modal |
 | `n` | Open New Session modal | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
 | `r` | No-op | Open Rename Session modal | No-op |
@@ -322,13 +322,15 @@ right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
 `d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
-Pressing `s` opens the `Send keys` modal for the highlighted session. The modal
+Pressing `s` opens the `Send Keys` modal for the highlighted session. The modal
 has a compact text field labeled `To: <session> on <host>`, accepts
-`motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, appends a
-tmux `C-m` terminator, and sends through the highlighted session target when
-`Ok` is focused and Enter is pressed, or when Enter is pressed from the text
-field after text has been entered. `Esc` or focused `Cancel` dismisses without
-sending.
+`motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, wraps long
+input by growing the text field vertically while keeping its width fixed,
+then sends the parsed input through the highlighted session target with a tmux
+`Enter` terminator appended to the same ordered key sequence. Sending
+happens when `Ok` is focused and Enter is pressed, or when Enter is pressed from
+the text field after text has been entered. `Esc` or focused `Cancel` dismisses
+without sending.
 
 The top status bar uses the same dark blue background as the bottom status bar. It
 shows `<hostname> | <ip address>` in bold at the left and the current time
@@ -346,16 +348,17 @@ Modal keys:
 
 | Key | Behavior |
 |-----|----------|
-| Left / Right | Choose Cancel or Ok in New Session, Kill Session, Rename Session, and Send keys modals. No-op in Help and Session Tags. |
-| Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Send keys, cycle text field, Ok, and Cancel. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
+| Left / Right | Choose Cancel or Ok in New Session, Kill Session, Rename Session, and Send Keys modals. No-op in Help and Session Tags. |
+| Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Send Keys, cycle text field, Ok, and Cancel. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
 | Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
 | `u` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
 | `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
-| Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, Send keys, or Session Tags; in Send keys, also sends from the text field when it has content; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
+| Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, Send Keys, or Session Tags; in Send Keys, also sends from the text field when it has content; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
 | Esc | Cancel action modals, discard staged Session Tags changes, close Session Tags, or close Help. |
 
-Modal content is padded inside the border. New Session and Rename Session render
+Modal content is padded inside the border. Focused text inputs show a blinking
+terminal cursor at the insertion point. New Session and Rename Session render
 their text fields with their own borders. In multi-host mode, New Session also
 renders a Host dropdown above the session-name field; the selected host and
 session name are used for `HostHandle::create_session()`. The New Session modal

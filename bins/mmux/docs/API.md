@@ -360,12 +360,17 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 
 `s` opens `SendKeys` for the highlighted session from any pane focus. The modal
 keeps focus explicit (`Input`, `Ok`, `Cancel`), renders a compact text field
-with `To: <session> on <host>`, sends from either focused `Ok` or non-empty
-`Input` Enter, parses the submitted text with `KeySequence::parse`, appends a
-tmux `C-m` terminator, resolves the captured stable session id with
-`HostHandle::session_by_id()`, and dispatches through `Target::send_keys`.
+with `To: <session> on <host>`, wraps long input by growing the field height
+against a fixed input width, sends from either focused `Ok` or non-empty
+`Input` Enter, parses the submitted text with `KeySequence::parse`, resolves
+the captured stable session id with `HostHandle::session_by_id()`, appends a
+tmux `Enter` segment to the parsed `KeySequence`, and dispatches it through
+`Target::send_keys`.
 The modal accepts tmux key-name shorthand such as `{C-m}` for Enter because
 `KeySequence` passes valid raw key names through to tmux.
+Focused modal text inputs set the terminal cursor to the insertion point; the
+terminal session configures that cursor as a blinking bar while mmux owns the
+screen.
 No new `motlie-tmux` API is required for this feature; the existing gap is only
 UI policy around which key owns pane focus, handled in mmux by moving pane
 cycling to Tab.

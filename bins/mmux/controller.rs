@@ -7,7 +7,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
     CreateSessionOptions, HostHandle, KeySequence, SessionEnvVar, SessionId, SessionInfo,
-    SessionTag, SpecialKey,
+    SessionTag,
 };
 
 use crate::consts::{
@@ -1419,7 +1419,7 @@ async fn send_keys_from_modal(
         return Ok(false);
     }
     let keys = match KeySequence::parse(&input) {
-        Ok(keys) => keys.then_key(SpecialKey::Raw("C-m".to_string())),
+        Ok(keys) => keys.then_enter(),
         Err(err) => {
             app.status = StatusBanner::error(format!("invalid keys: {err}"));
             return Ok(false);
