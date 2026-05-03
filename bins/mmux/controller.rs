@@ -25,7 +25,7 @@ use crate::model::{
 const TAG_PREFIX: &str = "mmux";
 const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
-const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "@@";
+const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
 
 pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
     load_motd_from(host, Path::new("/etc/motd")).await
@@ -1450,21 +1450,25 @@ async fn send_keys_from_modal(
     mode: SendKeysSubmitMode,
 ) -> Result<bool> {
     let (input, mode) = normalize_send_keys_input(input, mode);
-    if input.is_empty() {
-        app.status = StatusBanner::info("keys are empty");
-        return Ok(false);
-    }
-    let keys = match KeySequence::parse(&input) {
-        Ok(keys) => keys,
-        Err(err) => {
-            app.status = StatusBanner::error(format!("invalid keys: {err}"));
-            return Ok(false);
-        }
-    };
     let enter_keys = if mode == SendKeysSubmitMode::ThenEnterAfterDelay {
         Some(KeySequence::parse("{Enter}")?)
     } else {
         None
+    };
+    if input.is_empty() && enter_keys.is_none() {
+        app.status = StatusBanner::info("keys are empty");
+        return Ok(false);
+    }
+    let keys = if input.is_empty() {
+        None
+    } else {
+        match KeySequence::parse(&input) {
+            Ok(keys) => Some(keys),
+            Err(err) => {
+                app.status = StatusBanner::error(format!("invalid keys: {err}"));
+                return Ok(false);
+            }
+        }
     };
     let Some(host) = fleet_host(fleet, &session.host_id) else {
         app.status =
@@ -1472,25 +1476,26 @@ async fn send_keys_from_modal(
         return Ok(true);
     };
     match host.session_by_id(session.id()).await? {
-        Some(target) => match target.send_keys(&keys).await {
-            Ok(()) => {
-                if let Some(enter_keys) = enter_keys.as_ref() {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Err(err) = target.send_keys(enter_keys).await {
-                        app.status = StatusBanner::error(format!("send Enter failed: {err}"));
-                        return Ok(true);
-                    }
+        Some(target) => {
+            if let Some(keys) = keys.as_ref() {
+                if let Err(err) = target.send_keys(keys).await {
+                    app.status = StatusBanner::error(format!("send keys failed: {err}"));
+                    return Ok(true);
                 }
-                app.status = StatusBanner::info(if fleet.is_multi() {
-                    format!("sent keys to {} on {}", session.name(), session.host_label)
-                } else {
-                    format!("sent keys to {}", session.name())
-                });
             }
-            Err(err) => {
-                app.status = StatusBanner::error(format!("send keys failed: {err}"));
+            if let Some(enter_keys) = enter_keys.as_ref() {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Err(err) = target.send_keys(enter_keys).await {
+                    app.status = StatusBanner::error(format!("send Enter failed: {err}"));
+                    return Ok(true);
+                }
             }
-        },
+            app.status = StatusBanner::info(if fleet.is_multi() {
+                format!("sent keys to {} on {}", session.name(), session.host_label)
+            } else {
+                format!("sent keys to {}", session.name())
+            });
+        }
         None => {
             refresh_sessions(fleet, app, true).await?;
             app.status = StatusBanner::error(format!(

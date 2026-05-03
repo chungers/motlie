@@ -367,8 +367,9 @@ the captured stable session id with `HostHandle::session_by_id()`, and
 dispatches the parsed sequence exactly through `Target::send_keys`.
 Ctrl-Enter uses the same parsed input dispatch, then waits 500 ms and
 dispatches a second explicit `{Enter}` sequence through the same target.
-Submitted input ending in `@@` is normalized by stripping that suffix and using
-the same delayed Enter dispatch mode.
+Submitted input ending in `$$` is normalized by stripping that suffix and using
+the same delayed Enter dispatch mode. If the suffix is the entire submitted
+input, mmux skips the initial key dispatch and sends only the delayed `{Enter}`.
 The modal accepts tmux key-name shorthand such as `{C-m}` for Enter because
 `KeySequence` passes valid raw key names through to tmux.
 Focused modal text inputs set the terminal cursor to the insertion point; the
