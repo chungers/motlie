@@ -687,8 +687,10 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 - [x] 13.5 On focused `Ok`, parse the input with `KeySequence::parse`, resolve
   the captured session with `HostHandle::session_by_id`, and call
   `Target::send_keys`; non-empty Enter from the input follows the same send
-  path; append the tmux `Enter` terminator to the parsed `KeySequence` before
-  dispatch.
+  path; dispatch exactly what the user typed, with Enter represented only when
+  `{Enter}` or `{C-m}` is explicit in the input.
+- [x] 13.5a Ctrl-Enter in Send Keys dispatches the same parsed user input,
+  waits 500 ms, then dispatches a separate `{Enter}` key sequence.
 - [x] 13.6 `Esc` and focused `Cancel` close without sending; invalid key syntax
   keeps the modal open for correction.
 - [x] 13.7 Add modal rendering, open/cancel/send/invalid-sequence tests and

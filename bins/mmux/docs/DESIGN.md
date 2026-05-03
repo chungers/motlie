@@ -200,9 +200,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
   vertically while the input width stays fixed. `Tab` cycles the text field and
   buttons; Enter on focused `Ok`, or Enter from the text field after text has
-  been entered, parses the field as a `KeySequence`, appends a tmux `Enter`
-  segment to that sequence, and sends it to the captured stable session target
-  through `Target::send_keys`. `Esc` or focused
+  been entered, parses the field as a `KeySequence`, and sends that sequence
+  exactly to the captured stable session target through `Target::send_keys`.
+  Ctrl-Enter from the text field or focused `Ok` sends the same exact sequence,
+  waits 500 ms, and sends a separate `{Enter}` key. Otherwise, Enter must be
+  written explicitly as `{Enter}` or `{C-m}` when needed. `Esc` or focused
   `Cancel` closes without sending. Focused text inputs in mmux set the terminal
   cursor to the insertion point and use a blinking bar cursor while the TUI
   owns the screen.
@@ -754,7 +756,8 @@ Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok` where applicable; kill confirmation also accepts `Tab` /
 `Shift-Tab` for the same two-button cycle; Send Keys uses `Tab` / `Shift-Tab`
 to cycle `Input -> Ok -> Cancel`; `Enter` exits and applies `Ok` if selected,
-or sends from non-empty Send Keys input; `Esc` is `Cancel`.
+or sends from non-empty Send Keys input; Send Keys Ctrl-Enter sends the input
+and follows with `{Enter}` after 500 ms; `Esc` is `Cancel`.
 
 ### Portrait Mode
 
