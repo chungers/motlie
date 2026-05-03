@@ -11,10 +11,10 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_SQUARE, MODAL_BUTTON_HEIGHT,
-    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING, MODAL_MIN_WIDTH,
-    MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT, MOTLIE_PLACEHOLDER,
-    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
+    APP_BASE_BG, APP_BASE_FG, BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_SQUARE,
+    MODAL_BUTTON_HEIGHT, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING,
+    MODAL_MIN_WIDTH, MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT,
+    MOTLIE_PLACEHOLDER, STATUS_BAR_BG, STATUS_BAR_FG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
@@ -24,6 +24,8 @@ use crate::model::{
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
     let area = frame.area();
+    apply_app_base_style(frame, area);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -42,6 +44,26 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
     if let Some(modal) = &app.modal {
         draw_modal(frame, area, modal);
     }
+}
+
+fn apply_app_base_style(frame: &mut Frame<'_>, area: Rect) {
+    if let Some(style) = app_base_style() {
+        frame.buffer_mut().set_style(area, style);
+    }
+}
+
+fn app_base_style() -> Option<Style> {
+    let mut style = Style::default();
+    let mut styled = false;
+    if let Some(fg) = APP_BASE_FG {
+        style = style.fg(fg);
+        styled = true;
+    }
+    if let Some(bg) = APP_BASE_BG {
+        style = style.bg(bg);
+        styled = true;
+    }
+    styled.then_some(style)
 }
 
 fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
@@ -389,8 +411,29 @@ pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
 }
 
 pub(crate) fn detail_text_for_render(text: &str) -> Text<'_> {
-    text.into_text()
-        .unwrap_or_else(|_| Text::raw(strip_ansi(text)))
+    normalize_terminal_reset_colors(
+        text.into_text()
+            .unwrap_or_else(|_| Text::raw(strip_ansi(text))),
+    )
+}
+
+fn normalize_terminal_reset_colors(mut text: Text<'_>) -> Text<'_> {
+    for line in &mut text.lines {
+        normalize_style_reset_colors(&mut line.style);
+        for span in &mut line.spans {
+            normalize_style_reset_colors(&mut span.style);
+        }
+    }
+    text
+}
+
+fn normalize_style_reset_colors(style: &mut Style) {
+    if style.fg == Some(Color::Reset) {
+        style.fg = None;
+    }
+    if style.bg == Some(Color::Reset) {
+        style.bg = None;
+    }
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -425,7 +468,7 @@ pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<
             " ".repeat(padding_width),
             Style::default().bg(STATUS_BAR_BG),
         ),
-        TuiSpan::styled(time, Style::default().fg(Color::White).bg(STATUS_BAR_BG)),
+        TuiSpan::styled(time, Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG)),
     ]);
     Line::from(spans)
 }
@@ -435,7 +478,7 @@ fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'stati
         return Vec::new();
     }
     let base_style = Style::default()
-        .fg(Color::White)
+        .fg(STATUS_BAR_FG)
         .bg(STATUS_BAR_BG)
         .add_modifier(Modifier::BOLD);
     let spans = if app.fleet.is_multi() {
@@ -583,7 +626,7 @@ fn status_span(text: impl Into<std::borrow::Cow<'static, str>>) -> TuiSpan<'stat
 }
 
 fn status_base_style() -> Style {
-    Style::default().fg(Color::White).bg(STATUS_BAR_BG)
+    Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG)
 }
 
 fn status_mnemonic_style() -> Style {
@@ -626,6 +669,7 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = Rect::new(x, y, width, height);
     frame.render_widget(Clear, rect);
+    apply_app_base_style(frame, rect);
 
     let border = match view.active_button {
         Some(Button::Ok) => Color::Green,

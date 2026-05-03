@@ -8,7 +8,7 @@ use crate::types::{
     validate_session_env_var_name, validate_session_env_var_value, validate_session_tag_value,
     CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionEnvVar, SessionTag,
     SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength,
-    StatusStyle, TmuxSocket, WindowInfo,
+    StatusStyle, TmuxSocket, WindowInfo, WindowStyle,
 };
 
 /// Shell-escape a string for safe interpolation into shell commands.
@@ -901,6 +901,161 @@ pub(crate) async fn read_local_session_status_left_length_with_prefix(
     StatusLeftLength::new(length).map(Some)
 }
 
+/// Session window ids for applying window-local options across a session.
+pub(crate) async fn list_session_window_ids_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Vec<String>> {
+    let cmd = format!(
+        "{} list-windows -t {} -F '#{{q:window_id}}'",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(parse_window_id)
+        .collect()
+}
+
+/// Set window-local tmux `window-style`.
+pub(crate) async fn set_window_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    style: &WindowStyle,
+) -> Result<()> {
+    set_window_style_option_with_prefix(transport, prefix, target, "window-style", style).await
+}
+
+/// Unset window-local tmux `window-style`.
+pub(crate) async fn unset_window_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    unset_window_style_option_with_prefix(transport, prefix, target, "window-style").await
+}
+
+/// Read only the window-local `window-style` override.
+pub(crate) async fn read_local_window_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<WindowStyle>> {
+    read_local_window_style_option_with_prefix(transport, prefix, target, "window-style").await
+}
+
+/// Set window-local tmux `window-active-style`.
+pub(crate) async fn set_window_active_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    style: &WindowStyle,
+) -> Result<()> {
+    set_window_style_option_with_prefix(transport, prefix, target, "window-active-style", style)
+        .await
+}
+
+/// Unset window-local tmux `window-active-style`.
+pub(crate) async fn unset_window_active_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    unset_window_style_option_with_prefix(transport, prefix, target, "window-active-style").await
+}
+
+/// Read only the window-local `window-active-style` override.
+pub(crate) async fn read_local_window_active_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<WindowStyle>> {
+    read_local_window_style_option_with_prefix(transport, prefix, target, "window-active-style")
+        .await
+}
+
+async fn set_window_style_option_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    option_name: &str,
+    style: &WindowStyle,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} {} {}",
+        prefix,
+        shell_escape(target),
+        option_name,
+        shell_escape(style.as_str())
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+async fn unset_window_style_option_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    option_name: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} {}",
+        prefix,
+        shell_escape(target),
+        option_name
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+async fn read_local_window_style_option_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    expected_option_name: &str,
+) -> Result<Option<WindowStyle>> {
+    let cmd = format!(
+        "{} show-option -q -t {} {}",
+        prefix,
+        shell_escape(target),
+        expected_option_name
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed {expected_option_name} option without value: {line}"
+        )));
+    };
+    if option_name != expected_option_name {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading {expected_option_name}"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    WindowStyle::from_tmux_value(value).map(Some)
+}
+
+fn parse_window_id(line: &str) -> Result<String> {
+    let window_id = line.trim();
+    if window_id.is_empty() {
+        return Err(Error::Parse("empty tmux window id".to_string()));
+    }
+    if !window_id.starts_with('@') || !window_id[1..].bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::Parse(format!(
+            "invalid tmux window id: {window_id:?}"
+        )));
+    }
+    Ok(window_id.to_string())
+}
+
 /// List all tags under one namespace prefix for multiple sessions in one tmux call.
 pub(crate) async fn list_session_tags_for_targets_with_prefix(
     transport: &TransportKind,
@@ -1772,6 +1927,76 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("status-left"));
+    }
+
+    #[tokio::test]
+    async fn window_style_commands_target_stable_window_ids() {
+        let mock = MockTransport::new()
+            .with_response("tmux list-windows -t '$7' -F '#{q:window_id}'", "@2\n@5\n")
+            .with_response(
+                "tmux set-option -t '@2' window-style 'bg=black,fg=white'",
+                "",
+            )
+            .with_response(
+                "tmux show-option -q -t '@2' window-style",
+                "window-style \"bg=green,fg=black\"\n",
+            )
+            .with_response("tmux set-option -u -t '@2' window-style", "")
+            .with_response(
+                "tmux set-option -t '@5' window-active-style 'bg=black,fg=white'",
+                "",
+            )
+            .with_response(
+                "tmux show-option -q -t '@5' window-active-style",
+                "window-active-style bg=blue,fg=white\n",
+            )
+            .with_response("tmux set-option -u -t '@5' window-active-style", "");
+        let transport = TransportKind::Mock(mock);
+        let style = WindowStyle::new("bg=black,fg=white").unwrap();
+
+        assert_eq!(
+            list_session_window_ids_with_prefix(&transport, "tmux", "$7")
+                .await
+                .unwrap(),
+            vec!["@2".to_string(), "@5".to_string()]
+        );
+        set_window_style_with_prefix(&transport, "tmux", "@2", &style)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_local_window_style_with_prefix(&transport, "tmux", "@2")
+                .await
+                .unwrap(),
+            Some(WindowStyle::new("bg=green,fg=black").unwrap())
+        );
+        unset_window_style_with_prefix(&transport, "tmux", "@2")
+            .await
+            .unwrap();
+        set_window_active_style_with_prefix(&transport, "tmux", "@5", &style)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_local_window_active_style_with_prefix(&transport, "tmux", "@5")
+                .await
+                .unwrap(),
+            Some(WindowStyle::new("bg=blue,fg=white").unwrap())
+        );
+        unset_window_active_style_with_prefix(&transport, "tmux", "@5")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_session_window_ids_rejects_unexpected_format() {
+        let mock = MockTransport::new()
+            .with_response("tmux list-windows -t '$7' -F '#{q:window_id}'", "$7\n");
+        let transport = TransportKind::Mock(mock);
+
+        let err = list_session_window_ids_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("invalid tmux window id"));
     }
 
     #[tokio::test]

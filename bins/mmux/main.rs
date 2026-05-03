@@ -18,7 +18,10 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 
 use cli::{select_layout, Cli};
-use consts::{MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE};
+use consts::{
+    mmux_attach_status_style, mmux_attach_window_style, MMUX_ATTACH_STATUS_LEFT,
+    MMUX_ATTACH_STATUS_LEFT_LENGTH,
+};
 use controller::{
     handle_key, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
     stop_detail_source, KeyOutcome,
@@ -26,8 +29,9 @@ use controller::{
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
 use motlie_tmux::{
-    AttachExit, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot, StatusLeft,
-    StatusLeftLength, StatusStyle, Target,
+    AttachExit, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot,
+    SessionWindowStyleOverrides, SessionWindowStyles, SessionWindowStylesSnapshot, StatusLeft,
+    StatusLeftLength, StatusStyle, Target, WindowStyle,
 };
 use target_host::connect_fleet;
 use terminal::TerminalSession;
@@ -36,6 +40,11 @@ use terminal::TerminalSession;
 enum SelectorOutcome {
     Selected(SelectedSession),
     Cancelled,
+}
+
+struct AttachStyleSnapshot {
+    status: Option<SessionStatusSnapshot>,
+    window_styles: Option<SessionWindowStylesSnapshot>,
 }
 
 #[tokio::main]
@@ -103,15 +112,33 @@ async fn attach_current_pty_with_mmux_status(target: &Target) -> Result<AttachEx
             None
         }
     };
-    let snapshot = match &status {
-        Some(status) => prepare_attach_status(status).await,
-        None => None,
+    let window_styles = match target.window_styles().await {
+        Ok(styles) => Some(styles),
+        Err(err) => {
+            eprintln!("mmux: could not access tmux window styles before attach: {err}");
+            None
+        }
     };
+    let snapshot = prepare_attach_styles(status.as_ref(), window_styles.as_ref()).await;
     let exit = target.attach_current_pty().await;
-    if let Some(status) = &status {
-        restore_attach_status(status, snapshot).await;
-    }
+    restore_attach_styles(status.as_ref(), window_styles.as_ref(), snapshot).await;
     exit.map_err(Into::into)
+}
+
+async fn prepare_attach_styles(
+    status: Option<&SessionStatus<'_>>,
+    window_styles: Option<&SessionWindowStyles<'_>>,
+) -> AttachStyleSnapshot {
+    AttachStyleSnapshot {
+        status: match status {
+            Some(status) => prepare_attach_status(status).await,
+            None => None,
+        },
+        window_styles: match window_styles {
+            Some(window_styles) => prepare_attach_window_styles(window_styles).await,
+            None => None,
+        },
+    }
 }
 
 async fn prepare_attach_status(status: &SessionStatus<'_>) -> Option<SessionStatusSnapshot> {
@@ -122,7 +149,7 @@ async fn prepare_attach_status(status: &SessionStatus<'_>) -> Option<SessionStat
             return None;
         }
     };
-    let style = StatusStyle::new(MMUX_ATTACH_STATUS_STYLE)
+    let style = StatusStyle::new(mmux_attach_status_style())
         .expect("mmux attach status style is a valid static tmux style");
     let left = StatusLeft::new(MMUX_ATTACH_STATUS_LEFT)
         .expect("mmux attach status-left is a valid static tmux format");
@@ -139,6 +166,45 @@ async fn prepare_attach_status(status: &SessionStatus<'_>) -> Option<SessionStat
     Some(snapshot)
 }
 
+async fn prepare_attach_window_styles(
+    window_styles: &SessionWindowStyles<'_>,
+) -> Option<SessionWindowStylesSnapshot> {
+    let style = match mmux_attach_window_style() {
+        Some(style) => {
+            WindowStyle::new(style).expect("mmux attach window style is a valid static tmux style")
+        }
+        None => return None,
+    };
+    let snapshot = match window_styles.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            eprintln!("mmux: could not read tmux window style overrides before attach: {err}");
+            return None;
+        }
+    };
+    let overrides = SessionWindowStyleOverrides {
+        style: Some(style.clone()),
+        active_style: Some(style),
+    };
+    if let Err(err) = window_styles.apply(&overrides).await {
+        eprintln!("mmux: could not set tmux window style overrides before attach: {err}");
+    }
+    Some(snapshot)
+}
+
+async fn restore_attach_styles(
+    status: Option<&SessionStatus<'_>>,
+    window_styles: Option<&SessionWindowStyles<'_>>,
+    snapshot: AttachStyleSnapshot,
+) {
+    if let (Some(window_styles), Some(snapshot)) = (window_styles, snapshot.window_styles) {
+        restore_attach_window_styles(window_styles, Some(snapshot)).await;
+    }
+    if let (Some(status), Some(snapshot)) = (status, snapshot.status) {
+        restore_attach_status(status, Some(snapshot)).await;
+    }
+}
+
 async fn restore_attach_status(
     status: &SessionStatus<'_>,
     snapshot: Option<SessionStatusSnapshot>,
@@ -148,6 +214,18 @@ async fn restore_attach_status(
     };
     if let Err(err) = status.restore(&snapshot).await {
         eprintln!("mmux: could not restore tmux status overrides after attach: {err}");
+    }
+}
+
+async fn restore_attach_window_styles(
+    window_styles: &SessionWindowStyles<'_>,
+    snapshot: Option<SessionWindowStylesSnapshot>,
+) {
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    if let Err(err) = window_styles.restore(&snapshot).await {
+        eprintln!("mmux: could not restore tmux window style overrides after attach: {err}");
     }
 }
 
