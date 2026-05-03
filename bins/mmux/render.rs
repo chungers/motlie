@@ -2,7 +2,7 @@ use std::cmp::{max, min};
 
 use ansi_to_tui::IntoText;
 use motlie_tmux::strip_ansi;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as TuiSpan, Text};
 use ratatui::widgets::{
@@ -701,20 +701,24 @@ fn status_mnemonic_style() -> Style {
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     let view = modal_content(modal);
     let (content_horizontal_padding, content_vertical_padding) = modal_content_padding(&view.body);
+    let body_width = modal_content_width(&view);
     let width = min(
         max(
             modal_min_width(&view.body),
-            modal_content_width(&view)
+            body_width
                 .saturating_add(content_horizontal_padding.saturating_mul(2))
                 .saturating_add(2),
         ),
         area.width
             .saturating_sub(MODAL_OUTER_MARGIN.saturating_mul(2)),
     );
+    let content_width = width
+        .saturating_sub(2)
+        .saturating_sub(content_horizontal_padding.saturating_mul(2));
     let height = min(
         max(
             7,
-            modal_content_height(&view)
+            modal_content_height(&view, content_width)
                 .saturating_add(content_vertical_padding.saturating_mul(2))
                 .saturating_add(MODAL_SEPARATOR_HEIGHT)
                 .saturating_add(MODAL_BUTTON_HEIGHT)
@@ -786,7 +790,7 @@ fn modal_min_width(body: &ModalBody) -> u16 {
 
 fn modal_content_padding(body: &ModalBody) -> (u16, u16) {
     if matches!(body, ModalBody::SendKeys { .. }) {
-        (1, 0)
+        (1, 1)
     } else {
         (
             MODAL_CONTENT_HORIZONTAL_PADDING,
@@ -795,7 +799,7 @@ fn modal_content_padding(body: &ModalBody) -> (u16, u16) {
     }
 }
 
-fn modal_content_height(view: &ModalView) -> u16 {
+fn modal_content_height(view: &ModalView, content_width: u16) -> u16 {
     match &view.body {
         ModalBody::Text(text) => max(1, text.lines().count()) as u16,
         ModalBody::NewSession { host_label, .. } => {
@@ -816,7 +820,7 @@ fn modal_content_height(view: &ModalView) -> u16 {
                 .saturating_add(KEY_VALUE_INPUT_SECTION_HEIGHT)
         }
         ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
-        ModalBody::SendKeys { .. } => 1 + SEND_KEYS_TEXT_FIELD_HEIGHT,
+        ModalBody::SendKeys { input, .. } => 1 + send_keys_text_field_height(input, content_width),
         ModalBody::SessionKeyValues { rows, .. } => {
             let rows = max(1, rows.len()) as u16;
             min(rows, KEY_VALUE_LIST_MAX_ROWS as u16) + KEY_VALUE_INPUT_SECTION_HEIGHT
@@ -858,8 +862,8 @@ fn modal_content_width(view: &ModalView) -> u16 {
         ModalBody::RenameSession { input } => {
             max("Session Name".chars().count(), input.chars().count())
         }
-        ModalBody::SendKeys { label, input, .. } => {
-            max(label.chars().count(), input.chars().count())
+        ModalBody::SendKeys { label, .. } => {
+            max(label.chars().count(), SEND_KEYS_TEXT_FIELD_WIDTH as usize)
         }
         ModalBody::SessionKeyValues {
             kind,
@@ -1133,12 +1137,58 @@ const KEY_VALUE_EMPTY_KEY_COLUMN_PERCENT: u16 = 30;
 const KEY_VALUE_EDIT_ROW_OVERHEAD: usize = 6;
 const KEY_VALUE_LIST_ROW_OVERHEAD: usize = 7;
 const SEND_KEYS_MODAL_MIN_WIDTH: u16 = 40;
-const SEND_KEYS_TEXT_FIELD_HEIGHT: u16 = 3;
+const SEND_KEYS_TEXT_FIELD_WIDTH: u16 = 64;
+const SEND_KEYS_TEXT_FIELD_MIN_HEIGHT: u16 = 3;
 
 fn visible_session_key_value_rows(area_height: u16, row_count: usize) -> usize {
     let available = area_height.saturating_sub(KEY_VALUE_INPUT_SECTION_HEIGHT) as usize;
     let row_count = max(1, row_count);
     min(KEY_VALUE_LIST_MAX_ROWS, min(row_count, available))
+}
+
+fn send_keys_text_field_height(input: &str, width: u16) -> u16 {
+    let inner_width = width.saturating_sub(2).max(1) as usize;
+    let wrapped_rows = wrapped_line_count(input, inner_width);
+    max(
+        SEND_KEYS_TEXT_FIELD_MIN_HEIGHT,
+        wrapped_rows.saturating_add(2),
+    )
+}
+
+fn wrapped_line_count(input: &str, width: usize) -> u16 {
+    let width = max(1, width);
+    let rows = if input.is_empty() {
+        1
+    } else {
+        input
+            .split('\n')
+            .map(|line| max(1, (line.chars().count() + width - 1) / width))
+            .sum()
+    };
+    min(rows, u16::MAX as usize) as u16
+}
+
+fn hard_wrapped_text(input: &str, width: usize) -> String {
+    let width = max(1, width);
+    if input.is_empty() {
+        return String::new();
+    }
+    let mut output = String::new();
+    for (line_index, line) in input.split('\n').enumerate() {
+        if line_index > 0 {
+            output.push('\n');
+        }
+        if line.is_empty() {
+            continue;
+        }
+        for (index, ch) in line.chars().enumerate() {
+            if index > 0 && index % width == 0 {
+                output.push('\n');
+            }
+            output.push(ch);
+        }
+    }
+    output
 }
 
 fn key_value_prefix_column_width(area_width: u16) -> u16 {
@@ -1250,10 +1300,12 @@ fn draw_session_key_value_input_row(
     let key_style = key_value_edit_cell_style(focus == SessionKeyValueFocus::Key);
     let value_style = key_value_edit_cell_style(focus == SessionKeyValueFocus::Value);
     let value_width = columns.value_width.saturating_add(columns.indicator_width);
+    let key_focused = focus == SessionKeyValueFocus::Key;
+    let value_focused = focus == SessionKeyValueFocus::Value;
     let line = key_value_input_row_line(
         pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
-        pad_or_truncate_owned(key_input.to_string(), columns.key_width as usize),
-        pad_or_truncate_owned(value_input.to_string(), value_width as usize),
+        input_cell_text(key_input, columns.key_width as usize, key_focused),
+        input_cell_text(value_input, value_width as usize, value_focused),
         key_style,
         value_style,
     );
@@ -1261,6 +1313,24 @@ fn draw_session_key_value_input_row(
         Paragraph::new(line).style(key_value_input_row_style()),
         area,
     );
+    match focus {
+        SessionKeyValueFocus::Key => set_inline_text_cursor(
+            frame,
+            Rect::new(area.x + columns.prefix_width, area.y, columns.key_width, 1),
+            key_input,
+        ),
+        SessionKeyValueFocus::Value => set_inline_text_cursor(
+            frame,
+            Rect::new(
+                area.x + columns.prefix_width + columns.key_width,
+                area.y,
+                value_width,
+                1,
+            ),
+            value_input,
+        ),
+        _ => {}
+    }
 }
 
 fn key_value_list_row_line(
@@ -1296,6 +1366,93 @@ fn key_value_input_row_line(
 
 fn key_value_input_separator_style() -> Style {
     Style::default().fg(Color::DarkGray)
+}
+
+fn set_inline_text_cursor(frame: &mut Frame<'_>, area: Rect, value: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let offset = input_cursor_offset(value, area.width as usize);
+    frame.set_cursor_position(Position::new(area.x + offset, area.y));
+}
+
+fn set_single_line_cursor(frame: &mut Frame<'_>, input_inner: Rect, value: &str) {
+    set_inline_text_cursor(frame, input_inner, value);
+}
+
+fn set_wrapped_text_cursor(frame: &mut Frame<'_>, input_inner: Rect, value: &str) {
+    if input_inner.width == 0 || input_inner.height == 0 {
+        return;
+    }
+    let (x_offset, y_offset) = wrapped_cursor_offset(value, input_inner.width as usize);
+    frame.set_cursor_position(Position::new(
+        input_inner.x + min(x_offset, input_inner.width.saturating_sub(1)),
+        input_inner.y + min(y_offset, input_inner.height.saturating_sub(1)),
+    ));
+}
+
+fn wrapped_cursor_offset(input: &str, width: usize) -> (u16, u16) {
+    let width = max(1, width);
+    let mut parts = input.split('\n').collect::<Vec<_>>();
+    let last = parts.pop().unwrap_or("");
+    let row = parts.iter().fold(0u16, |row, line| {
+        row.saturating_add(wrapped_line_count(line, width))
+    });
+    let len = last.chars().count();
+    if len == 0 {
+        return (0, row);
+    }
+    if len < width {
+        return (len as u16, row);
+    }
+    if len % width == 0 {
+        (
+            (width - 1) as u16,
+            row.saturating_add((len / width - 1).min(u16::MAX as usize) as u16),
+        )
+    } else {
+        (
+            (len % width) as u16,
+            row.saturating_add((len / width).min(u16::MAX as usize) as u16),
+        )
+    }
+}
+
+fn input_cell_text(value: &str, width: usize, focused: bool) -> String {
+    let visible = if focused {
+        focused_input_visible_text(value, width)
+    } else {
+        truncate_chars(value, width)
+    };
+    let text_width = char_width(&visible);
+    if text_width >= width {
+        visible
+    } else {
+        format!("{visible}{}", " ".repeat(width - text_width))
+    }
+}
+
+fn focused_input_visible_text(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let len = value.chars().count();
+    if len < width {
+        value.to_string()
+    } else {
+        value
+            .chars()
+            .skip(len.saturating_sub(width.saturating_sub(1)))
+            .collect()
+    }
+}
+
+fn input_cursor_offset(value: &str, width: usize) -> u16 {
+    if width == 0 {
+        0
+    } else {
+        min(value.chars().count(), width.saturating_sub(1)) as u16
+    }
 }
 
 fn selected_list_row_style() -> Style {
@@ -1363,7 +1520,13 @@ fn draw_labeled_text_field(
     );
     let input_inner = inset_rect(input_rect, 1, 1);
     if input_inner.width > 0 && input_inner.height > 0 {
-        frame.render_widget(Paragraph::new(value), input_inner);
+        frame.render_widget(
+            Paragraph::new(input_cell_text(value, input_inner.width as usize, focused)),
+            input_inner,
+        );
+        if focused {
+            set_single_line_cursor(frame, input_inner, value);
+        }
     }
 }
 
@@ -1388,7 +1551,10 @@ fn draw_labeled_multiline_text_field(
         area.x,
         area.y.saturating_add(1),
         area.width,
-        min(SEND_KEYS_TEXT_FIELD_HEIGHT, area.height.saturating_sub(1)),
+        min(
+            send_keys_text_field_height(value, area.width),
+            area.height.saturating_sub(1),
+        ),
     );
     let border = if focused {
         Color::Green
@@ -1404,9 +1570,12 @@ fn draw_labeled_multiline_text_field(
     let input_inner = inset_rect(input_rect, 1, 1);
     if input_inner.width > 0 && input_inner.height > 0 {
         frame.render_widget(
-            Paragraph::new(value).wrap(Wrap { trim: false }),
+            Paragraph::new(hard_wrapped_text(value, input_inner.width as usize)),
             input_inner,
         );
+        if focused {
+            set_wrapped_text_cursor(frame, input_inner, value);
+        }
     }
 }
 
@@ -1559,7 +1728,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                 SendKeysFocus::Cancel => Some(Button::Cancel),
             };
             ModalView {
-                title: " Send keys ",
+                title: " Send Keys ",
                 body: ModalBody::SendKeys {
                     label: format!("To: {} on {}", session.name(), session.host_label),
                     input: ui.input.clone(),

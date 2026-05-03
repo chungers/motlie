@@ -4,8 +4,8 @@ use motlie_tmux::{
     transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
     StatusStyle, TransportKind, SSH_DEFAULT_PORT,
 };
-use ratatui::backend::TestBackend;
-use ratatui::layout::Rect;
+use ratatui::backend::{Backend, TestBackend};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::Terminal;
 
@@ -221,17 +221,27 @@ fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
 }
 
 fn render_to_lines(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
+    render_to_lines_and_cursor(app, width, height).0
+}
+
+fn render_to_lines_and_cursor(
+    app: &mut AppState,
+    width: u16,
+    height: u16,
+) -> (Vec<String>, Position) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| draw(frame, app)).unwrap();
-    terminal
+    let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+    let lines = terminal
         .backend()
         .buffer()
         .content()
         .chunks(width as usize)
         .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-        .collect()
+        .collect();
+    (lines, cursor)
 }
 
 fn modal_border_width(lines: &[String], title: &str) -> usize {
@@ -258,6 +268,29 @@ fn modal_border_left(lines: &[String], title: &str) -> usize {
         .find(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
         .and_then(|line| line.chars().position(|ch| ch == '┌'))
         .expect("expected modal left border")
+}
+
+fn modal_border_height(lines: &[String], title: &str) -> usize {
+    let top = lines
+        .iter()
+        .position(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
+        .expect("expected modal top border");
+    let left = modal_border_left(lines, title);
+    let bottom = lines
+        .iter()
+        .enumerate()
+        .skip(top + 1)
+        .find_map(|(index, line)| {
+            let is_bottom = line.chars().nth(left) == Some('└') && line.contains('┘');
+            is_bottom.then_some(index)
+        })
+        .expect("expected modal bottom border");
+    bottom - top + 1
+}
+
+fn line_char_index(line: &str, needle: &str) -> usize {
+    let byte_index = line.find(needle).expect("expected text in rendered line");
+    line[..byte_index].chars().count()
 }
 
 #[test]
@@ -1652,7 +1685,7 @@ fn modal_content_separates_body_from_button_bar() {
     assert!(!rename.body_text().contains("[Ok]"));
 
     let send_keys = modal_content(&test_send_keys_modal("echo hi", SendKeysFocus::Input));
-    assert_eq!(send_keys.title, " Send keys ");
+    assert_eq!(send_keys.title, " Send Keys ");
     assert_eq!(send_keys.active_button, None);
     assert_eq!(send_keys.buttons, " Cancel     Ok ");
     assert!(matches!(
@@ -1665,6 +1698,55 @@ fn modal_content_separates_body_from_button_bar() {
     let send_keys_ok = modal_content(&test_send_keys_modal("echo hi", SendKeysFocus::Ok));
     assert_eq!(send_keys_ok.active_button, Some(Button::Ok));
     assert_eq!(send_keys_ok.buttons, " Cancel    [Ok]");
+
+    let mut short_app = app_with_session();
+    short_app.modal = Some(test_send_keys_modal("short", SendKeysFocus::Input));
+    let short_lines = render_to_lines(&mut short_app, 100, 30);
+    let title_line = short_lines
+        .iter()
+        .position(|line| line.contains("Send Keys") && line.contains('┌'))
+        .expect("expected Send Keys modal title");
+    let label_line = short_lines
+        .iter()
+        .position(|line| line.contains("To: dev on host"))
+        .expect("expected Send Keys target label");
+    let input_bottom_line = short_lines
+        .iter()
+        .enumerate()
+        .skip(label_line + 1)
+        .find_map(|(index, line)| (line.contains('└') && line.contains('┘')).then_some(index))
+        .expect("expected Send Keys input bottom border");
+    let separator_line = short_lines
+        .iter()
+        .enumerate()
+        .skip(input_bottom_line + 1)
+        .find_map(|(index, line)| {
+            let is_separator = line.contains('─')
+                && !line.contains('┌')
+                && !line.contains('┐')
+                && !line.contains('└');
+            is_separator.then_some(index)
+        })
+        .expect("expected Send Keys separator");
+
+    assert_eq!(label_line, title_line + 2);
+    assert_eq!(separator_line, input_bottom_line + 2);
+
+    let mut long_app = app_with_session();
+    long_app.modal = Some(test_send_keys_modal(
+        &"0123456789".repeat(12),
+        SendKeysFocus::Input,
+    ));
+    let long_lines = render_to_lines(&mut long_app, 100, 30);
+
+    assert_eq!(
+        modal_border_width(&short_lines, "Send Keys"),
+        modal_border_width(&long_lines, "Send Keys")
+    );
+    assert!(
+        modal_border_height(&long_lines, "Send Keys")
+            > modal_border_height(&short_lines, "Send Keys")
+    );
 
     let tags = modal_content(&test_session_tags_modal(
         vec![SessionKeyValueRow {
@@ -1698,6 +1780,91 @@ fn modal_content_separates_body_from_button_bar() {
     ));
     assert_eq!(tags_ok.active_button, Some(Button::Ok));
     assert_eq!(tags_ok.buttons, " Cancel    [Ok]");
+}
+
+#[test]
+fn focused_modal_input_fields_place_terminal_cursor() {
+    let mut rename_app = app_with_session();
+    rename_app.modal = Some(ModalState::RenameSession {
+        session: test_selected_session(),
+        input: "dev".to_string(),
+        button: Button::Ok,
+    });
+    let (rename_lines, rename_cursor) = render_to_lines_and_cursor(&mut rename_app, 80, 24);
+    let rename_label_y = rename_lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| line.contains("Session Name").then_some(index))
+        .expect("expected rename label");
+    let rename_y = rename_label_y + 2;
+    let rename_line = &rename_lines[rename_y];
+    assert_eq!(
+        rename_cursor,
+        Position::new(
+            (line_char_index(rename_line, "dev") + "dev".len()) as u16,
+            rename_y as u16
+        )
+    );
+
+    let mut send_app = app_with_session();
+    send_app.modal = Some(test_send_keys_modal("abc", SendKeysFocus::Input));
+    let (send_lines, send_cursor) = render_to_lines_and_cursor(&mut send_app, 100, 30);
+    let send_label_y = send_lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| line.contains("To: dev on host").then_some(index))
+        .expect("expected send keys label");
+    let send_y = send_label_y + 2;
+    let send_line = &send_lines[send_y];
+    assert_eq!(
+        send_cursor,
+        Position::new(
+            (line_char_index(send_line, "abc") + "abc".len()) as u16,
+            send_y as u16
+        )
+    );
+
+    let mut tags_app = app_with_session();
+    tags_app.modal = Some(test_session_tags_modal(
+        Vec::new(),
+        None,
+        "owner",
+        "",
+        SessionKeyValueFocus::Key,
+    ));
+    let (tags_lines, tags_cursor) = render_to_lines_and_cursor(&mut tags_app, 80, 24);
+    let (tags_y, tags_line) = tags_lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("owner"))
+        .expect("expected tag key input");
+    assert_eq!(
+        tags_cursor,
+        Position::new(
+            (line_char_index(tags_line, "owner") + "owner".len()) as u16,
+            tags_y as u16
+        )
+    );
+
+    let mut long_rename_app = app_with_session();
+    long_rename_app.modal = Some(ModalState::RenameSession {
+        session: test_selected_session(),
+        input: "prefix-prefix-prefix-prefix-very-long-session-name-that-does-not-fit".to_string(),
+        button: Button::Ok,
+    });
+    let (long_rename_lines, long_rename_cursor) =
+        render_to_lines_and_cursor(&mut long_rename_app, 48, 18);
+    let long_label_y = long_rename_lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| line.contains("Session Name").then_some(index))
+        .expect("expected long rename label");
+    let long_input_y = long_label_y + 2;
+    let long_input_line = &long_rename_lines[long_input_y];
+    assert!(long_input_line.contains("me-that-does-not-fit"));
+    assert!(!long_input_line.contains("very-long-session"));
+    assert_eq!(long_rename_cursor.y, long_input_y as u16);
+    assert!(long_rename_cursor.x > line_char_index(long_input_line, "me-that-does-not-fit") as u16);
 }
 
 #[tokio::test]
@@ -2122,7 +2289,7 @@ async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
-        .with_response("send-keys -t '$1' C-m", "");
+        .with_response("send-keys -t '$1' Enter", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2172,7 +2339,7 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
-        .with_response("send-keys -t '$1' C-m", "");
+        .with_response("send-keys -t '$1' Enter", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
@@ -2211,7 +2378,7 @@ async fn send_keys_modal_appends_terminator_after_special_key_sequence() {
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("send-keys -l -t '$1' 1", "")
         .with_response("send-keys -t '$1' Tab", "")
-        .with_response("send-keys -t '$1' C-m", "");
+        .with_response("send-keys -t '$1' Enter", "");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
