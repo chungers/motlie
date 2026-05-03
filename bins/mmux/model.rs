@@ -1,12 +1,12 @@
-use std::cmp::{max, min};
+use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};
 use ratatui::style::{Color, Style};
 
 use crate::consts::{
-    DEFAULT_LEFT_PERCENT, DEFAULT_TOP_PERCENT, LANDSCAPE_MAX_LEFT_PERCENT,
-    LANDSCAPE_MIN_LEFT_PERCENT, MODAL_TEXT_FIELD_HEIGHT, PORTRAIT_MAX_TOP_PERCENT,
+    DEFAULT_LEFT_PERCENT, DEFAULT_TOP_PERCENT, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
+    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT,
     PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
 };
 use crate::detail::DetailSource;
@@ -30,20 +30,120 @@ pub(crate) enum Button {
     Ok,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionKeyValueFocus {
+    Row(usize),
+    Key,
+    Value,
+    Ok,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionKeyValueKind {
+    Tags,
+    Environment,
+}
+
+impl SessionKeyValueKind {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Tags => " Session Tags ",
+            Self::Environment => " Initial Environment ",
+        }
+    }
+
+    pub(crate) fn empty_label(self) -> &'static str {
+        match self {
+            Self::Tags => "No tags",
+            Self::Environment => "No environment",
+        }
+    }
+
+    pub(crate) fn noun(self) -> &'static str {
+        match self {
+            Self::Tags => "tag",
+            Self::Environment => "env var",
+        }
+    }
+
+    pub(crate) fn supports_checked_row(self) -> bool {
+        matches!(self, Self::Tags)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewSessionFocus {
+    Host,
+    Name,
+    EnvRow(usize),
+    EnvKey,
+    EnvValue,
+    Cancel,
+    Ok,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewSessionHostChoice {
+    pub(crate) id: HostId,
+    pub(crate) label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionKeyValueRow {
+    pub(crate) key: String,
+    pub(crate) value: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ModalState {
     NewSession {
+        ui: NewSessionModalUi,
+    },
+    KillSession {
+        session: SelectedSession,
+        button: Button,
+    },
+    RenameSession {
+        session: SelectedSession,
         input: String,
         button: Button,
     },
-    KillSession {
-        host_id: HostId,
-        host_label: String,
-        id: String,
-        name: String,
-        button: Button,
+    SessionKeyValues {
+        session: SelectedSession,
+        ui: SessionKeyValueModalUi,
     },
     Help,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NewSessionModalUi {
+    pub(crate) input: String,
+    pub(crate) hosts: Vec<NewSessionHostChoice>,
+    pub(crate) host_index: usize,
+    pub(crate) env_rows: Vec<SessionKeyValueRow>,
+    pub(crate) env_key_input: String,
+    pub(crate) env_value_input: String,
+    pub(crate) focus: NewSessionFocus,
+    pub(crate) button: Button,
+}
+
+impl NewSessionModalUi {
+    pub(crate) fn selected_host(&self) -> Option<&NewSessionHostChoice> {
+        self.hosts.get(self.host_index)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionKeyValueModalUi {
+    pub(crate) kind: SessionKeyValueKind,
+    pub(crate) rows: Vec<SessionKeyValueRow>,
+    pub(crate) selected_key: Option<String>,
+    pub(crate) original_rows: Vec<SessionKeyValueRow>,
+    pub(crate) original_selected_key: Option<String>,
+    pub(crate) key_input: String,
+    pub(crate) value_input: String,
+    pub(crate) focus: SessionKeyValueFocus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +151,7 @@ pub(crate) struct ModalView {
     pub(crate) title: &'static str,
     pub(crate) body: ModalBody,
     pub(crate) buttons: String,
-    pub(crate) active_button: Button,
+    pub(crate) active_button: Option<Button>,
 }
 
 impl ModalView {
@@ -59,36 +159,84 @@ impl ModalView {
     pub(crate) fn body_text(&self) -> String {
         match &self.body {
             ModalBody::Text(text) => text.clone(),
-            ModalBody::NewSession { input } => format!("Session name\n{input}"),
-        }
-    }
-
-    pub(crate) fn content_height(&self) -> u16 {
-        match &self.body {
-            ModalBody::Text(text) => max(1, text.lines().count()) as u16,
-            ModalBody::NewSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
-        }
-    }
-
-    pub(crate) fn content_width(&self) -> u16 {
-        let body_width = match &self.body {
-            ModalBody::Text(text) => text
-                .lines()
-                .map(|line| line.chars().count())
-                .max()
-                .unwrap_or(0),
-            ModalBody::NewSession { input } => {
-                max("Session name".chars().count(), input.chars().count())
+            ModalBody::NewSession {
+                input,
+                host_label,
+                env_rows,
+                env_key_input,
+                env_value_input,
+                ..
+            } => {
+                let fields = match host_label {
+                    Some(host_label) => format!("Host\n{host_label}\nSession name\n{input}"),
+                    None => format!("Session name\n{input}"),
+                };
+                let env = if env_rows.is_empty() {
+                    "No environment".to_string()
+                } else {
+                    env_rows
+                        .iter()
+                        .map(|row| format!("{}    {}", row.key, row.value))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                format!("{fields}\n{env}\n{env_key_input}    {env_value_input}")
             }
-        };
-        max(body_width, self.buttons.chars().count()) as u16
+            ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
+            ModalBody::SessionKeyValues {
+                kind,
+                rows,
+                selected_key,
+                key_input,
+                value_input,
+                ..
+            } => {
+                let rows = if rows.is_empty() {
+                    kind.empty_label().to_string()
+                } else {
+                    rows.iter()
+                        .map(|row| {
+                            let marker = if kind.supports_checked_row()
+                                && selected_key.as_deref() == Some(row.key.as_str())
+                            {
+                                "✓"
+                            } else {
+                                " "
+                            };
+                            format!("{}    {} {marker}", row.key, row.value)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                format!("{rows}\n{key_input}    {value_input}")
+            }
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModalBody {
     Text(String),
-    NewSession { input: String },
+    NewSession {
+        input: String,
+        host_label: Option<String>,
+        host_count: usize,
+        env_rows: Vec<SessionKeyValueRow>,
+        env_key_input: String,
+        env_value_input: String,
+        focus: NewSessionFocus,
+    },
+    RenameSession {
+        input: String,
+    },
+    SessionKeyValues {
+        kind: SessionKeyValueKind,
+        rows: Vec<SessionKeyValueRow>,
+        selected_key: Option<String>,
+        key_input: String,
+        value_input: String,
+        focus: SessionKeyValueFocus,
+    },
 }
 
 /// Stable identity for a target host across the binary. Either a normalized
@@ -116,7 +264,8 @@ impl std::fmt::Display for HostId {
     }
 }
 
-/// One configured host: stable id, display label, IP, and the connected handle.
+/// One configured host: stable id, display label, URI alias, IP, and the
+/// connected handle.
 ///
 /// Recency math (activity, age) is computed in the binary against the
 /// operator's wall clock. We assume host clocks are NTP-synced with the
@@ -127,9 +276,22 @@ impl std::fmt::Display for HostId {
 #[derive(Clone)]
 pub(crate) struct HostEntry {
     pub(crate) id: HostId,
+    /// Host-local name probed after connection; used for display.
     pub(crate) label: String,
+    /// Hostname parsed from the SSH URI; used as the stable operator alias.
+    pub(crate) alias: String,
     pub(crate) ip_address: String,
     pub(crate) handle: HostHandle,
+}
+
+impl HostEntry {
+    pub(crate) fn diagnostic_label(&self) -> String {
+        if self.alias == self.label {
+            self.label.clone()
+        } else {
+            format!("{} ({})", self.label, self.alias)
+        }
+    }
 }
 
 /// Collection of one or more configured hosts. Always has at least one entry
@@ -148,10 +310,6 @@ pub(crate) struct HostEntry {
 pub(crate) struct HostFleet {
     pub(crate) entries: Vec<HostEntry>,
 }
-
-/// Cap for the hostname column width in multi-host row format. Longer labels
-/// are truncated with an ellipsis to keep rows readable.
-pub(crate) const HOST_LABEL_COLUMN_MAX: usize = 24;
 
 impl HostFleet {
     pub(crate) fn from_entries(entries: Vec<HostEntry>) -> Self {
@@ -174,18 +332,51 @@ impl HostFleet {
         self.entries.first()
     }
 
-    /// Width of the hostname column when rendered in multi-host rows.
-    /// Returns 0 for single-host (column is omitted).
-    pub(crate) fn host_label_width(&self) -> usize {
+    /// Color assigned to the given host in multi-host rows and legends.
+    /// Returns `None` for single-host mode or an unknown host id.
+    pub(crate) fn host_color(&self, id: &HostId) -> Option<Color> {
         if !self.is_multi() {
-            return 0;
+            return None;
         }
         self.entries
             .iter()
-            .map(|entry| entry.label.chars().count().min(HOST_LABEL_COLUMN_MAX))
-            .max()
-            .unwrap_or(0)
+            .position(|entry| &entry.id == id)
+            .map(host_color_for_index)
     }
+
+    /// Width of the compact host marker column when rendered in multi-host rows.
+    /// Returns 0 for single-host (column is omitted).
+    pub(crate) fn host_marker_width(&self) -> usize {
+        if !self.is_multi() {
+            return 0;
+        }
+        HOST_COLOR_SQUARE.chars().count()
+    }
+
+    /// Host-color legend shown in the multi-host top status bar.
+    pub(crate) fn host_color_legend(&self) -> Option<Vec<(Color, String)>> {
+        if !self.is_multi() {
+            return None;
+        }
+        Some(
+            self.entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (host_color_for_index(index), entry.label.clone()))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn host_sort_index(&self, id: &HostId) -> usize {
+        self.entries
+            .iter()
+            .position(|entry| entry.id == *id)
+            .unwrap_or(usize::MAX)
+    }
+}
+
+fn host_color_for_index(index: usize) -> Color {
+    HOST_COLOR_PALETTE[index % HOST_COLOR_PALETTE.len()]
 }
 
 /// Identity of a session as returned to callers from the highlighted row.
@@ -195,8 +386,17 @@ impl HostFleet {
 pub(crate) struct SelectedSession {
     pub(crate) host_id: HostId,
     pub(crate) host_label: String,
-    pub(crate) id: String,
-    pub(crate) name: String,
+    pub(crate) info: SessionInfo,
+}
+
+impl SelectedSession {
+    pub(crate) fn id(&self) -> &str {
+        self.info.id.as_str()
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.info.name
+    }
 }
 
 /// One row in the merged session list.
@@ -217,6 +417,22 @@ pub(crate) struct SessionRow {
     pub(crate) local_now: u64,
     pub(crate) activity_observed_at_local: u64,
     pub(crate) session: SessionInfo,
+    pub(crate) selected_tag: Option<SessionSelectedTag>,
+}
+
+impl SessionRow {
+    pub(crate) fn displayed_tag_value(&self) -> Option<&str> {
+        self.selected_tag
+            .as_ref()
+            .map(|tag| tag.value.as_str())
+            .filter(|value| !value.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionSelectedTag {
+    pub(crate) key: String,
+    pub(crate) value: String,
 }
 
 /// Per-session, per-host activity tracker.
@@ -301,6 +517,7 @@ pub(crate) struct RetainedUiState {
     focus: Focus,
     left_percent: u16,
     top_percent: u16,
+    sort_mode: SessionSortMode,
 }
 
 impl Default for RetainedUiState {
@@ -318,6 +535,7 @@ impl RetainedUiState {
             focus: Focus::List,
             left_percent: DEFAULT_LEFT_PERCENT,
             top_percent: DEFAULT_TOP_PERCENT,
+            sort_mode: SessionSortMode::Activity,
         }
     }
 
@@ -331,17 +549,19 @@ impl RetainedUiState {
         app.layout.top_percent = self
             .top_percent
             .clamp(PORTRAIT_MIN_TOP_PERCENT, PORTRAIT_MAX_TOP_PERCENT);
+        app.session_list.sort_mode = self.sort_mode;
     }
 
     pub(crate) fn update_from(&mut self, app: &AppState) {
         self.layout_mode = app.layout.mode;
         self.selected_key = app
             .selected_session()
-            .map(|session| (session.host_id, session.id));
+            .map(|session| (session.host_id.clone(), session.id().to_string()));
         self.selected_index = app.session_list.selected;
         self.focus = app.layout.focus;
         self.left_percent = app.layout.left_percent;
         self.top_percent = app.layout.top_percent;
+        self.sort_mode = app.session_list.sort_mode;
     }
 
     pub(crate) fn selected_session_key(&self) -> Option<(HostId, String)> {
@@ -368,6 +588,14 @@ pub(crate) struct SessionListState {
     pub(crate) rows: Vec<SessionRow>,
     pub(crate) selected: usize,
     pub(crate) scroll: usize,
+    pub(crate) sort_mode: SessionSortMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSortMode {
+    #[default]
+    Activity,
+    TagGroup,
 }
 
 impl SessionListState {
@@ -380,23 +608,45 @@ impl SessionListState {
     /// clock skew across hosts in multi-host mode — a host whose clock is
     /// minutes ahead of others doesn't pin its sessions to the top.
     pub(crate) fn set_rows_sorted_by_activity(&mut self, mut rows: Vec<SessionRow>) {
-        rows.sort_by(|left, right| {
-            right
-                .activity_observed_at_local
-                .cmp(&left.activity_observed_at_local)
-                .then_with(|| left.session.name.cmp(&right.session.name))
-                .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
-                .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
-        });
+        sort_rows_by_activity(&mut rows);
         self.rows = rows;
+    }
+
+    pub(crate) fn set_rows_sorted(&mut self, rows: Vec<SessionRow>, fleet: &HostFleet) {
+        match self.sort_mode {
+            SessionSortMode::Activity => self.set_rows_sorted_by_activity(rows),
+            SessionSortMode::TagGroup => self.set_rows_grouped_by_tag(rows, fleet),
+        }
+    }
+
+    pub(crate) fn set_rows_grouped_by_tag(&mut self, mut rows: Vec<SessionRow>, fleet: &HostFleet) {
+        sort_rows_by_tag_group(&mut rows, fleet);
+        self.rows = rows;
+    }
+
+    pub(crate) fn toggle_sort_mode(&mut self) -> SessionSortMode {
+        self.sort_mode = match self.sort_mode {
+            SessionSortMode::Activity => SessionSortMode::TagGroup,
+            SessionSortMode::TagGroup => SessionSortMode::Activity,
+        };
+        self.sort_mode
+    }
+
+    pub(crate) fn resort(&mut self, fleet: &HostFleet) {
+        let rows = std::mem::take(&mut self.rows);
+        self.set_rows_sorted(rows, fleet);
+    }
+
+    pub(crate) fn select_first(&mut self) {
+        self.selected = 0;
+        self.scroll = 0;
     }
 
     pub(crate) fn selected_session(&self) -> Option<SelectedSession> {
         self.rows.get(self.selected).map(|row| SelectedSession {
             host_id: row.host_id.clone(),
             host_label: row.host_label.clone(),
-            id: row.session.id.as_str().to_string(),
-            name: row.session.name.clone(),
+            info: row.session.clone(),
         })
     }
 
@@ -431,6 +681,73 @@ impl SessionListState {
         let next = (self.selected as isize + delta).clamp(0, max_index) as usize;
         self.selected = next;
         old != next
+    }
+}
+
+fn sort_rows_by_activity(rows: &mut [SessionRow]) {
+    rows.sort_by(activity_sort_order);
+}
+
+fn activity_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
+    right
+        .activity_observed_at_local
+        .cmp(&left.activity_observed_at_local)
+        .then_with(|| left.session.name.cmp(&right.session.name))
+        .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
+        .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+}
+
+fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
+    let group_activity = tag_group_activity(rows);
+    rows.sort_by(|left, right| {
+        tag_group_sort_order(left, right, &group_activity)
+            .then_with(|| {
+                right
+                    .activity_observed_at_local
+                    .cmp(&left.activity_observed_at_local)
+            })
+            .then_with(|| {
+                fleet
+                    .host_sort_index(&left.host_id)
+                    .cmp(&fleet.host_sort_index(&right.host_id))
+            })
+            .then_with(|| left.host_label.cmp(&right.host_label))
+            .then_with(|| left.session.name.cmp(&right.session.name))
+            .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
+            .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
+    });
+}
+
+fn tag_group_activity(rows: &[SessionRow]) -> HashMap<String, u64> {
+    let mut group_activity: HashMap<String, u64> = HashMap::new();
+    for row in rows {
+        let Some(value) = row.displayed_tag_value() else {
+            continue;
+        };
+        group_activity
+            .entry(value.to_string())
+            .and_modify(|activity| *activity = (*activity).max(row.activity_observed_at_local))
+            .or_insert(row.activity_observed_at_local);
+    }
+    group_activity
+}
+
+fn tag_group_sort_order(
+    left: &SessionRow,
+    right: &SessionRow,
+    group_activity: &HashMap<String, u64>,
+) -> Ordering {
+    match (left.displayed_tag_value(), right.displayed_tag_value()) {
+        (Some(left_value), Some(right_value)) => {
+            let left_activity = group_activity.get(left_value).copied().unwrap_or(0);
+            let right_activity = group_activity.get(right_value).copied().unwrap_or(0);
+            right_activity
+                .cmp(&left_activity)
+                .then_with(|| left_value.cmp(right_value))
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
 }
 
@@ -560,6 +877,7 @@ impl AppState {
     ) -> Self {
         let entry = HostEntry {
             id: HostId::local(),
+            alias: host_label.clone(),
             label: host_label,
             ip_address: host_ip_address,
             handle: motlie_tmux::HostHandle::local(),

@@ -18,12 +18,17 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 
 use cli::{select_layout, Cli};
+use consts::{MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE};
 use controller::{
     handle_key, load_motd, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
     stop_detail_source, KeyOutcome,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
+use motlie_tmux::{
+    AttachExit, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot, StatusLeft,
+    StatusLeftLength, StatusStyle, Target,
+};
 use target_host::connect_fleet;
 use terminal::TerminalSession;
 
@@ -63,7 +68,7 @@ async fn run() -> Result<i32> {
         };
 
         if cli.script {
-            println!("{}", selected.name);
+            println!("{}", selected.name());
             return Ok(0);
         }
 
@@ -74,14 +79,14 @@ async fn run() -> Result<i32> {
             );
             continue;
         };
-        let target = match host.handle.session_by_id(&selected.id).await? {
+        let target = match host.handle.session_by_id(selected.id()).await? {
             Some(target) => target,
             None => {
                 eprintln!("mmux: selected session disappeared; returning to selector");
                 continue;
             }
         };
-        let exit = target.attach_current_pty().await?;
+        let exit = attach_current_pty_with_mmux_status(&target).await?;
         let code = exit.shell_status();
         if should_reenter_after_attach(&fleet, &selected, &exit).await? {
             continue;
@@ -90,10 +95,66 @@ async fn run() -> Result<i32> {
     }
 }
 
+async fn attach_current_pty_with_mmux_status(target: &Target) -> Result<AttachExit> {
+    let status = match target.status().await {
+        Ok(status) => Some(status),
+        Err(err) => {
+            eprintln!("mmux: could not access tmux session status before attach: {err}");
+            None
+        }
+    };
+    let snapshot = match &status {
+        Some(status) => prepare_attach_status(status).await,
+        None => None,
+    };
+    let exit = target.attach_current_pty().await;
+    if let Some(status) = &status {
+        restore_attach_status(status, snapshot).await;
+    }
+    exit.map_err(Into::into)
+}
+
+async fn prepare_attach_status(status: &SessionStatus<'_>) -> Option<SessionStatusSnapshot> {
+    let snapshot = match status.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            eprintln!("mmux: could not read tmux status overrides before attach: {err}");
+            return None;
+        }
+    };
+    let style = StatusStyle::new(MMUX_ATTACH_STATUS_STYLE)
+        .expect("mmux attach status style is a valid static tmux style");
+    let left = StatusLeft::new(MMUX_ATTACH_STATUS_LEFT)
+        .expect("mmux attach status-left is a valid static tmux format");
+    let left_length = StatusLeftLength::new(MMUX_ATTACH_STATUS_LEFT_LENGTH)
+        .expect("mmux attach status-left-length is within the supported range");
+    let overrides = SessionStatusOverrides {
+        style: Some(style),
+        left: Some(left),
+        left_length: Some(left_length),
+    };
+    if let Err(err) = status.apply(&overrides).await {
+        eprintln!("mmux: could not set tmux status overrides before attach: {err}");
+    }
+    Some(snapshot)
+}
+
+async fn restore_attach_status(
+    status: &SessionStatus<'_>,
+    snapshot: Option<SessionStatusSnapshot>,
+) {
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    if let Err(err) = status.restore(&snapshot).await {
+        eprintln!("mmux: could not restore tmux status overrides after attach: {err}");
+    }
+}
+
 async fn should_reenter_after_attach(
     fleet: &HostFleet,
     selected: &SelectedSession,
-    exit: &motlie_tmux::AttachExit,
+    exit: &AttachExit,
 ) -> Result<bool> {
     if exit.success() {
         return Ok(true);
@@ -101,7 +162,7 @@ async fn should_reenter_after_attach(
     let Some(entry) = fleet.entry(&selected.host_id) else {
         return Ok(false);
     };
-    Ok(entry.handle.session_by_id(&selected.id).await?.is_some())
+    Ok(entry.handle.session_by_id(selected.id()).await?.is_some())
 }
 
 async fn run_selector_once(

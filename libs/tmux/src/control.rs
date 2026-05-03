@@ -1,11 +1,14 @@
 use crate::error::{Error, Result};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
-    validate_session_tag_value, CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionTag,
-    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, TmuxSocket, WindowInfo,
+    validate_session_env_var_name, validate_session_env_var_value, validate_session_tag_value,
+    CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionEnvVar, SessionTag,
+    SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength,
+    StatusStyle, TmuxSocket, WindowInfo,
 };
 
 /// Shell-escape a string for safe interpolation into shell commands.
@@ -100,6 +103,10 @@ pub async fn create_session_with_prefix(
     }
     if let Some(h) = opts.height {
         cmd.push_str(&format!(" -y {}", h));
+    }
+    for var in &opts.initial_environment {
+        let assignment = format!("{}={}", var.name(), var.value());
+        cmd.push_str(&format!(" -e {}", shell_escape(&assignment)));
     }
     if let Some(c) = &opts.command {
         cmd.push_str(&format!(" {}", shell_escape(c)));
@@ -486,6 +493,31 @@ pub async fn get_history_limit_with_prefix(
     })
 }
 
+/// Query the hostname reported by tmux's `#{host}` format.
+pub(crate) async fn tmux_hostname_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+) -> Result<String> {
+    let cmd = format!("{} start-server \\; display-message -p '#{{host}}'", prefix);
+    let output = transport.exec(&cmd).await?;
+    parse_tmux_hostname(&output)
+}
+
+fn parse_tmux_hostname(output: &str) -> Result<String> {
+    let hostname = output.trim();
+    if hostname.is_empty() {
+        return Err(Error::Parse(
+            "tmux #{host} returned an empty hostname".to_string(),
+        ));
+    }
+    if hostname.chars().any(char::is_control) {
+        return Err(Error::Parse(format!(
+            "tmux #{{host}} returned hostname with control characters: {hostname:?}"
+        )));
+    }
+    Ok(hostname.to_string())
+}
+
 /// Set a namespaced session tag via tmux user-defined options.
 pub(crate) async fn set_session_tag_with_prefix(
     transport: &TransportKind,
@@ -503,6 +535,25 @@ pub(crate) async fn set_session_tag_with_prefix(
         shell_escape(target),
         option_name,
         shell_escape(value)
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset a namespaced session tag via tmux user-defined options.
+pub(crate) async fn unset_session_tag_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    tag_prefix: &SessionTagPrefix,
+    key: &str,
+) -> Result<()> {
+    let option_name = tag_prefix.option_name(key)?;
+    let cmd = format!(
+        "{} set-option -u -t {} {}",
+        prefix,
+        shell_escape(target),
+        option_name,
     );
     transport.exec(&cmd).await?;
     Ok(())
@@ -557,6 +608,372 @@ pub(crate) async fn list_session_tags_with_prefix(
     Ok(tags)
 }
 
+/// Set one session environment variable.
+pub(crate) async fn set_session_env_var_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    validate_session_env_var_name(name)?;
+    validate_session_env_var_value(value)?;
+    let cmd = format!(
+        "{} set-environment -t {} {} {}",
+        prefix,
+        shell_escape(target),
+        name,
+        shell_escape(value)
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset one session environment variable.
+pub(crate) async fn unset_session_env_var_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    name: &str,
+) -> Result<()> {
+    validate_session_env_var_name(name)?;
+    let cmd = format!(
+        "{} set-environment -u -t {} {}",
+        prefix,
+        shell_escape(target),
+        name,
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read one session environment variable. Missing variables return `Ok(None)`.
+pub(crate) async fn read_session_env_var_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    validate_session_env_var_name(name)?;
+    let cmd = format!(
+        "{} show-environment -t {} {}",
+        prefix,
+        shell_escape(target),
+        name
+    );
+    let output = match transport.exec(&cmd).await {
+        Ok(output) => output,
+        Err(err) if is_unknown_session_env_var_error(&err.to_string(), name) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let mut parsed = None;
+    for line in output.lines() {
+        let Some(var) = parse_session_env_var_line(line)? else {
+            continue;
+        };
+        if parsed.replace(var).is_some() {
+            return Err(Error::Parse(format!(
+                "show-environment returned multiple variables while reading {name}"
+            )));
+        }
+    }
+    let Some(var) = parsed else {
+        return Ok(None);
+    };
+    if var.name() != name {
+        return Err(Error::Parse(format!(
+            "show-environment returned {} while reading {}",
+            var.name(),
+            name
+        )));
+    }
+    Ok(Some(var.into_value()))
+}
+
+/// List all session environment variables.
+pub(crate) async fn list_session_env_vars_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Vec<SessionEnvVar>> {
+    let cmd = format!("{} show-environment -t {}", prefix, shell_escape(target));
+    let output = transport.exec(&cmd).await?;
+    let mut vars = Vec::new();
+    for line in output.lines() {
+        if let Some(var) = parse_session_env_var_line(line)? {
+            vars.push(var);
+        }
+    }
+    Ok(vars)
+}
+
+/// Set session-local tmux status bar style.
+pub(crate) async fn set_session_status_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    style: &StatusStyle,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} status-style {}",
+        prefix,
+        shell_escape(target),
+        shell_escape(style.as_str())
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset session-local tmux status bar style so inherited style applies.
+pub(crate) async fn unset_session_status_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} status-style",
+        prefix,
+        shell_escape(target),
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read only the session-local status-style override.
+///
+/// Missing local overrides return `Ok(None)`; inherited/global values are not
+/// resolved here.
+pub(crate) async fn read_local_session_status_style_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<StatusStyle>> {
+    let cmd = format!(
+        "{} show-option -q -t {} status-style",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed status-style option without value: {line}"
+        )));
+    };
+    if option_name != "status-style" {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading status-style"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    StatusStyle::from_tmux_value(value).map(Some)
+}
+
+/// Set session-local tmux status-left format.
+pub(crate) async fn set_session_status_left_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    status_left: &StatusLeft,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} status-left {}",
+        prefix,
+        shell_escape(target),
+        shell_escape(status_left.as_str())
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset session-local tmux status-left format so inherited format applies.
+pub(crate) async fn unset_session_status_left_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} status-left",
+        prefix,
+        shell_escape(target),
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read only the session-local status-left override.
+pub(crate) async fn read_local_session_status_left_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<StatusLeft>> {
+    let cmd = format!(
+        "{} show-option -q -t {} status-left",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed status-left option without value: {line}"
+        )));
+    };
+    if option_name != "status-left" {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading status-left"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    StatusLeft::from_tmux_value(value).map(Some)
+}
+
+/// Set session-local tmux status-left-length.
+pub(crate) async fn set_session_status_left_length_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    length: StatusLeftLength,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} status-left-length {}",
+        prefix,
+        shell_escape(target),
+        length.as_u32()
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Unset session-local tmux status-left-length so inherited length applies.
+pub(crate) async fn unset_session_status_left_length_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} status-left-length",
+        prefix,
+        shell_escape(target),
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+/// Read only the session-local status-left-length override.
+pub(crate) async fn read_local_session_status_left_length_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+) -> Result<Option<StatusLeftLength>> {
+    let cmd = format!(
+        "{} show-option -q -t {} status-left-length",
+        prefix,
+        shell_escape(target)
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed status-left-length option without value: {line}"
+        )));
+    };
+    if option_name != "status-left-length" {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading status-left-length"
+        )));
+    }
+    let value = parse_tmux_option_value(value)?;
+    let length = value.parse::<u32>().map_err(|err| {
+        Error::Parse(format!(
+            "failed to parse status-left-length {value:?}: {err}"
+        ))
+    })?;
+    StatusLeftLength::new(length).map(Some)
+}
+
+/// List all tags under one namespace prefix for multiple sessions in one tmux call.
+pub(crate) async fn list_session_tags_for_targets_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    targets: &[&str],
+    tag_prefix: &SessionTagPrefix,
+) -> Result<HashMap<String, Vec<SessionTag>>> {
+    let mut tags_by_target = targets
+        .iter()
+        .map(|target| ((*target).to_string(), Vec::new()))
+        .collect::<HashMap<_, _>>();
+    if targets.is_empty() {
+        return Ok(tags_by_target);
+    }
+
+    let mut cmd = String::new();
+    cmd.push_str(prefix);
+    for (index, target) in targets.iter().enumerate() {
+        if index > 0 {
+            cmd.push_str(" \\; ");
+        } else {
+            cmd.push(' ');
+        }
+        cmd.push_str("display-message -p ");
+        cmd.push_str(&shell_escape(&session_tag_batch_marker(target)));
+        cmd.push_str(" \\; show-options -t ");
+        cmd.push_str(&shell_escape(target));
+    }
+
+    let output = transport.exec(&cmd).await?;
+    for (target, tags) in parse_session_tag_batch_output(tag_prefix, &output)? {
+        tags_by_target.insert(target, tags);
+    }
+    Ok(tags_by_target)
+}
+
+fn session_tag_batch_marker(target: &str) -> String {
+    format!("__MOTLIE_TAGS__ {target}")
+}
+
+fn parse_session_tag_batch_output(
+    prefix: &SessionTagPrefix,
+    output: &str,
+) -> Result<HashMap<String, Vec<SessionTag>>> {
+    let mut tags_by_target = HashMap::<String, Vec<SessionTag>>::new();
+    let mut current_target = None::<String>;
+    let option_prefix = prefix.option_prefix();
+
+    for line in output.lines() {
+        let line = line.trim_end_matches('\r').trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(target) = line.strip_prefix("__MOTLIE_TAGS__ ") {
+            let target = target.to_string();
+            tags_by_target.entry(target.clone()).or_default();
+            current_target = Some(target);
+            continue;
+        }
+
+        let Some(target) = current_target.as_ref() else {
+            return Err(Error::Parse(format!(
+                "session tag batch output before target marker: {line}"
+            )));
+        };
+        if let Some(tag) = parse_session_tag_option_line(prefix, &option_prefix, line)? {
+            tags_by_target.entry(target.clone()).or_default().push(tag);
+        }
+    }
+
+    Ok(tags_by_target)
+}
+
 fn parse_session_tag_option_line(
     prefix: &SessionTagPrefix,
     option_prefix: &str,
@@ -584,6 +1001,30 @@ fn parse_session_tag_option_line(
     }
     let value = parse_tmux_option_value(value)?;
     Ok(Some(SessionTag::from_parts(prefix, key, value)?))
+}
+
+fn parse_session_env_var_line(line: &str) -> Result<Option<SessionEnvVar>> {
+    let line = line.trim_end_matches('\r');
+    if line.is_empty() {
+        return Ok(None);
+    }
+    if line.starts_with('-') {
+        return Ok(None);
+    }
+    let Some((name, value)) = line.split_once('=') else {
+        return Err(Error::Parse(format!(
+            "malformed environment variable without '=': {line}"
+        )));
+    };
+    Ok(Some(SessionEnvVar::from_parts(name, value.to_string())?))
+}
+
+fn is_unknown_session_env_var_error(message: &str, name: &str) -> bool {
+    let unknown = format!("unknown variable: {name}");
+    message.lines().any(|line| {
+        let line = line.trim();
+        line == unknown || line == format!("stderr: {unknown}")
+    })
 }
 
 fn split_once_whitespace(input: &str) -> Option<(&str, &str)> {
@@ -762,6 +1203,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_session_with_initial_environment_builds_expected_command() {
+        let expected = "tmux new-session -d -s 'test' -e 'MOTLIE=enabled' -e 'BUILD_ID=42 42'";
+        let mock = MockTransport::new().with_response(expected, "");
+        let transport = TransportKind::Mock(mock);
+        let opts = CreateSessionOptions {
+            initial_environment: vec![
+                SessionEnvVar::new("MOTLIE", "enabled").unwrap(),
+                SessionEnvVar::new("BUILD_ID", "42 42").unwrap(),
+            ],
+            ..Default::default()
+        };
+        create_session(&transport, None, "test", &opts)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn create_session_with_all_options() {
         let mock = MockTransport::new().with_default("");
         let transport = TransportKind::Mock(mock);
@@ -771,6 +1229,7 @@ mod tests {
             width: Some(200),
             height: Some(50),
             history_limit: Some(50000),
+            ..Default::default()
         };
         create_session(&transport, None, "test", &opts)
             .await
@@ -981,6 +1440,16 @@ mod tests {
     }
 
     #[test]
+    fn session_env_var_new_validates_and_is_self_describing() {
+        let var = SessionEnvVar::new("PATH", "/usr/bin").unwrap();
+        assert_eq!((var.name(), var.value()), ("PATH", "/usr/bin"));
+        assert!(SessionEnvVar::new("", "value").is_err());
+        assert!(SessionEnvVar::new("1BAD", "value").is_err());
+        assert!(SessionEnvVar::new("BAD-NAME", "value").is_err());
+        assert!(SessionEnvVar::new("GOOD_NAME", "line1\nline2").is_err());
+    }
+
+    #[test]
     fn parse_session_tag_option_line_decodes_tmux_values() {
         let prefix = tag_prefix();
         let option_prefix = prefix.option_prefix();
@@ -1041,6 +1510,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unset_session_tag_builds_expected_command() {
+        let expected = "tmux set-option -u -t '$7' @mmux/foo";
+        let mock = MockTransport::new().with_response(expected, "");
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        unset_session_tag_with_prefix(&transport, "tmux", "$7", &prefix, "foo")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn read_session_tag_returns_value_or_none() {
         let mock = MockTransport::new()
             .with_response(
@@ -1096,5 +1577,282 @@ mod tests {
                 SessionTag::new("mmux", "empty", "").unwrap(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn list_session_tags_for_targets_batches_prefix() {
+        let mock = MockTransport::new().with_response(
+            "__MOTLIE_TAGS__ $8",
+            "__MOTLIE_TAGS__ $7\n@mmux/foo one\n@other/foo nope\n__MOTLIE_TAGS__ $8\n@mmux/bar \"two words\"\n",
+        );
+        let transport = TransportKind::Mock(mock);
+        let prefix = tag_prefix();
+
+        let tags =
+            list_session_tags_for_targets_with_prefix(&transport, "tmux", &["$7", "$8"], &prefix)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            tags.get("$7").unwrap(),
+            &vec![SessionTag::new("mmux", "foo", "one").unwrap()]
+        );
+        assert_eq!(
+            tags.get("$8").unwrap(),
+            &vec![SessionTag::new("mmux", "bar", "two words").unwrap()]
+        );
+    }
+
+    #[test]
+    fn parse_session_env_var_line_decodes_values() {
+        assert_eq!(
+            parse_session_env_var_line("FOO=hello world").unwrap(),
+            Some(SessionEnvVar::new("FOO", "hello world").unwrap())
+        );
+        assert_eq!(
+            parse_session_env_var_line("EMPTY=").unwrap(),
+            Some(SessionEnvVar::new("EMPTY", "").unwrap())
+        );
+        assert_eq!(
+            parse_session_env_var_line("EQ=a=b").unwrap(),
+            Some(SessionEnvVar::new("EQ", "a=b").unwrap())
+        );
+        assert_eq!(
+            parse_session_env_var_line("SPACES= leading trailing ").unwrap(),
+            Some(SessionEnvVar::new("SPACES", " leading trailing ").unwrap())
+        );
+        assert_eq!(parse_session_env_var_line("-REMOVED").unwrap(), None);
+        assert_eq!(parse_session_env_var_line("").unwrap(), None);
+        assert!(parse_session_env_var_line("MALFORMED").is_err());
+    }
+
+    #[tokio::test]
+    async fn set_session_env_var_builds_expected_command() {
+        let mock =
+            MockTransport::new().with_response("tmux set-environment -t '$7' FOO 'bar baz'", "");
+        let transport = TransportKind::Mock(mock);
+
+        set_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO", "bar baz")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unset_session_env_var_builds_expected_command() {
+        let mock = MockTransport::new().with_response("tmux set-environment -u -t '$7' FOO", "");
+        let transport = TransportKind::Mock(mock);
+
+        unset_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_session_env_var_returns_value_or_none() {
+        let mock = MockTransport::new()
+            .with_response("tmux show-environment -t '$7' FOO", "FOO=hello world\n")
+            .with_error(
+                "tmux show-environment -t '$7' MISSING",
+                "unknown variable: MISSING",
+            );
+        let transport = TransportKind::Mock(mock);
+
+        let value = read_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap();
+        let missing = read_session_env_var_with_prefix(&transport, "tmux", "$7", "MISSING")
+            .await
+            .unwrap();
+
+        assert_eq!(value, Some("hello world".to_string()));
+        assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn read_session_env_var_does_not_fuzzy_match_missing_name() {
+        let mock = MockTransport::new().with_error(
+            "tmux show-environment -t '$7' FOO",
+            "unknown variable: FOO_BAR",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let err = read_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("FOO_BAR"));
+    }
+
+    #[tokio::test]
+    async fn read_session_env_var_rejects_unexpected_name() {
+        let mock =
+            MockTransport::new().with_response("tmux show-environment -t '$7' FOO", "BAR=value\n");
+        let transport = TransportKind::Mock(mock);
+
+        let err = read_session_env_var_with_prefix(&transport, "tmux", "$7", "FOO")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("BAR"));
+    }
+
+    #[tokio::test]
+    async fn list_session_env_vars_skips_unset_markers() {
+        let mock = MockTransport::new().with_response(
+            "tmux show-environment -t '$7'",
+            "FOO=hello world\n-REMOVED\nEMPTY=\nEQ=a=b\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let vars = list_session_env_vars_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vars,
+            vec![
+                SessionEnvVar::new("FOO", "hello world").unwrap(),
+                SessionEnvVar::new("EMPTY", "").unwrap(),
+                SessionEnvVar::new("EQ", "a=b").unwrap(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_style_commands_target_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_response(
+                "tmux set-option -t '$7' status-style 'bg=blue,fg=white'",
+                "",
+            )
+            .with_response(
+                "tmux show-option -q -t '$7' status-style",
+                "status-style \"bg=green,fg=black\"\n",
+            )
+            .with_response("tmux set-option -u -t '$7' status-style", "");
+        let transport = TransportKind::Mock(mock);
+        let style = StatusStyle::new("bg=blue,fg=white").unwrap();
+
+        set_session_status_style_with_prefix(&transport, "tmux", "$7", &style)
+            .await
+            .unwrap();
+        let read = read_local_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        unset_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(read, Some(StatusStyle::new("bg=green,fg=black").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn status_style_read_missing_returns_none() {
+        let mock =
+            MockTransport::new().with_response("tmux show-option -q -t '$7' status-style", "");
+        let transport = TransportKind::Mock(mock);
+
+        let read = read_local_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(read, None);
+    }
+
+    #[tokio::test]
+    async fn status_style_read_rejects_unexpected_option() {
+        let mock = MockTransport::new().with_response(
+            "tmux show-option -q -t '$7' status-style",
+            "status-left nope\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let err = read_local_session_status_style_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("status-left"));
+    }
+
+    #[tokio::test]
+    async fn tmux_hostname_reads_host_format() {
+        let mock = MockTransport::new().with_response(
+            "tmux start-server \\; display-message -p '#{host}'",
+            "alpha\n",
+        );
+        let transport = TransportKind::Mock(mock);
+
+        let hostname = tmux_hostname_with_prefix(&transport, "tmux").await.unwrap();
+
+        assert_eq!(hostname, "alpha");
+    }
+
+    #[tokio::test]
+    async fn tmux_hostname_rejects_empty_output() {
+        let mock = MockTransport::new()
+            .with_response("tmux start-server \\; display-message -p '#{host}'", "\n");
+        let transport = TransportKind::Mock(mock);
+
+        let err = tmux_hostname_with_prefix(&transport, "tmux")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("empty hostname"));
+    }
+
+    #[tokio::test]
+    async fn status_left_commands_target_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_response(
+                "tmux set-option -t '$7' status-left '#{=40:session_name}'",
+                "",
+            )
+            .with_response("tmux set-option -t '$7' status-left-length 40", "")
+            .with_response(
+                "tmux show-option -q -t '$7' status-left-length",
+                "status-left-length 32\n",
+            )
+            .with_response("tmux set-option -u -t '$7' status-left-length", "")
+            .with_response(
+                "tmux show-option -q -t '$7' status-left",
+                "status-left \"session: #{session_name}\"\n",
+            )
+            .with_response("tmux set-option -u -t '$7' status-left", "");
+        let transport = TransportKind::Mock(mock);
+
+        set_session_status_left_with_prefix(
+            &transport,
+            "tmux",
+            "$7",
+            &StatusLeft::new("#{=40:session_name}").unwrap(),
+        )
+        .await
+        .unwrap();
+        let left = read_local_session_status_left_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        unset_session_status_left_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        set_session_status_left_length_with_prefix(
+            &transport,
+            "tmux",
+            "$7",
+            StatusLeftLength::new(40).unwrap(),
+        )
+        .await
+        .unwrap();
+        let length = read_local_session_status_left_length_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+        unset_session_status_left_length_with_prefix(&transport, "tmux", "$7")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            left,
+            Some(StatusLeft::new("session: #{session_name}").unwrap())
+        );
+        assert_eq!(length, Some(StatusLeftLength::new(32).unwrap()));
     }
 }

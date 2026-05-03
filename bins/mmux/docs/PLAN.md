@@ -12,7 +12,28 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row hostname column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
+| 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
+| 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
+| 2026-05-02 | @codex | Moved environment-variable entry into New Session and create sessions with staged `CreateSessionOptions::initial_environment` values; removed the `e` environment modal. |
+| 2026-05-02 | @codex | Replaced multi-host `[A]` letter codes with a five-color square palette in the top legend and session rows. |
+| 2026-05-02 | @codex | Made kill clear the selected row immediately by filtering the killed session from the post-kill refresh. |
+| 2026-05-02 | @codex | Lightened the shared status-bar blue to `#002b55` and kept attach `status-style` matched. |
+| 2026-05-02 | @codex | Fixed multi-host kill dispatch by carrying captured `SessionInfo` in `SelectedSession` and killing that target on the selected host. |
+| 2026-05-02 | @codex | Darkened status bars and attach `status-style` to `#002b55` and changed mnemonic letters to bold coral. |
+| 2026-05-02 | @codex | Added multi-host New Session host selection. |
+| 2026-05-02 | @codex | Updated status styling: TUI bars use dark blue, shortcut letters are bold colored spans instead of underlined, and attach applies the same blue to tmux `status-style`. |
+| 2026-05-02 | @codex | Restored `a` as the attach key and changed list-pane tag grouping to `g`, with tag groups ordered by most recent activity. |
+| 2026-05-02 | @codex | Wrapped attach with best-effort temporary blue tmux `status-style` setup and previous local-style restoration after detach. |
+| 2026-05-02 | @codex | Removed the `a` attach shortcut; Enter is now the only attach key. |
+| 2026-05-02 | @codex | Defaulted the empty Session Tags key edit column to 30% of the edit strip width. |
+| 2026-05-02 | @codex | Tightened list-pane tag sort: visible non-empty checked-tag values sort to the top, and `s` selects the first row in the new order. |
+| 2026-05-02 | @codex | Added list-pane `s` sort toggle with persistent activity/tag sort mode; tag sort groups checked-tag rows first, then orders by tag value, activity, host code, and session name. |
+| 2026-05-02 | @codex | Addressed PR feedback: batched selected-tag metadata loads per host refresh, made Session Tags Cancel reachable, grouped modal session/tag UI state, moved modal sizing to render, and documented reserved tag keys. |
+| 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux [A] <host> ...`) and session rows use compact host-code columns instead of hostname columns. |
+| 2026-05-01 | @codex | Simplified Phase 12 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal to `t`, and left `i` unassigned for this feature. |
+| 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
+| 2026-05-01 | @codex | Started Phase 12 for issue #241: branch `feature/mmux-241-session-modals`. Plan covers list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add on `i`, modal-specific focus state, stable `(host_id, session_id)` dispatch, motlie-tmux tag API usage, and focused tests. |
+| 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row host-code column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
 | 2026-04-28 | @gpt55-dgx | Opened and linked issue #232 for Phase 9.6 env-gated SSH/ForceCommand integration tests; clarified exact bypass value contract. |
 | 2026-04-28 | @gpt55-dgx | Consolidated mmux refresh to one `list_sessions_now()` poller for activity sorting, recency text, structural state, and monitored-session closure. |
 | 2026-04-28 | @gpt55-dgx | Tracked one-second quiet visible-row refreshes so activity sorting updates without structural host events. |
@@ -32,7 +53,7 @@ host event stream backed by stable-id snapshot reconciliation.
 | 2026-04-27 | @gpt55-dgx | Tracked in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Updated resize-bound tracking for landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Updated Help modal tracking for build date and last-8-character git SHA display. |
-| 2026-04-27 | @gpt55-dgx | Updated bottom status tracking for `↑/↓ sel` and `←/→ pane` direction hints. |
+| 2026-04-27 | @gpt55-dgx | Updated bottom status tracking for `↑/↓` and `←/→ pane` direction hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status tracking for `|` host/IP separator and `(h)elp`-first bottom command hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status/title tracking for a top host/time status bar and count-only Sessions title. |
 | 2026-04-27 | @gpt55-dgx | Updated focus/input tracking for cyclic Left/Right pane navigation, including landscape MOTD focus. |
@@ -48,7 +69,7 @@ host event stream backed by stable-id snapshot reconciliation.
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
 | 2026-04-26 | @gpt55-dgx | Set portrait auto-detection to `columns / rows <= 2.0`, updated layout test targets, and embedded the `/tmp/motlie-TOP-CHOICE.txt` glyph as the MOTD-absent fallback icon. |
 | 2026-04-26 | @gpt55-dgx | Replaced short mode tracking with portrait mode: `--portrait`, PTY aspect-ratio auto-detection, old `-s` rejection, updated layout/test references, and the requested Claude artifact ASCII logo. |
-| 2026-04-26 | @gpt55-dgx | Updated implementation tracking for validation changes: Enter/`a` attach, Left/Right focus transitions, macOS iTerm2 Shift-arrow resize documentation, ANSI-preserving sample detail, polling-backed session refresh, and compact graphical MOTD fallback. |
+| 2026-04-26 | @gpt55-dgx | Updated implementation tracking for validation changes: Enter attach, Left/Right focus transitions, macOS iTerm2 Shift-arrow resize documentation, ANSI-preserving sample detail, polling-backed session refresh, and compact graphical MOTD fallback. |
 | 2026-04-26 | @gpt55-dgx | Addressed second manual validation feedback: monitor mode now mirrors rendered screen snapshots with ANSI/VTE parsing, modified-arrow fallback resize is tested, and attach PTY restore uses a `SIGTTOU`-safe foreground-process-group path. |
 | 2026-04-26 | @gpt55-dgx | Addressed manual validation feedback: robust Ctrl-arrow resize matching, readable monitor-mode normalization, conventional detail scroll direction with scrollbar/range indicator, `q` quit key, and dashboard re-entry after detach when the selected session still exists. |
 | 2026-04-26 | @gpt55-dgx | Implemented the initial selector binary and remaining library support: workspace package, CLI modes, normal/short TUI layouts, MOTD fallback art, trait-backed sample/monitor detail sources, create/kill modals, stable-id attach/kill, ForceCommand bypass/reject handling, `ScrollbackQuery::LinesRange`, host event diff stream, and docs/API/CLI updates. |
@@ -272,12 +293,12 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
   omit MOTD; clamp portrait resize bounds at 15/85.
 - [x] 4.5 Implement focused/unfocused border styles.
-- [x] 4.6 Implement a blue top status bar with bold left-justified
+- [x] 4.6 Implement a dark blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
-  title count-only as `Sessions [n]`; keep the blue bottom status bar to
-  compact direction hints (`↑/↓ sel`, underlined `p` in `pane`), command hints
-  ordered as `help`, `pane`, `monitor`, `enter/attach`, `new`, `kill`, `quit`,
-  `layout`, then resize, with shortcut letters underlined and app status with
+  title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
+  compact direction hints (`↑/↓`, bold coral `p` in `pane`), command hints
+  ordered as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `quit`,
+  `layout`, then resize, with shortcut letters bold coral and app status with
   no `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
@@ -306,9 +327,11 @@ References: [Functional Requirements](./DESIGN.md#functional),
   `Ctrl-Up`/`Ctrl-Down` for portrait mode. Accept modified-arrow and word-arrow
   fallback sequences for terminals that remap Ctrl-arrow.
 - [x] 5.5 Implement `New Session` modal with padded content, bordered text
-  input, separated Cancel/Ok button bar, Enter, and Esc handling.
+  input, separated Cancel/Ok button bar, Enter, and Esc handling. In
+  multi-host mode, include a Host dropdown above the session field and create
+  on the selected host.
 - [x] 5.6 Implement kill confirmation modal with padded content, separated
-  button bar, and id captured at modal-open.
+  button bar, Tab-reachable Ok/Cancel buttons, and id captured at modal-open.
 - [x] 5.7 Implement Help modal opened by `h`, showing the built-in motlie
   logo, build date, last 8 characters of the build git SHA, key functions,
   and a separated single Ok button; Enter or Esc closes it.
@@ -355,7 +378,7 @@ References: [Create Session](./DESIGN.md#create-session),
 
 References: [Attach](./DESIGN.md#attach), [CLI.md](./CLI.md).
 
-- [x] 8.1 Implement default Enter/`a` attach path.
+- [x] 8.1 Implement default `a` attach path.
 - [x] 8.2 Restore alternate screen and terminal raw mode before attach.
 - [x] 8.3 Stop monitor state and drop the active host-event subscription before
   attach; selector re-entry starts from a fresh `list_sessions()` snapshot and
@@ -473,29 +496,28 @@ it lands as a follow-up.
 - [ ] 11.4d Confirm 1 Hz cadence (inherited from single-host) is sufficient
   for `n` hosts; profile if needed.
 - [ ] 11.4e Tests: 2-host merge sort; 3-host with one failing; activity-tie
-  ordering stability; row hostname populated correctly.
+  ordering stability; row host metadata populated correctly.
 
 ### 11.5 Render
 
 - [ ] 11.5a `draw_top_status` switches on `fleet.is_multi()`:
   - Single: existing `<hostname> | <ip>     <time>` form.
-  - Multi: `mmux - multi-host mode (<n>)     <time>` form.
-- [ ] 11.5b `draw_sessions` row format: hostname column inserted between
+  - Multi: `mmux ■ <host-a> ■ <host-b>     <time>` legend form.
+- [ ] 11.5b `draw_sessions` row format: host-color square column inserted between
   attached marker and session name when `fleet.is_multi() == true`. Column
-  width = `fleet.host_label_width()` capped at a reasonable max
-  (e.g. 24 chars; longer labels truncated with `…`).
+  width = `fleet.host_marker_width()`.
 - [ ] 11.5c MOTD pane: hide entirely when `app.motd.is_none()`. Layout reflows
   the left column (landscape) or top region (portrait) to give the full area
   to sessions.
 - [ ] 11.5d Status banner: render `HostUnreachable` indicator(s) without
   blocking session listing.
 - [ ] 11.5e Snapshot tests for: multi-host top status; multi-host row format
-  (hostname column present, padded, truncated); MOTD-pane absence in
+  (host-color column present and padded); MOTD-pane absence in
   multi-host; layout reflow correctness.
 
 ### 11.6 Input + dispatch routing
 
-- [ ] 11.6a Attach (`Enter` / `a`): use highlighted `SessionRow` to look up
+- [ ] 11.6a Attach (Enter): use highlighted `SessionRow` to look up
   `fleet.entry(row.host_id).handle` and dispatch
   `handle.session_by_id(row.session.id).attach_current_pty()`.
 - [ ] 11.6b Monitor (`m`): same routing — detail-source `activate` takes the
@@ -541,6 +563,115 @@ it lands as a follow-up.
   verify activity-sort across hosts, attach to row routes correctly, host
   failure resilience.
 
+## Phase 12: Session Rename and Tag Modals (issue #241)
+
+References: [DESIGN.md → Session Rename and Tags](./DESIGN.md#session-rename-and-tags-issue-241),
+issue #241.
+
+This phase is primarily binary-side UI work, plus one small `motlie-tmux`
+contract addition for deleting tags. It must use `motlie-tmux` APIs:
+`HostHandle::session_by_id`, `Target::rename`, `Target::tags("mmux")`, and the
+new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
+
+### 12.0 motlie-tmux tag delete API
+
+- [x] 12.0a Add `SessionTags::unset(key) -> Result<()>`.
+- [x] 12.0b Keep tag mutation on the scoped `SessionTags` helper; do not add a
+  one-off `Target` wrapper for tag deletion.
+- [x] 12.0c Add control-layer helper using
+  `set-option -u -t <stable-session-id> @<prefix>/<key>` with no value
+  argument.
+- [x] 12.0d Keep existing tag contracts: session targets only, validated
+  prefix/key, stable session-id dispatch, no shell pipelines.
+- [x] 12.0e Add unit tests for command construction, validation-before-exec,
+  missing/non-session target behavior, and set/read/list/unset roundtrip shape.
+- [x] 12.0f Update `libs/tmux/docs/API.md`, `DESIGN.md`, and `PLAN.md` for
+  tag deletion.
+
+### 12.1 Modal model and rendering
+
+- [x] 12.1a Extend `ModalState` with `RenameSession` and `SessionKeyValues`
+  variants that capture `(host_id, session_id)` at open.
+- [x] 12.1b Add modal-specific focus enums for multi-field dialogs rather than
+  one global catch-all modal focus enum.
+- [x] 12.1c key/value modal focus must support existing rows (`Row(index)`)
+  plus bottom controls (`Key`, `Value`, `Ok`, `Cancel`).
+- [x] 12.1d Add render helpers for labeled bordered text fields that preserve
+  the existing modal padding, separator, and button styling.
+- [x] 12.1e Add Tab / Shift-Tab focus movement for multi-field modals while
+  preserving Left / Right button selection where buttons are focused.
+- [x] 12.1f Update Help/status key references for `r` and `t` if the existing
+  status width budget allows; otherwise keep them in Help only. Do not document
+  `i` as a command for this feature.
+
+### 12.2 Rename modal (`r`)
+
+- [x] 12.2a In main-view input, open rename only when `Focus::List` and a
+  session is selected; non-list focus is a no-op.
+- [x] 12.2b Prepopulate `Session Name` with the selected session's current
+  display name.
+- [x] 12.2c On `Ok`, trim using the New Session rule. Empty input reports a
+  status banner; unchanged input closes without tmux I/O.
+- [x] 12.2d On changed input, resolve the captured stable session id through
+  the captured host and call `Target::rename`.
+- [x] 12.2e Refresh sessions immediately after success and preserve selection
+  by `(host_id, session_id)`.
+- [ ] 12.2f Tests: list-focus gating, prepopulation, unchanged no-op, changed
+  rename dispatch by stable id, disappeared-session status.
+
+### 12.3 Session tags modal (`t`)
+
+- [x] 12.3a Open for the highlighted session from any pane focus; no selected
+  session reports the existing "no session selected" status. `i` remains
+  unassigned.
+- [x] 12.3b Load `target.tags("mmux").await?.list().await?`, sort by stripped
+  key lexicographically, and render keys without `mmux/` or `@mmux/` prefixes.
+- [x] 12.3c Initial focus is the first tag row when any tag exists, otherwise
+  the bottom `Key` field.
+- [x] 12.3d Render bottom edit controls: key/value edit fields and `Ok` /
+  `Cancel` buttons.
+- [x] 12.3e Up/Down move focus row-to-row through existing tag rows; Up from
+  edit controls returns to the last visible tag row when present.
+- [x] 12.3f Pressing `x` on a focused tag row stages deletion in the modal
+  draft and keeps the modal open.
+- [x] 12.3g Pressing `u` on a focused tag row copies that key/value into the
+  bottom `Key` and `Value` fields and focuses `Value`.
+- [x] 12.3h Enter in either edit field stages the non-empty-value rule. Existing
+  keys are updated in the draft; new keys are added to the draft.
+- [x] 12.3i Keep value text exact, without trimming, while trimming only the
+  tag key. Let `motlie-tmux` enforce key/value validation.
+- [x] 12.3j Enter on focused `Ok` diffs the draft against the original tag
+  state, writes required `set`/`unset`/selected-tag mutations, refreshes
+  sessions, and closes the modal.
+- [x] 12.3k Escape or Enter on focused `Cancel` dismisses without writing and
+  discards staged changes.
+- [x] 12.3l Tests: sorted display, stripped keys, row focus movement, staged
+  delete, update preload, staged update, Ok apply, empty value no-op, and
+  Cancel/Esc discard.
+
+### 12.4 Shared dispatch helpers
+
+- [ ] 12.4a Add a small helper for resolving captured modal session targets by
+  `(host_id, session_id)` to keep rename/tag apply paths consistent.
+- [x] 12.4b Add a small helper for setting an `mmux` tag from UI text that
+  centralizes key trimming, empty-value no-op, and `SessionTags::set(..)`
+  usage.
+- [x] 12.4c Add a small helper for deleting a focused `mmux` tag via the new
+  `SessionTags::unset` API.
+- [x] 12.4d Keep these helpers binary-private.
+
+### 12.5 Documentation and validation
+
+- [x] 12.5a Update `bins/mmux/docs/CLI.md` keymap and modal behavior after the
+  implementation is concrete.
+- [x] 12.5b Update `bins/mmux/docs/API.md` internal `ModalState` notes after
+  the implementation is concrete.
+- [ ] 12.5c `cargo fmt --all`
+- [x] 12.5d `cargo test -p motlie-tmux`
+- [x] 12.5e `cargo test -p motlie-mmux`
+- [x] 12.5f `cargo clippy -p motlie-tmux -- -D warnings`
+- [x] 12.5g `cargo clippy -p motlie-mmux -- -D warnings`
+
 ## Concrete Test Matrix
 
 | Area | Harness | Required coverage |
@@ -550,6 +681,7 @@ it lands as a follow-up.
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
 | Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
 | Input model | Pure unit tests | cyclic focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, build date, and short build SHA display |
+| Session rename/tags | Pure unit + mock tmux | `r` focus gating, rename prefill/no-op/dispatch, tag prefill, sorted stripped tag display, add/update/delete flows, empty-value no-op |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
 | SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |

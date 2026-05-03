@@ -18,7 +18,7 @@ pub(crate) struct Cli {
     pub(crate) script: bool,
     /// Optional SSH URI target(s). Omitted means local host. Two or more URIs
     /// activate multi-host mode (issue #235): aggregated activity-sorted list
-    /// across hosts; per-row hostname column; MOTD pane hidden.
+    /// across hosts; per-row host-code column; MOTD pane hidden.
     pub(crate) ssh_uris: Vec<String>,
 }
 

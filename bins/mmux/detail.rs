@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use motlie_tmux::{
-    has_visible_text, CaptureNormalizeMode, CaptureOptions, CaptureResult, HostHandle, PaneAddress,
-    ScrollbackQuery,
+    CaptureNormalizeMode, CaptureOptions, CaptureResult, HostHandle, PaneAddress, ScrollbackQuery,
+    has_visible_text,
 };
 
 use crate::consts::DEFAULT_DETAIL_LINES;
@@ -42,8 +42,8 @@ impl SessionDetailSource for SampleDetailSource {
     }
 
     async fn render(&mut self, host: &HostHandle, session: &SelectedSession) -> Result<String> {
-        let Some(target) = host.session_by_id(&session.id).await? else {
-            return Ok(format!("session {} disappeared", session.name));
+        let Some(target) = host.session_by_id(session.id()).await? else {
+            return Ok(format!("session {} disappeared", session.name()));
         };
         target
             .sample_text_with_options(
@@ -63,7 +63,7 @@ impl SessionDetailSource for SampleDetailSource {
         older_than_lines: usize,
         count: usize,
     ) -> Result<String> {
-        let Some(target) = host.session_by_id(&session.id).await? else {
+        let Some(target) = host.session_by_id(session.id()).await? else {
             return Ok(String::new());
         };
         target
@@ -106,17 +106,17 @@ impl MonitorDetailSource {
 impl SessionDetailSource for MonitorDetailSource {
     async fn activate(&mut self, host: &HostHandle, session: &SelectedSession) -> Result<()> {
         self.deactivate().await?;
-        if host.session_by_id(&session.id).await?.is_none() {
-            return Err(anyhow!("session {} disappeared", session.name));
+        if host.session_by_id(session.id()).await?.is_none() {
+            return Err(anyhow!("session {} disappeared", session.name()));
         }
-        self.session_id = Some(session.id.clone());
+        self.session_id = Some(session.id().to_string());
         self.host_id = Some(session.host_id.clone());
         Ok(())
     }
 
     async fn render(&mut self, host: &HostHandle, session: &SelectedSession) -> Result<String> {
-        let Some(target) = host.session_by_id(&session.id).await? else {
-            return Ok(format!("session {} disappeared", session.name));
+        let Some(target) = host.session_by_id(session.id()).await? else {
+            return Ok(format!("session {} disappeared", session.name()));
         };
         let panes = target
             .capture_all_with_options(&CaptureOptions::with_mode(
@@ -124,7 +124,7 @@ impl SessionDetailSource for MonitorDetailSource {
             ))
             .await
             .context("capture monitored session screen")?;
-        Ok(render_screen_capture(&session.name, panes))
+        Ok(render_screen_capture(session.name(), panes))
     }
 
     async fn fetch_older(
