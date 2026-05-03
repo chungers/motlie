@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-03 | @codex | Added Phase 13 for the `s` Send keys modal and moved pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment-variable entry into New Session and create sessions with staged `CreateSessionOptions::initial_environment` values; removed the `e` environment modal. |
@@ -296,10 +297,10 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.6 Implement a dark blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
-  compact direction hints (`↑/↓`, bold coral `p` in `pane`), command hints
-  ordered as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `quit`,
-  `layout`, then resize, with shortcut letters bold coral and app status with
-  no `keys`, host, time, focus, or layout-mode labels.
+  compact direction hints (`tab ↑/↓`), command hints ordered as `help`,
+  `monitor`, `send`, `attach`, `new`, `kill`, `rename`, `group`, `layout`,
+  `quit`, then resize, with shortcut letters bold coral and app status with no
+  `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.
@@ -317,7 +318,7 @@ References: [Layout](./DESIGN.md#layout),
 References: [Functional Requirements](./DESIGN.md#functional),
 [Layout](./DESIGN.md#layout).
 
-- [x] 5.1 Implement focus transitions: `p` pane navigation, `l` runtime layout
+- [x] 5.1 Implement focus transitions: Tab pane navigation, `l` runtime layout
   toggle, outside-modal `Esc` returning to the session list, and `q` as an
   exit alias for `Ctrl-C`.
 - [x] 5.2 Implement session-list movement and scrolling for `LB`/`T`.
@@ -336,7 +337,7 @@ References: [Functional Requirements](./DESIGN.md#functional),
   logo, build date, last 8 characters of the build git SHA, key functions,
   and a separated single Ok button; Enter or Esc closes it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
-  modal Esc behavior, `p` pane focus behavior, and `l` layout toggle behavior.
+  modal Esc behavior, Tab pane focus behavior, and `l` layout toggle behavior.
 
 ## Phase 6: Detail Sources
 
@@ -668,6 +669,27 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
   the implementation is concrete.
 - [ ] 12.5c `cargo fmt --all`
 - [x] 12.5d `cargo test -p motlie-tmux`
+
+## Phase 13: Send keys modal (`s`)
+
+- [x] 13.1 Start branch `feature/mmux-send-keys` from local `feature/mmux` in
+  worktree `motlie-mmux-send-keys`.
+- [x] 13.2 Add `ModalState::SendKeys` with explicit `Input`, `Ok`, and
+  `Cancel` focus.
+- [x] 13.3 Bind `s` to open `Send keys` for the highlighted session from any
+  pane focus; preserve pane focus cycling by moving the main-view cycle key to
+  Tab.
+- [x] 13.4 Render title `Send keys`, label
+  `Keys to send to <session> on <host>`, a compact text field, and the standard
+  `Cancel` / `Ok` button strip.
+- [x] 13.5 On focused `Ok`, parse the input with `KeySequence::parse`, resolve
+  the captured session with `HostHandle::session_by_id`, and call
+  `Target::send_keys`; non-empty Enter from the input follows the same send
+  path.
+- [x] 13.6 `Esc` and focused `Cancel` close without sending; invalid key syntax
+  keeps the modal open for correction.
+- [x] 13.7 Add modal rendering, open/cancel/send/invalid-sequence tests and
+  update keymap docs.
 - [x] 12.5e `cargo test -p motlie-mmux`
 - [x] 12.5f `cargo clippy -p motlie-tmux -- -D warnings`
 - [x] 12.5g `cargo clippy -p motlie-mmux -- -D warnings`

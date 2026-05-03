@@ -19,7 +19,7 @@ use crate::consts::{
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
     AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, MotdState,
-    NewSessionFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionRow,
+    NewSessionFocus, SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionRow,
 };
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
@@ -610,12 +610,12 @@ pub(crate) fn status_line_text(app: &AppState) -> String {
 }
 
 pub(crate) fn status_line(app: &AppState) -> Line<'static> {
-    let mut spans = vec![status_span(" ↑/↓ | ")];
+    let mut spans = vec![status_span(" tab ↑/↓ | ")];
     push_status_command(&mut spans, "help", 'h');
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "pane", 'p');
-    push_status_separator(&mut spans);
     push_status_command(&mut spans, "monitor", 'm');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "send", 's');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "attach", 'a');
     push_status_separator(&mut spans);
@@ -625,13 +625,11 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "rename", 'r');
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "tags", 't');
-    push_status_separator(&mut spans);
     push_status_command(&mut spans, "group", 'g');
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "quit", 'q');
-    push_status_separator(&mut spans);
     push_status_command(&mut spans, "layout", 'l');
+    push_status_separator(&mut spans);
+    push_status_command(&mut spans, "quit", 'q');
     push_status_separator(&mut spans);
     spans.push(status_span(match app.layout.mode {
         LayoutMode::Portrait => "mod-↑/↓ resize ",
@@ -702,11 +700,12 @@ fn status_mnemonic_style() -> Style {
 
 fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     let view = modal_content(modal);
+    let (content_horizontal_padding, content_vertical_padding) = modal_content_padding(&view.body);
     let width = min(
         max(
-            MODAL_MIN_WIDTH,
+            modal_min_width(&view.body),
             modal_content_width(&view)
-                .saturating_add(MODAL_CONTENT_HORIZONTAL_PADDING.saturating_mul(2))
+                .saturating_add(content_horizontal_padding.saturating_mul(2))
                 .saturating_add(2),
         ),
         area.width
@@ -716,7 +715,7 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
         max(
             7,
             modal_content_height(&view)
-                .saturating_add(MODAL_CONTENT_VERTICAL_PADDING.saturating_mul(2))
+                .saturating_add(content_vertical_padding.saturating_mul(2))
                 .saturating_add(MODAL_SEPARATOR_HEIGHT)
                 .saturating_add(MODAL_BUTTON_HEIGHT)
                 .saturating_add(2),
@@ -755,8 +754,8 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     );
     let content_rect = inset_rect(
         content_outer,
-        MODAL_CONTENT_HORIZONTAL_PADDING,
-        MODAL_CONTENT_VERTICAL_PADDING,
+        content_horizontal_padding,
+        content_vertical_padding,
     );
     draw_modal_body(frame, content_rect, &view.body);
 
@@ -771,9 +770,28 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     } else {
         draw_modal_buttons(
             frame,
-            inset_rect(button_area, MODAL_CONTENT_HORIZONTAL_PADDING, 0),
+            inset_rect(button_area, content_horizontal_padding, 0),
             &view.buttons,
         );
+    }
+}
+
+fn modal_min_width(body: &ModalBody) -> u16 {
+    if matches!(body, ModalBody::SendKeys { .. }) {
+        SEND_KEYS_MODAL_MIN_WIDTH
+    } else {
+        MODAL_MIN_WIDTH
+    }
+}
+
+fn modal_content_padding(body: &ModalBody) -> (u16, u16) {
+    if matches!(body, ModalBody::SendKeys { .. }) {
+        (1, 0)
+    } else {
+        (
+            MODAL_CONTENT_HORIZONTAL_PADDING,
+            MODAL_CONTENT_VERTICAL_PADDING,
+        )
     }
 }
 
@@ -798,6 +816,7 @@ fn modal_content_height(view: &ModalView) -> u16 {
                 .saturating_add(KEY_VALUE_INPUT_SECTION_HEIGHT)
         }
         ModalBody::RenameSession { .. } => 1 + MODAL_TEXT_FIELD_HEIGHT,
+        ModalBody::SendKeys { .. } => 1 + SEND_KEYS_TEXT_FIELD_HEIGHT,
         ModalBody::SessionKeyValues { rows, .. } => {
             let rows = max(1, rows.len()) as u16;
             min(rows, KEY_VALUE_LIST_MAX_ROWS as u16) + KEY_VALUE_INPUT_SECTION_HEIGHT
@@ -838,6 +857,9 @@ fn modal_content_width(view: &ModalView) -> u16 {
         .unwrap_or(0),
         ModalBody::RenameSession { input } => {
             max("Session Name".chars().count(), input.chars().count())
+        }
+        ModalBody::SendKeys { label, input, .. } => {
+            max(label.chars().count(), input.chars().count())
         }
         ModalBody::SessionKeyValues {
             kind,
@@ -918,6 +940,13 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
         }
         ModalBody::RenameSession { input } => {
             draw_labeled_text_field(frame, area, "Session Name", input, true);
+        }
+        ModalBody::SendKeys {
+            label,
+            input,
+            focused,
+        } => {
+            draw_labeled_multiline_text_field(frame, area, label, input, *focused);
         }
         ModalBody::SessionKeyValues {
             kind,
@@ -1103,6 +1132,8 @@ const KEY_VALUE_KEY_COLUMN_PADDING: u16 = 4;
 const KEY_VALUE_EMPTY_KEY_COLUMN_PERCENT: u16 = 30;
 const KEY_VALUE_EDIT_ROW_OVERHEAD: usize = 6;
 const KEY_VALUE_LIST_ROW_OVERHEAD: usize = 7;
+const SEND_KEYS_MODAL_MIN_WIDTH: u16 = 40;
+const SEND_KEYS_TEXT_FIELD_HEIGHT: u16 = 3;
 
 fn visible_session_key_value_rows(area_height: u16, row_count: usize) -> usize {
     let available = area_height.saturating_sub(KEY_VALUE_INPUT_SECTION_HEIGHT) as usize;
@@ -1336,6 +1367,49 @@ fn draw_labeled_text_field(
     }
 }
 
+fn draw_labeled_multiline_text_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(label),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height <= 1 {
+        return;
+    }
+    let input_rect = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        min(SEND_KEYS_TEXT_FIELD_HEIGHT, area.height.saturating_sub(1)),
+    );
+    let border = if focused {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border)),
+        input_rect,
+    );
+    let input_inner = inset_rect(input_rect, 1, 1);
+    if input_inner.width > 0 && input_inner.height > 0 {
+        frame.render_widget(
+            Paragraph::new(value).wrap(Wrap { trim: false }),
+            input_inner,
+        );
+    }
+}
+
 fn draw_labeled_select_field(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1478,6 +1552,31 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ),
             active_button: Some(*button),
         },
+        ModalState::SendKeys { session, ui } => {
+            let active_button = match ui.focus {
+                SendKeysFocus::Input => None,
+                SendKeysFocus::Ok => Some(Button::Ok),
+                SendKeysFocus::Cancel => Some(Button::Cancel),
+            };
+            ModalView {
+                title: " Send keys ",
+                body: ModalBody::SendKeys {
+                    label: format!(
+                        "Keys to send to {} on {}",
+                        session.name(),
+                        session.host_label
+                    ),
+                    input: ui.input.clone(),
+                    focused: ui.focus == SendKeysFocus::Input,
+                },
+                buttons: format!(
+                    "{}   {}",
+                    button_text(active_button, Button::Cancel),
+                    button_text(active_button, Button::Ok)
+                ),
+                active_button,
+            }
+        }
         ModalState::SessionKeyValues { ui, .. } => {
             let active_button = match ui.focus {
                 SessionKeyValueFocus::Ok => Some(Button::Ok),

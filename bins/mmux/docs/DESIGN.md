@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-03 | @codex | Added the `s` Send keys modal and moved main-view pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment variables into the New Session modal and apply them through `CreateSessionOptions::initial_environment`; removed the post-creation `e` environment modal. |
@@ -173,7 +174,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   when a client does not report Ctrl-arrow distinctly. On macOS iTerm2, manual
   validation observed `Shift-Left` and `Shift-Right` for L/R resize. Plain
   Left/Right do not change pane focus in the main view.
-- Pressing `p` cycles focus `LT -> Lb -> R -> LT` in landscape mode.
+- Pressing Tab cycles focus `LT -> Lb -> R -> LT` in landscape mode.
 - `R` initially shows sampled detail for the highlighted session.
 - `R` detail is supplied through a trait so future view models can summarize or
   otherwise transform session content.
@@ -194,6 +195,13 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode `%output` replay, because TUI programs rely on cursor movement,
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
+- Pressing `s` opens a centered `Send keys` modal for the highlighted session.
+  The modal shows a label `Keys to send to <session> on <host>` above a
+  compact text field and has `Cancel` / `Ok` buttons. `Tab` cycles the text
+  field and buttons; Enter on focused `Ok`, or Enter from the text field after
+  text has been entered, parses the field as a `KeySequence` and sends it to
+  the captured stable session target through `Target::send_keys`. `Esc` or
+  focused `Cancel` closes without sending.
 - Pressing `n` opens a centered `New Session` modal with padded content, a
   bordered session-name text field, a horizontal separator, and `Cancel` /
   `Ok` buttons in the button bar. In multi-host mode, the modal shows a Host
@@ -231,7 +239,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Enter exits the modal and applies `Ok` when selected. `Esc` in a modal is
   `Cancel` and closes without applying. In the help modal, Enter or `Esc`
   closes the modal without changing selector state.
-- Pressing `p` cycles focus through the landscape panes in this order:
+- Pressing Tab cycles focus through the landscape panes in this order:
   `LT -> Lb -> R -> LT`. Outside any modal, `Esc` returns focus to `Lb`
   (use `q` or `Ctrl-C` to exit). The currently
   focused pane must be visually distinguished from the unfocused panes via
@@ -279,11 +287,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   deferred.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
-  `left`, or `right`. Direction hints are `↑/↓` for selection and
-  `pane` for pane focus, with shortcut letters rendered bold coral. Always-on
-  command hints are ordered as `help`, `pane`, `monitor`, `attach`, `new`,
-  `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
-  letters `h`/`p`/`m`/`a`/`n`/`k`/`q`/`l` are bold coral in the TUI. The
+  `left`, or `right`. The left hint is `tab ↑/↓`, covering pane focus cycling
+  and selection/scroll movement, with shortcut letters rendered bold coral.
+  Always-on command hints are ordered as `help`, `monitor`, `send`, `attach`,
+  `new`, `kill`, `rename`, `group`, `layout`, `quit`, then mode-specific
+  resize. The shortcut letters `h`/`m`/`s`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
+  bold coral in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `Lb`, `R`), or layout mode (`portrait`,
   `landscape`, or `normal`) and must render with a dark blue background.
@@ -713,7 +722,7 @@ Main-selector keymap (focus-aware):
 | Up / Down | No-op | Move highlight; LB viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
 | PgUp / PgDn | No-op | Page through session list | Page through R buffer |
 | Home / End | No-op | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
-| `p` | Focus → `Lb` | Focus → `R` | Focus → `LT` |
+| Tab | Focus → `Lb` | Focus → `R` | Focus → `LT` |
 | Left / Right | No-op | No-op | No-op |
 | `Esc` | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal | Focus → `Lb` outside modal; `Cancel` inside modal |
 | Modified Left / Right | Resize `L`/`R` split (normal mode only; `Ctrl`, Alt, Shift, and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) | Resize `L`/`R` split (normal mode only; focus-independent) |
@@ -722,6 +731,7 @@ Main-selector keymap (focus-aware):
 | `n` | Open `New Session` modal | Same | Same |
 | `k` | Open kill-confirmation modal | Same | Same |
 | `r` | No-op | Open rename modal for highlight | No-op |
+| `s` | Open Send keys modal for highlight | Same | Same |
 | `t` | Open tag list/add/update/delete modal for highlight | Same | Same |
 | `g` | No-op | Toggle activity/tag grouping | No-op |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same | Same |
@@ -729,7 +739,7 @@ Main-selector keymap (focus-aware):
 | `q` / `Ctrl-C` | Exit selector without attach | Exit selector without attach | Exit selector without attach |
 
 Resize keys use modified arrows so plain arrows stay available to terminals and
-modal button selection while `p` owns main-view pane cycling. Normal mode advertises
+modal button selection while Tab owns main-view pane cycling. Normal mode advertises
 `Ctrl-Left`/`Ctrl-Right` for the L/R split and also accepts common terminal
 fallbacks; on macOS iTerm2 the observed fallback is `Shift-Left` /
 `Shift-Right`. Portrait mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
@@ -737,9 +747,10 @@ and accepts the same modifier family. Resize bounds are mode-specific:
 landscape L/R clamps at 25/75, while portrait T/B clamps at 15/85.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
-`Cancel` and `Ok`; kill confirmation also accepts `Tab` / `Shift-Tab` for the
-same two-button cycle; `Enter` exits and applies `Ok` if selected; `Esc` is
-`Cancel`.
+`Cancel` and `Ok` where applicable; kill confirmation also accepts `Tab` /
+`Shift-Tab` for the same two-button cycle; Send keys uses `Tab` / `Shift-Tab`
+to cycle `Input -> Ok -> Cancel`; `Enter` exits and applies `Ok` if selected,
+or sends from non-empty Send keys input; `Esc` is `Cancel`.
 
 ### Portrait Mode
 
@@ -763,13 +774,13 @@ at smaller sizes but is tuned for this target.
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar key hints remain, but key hints must be
   terser to fit ~64 cols. Use compact symbol labels for directional keys,
-  e.g., `↑/↓ | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout`.
+  e.g., `tab ↑/↓ | (h)elp | (m)onitor | (s)end | (a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout`.
 
 **Focus model:** Same semantics as normal mode, except MOTD is not present, so
-`p` cycles between `T` and `B`:
+Tab cycles between `T` and `B`:
 
 - Default focus is `T`.
-- `p` → cycle `T -> B -> T`.
+- Tab → cycle `T -> B -> T`.
 - `Esc` outside modal returns focus to `T`.
 - Visual focus borders: same rule (bright/doubled for focused; dim/single
   for unfocused).
@@ -829,9 +840,10 @@ existing single-host mode unchanged.
   Host-square column width is one character.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, `a` attach, `m` monitor, `n` new,
-  `k` kill, `r` rename, `t` tag list/add/update/delete, `Ctrl-C`/`q` exit,
-  `l` toggle layout, `p` cycle panes, `Ctrl-←/→` and `Ctrl-↑/↓` resize) behave
+- All command keys (`Up`/`Down`, `a` attach, `m` monitor, `s` send keys,
+  `n` new, `k` kill, `r` rename, `t` tag list/add/update/delete,
+  `Ctrl-C`/`q` exit, `l` toggle layout, Tab cycle panes, `Ctrl-←/→` and
+  `Ctrl-↑/↓` resize) behave
   the same as single-host. Each applies to the highlighted row and dispatches
   against that row's host, with `r` still restricted to list-pane focus.
 - Attach routes to the highlighted row's host: spawn-and-wait
@@ -1830,7 +1842,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - PTY aspect-ratio auto-detection: 64x32, 66x30, 80x24, 100x30, 160x40,
     and square-ish PTYs select portrait; 161x40 and wider-than-4.0 PTYs select
     landscape; `--portrait` forces portrait; `--landscape` forces landscape
-  - `p` cycles pane focus in the main view; modal use of Left/Right for button
+  - Tab cycles pane focus in the main view; modal use of Left/Right for button
     selection is unchanged
   - `l` toggles layout mode and normalizes focus when switching to portrait
 - Unit tests for state transitions:
@@ -1840,7 +1852,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - create/kill success and error paths
   - Help modal opens on `h`, shows the logo, build date, last 8 characters of
     the build git SHA, key functions, and closes on Enter or `Esc`
-  - focus cycling: `p` cycles `LT`→`Lb`→`R`→`LT`; `Esc` outside modal returns
+  - focus cycling: Tab cycles `LT`→`Lb`→`R`→`LT`; `Esc` outside modal returns
     focus to `Lb`
   - `Esc` inside modal = `Cancel`
 - Style/snapshot tests:
@@ -1921,7 +1933,7 @@ that remain speculative stay explicitly open.
   flags). Future enhancement.
 - **Remote targets in ForceCommand** — Local-only ForceCommand initially.
   Operator-invoked CLI mode may pass an SSH URI.
-- **Main-view pane key** — `p` cycles landscape focus `LT -> Lb -> R -> LT`.
+- **Main-view pane key** — Tab cycles landscape focus `LT -> Lb -> R -> LT`.
   Portrait mode cycles `T <-> B` because MOTD is omitted. Plain Left/Right are
   no-ops in main view, modified arrows own resize, and modal Left/Right keeps
   button selection behavior.

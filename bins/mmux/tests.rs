@@ -26,9 +26,9 @@ use crate::detail::{
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession,
-    SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow,
-    SessionRow, SessionSelectedTag, SessionSortMode,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
+    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
+    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
     detail_text_for_render, draw, key_value_key_column_width, modal_content, motd_render_text,
@@ -162,6 +162,16 @@ fn test_new_session_modal(input: &str, button: Button) -> ModalState {
             env_value_input: String::new(),
             focus: NewSessionFocus::Name,
             button,
+        },
+    }
+}
+
+fn test_send_keys_modal(input: &str, focus: SendKeysFocus) -> ModalState {
+    ModalState::SendKeys {
+        session: test_selected_session(),
+        ui: SendKeysModalUi {
+            input: input.to_string(),
+            focus,
         },
     }
 }
@@ -326,27 +336,26 @@ fn status_line_omits_layout_mode() {
         false,
     );
     let normal_status = status_line_text(&normal);
-    assert!(normal_status.contains(" ↑/↓"));
+    assert!(normal_status.contains(" tab ↑/↓"));
     assert!(!normal_status.contains(" ↑/↓ sel"));
     assert!(!normal_status.contains("keys"));
     assert!(!normal_status.contains("host"));
     assert!(!normal_status.contains("(h)elp"));
-    assert!(!normal_status.contains("(p)ane"));
-    assert!(normal_status.contains("pane"));
+    assert!(!normal_status.contains("(s)end"));
+    assert!(!normal_status.contains("tab pane"));
     assert_status_order(
         &normal_status,
         &[
             "help",
-            "pane",
             "monitor",
+            "send",
             "attach",
             "new",
             "kill",
             "rename",
-            "tags",
             "group",
-            "quit",
             "layout",
+            "quit",
             "mod-←/→ resize",
         ],
     );
@@ -361,23 +370,22 @@ fn status_line_omits_layout_mode() {
         false,
     );
     let portrait_status = status_line_text(&portrait);
-    assert!(portrait_status.contains(" ↑/↓"));
+    assert!(portrait_status.contains(" tab ↑/↓"));
     assert!(!portrait_status.contains(" ↑/↓ sel"));
-    assert!(portrait_status.contains("pane"));
+    assert!(!portrait_status.contains("tab pane"));
     assert_status_order(
         &portrait_status,
         &[
             "help",
-            "pane",
             "monitor",
+            "send",
             "attach",
             "new",
             "kill",
             "rename",
-            "tags",
             "group",
-            "quit",
             "layout",
+            "quit",
             "mod-↑/↓ resize",
         ],
     );
@@ -403,10 +411,10 @@ fn status_line_styles_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(styled_mnemonics, "hpmankrtgql");
+    assert_eq!(styled_mnemonics, "hmsankrglq");
     assert_eq!(
         status_line_text(&app),
-        " ↑/↓ | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
+        " tab ↑/↓ | help | monitor | send | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
     );
 }
 
@@ -1456,7 +1464,7 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
 }
 
 #[tokio::test]
-async fn s_no_longer_groups_sessions() {
+async fn s_no_longer_groups_sessions_and_opens_send_keys() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.focus = Focus::List;
@@ -1471,6 +1479,11 @@ async fn s_no_longer_groups_sessions() {
 
     assert!(matches!(outcome, KeyOutcome::Continue));
     assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { session, ui })
+            if session.name() == "dev" && ui.focus == SendKeysFocus::Input
+    ));
 }
 
 #[tokio::test]
@@ -1637,6 +1650,24 @@ fn modal_content_separates_body_from_button_bar() {
         ModalBody::RenameSession { ref input } if input == "dev"
     ));
     assert!(!rename.body_text().contains("[Ok]"));
+
+    let send_keys = modal_content(&test_send_keys_modal(
+        "echo hi{Enter}",
+        SendKeysFocus::Input,
+    ));
+    assert_eq!(send_keys.title, " Send keys ");
+    assert_eq!(send_keys.active_button, None);
+    assert_eq!(send_keys.buttons, " Cancel     Ok ");
+    assert!(matches!(
+        send_keys.body,
+        ModalBody::SendKeys { ref label, ref input, focused }
+            if label == "Keys to send to dev on host" && input == "echo hi{Enter}" && focused
+    ));
+    assert!(!send_keys.body_text().contains("[Ok]"));
+
+    let send_keys_ok = modal_content(&test_send_keys_modal("echo hi{Enter}", SendKeysFocus::Ok));
+    assert_eq!(send_keys_ok.active_button, Some(Button::Ok));
+    assert_eq!(send_keys_ok.buttons, " Cancel    [Ok]");
 
     let tags = modal_content(&test_session_tags_modal(
         vec![SessionKeyValueRow {
@@ -2063,6 +2094,230 @@ async fn rename_modal_renames_changed_session_by_stable_id() {
         Some("renamed".to_string())
     );
     assert_eq!(app.status.text(), "renamed session dev to renamed");
+}
+
+#[tokio::test]
+async fn s_opens_send_keys_modal_for_selected_session() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { session, ui })
+            if session.id() == "$1"
+                && session.name() == "dev"
+                && ui.input.is_empty()
+                && ui.focus == SendKeysFocus::Input
+    ));
+}
+
+#[tokio::test]
+async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' Enter", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1{Enter}".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { ui, .. }) if ui.focus == SendKeysFocus::Ok
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' Enter", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1{Enter}".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_accepts_ctrl_m_enter_shorthand() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' C-m", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1{C-m}".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_escape_cancels_without_sending() {
+    let mock = MockTransport::new().with_error("send-keys", "should not send keys");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn send_keys_modal_invalid_sequence_stays_open() {
+    let mock = MockTransport::new().with_error("send-keys", "should not send invalid keys");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "echo {Enter".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(app.modal, Some(ModalState::SendKeys { .. })));
+    assert!(app.status.text().starts_with("invalid keys:"));
 }
 
 #[tokio::test]
@@ -2700,14 +2955,14 @@ async fn session_tags_modal_rejects_reserved_selected_key() {
 }
 
 #[tokio::test]
-async fn p_cycles_landscape_panes() {
+async fn tab_cycles_landscape_panes() {
     let fleet = local_fleet();
     let mut app = app_with_session();
 
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2716,7 +2971,7 @@ async fn p_cycles_landscape_panes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2725,7 +2980,7 @@ async fn p_cycles_landscape_panes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2733,7 +2988,7 @@ async fn p_cycles_landscape_panes() {
 }
 
 #[tokio::test]
-async fn p_cycles_portrait_panes_without_motd() {
+async fn tab_cycles_portrait_panes_without_motd() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.mode = LayoutMode::Portrait;
@@ -2741,7 +2996,7 @@ async fn p_cycles_portrait_panes_without_motd() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2750,7 +3005,7 @@ async fn p_cycles_portrait_panes_without_motd() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();

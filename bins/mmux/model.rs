@@ -83,6 +83,13 @@ pub(crate) enum NewSessionFocus {
     Ok,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendKeysFocus {
+    Input,
+    Ok,
+    Cancel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NewSessionHostChoice {
     pub(crate) id: HostId,
@@ -109,11 +116,21 @@ pub(crate) enum ModalState {
         input: String,
         button: Button,
     },
+    SendKeys {
+        session: SelectedSession,
+        ui: SendKeysModalUi,
+    },
     SessionKeyValues {
         session: SelectedSession,
         ui: SessionKeyValueModalUi,
     },
     Help,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SendKeysModalUi {
+    pub(crate) input: String,
+    pub(crate) focus: SendKeysFocus,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +200,7 @@ impl ModalView {
                 format!("{fields}\n{env}\n{env_key_input}    {env_value_input}")
             }
             ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
+            ModalBody::SendKeys { label, input, .. } => format!("{label}\n{input}"),
             ModalBody::SessionKeyValues {
                 kind,
                 rows,
@@ -228,6 +246,11 @@ pub(crate) enum ModalBody {
     },
     RenameSession {
         input: String,
+    },
+    SendKeys {
+        label: String,
+        input: String,
+        focused: bool,
     },
     SessionKeyValues {
         kind: SessionKeyValueKind,

@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    CreateSessionOptions, HostHandle, SessionEnvVar, SessionId, SessionInfo, SessionTag,
+    CreateSessionOptions, HostHandle, KeySequence, SessionEnvVar, SessionId, SessionInfo,
+    SessionTag,
 };
 
 use crate::consts::{
@@ -16,9 +17,9 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession,
-    SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow,
-    SessionRow, SessionSelectedTag, SessionSortMode, StatusBanner,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
+    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
+    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode, StatusBanner,
 };
 
 const TAG_PREFIX: &str = "mmux";
@@ -389,6 +390,19 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
+        (KeyCode::Char('s'), _) => {
+            if let Some(selected) = app.selected_session() {
+                app.modal = Some(ModalState::SendKeys {
+                    session: selected,
+                    ui: SendKeysModalUi {
+                        input: String::new(),
+                        focus: SendKeysFocus::Input,
+                    },
+                });
+            } else {
+                app.status = StatusBanner::info("no session selected");
+            }
+        }
         (KeyCode::Char('a'), _) => {
             if let Some(selected) = app.selected_session() {
                 return Ok(KeyOutcome::Select(selected));
@@ -449,7 +463,7 @@ pub(crate) async fn handle_key(
                 .saturating_add(5)
                 .min(LANDSCAPE_MAX_LEFT_PERCENT);
         }
-        (KeyCode::Char('p'), _) => app.focus_next(),
+        (KeyCode::Tab | KeyCode::Char('\t'), _) => app.focus_next(),
         (KeyCode::Char('l'), _) => app.toggle_layout(),
         (KeyCode::Up, _) => match app.layout.focus {
             Focus::List => {
@@ -598,6 +612,10 @@ enum ModalAction {
         session: SelectedSession,
         input: String,
     },
+    SendKeys {
+        session: SelectedSession,
+        input: String,
+    },
     StageKeyValue {
         kind: SessionKeyValueKind,
         key: String,
@@ -678,6 +696,9 @@ async fn handle_modal_key(
             }
             _ => ModalAction::None,
         },
+        Some(ModalState::SendKeys { session, ui }) => {
+            handle_send_keys_modal_key(key, session.clone(), ui)
+        }
         Some(ModalState::SessionKeyValues { session, ui }) => {
             handle_session_key_values_modal_key(key, session.clone(), ui)
         }
@@ -719,6 +740,11 @@ async fn handle_modal_key(
             app.modal = None;
             rename_session_from_modal(fleet, app, session, input).await?;
         }
+        ModalAction::SendKeys { session, input } => {
+            if send_keys_from_modal(fleet, app, session, input).await? {
+                app.modal = None;
+            }
+        }
         ModalAction::StageKeyValue { kind, key, value } => {
             stage_key_value_in_modal(app, kind, key, value);
         }
@@ -749,6 +775,72 @@ fn discarded_key_value_status(modal: Option<&ModalState>) -> Option<String> {
             Some(format!("discarded tag changes on {}", session.name()))
         }
         _ => None,
+    }
+}
+
+fn handle_send_keys_modal_key(
+    key: KeyEvent,
+    session: SelectedSession,
+    ui: &mut SendKeysModalUi,
+) -> ModalAction {
+    match key.code {
+        KeyCode::Esc => ModalAction::Close,
+        KeyCode::Tab | KeyCode::Char('\t') => {
+            ui.focus = next_send_keys_focus(ui.focus);
+            ModalAction::None
+        }
+        KeyCode::BackTab => {
+            ui.focus = previous_send_keys_focus(ui.focus);
+            ModalAction::None
+        }
+        KeyCode::Left => {
+            ui.focus = SendKeysFocus::Cancel;
+            ModalAction::None
+        }
+        KeyCode::Right => {
+            ui.focus = SendKeysFocus::Ok;
+            ModalAction::None
+        }
+        KeyCode::Enter if ui.focus == SendKeysFocus::Ok => ModalAction::SendKeys {
+            session,
+            input: ui.input.clone(),
+        },
+        KeyCode::Enter if ui.focus == SendKeysFocus::Input && !ui.input.is_empty() => {
+            ModalAction::SendKeys {
+                session,
+                input: ui.input.clone(),
+            }
+        }
+        KeyCode::Enter if ui.focus == SendKeysFocus::Cancel => ModalAction::Close,
+        KeyCode::Enter => ModalAction::None,
+        KeyCode::Backspace if ui.focus == SendKeysFocus::Input => {
+            ui.input.pop();
+            ModalAction::None
+        }
+        KeyCode::Char(c)
+            if ui.focus == SendKeysFocus::Input
+                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            ui.input.push(c);
+            ModalAction::None
+        }
+        _ => ModalAction::None,
+    }
+}
+
+fn next_send_keys_focus(focus: SendKeysFocus) -> SendKeysFocus {
+    match focus {
+        SendKeysFocus::Input => SendKeysFocus::Ok,
+        SendKeysFocus::Ok => SendKeysFocus::Cancel,
+        SendKeysFocus::Cancel => SendKeysFocus::Input,
+    }
+}
+
+fn previous_send_keys_focus(focus: SendKeysFocus) -> SendKeysFocus {
+    match focus {
+        SendKeysFocus::Input => SendKeysFocus::Cancel,
+        SendKeysFocus::Ok => SendKeysFocus::Input,
+        SendKeysFocus::Cancel => SendKeysFocus::Ok,
     }
 }
 
@@ -1314,6 +1406,52 @@ async fn rename_session_from_modal(
         }
     }
     Ok(())
+}
+
+async fn send_keys_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    session: SelectedSession,
+    input: String,
+) -> Result<bool> {
+    if input.is_empty() {
+        app.status = StatusBanner::info("keys are empty");
+        return Ok(false);
+    }
+    let keys = match KeySequence::parse(&input) {
+        Ok(keys) => keys,
+        Err(err) => {
+            app.status = StatusBanner::error(format!("invalid keys: {err}"));
+            return Ok(false);
+        }
+    };
+    let Some(host) = fleet_host(fleet, &session.host_id) else {
+        app.status =
+            StatusBanner::error(format!("host {} no longer connected", session.host_label));
+        return Ok(true);
+    };
+    match host.session_by_id(session.id()).await? {
+        Some(target) => match target.send_keys(&keys).await {
+            Ok(()) => {
+                app.status = StatusBanner::info(if fleet.is_multi() {
+                    format!("sent keys to {} on {}", session.name(), session.host_label)
+                } else {
+                    format!("sent keys to {}", session.name())
+                });
+            }
+            Err(err) => {
+                app.status = StatusBanner::error(format!("send keys failed: {err}"));
+            }
+        },
+        None => {
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before keys were sent",
+                session.name()
+            ));
+        }
+    }
+    Ok(true)
 }
 
 async fn open_session_key_values_modal(
