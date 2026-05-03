@@ -196,12 +196,12 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
 - Pressing `s` opens a centered `Send keys` modal for the highlighted session.
-  The modal shows a label `Keys to send to <session> on <host>` above a
-  compact text field and has `Cancel` / `Ok` buttons. `Tab` cycles the text
-  field and buttons; Enter on focused `Ok`, or Enter from the text field after
-  text has been entered, parses the field as a `KeySequence` and sends it to
-  the captured stable session target through `Target::send_keys`. `Esc` or
-  focused `Cancel` closes without sending.
+  The modal shows a label `To: <session> on <host>` above a compact text field
+  and has `Cancel` / `Ok` buttons. `Tab` cycles the text field and buttons;
+  Enter on focused `Ok`, or Enter from the text field after text has been
+  entered, parses the field as a `KeySequence`, appends a tmux `C-m`
+  terminator, and sends it to the captured stable session target through
+  `Target::send_keys`. `Esc` or focused `Cancel` closes without sending.
 - Pressing `n` opens a centered `New Session` modal with padded content, a
   bordered session-name text field, a horizontal separator, and `Cancel` /
   `Ok` buttons in the button bar. In multi-host mode, the modal shows a Host

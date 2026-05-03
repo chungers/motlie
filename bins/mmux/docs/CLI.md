@@ -323,11 +323,12 @@ right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
 Pressing `s` opens the `Send keys` modal for the highlighted session. The modal
-has a compact text field labeled `Keys to send to <session> on <host>`, accepts
-`motlie-tmux` key-sequence syntax such as `echo hi{Enter}`, `1{C-m}`, or
-`{C-c}`, and sends through the highlighted session target when `Ok` is focused
-and Enter is pressed, or when Enter is pressed from the text field after text
-has been entered. `Esc` or focused `Cancel` dismisses without sending.
+has a compact text field labeled `To: <session> on <host>`, accepts
+`motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, appends a
+tmux `C-m` terminator, and sends through the highlighted session target when
+`Ok` is focused and Enter is pressed, or when Enter is pressed from the text
+field after text has been entered. `Esc` or focused `Cancel` dismisses without
+sending.
 
 The top status bar uses the same dark blue background as the bottom status bar. It
 shows `<hostname> | <ip address>` in bold at the left and the current time
