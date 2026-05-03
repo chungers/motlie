@@ -1264,6 +1264,9 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains(HELP_KEY_FUNCTIONS));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
+    assert!(body.contains("  u update focused tag"));
+    assert!(body.contains("  x unset focused tag"));
+    assert!(body.contains("  c toggle sort tag"));
     assert!(!body.contains("PgUp/PgDn page current pane"));
     assert!(!body.contains("Home/End jump current pane"));
     assert!(body.contains(BUILD_DATE));
