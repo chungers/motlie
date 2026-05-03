@@ -610,7 +610,7 @@ pub(crate) fn status_line_text(app: &AppState) -> String {
 }
 
 pub(crate) fn status_line(app: &AppState) -> Line<'static> {
-    let mut spans = vec![status_span(" ↑/↓ sel | ")];
+    let mut spans = vec![status_span(" ↑/↓ | ")];
     push_status_command(&mut spans, "help", 'h');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "pane", 'p');
@@ -729,10 +729,10 @@ fn draw_modal(frame: &mut Frame<'_>, area: Rect, modal: &ModalState) {
     let rect = Rect::new(x, y, width, height);
     frame.render_widget(Clear, rect);
 
-    let border = if view.active_button == Button::Ok {
-        Color::Green
-    } else {
-        Color::Yellow
+    let border = match view.active_button {
+        Some(Button::Ok) => Color::Green,
+        Some(Button::Cancel) => Color::Yellow,
+        None => Color::DarkGray,
     };
     let block = Block::default()
         .title(view.title)
@@ -1449,10 +1449,10 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             },
             buttons: format!(
                 "{}   {}",
-                button_text(ui.button, Button::Cancel),
-                button_text(ui.button, Button::Ok)
+                button_text(Some(ui.button), Button::Cancel),
+                button_text(Some(ui.button), Button::Ok)
             ),
-            active_button: ui.button,
+            active_button: Some(ui.button),
         },
         ModalState::KillSession {
             session, button, ..
@@ -1461,10 +1461,10 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             body: ModalBody::Text(format!("Kill session {}?", session.name())),
             buttons: format!(
                 "{}   {}",
-                button_text(*button, Button::Cancel),
-                button_text(*button, Button::Ok)
+                button_text(Some(*button), Button::Cancel),
+                button_text(Some(*button), Button::Ok)
             ),
-            active_button: *button,
+            active_button: Some(*button),
         },
         ModalState::RenameSession { input, button, .. } => ModalView {
             title: " Rename Session ",
@@ -1473,15 +1473,16 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             },
             buttons: format!(
                 "{}   {}",
-                button_text(*button, Button::Cancel),
-                button_text(*button, Button::Ok)
+                button_text(Some(*button), Button::Cancel),
+                button_text(Some(*button), Button::Ok)
             ),
-            active_button: *button,
+            active_button: Some(*button),
         },
         ModalState::SessionKeyValues { ui, .. } => {
             let active_button = match ui.focus {
-                SessionKeyValueFocus::Cancel => Button::Cancel,
-                _ => Button::Ok,
+                SessionKeyValueFocus::Ok => Some(Button::Ok),
+                SessionKeyValueFocus::Cancel => Some(Button::Cancel),
+                _ => None,
             };
             ModalView {
                 title: ui.kind.title(),
@@ -1511,7 +1512,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                 HELP_KEY_FUNCTIONS
             )),
             buttons: "[Ok]".to_string(),
-            active_button: Button::Ok,
+            active_button: Some(Button::Ok),
         },
     }
 }
@@ -1522,12 +1523,12 @@ pub(crate) fn short_build_git_sha() -> String {
     chars.into_iter().collect()
 }
 
-fn button_text(active: Button, button: Button) -> String {
+fn button_text(active: Option<Button>, button: Button) -> String {
     let label = match button {
         Button::Cancel => "Cancel",
         Button::Ok => "Ok",
     };
-    if active == button {
+    if active == Some(button) {
         format!("[{label}]")
     } else {
         format!(" {label} ")

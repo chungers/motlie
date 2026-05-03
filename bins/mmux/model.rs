@@ -151,7 +151,7 @@ pub(crate) struct ModalView {
     pub(crate) title: &'static str,
     pub(crate) body: ModalBody,
     pub(crate) buttons: String,
-    pub(crate) active_button: Button,
+    pub(crate) active_button: Option<Button>,
 }
 
 impl ModalView {

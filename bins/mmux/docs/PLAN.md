@@ -53,7 +53,7 @@ host event stream backed by stable-id snapshot reconciliation.
 | 2026-04-27 | @gpt55-dgx | Tracked in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Updated resize-bound tracking for landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Updated Help modal tracking for build date and last-8-character git SHA display. |
-| 2026-04-27 | @gpt55-dgx | Updated bottom status tracking for `↑/↓ sel` and `←/→ pane` direction hints. |
+| 2026-04-27 | @gpt55-dgx | Updated bottom status tracking for `↑/↓` and `←/→ pane` direction hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status tracking for `|` host/IP separator and `(h)elp`-first bottom command hints. |
 | 2026-04-27 | @gpt55-dgx | Updated status/title tracking for a top host/time status bar and count-only Sessions title. |
 | 2026-04-27 | @gpt55-dgx | Updated focus/input tracking for cyclic Left/Right pane navigation, including landscape MOTD focus. |
@@ -296,7 +296,7 @@ References: [Layout](./DESIGN.md#layout),
 - [x] 4.6 Implement a dark blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
-  compact direction hints (`↑/↓ sel`, bold coral `p` in `pane`), command hints
+  compact direction hints (`↑/↓`, bold coral `p` in `pane`), command hints
   ordered as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `quit`,
   `layout`, then resize, with shortcut letters bold coral and app status with
   no `keys`, host, time, focus, or layout-mode labels.

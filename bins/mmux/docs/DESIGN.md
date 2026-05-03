@@ -55,7 +55,7 @@ Draft.
 | 2026-04-27 | @gpt55-dgx | Added in-memory selector UI state retention across default attach/detach re-entry. |
 | 2026-04-27 | @gpt55-dgx | Split resize bounds by layout mode: landscape remains 25/75, portrait becomes 15/85. |
 | 2026-04-27 | @gpt55-dgx | Added build date to Help and shortened the displayed git SHA to the last 8 characters. |
-| 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓ sel` and `←/→ pane`. |
+| 2026-04-27 | @gpt55-dgx | Shortened bottom status direction hints to `↑/↓` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Changed top status host/IP separator to `|` and reordered bottom command hints with `(h)elp` first. |
 | 2026-04-27 | @gpt55-dgx | Added a top status bar for bold host/IP and right-justified time; Sessions title is now count-only. |
 | 2026-04-27 | @gpt55-dgx | Changed plain Left/Right focus movement to cycle through panes, including the landscape MOTD pane. |
@@ -279,7 +279,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   deferred.
 - A bottom status bar shows supported keys and status text.
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
-  `left`, or `right`. Direction hints are `↑/↓ sel` for selection and
+  `left`, or `right`. Direction hints are `↑/↓` for selection and
   `pane` for pane focus, with shortcut letters rendered bold coral. Always-on
   command hints are ordered as `help`, `pane`, `monitor`, `attach`, `new`,
   `kill`, `quit`, `layout`, then mode-specific resize. The shortcut
@@ -763,7 +763,7 @@ at smaller sizes but is tuned for this target.
 - MOTD (`LT`) and the motlie placeholder are **omitted** in portrait mode to
   maximize content density. Status-bar key hints remain, but key hints must be
   terser to fit ~64 cols. Use compact symbol labels for directional keys,
-  e.g., `↑/↓ sel | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout`.
+  e.g., `↑/↓ | (h)elp | (p)ane | (m)onitor | enter/(a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout`.
 
 **Focus model:** Same semantics as normal mode, except MOTD is not present, so
 `p` cycles between `T` and `B`:

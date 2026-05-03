@@ -51,7 +51,7 @@ Implemented API contract for the initial `mmux` selector and the
 | 2026-04-27 | @gpt55-dgx | Documented mode-specific resize bounds: landscape 25/75 and portrait 15/85. |
 | 2026-04-27 | @gpt55-dgx | Replaced build metadata shellouts with Rust filesystem/time APIs in `build.rs`. |
 | 2026-04-27 | @gpt55-dgx | Documented Help modal build date and last-8-character git SHA display. |
-| 2026-04-27 | @gpt55-dgx | Documented compact bottom status direction hints `↑/↓ sel` and `←/→ pane`. |
+| 2026-04-27 | @gpt55-dgx | Documented compact bottom status direction hints `↑/↓` and `←/→ pane`. |
 | 2026-04-27 | @gpt55-dgx | Documented `|` host/IP separator and `(h)elp`-first bottom status command hints. |
 | 2026-04-27 | @gpt55-dgx | Documented top status host/IP plus right-justified time and count-only Sessions title. |
 | 2026-04-27 | @gpt55-dgx | Documented cyclic Left/Right focus behavior, including landscape MOTD focus. |
@@ -338,7 +338,7 @@ the bottom status start with `help`, then `pane`, `monitor`, `attach`, `new`,
 `kill`, `rename`, `tags`, `group`, `quit`, `layout`, and the
 mode-specific resize hint. Attach uses the `a` shortcut; the
 command shortcut letter is rendered bold coral in each command label.
-Direction hints render as `↑/↓ sel`.
+Direction hints render as `↑/↓`.
 
 `r` opens `RenameSession` only when the session list has focus. The modal
 captures `(host_id, session_id)` plus the current display name, prepopulates the
