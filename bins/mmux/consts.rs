@@ -39,11 +39,12 @@ pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
-p cycle panes
+tab cycle panes
 l toggle layout
 PgUp/PgDn page current pane
 Home/End jump current pane
 m monitor highlighted session
+s send keys to highlighted session
 n create session
 k kill highlighted session
 r rename highlighted session (list pane)

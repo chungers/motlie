@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-03 | @codex | Added `SendKeys` modal state and documented the `s` send-keys flow through `Target::send_keys`. |
 | 2026-05-02 | @codex | Changed Session Tags modal add/update/delete/check operations to stage in modal state and flush as a diff only on Ok; Cancel/Esc discard the draft. |
 | 2026-05-02 | @codex | Refactored attach status setup to use `Target::status()` with `SessionStatusSnapshot` / `SessionStatusOverrides` instead of app-owned status option plumbing. |
 | 2026-05-02 | @codex | Moved environment editing into the New Session modal and apply staged variables through `CreateSessionOptions::initial_environment`; removed the `e` post-creation environment shortcut. |
@@ -253,6 +254,7 @@ enum ModalState {
     NewSession { ui: NewSessionModalUi },
     KillSession { session: SelectedSession, button: Button },
     RenameSession { session: SelectedSession, input: String, button: Button },
+    SendKeys { session: SelectedSession, ui: SendKeysModalUi },
     SessionKeyValues { session: SelectedSession, ui: SessionKeyValueModalUi },
     Help,
 }
@@ -277,6 +279,17 @@ struct NewSessionModalUi {
     env_value_input: String,
     focus: NewSessionFocus,
     button: Button,
+}
+
+enum SendKeysFocus {
+    Input,
+    Ok,
+    Cancel,
+}
+
+struct SendKeysModalUi {
+    input: String,
+    focus: SendKeysFocus,
 }
 
 struct SessionKeyValueModalUi {
@@ -334,16 +347,28 @@ Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with `help`, then `pane`, `monitor`, `attach`, `new`,
-`kill`, `rename`, `tags`, `group`, `quit`, `layout`, and the
-mode-specific resize hint. Attach uses the `a` shortcut; the
-command shortcut letter is rendered bold coral in each command label.
+the bottom status start with `tab ↑/↓`, then `help`, `monitor`, `send`,
+`attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, and the
+mode-specific resize hint. Attach uses the `a` shortcut; command shortcut
+letters are rendered bold coral in command labels.
 Direction hints render as `↑/↓`.
 
 `r` opens `RenameSession` only when the session list has focus. The modal
 captures `(host_id, session_id)` plus the current display name, prepopulates the
 `Session Name` field, and dispatches changed names through
 `HostHandle::session_by_id()` and `Target::rename()`.
+
+`s` opens `SendKeys` for the highlighted session from any pane focus. The modal
+keeps focus explicit (`Input`, `Ok`, `Cancel`), renders a compact text field
+with `Keys to send to <session> on <host>`, sends from either focused `Ok` or
+non-empty `Input` Enter, parses the submitted text with `KeySequence::parse`,
+resolves the captured stable session id with
+`HostHandle::session_by_id()`, and dispatches through `Target::send_keys`.
+The modal accepts tmux key-name shorthand such as `{C-m}` for Enter because
+`KeySequence` passes valid raw key names through to tmux.
+No new `motlie-tmux` API is required for this feature; the existing gap is only
+UI policy around which key owns pane focus, handled in mmux by moving pane
+cycling to Tab.
 
 `t` opens a `SessionKeyValues` modal in tag mode for the highlighted session. Rows are loaded from
 `Target::tags("mmux").await?.list().await?`, sorted lexicographically by
@@ -587,7 +612,7 @@ Current implementation coverage:
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, `a` attach, detail scroll direction,
-  modified-arrow resize fallbacks, `p` pane focus transitions, `l` layout
+  modified-arrow resize fallbacks, Tab pane focus transitions, `l` layout
   toggle behavior, compact status hint rendering, MOTD fallback/readability
   cases, full/compact placeholder rendering, landscape MOTD pane rendering,
   portrait MOTD omission, sample color preservation, Help modal
