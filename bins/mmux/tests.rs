@@ -2,20 +2,22 @@ use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
     transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
-    StatusStyle, TransportKind, SSH_DEFAULT_PORT,
+    StatusStyle, TransportKind, WindowStyle, SSH_DEFAULT_PORT,
 };
 use ratatui::backend::{Backend, TestBackend};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 
 use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
+    mmux_attach_status_style, mmux_attach_window_style, APP_BASE_BG, APP_BASE_FG, BUILD_DATE,
+    BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
     LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_LEFT,
-    MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE, MODAL_CONTENT_HORIZONTAL_PADDING,
-    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
-    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
+    MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH,
+    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
+    STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
     handle_key, refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed,
@@ -36,7 +38,9 @@ use crate::render::{
     short_build_git_sha, status_line, status_line_text, top_status_line,
 };
 use crate::target_host::resolve_ip_address;
-use crate::{prepare_attach_status, restore_attach_status};
+use crate::{
+    prepare_attach_status, prepare_attach_styles, restore_attach_status, restore_attach_styles,
+};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id).unwrap()
@@ -200,6 +204,14 @@ fn render_to_lines(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
     render_to_lines_and_cursor(app, width, height).0
 }
 
+fn render_to_buffer(app: &mut AppState, width: u16, height: u16) -> Buffer {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| draw(frame, app)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
 fn render_to_lines_and_cursor(
     app: &mut AppState,
     width: u16,
@@ -267,6 +279,43 @@ fn modal_border_height(lines: &[String], title: &str) -> usize {
 fn line_char_index(line: &str, needle: &str) -> usize {
     let byte_index = line.find(needle).expect("expected text in rendered line");
     line[..byte_index].chars().count()
+}
+
+#[test]
+fn render_applies_configured_base_colors_to_unstyled_cells() {
+    let mut app = app_with_session();
+    let buffer = render_to_buffer(&mut app, 80, 24);
+    let cell = &buffer[(70, 5)];
+
+    match APP_BASE_FG {
+        Some(fg) => assert_eq!(cell.fg, fg),
+        None => assert_eq!(cell.fg, Color::Reset),
+    }
+    match APP_BASE_BG {
+        Some(bg) => assert_eq!(cell.bg, bg),
+        None => assert_eq!(cell.bg, Color::Reset),
+    }
+}
+
+#[test]
+fn modal_clear_area_preserves_configured_base_background() {
+    let mut app = app_with_session();
+    app.modal = Some(test_send_keys_modal("", SendKeysFocus::Input));
+    let buffer = render_to_buffer(&mut app, 80, 24);
+
+    if let Some(bg) = APP_BASE_BG {
+        assert_eq!(buffer[(40, 12)].bg, bg);
+        assert!(buffer.content().iter().all(|cell| cell.bg != Color::Reset));
+    }
+}
+
+#[test]
+fn attach_styles_are_derived_from_mmux_theme() {
+    assert_eq!(mmux_attach_status_style(), "bg=#002b55,fg=white");
+    assert_eq!(
+        mmux_attach_window_style(),
+        Some("bg=black,fg=white".to_string())
+    );
 }
 
 #[test]
@@ -1158,7 +1207,10 @@ async fn attach_status_overrides_are_set_and_restored() {
             "status-left \"session: #{session_name}\"\n",
         )
         .with_response(
-            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            &format!(
+                "set-option -t '$1' status-style '{}'",
+                mmux_attach_status_style()
+            ),
             "",
         )
         .with_response(
@@ -1203,7 +1255,10 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
         .with_response("show-option -q -t '$1' status-left-length", "")
         .with_response("show-option -q -t '$1' status-left", "")
         .with_response(
-            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            &format!(
+                "set-option -t '$1' status-style '{}'",
+                mmux_attach_status_style()
+            ),
             "",
         )
         .with_response(
@@ -1226,6 +1281,83 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
     assert_eq!(snapshot.left, None);
     assert_eq!(snapshot.left_length, None);
     restore_attach_status(&status, Some(snapshot)).await;
+}
+
+#[tokio::test]
+async fn attach_styles_apply_status_and_window_theme_then_restore() {
+    let window_style = mmux_attach_window_style().expect("mmux attach window style is configured");
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 2  100\n")
+        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response("show-option -q -t '$1' status-left-length", "")
+        .with_response("show-option -q -t '$1' status-left", "")
+        .with_response("list-windows -t '$1'", "@2\n@5\n")
+        .with_response(
+            "show-option -q -t '@2' window-style",
+            "window-style bg=green,fg=black\n",
+        )
+        .with_response("show-option -q -t '@2' window-active-style", "")
+        .with_response("show-option -q -t '@5' window-style", "")
+        .with_response(
+            "show-option -q -t '@5' window-active-style",
+            "window-active-style bg=yellow,fg=black\n",
+        )
+        .with_response(
+            &format!(
+                "set-option -t '$1' status-style '{}'",
+                mmux_attach_status_style()
+            ),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        )
+        .with_response("list-windows -t '$1'", "@2\n@5\n")
+        .with_response(
+            &format!("set-option -t '@2' window-style '{window_style}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '@2' window-active-style '{window_style}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '@5' window-style '{window_style}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '@5' window-active-style '{window_style}'"),
+            "",
+        )
+        .with_response("set-option -t '@2' window-style 'bg=green,fg=black'", "")
+        .with_response("set-option -u -t '@2' window-active-style", "")
+        .with_response("set-option -u -t '@5' window-style", "")
+        .with_response(
+            "set-option -t '@5' window-active-style 'bg=yellow,fg=black'",
+            "",
+        )
+        .with_response("set-option -u -t '$1' status-style", "")
+        .with_response("set-option -u -t '$1' status-left-length", "")
+        .with_response("set-option -u -t '$1' status-left", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+    let status = target.status().await.unwrap();
+    let window_styles = target.window_styles().await.unwrap();
+
+    let snapshot = prepare_attach_styles(Some(&status), Some(&window_styles)).await;
+    assert!(snapshot.status.is_some());
+    assert!(snapshot.window_styles.is_some());
+    assert_eq!(
+        mmux_attach_window_style(),
+        Some(WindowStyle::new(window_style).unwrap().as_str().to_string())
+    );
+
+    restore_attach_styles(Some(&status), Some(&window_styles), snapshot).await;
 }
 
 #[tokio::test]
@@ -3235,6 +3367,11 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
     let text = detail_text_for_render("\x1b[31mred\x1b[0m");
     assert_eq!(text.lines[0].spans[0].content.as_ref(), "red");
     assert!(!text.lines[0].spans[0].content.contains('\x1b'));
+    assert!(text
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .all(|span| span.style.fg != Some(Color::Reset) && span.style.bg != Some(Color::Reset)));
 }
 
 #[test]

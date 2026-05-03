@@ -7,7 +7,7 @@ use ratatui::style::{Color, Style};
 use crate::consts::{
     DEFAULT_LEFT_PERCENT, DEFAULT_TOP_PERCENT, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
     LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT,
-    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
+    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_FG,
 };
 use crate::detail::DetailSource;
 
@@ -843,7 +843,7 @@ impl StatusBanner {
 
     pub(crate) fn style(&self) -> Style {
         match self {
-            StatusBanner::Loading(_) => Style::default().fg(Color::White).bg(STATUS_BAR_BG),
+            StatusBanner::Loading(_) => Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG),
             StatusBanner::Info(_) => Style::default().fg(Color::Yellow).bg(STATUS_BAR_BG),
             StatusBanner::Error(_) => Style::default().fg(Color::Red).bg(STATUS_BAR_BG),
         }
