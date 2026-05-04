@@ -420,8 +420,11 @@ pub(crate) struct HostLegendItem {
 ///
 /// `hosts` is the authoritative configured-host order used for presentation
 /// and stable color assignment. `entries` is the connected-host routing cache
-/// with owned `HostHandle`s, keyed by the same `HostId`s. Keep those
-/// collections in sync only through `upsert_connected` and `mark_host_failed`.
+/// with owned `HostHandle`s, keyed by the same `HostId`s. These two collections
+/// MUST be kept in sync: `entries` may contain only connected hosts that have a
+/// matching `hosts` slot, and connected `hosts` slots must have a matching
+/// `entries` route. Only `from_configured_hosts`, `upsert_connected`, and
+/// `mark_host_failed` mutate both sides of this invariant.
 #[derive(Clone, Default)]
 pub(crate) struct HostFleet {
     hosts: Vec<HostSlot>,
