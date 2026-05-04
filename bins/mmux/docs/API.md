@@ -299,15 +299,17 @@ struct SessionKeyValueModalUi {
 ```
 
 Implemented state is decomposed by concern: `HostFleet`, `LayoutState`,
-`SessionListState`, `DetailState`, and `StatusBanner`. `AppState`
-now coordinates those structs rather than owning one flat collection of UI,
-host, selection, detail, layout, and status fields. `main.rs` contains the
-entry/run loop. CLI parsing, terminal lifecycle, ForceCommand handling,
+`SessionListState`, `DetailState`, and `StatusBanner`. `main.rs` owns the live
+`HostFleet`; `AppState` owns UI state only and receives `&HostFleet` through
+rendering, key handling, refresh, and attach paths. This avoids a duplicated
+host snapshot inside app state while keeping layout, selection, detail, modal,
+status, and activity tracking together. `main.rs` contains the entry/run loop.
+CLI parsing, terminal lifecycle, ForceCommand handling,
 target-host identity, detail sources, key handling/event refresh, and rendering
 live in `cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`,
 `detail.rs`, `controller.rs`, and `render.rs`.
 
-The top status bar is derived from the app host identity and current local
+The top status bar is derived from the live `HostFleet` and current local
 clock: single-host mode renders `<hostname> | <ip address>` as bold
 left-justified text, while multi-host mode renders a compact host-color legend
 such as `mmux ■ alpha ■ beta`. Host display names come from
@@ -409,6 +411,12 @@ command in the new session.
 `fetch_fleet_rows()` enriches each `SessionRow` with the checked key/value by
 batch-listing `@mmux/` options once per host refresh, resolving
 `@mmux/__selected-key`, and copying the selected tag value into app state.
+The progressive refresh path drains all ready `HostRefreshResult`s into a
+batch before reconciling. Successful host results replace that host's rows,
+failed host results contribute status diagnostics while leaving last-good rows
+visible, and the merged list is sorted once per drain rather than once per host
+result. If a refresh task exits without sending a result, the selector awaits
+completed task handles and reports the host label in the status banner.
 `session_list_line()` renders
 that value in a right-aligned field after the session name. `i` is not assigned
 by this feature.

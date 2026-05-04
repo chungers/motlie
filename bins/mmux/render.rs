@@ -20,11 +20,12 @@ use crate::consts::{
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
-    AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, NewSessionFocus,
-    SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueRow, SessionRow,
+    AppState, Button, Focus, HostFleet, LayoutMode, ModalBody, ModalState, ModalView,
+    NewSessionFocus, SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueRow,
+    SessionRow,
 };
 
-pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
+pub(crate) fn draw(frame: &mut Frame<'_>, fleet: &HostFleet, app: &mut AppState) {
     let area = frame.area();
     apply_app_base_style(frame, area);
 
@@ -37,10 +38,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
         ])
         .split(area);
 
-    draw_top_status(frame, chunks[0], app);
+    draw_top_status(frame, chunks[0], fleet);
     match app.layout.mode {
-        LayoutMode::Normal => draw_normal(frame, chunks[1], app),
-        LayoutMode::Portrait => draw_portrait(frame, chunks[1], app),
+        LayoutMode::Normal => draw_normal(frame, chunks[1], fleet, app),
+        LayoutMode::Portrait => draw_portrait(frame, chunks[1], fleet, app),
     }
     draw_status(frame, chunks[2], app);
     if let Some(modal) = &app.modal {
@@ -64,7 +65,7 @@ fn apply_app_base_style(frame: &mut Frame<'_>, area: Rect) {
     }
 }
 
-fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+fn draw_normal(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet, app: &mut AppState) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -73,11 +74,11 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         ])
         .split(area);
 
-    draw_sessions(frame, columns[0], app);
+    draw_sessions(frame, columns[0], fleet, app);
     draw_detail(frame, columns[1], app);
 }
 
-fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+fn draw_portrait(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet, app: &mut AppState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -85,7 +86,7 @@ fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             Constraint::Percentage(100 - app.layout.top_percent),
         ])
         .split(area);
-    draw_sessions(frame, rows[0], app);
+    draw_sessions(frame, rows[0], fleet, app);
     draw_detail(frame, rows[1], app);
 }
 
@@ -101,14 +102,14 @@ pub(crate) fn sessions_title(app: &AppState) -> String {
     format!(" Sessions [{}] ", app.session_list.rows.len())
 }
 
-fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn draw_sessions(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet, app: &AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let row_width = area.width.saturating_sub(2) as usize;
-    let host_marker_width = app.fleet.host_marker_width();
+    let host_marker_width = fleet.host_marker_width();
     let mut lines = Vec::new();
     if app.session_list.rows.is_empty() {
         lines.push(Line::from(TuiSpan::styled(
-            empty_session_list_message(app),
+            empty_session_list_message(fleet),
             Style::default().fg(Color::DarkGray),
         )));
     } else {
@@ -125,7 +126,7 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             .take(height)
         {
             let selected = idx == app.session_list.selected;
-            let host_color = app.fleet.host_color(&row.host_id);
+            let host_color = fleet.host_color(&row.host_id);
             lines.push(styled_session_list_line(
                 session_list_line(
                     row,
@@ -147,11 +148,11 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn empty_session_list_message(app: &AppState) -> String {
-    if app.fleet.is_multi() {
-        let n = app.fleet.len();
+fn empty_session_list_message(fleet: &HostFleet) -> String {
+    if fleet.is_multi() {
+        let n = fleet.len();
         format!("(no sessions across {n} hosts - press n to create)")
-    } else if let Some(entry) = app.fleet.first() {
+    } else if let Some(entry) = fleet.first() {
         format!("(no sessions on {} - press n to create)", entry.label)
     } else {
         "(no sessions - press n to create)".to_string()
@@ -522,18 +523,18 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_top_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn draw_top_status(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet) {
     let time = chrono::Local::now().format("%H:%M:%S").to_string();
-    let paragraph = Paragraph::new(top_status_line(app, &time, area.width as usize))
+    let paragraph = Paragraph::new(top_status_line(fleet, &time, area.width as usize))
         .style(Style::default().bg(STATUS_BAR_BG));
     frame.render_widget(paragraph, area);
 }
 
-pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<'static> {
+pub(crate) fn top_status_line(fleet: &HostFleet, time: &str, width: usize) -> Line<'static> {
     let time = format!(" {time} ");
     let time = truncate_chars(&time, min(time.chars().count(), width));
     let max_left_width = width.saturating_sub(time.chars().count());
-    let left_spans = top_status_left_spans(app, max_left_width);
+    let left_spans = top_status_left_spans(fleet, max_left_width);
     let left_width = spans_width(&left_spans);
     let time_width = time.chars().count();
     let padding_width = width.saturating_sub(left_width + time_width);
@@ -549,7 +550,7 @@ pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<
     Line::from(spans)
 }
 
-fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'static>> {
+fn top_status_left_spans(fleet: &HostFleet, max_width: usize) -> Vec<TuiSpan<'static>> {
     if max_width == 0 {
         return Vec::new();
     }
@@ -557,9 +558,9 @@ fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'stati
         .fg(STATUS_BAR_FG)
         .bg(STATUS_BAR_BG)
         .add_modifier(Modifier::BOLD);
-    let spans = if app.fleet.is_multi() {
+    let spans = if fleet.is_multi() {
         let mut spans = vec![TuiSpan::styled("mmux ".to_string(), base_style)];
-        if let Some(legend) = app.fleet.host_color_legend() {
+        if let Some(legend) = fleet.host_color_legend() {
             for item in legend {
                 let label_style = if item.failed {
                     Style::default()
@@ -585,7 +586,7 @@ fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'stati
             }
         }
         spans
-    } else if let Some(entry) = app.fleet.first() {
+    } else if let Some(entry) = fleet.first() {
         vec![TuiSpan::styled(
             format!(" {} | {} ", entry.label, entry.ip_address),
             base_style,

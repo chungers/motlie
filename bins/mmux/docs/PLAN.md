@@ -474,7 +474,9 @@ it lands as a follow-up.
 
 - [ ] 11.3a Add `HostId(String)`, `HostEntry`, `HostFleet`, `SessionRow` types
   in `bins/mmux/model.rs`.
-- [ ] 11.3b Replace `HostContext` with `HostFleet` on `AppState`.
+- [x] 11.3b Replace `HostContext` with a live `HostFleet` owned by the selector
+  loop; pass `&HostFleet` to render/key/refresh paths instead of duplicating it
+  on `AppState`.
 - [ ] 11.3c Change `SessionListState.sessions: Vec<SessionInfo>` to
   `SessionListState.rows: Vec<SessionRow>`.
 - [x] 11.3d Remove `MotdState` from `AppState`; single-host and multi-host use
