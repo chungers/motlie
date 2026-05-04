@@ -38,7 +38,7 @@ use motlie_tmux::{
     SessionWindowStyleOverrides, SessionWindowStyles, SessionWindowStylesSnapshot, StatusLeft,
     StatusLeftLength, StatusStyle, Target, WindowStyle,
 };
-use target_host::{connect_initial_fleet, connect_ssh_entry, HostConnectSpec};
+use target_host::{connect_initial_fleet, connect_ssh_spec, HostConnectSpec};
 use terminal::TerminalSession;
 
 #[derive(Debug)]
@@ -62,6 +62,11 @@ enum HostConnectEvent {
 struct PendingHostConnections {
     receiver: UnboundedReceiver<HostConnectEvent>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct HostConnectApply {
+    connected: bool,
 }
 
 impl Drop for PendingHostConnections {
@@ -305,10 +310,20 @@ async fn run_selector_once(
     ));
 
     loop {
-        if apply_finished_host_connects(fleet, &mut app, host_connections) {
-            last_session_refresh = Instant::now()
-                .checked_sub(Duration::from_secs(1))
-                .unwrap_or_else(Instant::now);
+        let connect_apply = apply_finished_host_connects(fleet, &mut app, host_connections);
+        if connect_apply.connected {
+            abort_pending_session_refresh(&mut pending_session_refresh);
+            pending_session_refresh = Some(start_session_refresh(
+                fleet,
+                RefreshApplyOptions {
+                    force_detail: false,
+                    previous: selected_session_key(&app),
+                    update_status: false,
+                    excluded: None,
+                    allow_detail_refresh: true,
+                },
+            ));
+            last_session_refresh = Instant::now();
         }
         if let Some(completion) =
             apply_finished_session_refresh(fleet, &mut app, &mut pending_session_refresh).await?
@@ -385,7 +400,10 @@ fn start_host_connect_retries(specs: Vec<HostConnectSpec>) -> PendingHostConnect
 
 async fn retry_host_connect(spec: HostConnectSpec, tx: UnboundedSender<HostConnectEvent>) {
     loop {
-        match connect_ssh_entry(&spec.uri).await {
+        match connect_ssh_spec(&spec)
+            .await
+            .with_context(|| format!("connect host '{}'", spec.uri))
+        {
             Ok(entry) => {
                 let _ = tx.send(HostConnectEvent::Connected(entry));
                 return;
@@ -405,19 +423,29 @@ fn apply_finished_host_connects(
     fleet: &mut HostFleet,
     app: &mut AppState,
     connections: &mut PendingHostConnections,
-) -> bool {
+) -> HostConnectApply {
     let mut changed = false;
+    let mut applied = HostConnectApply::default();
     while let Ok(event) = connections.receiver.try_recv() {
         match event {
-            HostConnectEvent::Connected(entry) => fleet.upsert_connected(entry),
-            HostConnectEvent::Failed { id, error } => fleet.mark_host_failed(&id, error),
+            HostConnectEvent::Connected(entry) => {
+                changed |= fleet.upsert_connected(entry);
+                applied.connected = true;
+            }
+            HostConnectEvent::Failed { id, error } => {
+                changed |= fleet.mark_host_failed(&id, error);
+            }
         }
-        changed = true;
     }
     if changed {
         app.fleet = fleet.clone();
     }
-    changed
+    applied
+}
+
+fn selected_session_key(app: &AppState) -> Option<(HostId, String)> {
+    app.selected_session()
+        .map(|session| (session.host_id.clone(), session.id().to_string()))
 }
 
 fn start_session_refresh(fleet: &HostFleet, options: RefreshApplyOptions) -> PendingSessionRefresh {
