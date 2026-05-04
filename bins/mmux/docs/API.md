@@ -389,8 +389,9 @@ stripped key, rendered without `@mmux/`, filtered to hide the internal
 keeps row focus and bottom field focus explicit with `SessionKeyValueFocus`; `Tab`
 cycles the bottom Key/Value cells, Ok, and Cancel button, `Shift-Tab` reverses
 that cycle. Enter on either edit field stages a non-empty, non-reserved key/value
-row in modal state; `x` stages deletion of the focused row; `u` preloads the
-bottom fields. Pressing `c` on a focused tag row stages the checked key and
+row in modal state; `x` stages deletion of the focused row; `m` preloads the
+bottom fields. Plain `u` and `b` move row focus while a tag row is focused.
+Pressing `c` on a focused tag row stages the checked key and
 renders `✓` in that row's marker column. The modal keeps the original rows and
 selected key alongside the draft; Enter on focused Ok diffs the draft and writes
 only the resulting `SessionTags::set`, `SessionTags::unset`, and
