@@ -1344,6 +1344,7 @@ fn detail_scroll_up_moves_toward_older_content() {
     let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.detail.lines = (0..100).map(|n| format!("line {n}")).collect();
     app.detail.last_known_view_height = 10;
+    app.detail.last_known_scroll_max = 90;
 
     app.scroll_detail(1);
     assert_eq!(app.detail.scroll, 1);
@@ -1371,6 +1372,25 @@ fn detail_tail_view_accounts_for_wrapped_lines() {
     assert!(rendered.contains("recent-1"));
     assert!(rendered.contains("recent-2"));
     assert!(rendered.contains("recent-3"));
+}
+
+#[test]
+fn detail_home_reaches_oldest_wrapped_content() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    app.session_list.rows = vec![make_row(session("dev", "$1"))];
+    app.detail.lines = vec![
+        "oldest".to_string(),
+        "wide-content ".repeat(8),
+        "recent-1".to_string(),
+        "recent-2".to_string(),
+        "recent-3".to_string(),
+    ];
+
+    render_to_string(&mut app, 42, 8);
+    app.detail_home();
+    let rendered = render_to_string(&mut app, 42, 8);
+
+    assert!(rendered.contains("oldest"));
 }
 
 #[tokio::test]

@@ -9,6 +9,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::consts::{
     APP_BASE_BG, APP_BASE_FG, BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_SQUARE,
@@ -20,7 +21,7 @@ use crate::consts::{
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
     AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, NewSessionFocus,
-    SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionRow,
+    SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueRow, SessionRow,
 };
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
@@ -347,27 +348,34 @@ fn pad_or_truncate(text: String, width: usize) -> String {
 }
 
 fn char_width(text: &str) -> usize {
-    text.chars().count()
+    UnicodeWidthStr::width(text)
 }
 
 fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let width = max(1, area.width.saturating_sub(2) as usize);
-    app.detail.last_known_view_height = max(1, height);
-    app.detail.scroll = app.detail.scroll.min(app.detail.max_scroll());
-    let total = app.detail.lines.len();
-    let (start, end) = detail_view_window(&app.detail.lines, app.detail.scroll, height, width);
-    let visible = if start < end {
-        app.detail.lines[start..end].join("\n")
+    let visible = if !app.detail.lines.is_empty() {
+        app.detail.lines.join("\n")
     } else if app.session_list.rows.is_empty() {
         "press n to create a session".to_string()
     } else {
         String::new()
     };
-    let position = if total == 0 {
+    let detail_text = detail_text_for_render(&visible);
+    let total_rows = detail_total_wrapped_rows(&app.detail.lines, width);
+    app.detail.last_known_view_height = max(1, height);
+    app.detail.last_known_scroll_max = total_rows.saturating_sub(app.detail.last_known_view_height);
+    app.detail.scroll = app.detail.scroll.min(app.detail.max_scroll());
+    let scroll_from_top = app.detail.max_scroll().saturating_sub(app.detail.scroll);
+    let position = if total_rows == 0 {
         "0/0".to_string()
     } else {
-        format!("{}-{}/{}", start + 1, end, total)
+        let start_row = scroll_from_top + 1;
+        let end_row = min(
+            total_rows,
+            scroll_from_top + app.detail.last_known_view_height,
+        );
+        format!("{start_row}-{end_row}/{total_rows}")
     };
     let title = detail_title(app.detail.source.mode(), &position);
     let block = Block::default()
@@ -375,16 +383,17 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         .borders(Borders::ALL)
         .border_style(focused_style(app, Focus::Detail));
     frame.render_widget(
-        Paragraph::new(detail_text_for_render(&visible))
+        Paragraph::new(detail_text)
             .block(block)
+            .scroll((saturating_u16(scroll_from_top), 0))
             .wrap(Wrap { trim: false }),
         area,
     );
 
-    if total > height {
-        let mut scrollbar_state = ScrollbarState::new(total)
-            .position(start)
-            .viewport_content_length(height);
+    if total_rows > app.detail.last_known_view_height {
+        let mut scrollbar_state = ScrollbarState::new(total_rows)
+            .position(scroll_from_top)
+            .viewport_content_length(app.detail.last_known_view_height);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .thumb_style(Style::default().fg(Color::Green))
@@ -395,39 +404,74 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     }
 }
 
-fn detail_view_window(
-    lines: &[String],
-    scroll_from_tail: usize,
-    height: usize,
-    width: usize,
-) -> (usize, usize) {
-    let end = lines.len().saturating_sub(scroll_from_tail);
-    if end == 0 {
-        return (0, 0);
-    }
-
-    let height = max(1, height);
-    let width = max(1, width);
-    let mut start = end;
-    let mut rows = 0;
-    while start > 0 {
-        let line_rows = wrapped_line_rows(&lines[start - 1], width);
-        if rows > 0 && rows + line_rows > height {
-            break;
-        }
-        start -= 1;
-        rows += line_rows;
-        if rows >= height {
-            break;
-        }
-    }
-    (start, end)
+fn detail_total_wrapped_rows(lines: &[String], width: usize) -> usize {
+    lines
+        .iter()
+        .map(|line| wrapped_line_rows(line, width))
+        .sum()
 }
 
 fn wrapped_line_rows(line: &str, width: usize) -> usize {
     let width = max(1, width);
-    let visible_width = char_width(&strip_ansi(line));
-    max(1, visible_width.div_ceil(width))
+    let line = strip_ansi(line);
+    let mut rows = 0;
+    let mut line_width = 0;
+    let mut word_width = 0;
+    let mut whitespace_width = 0;
+    let mut non_whitespace_previous = false;
+
+    for ch in line.chars() {
+        let Some(symbol_width) = ch.width() else {
+            continue;
+        };
+        if symbol_width > width {
+            continue;
+        }
+        let is_whitespace = ch.is_whitespace();
+        let word_found = non_whitespace_previous && is_whitespace;
+        let untrimmed_overflow =
+            line_width == 0 && word_width + whitespace_width + symbol_width > width;
+
+        if word_found || untrimmed_overflow {
+            line_width += whitespace_width + word_width;
+            whitespace_width = 0;
+            word_width = 0;
+        }
+
+        let line_full = line_width >= width;
+        let pending_word_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width >= width;
+        if line_full || pending_word_overflow {
+            rows += 1;
+            let mut remaining_width = width.saturating_sub(line_width);
+            line_width = 0;
+
+            while whitespace_width > 0 && remaining_width > 0 {
+                whitespace_width -= 1;
+                remaining_width -= 1;
+            }
+
+            if is_whitespace && whitespace_width == 0 {
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            whitespace_width += symbol_width;
+        } else {
+            word_width += symbol_width;
+        }
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    if line_width > 0 || word_width > 0 || whitespace_width > 0 {
+        rows += 1;
+    }
+    max(1, rows)
+}
+
+fn saturating_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
 }
 
 pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
@@ -917,13 +961,15 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
             draw_new_session_body(
                 frame,
                 area,
-                input,
-                host_label,
-                *host_count,
-                env_rows,
-                env_key_input,
-                env_value_input,
-                *focus,
+                NewSessionBody {
+                    input,
+                    host_label,
+                    host_count: *host_count,
+                    env_rows,
+                    env_key_input,
+                    env_value_input,
+                    focus: *focus,
+                },
             );
         }
         ModalBody::RenameSession { input } => {
@@ -947,39 +993,41 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
             draw_session_key_values_body(
                 frame,
                 area,
-                *kind,
-                rows,
-                selected_key,
-                key_input,
-                value_input,
-                *focus,
+                SessionKeyValueBody {
+                    kind: *kind,
+                    rows,
+                    selected_key,
+                    key_input,
+                    value_input,
+                    focus: *focus,
+                },
             );
         }
     }
 }
 
-fn draw_new_session_body(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    input: &str,
-    host_label: &Option<String>,
+struct NewSessionBody<'a> {
+    input: &'a str,
+    host_label: &'a Option<String>,
     host_count: usize,
-    env_rows: &[crate::model::SessionKeyValueRow],
-    env_key_input: &str,
-    env_value_input: &str,
+    env_rows: &'a [SessionKeyValueRow],
+    env_key_input: &'a str,
+    env_value_input: &'a str,
     focus: NewSessionFocus,
-) {
+}
+
+fn draw_new_session_body(frame: &mut Frame<'_>, area: Rect, body: NewSessionBody<'_>) {
     let field_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
     let mut y = area.y;
-    if let Some(host_label) = host_label {
+    if let Some(host_label) = body.host_label {
         let host_area = Rect::new(area.x, y, area.width, min(field_height, area.height));
         draw_labeled_select_field(
             frame,
             host_area,
             "Host",
             host_label,
-            host_count > 1,
-            focus == NewSessionFocus::Host,
+            body.host_count > 1,
+            body.focus == NewSessionFocus::Host,
         );
         y = y.saturating_add(field_height + 1);
     }
@@ -997,47 +1045,50 @@ fn draw_new_session_body(
         frame,
         session_area,
         "Session name",
-        input,
-        focus == NewSessionFocus::Name,
+        body.input,
+        body.focus == NewSessionFocus::Name,
     );
     y = session_y.saturating_add(field_height + 1);
     if y >= area.bottom() {
         return;
     }
-    let env_focus = match focus {
+    let env_focus = match body.focus {
         NewSessionFocus::EnvRow(index) => SessionKeyValueFocus::Row(index),
         NewSessionFocus::EnvKey => SessionKeyValueFocus::Key,
         NewSessionFocus::EnvValue => SessionKeyValueFocus::Value,
         _ => SessionKeyValueFocus::Cancel,
     };
+    let no_selected_key = None;
     draw_session_key_values_body(
         frame,
         Rect::new(area.x, y, area.width, area.bottom().saturating_sub(y)),
-        SessionKeyValueKind::Environment,
-        env_rows,
-        &None,
-        env_key_input,
-        env_value_input,
-        env_focus,
+        SessionKeyValueBody {
+            kind: SessionKeyValueKind::Environment,
+            rows: body.env_rows,
+            selected_key: &no_selected_key,
+            key_input: body.env_key_input,
+            value_input: body.env_value_input,
+            focus: env_focus,
+        },
     );
 }
 
-fn draw_session_key_values_body(
-    frame: &mut Frame<'_>,
-    area: Rect,
+struct SessionKeyValueBody<'a> {
     kind: SessionKeyValueKind,
-    rows: &[crate::model::SessionKeyValueRow],
-    selected_key: &Option<String>,
-    key_input: &str,
-    value_input: &str,
+    rows: &'a [SessionKeyValueRow],
+    selected_key: &'a Option<String>,
+    key_input: &'a str,
+    value_input: &'a str,
     focus: SessionKeyValueFocus,
-) {
+}
+
+fn draw_session_key_values_body(frame: &mut Frame<'_>, area: Rect, body: SessionKeyValueBody<'_>) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    let key_width = key_value_key_column_width(area.width, rows, key_input);
-    let indicator_width = if kind.supports_checked_row() {
+    let key_width = key_value_key_column_width(area.width, body.rows, body.key_input);
+    let indicator_width = if body.kind.supports_checked_row() {
         key_value_indicator_column_width(area.width)
     } else {
         0
@@ -1052,8 +1103,8 @@ fn draw_session_key_values_body(
         value_width,
         indicator_width,
     };
-    let max_rows = visible_session_key_value_rows(area.height, rows.len());
-    let selected_row = match focus {
+    let max_rows = visible_session_key_value_rows(area.height, body.rows.len());
+    let selected_row = match body.focus {
         SessionKeyValueFocus::Row(index) => Some(index),
         _ => None,
     };
@@ -1062,15 +1113,15 @@ fn draw_session_key_values_body(
         .unwrap_or(0);
     let mut lines = Vec::new();
 
-    if rows.is_empty() && max_rows > 0 {
-        lines.push(no_session_key_values_line(kind, columns));
+    if body.rows.is_empty() && max_rows > 0 {
+        lines.push(no_session_key_values_line(body.kind, columns));
     } else {
-        for (index, row) in rows.iter().enumerate().skip(start).take(max_rows) {
-            let focused = matches!(focus, SessionKeyValueFocus::Row(row) if row == index);
+        for (index, row) in body.rows.iter().enumerate().skip(start).take(max_rows) {
+            let focused = matches!(body.focus, SessionKeyValueFocus::Row(row) if row == index);
             lines.push(session_key_value_line(
-                kind,
+                body.kind,
                 row,
-                selected_key,
+                body.selected_key,
                 columns,
                 focused,
             ));
@@ -1097,9 +1148,9 @@ fn draw_session_key_values_body(
         draw_session_key_value_input_row(
             frame,
             Rect::new(area.x, row_y, area.width, 1),
-            key_input,
-            value_input,
-            focus,
+            body.key_input,
+            body.value_input,
+            body.focus,
             columns,
         );
     }
@@ -1146,7 +1197,7 @@ fn wrapped_line_count(input: &str, width: usize) -> u16 {
     } else {
         input
             .split('\n')
-            .map(|line| max(1, (line.chars().count() + width - 1) / width))
+            .map(|line| max(1, line.chars().count().div_ceil(width)))
             .sum()
     };
     min(rows, u16::MAX as usize) as u16

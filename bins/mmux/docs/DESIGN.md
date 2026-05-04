@@ -641,15 +641,16 @@ Implemented selector state is split by concern:
 - `DetailState`: rendered lines, scroll state, source, and auto-tail behavior.
 - `StatusBanner`: typed loading/info/error status text for the bottom bar.
 
-`AppState` coordinates those pieces and owns modal state. Render feedback for
-detail-pane height is explicitly stored as `last_known_view_height` in
-`DetailState` so input handling can compute scroll bounds on the next tick.
-The main run loop is kept in `main.rs`. CLI parsing/layout detection,
-terminal lifecycle, ForceCommand bypass/reject handling, target-host identity
-resolution, detail sources, key handling/event refresh, and rendering live in
-`cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`, `detail.rs`,
-`controller.rs`, and `render.rs`; shared UI data structures live in
-`model.rs`.
+`AppState` coordinates those pieces and owns modal state. Detail scroll offsets
+are tracked in wrapped terminal rows from the tail, not logical captured lines.
+Render feedback for detail-pane height and max wrapped-row scroll is explicitly
+stored as `last_known_view_height` / `last_known_scroll_max` in `DetailState`
+so input handling can compute scroll bounds on the next tick. The main run
+loop is kept in `main.rs`. CLI parsing/layout detection, terminal lifecycle,
+ForceCommand bypass/reject handling, target-host identity resolution, detail
+sources, key handling/event refresh, and rendering live in `cli.rs`,
+`terminal.rs`, `forcecommand.rs`, `target_host.rs`, `detail.rs`,
+`controller.rs`, and `render.rs`; shared UI data structures live in `model.rs`.
 
 ## Layout
 

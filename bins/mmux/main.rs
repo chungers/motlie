@@ -496,8 +496,8 @@ fn start_session_refresh(fleet: &HostFleet, options: RefreshApplyOptions) -> Pen
     let tasks = fleet
         .entries
         .iter()
-        .cloned()
         .map(|entry| {
+            let entry = entry.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
                 let result = fetch_host_refresh(&entry).await;
