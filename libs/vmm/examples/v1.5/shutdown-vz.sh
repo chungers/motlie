@@ -17,10 +17,7 @@ done
 RUN_VM_NAME="${RUN_VM_NAME:-motlie-v1-5-${GUEST_NAME}-iter}"
 
 RUNNER_PID_FILE="${MOTLIE_VZ_RUNNER_PID_FILE:-$ARTIFACTS_DIR/${GUEST_NAME}-runner.pid}"
-EGRESS_HELPER_PID_FILE="${MOTLIE_VZ_EGRESS_HELPER_PID_FILE:-$ARTIFACTS_DIR/${GUEST_NAME}-egress-helper.pid}"
 RUN_VM_DIR="$ARTIFACTS_DIR/${RUN_VM_NAME}.vm"
-EGRESS_SOCKET_PATH="${MOTLIE_VZ_EGRESS_SOCKET_PATH:-/tmp/motlie-vmm-${GUEST_NAME}.egress.sock}"
-EMBEDDED_EGRESS="${MOTLIE_VZ_EMBEDDED_EGRESS:-0}"
 
 terminate_pid_file() {
   local pid_file="$1"
@@ -45,8 +42,6 @@ terminate_pid_file() {
 }
 
 terminate_pid_file "$RUNNER_PID_FILE"
-if [[ "$EMBEDDED_EGRESS" != "1" ]]; then
-  terminate_pid_file "$EGRESS_HELPER_PID_FILE"
-  rm -f "$EGRESS_SOCKET_PATH"
-fi
+# v1.5 convergence contract: VZ egress is owned by the VMM/harness runtime,
+# not by launch/shutdown shell helpers. Only the Apple VZ runner is external.
 rm -rf "$RUN_VM_DIR"

@@ -186,7 +186,7 @@ across the split:
    reuses the same VM (`auto-provision-ssh.json`).
 5. Tart-free runtime: the post-shutdown `~/.tart/` catalog must remain
    untouched. In v1.5 the only default Vz-side child process is
-   `vz-vsock-runner`; `vz_egress_helper` is diagnostic-only.
+   `vz-vsock-runner`; VZ egress is VMM/harness-owned runtime state.
 6. Convergence contract phases (`CONVERGENCE.md`):
    `image-ready → seed-ready → launched → interactive-ready →
    validation-complete → shutdown-clean`. The `interactive-ready` gate must

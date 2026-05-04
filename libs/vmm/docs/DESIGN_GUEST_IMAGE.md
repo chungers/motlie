@@ -212,9 +212,10 @@ artifacts/host/linux-arm64/
 `vz-vsock-runner` remains a host macOS runner artifact because it is the current
 Objective-C/Virtualization.framework boundary. VZ userspace egress is not a
 guest payload and is no longer a required launched helper in the v1.5 harness
-path. It is a VMM host-runtime backend backed by `motlie_vnet::slirp`; the
-standalone `vz_egress_helper_v1_5` example is retained only as a compatibility
-and diagnostic wrapper over the same runtime code.
+path. It is a VMM host-runtime backend backed by `motlie_vnet::slirp`.
+There is no standalone `vz_egress_helper_v1_5` artifact. The only transitional
+subprocess form is `harness_v1_5 vz-egress`, used by the VZ image-builder path
+while customizing a base VM.
 
 ## Host Runtime Boundary And CH/VZ Parallels
 
@@ -263,8 +264,7 @@ launch-vz.sh
   VZ-specific host adaptation: Apple Virtualization.framework runner, native
   disk clone, consumption of the VMM-owned userspace egress socket, and
   SSH-based dynamic seed refresh. The default v1.5 harness path must not spawn
-  a separate egress helper process; helper mode is only a manual compatibility
-  path.
+  a separate egress process. The VMM/harness runtime owns VZ egress lifecycle.
 
 launch-ch.sh
   CH-specific host adaptation: Cloud Hypervisor kernel/rootfs wiring, ext4

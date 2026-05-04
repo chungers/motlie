@@ -8,9 +8,13 @@ mod terminal;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use motlie_vmm::backend::vz::egress::{
+    run_vz_userspace_egress, VzHostForward, VzUserspaceEgressConfig,
+};
 use motlie_vmm::backend::BackendError;
 use motlie_vmm::ca::SshCa;
 use motlie_vmm::guestfs::GuestFsError;
@@ -246,9 +250,130 @@ pub(crate) fn build_guest_provisioner(
     }))
 }
 
+fn parse_vz_egress_ipv4(label: &str, value: &str) -> Result<Ipv4Addr, DynError> {
+    value
+        .parse::<Ipv4Addr>()
+        .map_err(|err| format!("invalid {label}: {value}: {err}").into())
+}
+
+fn parse_vz_host_forward(value: &str) -> Result<VzHostForward, DynError> {
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() != 3 {
+        return Err("host forward must be host_addr:host_port:guest_port".into());
+    }
+    let host_addr = parse_vz_egress_ipv4("host forward address", parts[0])?;
+    let host_port = parts[1]
+        .parse::<u16>()
+        .map_err(|err| format!("invalid host port in {value}: {err}"))?;
+    let guest_port = parts[2]
+        .parse::<u16>()
+        .map_err(|err| format!("invalid guest port in {value}: {err}"))?;
+    Ok(VzHostForward::tcp(host_addr, host_port, guest_port))
+}
+
+fn print_vz_egress_usage() {
+    eprintln!(
+        "usage: harness_v1_5 vz-egress --socket-path <path> [--guest-ip <ipv4>] [--host-ip <ipv4>] [--netmask <ipv4>] [--dns-ip <ipv4>] [--host-forward-tcp <host_ip:host_port:guest_port>] [--log-frames]"
+    );
+}
+
+fn run_vz_egress_subcommand(args: &[String]) -> Result<(), DynError> {
+    let mut socket_path: Option<PathBuf> = None;
+    let mut guest_ip = Ipv4Addr::new(10, 0, 2, 15);
+    let mut host_ip = Ipv4Addr::new(10, 0, 2, 2);
+    let mut netmask = Ipv4Addr::new(255, 255, 255, 0);
+    let mut dns_ip = Ipv4Addr::new(10, 0, 2, 3);
+    let mut forwards: Vec<VzHostForward> = Vec::new();
+    let mut log_frames = false;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--socket-path" if i + 1 < args.len() => {
+                socket_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--guest-ip" if i + 1 < args.len() => {
+                guest_ip = parse_vz_egress_ipv4("guest ip", &args[i + 1])?;
+                i += 2;
+            }
+            "--host-ip" if i + 1 < args.len() => {
+                host_ip = parse_vz_egress_ipv4("host ip", &args[i + 1])?;
+                i += 2;
+            }
+            "--netmask" if i + 1 < args.len() => {
+                netmask = parse_vz_egress_ipv4("netmask", &args[i + 1])?;
+                i += 2;
+            }
+            "--dns-ip" if i + 1 < args.len() => {
+                dns_ip = parse_vz_egress_ipv4("dns ip", &args[i + 1])?;
+                i += 2;
+            }
+            "--host-forward-tcp" if i + 1 < args.len() => {
+                forwards.push(parse_vz_host_forward(&args[i + 1])?);
+                i += 2;
+            }
+            "--log-frames" => {
+                log_frames = true;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                print_vz_egress_usage();
+                return Ok(());
+            }
+            other => return Err(format!("unknown vz-egress argument: {other}").into()),
+        }
+    }
+
+    if log_frames {
+        let _ = tracing_subscriber::fmt()
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
+            )
+            .try_init();
+    }
+
+    let socket_path = socket_path.ok_or_else(|| "--socket-path is required".to_string())?;
+    let config = VzUserspaceEgressConfig {
+        socket_path,
+        guest_ip,
+        host_ip,
+        netmask,
+        dns_ip,
+        host_forwards: forwards,
+        log_frames,
+    };
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_flag = Arc::clone(&shutdown);
+    ctrlc::set_handler(move || {
+        shutdown_flag.store(true, Ordering::SeqCst);
+    })?;
+
+    let stats = run_vz_userspace_egress(config, shutdown, None)?;
+    eprintln!(
+        "harness_v1_5 vz-egress summary: guest_to_host_frames={} host_to_guest_frames={}",
+        stats.guest_to_host_frames, stats.host_to_guest_frames
+    );
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), DynError> {
-    let mut args = std::env::args().skip(1);
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.first().is_some_and(|arg| arg == "vz-egress") {
+        // v1.5 convergence contract: there is no separate VZ egress helper
+        // binary. Image-building can still need a host-side egress process,
+        // but it is hosted by the single harness binary through this explicit
+        // operational subcommand. Normal guest launch uses the embedded VMM
+        // egress handle instead.
+        return run_vz_egress_subcommand(&raw_args[1..]);
+    }
+
+    let mut args = raw_args.into_iter();
     let mut mode = HarnessMode::Smoke;
     let mut root_override: Option<PathBuf> = None;
     let mut result_json_path: Option<PathBuf> = None;
@@ -1031,6 +1156,7 @@ fn print_usage() {
     println!(
         "usage: harness_v1_5 [smoke|pty|shell|scenario <file.json>] [--backend vz|ch] [--root <dir>] [--result-json <path>] [--terminal-backend vt100|shadow] [--auto-provision on|off] [--first-cid N] [--max-guests N] [--admin-base CIDR] [--admin-guest-prefix N] [--egress-base CIDR] [--egress-guest-prefix N]"
     );
+    println!("       harness_v1_5 vz-egress --socket-path <path> [VZ image-build egress options]");
     println!(
         "note: --auto-provision only affects shell mode; scenario auto-provision remains scenario-owned"
     );

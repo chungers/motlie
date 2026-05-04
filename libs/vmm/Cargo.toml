@@ -104,10 +104,6 @@ path = "examples/v1.45/harness/main.rs"
 name = "harness_v1_5"
 path = "examples/v1.5/harness/main.rs"
 
-[[example]]
-name = "vz_egress_helper_v1_5"
-path = "examples/v1.5/vz_egress_helper.rs"
-
 [[bin]]
 name = "motlie-vfs-guest-v1_5"
 path = "bins/v1.5/motlie-vfs-guest.rs"

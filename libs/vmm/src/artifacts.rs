@@ -312,11 +312,6 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         );
         export_path(
             &mut out,
-            "MOTLIE_VZ_EGRESS_HELPER_PID_FILE",
-            &cfg.runtime_paths.runtime_dir.join("vz-egress-helper.pid"),
-        );
-        export_path(
-            &mut out,
             "MOTLIE_VZ_RESULT_JSON",
             &cfg.runtime_paths.runtime_dir.join("vz-launch-result.json"),
         );
@@ -329,11 +324,6 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
             &mut out,
             "MOTLIE_VZ_GUEST_IP_FILE",
             &cfg.runtime_paths.runtime_dir.join("guest-ip.txt"),
-        );
-        export_path(
-            &mut out,
-            "MOTLIE_VZ_EGRESS_LOG",
-            &cfg.runtime_paths.runtime_dir.join("egress.log"),
         );
         export_path(
             &mut out,
@@ -419,14 +409,6 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         out.push_str("export MOTLIE_VZ_MOUNTS_FILE=\"$SEED_DIR/mounts.yaml\"\n");
         out.push_str("export MOTLIE_VZ_NET_MAC=\"$EGRESS_MAC\"\n");
         out.push_str("export MOTLIE_VZ_EGRESS_GUEST_IP=\"$EGRESS_GUEST_IP\"\n");
-        out.push_str("export MOTLIE_VZ_EGRESS_HOST_IP=\"$EGRESS_HOST_IP\"\n");
-        out.push_str("export MOTLIE_VZ_EGRESS_DNS_IP=\"$EGRESS_DNS_IP\"\n");
-        writeln!(
-            &mut out,
-            "export MOTLIE_VZ_EGRESS_NETMASK={}",
-            cfg.net_assignment.egress_ipv4.netmask
-        )
-        .expect("writing to String cannot fail");
         writeln!(&mut out, "VZ_VM_NAME={}", shell_single_quote(&vz_vm_name))
             .expect("writing to String cannot fail");
         out.push_str("export MOTLIE_VZ_KEEP_RUNNING=1\n");
@@ -675,9 +657,6 @@ mod tests {
         assert!(script
             .contains("export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"));
         assert!(script.contains("export MOTLIE_VZ_EGRESS_GUEST_IP=\"$EGRESS_GUEST_IP\""));
-        assert!(script.contains("export MOTLIE_VZ_EGRESS_HOST_IP=\"$EGRESS_HOST_IP\""));
-        assert!(script.contains("export MOTLIE_VZ_EGRESS_DNS_IP=\"$EGRESS_DNS_IP\""));
-        assert!(script.contains("export MOTLIE_VZ_EGRESS_NETMASK=255.255.255.0"));
         assert!(script.contains("VZ_VM_NAME='motlie-v1-45-motlie-vmm-v14-runtime-alice'"));
         assert!(script.contains("launch-vz.sh"));
         assert!(script.contains("--vm-name \"$VZ_VM_NAME\""));

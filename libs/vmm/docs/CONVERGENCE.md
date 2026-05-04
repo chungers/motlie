@@ -4,10 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex-vz | Remove the standalone v1.5 VZ egress helper; normal launch embeds VZ egress in VMM and VZ image-building uses `harness_v1_5 vz-egress` only as a subprocess mode |
 | 2026-05-04 | @codex-vz | Establish v1.5 runtime convergence boundary: VZ egress is embedded in VMM like CH VNET, while VZ and CH VM runners remain explicit backend adapters |
 | 2026-05-02 | @codex-vz | Add the v1.5 ownership decision: VMM owns the common CH/VZ guest image, seed schema, guest binary packaging, and guest runtime home; VFS/VNET remain reusable subsystem libraries |
 | 2026-04-26 | @codex-vz | Make the v1.45 Vz image hardening caveat explicit: apt-daily masking and ForceIPv4 are current Vz slice assumptions, not a converged CH/Vz image contract |
-| 2026-04-25 | @codex-vz | Treat prebuilt host Vz runner/egress helper artifacts as launch prerequisites by default; first-contact startup must not hide host cargo builds |
+| 2026-04-25 | @codex-vz | Treat prebuilt host Vz runner/v1.45 egress helper artifacts as launch prerequisites by default; first-contact startup must not hide host cargo builds |
 | 2026-04-25 | @codex-vz | Tighten v1.45 Vz first-contact enforcement: service units, SSH CA config, agent-state scripts, CLIs, and packages are base-image contract; runtime only stages dynamic mounts/CA/principal/identity and restarts VFS |
 | 2026-04-25 | @codex-vz | Remove v1.45 Vz first-contact dead ends inherited from standalone smoke scripts: no runtime guest builds, no runtime npm repair, and no default per-guest seed DMG creation |
 | 2026-04-25 | @codex-vz | Add the cross-backend guest boot/provisioning convergence contract and make the v1.45 Vz auto-provisioning long-pole plan findable from VMM, Vz, and harness docs |
@@ -100,7 +101,7 @@ The v1.45 Vz launcher now enforces the first slice of this contract:
 - missing or stale base-image service units, SSH CA config, profile scripts, or
   `MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3` are contract violations; rebuild
   the v1.45 base image instead of copying scripts during first SSH
-- missing prebuilt host Vz runner or egress helper artifacts are launch
+- missing prebuilt host Vz runner or v1.45 egress helper artifacts are launch
   prerequisites, not reasons to run host `cargo build` in first-contact startup
 - Vz no longer creates a per-guest seed DMG by default for the transitional
   mount-config path, and no longer uploads a tar seed by default; the only

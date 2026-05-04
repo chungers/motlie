@@ -31,14 +31,14 @@ SSH_BRIDGE_UNIT_FILE="$SCRIPT_DIR/motlie-vmm-vsock-ssh.service"
 RUNNER_BUILD_SCRIPT="$SCRIPT_DIR/build-vz-runner.sh"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 SKIP_RUNNER_BUILD="${MOTLIE_VZ_SKIP_RUNNER_BUILD:-0}"
-EGRESS_HELPER_BIN_OVERRIDE="${MOTLIE_VZ_EGRESS_HELPER_BIN:-}"
+EGRESS_HARNESS_BIN_OVERRIDE="${MOTLIE_VZ_EGRESS_HARNESS_BIN:-}"
 RUNNER_PID_FILE="$ARTIFACTS_DIR/build-runner.pid"
-EGRESS_HELPER_PID_FILE="$ARTIFACTS_DIR/build-egress-helper.pid"
+EGRESS_PID_FILE="$ARTIFACTS_DIR/build-egress.pid"
 SERIAL_LOG="$ARTIFACTS_DIR/build-serial.log"
 SOCKET_PATH="/tmp/motlie-vmm-build.vsock_5000"
 EGRESS_SOCKET_PATH="/tmp/motlie-vmm-build.egress.sock"
 EGRESS_LOG="$ARTIFACTS_DIR/build-egress.log"
-EGRESS_HELPER_LOG_FRAMES="${MOTLIE_VZ_LOG_FRAMES:-0}"
+EGRESS_LOG_FRAMES="${MOTLIE_VZ_LOG_FRAMES:-0}"
 NET_MAC="${MOTLIE_VZ_BUILD_NET_MAC:-02:4d:6f:74:62:25}"
 CONTROL_HOST="127.0.0.1"
 CONTROL_PORT="${MOTLIE_VZ_BUILD_SSH_PORT:-2225}"
@@ -91,9 +91,9 @@ cleanup() {
     kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
     rm -f "$RUNNER_PID_FILE"
   fi
-  if [[ -f "$EGRESS_HELPER_PID_FILE" ]]; then
-    kill "$(cat "$EGRESS_HELPER_PID_FILE")" >/dev/null 2>&1 || true
-    rm -f "$EGRESS_HELPER_PID_FILE"
+  if [[ -f "$EGRESS_PID_FILE" ]]; then
+    kill "$(cat "$EGRESS_PID_FILE")" >/dev/null 2>&1 || true
+    rm -f "$EGRESS_PID_FILE"
   fi
   rm -f "$EGRESS_SOCKET_PATH"
   rm -f "$SEED_IMAGE"
@@ -192,12 +192,12 @@ kill_stale_runners() {
   exit 1
 }
 
-kill_stale_egress_helpers() {
+kill_stale_egress_backends() {
   local stale_pids=()
   local stale_pid=""
 
-  if [[ -f "$EGRESS_HELPER_PID_FILE" ]]; then
-    stale_pid="$(cat "$EGRESS_HELPER_PID_FILE" 2>/dev/null || true)"
+  if [[ -f "$EGRESS_PID_FILE" ]]; then
+    stale_pid="$(cat "$EGRESS_PID_FILE" 2>/dev/null || true)"
     if [[ -n "$stale_pid" ]]; then
       stale_pids+=("$stale_pid")
     fi
@@ -209,7 +209,7 @@ kill_stale_egress_helpers() {
   done < <(lsof -tiTCP:"$CONTROL_PORT" -sTCP:LISTEN 2>/dev/null || true)
 
   if [[ "${#stale_pids[@]}" -eq 0 ]]; then
-    rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
+    rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_PID_FILE"
     return 0
   fi
 
@@ -234,7 +234,7 @@ kill_stale_egress_helpers() {
       survivors+=("$stale_pid")
     done < <(lsof -tiTCP:"$CONTROL_PORT" -sTCP:LISTEN 2>/dev/null || true)
     if [[ "${#survivors[@]}" -eq 0 ]]; then
-      rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
+      rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_PID_FILE"
       return 0
     fi
     sleep 0.5
@@ -244,43 +244,45 @@ kill_stale_egress_helpers() {
     fi
   done
 
-  echo "failed to terminate stale build egress helper on tcp:${CONTROL_PORT}" >&2
+  echo "failed to terminate stale build VZ egress backend on tcp:${CONTROL_PORT}" >&2
   lsof -iTCP:"$CONTROL_PORT" -n -P >&2 || true
   exit 1
 }
 
-start_egress_helper() {
-  local helper_bin=""
-  if [[ -n "$EGRESS_HELPER_BIN_OVERRIDE" ]]; then
-    helper_bin="$EGRESS_HELPER_BIN_OVERRIDE"
+start_egress_backend() {
+  local egress_bin=""
+  if [[ -n "$EGRESS_HARNESS_BIN_OVERRIDE" ]]; then
+    egress_bin="$EGRESS_HARNESS_BIN_OVERRIDE"
   else
-    cargo build -p motlie-vmm --example vz_egress_helper_v1_5 >/dev/null
-    helper_bin="$REPO_ROOT/target/debug/examples/vz_egress_helper_v1_5"
+    # v1.5 convergence contract: image-build egress is hosted by the single
+    # harness binary. Do not build or launch a standalone VZ egress binary.
+    cargo build -p motlie-vmm --example harness_v1_5 >/dev/null
+    egress_bin="$REPO_ROOT/target/debug/examples/harness_v1_5"
   fi
-  kill_stale_egress_helpers
-  rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_HELPER_PID_FILE"
+  kill_stale_egress_backends
+  rm -f "$EGRESS_SOCKET_PATH" "$EGRESS_PID_FILE"
   : > "$EGRESS_LOG"
-  "$helper_bin" \
+  "$egress_bin" vz-egress \
     --socket-path "$EGRESS_SOCKET_PATH" \
     --host-forward-tcp "127.0.0.1:${CONTROL_PORT}:22" \
-    $( [[ "$EGRESS_HELPER_LOG_FRAMES" == "1" ]] && print -- "--log-frames" ) \
+    $( [[ "$EGRESS_LOG_FRAMES" == "1" ]] && print -- "--log-frames" ) \
     >"$EGRESS_LOG" 2>&1 &
-  EGRESS_HELPER_PID="$!"
-  echo "$EGRESS_HELPER_PID" > "$EGRESS_HELPER_PID_FILE"
+  EGRESS_PID="$!"
+  echo "$EGRESS_PID" > "$EGRESS_PID_FILE"
   local attempts=0
   while [[ $attempts -lt 40 ]]; do
     if [[ -S "$EGRESS_SOCKET_PATH" ]]; then
       return 0
     fi
-    if ! kill -0 "$EGRESS_HELPER_PID" >/dev/null 2>&1; then
-      echo "egress helper exited early" >&2
+    if ! kill -0 "$EGRESS_PID" >/dev/null 2>&1; then
+      echo "VZ egress backend exited early" >&2
       cat "$EGRESS_LOG" >&2 || true
       exit 1
     fi
     sleep 0.25
     attempts=$(( attempts + 1 ))
   done
-  echo "timed out waiting for egress helper socket" >&2
+  echo "timed out waiting for VZ egress backend socket" >&2
   cat "$EGRESS_LOG" >&2 || true
   exit 1
 }
@@ -330,7 +332,7 @@ wait_for_guest_ssh() {
 }
 
 kill_stale_runners
-rm -f "$RUNNER_PID_FILE" "$SERIAL_LOG" "$SEED_IMAGE" "$EGRESS_HELPER_PID_FILE" "$EGRESS_SOCKET_PATH" "$EGRESS_LOG"
+rm -f "$RUNNER_PID_FILE" "$SERIAL_LOG" "$SEED_IMAGE" "$EGRESS_PID_FILE" "$EGRESS_SOCKET_PATH" "$EGRESS_LOG"
 rm -rf "$SEED_DIR"
 
 echo "--- rendering native NoCloud seed disk ---"
@@ -383,7 +385,7 @@ else
   RUNNER_BIN="$($RUNNER_BUILD_SCRIPT)"
 fi
 chmod +x "$RUNNER_BIN"
-start_egress_helper
+start_egress_backend
 
 VM_DIR="$WORK_VM_DIR"
 DISK_PATH="$VM_DIR/disk.img"

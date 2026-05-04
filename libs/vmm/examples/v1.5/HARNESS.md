@@ -4,12 +4,13 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-04 | @codex-vz | Move default VZ userspace egress into the VMM runtime/harness path and keep `vz_egress_helper_v1_5` as a diagnostic wrapper only |
+| 2026-05-04 | @codex-vz | Remove the standalone `vz_egress_helper_v1_5`; VZ egress is hosted by `harness_v1_5` either as embedded runtime state or the `vz-egress` image-build subcommand |
+| 2026-05-04 | @codex-vz | Move default VZ userspace egress into the VMM runtime/harness path and make `launch-vz.sh` consume, not own, the egress socket |
 | 2026-05-03 | @codex-vz | Promote guest-level VFS memfs views, apt-backed egress, and Codex/Claude startup into the v1.5 conformance scenario and harness validation surface |
 | 2026-05-03 | @codex-vz | Add `build-image.sh` as the common builder entrypoint and `build-ch-artifacts.sh` as the Linux CH emitter for the common v1.5 guest contract |
 | 2026-05-03 | @codex-vz | Mark v1.5 as the unified CH/VZ script home, add common-contract.sh as the shell-to-Rust extraction seam, and require CH launch to consume v1.5 guest-contract metadata instead of legacy v1.4 artifacts |
 | 2026-04-26 | @codex-vz | Replace copied v1.4/CH runbook text with the actual v1.5 Vz backend split, validation commands, and Vz-only image hardening caveat |
-| 2026-04-25 | @codex-vz | Require prebuilt Vz runner and egress helper artifacts by default so first-contact startup cannot hide host cargo builds |
+| 2026-04-25 | @codex-vz | Require prebuilt Vz runner artifacts by default so first-contact startup cannot hide host cargo builds |
 | 2026-04-25 | @codex-vz | Document that v1.5 Vz first-contact SSH follows the shared convergence contract: `ready` means interactive SSH plus required mounts, and full VFS/VNET/egress certification remains `validate` or a saved scenario |
 
 ## Purpose
@@ -50,9 +51,11 @@ Interpretation:
 Any documentation or scenario text that says this slice validates "Motlie
 vnet" on macOS is wrong. The correct phrase is "Vz userspace egress".
 
-The standalone `vz_egress_helper_v1_5` binary is still buildable for
-compatibility and low-level diagnostics, but it is not a default launch
-prerequisite.
+There is no standalone v1.5 VZ egress binary. The normal launch path embeds
+egress in the VMM runtime before `launch-vz.sh` starts the Apple VZ runner.
+The VZ image-builder path can still need a temporary host egress process while
+customizing the base VM, but that process is `harness_v1_5 vz-egress`, not a
+separate helper artifact.
 
 ## Backend Boundary Rules
 
@@ -231,7 +234,6 @@ Use this matrix before posting or merging v1.5 changes:
 
 ```bash
 cargo check -p motlie-vmm --example harness_v1_5
-cargo check -p motlie-vmm --example vz_egress_helper_v1_5
 cargo test -p motlie-vfs
 cargo clippy -p motlie-vmm --example harness_v1_5 -- -D warnings
 ./target/debug/examples/harness_v1_5 --backend vz scenario ./libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
