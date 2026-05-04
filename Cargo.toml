@@ -18,6 +18,7 @@ members = [
     "libs/models",
     "libs/tmux",
     "libs/driver",
+    "bins/voice-agent",
     "bins/tmux/driver",
     "bins/mmux",
 ]

@@ -8,6 +8,7 @@ use motlie_model_whisper_cpp::{
     WhisperCppHandle, WhisperCppTranscriptionBundle, WhisperCppTranscriptionSpec,
 };
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -25,7 +26,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("whisper_base_en"),
         display_name: "Whisper Base.en".into(),
         family: BundleFamily::Whisper,
-        capabilities: motlie_model::Capabilities::transcription_stream_only(),
+        capabilities: motlie_model::Capabilities::transcription_batch_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -104,7 +105,7 @@ fn resolve_local_ggml_root(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached ggml artifacts for `ggerganov/whisper.cpp` under `{}`; \
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached ggml artifacts for `ggerganov/whisper.cpp` under `{}`; \
              no refs/main found — run the download step first",
             root.display()
         )));
@@ -128,7 +129,7 @@ fn resolve_local_ggml_root(root: &Path) -> Result<PathBuf, ModelError> {
     let model_file = snapshot_dir.join("ggml-base.en.bin");
     if !model_file.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires `ggml-base.en.bin` in cached snapshot for `ggerganov/whisper.cpp` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `ggml-base.en.bin` in cached snapshot for `ggerganov/whisper.cpp` under `{}`",
             root.display()
         )));
     }

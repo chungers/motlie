@@ -52,7 +52,7 @@ impl SherpaOnnxStreamingSpec {
             decoder_filename: "decoder-epoch-99-avg-1-chunk-16-left-64.onnx",
             joiner_filename: "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx",
             tokens_filename: "tokens.txt",
-            capabilities: Capabilities::transcription_stream_only(),
+            capabilities: Capabilities::transcription_stream_partial_only(),
             quantization: QuantizationSupport::none(),
         }
     }

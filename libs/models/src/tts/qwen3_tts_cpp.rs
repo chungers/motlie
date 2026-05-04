@@ -9,6 +9,7 @@ use motlie_model_qwen3_tts_cpp::{
     Qwen3TtsCppHandle, Qwen3TtsCppSpeechBundle, Qwen3TtsCppSpeechSpec,
 };
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -31,7 +32,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("qwen3_tts_cpp_0_6b"),
         display_name: "Qwen3-TTS CPP 0.6B".into(),
         family: BundleFamily::Qwen,
-        capabilities: motlie_model::Capabilities::speech_stream_only(),
+        capabilities: motlie_model::Capabilities::speech_buffered_with_voice_clone(),
         eval_tracks: vec![EvalTrack::Speech],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -114,7 +115,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached GGUF artifacts for `{HF_REPO}` under `{}` or a direct model directory; no refs/main found",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached GGUF artifacts for `{HF_REPO}` under `{}` or a direct model directory; no refs/main found",
             root.display()
         )));
     }
@@ -135,7 +136,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !snapshot_dir.join(TOKENIZER_FILE_F16).is_file() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires `{TOKENIZER_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{TOKENIZER_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
             root.display()
         )));
     }
@@ -143,7 +144,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
     if !snapshot_dir.join(MODEL_FILE_Q8_0).is_file() && !snapshot_dir.join(MODEL_FILE_F16).is_file()
     {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires `{MODEL_FILE_Q8_0}` or `{MODEL_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{MODEL_FILE_Q8_0}` or `{MODEL_FILE_F16}` in cached snapshot for `{HF_REPO}` under `{}`",
             root.display()
         )));
     }
