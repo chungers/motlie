@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-03 | @codex | Added `SendKeys` modal state and documented the `s` send-keys flow through `Target::send_keys`. |
 | 2026-05-02 | @codex | Changed Session Tags modal add/update/delete/check operations to stage in modal state and flush as a diff only on Ok; Cancel/Esc discard the draft. |
 | 2026-05-02 | @codex | Refactored attach status setup to use `Target::status()` with `SessionStatusSnapshot` / `SessionStatusOverrides` instead of app-owned status option plumbing. |
 | 2026-05-02 | @codex | Moved environment editing into the New Session modal and apply staged variables through `CreateSessionOptions::initial_environment`; removed the `e` post-creation environment shortcut. |
@@ -59,7 +60,7 @@ Implemented API contract for the initial `mmux` selector and the
 | 2026-04-27 | @gpt55-dgx | Documented Sessions title count/hostname/IP format and removal of the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Documented moving the host label from status text into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Documented arrow-symbol status hints and Help modal key-function content. |
-| 2026-04-27 | @gpt55-dgx | Documented portrait mode's 30:70 default T/B split. |
+| 2026-05-03 | @codex | Documented portrait mode's 35:65 default T/B split. |
 | 2026-04-26 | @gpt55-dgx | Documented the About modal state and build-time git SHA metadata used by the `h` key. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
@@ -94,13 +95,7 @@ let host = SshConfig::parse("ssh://user@host?identity-file=/path/to/key")?
     .connect()
     .await?;
 let sessions = host.list_sessions().await?;
-let motd = host.read_text_file(std::path::Path::new("/etc/motd"), 64 * 1024).await?;
 ```
-
-`mmux` wraps that call in `load_motd_from(host, path)` so the default
-`/etc/motd` path and fallback policy can be tested separately. Missing, empty,
-whitespace-only, unreadable, and oversized files produce the embedded motlie
-placeholder; readable content is returned with trailing whitespace trimmed.
 
 For existing target operations:
 
@@ -253,6 +248,7 @@ enum ModalState {
     NewSession { ui: NewSessionModalUi },
     KillSession { session: SelectedSession, button: Button },
     RenameSession { session: SelectedSession, input: String, button: Button },
+    SendKeys { session: SelectedSession, ui: SendKeysModalUi },
     SessionKeyValues { session: SelectedSession, ui: SessionKeyValueModalUi },
     Help,
 }
@@ -279,6 +275,17 @@ struct NewSessionModalUi {
     button: Button,
 }
 
+enum SendKeysFocus {
+    Input,
+    Ok,
+    Cancel,
+}
+
+struct SendKeysModalUi {
+    input: String,
+    focus: SendKeysFocus,
+}
+
 struct SessionKeyValueModalUi {
     kind: SessionKeyValueKind,
     rows: Vec<SessionKeyValueRow>,
@@ -291,8 +298,8 @@ struct SessionKeyValueModalUi {
 }
 ```
 
-Implemented state is decomposed by concern: `HostContext`, `LayoutState`,
-`MotdState`, `SessionListState`, `DetailState`, and `StatusBanner`. `AppState`
+Implemented state is decomposed by concern: `HostFleet`, `LayoutState`,
+`SessionListState`, `DetailState`, and `StatusBanner`. `AppState`
 now coordinates those structs rather than owning one flat collection of UI,
 host, selection, detail, layout, and status fields. `main.rs` contains the
 entry/run loop. CLI parsing, terminal lifecycle, ForceCommand handling,
@@ -334,16 +341,46 @@ Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with `help`, then `pane`, `monitor`, `attach`, `new`,
-`kill`, `rename`, `tags`, `group`, `quit`, `layout`, and the
-mode-specific resize hint. Attach uses the `a` shortcut; the
-command shortcut letter is rendered bold coral in each command label.
+the bottom status start with `tab ↑/↓`, then `help`, `monitor`, `send`,
+`attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, and the
+mode-specific resize hint. Attach uses the `a` shortcut; command shortcut
+letters are rendered bold coral in command labels.
 Direction hints render as `↑/↓`.
+
+Plain Enter while the session list has focus resets the detail source to
+`Sample` and forces a one-shot capture for the highlighted session. This gives
+the operator a quick current-state refresh without entering continuous monitor
+mode; `m` remains the monitor command. The detail-pane title displays the
+active source mode as a bold `snapshot` or bold `monitor` label.
 
 `r` opens `RenameSession` only when the session list has focus. The modal
 captures `(host_id, session_id)` plus the current display name, prepopulates the
 `Session Name` field, and dispatches changed names through
 `HostHandle::session_by_id()` and `Target::rename()`.
+
+`s` opens `SendKeys` for the highlighted session from any pane focus. The modal
+keeps focus explicit (`Input`, `Ok`, `Cancel`), renders a compact text field
+with `To: <session> on <host>`, wraps long input by growing the field height
+against a fixed input width, sends from either focused `Ok` or non-empty
+`Input` Enter, parses the submitted text with `KeySequence::parse`, resolves
+the captured stable session id with `HostHandle::session_by_id()`, and
+dispatches the parsed sequence exactly through `Target::send_keys`.
+Ctrl-Enter uses the same parsed input dispatch, then waits 500 ms and
+dispatches a second explicit `{Enter}` sequence through the same target.
+Submitted input ending in `$$` is normalized by stripping that suffix and using
+the same delayed Enter dispatch mode. If the suffix is the entire submitted
+input, mmux skips the initial key dispatch and sends only the delayed `{Enter}`.
+After a successful send, mmux forces `refresh_detail(..., true)` when the detail
+source is `Sample`; monitor mode keeps its existing cadence and is not
+recaptured from the send path.
+The modal accepts tmux key-name shorthand such as `{C-m}` for Enter because
+`KeySequence` passes valid raw key names through to tmux.
+Focused modal text inputs set the terminal cursor to the insertion point; the
+terminal session configures that cursor as a blinking bar while mmux owns the
+screen.
+No new `motlie-tmux` API is required for this feature; the existing gap is only
+UI policy around which key owns pane focus, handled in mmux by moving pane
+cycling to Tab.
 
 `t` opens a `SessionKeyValues` modal in tag mode for the highlighted session. Rows are loaded from
 `Target::tags("mmux").await?.list().await?`, sorted lexicographically by
@@ -378,9 +415,9 @@ by this feature.
 Resize bounds are keyed by layout mode. Normal/landscape L/R resizing keeps
 both sides at least 25% wide (`25/75` through `75/25`). Portrait T/B resizing
 keeps both panes at least 15% tall (`15/85` through `85/15`).
-The `l` key toggles `LayoutMode` at runtime and normalizes focus if the MOTD
-pane is focused while switching into portrait. Default attach/re-entry retains
-that layout choice in memory inside the parent `mmux` process.
+The `l` key toggles `LayoutMode` at runtime while preserving list/detail focus.
+Default attach/re-entry retains that layout choice in memory inside the parent
+`mmux` process.
 
 ## Build Metadata
 
@@ -533,7 +570,7 @@ Validation rules:
   split, and focused pane in memory within the parent `mmux` process; this
   state is not persisted across binary runs
 - `--portrait` / `-p` forces portrait layout
-- portrait layout initializes the `T`/`B` split at 30:70
+- portrait layout initializes the `T`/`B` split at 35:65
 - `--landscape` / `-l` forces landscape layout
 - `--portrait` and `--landscape` are mutually exclusive
 - without a layout force flag, startup reads the connecting PTY dimensions and
@@ -571,25 +608,21 @@ API tests must cover:
 - session count rendering in the Sessions pane title without hostname/IP
 - Help modal open/close behavior, key-function display, build date display,
   and last-8-character build SHA display
-- MOTD fallback behavior for missing, empty, whitespace-only, oversized, and
-  readable files; embedded-logo width fit for full vs. compact placeholder
-  rendering; and landscape full-frame MOTD pane rendering vs. portrait-mode
-  MOTD omission
+- landscape and portrait layout rendering with session-list/detail panes and
+  no intro pane
 - default attach/re-enter and no-loop conditions
 
 Current implementation coverage:
 
 - `cargo test -p motlie-tmux`: attach command/status including the
   `SIGTTOU`-safe restore helper, `LinesRange`, stable-id host-event diffing,
-  stable-id kill coverage, and `read_text_file` local/mock behavior for
-  missing, empty, normal, oversized, and unreadable files.
+  stable-id kill coverage, and tmux status override snapshot/restore behavior.
 - `cargo test -p motlie-mmux`: CLI mutual exclusion, stable-id
   highlight preservation, `--script` parsing, removed mode-flag rejection,
   layout force-flag parsing, `-s` rejection, PTY aspect
   auto-detection, `q` exit, `a` attach, detail scroll direction,
-  modified-arrow resize fallbacks, `p` pane focus transitions, `l` layout
-  toggle behavior, compact status hint rendering, MOTD fallback/readability
-  cases, full/compact placeholder rendering, landscape MOTD pane rendering,
-  portrait MOTD omission, sample color preservation, Help modal
+  modified-arrow resize fallbacks, Tab pane focus transitions, `l` layout
+  toggle behavior, compact status hint rendering, landscape/portrait
+  session-list/detail rendering, sample color preservation, Help modal
   key-function/display/close behavior, monitor screen capture, ANSI/VTE
   parsing, and monitored-session-close reset.

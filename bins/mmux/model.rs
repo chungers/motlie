@@ -7,7 +7,7 @@ use ratatui::style::{Color, Style};
 use crate::consts::{
     DEFAULT_LEFT_PERCENT, DEFAULT_TOP_PERCENT, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
     LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT,
-    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
+    PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_FG,
 };
 use crate::detail::DetailSource;
 
@@ -19,7 +19,6 @@ pub(crate) enum LayoutMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
-    Motd,
     List,
     Detail,
 }
@@ -83,6 +82,13 @@ pub(crate) enum NewSessionFocus {
     Ok,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendKeysFocus {
+    Input,
+    Ok,
+    Cancel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NewSessionHostChoice {
     pub(crate) id: HostId,
@@ -109,11 +115,21 @@ pub(crate) enum ModalState {
         input: String,
         button: Button,
     },
+    SendKeys {
+        session: SelectedSession,
+        ui: SendKeysModalUi,
+    },
     SessionKeyValues {
         session: SelectedSession,
         ui: SessionKeyValueModalUi,
     },
     Help,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SendKeysModalUi {
+    pub(crate) input: String,
+    pub(crate) focus: SendKeysFocus,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +199,7 @@ impl ModalView {
                 format!("{fields}\n{env}\n{env_key_input}    {env_value_input}")
             }
             ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
+            ModalBody::SendKeys { label, input, .. } => format!("{label}\n{input}"),
             ModalBody::SessionKeyValues {
                 kind,
                 rows,
@@ -228,6 +245,11 @@ pub(crate) enum ModalBody {
     },
     RenameSession {
         input: String,
+    },
+    SendKeys {
+        label: String,
+        input: String,
+        focused: bool,
     },
     SessionKeyValues {
         kind: SessionKeyValueKind,
@@ -542,7 +564,7 @@ impl RetainedUiState {
     pub(crate) fn apply_to(&self, app: &mut AppState) {
         app.layout.mode = self.layout_mode;
         app.session_list.selected = self.selected_index;
-        app.layout.focus = focus_for_layout(self.focus, app.layout.mode);
+        app.layout.focus = self.focus;
         app.layout.left_percent = self
             .left_percent
             .clamp(LANDSCAPE_MIN_LEFT_PERCENT, LANDSCAPE_MAX_LEFT_PERCENT);
@@ -575,12 +597,6 @@ pub(crate) struct LayoutState {
     pub(crate) focus: Focus,
     pub(crate) left_percent: u16,
     pub(crate) top_percent: u16,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct MotdState {
-    pub(crate) text: String,
-    pub(crate) is_placeholder: bool,
 }
 
 #[derive(Default, Clone)]
@@ -827,7 +843,7 @@ impl StatusBanner {
 
     pub(crate) fn style(&self) -> Style {
         match self {
-            StatusBanner::Loading(_) => Style::default().fg(Color::White).bg(STATUS_BAR_BG),
+            StatusBanner::Loading(_) => Style::default().fg(STATUS_BAR_FG).bg(STATUS_BAR_BG),
             StatusBanner::Info(_) => Style::default().fg(Color::Yellow).bg(STATUS_BAR_BG),
             StatusBanner::Error(_) => Style::default().fg(Color::Red).bg(STATUS_BAR_BG),
         }
@@ -837,10 +853,6 @@ impl StatusBanner {
 pub(crate) struct AppState {
     pub(crate) fleet: HostFleet,
     pub(crate) layout: LayoutState,
-    /// `None` in multi-host mode (MOTD pane is hidden when multiple hosts are
-    /// listed). `Some` in single-host mode with the host's `/etc/motd` text or
-    /// the motlie placeholder.
-    pub(crate) motd: Option<MotdState>,
     pub(crate) session_list: SessionListState,
     pub(crate) detail: DetailState,
     pub(crate) status: StatusBanner,
@@ -850,21 +862,10 @@ pub(crate) struct AppState {
 
 impl AppState {
     /// Single-host test constructor. Builds a fleet with one entry from the
-    /// given label/IP and (optional) MOTD text.
+    /// given label/IP.
     #[cfg(test)]
-    pub(crate) fn new(
-        host_label: String,
-        layout_mode: LayoutMode,
-        motd: String,
-        placeholder: bool,
-    ) -> Self {
-        Self::new_with_host_ip(
-            host_label,
-            "unknown".to_string(),
-            layout_mode,
-            motd,
-            placeholder,
-        )
+    pub(crate) fn new(host_label: String, layout_mode: LayoutMode) -> Self {
+        Self::new_with_host_ip(host_label, "unknown".to_string(), layout_mode)
     }
 
     #[cfg(test)]
@@ -872,8 +873,6 @@ impl AppState {
         host_label: String,
         host_ip_address: String,
         layout_mode: LayoutMode,
-        motd: String,
-        placeholder: bool,
     ) -> Self {
         let entry = HostEntry {
             id: HostId::local(),
@@ -883,16 +882,10 @@ impl AppState {
             handle: motlie_tmux::HostHandle::local(),
         };
         let fleet = HostFleet::from_entries(vec![entry]);
-        Self::with_fleet(fleet, layout_mode, Some((motd, placeholder)))
+        Self::with_fleet(fleet, layout_mode)
     }
 
-    /// Production constructor. `motd` should be `Some` only in single-host
-    /// mode; multi-host mode passes `None` so the MOTD pane is hidden.
-    pub(crate) fn with_fleet(
-        fleet: HostFleet,
-        layout_mode: LayoutMode,
-        motd: Option<(String, bool)>,
-    ) -> Self {
+    pub(crate) fn with_fleet(fleet: HostFleet, layout_mode: LayoutMode) -> Self {
         Self {
             fleet,
             layout: LayoutState {
@@ -901,10 +894,6 @@ impl AppState {
                 left_percent: DEFAULT_LEFT_PERCENT,
                 top_percent: DEFAULT_TOP_PERCENT,
             },
-            motd: motd.map(|(text, is_placeholder)| MotdState {
-                text,
-                is_placeholder,
-            }),
             session_list: SessionListState::default(),
             detail: DetailState {
                 lines: Vec::new(),
@@ -951,14 +940,10 @@ impl AppState {
 
     pub(crate) fn focus_next(&mut self) {
         self.layout.focus = match (self.layout.mode, self.layout.focus) {
-            (LayoutMode::Normal, Focus::Motd) => Focus::List,
             (LayoutMode::Normal, Focus::List) => Focus::Detail,
-            // In multi-host (no MOTD) Normal mode, skip the MOTD focus state.
-            (LayoutMode::Normal, Focus::Detail) if self.motd.is_some() => Focus::Motd,
             (LayoutMode::Normal, Focus::Detail) => Focus::List,
             (LayoutMode::Portrait, Focus::List) => Focus::Detail,
             (LayoutMode::Portrait, Focus::Detail) => Focus::List,
-            (LayoutMode::Portrait, Focus::Motd) => Focus::List,
         };
     }
 
@@ -967,14 +952,6 @@ impl AppState {
             LayoutMode::Normal => LayoutMode::Portrait,
             LayoutMode::Portrait => LayoutMode::Normal,
         };
-        self.layout.focus = focus_for_layout(self.layout.focus, self.layout.mode);
         self.status = StatusBanner::info("layout toggled");
-    }
-}
-
-pub(crate) fn focus_for_layout(focus: Focus, layout_mode: LayoutMode) -> Focus {
-    match (layout_mode, focus) {
-        (LayoutMode::Portrait, Focus::Motd) => Focus::List,
-        _ => focus,
     }
 }

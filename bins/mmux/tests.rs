@@ -2,42 +2,45 @@ use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
     transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
-    StatusStyle, TransportKind, SSH_DEFAULT_PORT,
+    StatusStyle, TransportKind, WindowStyle, SSH_DEFAULT_PORT,
 };
-use ratatui::backend::TestBackend;
-use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::backend::{Backend, TestBackend};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Position;
+use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 
 use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
-    BUILD_DATE, BUILD_GIT_SHA, COMPACT_MOTLIE_PLACEHOLDER, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
-    HOST_COLOR_SQUARE, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MMUX_ATTACH_STATUS_STYLE,
-    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
-    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
+    mmux_attach_status_style, mmux_attach_window_style, APP_BASE_BG, APP_BASE_FG, BUILD_DATE,
+    BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
+    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_LEFT,
+    MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH,
+    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
+    STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
-    handle_key, load_motd_from, refresh_sessions_preserving, refresh_sessions_quiet,
-    stop_monitor_if_closed, KeyOutcome,
+    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed,
+    KeyOutcome,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
 };
 use crate::model::{
     AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession,
-    SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow,
-    SessionRow, SessionSelectedTag, SessionSortMode,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
+    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
+    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
-    detail_text_for_render, draw, key_value_key_column_width, modal_content, motd_render_text,
-    normal_motd_height, session_key_values_footer_line, session_list_line, session_recency_text,
-    sessions_title, short_build_git_sha, status_line, status_line_text, top_status_line,
-    use_compact_placeholder,
+    detail_text_for_render, detail_title, draw, key_value_key_column_width, modal_content,
+    session_key_values_footer_line, session_list_line, session_recency_text, sessions_title,
+    short_build_git_sha, status_line, status_line_text, top_status_line,
 };
 use crate::target_host::resolve_ip_address;
-use crate::{prepare_attach_status, restore_attach_status};
+use crate::{
+    prepare_attach_status, prepare_attach_styles, restore_attach_status, restore_attach_styles,
+};
 
 fn sid(id: &str) -> SessionId {
     SessionId::new(id).unwrap()
@@ -60,12 +63,7 @@ fn session_with_times(name: &str, id: &str, created: u64, activity: u64) -> Sess
 }
 
 fn app_with_session() -> AppState {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
     app
 }
@@ -166,6 +164,16 @@ fn test_new_session_modal(input: &str, button: Button) -> ModalState {
     }
 }
 
+fn test_send_keys_modal(input: &str, focus: SendKeysFocus) -> ModalState {
+    ModalState::SendKeys {
+        session: test_selected_session(),
+        ui: SendKeysModalUi {
+            input: input.to_string(),
+            focus,
+        },
+    }
+}
+
 fn test_session_tags_modal(
     tags: Vec<SessionKeyValueRow>,
     selected_key: Option<&str>,
@@ -188,40 +196,40 @@ fn test_session_tags_modal(
     }
 }
 
-fn unique_test_path(name: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("mmux-{name}-{}-{nanos}", std::process::id()))
-}
-
-async fn write_test_file(name: &str, content: impl AsRef<[u8]>) -> std::path::PathBuf {
-    let path = unique_test_path(name);
-    tokio::fs::write(&path, content).await.unwrap();
-    path
-}
-
-async fn remove_test_file(path: &std::path::Path) {
-    let _ = tokio::fs::remove_file(path).await;
-}
-
 fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
     render_to_lines(app, width, height).join("")
 }
 
 fn render_to_lines(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
+    render_to_lines_and_cursor(app, width, height).0
+}
+
+fn render_to_buffer(app: &mut AppState, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| draw(frame, app)).unwrap();
-    terminal
+    terminal.backend().buffer().clone()
+}
+
+fn render_to_lines_and_cursor(
+    app: &mut AppState,
+    width: u16,
+    height: u16,
+) -> (Vec<String>, Position) {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| draw(frame, app)).unwrap();
+    let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+    let lines = terminal
         .backend()
         .buffer()
         .content()
         .chunks(width as usize)
         .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-        .collect()
+        .collect();
+    (lines, cursor)
 }
 
 fn modal_border_width(lines: &[String], title: &str) -> usize {
@@ -248,6 +256,66 @@ fn modal_border_left(lines: &[String], title: &str) -> usize {
         .find(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
         .and_then(|line| line.chars().position(|ch| ch == '┌'))
         .expect("expected modal left border")
+}
+
+fn modal_border_height(lines: &[String], title: &str) -> usize {
+    let top = lines
+        .iter()
+        .position(|line| line.contains(title) && line.contains('┌') && line.contains('┐'))
+        .expect("expected modal top border");
+    let left = modal_border_left(lines, title);
+    let bottom = lines
+        .iter()
+        .enumerate()
+        .skip(top + 1)
+        .find_map(|(index, line)| {
+            let is_bottom = line.chars().nth(left) == Some('└') && line.contains('┘');
+            is_bottom.then_some(index)
+        })
+        .expect("expected modal bottom border");
+    bottom - top + 1
+}
+
+fn line_char_index(line: &str, needle: &str) -> usize {
+    let byte_index = line.find(needle).expect("expected text in rendered line");
+    line[..byte_index].chars().count()
+}
+
+#[test]
+fn render_applies_configured_base_colors_to_unstyled_cells() {
+    let mut app = app_with_session();
+    let buffer = render_to_buffer(&mut app, 80, 24);
+    let cell = &buffer[(70, 5)];
+
+    match APP_BASE_FG {
+        Some(fg) => assert_eq!(cell.fg, fg),
+        None => assert_eq!(cell.fg, Color::Reset),
+    }
+    match APP_BASE_BG {
+        Some(bg) => assert_eq!(cell.bg, bg),
+        None => assert_eq!(cell.bg, Color::Reset),
+    }
+}
+
+#[test]
+fn modal_clear_area_preserves_configured_base_background() {
+    let mut app = app_with_session();
+    app.modal = Some(test_send_keys_modal("", SendKeysFocus::Input));
+    let buffer = render_to_buffer(&mut app, 80, 24);
+
+    if let Some(bg) = APP_BASE_BG {
+        assert_eq!(buffer[(40, 12)].bg, bg);
+        assert!(buffer.content().iter().all(|cell| cell.bg != Color::Reset));
+    }
+}
+
+#[test]
+fn attach_styles_are_derived_from_mmux_theme() {
+    assert_eq!(mmux_attach_status_style(), "bg=#002b55,fg=white");
+    assert_eq!(
+        mmux_attach_window_style(),
+        Some("bg=black,fg=white".to_string())
+    );
 }
 
 #[test]
@@ -306,47 +374,36 @@ fn layout_auto_detection_uses_pty_aspect_ratio() {
 }
 
 #[test]
-fn portrait_default_split_is_30_70() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        "motd".to_string(),
-        false,
-    );
+fn portrait_default_split_is_35_65() {
+    let app = AppState::new("host".to_string(), LayoutMode::Portrait);
 
-    assert_eq!(app.layout.top_percent, 30);
+    assert_eq!(app.layout.top_percent, 35);
 }
 
 #[test]
 fn status_line_omits_layout_mode() {
-    let normal = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let normal = AppState::new("host".to_string(), LayoutMode::Normal);
     let normal_status = status_line_text(&normal);
-    assert!(normal_status.contains(" ↑/↓"));
+    assert!(normal_status.contains(" tab ↑/↓"));
     assert!(!normal_status.contains(" ↑/↓ sel"));
     assert!(!normal_status.contains("keys"));
     assert!(!normal_status.contains("host"));
     assert!(!normal_status.contains("(h)elp"));
-    assert!(!normal_status.contains("(p)ane"));
-    assert!(normal_status.contains("pane"));
+    assert!(!normal_status.contains("(s)end"));
+    assert!(!normal_status.contains("tab pane"));
     assert_status_order(
         &normal_status,
         &[
             "help",
-            "pane",
             "monitor",
+            "send",
             "attach",
             "new",
             "kill",
             "rename",
-            "tags",
             "group",
-            "quit",
             "layout",
+            "quit",
             "mod-←/→ resize",
         ],
     );
@@ -354,30 +411,24 @@ fn status_line_omits_layout_mode() {
     assert!(!normal_status.contains("landscape"));
     assert!(!normal_status.contains("portrait"));
 
-    let portrait = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        "motd".to_string(),
-        false,
-    );
+    let portrait = AppState::new("host".to_string(), LayoutMode::Portrait);
     let portrait_status = status_line_text(&portrait);
-    assert!(portrait_status.contains(" ↑/↓"));
+    assert!(portrait_status.contains(" tab ↑/↓"));
     assert!(!portrait_status.contains(" ↑/↓ sel"));
-    assert!(portrait_status.contains("pane"));
+    assert!(!portrait_status.contains("tab pane"));
     assert_status_order(
         &portrait_status,
         &[
             "help",
-            "pane",
             "monitor",
+            "send",
             "attach",
             "new",
             "kill",
             "rename",
-            "tags",
             "group",
-            "quit",
             "layout",
+            "quit",
             "mod-↑/↓ resize",
         ],
     );
@@ -385,12 +436,7 @@ fn status_line_omits_layout_mode() {
 
 #[test]
 fn status_line_styles_command_mnemonics() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let app = AppState::new("host".to_string(), LayoutMode::Normal);
     let line = status_line(&app);
     let styled_mnemonics = line
         .spans
@@ -403,10 +449,10 @@ fn status_line_styles_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(styled_mnemonics, "hpmankrtgql");
+    assert_eq!(styled_mnemonics, "hmsankrglq");
     assert_eq!(
         status_line_text(&app),
-        " ↑/↓ | help | pane | monitor | attach | new | kill | rename | tags | group | quit | layout | mod-←/→ resize "
+        " tab ↑/↓ | help | monitor | send | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
     );
 }
 
@@ -453,8 +499,6 @@ fn top_status_includes_bold_host_and_right_justified_time() {
         "target-host".to_string(),
         "192.0.2.10".to_string(),
         LayoutMode::Normal,
-        "motd".to_string(),
-        false,
     );
     let line = top_status_line(&app, "12:34:56", 40);
     let rendered = line
@@ -475,8 +519,6 @@ fn sessions_title_only_includes_count() {
         "target-host".to_string(),
         "192.0.2.10".to_string(),
         LayoutMode::Normal,
-        "motd".to_string(),
-        false,
     );
     app.session_list.rows = to_rows(vec![session("dev", "$1"), session("build", "$2")]);
 
@@ -524,12 +566,7 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     refresh_sessions_quiet(&fleet, &mut app, false)
         .await
@@ -543,12 +580,7 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
 
 #[test]
 fn session_list_sorts_most_recent_activity_first() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     app.session_list.set_rows_sorted_by_activity(to_rows(vec![
         session_with_times("older", "$1", 10, 100),
@@ -572,12 +604,7 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     let rows = vec![
         make_row_for_host(
             session_with_times("no-tag-fresh", "$1", 10, 900),
@@ -655,12 +682,7 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
 
 #[test]
 fn activity_sort_preserves_selection_by_stable_id() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session_with_times("selected", "$1", 10, 100),
         session_with_times("other", "$2", 20, 200),
@@ -773,12 +795,7 @@ async fn quiet_refresh_preserves_tag_group_mode() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.sort_mode = SessionSortMode::TagGroup;
 
     refresh_sessions_quiet(&fleet, &mut app, false)
@@ -804,12 +821,7 @@ async fn quiet_refresh_reorders_by_activity_without_overwriting_status() {
         )
         .with_response("capture-pane -ep", "fresh screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.status = crate::model::StatusBanner::info("keep this");
 
     let fleet = fleet_with(host);
@@ -833,12 +845,7 @@ async fn refresh_forces_detail_when_selected_session_changes() {
         .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![session_with_times("gone", "$1", 10, 300)]);
     app.session_list.selected = 0;
     app.set_detail_text("stale screen".to_string());
@@ -867,12 +874,7 @@ async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
         .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session_with_times("watched", "$1", 10, 300),
         session_with_times("replacement", "$2", 20, 200),
@@ -910,12 +912,7 @@ async fn quiet_refresh_skips_monitor_recapture() {
         .with_response("list-sessions", "__MOTLIE_S__ live $1 10 1 1  800\n")
         .with_error("capture-pane", "this should not be called");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     // Seed the row list with the older activity (200) and select $1.
     app.session_list.rows = to_rows(vec![session_with_times("live", "$1", 10, 200)]);
     app.session_list.selected = 0;
@@ -1007,12 +1004,7 @@ fn resolve_ip_address_preserves_literal_ip() {
 
 #[test]
 fn selection_preserves_stable_id_after_rename() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("old", "$1"))];
     app.session_list.selected = 0;
     app.session_list.rows = vec![make_row(session("new", "$1"))];
@@ -1026,12 +1018,7 @@ fn selection_preserves_stable_id_after_rename() {
 
 #[test]
 fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![session("shell", "$1"), session("build", "$2")]);
     app.session_list.selected = 1;
     app.layout.focus = Focus::Detail;
@@ -1042,12 +1029,7 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
     let mut retained = crate::model::RetainedUiState::default();
     retained.update_from(&app);
 
-    let mut reentered = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut reentered = AppState::new("host".to_string(), LayoutMode::Normal);
     retained.apply_to(&mut reentered);
     reentered.session_list.rows = to_rows(vec![session("build", "$2"), session("shell", "$1")]);
     reentered.preserve_selection(retained.selected_session_key());
@@ -1066,12 +1048,7 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
 
 #[test]
 fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session("one", "$1"),
         session("gone", "$2"),
@@ -1082,12 +1059,7 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
     let mut retained = crate::model::RetainedUiState::default();
     retained.update_from(&app);
 
-    let mut reentered = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut reentered = AppState::new("host".to_string(), LayoutMode::Normal);
     retained.apply_to(&mut reentered);
     reentered.session_list.rows = to_rows(vec![session("one", "$1"), session("three", "$3")]);
     reentered.preserve_selection(retained.selected_session_key());
@@ -1102,185 +1074,34 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
 }
 
 #[test]
-fn motd_placeholder_uses_compact_graphic_when_narrow() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-    let text = motd_render_text(&app, Rect::new(0, 0, 40, 5));
-    assert!(text.contains("motlie"));
-    assert!(text.contains("(no /etc/motd)"));
-}
-
-#[test]
-fn motd_placeholder_renders_full_logo_when_wide() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-
-    let text = motd_render_text(&app, Rect::new(0, 0, 100, 20));
-
-    assert!(text.contains(MOTLIE_PLACEHOLDER));
-    assert!(text.ends_with("(no /etc/motd)"));
-    assert!(!use_compact_placeholder(&app, 100, 20));
-}
-
-#[test]
-fn compact_placeholder_boundary_uses_embedded_logo_width() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-
-    assert!(use_compact_placeholder(&app, 40, 20));
-    assert!(!use_compact_placeholder(&app, 41, 20));
-
-    if let Some(motd) = app.motd.as_mut() {
-        motd.is_placeholder = false;
-    }
-    assert!(!use_compact_placeholder(&app, 30, 5));
-}
-
-#[test]
-fn landscape_layout_renders_motd_pane_with_placeholder() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
+fn landscape_layout_renders_sessions_and_detail_without_motd() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
 
     let rendered = render_to_string(&mut app, 120, 30);
 
-    assert!(rendered.contains("MOTD"));
-    assert!(rendered.contains("_ __ ___"));
-    assert!(!rendered.contains(COMPACT_MOTLIE_PLACEHOLDER));
-    assert!(rendered.contains("(no /etc/motd)"));
     assert!(rendered.contains("Sessions [1]"));
+    assert!(rendered.contains("Detail"));
+    assert!(!rendered.contains("MOTD"));
+    assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
 }
 
 #[test]
-fn landscape_layout_renders_motd_pane_with_host_content() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "Welcome to dev-host".to_string(),
-        false,
-    );
+fn portrait_layout_renders_sessions_and_detail_without_motd() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Portrait);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
 
-    let rendered = render_to_string(&mut app, 120, 30);
-
-    assert!(rendered.contains("MOTD"));
-    assert!(rendered.contains("Welcome to dev-host"));
-    assert!(rendered.contains("Sessions [1]"));
-}
-
-#[test]
-fn landscape_motd_height_preserves_visible_placeholder_before_sessions() {
-    let app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-
-    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 30)), 4);
-    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 41, 30)), 8);
-    assert_eq!(normal_motd_height(&app, Rect::new(0, 0, 40, 6)), 3);
-}
-
-#[test]
-fn portrait_layout_does_not_render_motd_widget() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-    app.session_list.rows = vec![make_row(session("dev", "$1"))];
     let rendered = render_to_string(&mut app, 100, 30);
 
-    assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-    assert!(!rendered.contains(COMPACT_MOTLIE_PLACEHOLDER));
+    assert!(rendered.contains("Sessions [1]"));
+    assert!(rendered.contains("Detail"));
     assert!(!rendered.contains("MOTD"));
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_missing() {
-    let host = HostHandle::local();
-    let missing = unique_test_path("missing-motd");
-
-    let (text, is_placeholder) = load_motd_from(&host, &missing).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_empty() {
-    let host = HostHandle::local();
-    let path = write_test_file("empty-motd", b"").await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_whitespace_only() {
-    let host = HostHandle::local();
-    let path = write_test_file("whitespace-motd", b"  \n\t\n  ").await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_falls_back_to_placeholder_when_oversized() {
-    let host = HostHandle::local();
-    let path = write_test_file("oversized-motd", vec![b'x'; 70 * 1024]).await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(is_placeholder);
-    assert_eq!(text, MOTLIE_PLACEHOLDER);
-}
-
-#[tokio::test]
-async fn load_motd_returns_content_when_readable() {
-    let host = HostHandle::local();
-    let path = write_test_file("normal-motd", b"Welcome to dev-host\n\n").await;
-
-    let (text, is_placeholder) = load_motd_from(&host, &path).await;
-    remove_test_file(&path).await;
-
-    assert!(!is_placeholder);
-    assert_eq!(text, "Welcome to dev-host");
+    assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
 }
 
 #[tokio::test]
 async fn closed_monitored_session_resets_detail_source() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
         session_id: Some("$1".to_string()),
         host_id: Some(local_host_id()),
@@ -1297,12 +1118,7 @@ async fn closed_monitored_session_resets_detail_source() {
 
 #[test]
 fn detail_scroll_up_moves_toward_older_content() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.detail.lines = (0..100).map(|n| format!("line {n}")).collect();
     app.detail.last_known_view_height = 10;
 
@@ -1318,12 +1134,7 @@ fn detail_scroll_up_moves_toward_older_content() {
 #[tokio::test]
 async fn q_exits_like_ctrl_c() {
     let fleet = local_fleet();
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     let outcome = handle_key(
         &fleet,
@@ -1353,9 +1164,18 @@ async fn a_attaches_selected_session() {
 }
 
 #[tokio::test]
-async fn enter_no_longer_attaches() {
-    let fleet = local_fleet();
+async fn enter_from_list_refreshes_sample_detail_without_attaching() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("capture-pane -ep", "current screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
     let mut app = app_with_session();
+    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+        session_id: Some("$1".to_string()),
+        host_id: Some(local_host_id()),
+    }));
+    app.set_detail_text("stale monitor screen".to_string());
 
     let outcome = handle_key(
         &fleet,
@@ -1366,6 +1186,8 @@ async fn enter_no_longer_attaches() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
+    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
+    assert_eq!(app.detail.lines, vec!["current screen".to_string()]);
 }
 
 #[tokio::test]
@@ -1385,7 +1207,10 @@ async fn attach_status_overrides_are_set_and_restored() {
             "status-left \"session: #{session_name}\"\n",
         )
         .with_response(
-            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            &format!(
+                "set-option -t '$1' status-style '{}'",
+                mmux_attach_status_style()
+            ),
             "",
         )
         .with_response(
@@ -1430,7 +1255,10 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
         .with_response("show-option -q -t '$1' status-left-length", "")
         .with_response("show-option -q -t '$1' status-left", "")
         .with_response(
-            &format!("set-option -t '$1' status-style '{MMUX_ATTACH_STATUS_STYLE}'"),
+            &format!(
+                "set-option -t '$1' status-style '{}'",
+                mmux_attach_status_style()
+            ),
             "",
         )
         .with_response(
@@ -1456,7 +1284,84 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
 }
 
 #[tokio::test]
-async fn s_no_longer_groups_sessions() {
+async fn attach_styles_apply_status_and_window_theme_then_restore() {
+    let window_style = mmux_attach_window_style().expect("mmux attach window style is configured");
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 2  100\n")
+        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response("show-option -q -t '$1' status-left-length", "")
+        .with_response("show-option -q -t '$1' status-left", "")
+        .with_response("list-windows -t '$1'", "@2\n@5\n")
+        .with_response(
+            "show-option -q -t '@2' window-style",
+            "window-style bg=green,fg=black\n",
+        )
+        .with_response("show-option -q -t '@2' window-active-style", "")
+        .with_response("show-option -q -t '@5' window-style", "")
+        .with_response(
+            "show-option -q -t '@5' window-active-style",
+            "window-active-style bg=yellow,fg=black\n",
+        )
+        .with_response(
+            &format!(
+                "set-option -t '$1' status-style '{}'",
+                mmux_attach_status_style()
+            ),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        )
+        .with_response("list-windows -t '$1'", "@2\n@5\n")
+        .with_response(
+            &format!("set-option -t '@2' window-style '{window_style}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '@2' window-active-style '{window_style}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '@5' window-style '{window_style}'"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '@5' window-active-style '{window_style}'"),
+            "",
+        )
+        .with_response("set-option -t '@2' window-style 'bg=green,fg=black'", "")
+        .with_response("set-option -u -t '@2' window-active-style", "")
+        .with_response("set-option -u -t '@5' window-style", "")
+        .with_response(
+            "set-option -t '@5' window-active-style 'bg=yellow,fg=black'",
+            "",
+        )
+        .with_response("set-option -u -t '$1' status-style", "")
+        .with_response("set-option -u -t '$1' status-left-length", "")
+        .with_response("set-option -u -t '$1' status-left", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+    let status = target.status().await.unwrap();
+    let window_styles = target.window_styles().await.unwrap();
+
+    let snapshot = prepare_attach_styles(Some(&status), Some(&window_styles)).await;
+    assert!(snapshot.status.is_some());
+    assert!(snapshot.window_styles.is_some());
+    assert_eq!(
+        mmux_attach_window_style(),
+        Some(WindowStyle::new(window_style).unwrap().as_str().to_string())
+    );
+
+    restore_attach_styles(Some(&status), Some(&window_styles), snapshot).await;
+}
+
+#[tokio::test]
+async fn s_no_longer_groups_sessions_and_opens_send_keys() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.focus = Focus::List;
@@ -1471,6 +1376,11 @@ async fn s_no_longer_groups_sessions() {
 
     assert!(matches!(outcome, KeyOutcome::Continue));
     assert_eq!(app.session_list.sort_mode, SessionSortMode::Activity);
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { session, ui })
+            if session.name() == "dev" && ui.focus == SendKeysFocus::Input
+    ));
 }
 
 #[tokio::test]
@@ -1495,6 +1405,14 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
+    assert!(body.contains("Enter sample highlighted session (list pane)"));
+    assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
+    assert!(body.contains("  $$ suffix same delayed Enter"));
+    assert!(body.contains("  u update focused tag"));
+    assert!(body.contains("  x unset focused tag"));
+    assert!(body.contains("  c toggle sort tag"));
+    assert!(!body.contains("PgUp/PgDn page current pane"));
+    assert!(!body.contains("Home/End jump current pane"));
     assert!(body.contains(BUILD_DATE));
     assert!(body.contains(&format!("Git SHA: {}", short_build_git_sha())));
     if BUILD_GIT_SHA.chars().count() > 8 {
@@ -1638,6 +1556,70 @@ fn modal_content_separates_body_from_button_bar() {
     ));
     assert!(!rename.body_text().contains("[Ok]"));
 
+    let send_keys = modal_content(&test_send_keys_modal("echo hi", SendKeysFocus::Input));
+    assert_eq!(send_keys.title, " Send Keys ");
+    assert_eq!(send_keys.active_button, None);
+    assert_eq!(send_keys.buttons, " Cancel     Ok ");
+    assert!(matches!(
+        send_keys.body,
+        ModalBody::SendKeys { ref label, ref input, focused }
+            if label == "To: dev on host" && input == "echo hi" && focused
+    ));
+    assert!(!send_keys.body_text().contains("[Ok]"));
+
+    let send_keys_ok = modal_content(&test_send_keys_modal("echo hi", SendKeysFocus::Ok));
+    assert_eq!(send_keys_ok.active_button, Some(Button::Ok));
+    assert_eq!(send_keys_ok.buttons, " Cancel    [Ok]");
+
+    let mut short_app = app_with_session();
+    short_app.modal = Some(test_send_keys_modal("short", SendKeysFocus::Input));
+    let short_lines = render_to_lines(&mut short_app, 100, 30);
+    let title_line = short_lines
+        .iter()
+        .position(|line| line.contains("Send Keys") && line.contains('┌'))
+        .expect("expected Send Keys modal title");
+    let label_line = short_lines
+        .iter()
+        .position(|line| line.contains("To: dev on host"))
+        .expect("expected Send Keys target label");
+    let input_bottom_line = short_lines
+        .iter()
+        .enumerate()
+        .skip(label_line + 1)
+        .find_map(|(index, line)| (line.contains('└') && line.contains('┘')).then_some(index))
+        .expect("expected Send Keys input bottom border");
+    let separator_line = short_lines
+        .iter()
+        .enumerate()
+        .skip(input_bottom_line + 1)
+        .find_map(|(index, line)| {
+            let is_separator = line.contains('─')
+                && !line.contains('┌')
+                && !line.contains('┐')
+                && !line.contains('└');
+            is_separator.then_some(index)
+        })
+        .expect("expected Send Keys separator");
+
+    assert_eq!(label_line, title_line + 2);
+    assert_eq!(separator_line, input_bottom_line + 2);
+
+    let mut long_app = app_with_session();
+    long_app.modal = Some(test_send_keys_modal(
+        &"0123456789".repeat(12),
+        SendKeysFocus::Input,
+    ));
+    let long_lines = render_to_lines(&mut long_app, 100, 30);
+
+    assert_eq!(
+        modal_border_width(&short_lines, "Send Keys"),
+        modal_border_width(&long_lines, "Send Keys")
+    );
+    assert!(
+        modal_border_height(&long_lines, "Send Keys")
+            > modal_border_height(&short_lines, "Send Keys")
+    );
+
     let tags = modal_content(&test_session_tags_modal(
         vec![SessionKeyValueRow {
             key: "owner".to_string(),
@@ -1672,18 +1654,98 @@ fn modal_content_separates_body_from_button_bar() {
     assert_eq!(tags_ok.buttons, " Cancel    [Ok]");
 }
 
+#[test]
+fn focused_modal_input_fields_place_terminal_cursor() {
+    let mut rename_app = app_with_session();
+    rename_app.modal = Some(ModalState::RenameSession {
+        session: test_selected_session(),
+        input: "dev".to_string(),
+        button: Button::Ok,
+    });
+    let (rename_lines, rename_cursor) = render_to_lines_and_cursor(&mut rename_app, 80, 24);
+    let rename_label_y = rename_lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| line.contains("Session Name").then_some(index))
+        .expect("expected rename label");
+    let rename_y = rename_label_y + 2;
+    let rename_line = &rename_lines[rename_y];
+    assert_eq!(
+        rename_cursor,
+        Position::new(
+            (line_char_index(rename_line, "dev") + "dev".len()) as u16,
+            rename_y as u16
+        )
+    );
+
+    let mut send_app = app_with_session();
+    send_app.modal = Some(test_send_keys_modal("abc", SendKeysFocus::Input));
+    let (send_lines, send_cursor) = render_to_lines_and_cursor(&mut send_app, 100, 30);
+    let send_label_y = send_lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| line.contains("To: dev on host").then_some(index))
+        .expect("expected send keys label");
+    let send_y = send_label_y + 2;
+    let send_line = &send_lines[send_y];
+    assert_eq!(
+        send_cursor,
+        Position::new(
+            (line_char_index(send_line, "abc") + "abc".len()) as u16,
+            send_y as u16
+        )
+    );
+
+    let mut tags_app = app_with_session();
+    tags_app.modal = Some(test_session_tags_modal(
+        Vec::new(),
+        None,
+        "owner",
+        "",
+        SessionKeyValueFocus::Key,
+    ));
+    let (tags_lines, tags_cursor) = render_to_lines_and_cursor(&mut tags_app, 80, 24);
+    let (tags_y, tags_line) = tags_lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("owner"))
+        .expect("expected tag key input");
+    assert_eq!(
+        tags_cursor,
+        Position::new(
+            (line_char_index(tags_line, "owner") + "owner".len()) as u16,
+            tags_y as u16
+        )
+    );
+
+    let mut long_rename_app = app_with_session();
+    long_rename_app.modal = Some(ModalState::RenameSession {
+        session: test_selected_session(),
+        input: "prefix-prefix-prefix-prefix-very-long-session-name-that-does-not-fit".to_string(),
+        button: Button::Ok,
+    });
+    let (long_rename_lines, long_rename_cursor) =
+        render_to_lines_and_cursor(&mut long_rename_app, 48, 18);
+    let long_label_y = long_rename_lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| line.contains("Session Name").then_some(index))
+        .expect("expected long rename label");
+    let long_input_y = long_label_y + 2;
+    let long_input_line = &long_rename_lines[long_input_y];
+    assert!(long_input_line.contains("me-that-does-not-fit"));
+    assert!(!long_input_line.contains("very-long-session"));
+    assert_eq!(long_rename_cursor.y, long_input_y as u16);
+    assert!(long_rename_cursor.x > line_char_index(long_input_line, "me-that-does-not-fit") as u16);
+}
+
 #[tokio::test]
 async fn new_session_modal_selects_host_in_multi_host_mode() {
     let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row_for_host(
         session("dev", "$1"),
         ssh_host_id("ssh://b"),
@@ -1755,12 +1817,7 @@ async fn new_session_modal_creates_on_selected_multi_host() {
         ssh_host_entry("ssh://a", "alpha", "x", alpha),
         ssh_host_entry("ssh://b", "beta", "y", beta),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![make_row_for_host(
         session("selected", "$1"),
         ssh_host_id("ssh://b"),
@@ -1828,12 +1885,7 @@ async fn kill_session_modal_clears_selected_multi_host_row() {
         ssh_host_entry("ssh://a", "alpha", "x", alpha),
         ssh_host_entry("ssh://b", "beta", "y", beta),
     ]);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.session_list.rows = vec![
         make_row_for_host(session("shell", "$1"), ssh_host_id("ssh://a"), "alpha"),
         make_row_for_host(session("build", "$7"), ssh_host_id("ssh://b"), "beta"),
@@ -2066,6 +2118,436 @@ async fn rename_modal_renames_changed_session_by_stable_id() {
 }
 
 #[tokio::test]
+async fn s_opens_send_keys_modal_for_selected_session() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { session, ui })
+            if session.id() == "$1"
+                && session.name() == "dev"
+                && ui.input.is_empty()
+                && ui.focus == SendKeysFocus::Input
+    ));
+}
+
+#[tokio::test]
+async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { ui, .. }) if ui.focus == SendKeysFocus::Ok
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.lines, vec!["updated screen".to_string()]);
+}
+
+#[tokio::test]
+async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.lines, vec!["updated screen".to_string()]);
+}
+
+#[tokio::test]
+async fn send_keys_modal_does_not_force_refresh_in_monitor_mode() {
+    let mock = MockTransport::new()
+        .with_error("capture-pane -ep", "snapshot capture should not run")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
+        session_id: Some("$1".to_string()),
+        host_id: Some(local_host_id()),
+    }));
+    app.set_detail_text("monitor screen".to_string());
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.source.mode(), DetailMode::Monitor);
+    assert_eq!(app.detail.lines, vec!["monitor screen".to_string()]);
+}
+
+#[tokio::test]
+async fn send_keys_modal_ctrl_enter_sends_keys_then_enter_and_closes() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' Enter", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_suffix_shorthand_sends_keys_then_enter_and_closes() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -l -t '$1' '1$$'", "should strip $$ suffix")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' Enter", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1$$".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_suffix_only_sends_delayed_enter_and_closes() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -l -t '$1'", "$$ should not send literal text")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -t '$1' Enter", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "$$".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_suffix_shorthand_only_applies_at_end() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("1$$2", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1$$2".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_sends_explicit_special_key_sequence() {
+    let mock = MockTransport::new()
+        .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("send-keys -t '$1' Tab", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "1{Tab}".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+}
+
+#[tokio::test]
+async fn send_keys_modal_escape_cancels_without_sending() {
+    let mock = MockTransport::new().with_error("send-keys", "should not send keys");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn send_keys_modal_invalid_sequence_stays_open() {
+    let mock = MockTransport::new().with_error("send-keys", "should not send invalid keys");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    for ch in "echo {Enter".chars() {
+        handle_key(
+            &fleet,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        )
+        .await
+        .unwrap();
+    }
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(app.modal, Some(ModalState::SendKeys { .. })));
+    assert!(app.status.text().starts_with("invalid keys:"));
+}
+
+#[tokio::test]
 async fn t_opens_session_tags_modal_and_i_is_unassigned() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
@@ -2122,12 +2604,7 @@ async fn new_session_modal_applies_staged_initial_environment() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
     handle_key(
         &fleet,
@@ -2700,14 +3177,14 @@ async fn session_tags_modal_rejects_reserved_selected_key() {
 }
 
 #[tokio::test]
-async fn p_cycles_landscape_panes() {
+async fn tab_cycles_landscape_panes() {
     let fleet = local_fleet();
     let mut app = app_with_session();
 
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2716,16 +3193,7 @@ async fn p_cycles_landscape_panes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
-    )
-    .await
-    .unwrap();
-    assert_eq!(app.layout.focus, Focus::Motd);
-
-    handle_key(
-        &fleet,
-        &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2733,7 +3201,7 @@ async fn p_cycles_landscape_panes() {
 }
 
 #[tokio::test]
-async fn p_cycles_portrait_panes_without_motd() {
+async fn tab_cycles_portrait_panes() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.mode = LayoutMode::Portrait;
@@ -2741,7 +3209,7 @@ async fn p_cycles_portrait_panes_without_motd() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2750,7 +3218,7 @@ async fn p_cycles_portrait_panes_without_motd() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2758,10 +3226,10 @@ async fn p_cycles_portrait_panes_without_motd() {
 }
 
 #[tokio::test]
-async fn l_toggles_layout_and_normalizes_motd_focus_for_portrait() {
+async fn l_toggles_layout_and_preserves_focus() {
     let fleet = local_fleet();
     let mut app = app_with_session();
-    app.layout.focus = Focus::Motd;
+    app.layout.focus = Focus::Detail;
 
     let outcome = handle_key(
         &fleet,
@@ -2773,7 +3241,7 @@ async fn l_toggles_layout_and_normalizes_motd_focus_for_portrait() {
 
     assert!(matches!(outcome, KeyOutcome::Continue));
     assert_eq!(app.layout.mode, LayoutMode::Portrait);
-    assert_eq!(app.layout.focus, Focus::List);
+    assert_eq!(app.layout.focus, Focus::Detail);
     assert_eq!(app.status.text(), "layout toggled");
 
     handle_key(
@@ -2784,7 +3252,7 @@ async fn l_toggles_layout_and_normalizes_motd_focus_for_portrait() {
     .await
     .unwrap();
     assert_eq!(app.layout.mode, LayoutMode::Normal);
-    assert_eq!(app.layout.focus, Focus::List);
+    assert_eq!(app.layout.focus, Focus::Detail);
 }
 
 #[tokio::test]
@@ -2812,41 +3280,9 @@ async fn plain_left_and_right_do_not_cycle_panes() {
 }
 
 #[tokio::test]
-async fn motd_focus_does_not_scroll_or_change_selection() {
-    let fleet = local_fleet();
-    let mut app = app_with_session();
-    app.layout.focus = Focus::Motd;
-    app.detail.lines = (0..20).map(|idx| format!("line {idx}")).collect();
-    app.detail.last_known_view_height = 5;
-
-    handle_key(
-        &fleet,
-        &mut app,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-    )
-    .await
-    .unwrap();
-    handle_key(
-        &fleet,
-        &mut app,
-        KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(app.session_list.selected, 0);
-    assert_eq!(app.detail.scroll, 0);
-}
-
-#[tokio::test]
 async fn modified_arrow_keys_resize_layouts() {
     let fleet = local_fleet();
-    let mut landscape = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut landscape = AppState::new("host".to_string(), LayoutMode::Normal);
     let initial = landscape.layout.left_percent;
 
     handle_key(
@@ -2878,12 +3314,7 @@ async fn modified_arrow_keys_resize_layouts() {
     .unwrap();
     assert_eq!(landscape.layout.left_percent, LANDSCAPE_MAX_LEFT_PERCENT);
 
-    let mut portrait = AppState::new(
-        "host".to_string(),
-        LayoutMode::Portrait,
-        "motd".to_string(),
-        false,
-    );
+    let mut portrait = AppState::new("host".to_string(), LayoutMode::Portrait);
     portrait.layout.top_percent = 5;
     handle_key(
         &fleet,
@@ -2908,12 +3339,7 @@ async fn modified_arrow_keys_resize_layouts() {
 #[tokio::test]
 async fn word_arrow_fallback_sequences_resize_normal_layout() {
     let fleet = local_fleet();
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     let initial = app.layout.left_percent;
 
     handle_key(
@@ -2941,6 +3367,39 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
     let text = detail_text_for_render("\x1b[31mred\x1b[0m");
     assert_eq!(text.lines[0].spans[0].content.as_ref(), "red");
     assert!(!text.lines[0].spans[0].content.contains('\x1b'));
+    assert!(text
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .all(|span| span.style.fg != Some(Color::Reset) && span.style.bg != Some(Color::Reset)));
+}
+
+#[test]
+fn detail_title_marks_snapshot_or_monitor_mode_in_bold() {
+    let snapshot = detail_title(DetailMode::Sample, "1-3/3");
+    assert_eq!(
+        snapshot
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        " Detail snapshot 1-3/3 "
+    );
+    assert!(snapshot.spans[1]
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD));
+
+    let monitor = detail_title(DetailMode::Monitor, "2-4/9");
+    assert_eq!(
+        monitor
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        " Detail monitor 2-4/9 "
+    );
+    assert!(monitor.spans[1].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[tokio::test]
@@ -3111,12 +3570,7 @@ fn fleet_entry_lookup_by_host_id() {
 
 #[test]
 fn multi_host_top_status_shows_host_color_legend() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "10.0.0.1", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "10.0.0.2", HostHandle::local()),
@@ -3149,25 +3603,13 @@ fn multi_host_top_status_shows_host_color_legend() {
 }
 
 #[test]
-fn multi_host_motd_pane_is_hidden() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        MOTLIE_PLACEHOLDER.to_string(),
-        true,
-    );
-    app.motd = None; // multi-host mode discards MOTD
+fn multi_host_landscape_uses_same_sessions_detail_layout() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
-
-    assert_eq!(
-        normal_motd_height(&app, Rect::new(0, 0, 80, 20)),
-        0,
-        "MOTD region collapses to 0 in multi-host"
-    );
 
     let rendered = render_to_string(&mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
@@ -3302,12 +3744,7 @@ fn single_host_row_omits_hostname_column() {
 
 #[test]
 fn multi_host_sort_merges_rows_by_activity_across_hosts() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
@@ -3357,12 +3794,7 @@ fn multi_host_sort_merges_rows_by_activity_across_hosts() {
 
 #[test]
 fn selection_preserves_host_and_session_after_multi_host_reorder() {
-    let mut app = AppState::new(
-        "host".to_string(),
-        LayoutMode::Normal,
-        "motd".to_string(),
-        false,
-    );
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     app.fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),

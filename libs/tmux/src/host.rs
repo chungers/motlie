@@ -1460,6 +1460,34 @@ pub struct SessionStatusOverrides {
     pub left_length: Option<StatusLeftLength>,
 }
 
+/// Local tmux window-style override snapshot for one window.
+///
+/// This records only window-local values. `None` means the window inherited a
+/// global/default value at snapshot time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowStyleSnapshot {
+    pub window_id: String,
+    pub style: Option<WindowStyle>,
+    pub active_style: Option<WindowStyle>,
+}
+
+/// Local tmux window-style override snapshot for all windows in one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionWindowStylesSnapshot {
+    pub windows: Vec<WindowStyleSnapshot>,
+}
+
+/// Window-local tmux style overrides to apply to every current window in a session.
+///
+/// `None` means "leave this option unchanged"; use [`SessionWindowStyles::restore`]
+/// with a [`SessionWindowStylesSnapshot`] to unset options that were absent
+/// before a temporary override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionWindowStyleOverrides {
+    pub style: Option<WindowStyle>,
+    pub active_style: Option<WindowStyle>,
+}
+
 /// Session-local tmux status-bar API.
 ///
 /// Construct with [`Target::status`]. The helper dispatches all operations
@@ -1593,15 +1621,15 @@ impl<'a> SessionStatus<'a> {
     pub async fn apply(&self, overrides: &SessionStatusOverrides) -> Result<()> {
         let mut first_error = None;
         if let Some(style) = &overrides.style {
-            remember_status_error(&mut first_error, self.set_style(style).await);
+            remember_first_error(&mut first_error, self.set_style(style).await);
         }
         if let Some(length) = overrides.left_length {
-            remember_status_error(&mut first_error, self.set_left_length(length).await);
+            remember_first_error(&mut first_error, self.set_left_length(length).await);
         }
         if let Some(left) = &overrides.left {
-            remember_status_error(&mut first_error, self.set_left(left).await);
+            remember_first_error(&mut first_error, self.set_left(left).await);
         }
-        status_result(first_error)
+        first_error_result(first_error)
     }
 
     /// Restore a prior local status-bar snapshot.
@@ -1615,24 +1643,157 @@ impl<'a> SessionStatus<'a> {
             Some(style) => self.set_style(style).await,
             None => self.unset_style().await,
         };
-        remember_status_error(&mut first_error, style_result);
+        remember_first_error(&mut first_error, style_result);
 
         let left_length_result = match snapshot.left_length {
             Some(length) => self.set_left_length(length).await,
             None => self.unset_left_length().await,
         };
-        remember_status_error(&mut first_error, left_length_result);
+        remember_first_error(&mut first_error, left_length_result);
 
         let left_result = match &snapshot.left {
             Some(left) => self.set_left(left).await,
             None => self.unset_left().await,
         };
-        remember_status_error(&mut first_error, left_result);
-        status_result(first_error)
+        remember_first_error(&mut first_error, left_result);
+        first_error_result(first_error)
     }
 }
 
-fn remember_status_error(first_error: &mut Option<Error>, result: Result<()>) {
+/// Window-local tmux style API for all windows in one session.
+///
+/// Construct with [`Target::window_styles`]. Snapshot/apply/restore operates
+/// over the current window ids in the session using tmux's stable `@<id>`
+/// window targets.
+pub struct SessionWindowStyles<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+}
+
+impl<'a> SessionWindowStyles<'a> {
+    /// Snapshot every current window's local `window-style` and
+    /// `window-active-style` overrides.
+    pub async fn snapshot(&self) -> Result<SessionWindowStylesSnapshot> {
+        let window_ids = self.window_ids().await?;
+        let mut windows = Vec::with_capacity(window_ids.len());
+        for window_id in window_ids {
+            windows.push(WindowStyleSnapshot {
+                style: self.read_local_style_for_window(&window_id).await?,
+                active_style: self.read_local_active_style_for_window(&window_id).await?,
+                window_id,
+            });
+        }
+        Ok(SessionWindowStylesSnapshot { windows })
+    }
+
+    /// Apply the provided window-local style overrides to every current window.
+    ///
+    /// Only fields set to `Some` are written; `None` leaves the corresponding
+    /// option unchanged. All requested writes are attempted and the first error,
+    /// if any, is returned.
+    pub async fn apply(&self, overrides: &SessionWindowStyleOverrides) -> Result<()> {
+        let mut first_error = None;
+        let window_ids = self.window_ids().await?;
+        for window_id in window_ids {
+            if let Some(style) = &overrides.style {
+                remember_first_error(
+                    &mut first_error,
+                    self.set_style_for_window(&window_id, style).await,
+                );
+            }
+            if let Some(style) = &overrides.active_style {
+                remember_first_error(
+                    &mut first_error,
+                    self.set_active_style_for_window(&window_id, style).await,
+                );
+            }
+        }
+        first_error_result(first_error)
+    }
+
+    /// Restore a prior local window-style snapshot.
+    ///
+    /// `Some` values are written back; `None` unsets the local option so the
+    /// inherited/global value applies again. All restore operations are
+    /// attempted and the first error, if any, is returned.
+    pub async fn restore(&self, snapshot: &SessionWindowStylesSnapshot) -> Result<()> {
+        let mut first_error = None;
+        for window in &snapshot.windows {
+            let style_result = match &window.style {
+                Some(style) => self.set_style_for_window(&window.window_id, style).await,
+                None => self.unset_style_for_window(&window.window_id).await,
+            };
+            remember_first_error(&mut first_error, style_result);
+
+            let active_style_result = match &window.active_style {
+                Some(style) => {
+                    self.set_active_style_for_window(&window.window_id, style)
+                        .await
+                }
+                None => self.unset_active_style_for_window(&window.window_id).await,
+            };
+            remember_first_error(&mut first_error, active_style_result);
+        }
+        first_error_result(first_error)
+    }
+
+    async fn window_ids(&self) -> Result<Vec<String>> {
+        control::list_session_window_ids_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    async fn set_style_for_window(&self, window_id: &str, style: &WindowStyle) -> Result<()> {
+        control::set_window_style_with_prefix(self.transport, &self.tmux_prefix, window_id, style)
+            .await
+    }
+
+    async fn unset_style_for_window(&self, window_id: &str) -> Result<()> {
+        control::unset_window_style_with_prefix(self.transport, &self.tmux_prefix, window_id).await
+    }
+
+    async fn read_local_style_for_window(&self, window_id: &str) -> Result<Option<WindowStyle>> {
+        control::read_local_window_style_with_prefix(self.transport, &self.tmux_prefix, window_id)
+            .await
+    }
+
+    async fn set_active_style_for_window(
+        &self,
+        window_id: &str,
+        style: &WindowStyle,
+    ) -> Result<()> {
+        control::set_window_active_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            window_id,
+            style,
+        )
+        .await
+    }
+
+    async fn unset_active_style_for_window(&self, window_id: &str) -> Result<()> {
+        control::unset_window_active_style_with_prefix(self.transport, &self.tmux_prefix, window_id)
+            .await
+    }
+
+    async fn read_local_active_style_for_window(
+        &self,
+        window_id: &str,
+    ) -> Result<Option<WindowStyle>> {
+        control::read_local_window_active_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            window_id,
+        )
+        .await
+    }
+}
+
+fn remember_first_error(first_error: &mut Option<Error>, result: Result<()>) {
     if let Err(err) = result {
         if first_error.is_none() {
             *first_error = Some(err);
@@ -1640,7 +1801,7 @@ fn remember_status_error(first_error: &mut Option<Error>, result: Result<()>) {
     }
 }
 
-fn status_result(first_error: Option<Error>) -> Result<()> {
+fn first_error_result(first_error: Option<Error>) -> Result<()> {
     match first_error {
         Some(err) => Err(err),
         None => Ok(()),
@@ -1771,6 +1932,14 @@ impl Target {
         self.status_with_operation("status").await
     }
 
+    /// Access window-local style overrides for every current window in this session.
+    ///
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
+    pub async fn window_styles(&self) -> Result<SessionWindowStyles<'_>> {
+        self.window_styles_with_operation("window_styles").await
+    }
+
     async fn tags_with_operation(
         &self,
         prefix: &str,
@@ -1816,6 +1985,23 @@ impl Target {
             .to_string();
         let tmux_prefix = self.inner.tmux_prefix().await;
         Ok(SessionStatus {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
+        })
+    }
+
+    async fn window_styles_with_operation(
+        &self,
+        operation: &'static str,
+    ) -> Result<SessionWindowStyles<'_>> {
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        Ok(SessionWindowStyles {
             transport: &self.inner.transport,
             tmux_prefix,
             session_id,
@@ -3472,6 +3658,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_window_styles_snapshot_apply_and_restore_use_stable_window_ids() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("list-windows -t '$7'", "@2\n@5\n")
+            .with_response(
+                "show-option -q -t '@2' window-style",
+                "window-style bg=green,fg=black\n",
+            )
+            .with_response("show-option -q -t '@2' window-active-style", "")
+            .with_response("show-option -q -t '@5' window-style", "")
+            .with_response(
+                "show-option -q -t '@5' window-active-style",
+                "window-active-style bg=yellow,fg=black\n",
+            )
+            .with_response("list-windows -t '$7'", "@2\n@5\n")
+            .with_response("set-option -t '@2' window-style 'bg=black,fg=white'", "")
+            .with_response(
+                "set-option -t '@2' window-active-style 'bg=black,fg=white'",
+                "",
+            )
+            .with_response("set-option -t '@5' window-style 'bg=black,fg=white'", "")
+            .with_response(
+                "set-option -t '@5' window-active-style 'bg=black,fg=white'",
+                "",
+            )
+            .with_response("set-option -t '@2' window-style 'bg=green,fg=black'", "")
+            .with_response("set-option -u -t '@2' window-active-style", "")
+            .with_response("set-option -u -t '@5' window-style", "")
+            .with_response(
+                "set-option -t '@5' window-active-style 'bg=yellow,fg=black'",
+                "",
+            );
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 2,
+                group: None,
+                activity: 0,
+            }),
+        };
+        let window_styles = target.window_styles().await.unwrap();
+
+        let snapshot = window_styles.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot,
+            SessionWindowStylesSnapshot {
+                windows: vec![
+                    WindowStyleSnapshot {
+                        window_id: "@2".to_string(),
+                        style: Some(WindowStyle::new("bg=green,fg=black").unwrap()),
+                        active_style: None,
+                    },
+                    WindowStyleSnapshot {
+                        window_id: "@5".to_string(),
+                        style: None,
+                        active_style: Some(WindowStyle::new("bg=yellow,fg=black").unwrap()),
+                    },
+                ],
+            }
+        );
+
+        let overrides = SessionWindowStyleOverrides {
+            style: Some(WindowStyle::new("bg=black,fg=white").unwrap()),
+            active_style: Some(WindowStyle::new("bg=black,fg=white").unwrap()),
+        };
+        window_styles.apply(&overrides).await.unwrap();
+        window_styles.restore(&snapshot).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn session_tags_reject_invalid_inputs_before_exec() {
         let mock = MockTransport::new()
             .with_error("set-option", "validation should run before exec")
@@ -3529,9 +3790,11 @@ mod tests {
         assert!(window_target.tags("mmux").await.is_err());
         assert!(window_target.environment().await.is_err());
         assert!(window_target.status().await.is_err());
+        assert!(window_target.window_styles().await.is_err());
         assert!(pane_target.tags("mmux").await.is_err());
         assert!(pane_target.environment().await.is_err());
         assert!(pane_target.status().await.is_err());
+        assert!(pane_target.window_styles().await.is_err());
     }
 
     #[tokio::test]
