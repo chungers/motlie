@@ -20,8 +20,8 @@ use crate::consts::{
     STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
-    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed,
-    KeyOutcome,
+    apply_fleet_refresh, fetch_fleet_refresh, handle_key, refresh_sessions_preserving,
+    refresh_sessions_quiet, stop_monitor_if_closed, KeyOutcome, RefreshApplyOptions,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
@@ -576,6 +576,84 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
         app.session_list.rows.first().and_then(|row| row.selected_tag.as_ref()),
         Some(SessionSelectedTag { key, value }) if key == "owner" && value == "platform"
     ));
+}
+
+#[tokio::test]
+async fn apply_fleet_refresh_can_defer_initial_detail_capture() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_error("capture-pane", "initial detail must be deferred");
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::with_fleet(fleet.clone(), LayoutMode::Normal);
+
+    let refresh = fetch_fleet_refresh(&fleet).await;
+    apply_fleet_refresh(
+        &fleet,
+        &mut app,
+        refresh,
+        RefreshApplyOptions {
+            force_detail: false,
+            previous: None,
+            update_status: true,
+            excluded: None,
+            allow_detail_refresh: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("dev".to_string())
+    );
+    assert!(app.detail.lines.is_empty());
+    assert_eq!(app.status.text(), "1 session(s)");
+}
+
+#[tokio::test]
+async fn apply_fleet_refresh_without_previous_preserves_current_selection() {
+    let mock = MockTransport::new().with_response(
+        "list-sessions",
+        "__MOTLIE_S__ selected $1 10 0 1  100\n__MOTLIE_S__ fresh $2 20 0 1  500\n",
+    );
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::with_fleet(fleet.clone(), LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![
+        session_with_times("selected", "$1", 10, 100),
+        session_with_times("fresh", "$2", 20, 50),
+    ]);
+    app.session_list.selected = 0;
+
+    let refresh = fetch_fleet_refresh(&fleet).await;
+    apply_fleet_refresh(
+        &fleet,
+        &mut app,
+        refresh,
+        RefreshApplyOptions {
+            force_detail: false,
+            previous: None,
+            update_status: false,
+            excluded: None,
+            allow_detail_refresh: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fresh", "selected"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("selected".to_string())
+    );
 }
 
 #[test]
