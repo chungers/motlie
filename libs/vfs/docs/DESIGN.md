@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex-vz | Clarify that post-v1.45 `libs/vmm/examples/v1.5` owns the product guest image and guest runtime, while `motlie-vfs` remains the filesystem library and must not add VMM v1.5 bin/example trees |
 | 2026-04-19 | @vmm-vz-cdx | Record the cross-backend timing rule: do not land shared `libs/vfs/src/<backend>/` modules before the vertical slices (`v1.1`, `v1.05`, `v1.15`, and the `vnet` successors) have shipped and `DESIGN_XBACKENDS.md` exists to justify the final layout |
 | 2026-04-17 | @vmm-vz-cdx | Add `libs/vfs/docs/DESIGN_VZ.md` and clarify that `v1.15` now provisions runtime disks with Tart but launches them through an Apple virtio-socket helper, aligning the Vz guestfs transport with the CH vsock boundary |
 | 2026-04-17 | @vmm-vz-cdx | Add the Apple Vz `v1.05` / `v1.15` sequencing note: `libs/vfs/examples/v1.05/` is the Tart-backed guest-image / guest-contract probe, while `v1.15` remains the first managed guestfs transport slice |
@@ -1323,6 +1324,12 @@ Boundary note:
   binaries and guest binaries should call into it rather than reimplementing mount loops
 - the tiny bootstrap binary and `BinaryRequest` delivery path remain VMM-owned and are not part
   of `libs/vfs`
+- post-v1.45, `libs/vmm/examples/v1.5` owns the common CH/VZ guest image,
+  seed schema, service graph, harness, and canonical guest binaries under
+  `libs/vmm/bins/v1.5`
+- do not add `libs/vfs/bins/v1.5` or `libs/vfs/examples/v1.5` for the VMM
+  convergence line; if VMM v1.5 exposes a filesystem gap, fix the reusable
+  `motlie-vfs` API and consume it from `libs/vmm/src/guest`
 
 ### Feature Flags
 

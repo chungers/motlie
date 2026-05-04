@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex-vz | Clarify the post-v1.45 boundary: VMM owns the v1.5 common guest image and harness, while `motlie-vnet` remains the network library, must not add VMM v1.5 trees, and owns future egress/L7 proxy capabilities such as MITM-TLS and self-signed cert support |
 | 2026-04-06 | @codex | Re-baseline docs around the implemented `v1.2` harness: `motlie-vnet` owns the `v1.2+` example line, the current composed flow lives under `libs/vnet/examples/v1.2`, and the design now distinguishes current implementation from future standalone/demo targets |
 | 2026-04-03 | @codex | Address final PR review nits: align `VnetError` variants with PLAN and remove stale `--net-mode` wording |
 | 2026-04-03 | @codex | Address review follow-ups: document why long-term SSH ingress moves into a host-side proxy, make short-term dual-NIC route ownership explicit, and align migration/docs with the public `start()` / `VnetHandle` API |
@@ -65,18 +66,25 @@ The example / validation harness lineage now splits by subsystem ownership:
 
 - `motlie-vfs` owns the historical `v1` and `v1.1` harnesses under
   `libs/vfs/examples/`
-- `motlie-vnet` owns the `v1.2+` harness line under
+- `motlie-vnet` owns the historical `v1.2` harness line under
   `libs/vnet/examples/v1.2/`
+- post-v1.45, `motlie-vmm` owns the unified CH/VZ product harness and guest
+  image under `libs/vmm/examples/v1.5/`
 
 That ownership boundary is about the harness and runbook, not about eliminating
 composition between the crates. The current `v1.2` host flow is intentionally
 composed:
 
-- `motlie-vnet` owns the split-network launcher, guest image, and validation
-  story
+- `motlie-vnet` owns the split-network launcher and validation story for the
+  historical v1.2 slice
 - `motlie-vfs` remains the filesystem service used by the `v1.2` host REPL
 - `libs/vnet/docs/{DESIGN,PLAN}.md` are the source of truth for `v1.2+`
-  architecture and follow-up work
+  networking architecture and follow-up work
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md` is the source of truth for the v1.5
+  common guest image and guest binary packaging
+- VMM v1.5 work must not create `libs/vnet/bins/v1.5` or
+  `libs/vnet/examples/v1.5`; VNET changes should be limited to reusable network
+  bug fixes or functionality-gap fixes consumed by VMM
 
 ## Background: Alternatives Investigated
 
@@ -793,6 +801,19 @@ incrementally move only the egress side to `vhost-user`.
 overlayfs, squashfs) is completely independent of networking. The same
 base image works across the migration. The only differences are which
 ingress / egress knobs the launcher uses and whether a vnet backend is running.
+
+Post-v1.45 ownership refinement:
+
+- VMM owns common guest image assembly, guest boot scripts, seed schema, and
+  end-to-end CH/VZ harnesses.
+- VNET owns reusable network capabilities consumed by VMM, including current
+  vhost-user/libslirp egress and future L7 proxy work such as MITM-TLS and
+  self-signed certificate generation.
+- Do not add VMM v1.5 guest-image, boot-script, harness, or guest-binary trees
+  under `libs/vnet`; keep that ownership under `libs/vmm/examples/v1.5`,
+  `libs/vmm/bins/v1.5`, and `libs/vmm/src/guest`.
+- VNET docs should specify network semantics and adapter behavior, not become
+  the source of truth for the VMM product image layout.
 
 ## Resolved Design Decisions
 

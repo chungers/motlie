@@ -3,8 +3,8 @@ mod demo_support;
 use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use motlie_vmm::ca::SshCa;
@@ -22,13 +22,13 @@ use motlie_vmm::spec::{
     GuestUser, RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError, new_guest_registry,
+    new_guest_registry, ExecOutput, PrincipalResolver, SshProxyConfig, SshProxyError,
 };
 
 use demo_support::{
-    HostEvent, ProxyRestartState, cleanup_development_guest_disks, demo_guest_ids,
-    demo_guest_socket_path, guest_runtime_paths, install_signal_watchers, prompt,
-    shutdown_active_guests, spawn_host_events, spawn_proxy_task, stdin_line_or_detach,
+    cleanup_development_guest_disks, demo_guest_ids, demo_guest_socket_path, guest_runtime_paths,
+    install_signal_watchers, prompt, shutdown_active_guests, spawn_host_events, spawn_proxy_task,
+    stdin_line_or_detach, HostEvent, ProxyRestartState,
 };
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -376,7 +376,11 @@ fn print_help() {
 }
 
 fn auto_provision_status(enabled: bool) -> &'static str {
-    if enabled { "on" } else { "off" }
+    if enabled {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 fn print_status(provisioner: &GuestProvisioner, auto_provision_enabled: bool) {

@@ -9,15 +9,29 @@
 //! runbook covering the programmatic harness, migrated REPL, multi-guest VFS,
 //! Motlie `vnet`, and real interactive SSH validation paths.
 
+#[cfg(feature = "host-runtime")]
 pub mod artifacts;
+#[cfg(feature = "host-runtime")]
 pub mod backend;
+#[cfg(feature = "host-runtime")]
 pub mod ca;
+#[cfg(feature = "guest-vfs")]
+pub mod guest;
+#[cfg(feature = "host-runtime")]
 pub mod guestfs;
+#[cfg(feature = "host-runtime")]
 pub mod network;
+#[cfg(feature = "host-runtime")]
 pub mod network_alloc;
+#[cfg(feature = "host-runtime")]
 pub mod observability;
+#[cfg(feature = "host-runtime")]
 pub mod orchestrator;
+#[cfg(feature = "host-runtime")]
 pub mod provisioning;
+#[cfg(feature = "host-runtime")]
 pub mod runtime;
+#[cfg(feature = "host-runtime")]
 pub mod spec;
+#[cfg(feature = "host-runtime")]
 pub mod ssh;

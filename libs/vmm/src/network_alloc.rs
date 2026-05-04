@@ -1,9 +1,9 @@
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::fmt;
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::Serialize;

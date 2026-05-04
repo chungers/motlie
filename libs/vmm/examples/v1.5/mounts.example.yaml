@@ -1,0 +1,10 @@
+mounts:
+  - tag: home
+    guest_path: /home/manual
+    read_only: false
+  - tag: workspace
+    guest_path: /workspace
+    read_only: false
+  - tag: agent-state
+    guest_path: /agent-state
+    read_only: false

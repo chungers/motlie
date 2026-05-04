@@ -8,7 +8,7 @@ use motlie_vfs::vsock::handler::VsockConnectionHandler;
 use thiserror::Error;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 
 use crate::spec::{GuestMountSpec, GuestSpec};
 

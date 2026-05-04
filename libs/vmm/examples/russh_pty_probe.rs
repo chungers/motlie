@@ -82,17 +82,17 @@ async fn main() -> Result<()> {
         return Err(anyhow!("password auth failed"));
     }
 
-    let mut channel = handle.channel_open_session().await.context("open session")?;
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .context("open session")?;
     let modes = default_pty_modes();
     channel
         .request_pty(want_reply, "xterm-256color", 80, 24, 0, 0, &modes)
         .await
         .context("request_pty")?;
     channel.exec(want_reply, command).await.context("exec")?;
-    channel
-        .data(&b"abc\r\x04"[..])
-        .await
-        .context("data")?;
+    channel.data(&b"abc\r\x04"[..]).await.context("data")?;
 
     let mut stdout = Vec::new();
     loop {

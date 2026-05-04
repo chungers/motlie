@@ -1044,8 +1044,8 @@ fn render_launch_script(
     if admin_net != AdminNet::None || egress_net != EgressNet::VzUserspace {
         anyhow::bail!("v1.35 launch requires --admin-net=none --egress-net=vz-userspace");
     }
-    let ssh_ca_pubkey = ssh_ca_pubkey
-        .ok_or_else(|| anyhow::anyhow!("missing SSH CA pubkey for v1.35 launch"))?;
+    let ssh_ca_pubkey =
+        ssh_ca_pubkey.ok_or_else(|| anyhow::anyhow!("missing SSH CA pubkey for v1.35 launch"))?;
     let base_dir = format!("{}/examples/v1.35", env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
     out.push_str("#!/usr/bin/env bash\n");
@@ -1093,7 +1093,8 @@ fn execute_launch_script(guest_name: &str, script: &str) -> Result<LaunchExecuti
 
     let script_path = log_dir.join("launch.sh");
     let launch_log_path = log_dir.join("launch.log");
-    let serial_log_path = guest_launch_artifacts_dir(guest_name).join(format!("{guest_name}-serial.log"));
+    let serial_log_path =
+        guest_launch_artifacts_dir(guest_name).join(format!("{guest_name}-serial.log"));
 
     std::fs::write(&script_path, script)?;
 
@@ -1538,8 +1539,12 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                                 let mut runner_pid = exec.pid;
                                 let result_path = guest_launch_result_path(guest_name);
                                 if let Ok(raw) = fs::read_to_string(&result_path) {
-                                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                                        if let Some(pid) = value.get("runner_pid").and_then(|v| v.as_u64()) {
+                                    if let Ok(value) =
+                                        serde_json::from_str::<serde_json::Value>(&raw)
+                                    {
+                                        if let Some(pid) =
+                                            value.get("runner_pid").and_then(|v| v.as_u64())
+                                        {
                                             runner_pid = pid as u32;
                                         }
                                     }
@@ -1590,7 +1595,10 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                         admin,
                         format!(
                             "ok: shutdown {guest_name} helper={}{}",
-                            format!("{}/examples/v1.35/shutdown-vz.sh", env!("CARGO_MANIFEST_DIR")),
+                            format!(
+                                "{}/examples/v1.35/shutdown-vz.sh",
+                                env!("CARGO_MANIFEST_DIR")
+                            ),
                             detail
                         ),
                     )

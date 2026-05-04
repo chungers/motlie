@@ -582,14 +582,7 @@ pub fn spawn_guest_ssh_bridge(
     registry: GuestRegistry,
 ) -> Result<GuestBridgeHandle, SshProxyError> {
     let (listener, uds_path) = bind_vsock_ssh_listener(vsock_socket)?;
-    spawn_guest_ssh_bridge_from_listener(
-        listener,
-        uds_path,
-        ca,
-        guest_name,
-        ssh_access,
-        registry,
-    )
+    spawn_guest_ssh_bridge_from_listener(listener, uds_path, ca, guest_name, ssh_access, registry)
 }
 
 pub fn spawn_guest_ssh_bridge_at_path(
@@ -600,14 +593,7 @@ pub fn spawn_guest_ssh_bridge_at_path(
     registry: GuestRegistry,
 ) -> Result<GuestBridgeHandle, SshProxyError> {
     let (listener, uds_path) = bind_guest_ssh_listener_at_path(uds_path)?;
-    spawn_guest_ssh_bridge_from_listener(
-        listener,
-        uds_path,
-        ca,
-        guest_name,
-        ssh_access,
-        registry,
-    )
+    spawn_guest_ssh_bridge_from_listener(listener, uds_path, ca, guest_name, ssh_access, registry)
 }
 
 fn spawn_guest_ssh_bridge_from_listener(
@@ -680,9 +666,10 @@ pub async fn run_guest_tcp_ssh_bridge(
     ssh_access: GuestSshAccess,
     registry: GuestRegistry,
 ) {
-    let error_file = ready_file
-        .as_ref()
-        .and_then(|path| path.parent().map(|parent| parent.join("control-plane-error")));
+    let error_file = ready_file.as_ref().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join("control-plane-error"))
+    });
     loop {
         match current_guest_handle(&registry, &guest_name) {
             Ok(Some(_)) => {

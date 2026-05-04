@@ -7,6 +7,7 @@ backend with libslirp for rootless guest networking.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex-vz | Clarify that v1.2 guest-image ownership is historical; post-v1.45 VMM owns the v1.5 common CH/VZ guest image and harness, while VNET owns reusable network adapters, does not add VMM v1.5 trees, and owns future L7 proxy/MITM-TLS work |
 | 2026-04-06 | @codex | Re-baseline the plan around the implemented `v1.2` harness: mark delivered work complete, preserve superseded tasks with explicit handoff notes, and make `libs/vnet/examples/v1.2` the source of truth for the `v1.2+` validation line |
 | 2026-04-04 | @claude-tl | Phase 2 implementation: two-thread vhost-user backend, public API (VnetConfig/VnetError/VnetBackend/VnetHandle), vm-memory pinned to 0.17 for vhost crate compat |
 | 2026-04-03 | @claude-tl | Phase 1 implementation: update dep versions to latest (libslirp-dev 4.7.0, vhost 0.16, vhost-user-backend 0.22, virtio-queue 0.17, vm-memory 0.17) |
@@ -26,7 +27,14 @@ backend with libslirp for rootless guest networking.
 - Phase 2 is implemented and merged.
 - `v1.2` is the current source of truth for the composed validation harness:
   `libs/vnet/examples/v1.2/`
-- `motlie-vnet` owns the `v1.2+` example / validation harness line.
+- `motlie-vnet` owns the historical `v1.2` example / validation harness line.
+- Post-v1.45 common CH/VZ guest image and harness work is VMM-owned under
+  `libs/vmm/examples/v1.5` and `libs/vmm/docs/DESIGN_GUEST_IMAGE.md`.
+- VMM-owned v1.5 work must not create `libs/vnet/bins/v1.5` or
+  `libs/vnet/examples/v1.5`; VNET changes should be limited to reusable network
+  bug fixes or functionality-gap fixes consumed by VMM.
+- Future network capabilities such as L7 proxying, MITM-TLS, and self-signed
+  certificate support remain VNET-owned library work consumed by VMM.
 - Remaining work is primarily:
   - documenting the handoff cleanly across `vfs` and `vnet`
   - long-term ingress migration away from the TAP admin path
@@ -236,11 +244,16 @@ Design references: [CH Integration](./DESIGN.md), [Guest Experience](./DESIGN.md
 
 ### 3.1 Guest Image Changes
 
-Current source of truth: `libs/vnet/examples/v1.2/build-guest.sh` and
+Historical v1.2 source of truth: `libs/vnet/examples/v1.2/build-guest.sh` and
 `libs/vnet/examples/v1.2/README.md`.
 
 Earlier `libs/vfs/examples/v1*` scripts are historical context only; the active
-guest image work for `v1.2+` now lives under `libs/vnet/examples/v1.2/`.
+guest image work for the post-v1.45 CH/VZ line now lives under VMM. See
+`libs/vmm/docs/DESIGN_GUEST_IMAGE.md`.
+
+Do not add a VNET-owned v1.5 guest image, harness, or guest-binary directory for
+this line; make reusable network library fixes in place and keep the v1.5
+product assembly under VMM.
 
 - [x] 3.1.1 Add `systemd-networkd` DHCP config for the vnet egress NIC to guest image build.
   Completed in `v1.2` with an equivalent boot-time `motlie-vnet-egress`

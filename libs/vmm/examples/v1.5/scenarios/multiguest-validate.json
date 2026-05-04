@@ -1,0 +1,50 @@
+{
+  "name": "multiguest-validate",
+  "description": "Full v1.5 guest functionality conformance: multi-guest VFS memfs views, backend internet egress via apt-get update, and Codex/Claude startup.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    { "action": "boot", "guest": "bob" },
+    { "action": "ready", "guest": "bob" },
+    { "action": "check_vfs_memfs", "guest": "alice", "timeout_ms": 20000 },
+    { "action": "check_vfs_memfs", "guest": "bob", "timeout_ms": 20000 },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'test -f /workspace/README.md && grep -q \"Alice workspace mounted from the host.\" /workspace/README.md && echo WORKSPACE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "WORKSPACE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "bob",
+      "command": "/bin/sh -lc 'test -f /workspace/README.md && grep -q \"Bob workspace mounted from the host.\" /workspace/README.md && echo WORKSPACE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "WORKSPACE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.2.2 \" && echo ROUTE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "ROUTE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "bob",
+      "command": "/bin/sh -lc 'ip route | grep -q \"^default via 10.0.3.2 \" && echo ROUTE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "ROUTE_OK" }
+    },
+    { "action": "wait_egress_ready", "guest": "alice", "timeout_ms": 60000 },
+    { "action": "wait_egress_ready", "guest": "bob", "timeout_ms": 60000 },
+    { "action": "wait_package_manager_quiescent", "guest": "alice", "timeout_ms": 180000 },
+    { "action": "apt_update", "guest": "alice", "timeout_ms": 120000 },
+    { "action": "wait_package_manager_quiescent", "guest": "bob", "timeout_ms": 180000 },
+    { "action": "apt_update", "guest": "bob", "timeout_ms": 120000 },
+    { "action": "check_agent_cli", "guest": "alice", "timeout_ms": 60000 },
+    { "action": "check_agent_cli", "guest": "bob", "timeout_ms": 60000 },
+    { "action": "shutdown", "guest": "bob" },
+    { "action": "shutdown", "guest": "alice" }
+  ]
+}

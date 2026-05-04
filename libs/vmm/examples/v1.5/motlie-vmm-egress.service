@@ -1,0 +1,13 @@
+[Unit]
+Description=motlie-vmm v1.5 CH egress NIC setup
+After=systemd-networkd.service
+Wants=systemd-networkd.service
+ConditionPathExists=/etc/motlie-vmm/egress.mac
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motlie-vmm-egress-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

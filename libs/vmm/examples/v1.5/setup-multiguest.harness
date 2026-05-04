@@ -1,0 +1,13 @@
+# setup-multiguest.harness
+# Plain one-command-per-line harness-shell input, similar to the older .vfs
+# setup files. This brings up the standard v1.5 Vz-backed two-guest flow
+# and leaves the harness running for further validation.
+
+where
+boot alice
+where alice
+boot bob
+where bob
+status
+validate alice
+validate bob

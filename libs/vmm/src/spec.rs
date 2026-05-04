@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -410,11 +410,10 @@ mod tests {
             "/home/dchung/cdx-autopro/this/path/is/intentionally/much/longer/than/the-unix-domain-socket-budget/live",
         )
         .unwrap();
-        let err = namespace.guest_vsock_port_socket("alice", 5000).unwrap_err();
-        assert!(matches!(
-            err,
-            SpecError::UnixSocketPathTooLong { .. }
-        ));
+        let err = namespace
+            .guest_vsock_port_socket("alice", 5000)
+            .unwrap_err();
+        assert!(matches!(err, SpecError::UnixSocketPathTooLong { .. }));
     }
 
     #[test]

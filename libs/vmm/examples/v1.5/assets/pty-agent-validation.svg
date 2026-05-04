@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1036" height="720" viewBox="0 0 1036 720" role="img" aria-label="shadow terminal snapshot"><defs><style><![CDATA[
+text {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 16px;
+  fill: #e8f0ea;
+}
+.meta {
+  font-size: 13px;
+  fill: #9ab0a1;
+}
+]]></style></defs><rect width="100%" height="100%" fill="#0f1412"/><rect x="10" y="10" width="1016" height="700" rx="14" fill="#161d19" stroke="#2c3a33"/><text class="meta" x="18" y="30">shadow terminal snapshot</text><rect x="268" y="326" width="10" height="22" fill="#83d97b" fill-opacity="0.28"/><text xml:space="preserve"><tspan x="18" y="40">  Welcome to Codex, OpenAI&apos;s command-line coding agent</tspan><tspan x="18" y="62"> </tspan><tspan x="18" y="84">  Sign in with ChatGPT to use Codex as part of your paid plan</tspan><tspan x="18" y="106">  or connect an API key for usage-based billing</tspan><tspan x="18" y="128"> </tspan><tspan x="18" y="150">&gt; 1. Sign in with ChatGPT</tspan><tspan x="18" y="172">     Usage included with Plus, Pro, Business, and Enterprise plans</tspan><tspan x="18" y="194"> </tspan><tspan x="18" y="216">  2. Sign in with Device Code</tspan><tspan x="18" y="238">     Sign in from another device with a one-time code</tspan><tspan x="18" y="260"> </tspan><tspan x="18" y="282">  3. Provide your own API key</tspan><tspan x="18" y="304">     Pay for what you use</tspan><tspan x="18" y="326"> </tspan><tspan x="18" y="348">  Press Enter to continue</tspan><tspan x="18" y="370"> </tspan><tspan x="18" y="392"> </tspan><tspan x="18" y="414"> </tspan><tspan x="18" y="436"> </tspan><tspan x="18" y="458"> </tspan><tspan x="18" y="480"> </tspan><tspan x="18" y="502"> </tspan><tspan x="18" y="524"> </tspan><tspan x="18" y="546"> </tspan><tspan x="18" y="568"> </tspan><tspan x="18" y="590"> </tspan><tspan x="18" y="612"> </tspan><tspan x="18" y="634"> </tspan><tspan x="18" y="656"> </tspan><tspan x="18" y="678"> </tspan></text></svg>

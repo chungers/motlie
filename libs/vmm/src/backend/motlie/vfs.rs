@@ -11,7 +11,10 @@ impl MotlieVfsBacking {
         Self
     }
 
-    pub async fn provision(&self, guest: &GuestSpec) -> Result<Option<MotlieVfsHandle>, GuestFsError> {
+    pub async fn provision(
+        &self,
+        guest: &GuestSpec,
+    ) -> Result<Option<MotlieVfsHandle>, GuestFsError> {
         if guest.mounts.is_empty() {
             return Ok(None);
         }

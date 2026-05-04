@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex-vz | Add the v1.5 ownership decision: VMM owns the common CH/VZ guest image, seed schema, guest binary packaging, and guest runtime home; VFS/VNET remain reusable subsystem libraries |
 | 2026-04-26 | @codex-vz | Make the v1.45 Vz image hardening caveat explicit: apt-daily masking and ForceIPv4 are current Vz slice assumptions, not a converged CH/Vz image contract |
 | 2026-04-25 | @codex-vz | Treat prebuilt host Vz runner/egress helper artifacts as launch prerequisites by default; first-contact startup must not hide host cargo builds |
 | 2026-04-25 | @codex-vz | Tighten v1.45 Vz first-contact enforcement: service units, SSH CA config, agent-state scripts, CLIs, and packages are base-image contract; runtime only stages dynamic mounts/CA/principal/identity and restarts VFS |
@@ -141,9 +142,17 @@ Near-term v1.45 tasks:
 
 Future VMM/VFS/VNET convergence tasks:
 
+- make `libs/vmm/docs/DESIGN_GUEST_IMAGE.md` the canonical design for the
+  v1.5 common guest image, guest binary packaging, and VMM-owned guest
+  agent location
 - define one backend-neutral guest seed schema for CH and Vz
 - make image builders produce the same immutable guest contract regardless of
   hypervisor
+- add the canonical v1.5 guest mounter under `libs/vmm/bins/v1.5` with
+  reusable guest runtime code under `libs/vmm/src/guest`, rather than forking
+  historical v1.1/v1.15 binaries or creating VFS/VNET v1.5 trees
+- keep VFS and VNET changes limited to reusable library bug fixes or
+  functionality-gap fixes required by the VMM-owned guest runtime
 - make VFS readiness report backend-neutral mount states rather than
   backend-specific service side effects
 - make VNET readiness report backend-neutral egress states and keep

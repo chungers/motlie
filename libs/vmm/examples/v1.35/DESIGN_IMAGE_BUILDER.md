@@ -5,6 +5,10 @@
 This document records the common guest-image contract that `v1.35` now shares
 with CH `v1.3`, and defines the next builder direction after parity.
 
+The canonical post-v1.45 VMM-owned guest image and guest binary plan now lives
+in [`../../docs/DESIGN_GUEST_IMAGE.md`](../../docs/DESIGN_GUEST_IMAGE.md).
+Use this file as historical v1.35 evidence, not as the owning v1.5 plan.
+
 The goal is not just to remove Tart or reduce duplicated scripting. The goal is
 to prevent backend-specific guest semantic drift.
 

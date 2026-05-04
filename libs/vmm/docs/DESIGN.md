@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex-vz | Add `DESIGN_GUEST_IMAGE.md` as the VMM-owned source of truth for the v1.5 common CH/VZ guest image, guest binary packaging, and `libs/vmm/src/guest` / `libs/vmm/bins` ownership |
 | 2026-04-12 | @codex-vmm | Refresh DESIGN from current merged reality: `v1.4` harness and PR #159 auto-provisioning are already proven, and the remaining work is reusable harness-core extraction, typed validation profiles, and the standard guest-path follow-up |
 | 2026-04-09 | @codex | Rescope the post-merge harness direction: preserve `examples/v1.4/harness` as the historical origin and first consumer, but extract reusable scenario/validation infrastructure into `libs/vmm` without rewriting away the existing `v1.4` harness artifacts |
 | 2026-04-08 | @codex | Address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story from the design, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record the typed `OverlaySize` plus namespace-sensitive socket-path allocation details |
@@ -65,6 +66,18 @@ The active next step is `v1.4`:
   around `VmSpec` plus a simple standard Cloud Hypervisor guest path
 - add a reporting layer that can answer both host-visible and guest-visible
   health/metrics questions during automated runs
+
+Post-v1.45 CH/VZ guest convergence is owned by:
+
+- [`DESIGN_GUEST_IMAGE.md`](./DESIGN_GUEST_IMAGE.md)
+- [`CONVERGENCE.md`](./CONVERGENCE.md)
+
+That work establishes `libs/vmm/examples/v1.5` as the common example line for
+CH and VZ. VMM owns the guest image, seed schema, guest binary packaging, and
+guest runtime home under `libs/vmm/src/guest` and `libs/vmm/bins/v1.5`.
+`motlie-vfs` and `motlie-vnet` remain reusable filesystem and network
+libraries consumed by that image; v1.5 work must not add new VFS/VNET bin or
+example trees except for library bug fixes or functionality-gap fixes.
 
 Current `v1.4` implementation status:
 

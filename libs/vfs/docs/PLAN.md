@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex-vz | Clarify the post-v1.45 boundary: VMM owns the v1.5 common guest image, seed schema, and guest runtime; VFS keeps reusable filesystem APIs and does not add VMM v1.5 bin/example trees |
 | 2026-03-28 | @codex-pm | Resolve PR #117 round-3 follow-ups: fix stale traceability phase references, add explicit PLAN coverage for v1 symlink/file-handle behavior, and align the plan with the completed event-emission contract |
 | 2026-03-28 | @codex-pm | Address PR #117 review feedback: convert DESIGN links to relative paths, fix phase/task numbering, and make the v2 RPC phase specification-oriented instead of implementation-oriented |
 | 2026-03-28 | @codex-pm | Align the plan title with the product framing: layered guest filesystem composition rather than transport plumbing |
@@ -46,6 +47,18 @@ Harness lineage handoff:
   - implementation and runbooks: `libs/vnet/examples/v1.2/`
   - design and forward plan: `libs/vnet/docs/DESIGN.md` and
     `libs/vnet/docs/PLAN.md`
+
+Post-v1.45 product guest ownership:
+
+- `libs/vmm/examples/v1.5` owns the common CH/VZ guest image, seed schema,
+  service graph, and harness
+- `libs/vmm/bins/v1.5` owns canonical v1.5 guest binary entrypoints, with
+  reusable guest runtime code under `libs/vmm/src/guest`
+- do not add `libs/vfs/bins/v1.5` or `libs/vfs/examples/v1.5` for the VMM
+  convergence line
+- if VMM v1.5 exposes a filesystem gap, fix the reusable `motlie-vfs` API and
+  consume it from VMM; VFS remains the filesystem library rather than the image
+  or guest-agent owner
 
 Roadmap-specific implementation choices:
 

@@ -15,8 +15,8 @@ use motlie_vmm::runtime::{
     RuntimeError,
 };
 use motlie_vmm::ssh::{
-    self, ExecOutput, PtyRead, PtyRequest, SshProxyConfig, SshProxyError, exec_via_proxy,
-    new_guest_registry,
+    self, exec_via_proxy, new_guest_registry, ExecOutput, PtyRead, PtyRequest, SshProxyConfig,
+    SshProxyError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,9 +25,9 @@ use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
-    DynError, HarnessInstance, PACKAGE_MANAGER_QUIESCENT_COMMAND, build_guest_provisioner,
-    ensure_file_exists, persist_json, print_instance_details, resolved_native_source_dir,
-    wait_for_egress_ready,
+    build_guest_provisioner, ensure_file_exists, persist_json, print_instance_details,
+    resolved_native_source_dir, wait_for_egress_ready, DynError, HarnessInstance,
+    PACKAGE_MANAGER_QUIESCENT_COMMAND,
 };
 
 #[derive(Debug, Deserialize)]

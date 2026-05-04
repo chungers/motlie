@@ -500,27 +500,21 @@ mod tests {
         let backend = ChShellBackend::new();
         let handle = backend.boot(&prepared).unwrap();
 
-        assert!(
-            prepared
-                .runtime_paths
-                .cloud_init_dir
-                .join("meta-data")
-                .exists()
-        );
-        assert!(
-            prepared
-                .runtime_paths
-                .cloud_init_dir
-                .join("user-data")
-                .exists()
-        );
-        assert!(
-            prepared
-                .runtime_paths
-                .cloud_init_dir
-                .join("mounts.yaml")
-                .exists()
-        );
+        assert!(prepared
+            .runtime_paths
+            .cloud_init_dir
+            .join("meta-data")
+            .exists());
+        assert!(prepared
+            .runtime_paths
+            .cloud_init_dir
+            .join("user-data")
+            .exists());
+        assert!(prepared
+            .runtime_paths
+            .cloud_init_dir
+            .join("mounts.yaml")
+            .exists());
         assert!(prepared.runtime_paths.launch_dir.join("launch.sh").exists());
         assert!(prepared.runtime_paths.launch_log.exists());
         assert_eq!(handle.kind(), BackendKind::ChShell);

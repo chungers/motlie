@@ -21,7 +21,10 @@ pub enum CaError {
     #[error("failed to sign certificate: {0}")]
     CertSigning(String),
     #[error("guest ssh login user '{login_user}' does not match guest user '{user_name}'")]
-    LoginUserMismatch { user_name: String, login_user: String },
+    LoginUserMismatch {
+        user_name: String,
+        login_user: String,
+    },
     #[error("failed to encode private key: {0}")]
     PrivateKeyEncoding(String),
 }
@@ -225,7 +228,9 @@ mod tests {
 
         assert_eq!(creds.principal, "alice");
         assert_eq!(creds.login_user, "alice");
-        assert!(creds.private_key_openssh.contains("BEGIN OPENSSH PRIVATE KEY"));
+        assert!(creds
+            .private_key_openssh
+            .contains("BEGIN OPENSSH PRIVATE KEY"));
         assert!(creds.certificate_openssh.contains("ssh-ed25519-cert-"));
     }
 

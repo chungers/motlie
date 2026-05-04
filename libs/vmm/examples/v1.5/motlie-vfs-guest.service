@@ -1,0 +1,15 @@
+[Unit]
+Description=motlie-vmm v1.5 guest filesystem mounter
+After=local-fs.target cloud-final.service
+Wants=cloud-final.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/motlie-vfs-guest --mounts /etc/motlie-vfs/mounts.yaml --backend-env /etc/motlie/v1.5/backend.env
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

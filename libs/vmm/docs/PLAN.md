@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-02 | @codex-vz | Record the v1.5 common guest image workstream and VMM ownership of guest image, seed schema, guest binary packaging, and `libs/vmm/src/guest` / `libs/vmm/bins` home |
 | 2026-04-25 | @codex-vz | Add `CONVERGENCE.md` as the findable guest boot/provisioning contract for CH/Vz parity and record that v1.45 Vz first-contact SSH must gate on interactive readiness, not hidden package/build/validation work |
 | 2026-04-12 | @codex-vmm | Refresh PLAN from current merged reality: `v1.4` harness is proven, PR #159 auto-provisioning is complete and independently validated, and the next work is Phase 8 extraction of reusable harness/validation core plus the standard guest-path follow-up |
 | 2026-04-09 | @codex | Sync PLAN with the merged `v1.4` harness reality: mark completed harness/PTY/VTE/scenario work accurately, update the proving-ground status from `v1.3` to merged `v1.4`, and rescope Phase 8 around extracting reusable harness infrastructure into `libs/vmm` |
@@ -38,6 +39,8 @@ Current source of truth for the merged `v1.4` line:
 - design: `libs/vmm/docs/DESIGN.md`
 - cross-backend boot/provisioning contract:
   `libs/vmm/docs/CONVERGENCE.md`
+- common CH/VZ guest image and guest binary ownership:
+  `libs/vmm/docs/DESIGN_GUEST_IMAGE.md`
 - merged checkpoint PR: `dev/vmm-v1.4` -> `feature/vmm`
 
 What is already working in the merged `v1.4` checkpoint:
