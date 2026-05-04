@@ -322,7 +322,11 @@ fn modal_clear_area_preserves_configured_base_background() {
 
 #[test]
 fn attach_styles_are_derived_from_mmux_theme() {
-    assert_eq!(mmux_attach_status_style(), "bg=#002b55,fg=white");
+    assert_eq!(mmux_attach_status_style(None), "bg=#002b55,fg=white");
+    assert_eq!(
+        mmux_attach_status_style(Some(HOST_COLOR_PALETTE[1])),
+        "bg=#ffc107,fg=black"
+    );
     assert_eq!(
         mmux_attach_window_style(),
         Some("bg=black,fg=white".to_string())
@@ -1428,7 +1432,7 @@ async fn attach_status_overrides_are_set_and_restored() {
         .with_response(
             &format!(
                 "set-option -t '$1' status-style '{}'",
-                mmux_attach_status_style()
+                mmux_attach_status_style(None)
             ),
             "",
         )
@@ -1450,7 +1454,7 @@ async fn attach_status_overrides_are_set_and_restored() {
     let target = host.session_by_id("$1").await.unwrap().unwrap();
 
     let status = target.status().await.unwrap();
-    let snapshot = prepare_attach_status(&status).await.unwrap();
+    let snapshot = prepare_attach_status(&status, None).await.unwrap();
     assert_eq!(
         snapshot.style,
         Some(StatusStyle::new("bg=green,fg=black").unwrap())
@@ -1467,6 +1471,34 @@ async fn attach_status_overrides_are_set_and_restored() {
 }
 
 #[tokio::test]
+async fn attach_status_uses_selected_host_color() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response("show-option -q -t '$1' status-left-length", "")
+        .with_response("show-option -q -t '$1' status-left", "")
+        .with_response("set-option -t '$1' status-style 'bg=#ffc107,fg=black'", "")
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+
+    let status = target.status().await.unwrap();
+    let snapshot = prepare_attach_status(&status, Some(HOST_COLOR_PALETTE[1]))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.style, None);
+    assert_eq!(snapshot.left, None);
+    assert_eq!(snapshot.left_length, None);
+}
+
+#[tokio::test]
 async fn attach_status_overrides_unset_when_no_previous_local_values() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
@@ -1476,7 +1508,7 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
         .with_response(
             &format!(
                 "set-option -t '$1' status-style '{}'",
-                mmux_attach_status_style()
+                mmux_attach_status_style(None)
             ),
             "",
         )
@@ -1495,7 +1527,7 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
     let target = host.session_by_id("$1").await.unwrap().unwrap();
 
     let status = target.status().await.unwrap();
-    let snapshot = prepare_attach_status(&status).await.unwrap();
+    let snapshot = prepare_attach_status(&status, None).await.unwrap();
     assert_eq!(snapshot.style, None);
     assert_eq!(snapshot.left, None);
     assert_eq!(snapshot.left_length, None);
@@ -1524,7 +1556,7 @@ async fn attach_styles_apply_status_and_window_theme_then_restore() {
         .with_response(
             &format!(
                 "set-option -t '$1' status-style '{}'",
-                mmux_attach_status_style()
+                mmux_attach_status_style(None)
             ),
             "",
         )
@@ -1568,7 +1600,7 @@ async fn attach_styles_apply_status_and_window_theme_then_restore() {
     let status = target.status().await.unwrap();
     let window_styles = target.window_styles().await.unwrap();
 
-    let snapshot = prepare_attach_styles(Some(&status), Some(&window_styles)).await;
+    let snapshot = prepare_attach_styles(Some(&status), Some(&window_styles), None).await;
     assert!(snapshot.status.is_some());
     assert!(snapshot.window_styles.is_some());
     assert_eq!(

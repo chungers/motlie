@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
+use ratatui::style::Color;
 use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender, UnboundedReceiver};
 use tokio::time::sleep;
 
@@ -146,7 +147,9 @@ async fn run() -> Result<i32> {
                 continue;
             }
         };
-        let exit = attach_current_pty_with_mmux_status(&target).await?;
+        let exit =
+            attach_current_pty_with_mmux_status(&target, fleet.host_color(&selected.host_id))
+                .await?;
         let code = exit.shell_status();
         if should_reenter_after_attach(&fleet, &selected, &exit).await? {
             continue;
@@ -155,7 +158,10 @@ async fn run() -> Result<i32> {
     }
 }
 
-async fn attach_current_pty_with_mmux_status(target: &Target) -> Result<AttachExit> {
+async fn attach_current_pty_with_mmux_status(
+    target: &Target,
+    host_color: Option<Color>,
+) -> Result<AttachExit> {
     let status = match target.status().await {
         Ok(status) => Some(status),
         Err(err) => {
@@ -170,7 +176,7 @@ async fn attach_current_pty_with_mmux_status(target: &Target) -> Result<AttachEx
             None
         }
     };
-    let snapshot = prepare_attach_styles(status.as_ref(), window_styles.as_ref()).await;
+    let snapshot = prepare_attach_styles(status.as_ref(), window_styles.as_ref(), host_color).await;
     let exit = target.attach_current_pty().await;
     restore_attach_styles(status.as_ref(), window_styles.as_ref(), snapshot).await;
     exit.map_err(Into::into)
@@ -179,10 +185,11 @@ async fn attach_current_pty_with_mmux_status(target: &Target) -> Result<AttachEx
 async fn prepare_attach_styles(
     status: Option<&SessionStatus<'_>>,
     window_styles: Option<&SessionWindowStyles<'_>>,
+    host_color: Option<Color>,
 ) -> AttachStyleSnapshot {
     AttachStyleSnapshot {
         status: match status {
-            Some(status) => prepare_attach_status(status).await,
+            Some(status) => prepare_attach_status(status, host_color).await,
             None => None,
         },
         window_styles: match window_styles {
@@ -192,7 +199,10 @@ async fn prepare_attach_styles(
     }
 }
 
-async fn prepare_attach_status(status: &SessionStatus<'_>) -> Option<SessionStatusSnapshot> {
+async fn prepare_attach_status(
+    status: &SessionStatus<'_>,
+    host_color: Option<Color>,
+) -> Option<SessionStatusSnapshot> {
     let snapshot = match status.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
@@ -200,7 +210,7 @@ async fn prepare_attach_status(status: &SessionStatus<'_>) -> Option<SessionStat
             return None;
         }
     };
-    let style = StatusStyle::new(mmux_attach_status_style())
+    let style = StatusStyle::new(mmux_attach_status_style(host_color))
         .expect("mmux attach status style is a valid static tmux style");
     let left = StatusLeft::new(MMUX_ATTACH_STATUS_LEFT)
         .expect("mmux attach status-left is a valid static tmux format");

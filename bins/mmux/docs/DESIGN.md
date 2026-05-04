@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex | Matched attached tmux status-bar background to the selected host's list-pane palette color in multi-host mode. |
 | 2026-05-03 | @codex | Added the `s` Send Keys modal and moved main-view pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
@@ -1497,9 +1498,11 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    (race), show stderr message and re-enter the TUI.
 5. Best-effort call `Target::status()`, snapshot the selected session's local
    `status-style`, `status-left`, and `status-left-length`, then apply
-   `SessionStatusOverrides` for `status-style bg=#002b55,fg=white`,
-   `status-left "#{=50:session_name}"`, and `status-left-length 50`. Failures
-   warn to stderr but do not block attach.
+   `SessionStatusOverrides` for a status style whose background matches the
+   selected host's list-pane palette color in multi-host mode, or the default
+   mmux status-bar blue in single-host mode. `status-left` is
+   `"#{=50:session_name}"` and `status-left-length` is `50`. Failures warn to
+   stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited
