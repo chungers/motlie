@@ -411,7 +411,7 @@ fn status_line_omits_layout_mode() {
         &[
             "help",
             "monitor",
-            "send",
+            "prompt",
             "attach",
             "new",
             "kill",
@@ -436,7 +436,7 @@ fn status_line_omits_layout_mode() {
         &[
             "help",
             "monitor",
-            "send",
+            "prompt",
             "attach",
             "new",
             "kill",
@@ -464,10 +464,10 @@ fn status_line_styles_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(styled_mnemonics, "hmsankrglq");
+    assert_eq!(styled_mnemonics, "hmpankrglq");
     assert_eq!(
         status_line_text(&app),
-        " tab ↑/↓ | help | monitor | send | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
+        " tab ↑/↓ | help | monitor | prompt | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
     );
 }
 
@@ -1426,6 +1426,47 @@ async fn a_attaches_selected_session() {
 }
 
 #[tokio::test]
+async fn u_and_b_move_list_selection_like_arrow_keys() {
+    let listing = "__MOTLIE_S__ top $1 10 0 1  100\n\
+                   __MOTLIE_S__ middle $2 10 0 1  100\n\
+                   __MOTLIE_S__ bottom $3 10 0 1  100\n";
+    let mock = MockTransport::new()
+        .with_response("list-sessions", listing)
+        .with_response("capture-pane -ep", "top screen\n")
+        .with_response("list-sessions", listing)
+        .with_response("capture-pane -ep", "middle screen\n");
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![
+        session("top", "$1"),
+        session("middle", "$2"),
+        session("bottom", "$3"),
+    ]);
+    app.session_list.selected = 1;
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.selected_session().unwrap().name(), "top");
+    assert_eq!(app.detail.lines, vec!["top screen".to_string()]);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.selected_session().unwrap().name(), "middle");
+    assert_eq!(app.detail.lines, vec!["middle screen".to_string()]);
+}
+
+#[tokio::test]
 async fn enter_from_list_refreshes_sample_detail_without_attaching() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
@@ -1651,7 +1692,7 @@ async fn attach_styles_apply_status_and_window_theme_then_restore() {
 }
 
 #[tokio::test]
-async fn s_no_longer_groups_sessions_and_opens_send_keys() {
+async fn p_opens_prompt_without_grouping_sessions() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.focus = Focus::List;
@@ -1659,7 +1700,7 @@ async fn s_no_longer_groups_sessions_and_opens_send_keys() {
     let outcome = handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -1695,6 +1736,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
+    assert!(body.contains("<up> = 'u' and <down> = 'b'"));
     assert!(body.contains("Enter sample highlighted session (list pane)"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
@@ -2408,7 +2450,7 @@ async fn rename_modal_renames_changed_session_by_stable_id() {
 }
 
 #[tokio::test]
-async fn s_opens_send_keys_modal_for_selected_session() {
+async fn p_opens_send_keys_modal_for_selected_session() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.focus = Focus::Detail;
@@ -2416,7 +2458,7 @@ async fn s_opens_send_keys_modal_for_selected_session() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2445,7 +2487,7 @@ async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2497,7 +2539,7 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2541,7 +2583,7 @@ async fn send_keys_modal_does_not_force_refresh_in_monitor_mode() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2580,7 +2622,7 @@ async fn send_keys_modal_ctrl_enter_sends_keys_then_enter_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2620,7 +2662,7 @@ async fn send_keys_modal_suffix_shorthand_sends_keys_then_enter_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2659,7 +2701,7 @@ async fn send_keys_modal_suffix_only_sends_delayed_enter_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2698,7 +2740,7 @@ async fn send_keys_modal_suffix_shorthand_only_applies_at_end() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2738,7 +2780,7 @@ async fn send_keys_modal_sends_explicit_special_key_sequence() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2773,7 +2815,7 @@ async fn send_keys_modal_escape_cancels_without_sending() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2805,7 +2847,7 @@ async fn send_keys_modal_invalid_sequence_stays_open() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();

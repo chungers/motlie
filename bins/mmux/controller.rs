@@ -505,7 +505,7 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
-        (KeyCode::Char('s'), _) => {
+        (KeyCode::Char('p'), _) => {
             if let Some(selected) = app.selected_session() {
                 app.modal = Some(ModalState::SendKeys {
                     session: selected,
@@ -587,20 +587,18 @@ pub(crate) async fn handle_key(
         }
         (KeyCode::Tab | KeyCode::Char('\t'), _) => app.focus_next(),
         (KeyCode::Char('l'), _) => app.toggle_layout(),
+        (KeyCode::Char('u'), KeyModifiers::NONE) if app.layout.focus == Focus::List => {
+            move_list_selection(fleet, app, -1).await?;
+        }
+        (KeyCode::Char('b'), KeyModifiers::NONE) if app.layout.focus == Focus::List => {
+            move_list_selection(fleet, app, 1).await?;
+        }
         (KeyCode::Up, _) => match app.layout.focus {
-            Focus::List => {
-                if app.move_selection(-1) {
-                    reset_to_sample_detail(fleet, app).await?;
-                }
-            }
+            Focus::List => move_list_selection(fleet, app, -1).await?,
             Focus::Detail => app.scroll_detail(1),
         },
         (KeyCode::Down, _) => match app.layout.focus {
-            Focus::List => {
-                if app.move_selection(1) {
-                    reset_to_sample_detail(fleet, app).await?;
-                }
-            }
+            Focus::List => move_list_selection(fleet, app, 1).await?,
             Focus::Detail => app.scroll_detail(-1),
         },
         (KeyCode::PageUp, _) => match app.layout.focus {
@@ -644,6 +642,13 @@ pub(crate) async fn handle_key(
     }
 
     Ok(KeyOutcome::Continue)
+}
+
+async fn move_list_selection(fleet: &HostFleet, app: &mut AppState, delta: isize) -> Result<()> {
+    if app.move_selection(delta) {
+        reset_to_sample_detail(fleet, app).await?;
+    }
+    Ok(())
 }
 
 fn is_resize_modifier(modifiers: KeyModifiers) -> bool {

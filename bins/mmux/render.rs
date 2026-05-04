@@ -642,7 +642,7 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "monitor", 'm');
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "send", 's');
+    push_status_command(&mut spans, "prompt", 'p');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "attach", 'a');
     push_status_separator(&mut spans);
