@@ -402,8 +402,8 @@ list-windows -a` runs in a single tmux invocation — single fork+exec).
 
 #### SSH target
 
-One **persistent SSH connection per host**, opened once at `connect_fleet`
-time and reused for every subsequent command:
+One **persistent SSH connection per connected host**, opened by the background
+host connector and reused for every subsequent command:
 
 ```text
 mmux process
@@ -786,17 +786,16 @@ or `ForceCommand /usr/local/bin/mmux --landscape`).
 
 ### Multi-host Mode (issue #235)
 
-Multi-host mode is enabled implicitly when **two or more** SSH host arguments are
-passed on the command line. With one host (or none) the selector remains in the
-existing single-host mode unchanged.
+Multi-host mode is enabled implicitly when **one or more** SSH host arguments
+are passed on the command line. Localhost is always included automatically; SSH
+arguments are additional hosts.
 
 **Activation rule.**
 
 | `len(ssh_hosts)` | Mode |
 |---|---|
 | `0` | Single-host, target = localhost |
-| `1` | Single-host, target = the SSH host |
-| `≥ 2` | **Multi-host**, targets = all listed SSH hosts |
+| `≥ 1` | **Multi-host**, targets = localhost + all listed SSH hosts |
 
 **Functional differences in multi-host mode:**
 
@@ -875,15 +874,30 @@ pub(crate) struct HostEntry {
     pub(crate) handle: motlie_tmux::HostHandle,
 }
 
+pub(crate) enum HostConnectionStatus {
+    Connecting,
+    Connected,
+    Failed { error: String },
+}
+
+pub(crate) struct HostSlot {
+    pub(crate) id: HostId,
+    pub(crate) label: String,
+    pub(crate) alias: String,
+    pub(crate) ip_address: String,
+    pub(crate) status: HostConnectionStatus,
+}
+
 pub(crate) struct HostFleet {
+    hosts: Vec<HostSlot>,             // configured hosts; stable display/order
     pub(crate) entries: Vec<HostEntry>,
 }
 
 impl HostFleet {
-    pub(crate) fn is_multi(&self) -> bool { self.entries.len() > 1 }
+    pub(crate) fn is_multi(&self) -> bool { self.hosts.len() > 1 }
     pub(crate) fn host_color(&self, id: &HostId) -> Option<Color> { /* palette color */ }
     pub(crate) fn host_marker_width(&self) -> usize { /* square width */ }
-    pub(crate) fn host_color_legend(&self) -> Option<Vec<(Color, String)>> { /* square + host */ }
+    pub(crate) fn host_color_legend(&self) -> Option<Vec<HostLegendItem>> { /* square + host */ }
 }
 
 pub(crate) struct SessionRow {
@@ -915,6 +929,10 @@ the operator-supplied routable name.
 
 `HostContext` is replaced by `HostFleet`; selection-by-id at the row level
 must compose `(host_id, session_id)` to remain stable across rename/reorder.
+`HostFleet.entries` contains only connected `HostHandle`s used for routing and
+refresh. `HostFleet.hosts` contains every configured host, including retrying
+or failed SSH targets, so the top status legend and host color assignment are
+stable before a remote connection succeeds.
 
 **Why a binary-side `HostFleet`, not `motlie_tmux::Fleet`?** The lib's `Fleet`
 (`libs/tmux/src/fleet.rs`) is the *monitoring/automation registry*. Its
@@ -1005,6 +1023,9 @@ from `HostFleet::host_marker_width()`. The host-color column is omitted when
 - Single: `<hostname> | <ip>                                     <time>`
 - Multi:  `mmux ■ <host-a> ■ <host-b>                          <time>`
 
+Failed SSH targets remain in the multi-host legend using the URI hostname and
+are highlighted in red until a background retry connects successfully.
+
 #### Scope and impact analysis
 
 **Library (`libs/tmux/`):** *No new public API surface required.* The existing
@@ -1021,11 +1042,11 @@ not required for v1.
 |---|---|
 | `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`). |
 | `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. |
-| `target_host.rs` | Rename / split: `connect_host(cli) → connect_fleet(cli) -> Result<HostFleet>`. Internally calls existing single-host connect for each entry. |
+| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<(HostFleet, Vec<HostConnectSpec>)>`. Localhost is connected immediately; SSH URIs become configured host slots for background retry. |
 | `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
 | `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. Landscape always renders session list left and detail right. Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |
-| `main.rs` | Calls `connect_fleet` instead of `connect_host`. |
+| `main.rs` | Calls `connect_initial_fleet`, starts SSH retry tasks, and applies connected/failed host events to the selector fleet. |
 | `forcecommand.rs` | No change (ForceCommand stays single-host; multi-host is operator-mode). |
 | `tests.rs` | New tests for: multi-host CLI parsing; fleet construction; merge-and-sort across hosts; row host-color column; top-status legend switching; per-host failure resilience; selection-by-(host_id, session_id) preservation across reorders. |
 
@@ -1280,13 +1301,18 @@ snapshot refresh path without changing the selector UI model.
 
 Single-poll reconcile loop driven by the main TUI loop:
 
-1. On startup, call `connect_fleet(cli)` to build the `HostFleet` (rejects
-   duplicate SSH URIs up-front), then run an initial fan-out
-   `controller::fetch_fleet_rows(fleet, &mut tracker)` and merge into the
+1. On startup, call `connect_initial_fleet(cli)` to build a `HostFleet`
+   containing localhost plus all configured SSH host slots (rejecting duplicate
+   SSH URIs up front). The TUI starts immediately with localhost connected.
+2. Start one background retry task per SSH URI. A failed attempt marks that
+   host's legend entry red and retries after a short delay. A successful retry
+   inserts the connected `HostEntry`, clears the red state, and allows normal
+   refresh fan-out to include that host.
+3. Run an initial fan-out across currently connected entries and merge into
    `SessionListState` by stable `(host_id, session_id)` key.
-2. Every second, call `refresh_sessions_quiet(...)` which re-runs the
+4. Every second, call `refresh_sessions_quiet(...)` which re-runs the
    fan-out and updates rows + tracker state.
-3. For each snapshot:
+5. For each snapshot:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
    - sort rows using `SessionSortMode`: activity mode sorts by

@@ -14,10 +14,10 @@ use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
     mmux_attach_status_style, mmux_attach_window_style, APP_BASE_BG, APP_BASE_FG, BUILD_DATE,
     BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
-    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_LEFT,
-    MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH,
-    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
-    STATUS_BAR_MNEMONIC_FG,
+    HOST_CONNECTION_FAILED_FG, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
+    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING,
+    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
     apply_fleet_refresh, apply_host_refresh, fetch_fleet_refresh, fetch_host_refresh, handle_key,
@@ -28,10 +28,10 @@ use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
 };
 use crate::model::{
-    AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
-    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
-    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
+    AppState, Button, Focus, HostConnectionStatus, HostEntry, HostFleet, HostId, HostSlot,
+    LayoutMode, ModalBody, ModalState, NewSessionFocus, NewSessionHostChoice, NewSessionModalUi,
+    SelectedSession, SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind,
+    SessionKeyValueModalUi, SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
     detail_text_for_render, detail_title, draw, key_value_key_column_width, modal_content,
@@ -3661,13 +3661,13 @@ fn cli_accepts_multiple_ssh_uris() {
 }
 
 #[tokio::test]
-async fn connect_fleet_rejects_duplicate_ssh_uris() {
-    use crate::target_host::connect_fleet;
+async fn connect_initial_fleet_rejects_duplicate_ssh_uris() {
+    use crate::target_host::connect_initial_fleet;
 
     let cli =
         Cli::try_parse_from(["mmux", "ssh://dchung@localhost", "ssh://dchung@localhost"]).unwrap();
 
-    let err = match connect_fleet(&cli).await {
+    let err = match connect_initial_fleet(&cli).await {
         Ok(_) => panic!("expected duplicate SSH URI to be rejected"),
         Err(err) => err,
     };
@@ -3675,6 +3675,30 @@ async fn connect_fleet_rejects_duplicate_ssh_uris() {
     assert!(
         msg.contains("duplicate SSH URI"),
         "expected duplicate-URI rejection, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn connect_initial_fleet_includes_localhost_and_defers_ssh_connect() {
+    use crate::target_host::connect_initial_fleet;
+
+    let cli = Cli::try_parse_from(["mmux", "ssh://remote.example.com"]).unwrap();
+
+    let (fleet, specs) = connect_initial_fleet(&cli).await.unwrap();
+    let remote_id = ssh_host_id("ssh://remote.example.com");
+
+    assert!(fleet.is_multi());
+    assert_eq!(fleet.len(), 2);
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].id, remote_id);
+    assert!(fleet.entry(&local_host_id()).is_some());
+    assert!(
+        fleet.entry(&remote_id).is_none(),
+        "SSH host should not block startup by connecting during initial fleet setup"
+    );
+    assert_eq!(
+        fleet.host_slot(&remote_id).map(|slot| slot.label.as_str()),
+        Some("remote.example.com")
     );
 }
 
@@ -3722,6 +3746,82 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
         multi.host_color(&ssh_host_id("ssh://b")),
         Some(HOST_COLOR_PALETTE[1])
     );
+}
+
+#[test]
+fn fleet_can_show_pending_ssh_host_without_connected_entry() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+
+    assert!(fleet.is_multi());
+    assert_eq!(fleet.len(), 2);
+    assert!(fleet.entry(&local_host_id()).is_some());
+    assert!(fleet.entry(&remote_id).is_none());
+    assert_eq!(
+        fleet.host_color(&local_host_id()),
+        Some(HOST_COLOR_PALETTE[0])
+    );
+    assert_eq!(fleet.host_color(&remote_id), Some(HOST_COLOR_PALETTE[1]));
+}
+
+#[test]
+fn connected_ssh_host_replaces_failed_slot_and_keeps_color_index() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let mut fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+    fleet.mark_host_failed(&remote_id, "network unreachable".to_string());
+
+    let remote = ssh_host_entry(
+        "ssh://remote",
+        "remote-tmux",
+        "10.0.0.8",
+        HostHandle::local(),
+    );
+    fleet.upsert_connected(remote);
+
+    assert_eq!(
+        fleet.host_slot(&remote_id).map(|slot| &slot.status),
+        Some(&HostConnectionStatus::Connected)
+    );
+    assert_eq!(
+        fleet.host_color(&remote_id),
+        Some(HOST_COLOR_PALETTE[1]),
+        "reconnected host keeps its configured legend/row color"
+    );
+    assert_eq!(fleet.entry(&remote_id).unwrap().label, "remote-tmux");
 }
 
 #[test]
@@ -3784,6 +3884,57 @@ fn multi_host_top_status_shows_host_color_legend() {
     assert!(!rendered.contains("multi-host mode"));
     assert!(!rendered.contains("10.0.0"));
     assert!(rendered.ends_with(" 12:34:56 "));
+}
+
+#[test]
+fn failed_multi_host_top_status_highlights_host_in_red() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    app.fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+    app.fleet
+        .mark_host_failed(&remote_id, "connection refused".to_string());
+
+    let line = top_status_line(&app, "12:34:56", 60);
+    let rendered = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(rendered.starts_with("mmux ■ local ■ remote"));
+    let remote_label = line
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == " remote ")
+        .expect("failed host label is rendered");
+    assert_eq!(remote_label.style.fg, Some(HOST_CONNECTION_FAILED_FG));
+
+    let square_colors = line
+        .spans
+        .iter()
+        .filter(|span| span.content.as_ref() == HOST_COLOR_SQUARE)
+        .map(|span| span.style.fg)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        square_colors,
+        vec![Some(HOST_COLOR_PALETTE[0]), Some(HOST_CONNECTION_FAILED_FG)]
+    );
 }
 
 #[test]

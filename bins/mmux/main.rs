@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::time::sleep;
 
 use cli::{select_layout, Cli};
 use consts::{
@@ -28,13 +29,16 @@ use controller::{
     HostRefreshResult, KeyOutcome, RefreshApplyOptions,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
-use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
+use model::{
+    AppState, HostEntry, HostFleet, HostId, LayoutMode, RetainedUiState, SelectedSession,
+    StatusBanner,
+};
 use motlie_tmux::{
     AttachExit, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot,
     SessionWindowStyleOverrides, SessionWindowStyles, SessionWindowStylesSnapshot, StatusLeft,
     StatusLeftLength, StatusStyle, Target, WindowStyle,
 };
-use target_host::connect_fleet;
+use target_host::{connect_initial_fleet, connect_ssh_entry, HostConnectSpec};
 use terminal::TerminalSession;
 
 #[derive(Debug)]
@@ -46,6 +50,26 @@ enum SelectorOutcome {
 struct AttachStyleSnapshot {
     status: Option<SessionStatusSnapshot>,
     window_styles: Option<SessionWindowStylesSnapshot>,
+}
+
+const HOST_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+enum HostConnectEvent {
+    Connected(HostEntry),
+    Failed { id: HostId, error: String },
+}
+
+struct PendingHostConnections {
+    receiver: UnboundedReceiver<HostConnectEvent>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for PendingHostConnections {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
 struct PendingSessionRefresh {
@@ -77,12 +101,14 @@ async fn run() -> Result<i32> {
     }
 
     let cli = Cli::parse();
-    let fleet = connect_fleet(&cli).await?;
+    let (mut fleet, host_specs) = connect_initial_fleet(&cli).await?;
+    let mut host_connections = start_host_connect_retries(host_specs);
     let layout = select_layout(cli.forced_layout());
     let mut ui_state = RetainedUiState::new(layout);
 
     loop {
-        let outcome = run_selector_once(&fleet, layout, &mut ui_state).await?;
+        let outcome =
+            run_selector_once(&mut fleet, &mut host_connections, layout, &mut ui_state).await?;
         let selected = match outcome {
             SelectorOutcome::Selected(selected) => selected,
             SelectorOutcome::Cancelled => return Ok(if cli.script { 1 } else { 0 }),
@@ -256,7 +282,8 @@ async fn should_reenter_after_attach(
 }
 
 async fn run_selector_once(
-    fleet: &HostFleet,
+    fleet: &mut HostFleet,
+    host_connections: &mut PendingHostConnections,
     layout: LayoutMode,
     ui_state: &mut RetainedUiState,
 ) -> Result<SelectorOutcome> {
@@ -278,6 +305,11 @@ async fn run_selector_once(
     ));
 
     loop {
+        if apply_finished_host_connects(fleet, &mut app, host_connections) {
+            last_session_refresh = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+        }
         if let Some(completion) =
             apply_finished_session_refresh(fleet, &mut app, &mut pending_session_refresh).await?
         {
@@ -334,6 +366,58 @@ async fn run_selector_once(
             }
         }
     }
+}
+
+fn start_host_connect_retries(specs: Vec<HostConnectSpec>) -> PendingHostConnections {
+    let (tx, receiver) = mpsc::unbounded_channel();
+    let tasks = specs
+        .into_iter()
+        .map(|spec| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                retry_host_connect(spec, tx).await;
+            })
+        })
+        .collect();
+    drop(tx);
+    PendingHostConnections { receiver, tasks }
+}
+
+async fn retry_host_connect(spec: HostConnectSpec, tx: UnboundedSender<HostConnectEvent>) {
+    loop {
+        match connect_ssh_entry(&spec.uri).await {
+            Ok(entry) => {
+                let _ = tx.send(HostConnectEvent::Connected(entry));
+                return;
+            }
+            Err(err) => {
+                let _ = tx.send(HostConnectEvent::Failed {
+                    id: spec.id.clone(),
+                    error: format!("{err:#}"),
+                });
+                sleep(HOST_CONNECT_RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
+fn apply_finished_host_connects(
+    fleet: &mut HostFleet,
+    app: &mut AppState,
+    connections: &mut PendingHostConnections,
+) -> bool {
+    let mut changed = false;
+    while let Ok(event) = connections.receiver.try_recv() {
+        match event {
+            HostConnectEvent::Connected(entry) => fleet.upsert_connected(entry),
+            HostConnectEvent::Failed { id, error } => fleet.mark_host_failed(&id, error),
+        }
+        changed = true;
+    }
+    if changed {
+        app.fleet = fleet.clone();
+    }
+    changed
 }
 
 fn start_session_refresh(fleet: &HostFleet, options: RefreshApplyOptions) -> PendingSessionRefresh {

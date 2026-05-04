@@ -316,9 +316,67 @@ impl HostEntry {
     }
 }
 
-/// Collection of one or more configured hosts. Always has at least one entry
-/// (localhost when no SSH URIs are specified). Multi-host mode is implicit:
-/// `is_multi() == true` iff `len() > 1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostConnectionStatus {
+    Connecting,
+    Connected,
+    Failed { error: String },
+}
+
+impl HostConnectionStatus {
+    pub(crate) fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct HostSlot {
+    pub(crate) id: HostId,
+    pub(crate) label: String,
+    pub(crate) alias: String,
+    pub(crate) ip_address: String,
+    pub(crate) status: HostConnectionStatus,
+}
+
+impl HostSlot {
+    pub(crate) fn connecting(id: HostId, label: String, alias: String) -> Self {
+        Self {
+            id,
+            label,
+            alias,
+            ip_address: "unknown".to_string(),
+            status: HostConnectionStatus::Connecting,
+        }
+    }
+
+    pub(crate) fn connected(entry: &HostEntry) -> Self {
+        Self {
+            id: entry.id.clone(),
+            label: entry.label.clone(),
+            alias: entry.alias.clone(),
+            ip_address: entry.ip_address.clone(),
+            status: HostConnectionStatus::Connected,
+        }
+    }
+
+    fn update_connected(&mut self, entry: &HostEntry) {
+        self.label = entry.label.clone();
+        self.alias = entry.alias.clone();
+        self.ip_address = entry.ip_address.clone();
+        self.status = HostConnectionStatus::Connected;
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct HostLegendItem {
+    pub(crate) color: Color,
+    pub(crate) label: String,
+    pub(crate) failed: bool,
+}
+
+/// Collection of one or more configured hosts. Always has at least one
+/// configured host (localhost when no SSH URIs are specified). Multi-host mode
+/// is implicit: `is_multi() == true` iff more than one host is configured.
 ///
 /// This is **not** `motlie_tmux::Fleet` (`libs/tmux/src/fleet.rs`). That type
 /// is a monitoring/automation registry — it owns a shared `OutputBus`,
@@ -330,20 +388,33 @@ impl HostEntry {
 /// §Internal data model for the full rationale.
 #[derive(Clone, Default)]
 pub(crate) struct HostFleet {
+    hosts: Vec<HostSlot>,
     pub(crate) entries: Vec<HostEntry>,
 }
 
 impl HostFleet {
     pub(crate) fn from_entries(entries: Vec<HostEntry>) -> Self {
-        Self { entries }
+        let hosts = entries.iter().map(HostSlot::connected).collect();
+        Self { hosts, entries }
+    }
+
+    pub(crate) fn from_configured_hosts(entries: Vec<HostEntry>, hosts: Vec<HostSlot>) -> Self {
+        let mut fleet = Self {
+            hosts,
+            entries: Vec::new(),
+        };
+        for entry in entries {
+            fleet.upsert_connected(entry);
+        }
+        fleet
     }
 
     pub(crate) fn is_multi(&self) -> bool {
-        self.entries.len() > 1
+        self.hosts.len() > 1
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.hosts.len()
     }
 
     pub(crate) fn entry(&self, id: &HostId) -> Option<&HostEntry> {
@@ -354,15 +425,41 @@ impl HostFleet {
         self.entries.first()
     }
 
+    #[cfg(test)]
+    pub(crate) fn host_slot(&self, id: &HostId) -> Option<&HostSlot> {
+        self.hosts.iter().find(|host| &host.id == id)
+    }
+
+    pub(crate) fn upsert_connected(&mut self, entry: HostEntry) {
+        match self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.id == entry.id)
+        {
+            Some(existing) => *existing = entry.clone(),
+            None => self.entries.push(entry.clone()),
+        }
+        match self.hosts.iter_mut().find(|host| host.id == entry.id) {
+            Some(host) => host.update_connected(&entry),
+            None => self.hosts.push(HostSlot::connected(&entry)),
+        }
+    }
+
+    pub(crate) fn mark_host_failed(&mut self, id: &HostId, error: String) {
+        if let Some(host) = self.hosts.iter_mut().find(|host| &host.id == id) {
+            host.status = HostConnectionStatus::Failed { error };
+        }
+    }
+
     /// Color assigned to the given host in multi-host rows and legends.
     /// Returns `None` for single-host mode or an unknown host id.
     pub(crate) fn host_color(&self, id: &HostId) -> Option<Color> {
         if !self.is_multi() {
             return None;
         }
-        self.entries
+        self.hosts
             .iter()
-            .position(|entry| &entry.id == id)
+            .position(|host| &host.id == id)
             .map(host_color_for_index)
     }
 
@@ -376,23 +473,27 @@ impl HostFleet {
     }
 
     /// Host-color legend shown in the multi-host top status bar.
-    pub(crate) fn host_color_legend(&self) -> Option<Vec<(Color, String)>> {
+    pub(crate) fn host_color_legend(&self) -> Option<Vec<HostLegendItem>> {
         if !self.is_multi() {
             return None;
         }
         Some(
-            self.entries
+            self.hosts
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| (host_color_for_index(index), entry.label.clone()))
+                .map(|(index, host)| HostLegendItem {
+                    color: host_color_for_index(index),
+                    label: host.label.clone(),
+                    failed: host.status.is_failed(),
+                })
                 .collect(),
         )
     }
 
     pub(crate) fn host_sort_index(&self, id: &HostId) -> usize {
-        self.entries
+        self.hosts
             .iter()
-            .position(|entry| entry.id == *id)
+            .position(|host| host.id == *id)
             .unwrap_or(usize::MAX)
     }
 }

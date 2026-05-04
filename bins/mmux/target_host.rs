@@ -5,7 +5,15 @@ use anyhow::{anyhow, Context, Result};
 use motlie_tmux::{HostHandle, SshConfig, SSH_DEFAULT_PORT};
 
 use crate::cli::Cli;
-use crate::model::{HostEntry, HostFleet, HostId};
+use crate::model::{HostEntry, HostFleet, HostId, HostSlot};
+
+#[derive(Debug, Clone)]
+pub(crate) struct HostConnectSpec {
+    pub(crate) id: HostId,
+    pub(crate) uri: String,
+    pub(crate) label: String,
+    pub(crate) alias: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IpAddressSource {
@@ -13,61 +21,68 @@ enum IpAddressSource {
     Alias { port: u16 },
 }
 
-/// Connect to all hosts named on the CLI. With zero URIs, returns a fleet
-/// containing only the local host. With one or more URIs, connects to each
-/// concurrently. A single-URI fleet stays in single-host UX; two or more
-/// URIs implicitly activate multi-host mode in the renderer.
-///
-/// Per-host connect failure aborts startup if no hosts succeed; otherwise
-/// the failures are surfaced via stderr but successful hosts proceed. (For
-/// v1 we keep startup strict: all-or-nothing for explicit URIs to avoid
-/// silently dropping hosts the operator named.)
+/// Build the selector's initial fleet. Localhost is connected immediately and
+/// every explicit SSH URI is registered as a configured host for background
+/// connection/retry.
 ///
 /// Duplicate URIs are rejected up-front. `HostId` is derived from the URI
 /// string; two entries with the same id would collapse `HostFleet::entry`
 /// lookups, selection-preservation keys, and `ActivityTracker` keys onto
 /// each other. Reject explicitly rather than silently degrade.
-pub(crate) async fn connect_fleet(cli: &Cli) -> Result<HostFleet> {
-    if cli.ssh_uris.is_empty() {
-        let handle = HostHandle::local();
-        let fallback_label = local_hostname();
-        let alias = handle.host_alias().to_string();
-        let entry = build_host_entry(
-            HostId::local(),
-            handle,
-            alias,
-            fallback_label,
-            IpAddressSource::Local,
-        )
-        .await;
-        return Ok(HostFleet::from_entries(vec![entry]));
+pub(crate) async fn connect_initial_fleet(cli: &Cli) -> Result<(HostFleet, Vec<HostConnectSpec>)> {
+    let specs = ssh_connect_specs(cli)?;
+    let local = connect_local_entry().await;
+    if specs.is_empty() {
+        return Ok((HostFleet::from_entries(vec![local]), Vec::new()));
     }
 
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for uri in &cli.ssh_uris {
-        if !seen.insert(uri.as_str()) {
-            return Err(anyhow!(
-                "duplicate SSH URI '{uri}' on the command line; each host must appear once"
-            ));
-        }
-    }
-
-    // Connect concurrently. try_join_all so a single bad URI fails fast and
-    // surfaces clearly rather than silently dropping hosts the operator
-    // named on the command line.
-    let futures = cli.ssh_uris.iter().map(|uri| async move {
-        connect_ssh_entry(uri)
-            .await
-            .with_context(|| format!("connect host '{uri}'"))
-    });
-    let entries = futures::future::try_join_all(futures).await?;
-    if entries.is_empty() {
-        return Err(anyhow!("no hosts configured"));
-    }
-    Ok(HostFleet::from_entries(entries))
+    let mut hosts = Vec::with_capacity(specs.len() + 1);
+    hosts.push(HostSlot::connected(&local));
+    hosts.extend(
+        specs.iter().map(|spec| {
+            HostSlot::connecting(spec.id.clone(), spec.label.clone(), spec.alias.clone())
+        }),
+    );
+    Ok((HostFleet::from_configured_hosts(vec![local], hosts), specs))
 }
 
-async fn connect_ssh_entry(uri: &str) -> Result<HostEntry> {
+fn ssh_connect_specs(cli: &Cli) -> Result<Vec<HostConnectSpec>> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    cli.ssh_uris
+        .iter()
+        .map(|uri| {
+            if !seen.insert(uri.as_str()) {
+                return Err(anyhow!(
+                    "duplicate SSH URI '{uri}' on the command line; each host must appear once"
+                ));
+            }
+            let config = SshConfig::parse(uri).context("parse ssh target")?;
+            let alias = config.host().to_string();
+            Ok(HostConnectSpec {
+                id: HostId::from_ssh_uri(uri),
+                uri: uri.clone(),
+                label: alias.clone(),
+                alias,
+            })
+        })
+        .collect()
+}
+
+pub(crate) async fn connect_local_entry() -> HostEntry {
+    let handle = HostHandle::local();
+    let fallback_label = local_hostname();
+    let alias = handle.host_alias().to_string();
+    build_host_entry(
+        HostId::local(),
+        handle,
+        alias,
+        fallback_label,
+        IpAddressSource::Local,
+    )
+    .await
+}
+
+pub(crate) async fn connect_ssh_entry(uri: &str) -> Result<HostEntry> {
     let config = SshConfig::parse(uri).context("parse ssh target")?;
     let port = config.port();
     let handle = config.connect().await.context("connect ssh target")?;
