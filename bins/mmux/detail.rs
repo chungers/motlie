@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use motlie_tmux::{
-    CaptureNormalizeMode, CaptureOptions, CaptureResult, HostHandle, PaneAddress, ScrollbackQuery,
-    has_visible_text,
+    has_visible_text, CaptureNormalizeMode, CaptureOptions, CaptureResult, HostHandle, PaneAddress,
+    ScrollbackQuery,
 };
 
 use crate::consts::DEFAULT_DETAIL_LINES;

@@ -1,7 +1,7 @@
 use std::io;
 
 use anyhow::{Context, Result};
-use crossterm::cursor::{Hide, Show};
+use crossterm::cursor::{Hide, SetCursorStyle, Show};
 use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
@@ -29,6 +29,7 @@ impl TerminalSession {
             stderr,
             PushKeyboardEnhancementFlags(keyboard_enhancement_flags()),
             EnterAlternateScreen,
+            SetCursorStyle::BlinkingBar,
             Hide
         )
         .context("enter alternate screen")?;
@@ -53,14 +54,20 @@ impl TerminalSession {
                 execute!(
                     self.terminal.backend_mut(),
                     PopKeyboardEnhancementFlags,
+                    SetCursorStyle::DefaultUserShape,
                     Show,
                     LeaveAlternateScreen
                 )
                 .context("leave alternate screen")?;
                 self.keyboard_enhanced = false;
             } else {
-                execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen)
-                    .context("leave alternate screen")?;
+                execute!(
+                    self.terminal.backend_mut(),
+                    SetCursorStyle::DefaultUserShape,
+                    Show,
+                    LeaveAlternateScreen
+                )
+                .context("leave alternate screen")?;
             }
             self.active = false;
         }
@@ -76,11 +83,17 @@ impl Drop for TerminalSession {
                 let _ = execute!(
                     self.terminal.backend_mut(),
                     PopKeyboardEnhancementFlags,
+                    SetCursorStyle::DefaultUserShape,
                     Show,
                     LeaveAlternateScreen
                 );
             } else {
-                let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+                let _ = execute!(
+                    self.terminal.backend_mut(),
+                    SetCursorStyle::DefaultUserShape,
+                    Show,
+                    LeaveAlternateScreen
+                );
             }
         }
     }
