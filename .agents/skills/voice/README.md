@@ -73,6 +73,7 @@ What the human should install:
 - TTS default: `piper`
 - TTS override: if the human says `say with qwen3`, use `qwen3cpp`
 - TTS semantics: `piper` and `qwen3cpp` are buffered TTS backends; they synthesize full audio first and then the runtime writes that buffered audio to file or playback sinks
+- runtime contract rule: after the human or CLI selects a curated model, `voice-agent` derives buffered-vs-streaming TTS and batch-vs-streaming ASR behavior from the curated capability metadata instead of backend-name heuristics
 - ASR default: `whisper`
 - ASR semantics: `whisper` is batch/final-only, while `sherpa` and `moonshine` are streaming ASR backends
 - ASR override: if the human says `listen with sherpa` or `listen with moonshine`, use that backend

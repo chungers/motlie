@@ -4,6 +4,8 @@
 |---|---|---|
 | 2026-04-29 | @codex-tts | Initial plan for tightening speech model contracts and curated metadata across `libs/model` and `libs/models`. |
 | 2026-04-29 | @codex-tts | Implementation update: completed the in-repo contract/catalog migration slice, validated buffered TTS backends, and recorded the external voice-skill follow-on explicitly. |
+| 2026-04-30 | @codex-tts | Imported the voice-agent skill layer onto `feature/models`, migrated `bins/voice-agent` and the playbook to capability-driven buffered/batch/streaming composition, and removed the stale compatibility helper constructors that still implied the old semantics. |
+| 2026-05-02 | @codex-tts | Review follow-up: completed typed delivery/generation metadata wiring in `voice-agent`, removed descriptor-equality routing, and flattened redundant handle indirection. |
 
 # Plan: Voice Contracts
 
@@ -26,9 +28,11 @@ This PLAN focuses on brownfield contract correction and migration. It covers the
 
 - [x] 2.1 Extend `libs/model` capability or metadata structures to represent transcription execution mode explicitly:
   `Batch`, `StreamingFinalOnly`, `StreamingWithPartials`.
+  2026-05-02 @codex-tts -- Landed as typed `TranscriptDelivery` metadata on `CapabilityDescriptor`, with `Capabilities::transcription_delivery_for()` consumed by `voice-agent`.
   DESIGN reference: `1. Keep ASR type split, but tighten metadata`, `3. Add explicit speech execution metadata`
 - [x] 2.2 Extend `libs/model` capability or metadata structures to represent speech execution mode explicitly:
   `Buffered`, `Streaming`.
+  2026-05-02 @codex-tts -- Landed as typed `SpeechGeneration` metadata on `CapabilityDescriptor`, with `Capabilities::speech_generation_for()` consumed by `voice-agent`.
   DESIGN reference: `2. Split TTS into buffered vs streaming contracts`, `3. Add explicit speech execution metadata`
 - [x] 2.3 Encode voice-cloning support in structured metadata rather than requiring caller knowledge of backend identity.
   DESIGN reference: `Goals`, `3. Add explicit speech execution metadata`
@@ -82,8 +86,9 @@ This PLAN focuses on brownfield contract correction and migration. It covers the
   2026-04-29 @codex-tts -- Not started in this repo slice.
   batch ASR, streaming ASR, buffered TTS, and streaming TTS if available.
   DESIGN reference: `API Ergonomics Examples`
-- [ ] 6.2 Update voice-skill selection and composition logic to choose behavior from typed capabilities and execution metadata rather than backend name switches.
-  2026-04-29 @codex-tts -- External follow-on. There are no voice-skill files in this repo worktree.
+- [x] 6.2 Update voice-skill selection and composition logic to choose behavior from typed capabilities and execution metadata rather than backend name switches.
+  2026-04-30 @codex-tts -- `feature/models` now carries the imported voice skill tree. `bins/voice-agent` resolves the selected curated model, derives buffered-vs-streaming / batch-vs-streaming behavior from capability metadata, and the voice playbook documents the same execution semantics explicitly.
+  2026-05-02 @codex-tts -- Review follow-up replaced descriptor-equality routing with typed delivery/generation metadata and kept adapter dispatch explicit instead of mixing metadata lookup with runtime handle selection.
   DESIGN reference: `5. Treat composition as a first-class design goal`, `Expected Impact on Voice Skills`
 - [ ] 6.3 Add example or integration coverage for:
   2026-04-29 @codex-tts -- Deferred with Phase 6.
@@ -100,8 +105,8 @@ This PLAN focuses on brownfield contract correction and migration. It covers the
 - [ ] 7.2 Update `libs/models/docs/DESIGN_ASR.md`, `PLAN_ASR.md`, `DESIGN_TTS.md`, and `PLAN_TTS.md` if their current language assumes streaming where the implementation is actually buffered or batch.
   2026-04-29 @codex-tts -- Not started; those docs were not part of this initial repo slice.
   DESIGN reference: `Migration Strategy`
-- [ ] 7.3 Remove obsolete or misleading helper constructors such as `transcription_stream_only` / `speech_stream_only` if they no longer describe the real contract surface.
-  2026-04-29 @codex-tts -- Deferred intentionally; compatibility aliases remain during the brownfield migration.
+- [x] 7.3 Remove obsolete or misleading helper constructors such as `transcription_stream_only` / `speech_stream_only` if they no longer describe the real contract surface.
+  2026-04-30 @codex-tts -- Removed the stale aliases from `libs/model` once the voice-agent and catalog callers had moved to explicit execution-mode descriptors.
   DESIGN reference: `Migration Strategy / Phase 5`
 
 ## Validation Matrix
@@ -113,8 +118,8 @@ This PLAN focuses on brownfield contract correction and migration. It covers the
 - [ ] V4 Streaming ASR examples compile and run against Moonshine and Sherpa with the streaming contract.
 - [ ] V5 Buffered TTS examples compile and run against Piper and qwen3-tts.cpp.
   2026-04-29 @codex-tts -- Backend crates and typed wrappers are validated, but example-binary execution is still open.
-- [ ] V6 Voice-skill selection logic correctly distinguishes buffered vs streaming TTS and batch vs streaming ASR.
-  2026-04-29 @codex-tts -- External follow-on; no voice-skill files exist in this repo worktree.
+- [x] V6 Voice-skill selection logic correctly distinguishes buffered vs streaming TTS and batch vs streaming ASR.
+  2026-04-30 @codex-tts -- Validated on the imported voice-agent runtime by starting models through curated selectors and letting capability metadata choose batch vs streaming ASR and buffered TTS behavior.
 - [x] V7 Curated metadata tests fail closed when a bundle advertises a capability that does not match its typed backend contract.
 
 ## Notes
