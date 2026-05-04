@@ -897,7 +897,7 @@ pub(crate) struct HostSlot {
 
 pub(crate) struct HostFleet {
     hosts: Vec<HostSlot>,             // configured hosts; stable display/order
-    pub(crate) entries: Vec<HostEntry>,
+    pub(crate) entries: Vec<HostEntry>, // connected-host routing cache
 }
 
 impl HostFleet {
@@ -924,6 +924,12 @@ pub(crate) struct SessionListState {
     pub(crate) sort_mode: SessionSortMode,
 }
 ```
+
+`HostFleet::hosts` and `HostFleet::entries` MUST be kept in sync. `entries`
+may contain only connected hosts that have matching `hosts` slots, and connected
+`hosts` slots must have matching `entries` routes. Only
+`from_configured_hosts`, `upsert_connected`, and `mark_host_failed` mutate both
+sides of this invariant.
 
 `target_host.rs` owns host identity probing. For SSH targets, it parses the URI
 hostname into `HostEntry.alias`, connects the `HostHandle`, then asks tmux for
