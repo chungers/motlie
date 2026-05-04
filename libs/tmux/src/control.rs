@@ -707,6 +707,82 @@ pub(crate) async fn list_session_env_vars_with_prefix(
     Ok(vars)
 }
 
+async fn set_tmux_option_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    option_name: &str,
+    value: &str,
+) -> Result<()> {
+    set_raw_tmux_option_with_prefix(transport, prefix, target, option_name, &shell_escape(value))
+        .await
+}
+
+async fn set_raw_tmux_option_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    option_name: &str,
+    value: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -t {} {} {}",
+        prefix,
+        shell_escape(target),
+        option_name,
+        value
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+async fn unset_tmux_option_with_prefix(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    option_name: &str,
+) -> Result<()> {
+    let cmd = format!(
+        "{} set-option -u -t {} {}",
+        prefix,
+        shell_escape(target),
+        option_name
+    );
+    transport.exec(&cmd).await?;
+    Ok(())
+}
+
+async fn read_local_tmux_option_with_prefix<T>(
+    transport: &TransportKind,
+    prefix: &str,
+    target: &str,
+    expected_option_name: &str,
+    parse_value: impl FnOnce(String) -> Result<T>,
+) -> Result<Option<T>> {
+    let cmd = format!(
+        "{} show-option -q -t {} {}",
+        prefix,
+        shell_escape(target),
+        expected_option_name
+    );
+    let output = transport.exec(&cmd).await?;
+    let line = output.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let Some((option_name, value)) = split_once_whitespace(line) else {
+        return Err(Error::Parse(format!(
+            "malformed {expected_option_name} option without value: {line}"
+        )));
+    };
+    if option_name != expected_option_name {
+        return Err(Error::Parse(format!(
+            "show-option returned {option_name} while reading {expected_option_name}"
+        )));
+    }
+    parse_value(parse_tmux_option_value(value)?).map(Some)
+}
+
 /// Set session-local tmux status bar style.
 pub(crate) async fn set_session_status_style_with_prefix(
     transport: &TransportKind,
@@ -714,14 +790,7 @@ pub(crate) async fn set_session_status_style_with_prefix(
     target: &str,
     style: &StatusStyle,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -t {} status-style {}",
-        prefix,
-        shell_escape(target),
-        shell_escape(style.as_str())
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+    set_tmux_option_with_prefix(transport, prefix, target, "status-style", style.as_str()).await
 }
 
 /// Unset session-local tmux status bar style so inherited style applies.
@@ -730,13 +799,7 @@ pub(crate) async fn unset_session_status_style_with_prefix(
     prefix: &str,
     target: &str,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -u -t {} status-style",
-        prefix,
-        shell_escape(target),
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+    unset_tmux_option_with_prefix(transport, prefix, target, "status-style").await
 }
 
 /// Read only the session-local status-style override.
@@ -748,28 +811,14 @@ pub(crate) async fn read_local_session_status_style_with_prefix(
     prefix: &str,
     target: &str,
 ) -> Result<Option<StatusStyle>> {
-    let cmd = format!(
-        "{} show-option -q -t {} status-style",
+    read_local_tmux_option_with_prefix(
+        transport,
         prefix,
-        shell_escape(target)
-    );
-    let output = transport.exec(&cmd).await?;
-    let line = output.trim();
-    if line.is_empty() {
-        return Ok(None);
-    }
-    let Some((option_name, value)) = split_once_whitespace(line) else {
-        return Err(Error::Parse(format!(
-            "malformed status-style option without value: {line}"
-        )));
-    };
-    if option_name != "status-style" {
-        return Err(Error::Parse(format!(
-            "show-option returned {option_name} while reading status-style"
-        )));
-    }
-    let value = parse_tmux_option_value(value)?;
-    StatusStyle::from_tmux_value(value).map(Some)
+        target,
+        "status-style",
+        StatusStyle::from_tmux_value,
+    )
+    .await
 }
 
 /// Set session-local tmux status-left format.
@@ -779,14 +828,14 @@ pub(crate) async fn set_session_status_left_with_prefix(
     target: &str,
     status_left: &StatusLeft,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -t {} status-left {}",
+    set_tmux_option_with_prefix(
+        transport,
         prefix,
-        shell_escape(target),
-        shell_escape(status_left.as_str())
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+        target,
+        "status-left",
+        status_left.as_str(),
+    )
+    .await
 }
 
 /// Unset session-local tmux status-left format so inherited format applies.
@@ -795,13 +844,7 @@ pub(crate) async fn unset_session_status_left_with_prefix(
     prefix: &str,
     target: &str,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -u -t {} status-left",
-        prefix,
-        shell_escape(target),
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+    unset_tmux_option_with_prefix(transport, prefix, target, "status-left").await
 }
 
 /// Read only the session-local status-left override.
@@ -810,28 +853,14 @@ pub(crate) async fn read_local_session_status_left_with_prefix(
     prefix: &str,
     target: &str,
 ) -> Result<Option<StatusLeft>> {
-    let cmd = format!(
-        "{} show-option -q -t {} status-left",
+    read_local_tmux_option_with_prefix(
+        transport,
         prefix,
-        shell_escape(target)
-    );
-    let output = transport.exec(&cmd).await?;
-    let line = output.trim();
-    if line.is_empty() {
-        return Ok(None);
-    }
-    let Some((option_name, value)) = split_once_whitespace(line) else {
-        return Err(Error::Parse(format!(
-            "malformed status-left option without value: {line}"
-        )));
-    };
-    if option_name != "status-left" {
-        return Err(Error::Parse(format!(
-            "show-option returned {option_name} while reading status-left"
-        )));
-    }
-    let value = parse_tmux_option_value(value)?;
-    StatusLeft::from_tmux_value(value).map(Some)
+        target,
+        "status-left",
+        StatusLeft::from_tmux_value,
+    )
+    .await
 }
 
 /// Set session-local tmux status-left-length.
@@ -841,14 +870,14 @@ pub(crate) async fn set_session_status_left_length_with_prefix(
     target: &str,
     length: StatusLeftLength,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -t {} status-left-length {}",
+    set_raw_tmux_option_with_prefix(
+        transport,
         prefix,
-        shell_escape(target),
-        length.as_u32()
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+        target,
+        "status-left-length",
+        &length.as_u32().to_string(),
+    )
+    .await
 }
 
 /// Unset session-local tmux status-left-length so inherited length applies.
@@ -857,13 +886,7 @@ pub(crate) async fn unset_session_status_left_length_with_prefix(
     prefix: &str,
     target: &str,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -u -t {} status-left-length",
-        prefix,
-        shell_escape(target),
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+    unset_tmux_option_with_prefix(transport, prefix, target, "status-left-length").await
 }
 
 /// Read only the session-local status-left-length override.
@@ -872,33 +895,15 @@ pub(crate) async fn read_local_session_status_left_length_with_prefix(
     prefix: &str,
     target: &str,
 ) -> Result<Option<StatusLeftLength>> {
-    let cmd = format!(
-        "{} show-option -q -t {} status-left-length",
-        prefix,
-        shell_escape(target)
-    );
-    let output = transport.exec(&cmd).await?;
-    let line = output.trim();
-    if line.is_empty() {
-        return Ok(None);
-    }
-    let Some((option_name, value)) = split_once_whitespace(line) else {
-        return Err(Error::Parse(format!(
-            "malformed status-left-length option without value: {line}"
-        )));
-    };
-    if option_name != "status-left-length" {
-        return Err(Error::Parse(format!(
-            "show-option returned {option_name} while reading status-left-length"
-        )));
-    }
-    let value = parse_tmux_option_value(value)?;
-    let length = value.parse::<u32>().map_err(|err| {
-        Error::Parse(format!(
-            "failed to parse status-left-length {value:?}: {err}"
-        ))
-    })?;
-    StatusLeftLength::new(length).map(Some)
+    read_local_tmux_option_with_prefix(transport, prefix, target, "status-left-length", |value| {
+        let length = value.parse::<u32>().map_err(|err| {
+            Error::Parse(format!(
+                "failed to parse status-left-length {value:?}: {err}"
+            ))
+        })?;
+        StatusLeftLength::new(length)
+    })
+    .await
 }
 
 /// Session window ids for applying window-local options across a session.
@@ -985,15 +990,7 @@ async fn set_window_style_option_with_prefix(
     option_name: &str,
     style: &WindowStyle,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -t {} {} {}",
-        prefix,
-        shell_escape(target),
-        option_name,
-        shell_escape(style.as_str())
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+    set_tmux_option_with_prefix(transport, prefix, target, option_name, style.as_str()).await
 }
 
 async fn unset_window_style_option_with_prefix(
@@ -1002,14 +999,7 @@ async fn unset_window_style_option_with_prefix(
     target: &str,
     option_name: &str,
 ) -> Result<()> {
-    let cmd = format!(
-        "{} set-option -u -t {} {}",
-        prefix,
-        shell_escape(target),
-        option_name
-    );
-    transport.exec(&cmd).await?;
-    Ok(())
+    unset_tmux_option_with_prefix(transport, prefix, target, option_name).await
 }
 
 async fn read_local_window_style_option_with_prefix(
@@ -1018,29 +1008,14 @@ async fn read_local_window_style_option_with_prefix(
     target: &str,
     expected_option_name: &str,
 ) -> Result<Option<WindowStyle>> {
-    let cmd = format!(
-        "{} show-option -q -t {} {}",
+    read_local_tmux_option_with_prefix(
+        transport,
         prefix,
-        shell_escape(target),
-        expected_option_name
-    );
-    let output = transport.exec(&cmd).await?;
-    let line = output.trim();
-    if line.is_empty() {
-        return Ok(None);
-    }
-    let Some((option_name, value)) = split_once_whitespace(line) else {
-        return Err(Error::Parse(format!(
-            "malformed {expected_option_name} option without value: {line}"
-        )));
-    };
-    if option_name != expected_option_name {
-        return Err(Error::Parse(format!(
-            "show-option returned {option_name} while reading {expected_option_name}"
-        )));
-    }
-    let value = parse_tmux_option_value(value)?;
-    WindowStyle::from_tmux_value(value).map(Some)
+        target,
+        expected_option_name,
+        WindowStyle::from_tmux_value,
+    )
+    .await
 }
 
 fn parse_window_id(line: &str) -> Result<String> {

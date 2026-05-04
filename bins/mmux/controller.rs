@@ -1,6 +1,6 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -25,6 +25,7 @@ const TAG_PREFIX: &str = "mmux";
 const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
 const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
+const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
 
 /// Fan out `list_sessions()` across all configured hosts in parallel, merge
 /// into a flat `Vec<SessionRow>`, run the activity-tracker over the
@@ -683,14 +684,7 @@ async fn handle_modal_key(
                 input: input.clone(),
             },
             KeyCode::Enter => ModalAction::Close,
-            KeyCode::Backspace => {
-                input.pop();
-                ModalAction::None
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.push(c);
-                ModalAction::None
-            }
+            _ if edit_focused_text_field(&key, true, input) => ModalAction::None,
             _ => ModalAction::None,
         },
         Some(ModalState::SendKeys { session, ui }) => {
@@ -787,11 +781,11 @@ fn handle_send_keys_modal_key(
     match key.code {
         KeyCode::Esc => ModalAction::Close,
         KeyCode::Tab | KeyCode::Char('\t') => {
-            ui.focus = next_send_keys_focus(ui.focus);
+            ui.focus = next_focus(ui.focus, &SEND_KEYS_FOCUS_ORDER);
             ModalAction::None
         }
         KeyCode::BackTab => {
-            ui.focus = previous_send_keys_focus(ui.focus);
+            ui.focus = previous_focus(ui.focus, &SEND_KEYS_FOCUS_ORDER);
             ModalAction::None
         }
         KeyCode::Left => {
@@ -802,70 +796,44 @@ fn handle_send_keys_modal_key(
             ui.focus = SendKeysFocus::Ok;
             ModalAction::None
         }
-        KeyCode::Enter
-            if key.modifiers.contains(KeyModifiers::CONTROL) && ui.focus == SendKeysFocus::Ok =>
-        {
-            ModalAction::SendKeys {
-                session,
-                input: ui.input.clone(),
-                mode: SendKeysSubmitMode::ThenEnterAfterDelay,
-            }
+        KeyCode::Enter => {
+            submit_send_keys_modal(key.modifiers.contains(KeyModifiers::CONTROL), session, ui)
         }
-        KeyCode::Enter
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && ui.focus == SendKeysFocus::Input
-                && !ui.input.is_empty() =>
-        {
-            ModalAction::SendKeys {
-                session,
-                input: ui.input.clone(),
-                mode: SendKeysSubmitMode::ThenEnterAfterDelay,
-            }
-        }
-        KeyCode::Enter if ui.focus == SendKeysFocus::Ok => ModalAction::SendKeys {
-            session,
-            input: ui.input.clone(),
-            mode: SendKeysSubmitMode::Exact,
-        },
-        KeyCode::Enter if ui.focus == SendKeysFocus::Input && !ui.input.is_empty() => {
-            ModalAction::SendKeys {
-                session,
-                input: ui.input.clone(),
-                mode: SendKeysSubmitMode::Exact,
-            }
-        }
-        KeyCode::Enter if ui.focus == SendKeysFocus::Cancel => ModalAction::Close,
-        KeyCode::Enter => ModalAction::None,
-        KeyCode::Backspace if ui.focus == SendKeysFocus::Input => {
-            ui.input.pop();
-            ModalAction::None
-        }
-        KeyCode::Char(c)
-            if ui.focus == SendKeysFocus::Input
-                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            ui.input.push(c);
+        _ if edit_focused_text_field(&key, ui.focus == SendKeysFocus::Input, &mut ui.input) => {
             ModalAction::None
         }
         _ => ModalAction::None,
     }
 }
 
-fn next_send_keys_focus(focus: SendKeysFocus) -> SendKeysFocus {
-    match focus {
-        SendKeysFocus::Input => SendKeysFocus::Ok,
-        SendKeysFocus::Ok => SendKeysFocus::Cancel,
-        SendKeysFocus::Cancel => SendKeysFocus::Input,
+fn submit_send_keys_modal(
+    with_delayed_enter: bool,
+    session: SelectedSession,
+    ui: &SendKeysModalUi,
+) -> ModalAction {
+    if ui.focus == SendKeysFocus::Cancel {
+        return ModalAction::Close;
+    }
+    if ui.focus != SendKeysFocus::Ok && !(ui.focus == SendKeysFocus::Input && !ui.input.is_empty())
+    {
+        return ModalAction::None;
+    }
+    ModalAction::SendKeys {
+        session,
+        input: ui.input.clone(),
+        mode: if with_delayed_enter {
+            SendKeysSubmitMode::ThenEnterAfterDelay
+        } else {
+            SendKeysSubmitMode::Exact
+        },
     }
 }
 
-fn previous_send_keys_focus(focus: SendKeysFocus) -> SendKeysFocus {
-    match focus {
-        SendKeysFocus::Input => SendKeysFocus::Cancel,
-        SendKeysFocus::Ok => SendKeysFocus::Input,
-        SendKeysFocus::Cancel => SendKeysFocus::Ok,
-    }
-}
+const SEND_KEYS_FOCUS_ORDER: [SendKeysFocus; 3] = [
+    SendKeysFocus::Input,
+    SendKeysFocus::Ok,
+    SendKeysFocus::Cancel,
+];
 
 fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> ModalAction {
     let multi_host = ui.hosts.len() > 1;
@@ -942,18 +910,6 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             host_id: ui.selected_host().map(|host| host.id.clone()),
             env_rows: ui.env_rows.clone(),
         },
-        KeyCode::Backspace if ui.focus == NewSessionFocus::Name => {
-            ui.input.pop();
-            ModalAction::None
-        }
-        KeyCode::Backspace if ui.focus == NewSessionFocus::EnvKey => {
-            ui.env_key_input.pop();
-            ModalAction::None
-        }
-        KeyCode::Backspace if ui.focus == NewSessionFocus::EnvValue => {
-            ui.env_value_input.pop();
-            ModalAction::None
-        }
         KeyCode::Char('x') if matches!(ui.focus, NewSessionFocus::EnvRow(_)) => {
             let NewSessionFocus::EnvRow(index) = ui.focus else {
                 return ModalAction::None;
@@ -971,27 +927,7 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             }
             ModalAction::None
         }
-        KeyCode::Char(c)
-            if ui.focus == NewSessionFocus::Name
-                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            ui.input.push(c);
-            ModalAction::None
-        }
-        KeyCode::Char(c)
-            if ui.focus == NewSessionFocus::EnvKey
-                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            ui.env_key_input.push(c);
-            ModalAction::None
-        }
-        KeyCode::Char(c)
-            if ui.focus == NewSessionFocus::EnvValue
-                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            ui.env_value_input.push(c);
-            ModalAction::None
-        }
+        _ if edit_new_session_text_field(&key, ui) => ModalAction::None,
         _ => ModalAction::None,
     }
 }
@@ -1004,22 +940,58 @@ fn set_new_session_focus(ui: &mut NewSessionModalUi, focus: NewSessionFocus) {
     };
 }
 
+fn edit_new_session_text_field(key: &KeyEvent, ui: &mut NewSessionModalUi) -> bool {
+    match ui.focus {
+        NewSessionFocus::Name => edit_text_field(key, &mut ui.input),
+        NewSessionFocus::EnvKey => edit_text_field(key, &mut ui.env_key_input),
+        NewSessionFocus::EnvValue => edit_text_field(key, &mut ui.env_value_input),
+        _ => false,
+    }
+}
+
+fn edit_focused_text_field(key: &KeyEvent, focused: bool, input: &mut String) -> bool {
+    focused && edit_text_field(key, input)
+}
+
+fn edit_text_field(key: &KeyEvent, input: &mut String) -> bool {
+    match key.code {
+        KeyCode::Backspace => {
+            input.pop();
+            true
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            input.push(c);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn next_focus<T: Copy + Eq>(focus: T, order: &[T]) -> T {
+    cycle_focus(focus, order, 1)
+}
+
+fn previous_focus<T: Copy + Eq>(focus: T, order: &[T]) -> T {
+    cycle_focus(focus, order, order.len().saturating_sub(1))
+}
+
+fn cycle_focus<T: Copy + Eq>(focus: T, order: &[T], offset: usize) -> T {
+    if order.is_empty() {
+        return focus;
+    }
+    let Some(index) = order.iter().position(|candidate| *candidate == focus) else {
+        return focus;
+    };
+    order[(index + offset) % order.len()]
+}
+
 fn next_new_session_focus(
     focus: NewSessionFocus,
     multi_host: bool,
     env_row_count: usize,
 ) -> NewSessionFocus {
-    match focus {
-        NewSessionFocus::Host => NewSessionFocus::Name,
-        NewSessionFocus::Name if env_row_count > 0 => NewSessionFocus::EnvRow(0),
-        NewSessionFocus::Name => NewSessionFocus::EnvKey,
-        NewSessionFocus::EnvRow(_) => NewSessionFocus::EnvKey,
-        NewSessionFocus::EnvKey => NewSessionFocus::EnvValue,
-        NewSessionFocus::EnvValue => NewSessionFocus::Ok,
-        NewSessionFocus::Ok => NewSessionFocus::Cancel,
-        NewSessionFocus::Cancel if multi_host => NewSessionFocus::Host,
-        NewSessionFocus::Cancel => NewSessionFocus::Name,
-    }
+    let order = new_session_focus_order(multi_host, env_row_count);
+    next_focus(normalized_new_session_focus(focus), &order)
 }
 
 fn previous_new_session_focus(
@@ -1027,16 +999,37 @@ fn previous_new_session_focus(
     multi_host: bool,
     env_row_count: usize,
 ) -> NewSessionFocus {
+    let order = new_session_focus_order(multi_host, env_row_count);
+    let previous = previous_focus(normalized_new_session_focus(focus), &order);
+    if matches!(previous, NewSessionFocus::EnvRow(_)) {
+        NewSessionFocus::EnvRow(env_row_count.saturating_sub(1))
+    } else {
+        previous
+    }
+}
+
+fn new_session_focus_order(multi_host: bool, env_row_count: usize) -> Vec<NewSessionFocus> {
+    let mut order = Vec::with_capacity(7);
+    if multi_host {
+        order.push(NewSessionFocus::Host);
+    }
+    order.push(NewSessionFocus::Name);
+    if env_row_count > 0 {
+        order.push(NewSessionFocus::EnvRow(0));
+    }
+    order.extend([
+        NewSessionFocus::EnvKey,
+        NewSessionFocus::EnvValue,
+        NewSessionFocus::Ok,
+        NewSessionFocus::Cancel,
+    ]);
+    order
+}
+
+fn normalized_new_session_focus(focus: NewSessionFocus) -> NewSessionFocus {
     match focus {
-        NewSessionFocus::Host => NewSessionFocus::Cancel,
-        NewSessionFocus::Name if multi_host => NewSessionFocus::Host,
-        NewSessionFocus::Name => NewSessionFocus::Cancel,
-        NewSessionFocus::EnvRow(_) => NewSessionFocus::Name,
-        NewSessionFocus::EnvKey if env_row_count > 0 => NewSessionFocus::EnvRow(env_row_count - 1),
-        NewSessionFocus::EnvKey => NewSessionFocus::Name,
-        NewSessionFocus::EnvValue => NewSessionFocus::EnvKey,
-        NewSessionFocus::Ok => NewSessionFocus::EnvValue,
-        NewSessionFocus::Cancel => NewSessionFocus::Ok,
+        NewSessionFocus::EnvRow(_) => NewSessionFocus::EnvRow(0),
+        _ => focus,
     }
 }
 
@@ -1190,27 +1183,9 @@ fn handle_session_key_values_edit(
     value_input: &mut String,
     focus: SessionKeyValueFocus,
 ) -> bool {
-    match key.code {
-        KeyCode::Backspace => {
-            match focus {
-                SessionKeyValueFocus::Key => {
-                    key_input.pop();
-                }
-                SessionKeyValueFocus::Value => {
-                    value_input.pop();
-                }
-                _ => {}
-            }
-            true
-        }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            match focus {
-                SessionKeyValueFocus::Key => key_input.push(c),
-                SessionKeyValueFocus::Value => value_input.push(c),
-                _ => {}
-            }
-            true
-        }
+    match focus {
+        SessionKeyValueFocus::Key => edit_text_field(key, key_input),
+        SessionKeyValueFocus::Value => edit_text_field(key, value_input),
         _ => false,
     }
 }
@@ -1218,22 +1193,23 @@ fn handle_session_key_values_edit(
 fn next_session_key_values_focus(focus: SessionKeyValueFocus) -> SessionKeyValueFocus {
     match focus {
         SessionKeyValueFocus::Row(_) => SessionKeyValueFocus::Key,
-        SessionKeyValueFocus::Key => SessionKeyValueFocus::Value,
-        SessionKeyValueFocus::Value => SessionKeyValueFocus::Ok,
-        SessionKeyValueFocus::Ok => SessionKeyValueFocus::Cancel,
-        SessionKeyValueFocus::Cancel => SessionKeyValueFocus::Key,
+        _ => next_focus(focus, &SESSION_KEY_VALUES_FOCUS_ORDER),
     }
 }
 
 fn previous_session_key_values_focus(focus: SessionKeyValueFocus) -> SessionKeyValueFocus {
     match focus {
         SessionKeyValueFocus::Row(_) => SessionKeyValueFocus::Cancel,
-        SessionKeyValueFocus::Key => SessionKeyValueFocus::Cancel,
-        SessionKeyValueFocus::Value => SessionKeyValueFocus::Key,
-        SessionKeyValueFocus::Ok => SessionKeyValueFocus::Value,
-        SessionKeyValueFocus::Cancel => SessionKeyValueFocus::Ok,
+        _ => previous_focus(focus, &SESSION_KEY_VALUES_FOCUS_ORDER),
     }
 }
+
+const SESSION_KEY_VALUES_FOCUS_ORDER: [SessionKeyValueFocus; 4] = [
+    SessionKeyValueFocus::Key,
+    SessionKeyValueFocus::Value,
+    SessionKeyValueFocus::Ok,
+    SessionKeyValueFocus::Cancel,
+];
 
 async fn create_session_from_modal(
     fleet: &HostFleet,
@@ -1473,7 +1449,7 @@ async fn send_keys_from_modal(
                 }
             }
             if let Some(enter_keys) = enter_keys.as_ref() {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(SEND_KEYS_ENTER_DELAY).await;
                 if let Err(err) = target.send_keys(enter_keys).await {
                     app.status = StatusBanner::error(format!("send Enter failed: {err}"));
                     return Ok(true);

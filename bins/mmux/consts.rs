@@ -57,23 +57,10 @@ fn tmux_color(color: Color) -> Option<String> {
     match color {
         Color::Reset => None,
         Color::Black => Some("black".to_string()),
-        Color::Red => Some("red".to_string()),
-        Color::Green => Some("green".to_string()),
-        Color::Yellow => Some("yellow".to_string()),
-        Color::Blue => Some("blue".to_string()),
-        Color::Magenta => Some("magenta".to_string()),
-        Color::Cyan => Some("cyan".to_string()),
-        Color::Gray => Some("colour7".to_string()),
-        Color::DarkGray => Some("colour8".to_string()),
-        Color::LightRed => Some("brightred".to_string()),
-        Color::LightGreen => Some("brightgreen".to_string()),
-        Color::LightYellow => Some("brightyellow".to_string()),
-        Color::LightBlue => Some("brightblue".to_string()),
-        Color::LightMagenta => Some("brightmagenta".to_string()),
-        Color::LightCyan => Some("brightcyan".to_string()),
         Color::White => Some("white".to_string()),
         Color::Indexed(index) => Some(format!("colour{index}")),
         Color::Rgb(red, green, blue) => Some(format!("#{red:02x}{green:02x}{blue:02x}")),
+        _ => None,
     }
 }
 

@@ -47,12 +47,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
 }
 
 fn apply_app_base_style(frame: &mut Frame<'_>, area: Rect) {
-    if let Some(style) = app_base_style() {
-        frame.buffer_mut().set_style(area, style);
-    }
-}
-
-fn app_base_style() -> Option<Style> {
     let mut style = Style::default();
     let mut styled = false;
     if let Some(fg) = APP_BASE_FG {
@@ -63,7 +57,9 @@ fn app_base_style() -> Option<Style> {
         style = style.bg(bg);
         styled = true;
     }
-    styled.then_some(style)
+    if styled {
+        frame.buffer_mut().set_style(area, style);
+    }
 }
 
 fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
@@ -1315,10 +1311,6 @@ fn set_inline_text_cursor(frame: &mut Frame<'_>, area: Rect, value: &str) {
     frame.set_cursor_position(Position::new(area.x + offset, area.y));
 }
 
-fn set_single_line_cursor(frame: &mut Frame<'_>, input_inner: Rect, value: &str) {
-    set_inline_text_cursor(frame, input_inner, value);
-}
-
 fn set_wrapped_text_cursor(frame: &mut Frame<'_>, input_inner: Rect, value: &str) {
     if input_inner.width == 0 || input_inner.height == 0 {
         return;
@@ -1338,23 +1330,11 @@ fn wrapped_cursor_offset(input: &str, width: usize) -> (u16, u16) {
         row.saturating_add(wrapped_line_count(line, width))
     });
     let len = last.chars().count();
-    if len == 0 {
-        return (0, row);
-    }
-    if len < width {
-        return (len as u16, row);
-    }
-    if len % width == 0 {
-        (
-            (width - 1) as u16,
-            row.saturating_add((len / width - 1).min(u16::MAX as usize) as u16),
-        )
-    } else {
-        (
-            (len % width) as u16,
-            row.saturating_add((len / width).min(u16::MAX as usize) as u16),
-        )
-    }
+    let cursor_cell = len.saturating_sub(usize::from(len > 0 && len % width == 0));
+    (
+        (cursor_cell % width) as u16,
+        row.saturating_add((cursor_cell / width).min(u16::MAX as usize) as u16),
+    )
 }
 
 fn input_cell_text(value: &str, width: usize, focused: bool) -> String {
@@ -1464,7 +1444,7 @@ fn draw_labeled_text_field(
             input_inner,
         );
         if focused {
-            set_single_line_cursor(frame, input_inner, value);
+            set_inline_text_cursor(frame, input_inner, value);
         }
     }
 }
