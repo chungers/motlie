@@ -352,11 +352,11 @@ fn char_width(text: &str) -> usize {
 
 fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let height = area.height.saturating_sub(2) as usize;
+    let width = max(1, area.width.saturating_sub(2) as usize);
     app.detail.last_known_view_height = max(1, height);
     app.detail.scroll = app.detail.scroll.min(app.detail.max_scroll());
     let total = app.detail.lines.len();
-    let end = total.saturating_sub(app.detail.scroll);
-    let start = end.saturating_sub(height);
+    let (start, end) = detail_view_window(&app.detail.lines, app.detail.scroll, height, width);
     let visible = if start < end {
         app.detail.lines[start..end].join("\n")
     } else if app.session_list.rows.is_empty() {
@@ -393,6 +393,41 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             &mut scrollbar_state,
         );
     }
+}
+
+fn detail_view_window(
+    lines: &[String],
+    scroll_from_tail: usize,
+    height: usize,
+    width: usize,
+) -> (usize, usize) {
+    let end = lines.len().saturating_sub(scroll_from_tail);
+    if end == 0 {
+        return (0, 0);
+    }
+
+    let height = max(1, height);
+    let width = max(1, width);
+    let mut start = end;
+    let mut rows = 0;
+    while start > 0 {
+        let line_rows = wrapped_line_rows(&lines[start - 1], width);
+        if rows > 0 && rows + line_rows > height {
+            break;
+        }
+        start -= 1;
+        rows += line_rows;
+        if rows >= height {
+            break;
+        }
+    }
+    (start, end)
+}
+
+fn wrapped_line_rows(line: &str, width: usize) -> usize {
+    let width = max(1, width);
+    let visible_width = char_width(&strip_ansi(line));
+    max(1, visible_width.div_ceil(width))
 }
 
 pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
