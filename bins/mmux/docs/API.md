@@ -341,7 +341,7 @@ Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with `tab ↑/↓`, then `help`, `monitor`, `send`,
+the bottom status start with `tab ↑/↓`, then `help`, `monitor`, `prompt`,
 `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, and the
 mode-specific resize hint. Attach uses the `a` shortcut; command shortcut
 letters are rendered bold coral in command labels.
@@ -358,7 +358,7 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 `Session Name` field, and dispatches changed names through
 `HostHandle::session_by_id()` and `Target::rename()`.
 
-`s` opens `SendKeys` for the highlighted session from any pane focus. The modal
+`p` opens `SendKeys` for the highlighted session from any pane focus. The modal
 keeps focus explicit (`Input`, `Ok`, `Cancel`), renders a compact text field
 with `To: <session> on <host>`, wraps long input by growing the field height
 against a fixed input width, sends from either focused `Ok` or non-empty

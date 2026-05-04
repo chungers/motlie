@@ -225,8 +225,8 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   legend is the full host-name lookup for those row colors.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
-- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`,
-  `a`, `m`, `s`, `n`, `k`, `r`, `t`, `g`, `Ctrl-C`/`q`, `l`,
+- All command keys (`Up`/`Down`, `u`/`b`, `PgUp`/`PgDn`, `Home`/`End`,
+  `a`, `m`, `p`, `n`, `k`, `r`, `t`, `g`, `Ctrl-C`/`q`, `l`,
   `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
@@ -268,7 +268,7 @@ Main-view keys:
 
 | Key | List focused | Detail focused |
 |-----|--------------|----------------|
-| Up / Down | Move highlighted session | Scroll detail one line |
+| Up / Down, `u` / `b` | Move highlighted session | Scroll detail one line for Up / Down; `u` / `b` no-op |
 | PgUp / PgDn | Page session list | Page detail buffer |
 | Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
 | Enter | Refresh one-shot sample detail | No-op |
@@ -279,7 +279,7 @@ Main-view keys:
 | `Ctrl-Up` / `Ctrl-Down`, `Shift-Up` / `Shift-Down`, Alt Up / Down | Resize T/B split (portrait only) | Resize T/B split (portrait only) |
 | `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
 | `m` | Monitor highlighted session | Monitor highlighted session |
-| `s` | Open Send Keys modal | Open Send Keys modal |
+| `p` | Open Send Keys modal | Open Send Keys modal |
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
 | `r` | Open Rename Session modal | No-op |
@@ -325,7 +325,7 @@ right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
 `d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
-Pressing `s` opens the `Send Keys` modal for the highlighted session. The modal
+Pressing `p` opens the `Send Keys` modal for the highlighted session. The modal
 has a compact text field labeled `To: <session> on <host>`, accepts
 `motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, wraps long
 input by growing the text field vertically while keeping its width fixed,
@@ -346,9 +346,9 @@ right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom dark blue status bar shows compact key hints and
 status text only. Its left hint is `tab ↑/↓`, covering pane focus cycling and
 selection/scroll movement. It orders command hints as `help`, `monitor`,
-`send`, `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, then
+`prompt`, `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, then
 mode-specific resize; the command shortcut letters
-`h`/`m`/`s`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
+`h`/`m`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
 bold coral in the TUI. It does not repeat the host/time, show focus/layout
 mode, or prefix the hints with a `keys` label.
 

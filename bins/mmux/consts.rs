@@ -92,11 +92,12 @@ pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑/↓ select session or scroll detail
+<up> = 'u' and <down> = 'b'
 Enter sample highlighted session (list pane)
 tab cycle panes
 l toggle layout
 m monitor highlighted session
-s send keys to highlighted session
+p prompt highlighted session
   Ctrl-Enter send keys, wait, Enter
   $$ suffix same delayed Enter
 n create session

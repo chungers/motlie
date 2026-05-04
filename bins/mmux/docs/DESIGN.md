@@ -137,8 +137,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - `L` and `R` are both scrollable. The `L` viewport scrolls automatically to
   keep the highlighted row visible when `len(sessions) > visible_rows`. A
   position indicator (e.g., `5/12`) is shown in the session-list chrome.
-- Up and Down move the highlighted session when focus is `L`. When focus is
-  `R`, Up/Down scroll the `R` content one line; `PgUp`/`PgDn` page through;
+- Up and Down move the highlighted session when focus is `L`; plain `u` and
+  `b` are list-focus aliases for Up and Down. When focus is `R`, Up/Down
+  scroll the `R` content one line; `PgUp`/`PgDn` page through;
   `Home`/`End` jump to top/bottom of the buffer. When focus is `L`,
   `PgUp`/`PgDn` page through the session list and `Home`/`End` jump to
   first/last session.
@@ -169,7 +170,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode `%output` replay, because TUI programs rely on cursor movement,
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
-- Pressing `s` opens a centered `Send Keys` modal for the highlighted session.
+- Pressing `p` opens a centered `Send Keys` modal for the highlighted session.
   The modal shows a label `To: <session> on <host>` above a compact text field
   and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
   vertically while the input width stays fixed. `Tab` cycles the text field and
@@ -272,9 +273,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. The left hint is `tab ↑/↓`, covering pane focus cycling
   and selection/scroll movement, with shortcut letters rendered bold coral.
-  Always-on command hints are ordered as `help`, `monitor`, `send`, `attach`,
+  Always-on command hints are ordered as `help`, `monitor`, `prompt`, `attach`,
   `new`, `kill`, `rename`, `group`, `layout`, `quit`, then mode-specific
-  resize. The shortcut letters `h`/`m`/`s`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
+  resize. The shortcut letters `h`/`m`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
   bold coral in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `L`, `R`), or layout mode (`portrait`,
@@ -688,7 +689,7 @@ Main-selector keymap (focus-aware):
 
 | Key | `L` focused | `R` focused |
 |-----|-------------|-------------|
-| Up / Down | Move highlight; session viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
+| Up / Down, `u` / `b` | Move highlight; session viewport auto-scrolls | Scroll R one line for Up / Down; `u` / `b` no-op |
 | PgUp / PgDn | Page through session list | Page through R buffer |
 | Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
 | Enter | Refresh one-shot sample detail for the highlighted session | No-op |
@@ -814,7 +815,7 @@ arguments are additional hosts.
   Host-square column width is one character.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, `a` attach, `m` monitor, `s` send keys,
+- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `m` monitor, `p` prompt,
   `n` new, `k` kill, `r` rename, `t` tag list/add/update/delete,
   `Ctrl-C`/`q` exit, `l` toggle layout, Tab cycle panes, `Ctrl-←/→` and
   `Ctrl-↑/↓` resize) behave

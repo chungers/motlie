@@ -297,7 +297,7 @@ References: [Layout](./DESIGN.md#layout),
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
   compact direction hints (`tab ↑/↓`), command hints ordered as `help`,
-  `monitor`, `send`, `attach`, `new`, `kill`, `rename`, `group`, `layout`,
+  `monitor`, `prompt`, `attach`, `new`, `kill`, `rename`, `group`, `layout`,
   `quit`, then resize, with shortcut letters bold coral and app status with no
   `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
