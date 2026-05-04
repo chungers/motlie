@@ -1736,7 +1736,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
-    assert!(body.contains("<up> = 'u' and <down> = 'b'"));
+    assert!(body.contains("↑/↓, u/b select session or scroll detail"));
     assert!(body.contains("Enter sample highlighted session (list pane)"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
