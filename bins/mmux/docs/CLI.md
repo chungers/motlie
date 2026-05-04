@@ -268,7 +268,7 @@ Main-view keys:
 
 | Key | List focused | Detail focused |
 |-----|--------------|----------------|
-| Up / Down, `u` / `b` | Move highlighted session | Scroll detail one line for Up / Down; `u` / `b` no-op |
+| Up / Down, `u` / `b` | Move highlighted session | Scroll detail one line |
 | PgUp / PgDn | Page session list | Page detail buffer |
 | Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
 | Enter | Refresh one-shot sample detail | No-op |
