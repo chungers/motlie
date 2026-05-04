@@ -3825,6 +3825,36 @@ fn connected_ssh_host_replaces_failed_slot_and_keeps_color_index() {
 }
 
 #[test]
+fn repeated_host_failure_with_same_error_is_not_a_state_change() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let mut fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+
+    assert!(fleet.mark_host_failed(&remote_id, "connection refused".to_string()));
+    assert!(
+        !fleet.mark_host_failed(&remote_id, "connection refused".to_string()),
+        "unchanged retry failure should not force a redraw"
+    );
+    assert!(fleet.mark_host_failed(&remote_id, "network unreachable".to_string()));
+}
+
+#[test]
 fn fleet_entry_lookup_by_host_id() {
     let fleet = HostFleet::from_entries(vec![
         HostEntry {

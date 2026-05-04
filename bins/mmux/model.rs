@@ -359,11 +359,16 @@ impl HostSlot {
         }
     }
 
-    fn update_connected(&mut self, entry: &HostEntry) {
+    fn update_connected(&mut self, entry: &HostEntry) -> bool {
+        let changed = self.label != entry.label
+            || self.alias != entry.alias
+            || self.ip_address != entry.ip_address
+            || self.status != HostConnectionStatus::Connected;
         self.label = entry.label.clone();
         self.alias = entry.alias.clone();
         self.ip_address = entry.ip_address.clone();
         self.status = HostConnectionStatus::Connected;
+        changed
     }
 }
 
@@ -430,25 +435,39 @@ impl HostFleet {
         self.hosts.iter().find(|host| &host.id == id)
     }
 
-    pub(crate) fn upsert_connected(&mut self, entry: HostEntry) {
+    pub(crate) fn upsert_connected(&mut self, entry: HostEntry) -> bool {
+        let mut changed = false;
         match self
             .entries
             .iter_mut()
             .find(|existing| existing.id == entry.id)
         {
             Some(existing) => *existing = entry.clone(),
-            None => self.entries.push(entry.clone()),
+            None => {
+                self.entries.push(entry.clone());
+                changed = true;
+            }
         }
         match self.hosts.iter_mut().find(|host| host.id == entry.id) {
-            Some(host) => host.update_connected(&entry),
-            None => self.hosts.push(HostSlot::connected(&entry)),
+            Some(host) => changed |= host.update_connected(&entry),
+            None => {
+                self.hosts.push(HostSlot::connected(&entry));
+                changed = true;
+            }
         }
+        changed
     }
 
-    pub(crate) fn mark_host_failed(&mut self, id: &HostId, error: String) {
+    pub(crate) fn mark_host_failed(&mut self, id: &HostId, error: String) -> bool {
+        let status = HostConnectionStatus::Failed { error };
         if let Some(host) = self.hosts.iter_mut().find(|host| &host.id == id) {
-            host.status = HostConnectionStatus::Failed { error };
+            if host.status == status {
+                return false;
+            }
+            host.status = status;
+            return true;
         }
+        false
     }
 
     /// Color assigned to the given host in multi-host rows and legends.

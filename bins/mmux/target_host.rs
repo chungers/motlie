@@ -13,6 +13,7 @@ pub(crate) struct HostConnectSpec {
     pub(crate) uri: String,
     pub(crate) label: String,
     pub(crate) alias: String,
+    config: SshConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +64,7 @@ fn ssh_connect_specs(cli: &Cli) -> Result<Vec<HostConnectSpec>> {
                 uri: uri.clone(),
                 label: alias.clone(),
                 alias,
+                config,
             })
         })
         .collect()
@@ -82,13 +84,16 @@ pub(crate) async fn connect_local_entry() -> HostEntry {
     .await
 }
 
-pub(crate) async fn connect_ssh_entry(uri: &str) -> Result<HostEntry> {
-    let config = SshConfig::parse(uri).context("parse ssh target")?;
+pub(crate) async fn connect_ssh_spec(spec: &HostConnectSpec) -> Result<HostEntry> {
+    connect_ssh_config(spec.id.clone(), spec.config.clone()).await
+}
+
+async fn connect_ssh_config(id: HostId, config: SshConfig) -> Result<HostEntry> {
     let port = config.port();
     let handle = config.connect().await.context("connect ssh target")?;
     let alias = handle.host_alias().to_string();
     Ok(build_host_entry(
-        HostId::from_ssh_uri(uri),
+        id,
         handle,
         alias.clone(),
         alias,
