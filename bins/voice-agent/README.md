@@ -19,7 +19,10 @@ bootstraps curated model weights into `.agents/skills/voice/artifacts/hf-cache/`
 and talks to the typed Motlie TTS/ASR backends directly without shelling out to
 repo example binaries. On this branch it consumes the new speech-contract split explicitly:
 buffered TTS for Piper and qwen3-tts.cpp, batch ASR for Whisper, and streaming
-ASR for Sherpa/Moonshine.
+ASR for Sherpa/Moonshine. The CLI still exposes stable curated selectors such as
+`--backend whisper` or `--backend qwen3cpp`, but the runtime now derives the
+actual execution path from the selected bundle's capability metadata instead of
+assuming semantics from the selector name alone.
 
 When the full `motlie` repo is present, one repo-based build should seed the three
 voice subskill `bin/` directories and repopulate the packaged runtime sidecars in
