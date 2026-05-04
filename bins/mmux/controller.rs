@@ -939,8 +939,9 @@ fn submit_send_keys_modal(
     if ui.focus == SendKeysFocus::Cancel {
         return ModalAction::Close;
     }
-    if ui.focus != SendKeysFocus::Ok && !(ui.focus == SendKeysFocus::Input && !ui.input.is_empty())
-    {
+    let can_submit =
+        ui.focus == SendKeysFocus::Ok || (ui.focus == SendKeysFocus::Input && !ui.input.is_empty());
+    if !can_submit {
         return ModalAction::None;
     }
     ModalAction::SendKeys {

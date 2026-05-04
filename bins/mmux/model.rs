@@ -929,10 +929,14 @@ fn tag_group_sort_order(
 
 pub(crate) struct DetailState {
     pub(crate) lines: Vec<String>,
+    /// Wrapped terminal rows scrolled back from the tail. The renderer owns the
+    /// current wrap width, feeds back `last_known_scroll_max`, and renders the
+    /// corresponding top-origin `Paragraph` offset.
     pub(crate) scroll: usize,
     /// Render-feedback cache used by next-tick scroll math. The renderer owns
     /// the actual viewport size; input handling uses this last known value.
     pub(crate) last_known_view_height: usize,
+    pub(crate) last_known_scroll_max: usize,
     pub(crate) source: DetailSource,
     pub(crate) auto_tail: bool,
 }
@@ -945,7 +949,7 @@ impl DetailState {
     }
 
     pub(crate) fn max_scroll(&self) -> usize {
-        self.lines.len().saturating_sub(self.last_known_view_height)
+        self.last_known_scroll_max
     }
 
     pub(crate) fn scroll(&mut self, delta: isize) -> bool {
@@ -1059,6 +1063,7 @@ impl AppState {
                 lines: Vec::new(),
                 scroll: 0,
                 last_known_view_height: 1,
+                last_known_scroll_max: 0,
                 source: DetailSource::sample(),
                 auto_tail: true,
             },
@@ -1086,7 +1091,7 @@ impl AppState {
 
     pub(crate) fn scroll_detail(&mut self, delta: isize) {
         if self.detail.scroll(delta) {
-            self.status = StatusBanner::info(format!("detail offset {}", self.detail.scroll));
+            self.status = StatusBanner::info(format!("detail row offset {}", self.detail.scroll));
         }
     }
 
