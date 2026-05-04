@@ -23,8 +23,8 @@ use consts::{
     MMUX_ATTACH_STATUS_LEFT_LENGTH,
 };
 use controller::{
-    handle_key, refresh_detail, refresh_sessions_preserving, refresh_sessions_quiet,
-    stop_detail_source, KeyOutcome,
+    apply_fleet_refresh, fetch_fleet_refresh, handle_key, refresh_detail, stop_detail_source,
+    FleetRefresh, KeyOutcome, RefreshApplyOptions,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
@@ -45,6 +45,15 @@ enum SelectorOutcome {
 struct AttachStyleSnapshot {
     status: Option<SessionStatusSnapshot>,
     window_styles: Option<SessionWindowStylesSnapshot>,
+}
+
+struct PendingSessionRefresh {
+    task: tokio::task::JoinHandle<FleetRefresh>,
+    options: RefreshApplyOptions,
+}
+
+struct SessionRefreshCompletion {
+    deferred_detail: bool,
 }
 
 #[tokio::main]
@@ -250,18 +259,43 @@ async fn run_selector_once(
 ) -> Result<SelectorOutcome> {
     let mut app = AppState::with_fleet(fleet.clone(), layout);
     ui_state.apply_to(&mut app);
-    let previous_selection = ui_state.selected_session_key();
-    refresh_sessions_preserving(fleet, &mut app, true, previous_selection).await?;
 
     let mut terminal = TerminalSession::enter()?;
     let mut last_detail_refresh = Instant::now();
     let mut last_session_refresh = Instant::now();
+    let mut pending_session_refresh = Some(start_session_refresh(
+        fleet,
+        RefreshApplyOptions {
+            force_detail: false,
+            previous: ui_state.selected_session_key(),
+            update_status: true,
+            excluded: None,
+            allow_detail_refresh: false,
+        },
+    ));
 
     loop {
-        if last_session_refresh.elapsed() >= Duration::from_secs(1) {
-            if let Err(err) = refresh_sessions_quiet(fleet, &mut app, false).await {
-                app.status = StatusBanner::error(format!("session refresh failed: {err:#}"));
+        if let Some(completion) =
+            apply_finished_session_refresh(fleet, &mut app, &mut pending_session_refresh).await?
+        {
+            last_session_refresh = Instant::now();
+            if completion.deferred_detail {
+                last_detail_refresh = Instant::now();
             }
+        }
+        if pending_session_refresh.is_none()
+            && last_session_refresh.elapsed() >= Duration::from_secs(1)
+        {
+            pending_session_refresh = Some(start_session_refresh(
+                fleet,
+                RefreshApplyOptions {
+                    force_detail: false,
+                    previous: None,
+                    update_status: false,
+                    excluded: None,
+                    allow_detail_refresh: true,
+                },
+            ));
             last_session_refresh = Instant::now();
         }
         if last_detail_refresh.elapsed() >= Duration::from_millis(750) {
@@ -281,12 +315,14 @@ async fn run_selector_once(
                 KeyOutcome::Continue => {}
                 KeyOutcome::Select(selected) => {
                     ui_state.update_from(&app);
+                    abort_pending_session_refresh(&mut pending_session_refresh);
                     stop_detail_source(&mut app).await;
                     terminal.restore()?;
                     return Ok(SelectorOutcome::Selected(selected));
                 }
                 KeyOutcome::Cancel => {
                     ui_state.update_from(&app);
+                    abort_pending_session_refresh(&mut pending_session_refresh);
                     stop_detail_source(&mut app).await;
                     terminal.restore()?;
                     return Ok(SelectorOutcome::Cancelled);
@@ -294,4 +330,42 @@ async fn run_selector_once(
             }
         }
     }
+}
+
+fn start_session_refresh(fleet: &HostFleet, options: RefreshApplyOptions) -> PendingSessionRefresh {
+    let fleet = fleet.clone();
+    PendingSessionRefresh {
+        task: tokio::spawn(async move { fetch_fleet_refresh(&fleet).await }),
+        options,
+    }
+}
+
+fn abort_pending_session_refresh(pending: &mut Option<PendingSessionRefresh>) {
+    if let Some(refresh) = pending.take() {
+        refresh.task.abort();
+    }
+}
+
+async fn apply_finished_session_refresh(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    pending: &mut Option<PendingSessionRefresh>,
+) -> Result<Option<SessionRefreshCompletion>> {
+    let Some(refresh) = pending.as_ref() else {
+        return Ok(None);
+    };
+    if !refresh.task.is_finished() {
+        return Ok(None);
+    }
+    let refresh = pending.take().expect("pending refresh checked above");
+    let deferred_detail = !refresh.options.allow_detail_refresh;
+    match refresh.task.await {
+        Ok(result) => {
+            apply_fleet_refresh(fleet, app, result, refresh.options).await?;
+        }
+        Err(err) => {
+            app.status = StatusBanner::error(format!("session refresh task failed: {err}"));
+        }
+    }
+    Ok(Some(SessionRefreshCompletion { deferred_detail }))
 }

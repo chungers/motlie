@@ -27,6 +27,23 @@ const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
 const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
 const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
 
+pub(crate) struct HostRefreshResult {
+    host_id: HostId,
+    host_label: String,
+    diagnostic_label: String,
+    local_now: u64,
+    result: std::result::Result<HostSessionSnapshot, String>,
+}
+
+struct HostSessionSnapshot {
+    sessions: Vec<SessionInfo>,
+    selected_tags: HashMap<SessionId, SessionSelectedTag>,
+}
+
+pub(crate) struct FleetRefresh {
+    hosts: Vec<HostRefreshResult>,
+}
+
 /// Fan out `list_sessions()` across all configured hosts in parallel, merge
 /// into a flat `Vec<SessionRow>`, run the activity-tracker over the
 /// observations, and return rows for the caller to sort.
@@ -40,42 +57,71 @@ const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
 /// against `local_now` under the NTP-synced clock assumption. Tracker
 /// state is pruned to drop entries for sessions that have disappeared from
 /// the merged listing.
+#[cfg(test)]
 pub(crate) async fn fetch_fleet_rows(
     fleet: &HostFleet,
     tracker: &mut ActivityTracker,
 ) -> (Vec<SessionRow>, Vec<String>) {
-    let listings = futures::future::join_all(
-        fleet
-            .entries
-            .iter()
-            .map(|entry| async move { (entry, entry.handle.list_sessions().await) }),
-    )
-    .await;
+    let refresh = fetch_fleet_refresh(fleet).await;
+    rows_from_fleet_refresh(tracker, &refresh, None)
+}
 
-    // Capture local_now once per refresh so all rows in this tick agree on
-    // the operator-side observation time.
+pub(crate) async fn fetch_fleet_refresh(fleet: &HostFleet) -> FleetRefresh {
+    let hosts = futures::future::join_all(fleet.entries.iter().map(fetch_host_refresh)).await;
+    FleetRefresh { hosts }
+}
+
+async fn fetch_host_refresh(entry: &HostEntry) -> HostRefreshResult {
     let local_now = local_epoch_seconds();
+    let result = match entry.handle.list_sessions().await {
+        Ok(sessions) => {
+            let selected_tags = load_selected_session_tags(&entry.handle, &sessions).await;
+            Ok(HostSessionSnapshot {
+                sessions,
+                selected_tags,
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    };
+    HostRefreshResult {
+        host_id: entry.id.clone(),
+        host_label: entry.label.clone(),
+        diagnostic_label: entry.diagnostic_label(),
+        local_now,
+        result,
+    }
+}
+
+fn rows_from_fleet_refresh(
+    tracker: &mut ActivityTracker,
+    refresh: &FleetRefresh,
+    excluded: Option<&(HostId, String)>,
+) -> (Vec<SessionRow>, Vec<String>) {
     let mut rows = Vec::new();
     let mut failures = Vec::new();
     let mut keep_keys: HashSet<(HostId, String)> = HashSet::new();
-    for (entry, listing) in listings {
-        match listing {
-            Ok(sessions) => {
-                let selected_tags = load_selected_session_tags(&entry.handle, &sessions).await;
-                for session in sessions {
-                    let key = (entry.id.clone(), session.id.as_str().to_string());
+    for host in &refresh.hosts {
+        match &host.result {
+            Ok(snapshot) => {
+                for session in snapshot.sessions.iter().cloned() {
+                    let key = (host.host_id.clone(), session.id.as_str().to_string());
+                    if excluded.is_some_and(|(host_id, session_id)| {
+                        host_id == &host.host_id && session_id.as_str() == session.id.as_str()
+                    }) {
+                        continue;
+                    }
                     let activity_observed_at_local = tracker.observe(
-                        &entry.id,
+                        &host.host_id,
                         session.id.as_str(),
                         session.activity,
-                        local_now,
+                        host.local_now,
                     );
-                    let selected_tag = selected_tags.get(&session.id).cloned();
+                    let selected_tag = snapshot.selected_tags.get(&session.id).cloned();
                     keep_keys.insert(key);
                     rows.push(SessionRow {
-                        host_id: entry.id.clone(),
-                        host_label: entry.label.clone(),
-                        local_now,
+                        host_id: host.host_id.clone(),
+                        host_label: host.host_label.clone(),
+                        local_now: host.local_now,
                         activity_observed_at_local,
                         session,
                         selected_tag,
@@ -83,7 +129,7 @@ pub(crate) async fn fetch_fleet_rows(
                 }
             }
             Err(err) => {
-                failures.push(format!("{}: {err}", entry.diagnostic_label()));
+                failures.push(format!("{}: {err}", host.diagnostic_label));
             }
         }
     }
@@ -139,6 +185,7 @@ pub(crate) async fn refresh_sessions_quiet(
     refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, false, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn refresh_sessions_preserving(
     fleet: &HostFleet,
     app: &mut AppState,
@@ -179,15 +226,47 @@ async fn refresh_sessions_preserving_with_status(
     update_status: bool,
     excluded: Option<(HostId, String)>,
 ) -> Result<()> {
-    let (mut rows, failures) = fetch_fleet_rows(fleet, &mut app.activity_tracker).await;
-    if let Some((host_id, session_id)) = excluded.as_ref() {
-        rows.retain(|row| row.host_id != *host_id || row.session.id.as_str() != session_id);
-    }
+    let refresh = fetch_fleet_refresh(fleet).await;
+    apply_fleet_refresh(
+        fleet,
+        app,
+        refresh,
+        RefreshApplyOptions {
+            force_detail,
+            previous,
+            update_status,
+            excluded,
+            allow_detail_refresh: true,
+        },
+    )
+    .await
+}
+
+pub(crate) struct RefreshApplyOptions {
+    pub(crate) force_detail: bool,
+    pub(crate) previous: Option<(HostId, String)>,
+    pub(crate) update_status: bool,
+    pub(crate) excluded: Option<(HostId, String)>,
+    pub(crate) allow_detail_refresh: bool,
+}
+
+pub(crate) async fn apply_fleet_refresh(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    refresh: FleetRefresh,
+    options: RefreshApplyOptions,
+) -> Result<()> {
+    let (rows, failures) = rows_from_fleet_refresh(
+        &mut app.activity_tracker,
+        &refresh,
+        options.excluded.as_ref(),
+    );
     let closed_monitored = closed_monitored_session(app, &rows);
-    let previous_key = previous.clone();
+    let previous_key = options.previous.or_else(|| current_selection_key(app));
+    let selection_key_before_refresh = previous_key.clone();
     app.session_list.set_rows_sorted(rows, fleet);
-    app.preserve_selection(previous);
-    if update_status {
+    app.preserve_selection(previous_key);
+    if options.update_status {
         app.status = build_status(app, &failures);
     }
     let selected_key = current_selection_key(app);
@@ -210,8 +289,10 @@ async fn refresh_sessions_preserving_with_status(
     // activity in the row list lands a tick or more late. The main loop
     // owns the monitor refresh cadence (its 750 ms `refresh_detail` call);
     // session refresh does not need to drive it.
-    let selection_changed = previous_key != selected_key;
-    if force_detail || selection_changed || monitor_just_closed {
+    let selection_changed = selection_key_before_refresh != selected_key;
+    if options.allow_detail_refresh
+        && (options.force_detail || selection_changed || monitor_just_closed)
+    {
         refresh_detail(fleet, app, true).await?;
     }
     Ok(())
