@@ -34,8 +34,9 @@ pub(crate) const HOST_COLOR_PALETTE: [Color; 5] = [
     Color::Rgb(171, 71, 188),
 ];
 
-pub(crate) fn mmux_attach_status_style() -> String {
-    tmux_style(Some(STATUS_BAR_BG), Some(STATUS_BAR_FG))
+pub(crate) fn mmux_attach_status_style(host_color: Option<Color>) -> String {
+    let bg = host_color.unwrap_or(STATUS_BAR_BG);
+    tmux_style(Some(bg), Some(status_foreground_for_bg(bg)))
         .expect("mmux attach status style has at least one color")
 }
 
@@ -52,6 +53,22 @@ fn tmux_style(bg: Option<Color>, fg: Option<Color>) -> Option<String> {
         parts.push(format!("fg={fg}"));
     }
     (!parts.is_empty()).then(|| parts.join(","))
+}
+
+fn status_foreground_for_bg(bg: Color) -> Color {
+    match bg {
+        Color::Rgb(red, green, blue) => {
+            let luma =
+                (u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114) / 1000;
+            if luma >= 128 {
+                Color::Black
+            } else {
+                STATUS_BAR_FG
+            }
+        }
+        Color::White => Color::Black,
+        _ => STATUS_BAR_FG,
+    }
 }
 
 fn tmux_color(color: Color) -> Option<String> {
