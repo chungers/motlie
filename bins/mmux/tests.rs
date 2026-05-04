@@ -28,10 +28,11 @@ use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
 };
 use crate::model::{
-    AppState, Button, Focus, HostConnectionStatus, HostEntry, HostFleet, HostId, HostSlot,
-    LayoutMode, ModalBody, ModalState, NewSessionFocus, NewSessionHostChoice, NewSessionModalUi,
-    SelectedSession, SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind,
-    SessionKeyValueModalUi, SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
+    AppState, Button, Focus, HostConnectFailure, HostConnectionStatus, HostEntry, HostFleet,
+    HostId, HostSlot, LayoutMode, ModalBody, ModalState, NewSessionFocus, NewSessionHostChoice,
+    NewSessionModalUi, SelectedSession, SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus,
+    SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow, SessionRow,
+    SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
     detail_text_for_render, detail_title, draw, key_value_key_column_width, modal_content,
@@ -98,11 +99,20 @@ fn make_row_at(session: SessionInfo, now: u64) -> SessionRow {
 }
 
 fn make_row_for_host(session: SessionInfo, host_id: HostId, host_label: &str) -> SessionRow {
+    make_row_for_host_at(session, host_id, host_label, u64::MAX)
+}
+
+fn make_row_for_host_at(
+    session: SessionInfo,
+    host_id: HostId,
+    host_label: &str,
+    now: u64,
+) -> SessionRow {
     let activity_observed_at_local = session.activity;
     SessionRow {
         host_id,
         host_label: host_label.to_string(),
-        local_now: u64::MAX,
+        local_now: now,
         activity_observed_at_local,
         session,
         selected_tag: None,
@@ -766,12 +776,12 @@ async fn failed_host_refresh_keeps_existing_rows_visible() {
 fn session_list_sorts_most_recent_activity_first() {
     let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
 
-    app.session_list.set_rows_sorted_by_activity(to_rows(vec![
-        session_with_times("older", "$1", 10, 100),
-        session_with_times("fresh", "$2", 20, 300),
-        session_with_times("alpha", "$3", 30, 200),
-        session_with_times("beta", "$4", 40, 200),
-    ]));
+    app.session_list.set_rows_sorted_by_activity(vec![
+        make_row_at(session_with_times("older", "$1", 10, 100), 400),
+        make_row_at(session_with_times("fresh", "$2", 20, 300), 400),
+        make_row_at(session_with_times("alpha", "$3", 30, 200), 400),
+        make_row_at(session_with_times("beta", "$4", 40, 200), 400),
+    ]);
 
     let names = app
         .session_list
@@ -783,6 +793,24 @@ fn session_list_sorts_most_recent_activity_first() {
 }
 
 #[test]
+fn activity_sort_is_stable_within_visible_recency_bucket() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+
+    app.session_list.set_rows_sorted_by_activity(vec![
+        make_row_at(session_with_times("zeta", "$1", 10, 999), 1_000),
+        make_row_at(session_with_times("alpha", "$2", 10, 950), 1_000),
+    ]);
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha", "zeta"]);
+}
+
+#[test]
 fn session_list_tag_group_orders_groups_by_recent_activity() {
     let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
@@ -790,55 +818,62 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
     ]);
     let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
     let rows = vec![
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("no-tag-fresh", "$1", 10, 900),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("b-alpha-low", "$2", 10, 100),
                 ssh_host_id("ssh://b"),
                 "beta",
+                1_000,
             ),
             "alpha",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("a-alpha-high", "$3", 10, 300),
                 ssh_host_id("ssh://a"),
                 "alpha",
+                1_000,
             ),
             "alpha",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("b-same", "$4", 10, 400),
                 ssh_host_id("ssh://b"),
                 "beta",
+                1_000,
             ),
             "same",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("z-same", "$5", 10, 400),
                 ssh_host_id("ssh://a"),
                 "alpha",
+                1_000,
             ),
             "same",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("empty-selected-tag", "$7", 10, 800),
                 ssh_host_id("ssh://a"),
                 "alpha",
+                1_000,
             ),
             "",
         ),
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("no-tag-old", "$6", 10, 100),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
     ];
 
@@ -992,7 +1027,7 @@ async fn quiet_refresh_preserves_tag_group_mode() {
             .iter()
             .map(|row| row.session.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["zed", "alpha"]
+        vec!["alpha", "zed"]
     );
 }
 
@@ -3684,7 +3719,9 @@ async fn connect_initial_fleet_includes_localhost_and_defers_ssh_connect() {
 
     let cli = Cli::try_parse_from(["mmux", "ssh://remote.example.com"]).unwrap();
 
-    let (fleet, specs) = connect_initial_fleet(&cli).await.unwrap();
+    let initial_fleet = connect_initial_fleet(&cli).await.unwrap();
+    let fleet = initial_fleet.fleet;
+    let specs = initial_fleet.retry_specs;
     let remote_id = ssh_host_id("ssh://remote.example.com");
 
     assert!(fleet.is_multi());
@@ -3802,7 +3839,10 @@ fn connected_ssh_host_replaces_failed_slot_and_keeps_color_index() {
             ),
         ],
     );
-    fleet.mark_host_failed(&remote_id, "network unreachable".to_string());
+    fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("network unreachable".to_string()),
+    );
 
     let remote = ssh_host_entry(
         "ssh://remote",
@@ -3846,12 +3886,21 @@ fn repeated_host_failure_with_same_error_is_not_a_state_change() {
         ],
     );
 
-    assert!(fleet.mark_host_failed(&remote_id, "connection refused".to_string()));
+    assert!(fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("connection refused".to_string())
+    ));
     assert!(
-        !fleet.mark_host_failed(&remote_id, "connection refused".to_string()),
+        !fleet.mark_host_failed(
+            &remote_id,
+            HostConnectFailure::connect("connection refused".to_string())
+        ),
         "unchanged retry failure should not force a redraw"
     );
-    assert!(fleet.mark_host_failed(&remote_id, "network unreachable".to_string()));
+    assert!(fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("network unreachable".to_string())
+    ));
 }
 
 #[test]
@@ -3938,8 +3987,10 @@ fn failed_multi_host_top_status_highlights_host_in_red() {
             ),
         ],
     );
-    app.fleet
-        .mark_host_failed(&remote_id, "connection refused".to_string());
+    app.fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("connection refused".to_string()),
+    );
 
     let line = top_status_line(&app, "12:34:56", 60);
     let rendered = line
@@ -4115,25 +4166,29 @@ fn multi_host_sort_merges_rows_by_activity_across_hosts() {
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
     let rows = vec![
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("alpha-old", "$1", 10, 100),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("beta-fresh", "$2", 20, 500),
+        make_row_for_host_at(
+            session_with_times("beta-fresh", "$2", 20, 950),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("alpha-fresh", "$3", 30, 400),
+        make_row_for_host_at(
+            session_with_times("alpha-fresh", "$3", 30, 800),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("beta-old", "$4", 40, 200),
+        make_row_for_host_at(
+            session_with_times("beta-old", "$4", 40, 600),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
     ];
     app.session_list.set_rows_sorted_by_activity(rows);
@@ -4165,15 +4220,17 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
     app.session_list.set_rows_sorted_by_activity(vec![
-        make_row_for_host(
-            session_with_times("aa", "$1", 10, 200),
+        make_row_for_host_at(
+            session_with_times("aa", "$1", 10, 900),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("bb", "$2", 20, 100),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
     ]);
     // First row by activity is alpha/$1.
@@ -4186,15 +4243,17 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
 
     // Reorder: now bb is most active. Selection should preserve alpha/$1.
     app.session_list.set_rows_sorted_by_activity(vec![
-        make_row_for_host(
-            session_with_times("bb", "$2", 20, 500),
+        make_row_for_host_at(
+            session_with_times("bb", "$2", 20, 950),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("aa", "$1", 10, 200),
+        make_row_for_host_at(
+            session_with_times("aa", "$1", 10, 900),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
     ]);
     app.preserve_selection(Some(key));

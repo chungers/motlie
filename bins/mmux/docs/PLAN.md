@@ -462,8 +462,8 @@ it lands as a follow-up.
 ### 11.2 Connect fleet
 
 - [ ] 11.2a Rename / split `connect_host(cli) -> Result<(HostHandle, HostIdentity)>`
-  to `connect_initial_fleet(cli) -> Result<(HostFleet, Vec<HostConnectSpec>)>`.
-  Localhost connects immediately; SSH URIs become configured host slots.
+  to `connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost
+  connects immediately; SSH URIs become configured host slots and retry specs.
 - [ ] 11.2b Connect SSH hosts in background retry tasks so startup is not gated
   on remote SSH latency.
 - [ ] 11.2c Per-host connect failure remains visible in the top host legend and

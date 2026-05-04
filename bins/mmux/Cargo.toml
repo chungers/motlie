@@ -21,3 +21,4 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm"]
 crossterm = "0.29"
 chrono = "0.4"
 ansi-to-tui = "8"
+tracing = "0.1"

@@ -320,13 +320,39 @@ impl HostEntry {
 pub(crate) enum HostConnectionStatus {
     Connecting,
     Connected,
-    Failed { error: String },
+    Failed(HostConnectFailure),
 }
 
 impl HostConnectionStatus {
     pub(crate) fn is_failed(&self) -> bool {
-        matches!(self, Self::Failed { .. })
+        matches!(self, Self::Failed(_))
     }
+}
+
+/// Stable, user-visible equivalence class for SSH connection failures.
+///
+/// `PartialEq` intentionally compares both the typed phase and the display
+/// message. That keeps repeated identical retry failures from forcing redraws,
+/// while still updating the status if a host moves from one concrete failure
+/// mode to another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostConnectFailure {
+    phase: HostConnectFailurePhase,
+    message: String,
+}
+
+impl HostConnectFailure {
+    pub(crate) fn connect(message: String) -> Self {
+        Self {
+            phase: HostConnectFailurePhase::Connect,
+            message,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostConnectFailurePhase {
+    Connect,
 }
 
 #[derive(Clone)]
@@ -391,6 +417,11 @@ pub(crate) struct HostLegendItem {
 /// hosts with per-row metadata (label, ip) and 1 Hz fan-out polling via
 /// `HostHandle::list_sessions()`. See `docs/DESIGN.md` §Multi-host Mode →
 /// §Internal data model for the full rationale.
+///
+/// `hosts` is the authoritative configured-host order used for presentation
+/// and stable color assignment. `entries` is the connected-host routing cache
+/// with owned `HostHandle`s, keyed by the same `HostId`s. Keep those
+/// collections in sync only through `upsert_connected` and `mark_host_failed`.
 #[derive(Clone, Default)]
 pub(crate) struct HostFleet {
     hosts: Vec<HostSlot>,
@@ -458,8 +489,8 @@ impl HostFleet {
         changed
     }
 
-    pub(crate) fn mark_host_failed(&mut self, id: &HostId, error: String) -> bool {
-        let status = HostConnectionStatus::Failed { error };
+    pub(crate) fn mark_host_failed(&mut self, id: &HostId, failure: HostConnectFailure) -> bool {
+        let status = HostConnectionStatus::Failed(failure);
         if let Some(host) = self.hosts.iter_mut().find(|host| &host.id == id) {
             if host.status == status {
                 return false;
@@ -735,14 +766,14 @@ pub(crate) enum SessionSortMode {
 }
 
 impl SessionListState {
-    /// Set the merged set of rows, sorted by activity descending across all
-    /// hosts. Tie-breaks: name, then session id, then host id.
+    /// Set the merged set of rows, sorted by visible activity recency across
+    /// all hosts. Tie-breaks: name, then session id, then host id.
     ///
-    /// Sort key is `activity_observed_at_local` (operator-side wall clock)
-    /// not the raw host `session.activity`. This keeps the merged-list order
-    /// consistent with the displayed activity column and is robust to host
-    /// clock skew across hosts in multi-host mode — a host whose clock is
-    /// minutes ahead of others doesn't pin its sessions to the top.
+    /// Sort key is the same coarse recency bucket rendered in the row, not the
+    /// raw host `session.activity` or exact observer timestamp. This keeps the
+    /// list stable when several active sessions all display `now`; otherwise
+    /// invisible one-second host refresh timing differences can reshuffle rows
+    /// on every poll.
     pub(crate) fn set_rows_sorted_by_activity(&mut self, mut rows: Vec<SessionRow>) {
         sort_rows_by_activity(&mut rows);
         self.rows = rows;
@@ -825,23 +856,18 @@ fn sort_rows_by_activity(rows: &mut [SessionRow]) {
 }
 
 fn activity_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
-    right
-        .activity_observed_at_local
-        .cmp(&left.activity_observed_at_local)
+    activity_recency_bucket(left)
+        .cmp(&activity_recency_bucket(right))
         .then_with(|| left.session.name.cmp(&right.session.name))
         .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
         .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
 }
 
 fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
-    let group_activity = tag_group_activity(rows);
+    let group_activity = tag_group_activity_bucket(rows);
     rows.sort_by(|left, right| {
         tag_group_sort_order(left, right, &group_activity)
-            .then_with(|| {
-                right
-                    .activity_observed_at_local
-                    .cmp(&left.activity_observed_at_local)
-            })
+            .then_with(|| activity_recency_bucket(left).cmp(&activity_recency_bucket(right)))
             .then_with(|| {
                 fleet
                     .host_sort_index(&left.host_id)
@@ -854,16 +880,30 @@ fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
     });
 }
 
-fn tag_group_activity(rows: &[SessionRow]) -> HashMap<String, u64> {
+fn activity_recency_bucket(row: &SessionRow) -> u64 {
+    let seconds = row.local_now.saturating_sub(row.activity_observed_at_local);
+    if seconds < 60 {
+        0
+    } else if seconds < 60 * 60 {
+        1 + seconds / 60
+    } else if seconds < 48 * 60 * 60 {
+        61 + seconds / 60 / 60
+    } else {
+        109 + seconds / 60 / 60 / 24
+    }
+}
+
+fn tag_group_activity_bucket(rows: &[SessionRow]) -> HashMap<String, u64> {
     let mut group_activity: HashMap<String, u64> = HashMap::new();
     for row in rows {
         let Some(value) = row.displayed_tag_value() else {
             continue;
         };
+        let bucket = activity_recency_bucket(row);
         group_activity
             .entry(value.to_string())
-            .and_modify(|activity| *activity = (*activity).max(row.activity_observed_at_local))
-            .or_insert(row.activity_observed_at_local);
+            .and_modify(|activity| *activity = (*activity).min(bucket))
+            .or_insert(bucket);
     }
     group_activity
 }
@@ -877,8 +917,8 @@ fn tag_group_sort_order(
         (Some(left_value), Some(right_value)) => {
             let left_activity = group_activity.get(left_value).copied().unwrap_or(0);
             let right_activity = group_activity.get(right_value).copied().unwrap_or(0);
-            right_activity
-                .cmp(&left_activity)
+            left_activity
+                .cmp(&right_activity)
                 .then_with(|| left_value.cmp(right_value))
         }
         (Some(_), None) => Ordering::Less,

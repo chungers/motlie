@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender, UnboundedReceiver};
 use tokio::time::sleep;
 
 use cli::{select_layout, Cli};
@@ -30,8 +30,8 @@ use controller::{
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{
-    AppState, HostEntry, HostFleet, HostId, LayoutMode, RetainedUiState, SelectedSession,
-    StatusBanner,
+    AppState, HostConnectFailure, HostEntry, HostFleet, HostId, LayoutMode, RetainedUiState,
+    SelectedSession, StatusBanner,
 };
 use motlie_tmux::{
     AttachExit, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot,
@@ -53,14 +53,18 @@ struct AttachStyleSnapshot {
 }
 
 const HOST_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
+const HOST_CONNECT_EVENT_BUFFER: usize = 64;
 
 enum HostConnectEvent {
     Connected(HostEntry),
-    Failed { id: HostId, error: String },
+    Failed {
+        id: HostId,
+        failure: HostConnectFailure,
+    },
 }
 
 struct PendingHostConnections {
-    receiver: UnboundedReceiver<HostConnectEvent>,
+    receiver: Receiver<HostConnectEvent>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -85,7 +89,10 @@ struct PendingSessionRefresh {
 }
 
 struct SessionRefreshCompletion {
-    deferred_detail: bool,
+    /// True when detail refresh was intentionally suppressed during session
+    /// list reconciliation. The caller extends the quiet period so the list can
+    /// settle before the next routine detail capture.
+    suppress_detail_refresh: bool,
 }
 
 #[tokio::main]
@@ -106,8 +113,9 @@ async fn run() -> Result<i32> {
     }
 
     let cli = Cli::parse();
-    let (mut fleet, host_specs) = connect_initial_fleet(&cli).await?;
-    let mut host_connections = start_host_connect_retries(host_specs);
+    let initial_fleet = connect_initial_fleet(&cli).await?;
+    let mut fleet = initial_fleet.fleet;
+    let mut host_connections = start_host_connect_retries(initial_fleet.retry_specs);
     let layout = select_layout(cli.forced_layout());
     let mut ui_state = RetainedUiState::new(layout);
 
@@ -329,7 +337,7 @@ async fn run_selector_once(
             apply_finished_session_refresh(fleet, &mut app, &mut pending_session_refresh).await?
         {
             last_session_refresh = Instant::now();
-            if completion.deferred_detail {
+            if completion.suppress_detail_refresh {
                 last_detail_refresh = Instant::now();
             }
         }
@@ -384,7 +392,7 @@ async fn run_selector_once(
 }
 
 fn start_host_connect_retries(specs: Vec<HostConnectSpec>) -> PendingHostConnections {
-    let (tx, receiver) = mpsc::unbounded_channel();
+    let (tx, receiver) = mpsc::channel(HOST_CONNECT_EVENT_BUFFER);
     let tasks = specs
         .into_iter()
         .map(|spec| {
@@ -398,21 +406,46 @@ fn start_host_connect_retries(specs: Vec<HostConnectSpec>) -> PendingHostConnect
     PendingHostConnections { receiver, tasks }
 }
 
-async fn retry_host_connect(spec: HostConnectSpec, tx: UnboundedSender<HostConnectEvent>) {
+async fn retry_host_connect(spec: HostConnectSpec, tx: Sender<HostConnectEvent>) {
+    let mut last_sent_failure: Option<HostConnectFailure> = None;
     loop {
         match connect_ssh_spec(&spec)
             .await
             .with_context(|| format!("connect host '{}'", spec.uri))
         {
             Ok(entry) => {
-                let _ = tx.send(HostConnectEvent::Connected(entry));
+                if let Err(err) = tx.send(HostConnectEvent::Connected(entry)).await {
+                    tracing::debug!(
+                        host = %spec.id,
+                        error = %err,
+                        "discarded successful host-connect event because selector exited"
+                    );
+                }
                 return;
             }
             Err(err) => {
-                let _ = tx.send(HostConnectEvent::Failed {
-                    id: spec.id.clone(),
-                    error: format!("{err:#}"),
-                });
+                let failure = HostConnectFailure::connect(format!("{err:#}"));
+                if last_sent_failure.as_ref() != Some(&failure) {
+                    match tx.try_send(HostConnectEvent::Failed {
+                        id: spec.id.clone(),
+                        failure: failure.clone(),
+                    }) {
+                        Ok(()) => last_sent_failure = Some(failure),
+                        Err(TrySendError::Full(_)) => {
+                            tracing::debug!(
+                                host = %spec.id,
+                                "host-connect event buffer full; coalescing failed retry event"
+                            );
+                        }
+                        Err(TrySendError::Closed(_)) => {
+                            tracing::debug!(
+                                host = %spec.id,
+                                "discarded failed host-connect event because selector exited"
+                            );
+                            return;
+                        }
+                    }
+                }
                 sleep(HOST_CONNECT_RETRY_DELAY).await;
             }
         }
@@ -432,8 +465,8 @@ fn apply_finished_host_connects(
                 changed |= fleet.upsert_connected(entry);
                 applied.connected = true;
             }
-            HostConnectEvent::Failed { id, error } => {
-                changed |= fleet.mark_host_failed(&id, error);
+            HostConnectEvent::Failed { id, failure } => {
+                changed |= fleet.mark_host_failed(&id, failure);
             }
         }
     }
@@ -495,9 +528,9 @@ async fn apply_finished_session_refresh(
         return Ok(None);
     };
     let mut applied = false;
-    let mut deferred_detail = false;
+    let mut suppress_detail_refresh = false;
     while let Ok(result) = refresh.receiver.try_recv() {
-        deferred_detail |= !refresh.options.allow_detail_refresh;
+        suppress_detail_refresh |= !refresh.options.allow_detail_refresh;
         apply_host_refresh(fleet, app, result, refresh.options.clone()).await?;
         refresh.remaining = refresh.remaining.saturating_sub(1);
         applied = true;
@@ -512,5 +545,7 @@ async fn apply_finished_session_refresh(
     if !applied {
         return Ok(None);
     }
-    Ok(Some(SessionRefreshCompletion { deferred_detail }))
+    Ok(Some(SessionRefreshCompletion {
+        suppress_detail_refresh,
+    }))
 }
