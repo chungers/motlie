@@ -22,6 +22,7 @@ pub(crate) const APP_BASE_BG: Option<Color> = Some(Color::Black);
 pub(crate) const STATUS_BAR_FG: Color = Color::White;
 pub(crate) const STATUS_BAR_BG: Color = Color::Rgb(0, 43, 85);
 pub(crate) const STATUS_BAR_MNEMONIC_FG: Color = Color::Rgb(255, 111, 97);
+pub(crate) const HOST_CONNECTION_FAILED_FG: Color = Color::Red;
 pub(crate) const MMUX_ATTACH_STATUS_LEFT: &str = "#{=50:session_name}";
 pub(crate) const MMUX_ATTACH_STATUS_LEFT_LENGTH: u32 = 50;
 pub(crate) const HOST_COLOR_SQUARE: &str = "■";

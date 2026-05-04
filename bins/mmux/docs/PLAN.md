@@ -452,20 +452,22 @@ it lands as a follow-up.
 
 - [ ] 11.1a Change `Cli.ssh_uri: Option<String>` to `Cli.ssh_uris: Vec<String>` in
   `bins/mmux/cli.rs`. Use `clap::Args` with `num_args = 0..` for the positional.
-- [ ] 11.1b Backward-compat: zero or one URI keeps existing single-host behavior.
+- [ ] 11.1b Backward-compat: zero URIs keeps existing single-host localhost
+  behavior; one or more URI arguments activates multi-host with localhost
+  included automatically.
 - [ ] 11.1c Reject malformed URIs at parse time using existing `SshConfig::parse`;
   surface a single error listing all failed URIs.
 - [ ] 11.1d Tests: zero, one, two, many URIs; mixed valid + invalid.
 
 ### 11.2 Connect fleet
 
-- [ ] 11.2a Rename `connect_host(cli) -> Result<(HostHandle, HostIdentity)>`
-  to `connect_fleet(cli) -> Result<HostFleet>`. Internally iterates and calls
-  the existing per-host connect logic.
-- [ ] 11.2b Connect concurrently via `tokio::try_join_all` to keep startup
-  latency O(slowest), not O(sum).
-- [ ] 11.2c Per-host connect failure surfaces in stderr but does not abort
-  startup if at least one host connects (operator can still use the rest).
+- [ ] 11.2a Rename / split `connect_host(cli) -> Result<(HostHandle, HostIdentity)>`
+  to `connect_initial_fleet(cli) -> Result<(HostFleet, Vec<HostConnectSpec>)>`.
+  Localhost connects immediately; SSH URIs become configured host slots.
+- [ ] 11.2b Connect SSH hosts in background retry tasks so startup is not gated
+  on remote SSH latency.
+- [ ] 11.2c Per-host connect failure remains visible in the top host legend and
+  does not abort startup; failed hosts continue retrying until connected.
 - [ ] 11.2d Tests: all-succeed, partial-fail, all-fail (the last exits non-zero).
 
 ### 11.3 Internal data model

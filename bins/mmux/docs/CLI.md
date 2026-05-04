@@ -188,7 +188,8 @@ be read, startup defaults to landscape layout.
 
 ## Multi-host Mode (issue #235)
 
-Pass two or more SSH URIs on the command line to enter multi-host mode:
+Pass one or more SSH URIs on the command line to enter multi-host mode.
+Localhost is always included automatically; CLI URIs are additional hosts:
 
 ```bash
 mmux ssh://a.example.com ssh://b.example.com
@@ -200,14 +201,15 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 | `len(ssh_uris)` | Mode |
 |---|---|
 | `0` | Single-host, target = localhost |
-| `1` | Single-host, target = the SSH host |
-| `≥ 2` | Multi-host, targets = all listed SSH hosts |
+| `≥ 1` | Multi-host, targets = localhost + all listed SSH hosts |
 
 **UX differences in multi-host mode:**
 
 - Top status bar shows a host-color legend after `mmux` instead of the usual
   `<hostname> | <ip>`, for example `mmux ■ alpha ■ beta`. Host labels are
   tmux's own `#{host}` values; SSH URI hostnames are retained only as aliases.
+  If an SSH host is not connected yet, its URI hostname remains in the legend
+  in red while mmux retries in the background.
 - Session list rows insert the host's compact colored square between the
   attached marker and the session name:
 

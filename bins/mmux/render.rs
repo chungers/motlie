@@ -12,9 +12,10 @@ use ratatui::Frame;
 
 use crate::consts::{
     APP_BASE_BG, APP_BASE_FG, BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_SQUARE,
-    MODAL_BUTTON_HEIGHT, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING,
-    MODAL_MIN_WIDTH, MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT,
-    MOTLIE_PLACEHOLDER, STATUS_BAR_BG, STATUS_BAR_FG, STATUS_BAR_MNEMONIC_FG,
+    HOST_CONNECTION_FAILED_FG, MODAL_BUTTON_HEIGHT, MODAL_CONTENT_HORIZONTAL_PADDING,
+    MODAL_CONTENT_VERTICAL_PADDING, MODAL_MIN_WIDTH, MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT,
+    MODAL_TEXT_FIELD_HEIGHT, MOTLIE_PLACEHOLDER, STATUS_BAR_BG, STATUS_BAR_FG,
+    STATUS_BAR_MNEMONIC_FG,
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
@@ -480,15 +481,28 @@ fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'stati
     let spans = if app.fleet.is_multi() {
         let mut spans = vec![TuiSpan::styled("mmux ".to_string(), base_style)];
         if let Some(legend) = app.fleet.host_color_legend() {
-            for (color, label) in legend {
+            for item in legend {
+                let label_style = if item.failed {
+                    Style::default()
+                        .fg(HOST_CONNECTION_FAILED_FG)
+                        .bg(STATUS_BAR_BG)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    base_style
+                };
+                let square_color = if item.failed {
+                    HOST_CONNECTION_FAILED_FG
+                } else {
+                    item.color
+                };
                 spans.push(TuiSpan::styled(
                     HOST_COLOR_SQUARE.to_string(),
                     Style::default()
-                        .fg(color)
+                        .fg(square_color)
                         .bg(STATUS_BAR_BG)
                         .add_modifier(Modifier::BOLD),
                 ));
-                spans.push(TuiSpan::styled(format!(" {label} "), base_style));
+                spans.push(TuiSpan::styled(format!(" {} ", item.label), label_style));
             }
         }
         spans
