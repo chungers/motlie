@@ -700,7 +700,7 @@ pub(crate) fn session_key_values_footer_line(
 ) -> Line<'static> {
     let mut spans = vec![status_span(buttons.to_string())];
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "update", 'u');
+    push_status_command(&mut spans, "modify", 'm');
     push_status_separator(&mut spans);
     push_status_key_command(&mut spans, 'x', "unset");
     if kind.supports_checked_row() {

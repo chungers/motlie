@@ -30,7 +30,7 @@ Draft.
 | 2026-05-02 | @codex | Added the list-pane `s` sort toggle: activity sort remains the default, and tag sort groups checked-tag rows before unchecked rows before falling back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for issue #241: selected-tag refresh is batched per host, Session Tags Cancel is reachable by Tab, modal session identity and tag UI state are grouped, and modal sizing arithmetic moved to the render layer. |
 | 2026-05-01 | @codex | Simplified issue #241 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal from `i` to `t`, and left `i` unassigned for this feature. |
-| 2026-05-01 | @codex | Updated issue #241 design after tmux unset research: tag deletion requires a `motlie-tmux` unset API over `set-option -u`, and the `i` modal now supports row focus with Up/Down plus `x` delete and `u` update actions for focused tag rows. |
+| 2026-05-01 | @codex | Updated issue #241 design after tmux unset research: tag deletion requires a `motlie-tmux` unset API over `set-option -u`, and the `i` modal now supports row focus with Up/Down plus `x` delete and `m` update actions for focused tag rows. |
 | 2026-05-01 | @codex | Started issue #241 design for session-list rename and mmux tag management modals: list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add modal on `i`, dispatch through the motlie-tmux session tag API, and stable `(host_id, session_id)` routing. |
 | 2026-04-29 | @opus47-macos-tmux | Swept stale DESIGN.md sections that still described removed contracts (`list_sessions_now()`, `SessionListing.now`, `host_clock_offset_secs`, `probe_host_clock()`, raw `SessionInfo.activity` sort): rewrote the recency-display section, transport/fan-out architecture, multi-host recency/resilience block, internal data-model snippet, refresh-loop pseudocode, and Live Session List section to match shipped behavior — `HostHandle::list_sessions()` plus binary-side `ActivityTracker`, `(host_id, session_id)` selection identity, and observer-relative sort. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `server_epoch` and the per-host clock-offset cache: there is no portable, side-effect-free way to read the host clock on tmux ≤ 3.6 (`run-shell 'date +%s'` corrupts the operator's attached pane on older tmux). Activity stays observer-relative; age now uses operator-side `local_now` under an explicit NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate "age" text but no functional regression. Net: zero new public methods on `HostHandle` for this PR. |
@@ -202,7 +202,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `t` opens a centered `Session Tags` modal for the highlighted
   session. It lists all `@mmux/<tag>` options for that session sorted
   lexicographically by stripped tag key. Existing tag rows are focusable with
-  Up/Down; `x` deletes the focused tag and `u` loads the focused tag into the
+  Up/Down; `u` and `b` are row-movement aliases while row focus is active.
+  `x` deletes the focused tag and `m` loads the focused tag into the
   update controls. The bottom of the modal shows visually distinct `Key` and
   `Value` fields. Enter in either field writes through the `motlie-tmux`
   session tag API only when `Value` is non-empty.
@@ -1126,13 +1127,14 @@ existing stable-id dispatch model.
   available height. The edit row stays visible at the bottom and contains
   visually distinct key and value fields aligned to the list columns.
 - Up/Down move focus row-to-row through the visible tag list when a tag row is
-  focused. If focus is in the edit controls, Up returns focus to the last
-  visible tag row when one exists.
+  focused. Plain `u` and `b` are row-focus aliases for Up and Down. If focus is
+  in the edit controls, Up returns focus to the last visible tag row when one
+  exists.
 - `x` on a focused tag row removes the row from the modal draft and clears the
   draft checked key if it referenced the deleted row. If the deleted row was the
   last row, focus moves to the previous row or to the `Key` field when the list
   becomes empty.
-- `u` on a focused tag row copies that key/value into the bottom `Key` and
+- `m` on a focused tag row copies that key/value into the bottom `Key` and
   `Value` fields and focuses `Value`. Pressing Enter in either edit field then
   stages an update to the same key.
 - Enter in either edit field applies the bottom fields with this rule: non-empty

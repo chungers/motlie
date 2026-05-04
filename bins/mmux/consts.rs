@@ -103,7 +103,8 @@ n create session
 k kill highlighted session
 r rename highlighted session (list pane)
 t manage highlighted session tags
-  u update focused tag
+  ↑ (u) / ↓ (b) move focused tag
+  m modify focused tag
   x unset focused tag
   c toggle sort tag
 g group sessions by tag (list pane)

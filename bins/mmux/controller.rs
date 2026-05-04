@@ -1249,26 +1249,49 @@ fn handle_session_key_values_navigation(
             true
         }
         KeyCode::Up => {
-            *focus = match *focus {
-                SessionKeyValueFocus::Row(index) => {
-                    SessionKeyValueFocus::Row(index.saturating_sub(1))
-                }
-                _ if !rows.is_empty() => SessionKeyValueFocus::Row(rows.len() - 1),
-                _ => *focus,
-            };
+            move_session_key_value_focus_up(rows, focus);
+            true
+        }
+        KeyCode::Char('u')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(*focus, SessionKeyValueFocus::Row(_)) =>
+        {
+            move_session_key_value_focus_up(rows, focus);
             true
         }
         KeyCode::Down => {
-            *focus = match *focus {
-                SessionKeyValueFocus::Row(index) => {
-                    SessionKeyValueFocus::Row(min(index + 1, rows.len().saturating_sub(1)))
-                }
-                _ => *focus,
-            };
+            move_session_key_value_focus_down(rows, focus);
+            true
+        }
+        KeyCode::Char('b')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(*focus, SessionKeyValueFocus::Row(_)) =>
+        {
+            move_session_key_value_focus_down(rows, focus);
             true
         }
         _ => false,
     }
+}
+
+fn move_session_key_value_focus_up(rows: &[SessionKeyValueRow], focus: &mut SessionKeyValueFocus) {
+    *focus = match *focus {
+        SessionKeyValueFocus::Row(index) => SessionKeyValueFocus::Row(index.saturating_sub(1)),
+        _ if !rows.is_empty() => SessionKeyValueFocus::Row(rows.len() - 1),
+        _ => *focus,
+    };
+}
+
+fn move_session_key_value_focus_down(
+    rows: &[SessionKeyValueRow],
+    focus: &mut SessionKeyValueFocus,
+) {
+    *focus = match *focus {
+        SessionKeyValueFocus::Row(index) => {
+            SessionKeyValueFocus::Row(min(index + 1, rows.len().saturating_sub(1)))
+        }
+        _ => *focus,
+    };
 }
 
 fn handle_session_key_values_row_action(
@@ -1296,7 +1319,7 @@ fn handle_session_key_values_row_action(
                 index,
                 selected_key: ui.selected_key.clone(),
             }),
-        KeyCode::Char('u') => {
+        KeyCode::Char('m') => {
             if let Some(row) = ui.rows.get(index) {
                 ui.key_input = row.key.clone();
                 ui.value_input = row.value.clone();

@@ -490,8 +490,8 @@ fn session_tags_footer_styles_tag_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(text, "[Cancel]   Ok  | update | x unset | check");
-    assert_eq!(styled_mnemonics, "uxc");
+    assert_eq!(text, "[Cancel]   Ok  | modify | x unset | check");
+    assert_eq!(styled_mnemonics, "mxc");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -1770,7 +1770,8 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains("Enter sample highlighted session (list pane)"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
-    assert!(body.contains("  u update focused tag"));
+    assert!(body.contains("  ↑ (u) / ↓ (b) move focused tag"));
+    assert!(body.contains("  m modify focused tag"));
     assert!(body.contains("  x unset focused tag"));
     assert!(body.contains("  c toggle sort tag"));
     assert!(!body.contains("PgUp/PgDn page current pane"));
@@ -2305,7 +2306,7 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
     let screen = screen_lines.join("");
     let footer = screen_lines
         .iter()
-        .find(|line| line.contains("Cancel") && line.contains("update"))
+        .find(|line| line.contains("Cancel") && line.contains("modify"))
         .expect("expected session tags footer");
 
     assert_eq!(
@@ -2328,7 +2329,7 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
     assert!(screen.contains("platform"));
     assert!(screen.contains("phase"));
     assert!(screen.contains("build"));
-    assert!(screen.contains("update"));
+    assert!(screen.contains("modify"));
     assert!(screen.contains("x unset"));
     assert!(screen.contains("check"));
     assert!(!screen.contains("+"));
@@ -3317,7 +3318,7 @@ async fn session_tags_modal_update_uses_bottom_fields() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -3348,6 +3349,64 @@ async fn session_tags_modal_update_uses_bottom_fields() {
                 && ui.focus == SessionKeyValueFocus::Row(0)
     ));
     assert_eq!(app.status.text(), "staged tag owner on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_u_and_b_move_rows_and_m_updates() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/a one\n@mmux/b two\n@mmux/c three\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Row(1)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Row(0)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.key_input == "a" && ui.value_input == "one" && ui.focus == SessionKeyValueFocus::Value
+    ));
 }
 
 #[tokio::test]
