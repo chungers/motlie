@@ -1416,7 +1416,7 @@ async fn send_keys_from_modal(
 ) -> Result<bool> {
     let (input, mode) = normalize_send_keys_input(input, mode);
     let enter_keys = if mode == SendKeysSubmitMode::ThenEnterAfterDelay {
-        Some(KeySequence::parse("{Enter}")?)
+        Some(KeySequence::parse("{Enter}").expect("Enter is a valid KeySequence literal"))
     } else {
         None
     };
