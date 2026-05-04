@@ -91,8 +91,7 @@ pub(crate) const MOTLIE_PLACEHOLDER: &str = r#"                 _   _ _
 pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
-↑/↓ select session or scroll detail
-<up> = 'u' and <down> = 'b'
+↑/↓, u/b select session or scroll detail
 Enter sample highlighted session (list pane)
 tab cycle panes
 l toggle layout
