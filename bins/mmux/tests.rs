@@ -1467,6 +1467,36 @@ async fn u_and_b_move_list_selection_like_arrow_keys() {
 }
 
 #[tokio::test]
+async fn u_and_b_scroll_detail_like_arrow_keys() {
+    let fleet = local_fleet();
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    app.layout.focus = Focus::Detail;
+    app.detail.lines = (0..100).map(|n| format!("line {n}")).collect();
+    app.detail.last_known_view_height = 10;
+    app.detail.last_known_scroll_max = 90;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.detail.scroll, 1);
+    assert!(!app.detail.auto_tail);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.detail.scroll, 0);
+    assert!(app.detail.auto_tail);
+}
+
+#[tokio::test]
 async fn enter_from_list_refreshes_sample_detail_without_attaching() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")

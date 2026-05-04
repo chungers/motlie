@@ -138,8 +138,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   keep the highlighted row visible when `len(sessions) > visible_rows`. A
   position indicator (e.g., `5/12`) is shown in the session-list chrome.
 - Up and Down move the highlighted session when focus is `L`; plain `u` and
-  `b` are list-focus aliases for Up and Down. When focus is `R`, Up/Down
-  scroll the `R` content one line; `PgUp`/`PgDn` page through;
+  `b` are aliases for Up and Down in both `L` and `R`. When focus is `R`,
+  Up/Down scroll the `R` content one line; `PgUp`/`PgDn` page through;
   `Home`/`End` jump to top/bottom of the buffer. When focus is `L`,
   `PgUp`/`PgDn` page through the session list and `Home`/`End` jump to
   first/last session.
@@ -689,7 +689,7 @@ Main-selector keymap (focus-aware):
 
 | Key | `L` focused | `R` focused |
 |-----|-------------|-------------|
-| Up / Down, `u` / `b` | Move highlight; session viewport auto-scrolls | Scroll R one line for Up / Down; `u` / `b` no-op |
+| Up / Down, `u` / `b` | Move highlight; session viewport auto-scrolls | Scroll R one line |
 | PgUp / PgDn | Page through session list | Page through R buffer |
 | Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
 | Enter | Refresh one-shot sample detail for the highlighted session | No-op |
