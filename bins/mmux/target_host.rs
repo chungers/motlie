@@ -16,6 +16,16 @@ pub(crate) struct HostConnectSpec {
     config: SshConfig,
 }
 
+/// Initial selector state plus the retry work needed to complete it.
+///
+/// `fleet` is usable immediately by the TUI. `retry_specs` contains the SSH
+/// hosts represented by connecting slots in that fleet; the caller starts
+/// background retries for these specs before entering the selector loop.
+pub(crate) struct InitialHostFleet {
+    pub(crate) fleet: HostFleet,
+    pub(crate) retry_specs: Vec<HostConnectSpec>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IpAddressSource {
     Local,
@@ -30,11 +40,14 @@ enum IpAddressSource {
 /// string; two entries with the same id would collapse `HostFleet::entry`
 /// lookups, selection-preservation keys, and `ActivityTracker` keys onto
 /// each other. Reject explicitly rather than silently degrade.
-pub(crate) async fn connect_initial_fleet(cli: &Cli) -> Result<(HostFleet, Vec<HostConnectSpec>)> {
+pub(crate) async fn connect_initial_fleet(cli: &Cli) -> Result<InitialHostFleet> {
     let specs = ssh_connect_specs(cli)?;
     let local = connect_local_entry().await;
     if specs.is_empty() {
-        return Ok((HostFleet::from_entries(vec![local]), Vec::new()));
+        return Ok(InitialHostFleet {
+            fleet: HostFleet::from_entries(vec![local]),
+            retry_specs: Vec::new(),
+        });
     }
 
     let mut hosts = Vec::with_capacity(specs.len() + 1);
@@ -44,7 +57,10 @@ pub(crate) async fn connect_initial_fleet(cli: &Cli) -> Result<(HostFleet, Vec<H
             HostSlot::connecting(spec.id.clone(), spec.label.clone(), spec.alias.clone())
         }),
     );
-    Ok((HostFleet::from_configured_hosts(vec![local], hosts), specs))
+    Ok(InitialHostFleet {
+        fleet: HostFleet::from_configured_hosts(vec![local], hosts),
+        retry_specs: specs,
+    })
 }
 
 fn ssh_connect_specs(cli: &Cli) -> Result<Vec<HostConnectSpec>> {

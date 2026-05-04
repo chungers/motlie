@@ -877,7 +877,12 @@ pub(crate) struct HostEntry {
 pub(crate) enum HostConnectionStatus {
     Connecting,
     Connected,
-    Failed { error: String },
+    Failed(HostConnectFailure),
+}
+
+pub(crate) struct HostConnectFailure {
+    // Stable typed phase plus display message; equality defines retry-event
+    // coalescing and redraw suppression for repeated failures.
 }
 
 pub(crate) struct HostSlot {
@@ -1042,7 +1047,7 @@ not required for v1.
 |---|---|
 | `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`). |
 | `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. |
-| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<(HostFleet, Vec<HostConnectSpec>)>`. Localhost is connected immediately; SSH URIs become configured host slots for background retry. |
+| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost is connected immediately; SSH URIs become configured host slots and retry specs for background retry. |
 | `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
 | `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. Landscape always renders session list left and detail right. Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |
@@ -1301,10 +1306,11 @@ snapshot refresh path without changing the selector UI model.
 
 Single-poll reconcile loop driven by the main TUI loop:
 
-1. On startup, call `connect_initial_fleet(cli)` to build a `HostFleet`
-   containing localhost plus all configured SSH host slots (rejecting duplicate
-   SSH URIs up front). The TUI starts immediately with localhost connected.
-2. Start one background retry task per SSH URI. A failed attempt marks that
+1. On startup, call `connect_initial_fleet(cli)` to build an `InitialHostFleet`
+   whose `fleet` contains localhost plus all configured SSH host slots
+   (rejecting duplicate SSH URIs up front). The TUI starts immediately with
+   localhost connected.
+2. Start one background retry task per `retry_specs` entry. A failed attempt marks that
    host's legend entry red and retries after a short delay. A successful retry
    inserts the connected `HostEntry`, clears the red state, and allows normal
    refresh fan-out to include that host.
