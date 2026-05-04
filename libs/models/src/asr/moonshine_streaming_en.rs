@@ -6,6 +6,7 @@ use motlie_model::{
 };
 use motlie_model_moonshine::{MoonshineHandle, MoonshineStreamingBundle, MoonshineStreamingSpec};
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -33,7 +34,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("moonshine_streaming_en"),
         display_name: "Moonshine Streaming EN".into(),
         family: BundleFamily::Other("Moonshine".into()),
-        capabilities: motlie_model::Capabilities::transcription_stream_only(),
+        capabilities: motlie_model::Capabilities::transcription_stream_partial_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -131,7 +132,7 @@ fn resolve_local_model_root(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
             root.display()
         )));
     }
@@ -163,7 +164,7 @@ fn resolve_local_model_root(root: &Path) -> Result<PathBuf, ModelError> {
         let path = snapshot_dir.join(filename);
         if !path.exists() {
             return Err(ModelError::InvalidConfiguration(format!(
-                "artifact policy `LocalOnly` requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
+                "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
                 root.display()
             )));
         }

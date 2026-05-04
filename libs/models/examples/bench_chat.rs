@@ -19,7 +19,7 @@ use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, QuantizationBits,
     StartOptions,
 };
-use motlie_models::{CuratedBundle, default_artifact_root};
+use motlie_models::{CuratedBundle, default_artifact_root, quantization_label_isq};
 use std::time::Instant;
 
 #[tokio::main]
@@ -70,14 +70,7 @@ async fn main() -> Result<()> {
 
     println!("=== bench_chat ===");
     println!("model: {model_name}");
-    println!(
-        "quantization: {}",
-        match quantization {
-            Some(QuantizationBits::Four) => "ISQ Q4",
-            Some(QuantizationBits::Eight) => "ISQ Q8",
-            None => "F32",
-        }
-    );
+    println!("quantization: {}", quantization_label_isq(quantization));
     println!("iterations: {iterations}");
     println!("force-cpu: {force_cpu}");
     let pa_context = std::env::var("MOTLIE_PAGED_ATTN_CONTEXT").ok();

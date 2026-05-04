@@ -3,7 +3,7 @@ use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
     QuantizationBits, StartOptions,
 };
-use motlie_models::{chat::ChatModels, default_artifact_root};
+use motlie_models::{chat::ChatModels, default_artifact_root, quantization_label_isq};
 use std::path::Path;
 use std::time::Instant;
 
@@ -63,14 +63,7 @@ async fn main() -> Result<()> {
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
     support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
-    println!(
-        "quantization: {}",
-        match quantization {
-            Some(QuantizationBits::Four) => "ISQ Q4",
-            Some(QuantizationBits::Eight) => "ISQ Q8",
-            None => "F32 (none)",
-        }
-    );
+    println!("quantization: {}", quantization_label_isq(quantization));
 
     if download_artifacts {
         let summary =

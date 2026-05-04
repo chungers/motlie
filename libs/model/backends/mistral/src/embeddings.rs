@@ -384,7 +384,7 @@ async fn build_embedding_model(
         .with_dtype(ModelDType::F32);
 
     if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits));
+        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
     }
 
     if should_force_cpu() {

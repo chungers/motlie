@@ -25,7 +25,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", ggml_cmake.display());
 
     validate_submodule_checkout(&vendor_dir, &api_cpp, &api_h, &ggml_cmake);
-    build_ggml_submodule(&ggml_dir);
+    let ggml_build_dir = build_ggml_submodule(&ggml_dir);
+    sync_vendor_ggml_build_dir(&ggml_dir, &ggml_build_dir);
 
     let wrapper_dir = generate_wrapper_project(&vendor_dir);
     let mut config = cmake::Config::new(&wrapper_dir);
@@ -44,7 +45,11 @@ fn main() {
 
     config.define(
         "MOTLIE_ENABLE_COREML",
-        if cfg!(target_os = "macos") { "ON" } else { "OFF" },
+        if cfg!(target_os = "macos") {
+            "ON"
+        } else {
+            "OFF"
+        },
     );
     if cfg!(target_os = "macos") {
         config.define("GGML_METAL", "ON");
@@ -130,8 +135,9 @@ fn validate_submodule_checkout(vendor_dir: &Path, api_cpp: &Path, api_h: &Path, 
     }
 }
 
-fn build_ggml_submodule(ggml_dir: &Path) {
-    let build_dir = ggml_dir.join("build");
+fn build_ggml_submodule(ggml_dir: &Path) -> PathBuf {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
+    let build_dir = out_dir.join("ggml-build");
     let mut configure = Command::new("cmake");
     configure.arg("-S").arg(ggml_dir);
     configure.arg("-B").arg(&build_dir);
@@ -164,6 +170,53 @@ fn build_ggml_submodule(ggml_dir: &Path) {
             );
         }
     }
+
+    build_dir
+}
+
+fn sync_vendor_ggml_build_dir(ggml_dir: &Path, build_dir: &Path) {
+    let vendor_build_dir = ggml_dir.join("build");
+    if let Ok(metadata) = fs::symlink_metadata(&vendor_build_dir) {
+        let existing = fs::canonicalize(&vendor_build_dir).ok();
+        let desired = fs::canonicalize(build_dir).ok();
+        if existing.is_some() && existing == desired {
+            return;
+        }
+
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(&vendor_build_dir).unwrap_or_else(|error| {
+                panic!(
+                    "failed to remove stale ggml build link `{}`: {error}",
+                    vendor_build_dir.display()
+                )
+            });
+        } else if metadata.is_dir() {
+            fs::remove_dir_all(&vendor_build_dir).unwrap_or_else(|error| {
+                panic!(
+                    "failed to remove stale ggml build directory `{}`: {error}",
+                    vendor_build_dir.display()
+                )
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(build_dir, &vendor_build_dir).unwrap_or_else(|error| {
+        panic!(
+            "failed to link `{}` to ggml build output `{}`: {error}",
+            vendor_build_dir.display(),
+            build_dir.display()
+        )
+    });
+
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(build_dir, &vendor_build_dir).unwrap_or_else(|error| {
+        panic!(
+            "failed to link `{}` to ggml build output `{}`: {error}",
+            vendor_build_dir.display(),
+            build_dir.display()
+        )
+    });
 }
 
 fn generate_wrapper_project(vendor_dir: &Path) -> PathBuf {
@@ -195,6 +248,7 @@ project(motlie-qwen3-tts-wrapper LANGUAGES CXX)
 if(NOT DEFINED MOTLIE_VENDOR_DIR)
     message(FATAL_ERROR "MOTLIE_VENDOR_DIR must point at the qwen3-tts.cpp checkout")
 endif()
+
 
 if(NOT DEFINED MOTLIE_ENABLE_CUDA)
     set(MOTLIE_ENABLE_CUDA OFF)
@@ -326,14 +380,24 @@ fn discover_cuda_lib_dirs() -> Vec<PathBuf> {
 
     dirs.push(PathBuf::from("/usr/local/cuda/lib64"));
     dirs.push(PathBuf::from("/usr/local/cuda/targets/sbsa-linux/lib"));
-    dirs.push(PathBuf::from("/usr/local/cuda/targets/sbsa-linux/lib/stubs"));
+    dirs.push(PathBuf::from(
+        "/usr/local/cuda/targets/sbsa-linux/lib/stubs",
+    ));
     dirs.push(PathBuf::from("/usr/local/cuda/targets/x86_64-linux/lib"));
-    dirs.push(PathBuf::from("/usr/local/cuda/targets/x86_64-linux/lib/stubs"));
+    dirs.push(PathBuf::from(
+        "/usr/local/cuda/targets/x86_64-linux/lib/stubs",
+    ));
     dirs.push(PathBuf::from("/usr/local/cuda-13.0/lib64"));
     dirs.push(PathBuf::from("/usr/local/cuda-13.0/targets/sbsa-linux/lib"));
-    dirs.push(PathBuf::from("/usr/local/cuda-13.0/targets/sbsa-linux/lib/stubs"));
-    dirs.push(PathBuf::from("/usr/local/cuda-13.0/targets/x86_64-linux/lib"));
-    dirs.push(PathBuf::from("/usr/local/cuda-13.0/targets/x86_64-linux/lib/stubs"));
+    dirs.push(PathBuf::from(
+        "/usr/local/cuda-13.0/targets/sbsa-linux/lib/stubs",
+    ));
+    dirs.push(PathBuf::from(
+        "/usr/local/cuda-13.0/targets/x86_64-linux/lib",
+    ));
+    dirs.push(PathBuf::from(
+        "/usr/local/cuda-13.0/targets/x86_64-linux/lib/stubs",
+    ));
     dirs.push(PathBuf::from("/usr/lib/aarch64-linux-gnu"));
     dirs.push(PathBuf::from("/usr/lib/x86_64-linux-gnu"));
 

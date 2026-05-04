@@ -6,6 +6,7 @@ use motlie_model::{
 };
 use motlie_model_piper::{PiperHandle, PiperSpeechBundle, PiperSpeechSpec};
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -27,7 +28,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("piper_en_us_ljspeech_medium"),
         display_name: "Piper en_US ljspeech medium".into(),
         family: BundleFamily::Piper,
-        capabilities: motlie_model::Capabilities::speech_stream_only(),
+        capabilities: motlie_model::Capabilities::speech_buffered_only(),
         eval_tracks: vec![EvalTrack::Speech],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -135,7 +136,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
             root.display()
         )));
     }
@@ -159,7 +160,7 @@ fn resolve_local_model_path(root: &Path) -> Result<PathBuf, ModelError> {
         let path = snapshot_dir.join(filename);
         if !path.exists() {
             return Err(ModelError::InvalidConfiguration(format!(
-                "artifact policy `LocalOnly` requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
+                "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
                 root.display()
             )));
         }

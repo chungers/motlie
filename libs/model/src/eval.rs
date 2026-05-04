@@ -30,6 +30,7 @@ impl EvalTrack {
             CapabilityKind::Embeddings => Some(Self::Embeddings),
             CapabilityKind::Speech => Some(Self::Speech),
             CapabilityKind::Transcription => Some(Self::Transcription),
+            CapabilityKind::VoiceClone => Some(Self::Speech),
             _ => None,
         }
     }

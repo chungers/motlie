@@ -2,7 +2,9 @@ use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, EmbeddingModel, EmbeddingRequest, QuantizationBits, StartOptions,
 };
-use motlie_models::{ModelSelector, default_artifact_root, download_bundle_artifacts};
+use motlie_models::{
+    ModelSelector, default_artifact_root, download_bundle_artifacts, quantization_label_isq,
+};
 use std::time::Instant;
 
 #[path = "../support.rs"]
@@ -82,14 +84,7 @@ async fn main() -> Result<()> {
     println!("bundle-id: {}", bundle_id.as_str());
     println!("artifact-root: {}", artifact_root.display());
     support::print_process_snapshot("process-before-start", &support::current_process_snapshot());
-    println!(
-        "quantization: {}",
-        match quantization {
-            Some(QuantizationBits::Four) => "ISQ Q4",
-            Some(QuantizationBits::Eight) => "ISQ Q8",
-            None => "F32 (none)",
-        }
-    );
+    println!("quantization: {}", quantization_label_isq(quantization));
 
     if download_artifacts {
         let summary = download_bundle_artifacts(&catalog, &bundle_id, &artifact_root)

@@ -405,7 +405,7 @@ async fn build_multimodal_model(
     // `ModelBuilder`, and that path preserves multimodal chat-template discovery.
     let mut builder = ModelBuilder::new(model_target);
     if let Some(bits) = resolved_quantization {
-        builder = builder.with_auto_isq(map_quantization_bits(bits));
+        builder = builder.with_auto_isq(map_quantization_bits(bits)?);
     }
     if should_force_cpu() {
         builder = builder.with_force_cpu();
