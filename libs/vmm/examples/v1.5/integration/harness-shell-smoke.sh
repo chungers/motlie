@@ -117,7 +117,6 @@ test -f "$BASE_VM_DIR/nvram.bin" || {
 }
 
 cargo build -p motlie-vmm --example harness_v1_5 >/dev/null
-cargo build -p motlie-vmm --example vz_egress_helper_v1_5 >/dev/null
 
 mkdir -p "$CONTROL_ROOT"
 mkfifo "$HARNESS_FIFO"

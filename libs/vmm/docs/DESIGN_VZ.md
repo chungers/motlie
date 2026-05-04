@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex-vz | Update the live networking shape for v1.5: VZ userspace egress is embedded in the VMM runtime; `launch-vz.sh` consumes its socket instead of spawning the default helper |
 | 2026-04-26 | @codex-vz | Reconcile the design text with the live v1.45 slice: Motlie VFS is the current filesystem backing, Vz userspace egress is backend-owned, and `vz-userspace` is not a global launcher selector |
 | 2026-04-25 | @codex-vz | Link Vz backend readiness to the shared guest convergence contract: `control-plane-ready` is an interactive-readiness gate, while full VFS/VNET/egress certification remains an explicit harness validation step |
 | 2026-04-17 | @vmm-vz-cdx | Record `libs/vfs/examples/v1.05` as the Tart-backed guest-image / guest-contract probe, document Tart as an interim signed launcher ahead of `vz-runner`, and make the `v1.05` -> `v1.15` sequencing explicit |
@@ -548,16 +549,20 @@ Live `v1.45` mapping:
 
 - `AdminNetMode::None + EgressNetMode::VzUserspace`
   - accepted only for `BackendKind::Vz`
-  - launches the Vz userspace egress helper and configures the guest default
-    route through that helper
+  - v1.45 launched a Vz userspace egress helper and configured the guest
+    default route through that helper
+  - v1.5 embeds the same userspace egress role in
+    `NetworkBacking::VzUserspaceEgress`; `launch-vz.sh` receives only the
+    datagram socket path consumed by `vz-vsock-runner`
 - all other combinations for Vz
   - reject as unsupported for Vz phase 1
 
 Reasoning:
 
 - Vz does not consume the existing userspace `motlie-vnet` vhost-user socket
-- the current helper is the closest equivalent to “guest has outbound network
-  access” for this slice
+- the current embedded backend is the closest equivalent to "guest has
+  outbound network access" for this slice; it shares the libslirp engine but
+  uses the VZ file-handle NIC transport instead of CH vhost-user
 - bridged and vmnet custom topologies can come later, but they should be added
   as explicit Vz network modes, not hidden behind CH vocabulary
 

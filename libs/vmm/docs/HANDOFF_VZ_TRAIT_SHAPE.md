@@ -13,6 +13,7 @@ issues can resolve their own AC items without re-deriving context.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex-vz | Add v1.5 update: VZ userspace egress is now embedded in the VMM runtime, so the open #169 question narrows to adapter shape and transport, not helper-process ownership |
 | 2026-04-26 | @opus47-mac | Initial handoff doc capturing v1.35/v1.45 empirical findings for #169 / #171 / #207 |
 
 ## Source of evidence
@@ -34,9 +35,15 @@ The current backend split, as of `feature/vmm-vz` head:
 ```text
 HypervisorBacking::AppleVirtualizationShell(VzShellBackend)
 FilesystemBacking::MotlieVfs(MotlieVfsBacking)
-NetworkBacking::HypervisorManaged
+NetworkBacking::VzUserspaceEgress(VzUserspaceEgressBacking) // v1.5
 ControlPlaneBacking::MotlieSshProxy
 ```
+
+Before v1.5, the VZ slice used `NetworkBacking::HypervisorManaged` and spawned
+one `vz_egress_helper` process per guest. v1.5 moves that libslirp role into
+the VMM runtime so it is lifecycle-owned like the CH `MotlieVnet` handle. The
+external VZ process boundary that remains is `vz-vsock-runner`, parallel to the
+CH `cloud-hypervisor` runner boundary.
 
 ## #169 (motlie-vnet core/adapter split) — what the slice proved
 
@@ -61,11 +68,11 @@ transport.
 
 **Still ambiguous:**
 
-- **Per-guest vs per-host helper.** v1.25 and v1.45 spawn one egress helper
-  process per guest. A per-host singleton would be cheaper at N guests but
-  loses per-guest isolation guarantees and complicates ownership of the
-  libslirp instance. `libs/vmm/examples/v1.45/launch-vz.sh:kill_stale_egress_helpers`
-  already assumes per-guest. #169 should pick a side.
+- **Per-guest isolation is selected.** v1.5 keeps one libslirp instance per
+  guest, but embeds that instance in the VMM runtime instead of spawning one
+  helper process per guest. #169 should focus on the transport/core adapter
+  shape and preserve this per-guest isolation unless a later design explicitly
+  replaces it.
 - **Two-hop bridge cost.** The current path is `VZ NIC fd → socketpair → bridge
   thread → sendto(helper)`. PR #212 finding #7 (still open in #215 AC #4)
   proposes collapsing to per-guest `connect(SOCK_DGRAM)` + direct
@@ -178,8 +185,8 @@ across the split:
 4. Unknown-principal SSH first-contact triggers auto-provision; second SSH
    reuses the same VM (`auto-provision-ssh.json`).
 5. Tart-free runtime: the post-shutdown `~/.tart/` catalog must remain
-   untouched. `vz-vsock-runner` and `vz_egress_helper` are the only Vz-side
-   processes.
+   untouched. In v1.5 the only default Vz-side child process is
+   `vz-vsock-runner`; `vz_egress_helper` is diagnostic-only.
 6. Convergence contract phases (`CONVERGENCE.md`):
    `image-ready → seed-ready → launched → interactive-ready →
    validation-complete → shutdown-clean`. The `interactive-ready` gate must

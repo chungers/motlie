@@ -1295,6 +1295,12 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Driver
             code: "vnet_failed",
             message: error.to_string(),
         },
+        RuntimeError::VzEgress(_) => DriverFailure {
+            class: DriverFailureClass::Network,
+            stage,
+            code: "vz_egress_failed",
+            message: error.to_string(),
+        },
         RuntimeError::UnsupportedHypervisor => DriverFailure {
             class: DriverFailureClass::Backend,
             stage,

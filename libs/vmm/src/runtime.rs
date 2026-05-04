@@ -7,6 +7,9 @@ use crate::backend::motlie::ssh_proxy::{MotlieSshProxyBacking, MotlieSshProxyHan
 use crate::backend::motlie::vfs::{MotlieVfsBacking, MotlieVfsHandle};
 #[cfg(target_os = "linux")]
 use crate::backend::motlie::vnet::{MotlieVnetBacking, MotlieVnetHandle, MotlieVnetProvisionError};
+use crate::backend::vz::egress::{
+    VzEgressError, VzUserspaceEgressBacking, VzUserspaceEgressHandle,
+};
 use crate::backend::vz::shell::VzShellBackend;
 use crate::backend::{BackendError, BackendHandle, BackendKind, BackendShutdownOutcome};
 use crate::guestfs::GuestFsError;
@@ -58,6 +61,7 @@ pub enum FilesystemBacking {
 pub enum NetworkBacking {
     None,
     HypervisorManaged,
+    VzUserspaceEgress(VzUserspaceEgressBacking),
     #[cfg(target_os = "linux")]
     MotlieVnet(MotlieVnetBacking),
     #[cfg(target_os = "linux")]
@@ -77,6 +81,7 @@ pub enum FilesystemHandle {
 
 #[derive(Debug)]
 pub enum NetworkHandle {
+    VzUserspaceEgress(VzUserspaceEgressHandle),
     #[cfg(target_os = "linux")]
     MotlieVnet(MotlieVnetHandle),
 }
@@ -100,6 +105,8 @@ pub enum RuntimeError {
     #[cfg(target_os = "linux")]
     #[error(transparent)]
     VnetShutdown(#[from] VnetError),
+    #[error(transparent)]
+    VzEgress(#[from] VzEgressError),
     #[error("hypervisor backing is not implemented yet")]
     UnsupportedHypervisor,
 }
@@ -197,6 +204,9 @@ impl NetworkBacking {
     ) -> Result<Option<NetworkHandle>, RuntimeError> {
         match self {
             Self::None | Self::HypervisorManaged => Ok(None),
+            Self::VzUserspaceEgress(backing) => Ok(backing
+                .provision(_prepared)?
+                .map(NetworkHandle::VzUserspaceEgress)),
             #[cfg(target_os = "linux")]
             Self::MotlieVnet(backing) | Self::HypervisorManagedPlusMotlieVnet(backing) => {
                 Ok(backing.provision(_prepared)?.map(NetworkHandle::MotlieVnet))
@@ -205,40 +215,32 @@ impl NetworkBacking {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl NetworkHandle {
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
         match self {
+            Self::VzUserspaceEgress(handle) => Ok(handle.shutdown()?),
+            #[cfg(target_os = "linux")]
             Self::MotlieVnet(handle) => Ok(handle.shutdown()?),
         }
     }
 
     pub fn backing_name(&self) -> &'static str {
         match self {
+            Self::VzUserspaceEgress(_) => "vz-userspace-egress",
+            #[cfg(target_os = "linux")]
             Self::MotlieVnet(_) => "motlie-vnet",
         }
     }
 
-    pub fn observability(&self, runtime_paths: &GuestRuntimePaths) -> NetworkObservability {
+    pub fn observability(&self, _runtime_paths: &GuestRuntimePaths) -> NetworkObservability {
         NetworkObservability {
             backing: self.backing_name(),
-            socket_path: Some(runtime_paths.vnet_socket.clone()),
+            socket_path: match self {
+                Self::VzUserspaceEgress(handle) => Some(handle.socket_path().to_path_buf()),
+                #[cfg(target_os = "linux")]
+                Self::MotlieVnet(_) => Some(_runtime_paths.vnet_socket.clone()),
+            },
         }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-impl NetworkHandle {
-    pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
-        match *self {}
-    }
-
-    pub fn backing_name(&self) -> &'static str {
-        match *self {}
-    }
-
-    pub fn observability(&self, _runtime_paths: &GuestRuntimePaths) -> NetworkObservability {
-        match *self {}
     }
 }
 

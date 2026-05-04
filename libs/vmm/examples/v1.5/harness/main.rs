@@ -959,6 +959,12 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Scenar
             code: "vnet_failed",
             message: error.to_string(),
         },
+        RuntimeError::VzEgress(_) => ScenarioFailure {
+            class: FailureClass::Network,
+            stage,
+            code: "vz_egress_failed",
+            message: error.to_string(),
+        },
         RuntimeError::UnsupportedHypervisor => ScenarioFailure {
             class: FailureClass::Backend,
             stage,

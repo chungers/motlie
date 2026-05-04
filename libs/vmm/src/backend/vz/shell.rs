@@ -23,6 +23,7 @@ pub struct VzShellHandle {
     pub runner_pid_file: PathBuf,
     pub egress_helper_pid_file: PathBuf,
     pub egress_socket_path: PathBuf,
+    pub embedded_egress: bool,
     pub(crate) child: Mutex<Option<Child>>,
 }
 
@@ -267,7 +268,11 @@ impl VzShellBackend {
                 .runtime_paths
                 .runtime_dir
                 .join("vz-egress-helper.pid"),
-            egress_socket_path: prepared.runtime_paths.runtime_dir.join("egress.sock"),
+            egress_socket_path: prepared.runtime_paths.vnet_socket.clone(),
+            embedded_egress: matches!(
+                prepared.network_modes.egress,
+                crate::network::EgressNetMode::VzUserspace
+            ),
             child: Mutex::new(Some(child)),
         }))
     }
@@ -285,7 +290,8 @@ impl VzShellBackend {
 
         let shutdown_script =
             Self::shutdown_script_path(&shell_handle.base_dir, &shell_handle.launch_script_path);
-        let output = Command::new(&shutdown_script)
+        let mut command = Command::new(&shutdown_script);
+        command
             .env("MOTLIE_VZ_ARTIFACTS_DIR", &shell_handle.artifacts_dir)
             .env("MOTLIE_VZ_RUNNER_PID_FILE", &shell_handle.runner_pid_file)
             .env(
@@ -295,7 +301,11 @@ impl VzShellBackend {
             .env(
                 "MOTLIE_VZ_EGRESS_SOCKET_PATH",
                 &shell_handle.egress_socket_path,
-            )
+            );
+        if shell_handle.embedded_egress {
+            command.env("MOTLIE_VZ_EMBEDDED_EGRESS", "1");
+        }
+        let output = command
             .arg("--guest")
             .arg(&shell_handle.guest_id)
             .arg("--vm-name")

@@ -10,8 +10,9 @@ set -euo pipefail
 # This launch path must not run cargo, rustup, npm, apt, or signing/build
 # helpers. Missing immutable content is a base-image contract violation.
 # VZ-specific adaptation is confined to Apple Virtualization.framework runner
-# setup, disk cloning, userspace egress helper, and SSH-based dynamic seed
-# refresh. Guest-visible schema stays aligned with launch-ch.sh.
+# setup, disk cloning, VMM-owned userspace egress socket consumption, and
+# SSH-based dynamic seed refresh. Guest-visible schema stays aligned with
+# launch-ch.sh.
 # Keep this sequence aligned with libs/vmm/docs/CONVERGENCE.md.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,6 +25,7 @@ TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-900}"
 RUNNER_BIN_OVERRIDE="${MOTLIE_VZ_RUNNER_BIN:-}"
 ENABLE_GUEST_SSH_VSOCK="${MOTLIE_VZ_ENABLE_GUEST_SSH_VSOCK:-0}"
 EGRESS_HELPER_BIN_OVERRIDE="${MOTLIE_VZ_EGRESS_HELPER_BIN:-}"
+EMBEDDED_EGRESS="${MOTLIE_VZ_EMBEDDED_EGRESS:-0}"
 KEEP_RUNNING="${MOTLIE_VZ_KEEP_RUNNING:-0}"
 REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
 NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/../v1.35/artifacts/source-base.vm}"
@@ -264,11 +266,24 @@ if [[ -n "$CONTROL_READY_FILE" ]]; then
 fi
 if [[ -n "$CONTROL_PORT_FILE" ]]; then
   mkdir -p "$(dirname "$CONTROL_PORT_FILE")"
-  rm -f "$CONTROL_PORT_FILE"
 fi
 
 if [[ -n "$CONTROL_PORT_FILE" ]]; then
-  CONTROL_PORT="$(python3 - <<'PY'
+  if [[ "$EMBEDDED_EGRESS" == "1" ]]; then
+    if [[ ! -f "$CONTROL_PORT_FILE" ]]; then
+      cat >&2 <<EOF
+embedded VZ egress requires a preselected control-port file:
+  $CONTROL_PORT_FILE
+
+The VMM runtime must start backend::vz::egress before launch-vz.sh so the
+libslirp host-forward and the SSH control-plane agree on one port.
+EOF
+      exit 1
+    fi
+    CONTROL_PORT="$(<"$CONTROL_PORT_FILE")"
+  else
+    rm -f "$CONTROL_PORT_FILE"
+    CONTROL_PORT="$(python3 - <<'PY'
 import socket
 sock = socket.socket()
 sock.bind(("127.0.0.1", 0))
@@ -277,7 +292,8 @@ sock.close()
 print(port)
 PY
 )"
-  printf '%s\n' "$CONTROL_PORT" >"$CONTROL_PORT_FILE"
+    printf '%s\n' "$CONTROL_PORT" >"$CONTROL_PORT_FILE"
+  fi
 fi
 
 require_host_socket_ready() {
@@ -464,8 +480,10 @@ cleanup() {
     # script start so the signal/wait/SIGKILL-escalate/remove flow is
     # the single source of truth for the runner and egress lifecycle.
     kill_stale_runners
-    kill_stale_egress_helpers
-    rm -f "$EGRESS_SOCKET_PATH"
+    if [[ "$EMBEDDED_EGRESS" != "1" ]]; then
+      kill_stale_egress_helpers
+      rm -f "$EGRESS_SOCKET_PATH"
+    fi
     if [[ "$REUSED_VM" -eq 0 ]] && [[ -n "$RUN_VM_DIR" && -d "$RUN_VM_DIR" ]]; then
       rm -rf "$RUN_VM_DIR"
     fi
@@ -637,6 +655,26 @@ kill_stale_egress_helpers() {
 }
 
 start_egress_helper() {
+  if [[ "$EMBEDDED_EGRESS" == "1" ]]; then
+    local attempts=0
+    while [[ $attempts -lt 40 ]]; do
+      if [[ -S "$EGRESS_SOCKET_PATH" ]]; then
+        echo "--- using embedded VMM VZ egress backend at $EGRESS_SOCKET_PATH ---"
+        return 0
+      fi
+      sleep 0.25
+      attempts=$(( attempts + 1 ))
+    done
+    cat >&2 <<EOF
+timed out waiting for embedded VZ egress socket:
+  $EGRESS_SOCKET_PATH
+
+launch-vz.sh does not start libslirp in embedded mode. The VMM runtime owns
+this socket and must provision it before the Apple VZ runner starts.
+EOF
+    exit 1
+  fi
+
   local helper_bin=""
   if [[ -n "$EGRESS_HELPER_BIN_OVERRIDE" ]]; then
     helper_bin="$EGRESS_HELPER_BIN_OVERRIDE"
@@ -693,7 +731,9 @@ EOF
 # read/validate PID file, union with ps-grep candidates, signal, poll,
 # SIGKILL escalate, and remove the file on success.
 kill_stale_runners
-kill_stale_egress_helpers
+if [[ "$EMBEDDED_EGRESS" != "1" ]]; then
+  kill_stale_egress_helpers
+fi
 
 if [[ ! -f "$BASE_SOURCE_DIR/disk.img" || ! -f "$BASE_SOURCE_DIR/nvram.bin" ]]; then
   echo "base VM artifacts not found at '$BASE_SOURCE_DIR'; run ./build-guest.sh first" >&2
@@ -714,7 +754,12 @@ fi
 
 mkdir -p "$ARTIFACTS_DIR"
 rm -f "$RUN_LOG" "$SERIAL_LOG" "$RUNNER_PID_FILE" "$GUEST_IP_FILE" "$RESULT_JSON" \
-  "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$EGRESS_SOCKET_PATH" "$EGRESS_LOG" "$EGRESS_HELPER_PID_FILE" "$SEED_IMAGE"
+  "$ARTIFACTS_DIR/${GUEST_NAME}-validation.json" "$EGRESS_LOG" "$EGRESS_HELPER_PID_FILE" "$SEED_IMAGE"
+if [[ "$EMBEDDED_EGRESS" != "1" ]]; then
+  # Embedded VZ egress is already bound by the VMM runtime before this script
+  # runs. Do not unlink its socket from launch-vz.sh.
+  rm -f "$EGRESS_SOCKET_PATH"
+fi
 rm -rf "$SEED_DIR"
 
 guest_fetch() {
@@ -1059,7 +1104,7 @@ EOF
 fi
 chmod +x "$RUNNER_BIN"
 start_egress_helper
-mark_phase "egress-helper-ready"
+mark_phase "egress-backend-ready"
 
 VM_DIR="$RUN_VM_DIR"
 DISK_PATH="$VM_DIR/disk.img"

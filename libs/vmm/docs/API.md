@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-04 | @codex-vz | add `VzUserspaceEgress` to the reviewed runtime model so VZ egress is lifecycle-owned by VMM like CH Motlie VNET while the VZ runner remains a hypervisor adapter
 - 2026-04-08 | @codex | add `wait_egress_ready` as a first-class harness/scenario readiness primitive so saved validations and manual certification can block on DNS + outbound HTTPS readiness instead of one opportunistic probe
 - 2026-04-08 | @codex | address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record typed `OverlaySize`, namespace-sensitive socket paths, and shutdown-cleanup failure reporting
 - 2026-04-08 | @codex | add PTY asciicast export as the portable replay artifact beside canonical transcript NDJSON + VTE screen JSON, and add a Rust-native static SVG export for GitHub-friendly snapshot embedding; PNG/GIF generation remains out of scope for `v1.4`
@@ -255,6 +256,7 @@ pub enum FilesystemBacking {
 pub enum NetworkBacking {
     None,
     HypervisorManaged,
+    VzUserspaceEgress,
     MotlieVnet,
     HypervisorManagedPlusMotlieVnet,
 }

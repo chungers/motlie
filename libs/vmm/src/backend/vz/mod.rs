@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::spec::GuestRuntimePaths;
 
+pub mod egress;
 pub mod shell;
 
 pub fn artifacts_dir(runtime_paths: &GuestRuntimePaths) -> PathBuf {

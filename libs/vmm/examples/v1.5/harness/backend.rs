@@ -169,7 +169,9 @@ impl HarnessBackend {
 
     fn network_backing(self) -> Result<NetworkBacking, DynError> {
         match self {
-            Self::Vz => Ok(NetworkBacking::HypervisorManaged),
+            Self::Vz => Ok(NetworkBacking::VzUserspaceEgress(
+                motlie_vmm::backend::vz::egress::VzUserspaceEgressBacking::new(),
+            )),
             Self::Ch => ch_network_backing(),
         }
     }

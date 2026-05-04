@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex-vz | Record the v1.5 host-runtime convergence boundary: CH and VZ keep external VM runners while VFS and egress/VNET services are embedded VMM runtime backends |
 | 2026-05-03 | @codex-vz | Define guest functionality conformance as VFS memfs views, apt-backed egress, and Codex/Claude startup in the shared v1.5 harness |
 | 2026-05-03 | @codex-vz | Add the Linux CH artifact emitter for the common v1.5 guest contract and make CH egress setup explicit v1.5 platform adaptation |
 | 2026-05-03 | @codex-vz | Consolidate v1.5 manual/interactive operation into `harness_v1_5`, deprecate the v1.5 REPL entrypoint, and require SSH auto-provision toggling to live in the harness shell |
@@ -203,11 +204,35 @@ Expected host artifact boundary:
 ```text
 artifacts/host/darwin-arm64/
   vz-vsock-runner
-  vz_egress_helper_v1_5
 
 artifacts/host/linux-arm64/
   motlie-vnet-vhost-user
 ```
+
+`vz-vsock-runner` remains a host macOS runner artifact because it is the current
+Objective-C/Virtualization.framework boundary. VZ userspace egress is not a
+guest payload and is no longer a required launched helper in the v1.5 harness
+path. It is a VMM host-runtime backend backed by `motlie_vnet::slirp`; the
+standalone `vz_egress_helper_v1_5` example is retained only as a compatibility
+and diagnostic wrapper over the same runtime code.
+
+## Host Runtime Boundary And CH/VZ Parallels
+
+The v1.5 convergence target is one VMM host runtime shape with backend-specific
+runner adapters clearly isolated:
+
+| Concern | CH Track | VZ Track | Convergence Boundary |
+|---------|----------|----------|----------------------|
+| VM runner | External `cloud-hypervisor` process via `launch-ch.sh` | External `vz-vsock-runner` process via `launch-vz.sh` | External runners are acceptable until both can be represented by typed Rust backends |
+| VFS host service | Embedded `FilesystemBacking::MotlieVfs` | Embedded `FilesystemBacking::MotlieVfs` | Same VFS server, same guest mounter, backend-specific transport only |
+| Egress host service | Embedded `NetworkBacking::MotlieVnet` on Linux | Embedded `NetworkBacking::VzUserspaceEgress` on macOS | Same VMM runtime owns service lifecycle; platform-specific virtio transport differs |
+| Guest egress setup | CH service configures the vhost-user/default-route NIC | VZ obtains DHCP/default route from the VZ file-handle NIC/libslirp path | No VNET guest binary; guest-visible network contract stays backend-neutral |
+| SSH control plane | VMM SSH proxy over guest bridge | VMM SSH proxy over VZ userspace TCP host-forward | First-contact waits only for `interactive-ready` |
+
+This boundary is intentional. CH and VZ may have different process adapters for
+the hypervisor runner, but long-lived host services such as VFS and egress must
+be owned by the VMM runtime so lifecycle, observability, shutdown, and future
+multi-backend convergence can be reasoned about in one place.
 
 ## v1.5 Script Layout And Rust Extraction Seams
 
@@ -236,7 +261,10 @@ build-ch-artifacts.sh
 
 launch-vz.sh
   VZ-specific host adaptation: Apple Virtualization.framework runner, native
-  disk clone, userspace egress helper, and SSH-based dynamic seed refresh.
+  disk clone, consumption of the VMM-owned userspace egress socket, and
+  SSH-based dynamic seed refresh. The default v1.5 harness path must not spawn
+  a separate egress helper process; helper mode is only a manual compatibility
+  path.
 
 launch-ch.sh
   CH-specific host adaptation: Cloud Hypervisor kernel/rootfs wiring, ext4

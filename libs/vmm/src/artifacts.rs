@@ -295,11 +295,15 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
             "# Full VFS/VNET/egress certification stays in harness validate/scenario steps.\n",
         );
         out.push_str("export MOTLIE_VZ_INLINE_VALIDATION=0\n");
+        out.push_str(
+            "# Vz egress is VMM-owned runtime state; launch-vz.sh must only consume the socket.\n",
+        );
+        out.push_str("export MOTLIE_VZ_EMBEDDED_EGRESS=1\n");
         export_path(&mut out, "MOTLIE_VZ_ARTIFACTS_DIR", &vz_artifacts_dir);
         export_path(
             &mut out,
             "MOTLIE_VZ_EGRESS_SOCKET_PATH",
-            &cfg.runtime_paths.runtime_dir.join("egress.sock"),
+            &cfg.runtime_paths.vnet_socket,
         );
         export_path(
             &mut out,
@@ -364,7 +368,7 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
         export_path(
             &mut out,
             "MOTLIE_VZ_CONTROL_PORT_FILE",
-            &cfg.runtime_paths.runtime_dir.join("control-port"),
+            &vz::egress::control_port_file(cfg.runtime_paths),
         );
         export_path(
             &mut out,
@@ -641,12 +645,13 @@ mod tests {
         assert!(script.contains("EGRESS_NET='vz-userspace'"));
         assert!(script.contains("export MOTLIE_VZ_SSH_CA_PUBKEY=\"$SSH_CA_PUBKEY\""));
         assert!(script.contains("export MOTLIE_VZ_INLINE_VALIDATION=0"));
+        assert!(script.contains("export MOTLIE_VZ_EMBEDDED_EGRESS=1"));
         assert!(script.contains(
             "export MOTLIE_VZ_ARTIFACTS_DIR='/tmp/motlie-vmm-v14-runtime/alice/vz-artifacts'"
         ));
-        assert!(script.contains(
-            "export MOTLIE_VZ_EGRESS_SOCKET_PATH='/tmp/motlie-vmm-v14-runtime/alice/egress.sock'"
-        ));
+        assert!(
+            script.contains("export MOTLIE_VZ_EGRESS_SOCKET_PATH='/tmp/motlie-vmm-v14-alice.sock'")
+        );
         assert!(script.contains(
             "export MOTLIE_VZ_RUNNER_PID_FILE='/tmp/motlie-vmm-v14-runtime/alice/vz-runner.pid'"
         ));
@@ -661,6 +666,9 @@ mod tests {
         ));
         assert!(script.contains(
             "export MOTLIE_VZ_PHASES_LOG='/tmp/motlie-vmm-v14-runtime/alice/vz-phases.log'"
+        ));
+        assert!(script.contains(
+            "export MOTLIE_VZ_CONTROL_PORT_FILE='/tmp/motlie-vmm-v14-runtime/alice/control-port'"
         ));
         assert!(script
             .contains("export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"));

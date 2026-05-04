@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex-vz | Move default VZ userspace egress into the VMM runtime/harness path and keep `vz_egress_helper_v1_5` as a diagnostic wrapper only |
 | 2026-05-03 | @codex-vz | Promote guest-level VFS memfs views, apt-backed egress, and Codex/Claude startup into the v1.5 conformance scenario and harness validation surface |
 | 2026-05-03 | @codex-vz | Add `build-image.sh` as the common builder entrypoint and `build-ch-artifacts.sh` as the Linux CH emitter for the common v1.5 guest contract |
 | 2026-05-03 | @codex-vz | Mark v1.5 as the unified CH/VZ script home, add common-contract.sh as the shell-to-Rust extraction seam, and require CH launch to consume v1.5 guest-contract metadata instead of legacy v1.4 artifacts |
@@ -28,23 +29,30 @@ The current harness creates this runtime:
 ```text
 HypervisorBacking::AppleVirtualizationShell(VzShellBackend)
 FilesystemBacking::MotlieVfs(MotlieVfsBacking)
-NetworkBacking::HypervisorManaged
+NetworkBacking::VzUserspaceEgress(VzUserspaceEgressBacking)
 ControlPlaneBacking::MotlieSshProxy
 ```
 
 Interpretation:
 
-- Vz owns the VM process, serial log, guest disk clone, and userspace egress
-  helper launch.
+- Vz owns the VM process, serial log, and guest disk clone through the external
+  `vz-vsock-runner` boundary.
 - Motlie VFS is still the filesystem backing for guest workspace/home/state
   mounts in this slice.
-- There is no macOS `motlie-vnet` runtime handle. The Vz userspace egress
-  helper provides outbound connectivity for the Vz VM.
+- The VMM runtime owns the Vz userspace egress backend. `launch-vz.sh` consumes
+  the rendered datagram socket and must not spawn a helper in the harness path.
+- There is no macOS CH-style `MotlieVnet` vhost-user handle. The Vz egress
+  backend uses the same libslirp core through the VZ file-handle NIC transport.
 - The SSH proxy remains the common control plane for exec, PTY, and external
-  SSH.
+  SSH. Vz first-contact SSH uses the host-forward port selected by the embedded
+  egress backend and written to `control-port`.
 
 Any documentation or scenario text that says this slice validates "Motlie
-vnet" is wrong. The correct phrase is "Vz userspace egress".
+vnet" on macOS is wrong. The correct phrase is "Vz userspace egress".
+
+The standalone `vz_egress_helper_v1_5` binary is still buildable for
+compatibility and low-level diagnostics, but it is not a default launch
+prerequisite.
 
 ## Backend Boundary Rules
 
@@ -136,7 +144,6 @@ From the repository root:
 
 ```bash
 cargo build -p motlie-vmm --example harness_v1_5
-cargo build -p motlie-vmm --example vz_egress_helper_v1_5
 ```
 
 Build the guest image when base content changes:
@@ -154,11 +161,11 @@ Build CH artifacts on a Linux CH host when common base content changes:
 Required launch artifacts:
 
 - `libs/vmm/examples/v1.5/artifacts/build/vz-vsock-runner`
-- `target/debug/examples/vz_egress_helper_v1_5`
 - `disk.img` and `nvram.bin` under the base VM directory
 
-`launch-vz.sh` and the harness do not compile or sign host helpers. Build those
-artifacts before launch; missing artifacts are contract failures.
+`launch-vz.sh` and the harness do not compile or sign host helpers. Build the
+runner before launch; missing artifacts are contract failures. The default Vz
+egress path is embedded in `harness_v1_5`.
 
 ## Core Modes
 

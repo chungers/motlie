@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex-vz | Establish v1.5 runtime convergence boundary: VZ egress is embedded in VMM like CH VNET, while VZ and CH VM runners remain explicit backend adapters |
 | 2026-05-02 | @codex-vz | Add the v1.5 ownership decision: VMM owns the common CH/VZ guest image, seed schema, guest binary packaging, and guest runtime home; VFS/VNET remain reusable subsystem libraries |
 | 2026-04-26 | @codex-vz | Make the v1.45 Vz image hardening caveat explicit: apt-daily masking and ForceIPv4 are current Vz slice assumptions, not a converged CH/Vz image contract |
 | 2026-04-25 | @codex-vz | Treat prebuilt host Vz runner/egress helper artifacts as launch prerequisites by default; first-contact startup must not hide host cargo builds |
@@ -145,6 +146,10 @@ Future VMM/VFS/VNET convergence tasks:
 - make `libs/vmm/docs/DESIGN_GUEST_IMAGE.md` the canonical design for the
   v1.5 common guest image, guest binary packaging, and VMM-owned guest
   agent location
+- keep host service lifecycle in the VMM runtime: CH VNET and VZ userspace
+  egress are embedded network handles, while CH and VZ hypervisor runners may
+  remain external process adapters until the typed Rust launcher work absorbs
+  them
 - define one backend-neutral guest seed schema for CH and Vz
 - make image builders produce the same immutable guest contract regardless of
   hypervisor
@@ -159,6 +164,10 @@ Future VMM/VFS/VNET convergence tasks:
   certification probes out of first SSH
 - converge launcher/result artifacts so every backend emits the same phase and
   validation fields
+- preserve the v1.5 boundary when extracting Rust launchers: VZ may keep
+  `vz-vsock-runner` external until Virtualization.framework ownership moves
+  into Rust, but VZ egress must stay a VMM-owned network backend rather than a
+  default helper process
 
 ## Manual Verification Rule
 
