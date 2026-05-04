@@ -20,8 +20,9 @@ use crate::consts::{
     STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
-    apply_fleet_refresh, fetch_fleet_refresh, handle_key, refresh_sessions_preserving,
-    refresh_sessions_quiet, stop_monitor_if_closed, KeyOutcome, RefreshApplyOptions,
+    apply_fleet_refresh, apply_host_refresh, fetch_fleet_refresh, fetch_host_refresh, handle_key,
+    refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed, KeyOutcome,
+    RefreshApplyOptions,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
@@ -654,6 +655,111 @@ async fn apply_fleet_refresh_without_previous_preserves_current_selection() {
             .map(|session| session.name().to_string()),
         Some("selected".to_string())
     );
+}
+
+#[tokio::test]
+async fn apply_host_refresh_replaces_only_completed_host_rows() {
+    let a_entry = ssh_host_entry(
+        "ssh://a",
+        "alpha",
+        "x",
+        HostHandle::new(
+            TransportKind::Mock(
+                MockTransport::new()
+                    .with_response("list-sessions", "__MOTLIE_S__ a-new $1 10 0 1  900\n"),
+            ),
+            None,
+        ),
+    );
+    let b_entry = ssh_host_entry("ssh://b", "beta", "y", HostHandle::local());
+    let fleet = HostFleet::from_entries(vec![a_entry.clone(), b_entry]);
+    let mut app = AppState::with_fleet(fleet.clone(), LayoutMode::Normal);
+    app.session_list.rows = vec![
+        make_row_for_host(
+            session_with_times("a-old", "$1", 10, 100),
+            ssh_host_id("ssh://a"),
+            "alpha",
+        ),
+        make_row_for_host(
+            session_with_times("b-stale", "$2", 20, 200),
+            ssh_host_id("ssh://b"),
+            "beta",
+        ),
+    ];
+    app.session_list.selected = 1;
+
+    let refresh = fetch_host_refresh(&a_entry).await;
+    apply_host_refresh(
+        &fleet,
+        &mut app,
+        refresh,
+        RefreshApplyOptions {
+            force_detail: false,
+            previous: None,
+            update_status: true,
+            excluded: None,
+            allow_detail_refresh: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| (row.host_label.as_str(), row.session.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "a-new"), ("beta", "b-stale")]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("b-stale".to_string())
+    );
+    assert_eq!(app.status.text(), "2 session(s)");
+}
+
+#[tokio::test]
+async fn failed_host_refresh_keeps_existing_rows_visible() {
+    let entry = ssh_host_entry(
+        "ssh://down",
+        "down-host",
+        "x",
+        HostHandle::new(
+            TransportKind::Mock(
+                MockTransport::new().with_error("list-sessions", "transport: connection refused"),
+            ),
+            None,
+        ),
+    );
+    let fleet = HostFleet::from_entries(vec![entry.clone()]);
+    let mut app = AppState::with_fleet(fleet.clone(), LayoutMode::Normal);
+    app.session_list.rows = vec![make_row_for_host(
+        session_with_times("stale", "$1", 10, 100),
+        ssh_host_id("ssh://down"),
+        "down-host",
+    )];
+
+    let refresh = fetch_host_refresh(&entry).await;
+    apply_host_refresh(
+        &fleet,
+        &mut app,
+        refresh,
+        RefreshApplyOptions {
+            force_detail: false,
+            previous: None,
+            update_status: true,
+            excluded: None,
+            allow_detail_refresh: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_list.rows.len(), 1);
+    assert_eq!(app.session_list.rows[0].session.name, "stale");
+    assert!(app.status.text().contains("host unreachable: down-host"));
 }
 
 #[test]

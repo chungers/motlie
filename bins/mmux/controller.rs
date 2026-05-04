@@ -63,7 +63,9 @@ pub(crate) async fn fetch_fleet_rows(
     tracker: &mut ActivityTracker,
 ) -> (Vec<SessionRow>, Vec<String>) {
     let refresh = fetch_fleet_refresh(fleet).await;
-    rows_from_fleet_refresh(tracker, &refresh, None)
+    let (rows, failures, keep_keys) = rows_from_fleet_refresh(tracker, &refresh, None);
+    tracker.retain(&keep_keys);
+    (rows, failures)
 }
 
 pub(crate) async fn fetch_fleet_refresh(fleet: &HostFleet) -> FleetRefresh {
@@ -71,7 +73,7 @@ pub(crate) async fn fetch_fleet_refresh(fleet: &HostFleet) -> FleetRefresh {
     FleetRefresh { hosts }
 }
 
-async fn fetch_host_refresh(entry: &HostEntry) -> HostRefreshResult {
+pub(crate) async fn fetch_host_refresh(entry: &HostEntry) -> HostRefreshResult {
     let local_now = local_epoch_seconds();
     let result = match entry.handle.list_sessions().await {
         Ok(sessions) => {
@@ -96,7 +98,7 @@ fn rows_from_fleet_refresh(
     tracker: &mut ActivityTracker,
     refresh: &FleetRefresh,
     excluded: Option<&(HostId, String)>,
-) -> (Vec<SessionRow>, Vec<String>) {
+) -> (Vec<SessionRow>, Vec<String>, HashSet<(HostId, String)>) {
     let mut rows = Vec::new();
     let mut failures = Vec::new();
     let mut keep_keys: HashSet<(HostId, String)> = HashSet::new();
@@ -133,8 +135,7 @@ fn rows_from_fleet_refresh(
             }
         }
     }
-    tracker.retain(&keep_keys);
-    (rows, failures)
+    (rows, failures, keep_keys)
 }
 
 fn local_epoch_seconds() -> u64 {
@@ -242,6 +243,7 @@ async fn refresh_sessions_preserving_with_status(
     .await
 }
 
+#[derive(Clone)]
 pub(crate) struct RefreshApplyOptions {
     pub(crate) force_detail: bool,
     pub(crate) previous: Option<(HostId, String)>,
@@ -256,11 +258,47 @@ pub(crate) async fn apply_fleet_refresh(
     refresh: FleetRefresh,
     options: RefreshApplyOptions,
 ) -> Result<()> {
-    let (rows, failures) = rows_from_fleet_refresh(
+    let (rows, failures, keep_keys) = rows_from_fleet_refresh(
         &mut app.activity_tracker,
         &refresh,
         options.excluded.as_ref(),
     );
+    app.activity_tracker.retain(&keep_keys);
+    apply_refreshed_rows(fleet, app, rows, failures, options).await
+}
+
+pub(crate) async fn apply_host_refresh(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    refresh: HostRefreshResult,
+    options: RefreshApplyOptions,
+) -> Result<()> {
+    let host_id = refresh.host_id.clone();
+    let host_succeeded = refresh.result.is_ok();
+    let refresh = FleetRefresh {
+        hosts: vec![refresh],
+    };
+    let (host_rows, failures, _) = rows_from_fleet_refresh(
+        &mut app.activity_tracker,
+        &refresh,
+        options.excluded.as_ref(),
+    );
+    let mut rows = app.session_list.rows.clone();
+    if host_succeeded {
+        rows.retain(|row| row.host_id != host_id);
+        rows.extend(host_rows);
+        app.activity_tracker.retain(&row_keys(&rows));
+    }
+    apply_refreshed_rows(fleet, app, rows, failures, options).await
+}
+
+async fn apply_refreshed_rows(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    rows: Vec<SessionRow>,
+    failures: Vec<String>,
+    options: RefreshApplyOptions,
+) -> Result<()> {
     let closed_monitored = closed_monitored_session(app, &rows);
     let previous_key = options.previous.or_else(|| current_selection_key(app));
     let selection_key_before_refresh = previous_key.clone();
@@ -296,6 +334,12 @@ pub(crate) async fn apply_fleet_refresh(
         refresh_detail(fleet, app, true).await?;
     }
     Ok(())
+}
+
+fn row_keys(rows: &[SessionRow]) -> HashSet<(HostId, String)> {
+    rows.iter()
+        .map(|row| (row.host_id.clone(), row.session.id.as_str().to_string()))
+        .collect()
 }
 
 fn build_status(app: &AppState, failures: &[String]) -> StatusBanner {

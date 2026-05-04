@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use cli::{select_layout, Cli};
 use consts::{
@@ -23,8 +24,8 @@ use consts::{
     MMUX_ATTACH_STATUS_LEFT_LENGTH,
 };
 use controller::{
-    apply_fleet_refresh, fetch_fleet_refresh, handle_key, refresh_detail, stop_detail_source,
-    FleetRefresh, KeyOutcome, RefreshApplyOptions,
+    apply_host_refresh, fetch_host_refresh, handle_key, refresh_detail, stop_detail_source,
+    HostRefreshResult, KeyOutcome, RefreshApplyOptions,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{AppState, HostFleet, LayoutMode, RetainedUiState, SelectedSession, StatusBanner};
@@ -48,7 +49,9 @@ struct AttachStyleSnapshot {
 }
 
 struct PendingSessionRefresh {
-    task: tokio::task::JoinHandle<FleetRefresh>,
+    receiver: UnboundedReceiver<HostRefreshResult>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    remaining: usize,
     options: RefreshApplyOptions,
 }
 
@@ -311,6 +314,7 @@ async fn run_selector_once(
             if key.kind == KeyEventKind::Release {
                 continue;
             }
+            clear_pending_previous_selection(&mut pending_session_refresh);
             match handle_key(fleet, &mut app, key).await? {
                 KeyOutcome::Continue => {}
                 KeyOutcome::Select(selected) => {
@@ -333,16 +337,40 @@ async fn run_selector_once(
 }
 
 fn start_session_refresh(fleet: &HostFleet, options: RefreshApplyOptions) -> PendingSessionRefresh {
-    let fleet = fleet.clone();
+    let (tx, receiver) = mpsc::unbounded_channel();
+    let tasks = fleet
+        .entries
+        .iter()
+        .cloned()
+        .map(|entry| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = fetch_host_refresh(&entry).await;
+                let _ = tx.send(result);
+            })
+        })
+        .collect::<Vec<_>>();
+    let remaining = tasks.len();
+    drop(tx);
     PendingSessionRefresh {
-        task: tokio::spawn(async move { fetch_fleet_refresh(&fleet).await }),
+        receiver,
+        tasks,
+        remaining,
         options,
     }
 }
 
 fn abort_pending_session_refresh(pending: &mut Option<PendingSessionRefresh>) {
     if let Some(refresh) = pending.take() {
-        refresh.task.abort();
+        for task in refresh.tasks {
+            task.abort();
+        }
+    }
+}
+
+fn clear_pending_previous_selection(pending: &mut Option<PendingSessionRefresh>) {
+    if let Some(refresh) = pending {
+        refresh.options.previous = None;
     }
 }
 
@@ -351,21 +379,26 @@ async fn apply_finished_session_refresh(
     app: &mut AppState,
     pending: &mut Option<PendingSessionRefresh>,
 ) -> Result<Option<SessionRefreshCompletion>> {
-    let Some(refresh) = pending.as_ref() else {
+    let Some(refresh) = pending.as_mut() else {
         return Ok(None);
     };
-    if !refresh.task.is_finished() {
-        return Ok(None);
+    let mut applied = false;
+    let mut deferred_detail = false;
+    while let Ok(result) = refresh.receiver.try_recv() {
+        deferred_detail |= !refresh.options.allow_detail_refresh;
+        apply_host_refresh(fleet, app, result, refresh.options.clone()).await?;
+        refresh.remaining = refresh.remaining.saturating_sub(1);
+        applied = true;
     }
-    let refresh = pending.take().expect("pending refresh checked above");
-    let deferred_detail = !refresh.options.allow_detail_refresh;
-    match refresh.task.await {
-        Ok(result) => {
-            apply_fleet_refresh(fleet, app, result, refresh.options).await?;
-        }
-        Err(err) => {
-            app.status = StatusBanner::error(format!("session refresh task failed: {err}"));
-        }
+    if refresh.receiver.is_closed() && refresh.remaining > 0 {
+        refresh.remaining = 0;
+        app.status = StatusBanner::error("session refresh task failed");
+    }
+    if refresh.remaining == 0 {
+        pending.take();
+    }
+    if !applied {
+        return Ok(None);
     }
     Ok(Some(SessionRefreshCompletion { deferred_detail }))
 }
