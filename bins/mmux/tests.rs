@@ -1354,6 +1354,25 @@ fn detail_scroll_up_moves_toward_older_content() {
     assert!(app.detail.auto_tail);
 }
 
+#[test]
+fn detail_tail_view_accounts_for_wrapped_lines() {
+    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    app.session_list.rows = vec![make_row(session("dev", "$1"))];
+    app.detail.lines = vec![
+        "older".to_string(),
+        "wide-content ".repeat(8),
+        "recent-1".to_string(),
+        "recent-2".to_string(),
+        "recent-3".to_string(),
+    ];
+
+    let rendered = render_to_string(&mut app, 42, 8);
+
+    assert!(rendered.contains("recent-1"));
+    assert!(rendered.contains("recent-2"));
+    assert!(rendered.contains("recent-3"));
+}
+
 #[tokio::test]
 async fn q_exits_like_ctrl_c() {
     let fleet = local_fleet();
