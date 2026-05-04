@@ -201,7 +201,7 @@ pub struct CapabilityDescriptor {
 }
 
 impl CapabilityDescriptor {
-    pub fn new(
+    fn new(
         kind: CapabilityKind,
         summary: &'static str,
         inputs: Vec<ContentKind>,
