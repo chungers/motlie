@@ -1,40 +1,31 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    CreateSessionOptions, HostHandle, SessionEnvVar, SessionId, SessionInfo, SessionTag,
+    CreateSessionOptions, HostHandle, KeySequence, SessionEnvVar, SessionId, SessionInfo,
+    SessionTag,
 };
 
 use crate::consts::{
     DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession,
-    SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow,
-    SessionRow, SessionSelectedTag, SessionSortMode, StatusBanner,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
+    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
+    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode, StatusBanner,
 };
 
 const TAG_PREFIX: &str = "mmux";
 const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
-
-pub(crate) async fn load_motd(host: &HostHandle) -> (String, bool) {
-    load_motd_from(host, Path::new("/etc/motd")).await
-}
-
-pub(crate) async fn load_motd_from(host: &HostHandle, path: &Path) -> (String, bool) {
-    match host.read_text_file(path, 64 * 1024).await {
-        Ok(text) if !text.trim().is_empty() => (text.trim_end().to_string(), false),
-        _ => (MOTLIE_PLACEHOLDER.to_string(), true),
-    }
-}
+const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
+const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
 
 /// Fan out `list_sessions()` across all configured hosts in parallel, merge
 /// into a flat `Vec<SessionRow>`, run the activity-tracker over the
@@ -389,11 +380,31 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
+        (KeyCode::Char('s'), _) => {
+            if let Some(selected) = app.selected_session() {
+                app.modal = Some(ModalState::SendKeys {
+                    session: selected,
+                    ui: SendKeysModalUi {
+                        input: String::new(),
+                        focus: SendKeysFocus::Input,
+                    },
+                });
+            } else {
+                app.status = StatusBanner::info("no session selected");
+            }
+        }
         (KeyCode::Char('a'), _) => {
             if let Some(selected) = app.selected_session() {
                 return Ok(KeyOutcome::Select(selected));
             }
             app.status = StatusBanner::info("no session selected");
+        }
+        (KeyCode::Enter, _) if app.layout.focus == Focus::List => {
+            if app.selected_session().is_some() {
+                reset_to_sample_detail(fleet, app).await?;
+            } else {
+                app.status = StatusBanner::info("no session selected");
+            }
         }
         (KeyCode::Up, modifiers)
             if app.layout.mode == LayoutMode::Portrait && is_resize_modifier(modifiers) =>
@@ -449,7 +460,7 @@ pub(crate) async fn handle_key(
                 .saturating_add(5)
                 .min(LANDSCAPE_MAX_LEFT_PERCENT);
         }
-        (KeyCode::Char('p'), _) => app.focus_next(),
+        (KeyCode::Tab | KeyCode::Char('\t'), _) => app.focus_next(),
         (KeyCode::Char('l'), _) => app.toggle_layout(),
         (KeyCode::Up, _) => match app.layout.focus {
             Focus::List => {
@@ -458,7 +469,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.scroll_detail(1),
-            Focus::Motd => {}
         },
         (KeyCode::Down, _) => match app.layout.focus {
             Focus::List => {
@@ -467,7 +477,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.scroll_detail(-1),
-            Focus::Motd => {}
         },
         (KeyCode::PageUp, _) => match app.layout.focus {
             Focus::List => {
@@ -479,7 +488,6 @@ pub(crate) async fn handle_key(
                 fetch_older_detail(fleet, app).await?;
                 app.scroll_detail(10);
             }
-            Focus::Motd => {}
         },
         (KeyCode::PageDown, _) => match app.layout.focus {
             Focus::List => {
@@ -488,7 +496,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.scroll_detail(-10),
-            Focus::Motd => {}
         },
         (KeyCode::Home, _) => match app.layout.focus {
             Focus::List => {
@@ -498,7 +505,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.detail_home(),
-            Focus::Motd => {}
         },
         (KeyCode::End, _) => match app.layout.focus {
             Focus::List => {
@@ -508,7 +514,6 @@ pub(crate) async fn handle_key(
                 }
             }
             Focus::Detail => app.detail_end(),
-            Focus::Motd => {}
         },
         _ => {}
     }
@@ -598,6 +603,11 @@ enum ModalAction {
         session: SelectedSession,
         input: String,
     },
+    SendKeys {
+        session: SelectedSession,
+        input: String,
+        mode: SendKeysSubmitMode,
+    },
     StageKeyValue {
         kind: SessionKeyValueKind,
         key: String,
@@ -617,6 +627,12 @@ enum ModalAction {
         session: SelectedSession,
         ui: SessionKeyValueModalUi,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendKeysSubmitMode {
+    Exact,
+    ThenEnterAfterDelay,
 }
 
 async fn handle_modal_key(
@@ -668,16 +684,12 @@ async fn handle_modal_key(
                 input: input.clone(),
             },
             KeyCode::Enter => ModalAction::Close,
-            KeyCode::Backspace => {
-                input.pop();
-                ModalAction::None
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                input.push(c);
-                ModalAction::None
-            }
+            _ if edit_focused_text_field(&key, true, input) => ModalAction::None,
             _ => ModalAction::None,
         },
+        Some(ModalState::SendKeys { session, ui }) => {
+            handle_send_keys_modal_key(key, session.clone(), ui)
+        }
         Some(ModalState::SessionKeyValues { session, ui }) => {
             handle_session_key_values_modal_key(key, session.clone(), ui)
         }
@@ -719,6 +731,15 @@ async fn handle_modal_key(
             app.modal = None;
             rename_session_from_modal(fleet, app, session, input).await?;
         }
+        ModalAction::SendKeys {
+            session,
+            input,
+            mode,
+        } => {
+            if send_keys_from_modal(fleet, app, session, input, mode).await? {
+                app.modal = None;
+            }
+        }
         ModalAction::StageKeyValue { kind, key, value } => {
             stage_key_value_in_modal(app, kind, key, value);
         }
@@ -751,6 +772,68 @@ fn discarded_key_value_status(modal: Option<&ModalState>) -> Option<String> {
         _ => None,
     }
 }
+
+fn handle_send_keys_modal_key(
+    key: KeyEvent,
+    session: SelectedSession,
+    ui: &mut SendKeysModalUi,
+) -> ModalAction {
+    match key.code {
+        KeyCode::Esc => ModalAction::Close,
+        KeyCode::Tab | KeyCode::Char('\t') => {
+            ui.focus = next_focus(ui.focus, &SEND_KEYS_FOCUS_ORDER);
+            ModalAction::None
+        }
+        KeyCode::BackTab => {
+            ui.focus = previous_focus(ui.focus, &SEND_KEYS_FOCUS_ORDER);
+            ModalAction::None
+        }
+        KeyCode::Left => {
+            ui.focus = SendKeysFocus::Cancel;
+            ModalAction::None
+        }
+        KeyCode::Right => {
+            ui.focus = SendKeysFocus::Ok;
+            ModalAction::None
+        }
+        KeyCode::Enter => {
+            submit_send_keys_modal(key.modifiers.contains(KeyModifiers::CONTROL), session, ui)
+        }
+        _ if edit_focused_text_field(&key, ui.focus == SendKeysFocus::Input, &mut ui.input) => {
+            ModalAction::None
+        }
+        _ => ModalAction::None,
+    }
+}
+
+fn submit_send_keys_modal(
+    with_delayed_enter: bool,
+    session: SelectedSession,
+    ui: &SendKeysModalUi,
+) -> ModalAction {
+    if ui.focus == SendKeysFocus::Cancel {
+        return ModalAction::Close;
+    }
+    if ui.focus != SendKeysFocus::Ok && !(ui.focus == SendKeysFocus::Input && !ui.input.is_empty())
+    {
+        return ModalAction::None;
+    }
+    ModalAction::SendKeys {
+        session,
+        input: ui.input.clone(),
+        mode: if with_delayed_enter {
+            SendKeysSubmitMode::ThenEnterAfterDelay
+        } else {
+            SendKeysSubmitMode::Exact
+        },
+    }
+}
+
+const SEND_KEYS_FOCUS_ORDER: [SendKeysFocus; 3] = [
+    SendKeysFocus::Input,
+    SendKeysFocus::Ok,
+    SendKeysFocus::Cancel,
+];
 
 fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> ModalAction {
     let multi_host = ui.hosts.len() > 1;
@@ -827,18 +910,6 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             host_id: ui.selected_host().map(|host| host.id.clone()),
             env_rows: ui.env_rows.clone(),
         },
-        KeyCode::Backspace if ui.focus == NewSessionFocus::Name => {
-            ui.input.pop();
-            ModalAction::None
-        }
-        KeyCode::Backspace if ui.focus == NewSessionFocus::EnvKey => {
-            ui.env_key_input.pop();
-            ModalAction::None
-        }
-        KeyCode::Backspace if ui.focus == NewSessionFocus::EnvValue => {
-            ui.env_value_input.pop();
-            ModalAction::None
-        }
         KeyCode::Char('x') if matches!(ui.focus, NewSessionFocus::EnvRow(_)) => {
             let NewSessionFocus::EnvRow(index) = ui.focus else {
                 return ModalAction::None;
@@ -856,27 +927,7 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             }
             ModalAction::None
         }
-        KeyCode::Char(c)
-            if ui.focus == NewSessionFocus::Name
-                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            ui.input.push(c);
-            ModalAction::None
-        }
-        KeyCode::Char(c)
-            if ui.focus == NewSessionFocus::EnvKey
-                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            ui.env_key_input.push(c);
-            ModalAction::None
-        }
-        KeyCode::Char(c)
-            if ui.focus == NewSessionFocus::EnvValue
-                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            ui.env_value_input.push(c);
-            ModalAction::None
-        }
+        _ if edit_new_session_text_field(&key, ui) => ModalAction::None,
         _ => ModalAction::None,
     }
 }
@@ -889,22 +940,58 @@ fn set_new_session_focus(ui: &mut NewSessionModalUi, focus: NewSessionFocus) {
     };
 }
 
+fn edit_new_session_text_field(key: &KeyEvent, ui: &mut NewSessionModalUi) -> bool {
+    match ui.focus {
+        NewSessionFocus::Name => edit_text_field(key, &mut ui.input),
+        NewSessionFocus::EnvKey => edit_text_field(key, &mut ui.env_key_input),
+        NewSessionFocus::EnvValue => edit_text_field(key, &mut ui.env_value_input),
+        _ => false,
+    }
+}
+
+fn edit_focused_text_field(key: &KeyEvent, focused: bool, input: &mut String) -> bool {
+    focused && edit_text_field(key, input)
+}
+
+fn edit_text_field(key: &KeyEvent, input: &mut String) -> bool {
+    match key.code {
+        KeyCode::Backspace => {
+            input.pop();
+            true
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            input.push(c);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn next_focus<T: Copy + Eq>(focus: T, order: &[T]) -> T {
+    cycle_focus(focus, order, 1)
+}
+
+fn previous_focus<T: Copy + Eq>(focus: T, order: &[T]) -> T {
+    cycle_focus(focus, order, order.len().saturating_sub(1))
+}
+
+fn cycle_focus<T: Copy + Eq>(focus: T, order: &[T], offset: usize) -> T {
+    if order.is_empty() {
+        return focus;
+    }
+    let Some(index) = order.iter().position(|candidate| *candidate == focus) else {
+        return focus;
+    };
+    order[(index + offset) % order.len()]
+}
+
 fn next_new_session_focus(
     focus: NewSessionFocus,
     multi_host: bool,
     env_row_count: usize,
 ) -> NewSessionFocus {
-    match focus {
-        NewSessionFocus::Host => NewSessionFocus::Name,
-        NewSessionFocus::Name if env_row_count > 0 => NewSessionFocus::EnvRow(0),
-        NewSessionFocus::Name => NewSessionFocus::EnvKey,
-        NewSessionFocus::EnvRow(_) => NewSessionFocus::EnvKey,
-        NewSessionFocus::EnvKey => NewSessionFocus::EnvValue,
-        NewSessionFocus::EnvValue => NewSessionFocus::Ok,
-        NewSessionFocus::Ok => NewSessionFocus::Cancel,
-        NewSessionFocus::Cancel if multi_host => NewSessionFocus::Host,
-        NewSessionFocus::Cancel => NewSessionFocus::Name,
-    }
+    let order = new_session_focus_order(multi_host, env_row_count);
+    next_focus(normalized_new_session_focus(focus), &order)
 }
 
 fn previous_new_session_focus(
@@ -912,16 +999,37 @@ fn previous_new_session_focus(
     multi_host: bool,
     env_row_count: usize,
 ) -> NewSessionFocus {
+    let order = new_session_focus_order(multi_host, env_row_count);
+    let previous = previous_focus(normalized_new_session_focus(focus), &order);
+    if matches!(previous, NewSessionFocus::EnvRow(_)) {
+        NewSessionFocus::EnvRow(env_row_count.saturating_sub(1))
+    } else {
+        previous
+    }
+}
+
+fn new_session_focus_order(multi_host: bool, env_row_count: usize) -> Vec<NewSessionFocus> {
+    let mut order = Vec::with_capacity(7);
+    if multi_host {
+        order.push(NewSessionFocus::Host);
+    }
+    order.push(NewSessionFocus::Name);
+    if env_row_count > 0 {
+        order.push(NewSessionFocus::EnvRow(0));
+    }
+    order.extend([
+        NewSessionFocus::EnvKey,
+        NewSessionFocus::EnvValue,
+        NewSessionFocus::Ok,
+        NewSessionFocus::Cancel,
+    ]);
+    order
+}
+
+fn normalized_new_session_focus(focus: NewSessionFocus) -> NewSessionFocus {
     match focus {
-        NewSessionFocus::Host => NewSessionFocus::Cancel,
-        NewSessionFocus::Name if multi_host => NewSessionFocus::Host,
-        NewSessionFocus::Name => NewSessionFocus::Cancel,
-        NewSessionFocus::EnvRow(_) => NewSessionFocus::Name,
-        NewSessionFocus::EnvKey if env_row_count > 0 => NewSessionFocus::EnvRow(env_row_count - 1),
-        NewSessionFocus::EnvKey => NewSessionFocus::Name,
-        NewSessionFocus::EnvValue => NewSessionFocus::EnvKey,
-        NewSessionFocus::Ok => NewSessionFocus::EnvValue,
-        NewSessionFocus::Cancel => NewSessionFocus::Ok,
+        NewSessionFocus::EnvRow(_) => NewSessionFocus::EnvRow(0),
+        _ => focus,
     }
 }
 
@@ -1075,27 +1183,9 @@ fn handle_session_key_values_edit(
     value_input: &mut String,
     focus: SessionKeyValueFocus,
 ) -> bool {
-    match key.code {
-        KeyCode::Backspace => {
-            match focus {
-                SessionKeyValueFocus::Key => {
-                    key_input.pop();
-                }
-                SessionKeyValueFocus::Value => {
-                    value_input.pop();
-                }
-                _ => {}
-            }
-            true
-        }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            match focus {
-                SessionKeyValueFocus::Key => key_input.push(c),
-                SessionKeyValueFocus::Value => value_input.push(c),
-                _ => {}
-            }
-            true
-        }
+    match focus {
+        SessionKeyValueFocus::Key => edit_text_field(key, key_input),
+        SessionKeyValueFocus::Value => edit_text_field(key, value_input),
         _ => false,
     }
 }
@@ -1103,22 +1193,23 @@ fn handle_session_key_values_edit(
 fn next_session_key_values_focus(focus: SessionKeyValueFocus) -> SessionKeyValueFocus {
     match focus {
         SessionKeyValueFocus::Row(_) => SessionKeyValueFocus::Key,
-        SessionKeyValueFocus::Key => SessionKeyValueFocus::Value,
-        SessionKeyValueFocus::Value => SessionKeyValueFocus::Ok,
-        SessionKeyValueFocus::Ok => SessionKeyValueFocus::Cancel,
-        SessionKeyValueFocus::Cancel => SessionKeyValueFocus::Key,
+        _ => next_focus(focus, &SESSION_KEY_VALUES_FOCUS_ORDER),
     }
 }
 
 fn previous_session_key_values_focus(focus: SessionKeyValueFocus) -> SessionKeyValueFocus {
     match focus {
         SessionKeyValueFocus::Row(_) => SessionKeyValueFocus::Cancel,
-        SessionKeyValueFocus::Key => SessionKeyValueFocus::Cancel,
-        SessionKeyValueFocus::Value => SessionKeyValueFocus::Key,
-        SessionKeyValueFocus::Ok => SessionKeyValueFocus::Value,
-        SessionKeyValueFocus::Cancel => SessionKeyValueFocus::Ok,
+        _ => previous_focus(focus, &SESSION_KEY_VALUES_FOCUS_ORDER),
     }
 }
+
+const SESSION_KEY_VALUES_FOCUS_ORDER: [SessionKeyValueFocus; 4] = [
+    SessionKeyValueFocus::Key,
+    SessionKeyValueFocus::Value,
+    SessionKeyValueFocus::Ok,
+    SessionKeyValueFocus::Cancel,
+];
 
 async fn create_session_from_modal(
     fleet: &HostFleet,
@@ -1314,6 +1405,85 @@ async fn rename_session_from_modal(
         }
     }
     Ok(())
+}
+
+async fn send_keys_from_modal(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    session: SelectedSession,
+    input: String,
+    mode: SendKeysSubmitMode,
+) -> Result<bool> {
+    let (input, mode) = normalize_send_keys_input(input, mode);
+    let enter_keys = if mode == SendKeysSubmitMode::ThenEnterAfterDelay {
+        Some(KeySequence::parse("{Enter}").expect("Enter is a valid KeySequence literal"))
+    } else {
+        None
+    };
+    if input.is_empty() && enter_keys.is_none() {
+        app.status = StatusBanner::info("keys are empty");
+        return Ok(false);
+    }
+    let keys = if input.is_empty() {
+        None
+    } else {
+        match KeySequence::parse(&input) {
+            Ok(keys) => Some(keys),
+            Err(err) => {
+                app.status = StatusBanner::error(format!("invalid keys: {err}"));
+                return Ok(false);
+            }
+        }
+    };
+    let Some(host) = fleet_host(fleet, &session.host_id) else {
+        app.status =
+            StatusBanner::error(format!("host {} no longer connected", session.host_label));
+        return Ok(true);
+    };
+    match host.session_by_id(session.id()).await? {
+        Some(target) => {
+            if let Some(keys) = keys.as_ref() {
+                if let Err(err) = target.send_keys(keys).await {
+                    app.status = StatusBanner::error(format!("send keys failed: {err}"));
+                    return Ok(true);
+                }
+            }
+            if let Some(enter_keys) = enter_keys.as_ref() {
+                tokio::time::sleep(SEND_KEYS_ENTER_DELAY).await;
+                if let Err(err) = target.send_keys(enter_keys).await {
+                    app.status = StatusBanner::error(format!("send Enter failed: {err}"));
+                    return Ok(true);
+                }
+            }
+            app.status = StatusBanner::info(if fleet.is_multi() {
+                format!("sent keys to {} on {}", session.name(), session.host_label)
+            } else {
+                format!("sent keys to {}", session.name())
+            });
+            if app.detail.source.mode() == DetailMode::Sample {
+                refresh_detail(fleet, app, true).await?;
+            }
+        }
+        None => {
+            refresh_sessions(fleet, app, true).await?;
+            app.status = StatusBanner::error(format!(
+                "session {} disappeared before keys were sent",
+                session.name()
+            ));
+        }
+    }
+    Ok(true)
+}
+
+fn normalize_send_keys_input(
+    input: String,
+    mode: SendKeysSubmitMode,
+) -> (String, SendKeysSubmitMode) {
+    if let Some(input) = input.strip_suffix(SEND_KEYS_THEN_ENTER_SUFFIX) {
+        (input.to_string(), SendKeysSubmitMode::ThenEnterAfterDelay)
+    } else {
+        (input, mode)
+    }
 }
 
 async fn open_session_key_values_modal(

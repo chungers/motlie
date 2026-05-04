@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-03 | @codex | Added the `s` Send Keys modal for highlighted sessions and moved main-view pane cycling to `Tab`. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply to tmux only when Ok closes the dialog; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Moved environment-variable entry into the New Session modal and apply staged variables at creation time through `CreateSessionOptions::initial_environment`; removed the `e` shortcut. |
 | 2026-05-02 | @codex | Changed host labels in the top status bar to use tmux `#{host}` rather than SSH URI hostnames; URI hostnames remain internal aliases. |
@@ -55,7 +56,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title format to `Sessions [n] @ <hostname>, <ip address>` and removed the `keys` status-bar label. |
 | 2026-04-27 | @gpt55-dgx | Moved the host label from the status bar into the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Replaced directional words in status hints with arrow symbols and expanded the `h` help modal with key functions. |
-| 2026-04-27 | @gpt55-dgx | Changed portrait mode default T/B split from 40:60 to 30:70. |
+| 2026-05-03 | @codex | Changed portrait mode default T/B split to 35:65 so the session list pane is taller. |
 | 2026-04-26 | @gpt55-dgx | Added the `h` key for an About modal showing the motlie logo and build git SHA; Enter or Esc closes it. |
 | 2026-04-26 | @gpt55-dgx | Finalized the CLI mode contract: default mode is attach-and-reenter selector behavior, and `--script` replaces `--print-session` / `--dashboard` for shell integration. |
 | 2026-04-26 | @gpt55-dgx | Added `--portrait/-p` and `--landscape/-l` force flags and changed auto-detection to `columns / rows <= 4.0`, making 66x30 portrait. |
@@ -93,9 +94,9 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 | Form | Behavior |
 |------|----------|
 | no `ssh-uri` | Operate on the local host. |
-| `[ssh-uri]` | Operate on the remote SSH target for MOTD, session list, sampling, monitor, create, kill, and attach. |
-| `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. MOTD is omitted. Mutually exclusive with `--landscape` / `-l`. |
-| `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L`/`R`, with `L` split into MOTD and session list. Mutually exclusive with `--portrait` / `-p`. |
+| `[ssh-uri]` | Operate on the remote SSH target for session list, sampling, monitor, create, kill, and attach. |
+| `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. Mutually exclusive with `--landscape` / `-l`. |
+| `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L` session list and `R` detail pane. Mutually exclusive with `--portrait` / `-p`. |
 | `--script` | Select a session, print exactly `<name>\n` to stdout, and exit 0 without attaching. Cancel exits non-zero with empty stdout. |
 | `--portrait --landscape` | Invalid. Startup error. |
 
@@ -171,13 +172,12 @@ vertical split:
 - `B`: detail pane
 - one-row top status bar and one-row bottom command/status bar
 
-The initial T/B ratio is 30:70, giving the detail pane more vertical space by
+The initial T/B ratio is 35:65, giving the session list more vertical space by
 default. `Ctrl-Up` / `Ctrl-Down` can resize the split after startup. Portrait
 mode clamps the split so both `T` and `B` keep at least 15% height.
 
-MOTD and the motlie placeholder are omitted in portrait mode. Use
-`--landscape` / `-l` to force the normal `L`/`R` layout even when the PTY is
-auto-detected as portrait.
+Use `--landscape` / `-l` to force the normal `L`/`R` layout even when the PTY
+is auto-detected as portrait.
 
 Without `--portrait` / `-p` or `--landscape` / `-l`, startup calls
 `crossterm::terminal::size()` on the connecting PTY and chooses portrait layout
@@ -223,16 +223,17 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   legend is the full host-name lookup for those row colors.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
-- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`, Enter,
-  `m`, `n`, `k`, `Ctrl-C`/`q`, `l`, `p`, `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
+- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`,
+  `a`, `m`, `s`, `n`, `k`, `r`, `t`, `g`, `Ctrl-C`/`q`, `l`,
+  `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
 - Attach uses the highlighted row's host: an interactive
   `ssh -t <host> tmux attach-session -t <name>` for SSH targets.
 - New session and kill modals act on the highlighted row's host. Kill captures
   the selected row's stable session info when the modal opens.
-- MOTD pane is **hidden** in multi-host mode (per-host MOTD is not
-  meaningful when multiple hosts coexist). Layout reflows accordingly.
+- Landscape and portrait layout behavior is shared with single-host mode; the
+  only presentation difference is the host marker column and top-bar legend.
 - Layout flags (`-p`/`-l`) compose with multi-host as expected.
 
 **Resilience:** if one host goes unreachable at refresh time, its rows
@@ -261,33 +262,35 @@ is identical to pre-multi-host behavior.
 
 ## TUI Keymap
 
-Normal mode main-view keys:
+Main-view keys:
 
-| Key | `MOTD` focused | `Lb` focused | `R` focused |
-|-----|----------------|--------------|-------------|
-| Up / Down | No-op | Move highlighted session | Scroll detail one line |
-| PgUp / PgDn | No-op | Page session list | Page detail buffer |
-| Home / End | No-op | First / last session | Top / bottom detail; End resumes monitor tail |
-| `p` | Focus session list | Focus detail pane | Focus MOTD pane |
-| Left / Right | No-op | No-op | No-op |
-| `Esc` | Focus session list | Focus session list | Focus session list |
-| `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) | Resize L/R split (normal mode only) |
-| `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
-| `m` | Monitor highlighted session | Monitor highlighted session | Monitor highlighted session |
-| `n` | Open New Session modal | Open New Session modal | Open New Session modal |
-| `k` | Open Kill Session modal | Open Kill Session modal | Open Kill Session modal |
-| `r` | No-op | Open Rename Session modal | No-op |
-| `t` | Open Session Tags modal | Open Session Tags modal | Open Session Tags modal |
-| `g` | No-op | Toggle activity/tag grouping | No-op |
-| `h` | Open Help modal | Open Help modal | Open Help modal |
-| `a` | Attach highlighted session | Attach highlighted session | Attach highlighted session |
-| `q` / `Ctrl-C` | Exit without attach | Exit without attach | Exit without attach |
+| Key | List focused | Detail focused |
+|-----|--------------|----------------|
+| Up / Down | Move highlighted session | Scroll detail one line |
+| PgUp / PgDn | Page session list | Page detail buffer |
+| Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
+| Enter | Refresh one-shot sample detail | No-op |
+| Tab | Focus detail pane | Focus session list |
+| Left / Right | No-op | No-op |
+| `Esc` | Focus session list | Focus session list |
+| `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (landscape only) | Resize L/R split (landscape only) |
+| `Ctrl-Up` / `Ctrl-Down`, `Shift-Up` / `Shift-Down`, Alt Up / Down | Resize T/B split (portrait only) | Resize T/B split (portrait only) |
+| `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
+| `m` | Monitor highlighted session | Monitor highlighted session |
+| `s` | Open Send Keys modal | Open Send Keys modal |
+| `n` | Open New Session modal | Open New Session modal |
+| `k` | Open Kill Session modal | Open Kill Session modal |
+| `r` | Open Rename Session modal | No-op |
+| `t` | Open Session Tags modal | Open Session Tags modal |
+| `g` | Toggle activity/tag grouping | No-op |
+| `h` | Open Help modal | Open Help modal |
+| `a` | Attach highlighted session | Attach highlighted session |
+| `q` / `Ctrl-C` | Exit without attach | Exit without attach |
 
-Portrait mode maps `T` to `Lb` and `B` to `R`; because MOTD is omitted, `p`
-cycles between `T` and `B`. It uses
-`Ctrl-Up` / `Ctrl-Down` to resize `T` / `B`; Alt/Shift modified arrows are
-accepted as compatibility fallbacks. Normal mode L/R resize stays clamped to
-25/75; portrait T/B resize is clamped to 15/85.
+Landscape mode uses the L/R split and clamps resize to 25/75. Portrait mode
+uses the T/B split and clamps resize to 15/85. Tab cycles between the two
+visible panes in both modes. The detail pane title shows bold `snapshot` for
+one-shot samples and bold `monitor` for continuous monitoring.
 
 On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.
@@ -320,15 +323,30 @@ right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
 `d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
+Pressing `s` opens the `Send Keys` modal for the highlighted session. The modal
+has a compact text field labeled `To: <session> on <host>`, accepts
+`motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, wraps long
+input by growing the text field vertically while keeping its width fixed,
+then sends the parsed input exactly through the highlighted session target.
+Include `{Enter}` or `{C-m}` explicitly when the target should receive Enter.
+Sending happens when `Ok` is focused and Enter is pressed, or when Enter is
+pressed from the text field after text has been entered. Ctrl-Enter from the
+text field or focused `Ok` first sends the parsed input exactly, then waits
+500 ms and sends a separate `{Enter}` key. A trailing `$$` suffix is stripped
+from the input and uses that same delayed Enter behavior; when the input is only
+`$$`, mmux sends only the delayed `{Enter}` key. After a successful send, the
+detail pane refreshes when it is in snapshot mode. `Esc` or focused `Cancel`
+dismisses without sending.
+
 The top status bar uses the same dark blue background as the bottom status bar. It
 shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom dark blue status bar shows compact key hints and
-status text only. Its direction hints are `↑/↓` for selection and
-`pane` for pane focus, with shortcut letters bold coral. It orders command
-hints as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `rename`,
-`tags`, `group`, `quit`, `layout`, then mode-specific resize; the
-command shortcut letters `h`/`p`/`m`/`a`/`n`/`k`/`r`/`t`/`g`/`q`/`l` are
+status text only. Its left hint is `tab ↑/↓`, covering pane focus cycling and
+selection/scroll movement. It orders command hints as `help`, `monitor`,
+`send`, `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, then
+mode-specific resize; the command shortcut letters
+`h`/`m`/`s`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
 bold coral in the TUI. It does not repeat the host/time, show focus/layout
 mode, or prefix the hints with a `keys` label.
 
@@ -336,16 +354,19 @@ Modal keys:
 
 | Key | Behavior |
 |-----|----------|
-| Left / Right | Choose Cancel or Ok in New Session, Kill Session, and Rename Session modals. No-op in Help and Session Tags. |
-| Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
+| Left / Right | Choose Cancel or Ok in New Session, Kill Session, Rename Session, and Send Keys modals. No-op in Help and Session Tags. |
+| Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Send Keys, cycle text field, Ok, and Cancel. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
 | Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
 | `u` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
 | `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
-| Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, or Session Tags; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
+| Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, Send Keys, or Session Tags; in Send Keys, also sends from the text field when it has content; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
+| Ctrl-Enter | In Send Keys, sends the current key sequence and then sends `{Enter}` after 500 ms. |
+| `$$` suffix | In Send Keys, stripped from the end of submitted input and treated like Ctrl-Enter; by itself, sends only the delayed `{Enter}`. |
 | Esc | Cancel action modals, discard staged Session Tags changes, close Session Tags, or close Help. |
 
-Modal content is padded inside the border. New Session and Rename Session render
+Modal content is padded inside the border. Focused text inputs show a blinking
+terminal cursor at the insertion point. New Session and Rename Session render
 their text fields with their own borders. In multi-host mode, New Session also
 renders a Host dropdown above the session-name field; the selected host and
 session name are used for `HostHandle::create_session()`. The New Session modal

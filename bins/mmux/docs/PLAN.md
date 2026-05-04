@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-03 | @codex | Added Phase 13 for the `s` Send Keys modal and moved pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
 | 2026-05-02 | @codex | Moved environment-variable entry into New Session and create sessions with staged `CreateSessionOptions::initial_environment` values; removed the `e` environment modal. |
@@ -61,7 +62,7 @@ host event stream backed by stable-id snapshot reconciliation.
 | 2026-04-27 | @gpt55-dgx | Updated Sessions title tracking for count/hostname/IP format and removed the `keys` status label. |
 | 2026-04-27 | @gpt55-dgx | Moved host-label tracking from the status bar to the Sessions pane title. |
 | 2026-04-27 | @gpt55-dgx | Updated status hint tracking to use arrow symbols and expanded help modal coverage for key functions. |
-| 2026-04-27 | @gpt55-dgx | Changed portrait mode implementation tracking from a 40:60 to a 30:70 T/B split. |
+| 2026-05-03 | @codex | Changed portrait mode implementation tracking to a 35:65 T/B split. |
 | 2026-04-26 | @gpt55-dgx | Added implementation tracking for the `h` About modal with build git SHA display and Enter/Esc close behavior. |
 | 2026-04-26 | @gpt55-dgx | Removed focus labels from the status bar because focused panes are already indicated by border styling. |
 | 2026-04-26 | @gpt55-dgx | Updated status bar tracking: omit layout labels from the status text and render the bar with a blue background. |
@@ -193,8 +194,7 @@ References: [Kill Session](./DESIGN.md#kill-session),
 
 ### 1.5 Review Cleanup: Host Metadata and Stable IDs
 
-References: [Remote MOTD](./DESIGN.md#remote-motd),
-[Live Session List](./DESIGN.md#live-session-list).
+References: [Live Session List](./DESIGN.md#live-session-list).
 
 - [x] 1.5a Replace the broad host shell helper with bounded
   `HostHandle::read_text_file(path, max_bytes)` for `/etc/motd`.
@@ -290,16 +290,16 @@ References: [Layout](./DESIGN.md#layout),
   pane height.
 - [x] 4.3 Implement absent-MOTD motlie placeholder with narrow-terminal
   fallback.
-- [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 30:70 and
+- [x] 4.4 Implement portrait mode `--portrait`: `T`/`B` split at 35:65 and
   omit MOTD; clamp portrait resize bounds at 15/85.
 - [x] 4.5 Implement focused/unfocused border styles.
 - [x] 4.6 Implement a dark blue top status bar with bold left-justified
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
-  compact direction hints (`↑/↓`, bold coral `p` in `pane`), command hints
-  ordered as `help`, `pane`, `monitor`, `attach`, `new`, `kill`, `quit`,
-  `layout`, then resize, with shortcut letters bold coral and app status with
-  no `keys`, host, time, focus, or layout-mode labels.
+  compact direction hints (`tab ↑/↓`), command hints ordered as `help`,
+  `monitor`, `send`, `attach`, `new`, `kill`, `rename`, `group`, `layout`,
+  `quit`, then resize, with shortcut letters bold coral and app status with no
+  `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
   threshold 4.0, landscape force flag, narrow placeholder fallback, status bar
   reservation, and resize bounds.
@@ -317,7 +317,7 @@ References: [Layout](./DESIGN.md#layout),
 References: [Functional Requirements](./DESIGN.md#functional),
 [Layout](./DESIGN.md#layout).
 
-- [x] 5.1 Implement focus transitions: `p` pane navigation, `l` runtime layout
+- [x] 5.1 Implement focus transitions: Tab pane navigation, `l` runtime layout
   toggle, outside-modal `Esc` returning to the session list, and `q` as an
   exit alias for `Ctrl-C`.
 - [x] 5.2 Implement session-list movement and scrolling for `LB`/`T`.
@@ -336,7 +336,7 @@ References: [Functional Requirements](./DESIGN.md#functional),
   logo, build date, last 8 characters of the build git SHA, key functions,
   and a separated single Ok button; Enter or Esc closes it.
 - [ ] 5.8 Add unit tests for every key transition, modal button selection,
-  modal Esc behavior, `p` pane focus behavior, and `l` layout toggle behavior.
+  modal Esc behavior, Tab pane focus behavior, and `l` layout toggle behavior.
 
 ## Phase 6: Detail Sources
 
@@ -475,8 +475,8 @@ it lands as a follow-up.
 - [ ] 11.3b Replace `HostContext` with `HostFleet` on `AppState`.
 - [ ] 11.3c Change `SessionListState.sessions: Vec<SessionInfo>` to
   `SessionListState.rows: Vec<SessionRow>`.
-- [ ] 11.3d Make `MotdState` an `Option` field on `AppState`: `motd: Option<MotdState>`.
-  `None` in multi-host mode.
+- [x] 11.3d Remove `MotdState` from `AppState`; single-host and multi-host use
+  the same session-list/detail state model.
 - [ ] 11.3e Selection identity is `(HostId, SessionId)` not just `SessionId`.
   Update `RetainedUiState` to preserve both across re-entry.
 - [ ] 11.3f Tests: model construction; selection preservation across reorder;
@@ -506,14 +506,13 @@ it lands as a follow-up.
 - [ ] 11.5b `draw_sessions` row format: host-color square column inserted between
   attached marker and session name when `fleet.is_multi() == true`. Column
   width = `fleet.host_marker_width()`.
-- [ ] 11.5c MOTD pane: hide entirely when `app.motd.is_none()`. Layout reflows
-  the left column (landscape) or top region (portrait) to give the full area
-  to sessions.
+- [x] 11.5c Landscape layout always renders session list left and detail right;
+  no MOTD pane or multi-host-only reflow branch remains.
 - [ ] 11.5d Status banner: render `HostUnreachable` indicator(s) without
   blocking session listing.
 - [ ] 11.5e Snapshot tests for: multi-host top status; multi-host row format
-  (host-color column present and padded); MOTD-pane absence in
-  multi-host; layout reflow correctness.
+  (host-color column present and padded); shared session-list/detail layout in
+  single-host and multi-host.
 
 ### 11.6 Input + dispatch routing
 
@@ -668,6 +667,35 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
   the implementation is concrete.
 - [ ] 12.5c `cargo fmt --all`
 - [x] 12.5d `cargo test -p motlie-tmux`
+
+## Phase 13: Send Keys modal (`s`)
+
+- [x] 13.1 Start branch `feature/mmux-send-keys` from local `feature/mmux` in
+  worktree `motlie-mmux-send-keys`.
+- [x] 13.2 Add `ModalState::SendKeys` with explicit `Input`, `Ok`, and
+  `Cancel` focus.
+- [x] 13.3 Bind `s` to open `Send Keys` for the highlighted session from any
+  pane focus; preserve pane focus cycling by moving the main-view cycle key to
+  Tab.
+- [x] 13.4 Render title `Send Keys`, label
+  `To: <session> on <host>`, a compact fixed-width text field that grows
+  vertically for wrapped long input, and the standard `Cancel` / `Ok` button
+  strip; focused input fields place a blinking terminal cursor at the insertion
+  point.
+- [x] 13.5 On focused `Ok`, parse the input with `KeySequence::parse`, resolve
+  the captured session with `HostHandle::session_by_id`, and call
+  `Target::send_keys`; non-empty Enter from the input follows the same send
+  path; dispatch exactly what the user typed, with Enter represented only when
+  `{Enter}` or `{C-m}` is explicit in the input.
+- [x] 13.5a Ctrl-Enter in Send Keys dispatches the same parsed user input,
+  waits 500 ms, then dispatches a separate `{Enter}` key sequence.
+- [x] 13.5b A trailing `$$` suffix in Send Keys input is stripped and uses the
+  same delayed follow-up `{Enter}` behavior; `$$` alone sends only delayed
+  `{Enter}`.
+- [x] 13.6 `Esc` and focused `Cancel` close without sending; invalid key syntax
+  keeps the modal open for correction.
+- [x] 13.7 Add modal rendering, open/cancel/send/invalid-sequence tests and
+  update keymap docs.
 - [x] 12.5e `cargo test -p motlie-mmux`
 - [x] 12.5f `cargo clippy -p motlie-tmux -- -D warnings`
 - [x] 12.5g `cargo clippy -p motlie-mmux -- -D warnings`
@@ -679,12 +707,12 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 | Library attach | Unit + localhost smoke | command construction, process group handoff, exit status mapping, terminal restore |
 | Host events | Polling-backed typed stream | add, close, rename, disconnect, one-second snapshot reconciliation |
 | Scrollback range | Unit tests | first/middle/exhausted ranges, chunk size, invalid range |
-| Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, MOTD cap, placeholder fallback, resize bounds |
+| Layout | Pure unit tests | normal split, portrait mode 64x32, PTY auto-detect threshold 4.0, landscape force flag, shared session-list/detail rendering, resize bounds |
 | Input model | Pure unit tests | cyclic focus transitions, scrolling, attach key, modal Enter/Esc, Help modal `h` key, key functions, build date, and short build SHA display |
 | Session rename/tags | Pure unit + mock tmux | `r` focus gating, rename prefill/no-op/dispatch, tag prefill, sorted stripped tag display, add/update/delete flows, empty-value no-op |
 | Detail source | Mock `motlie-tmux` facade | sample color preservation, monitor screen capture, ANSI/VTE parse, tail pause, older-history fetch |
 | Local integration | Dedicated tmux socket | create/list/sample/monitor/kill/attach/re-entry |
-| SSH integration | Env-gated SSH URI | remote MOTD/list/sample/monitor/attach/bypass |
+| SSH integration | Env-gated SSH URI | remote list/sample/monitor/attach/bypass |
 | Terminal cleanup | PTY harness | raw mode restore, alternate-screen restore, panic-path cleanup |
 
 ## Done Criteria

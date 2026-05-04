@@ -142,34 +142,35 @@ pub const SESSION_TAG_VALUE_MAX_BYTES: usize = 2 * 1024;
 /// construction paths.
 pub const SESSION_ENV_VAR_VALUE_MAX_BYTES: usize = 8 * 1024;
 
-/// Maximum supported tmux status-style string size.
+/// Maximum supported tmux style string size.
 ///
-/// The style is passed as one tmux option value. Keeping it bounded avoids
+/// Styles are passed as one tmux option value. Keeping them bounded avoids
 /// accidentally piping large content through command construction paths.
-pub const STATUS_STYLE_MAX_BYTES: usize = 512;
+pub const TMUX_STYLE_MAX_BYTES: usize = 512;
+pub const STATUS_STYLE_MAX_BYTES: usize = TMUX_STYLE_MAX_BYTES;
 pub const STATUS_LEFT_MAX_BYTES: usize = 512;
 pub const STATUS_LEFT_LENGTH_MAX: u32 = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StatusStyle(String);
+pub struct TmuxStyle(String);
 
-impl StatusStyle {
-    /// Create a validated tmux status-style value, for example
+impl TmuxStyle {
+    /// Create a validated tmux style value, for example
     /// `bg=blue,fg=white`.
     ///
-    /// Empty styles are rejected; use the session status API's unset operation
-    /// to remove a local style override.
+    /// Empty styles are rejected; use the relevant unset operation to remove a
+    /// local style override.
     ///
     /// This intentionally validates only transport-safety properties and lets
     /// tmux validate style syntax.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
-        validate_status_style(&value)?;
+        validate_tmux_style(&value)?;
         Ok(Self(value))
     }
 
     pub(crate) fn from_tmux_value(value: String) -> Result<Self> {
-        validate_status_style(&value)?;
+        validate_tmux_style(&value)?;
         Ok(Self(value))
     }
 
@@ -177,6 +178,9 @@ impl StatusStyle {
         &self.0
     }
 }
+
+pub type StatusStyle = TmuxStyle;
+pub type WindowStyle = TmuxStyle;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StatusLeft(String);
@@ -418,20 +422,20 @@ pub(crate) fn validate_session_env_var_value(value: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_status_style(value: &str) -> Result<()> {
+pub(crate) fn validate_tmux_style(value: &str) -> Result<()> {
     if value.is_empty() {
-        return Err(Error::Parse("status style cannot be empty".to_string()));
+        return Err(Error::Parse("tmux style cannot be empty".to_string()));
     }
-    if value.len() > STATUS_STYLE_MAX_BYTES {
+    if value.len() > TMUX_STYLE_MAX_BYTES {
         return Err(Error::Parse(format!(
-            "status style is {} bytes, exceeding {} byte limit",
+            "tmux style is {} bytes, exceeding {} byte limit",
             value.len(),
-            STATUS_STYLE_MAX_BYTES
+            TMUX_STYLE_MAX_BYTES
         )));
     }
     if value.chars().any(char::is_control) {
         return Err(Error::Parse(
-            "status style cannot contain control characters".to_string(),
+            "tmux style cannot contain control characters".to_string(),
         ));
     }
     Ok(())
