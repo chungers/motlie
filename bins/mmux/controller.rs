@@ -267,28 +267,35 @@ pub(crate) async fn apply_fleet_refresh(
     apply_refreshed_rows(fleet, app, rows, failures, options).await
 }
 
-pub(crate) async fn apply_host_refresh(
+pub(crate) async fn apply_host_refreshes(
     fleet: &HostFleet,
     app: &mut AppState,
-    refresh: HostRefreshResult,
+    refreshes: Vec<HostRefreshResult>,
     options: RefreshApplyOptions,
 ) -> Result<()> {
-    let host_id = refresh.host_id.clone();
-    let host_succeeded = refresh.result.is_ok();
-    let refresh = FleetRefresh {
-        hosts: vec![refresh],
-    };
+    if refreshes.is_empty() {
+        return Ok(());
+    }
+    let succeeded_hosts = refreshes
+        .iter()
+        .filter_map(|refresh| refresh.result.is_ok().then_some(refresh.host_id.clone()))
+        .collect::<HashSet<_>>();
+    let refresh = FleetRefresh { hosts: refreshes };
     let (host_rows, failures, _) = rows_from_fleet_refresh(
         &mut app.activity_tracker,
         &refresh,
         options.excluded.as_ref(),
     );
-    let mut rows = app.session_list.rows.clone();
-    if host_succeeded {
-        rows.retain(|row| row.host_id != host_id);
-        rows.extend(host_rows);
-        app.activity_tracker.retain(&row_keys(&rows));
-    }
+    let mut rows = Vec::with_capacity(app.session_list.rows.len() + host_rows.len());
+    rows.extend(
+        app.session_list
+            .rows
+            .iter()
+            .filter(|row| !succeeded_hosts.contains(&row.host_id))
+            .cloned(),
+    );
+    rows.extend(host_rows);
+    app.activity_tracker.retain(&row_keys(&rows));
     apply_refreshed_rows(fleet, app, rows, failures, options).await
 }
 

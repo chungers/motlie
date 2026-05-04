@@ -949,6 +949,12 @@ refresh. `HostFleet.hosts` contains every configured host, including retrying
 or failed SSH targets, so the top status legend and host color assignment are
 stable before a remote connection succeeds.
 
+`HostFleet` lives in `main.rs` as the selector loop's live fleet; `AppState`
+does not own a duplicate fleet snapshot. Rendering, key handling, refresh, and
+attach paths receive `&HostFleet` explicitly. This keeps host connection state
+single-sourced while `AppState` remains the UI-state holder for layout,
+selection, detail, status, modal, and activity-tracker state.
+
 **Why a binary-side `HostFleet`, not `motlie_tmux::Fleet`?** The lib's `Fleet`
 (`libs/tmux/src/fleet.rs`) is the *monitoring/automation registry*. Its
 load-bearing features — a shared `OutputBus` aggregating output across hosts,
@@ -1327,8 +1333,11 @@ Single-poll reconcile loop driven by the main TUI loop:
    refresh fan-out to include that host.
 3. Run an initial fan-out across currently connected entries and merge into
    `SessionListState` by stable `(host_id, session_id)` key.
-4. Every second, call `refresh_sessions_quiet(...)` which re-runs the
-   fan-out and updates rows + tracker state.
+4. Every second, start a non-blocking fan-out refresh across currently
+   connected entries. The TUI loop drains ready host results without blocking,
+   batches all results currently available, and reconciles the merged list once
+   per drain. This preserves progressive display of fast hosts without cloning
+   and re-sorting the full row list once per host.
 5. For each snapshot:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
@@ -1348,6 +1357,8 @@ Single-poll reconcile loop driven by the main TUI loop:
      owns the live-monitor recapture cadence on its own 750 ms tick)
    - on per-host polling failure, surface the failed host's label in the
      status banner; other hosts continue to populate the merged list
+   - failed host refreshes keep the host's last-good rows visible; only
+     successful host results replace that host's existing rows
 4. Reconciliation must preserve the user's highlight when possible: if the
    highlighted `(host_id, session_id)` still exists, keep it highlighted;
    otherwise clamp to the previous index.

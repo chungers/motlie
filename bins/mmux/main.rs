@@ -26,7 +26,7 @@ use consts::{
     MMUX_ATTACH_STATUS_LEFT_LENGTH,
 };
 use controller::{
-    apply_host_refresh, fetch_host_refresh, handle_key, refresh_detail, stop_detail_source,
+    apply_host_refreshes, fetch_host_refresh, handle_key, refresh_detail, stop_detail_source,
     HostRefreshResult, KeyOutcome, RefreshApplyOptions,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
@@ -84,9 +84,14 @@ impl Drop for PendingHostConnections {
 
 struct PendingSessionRefresh {
     receiver: UnboundedReceiver<HostRefreshResult>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<PendingHostRefreshTask>,
     remaining: usize,
     options: RefreshApplyOptions,
+}
+
+struct PendingHostRefreshTask {
+    diagnostic_label: String,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 struct SessionRefreshCompletion {
@@ -310,7 +315,7 @@ async fn run_selector_once(
     layout: LayoutMode,
     ui_state: &mut RetainedUiState,
 ) -> Result<SelectorOutcome> {
-    let mut app = AppState::with_fleet(fleet.clone(), layout);
+    let mut app = AppState::new(layout);
     ui_state.apply_to(&mut app);
 
     let mut terminal = TerminalSession::enter()?;
@@ -328,7 +333,7 @@ async fn run_selector_once(
     ));
 
     loop {
-        let connect_apply = apply_finished_host_connects(fleet, &mut app, host_connections);
+        let connect_apply = apply_finished_host_connects(fleet, host_connections);
         if connect_apply.connected {
             abort_pending_session_refresh(&mut pending_session_refresh);
             pending_session_refresh = Some(start_session_refresh(
@@ -370,7 +375,7 @@ async fn run_selector_once(
             refresh_detail(fleet, &mut app, false).await?;
             last_detail_refresh = Instant::now();
         }
-        terminal.draw(&mut app)?;
+        terminal.draw(fleet, &mut app)?;
 
         if event::poll(Duration::from_millis(100)).context("poll terminal event")? {
             let Event::Key(key) = event::read().context("read terminal event")? else {
@@ -412,6 +417,7 @@ fn start_host_connect_retries(specs: Vec<HostConnectSpec>) -> PendingHostConnect
             })
         })
         .collect();
+    // Drop the parent sender so receiver close means every retry task exited.
     drop(tx);
     PendingHostConnections { receiver, tasks }
 }
@@ -464,24 +470,19 @@ async fn retry_host_connect(spec: HostConnectSpec, tx: Sender<HostConnectEvent>)
 
 fn apply_finished_host_connects(
     fleet: &mut HostFleet,
-    app: &mut AppState,
     connections: &mut PendingHostConnections,
 ) -> HostConnectApply {
-    let mut changed = false;
     let mut applied = HostConnectApply::default();
     while let Ok(event) = connections.receiver.try_recv() {
         match event {
             HostConnectEvent::Connected(entry) => {
-                changed |= fleet.upsert_connected(entry);
-                applied.connected = true;
+                let host_changed = fleet.upsert_connected(entry);
+                applied.connected |= host_changed;
             }
             HostConnectEvent::Failed { id, failure } => {
-                changed |= fleet.mark_host_failed(&id, failure);
+                fleet.mark_host_failed(&id, failure);
             }
         }
-    }
-    if changed {
-        app.fleet = fleet.clone();
     }
     applied
 }
@@ -497,15 +498,26 @@ fn start_session_refresh(fleet: &HostFleet, options: RefreshApplyOptions) -> Pen
         .entries
         .iter()
         .map(|entry| {
+            let diagnostic_label = entry.diagnostic_label();
             let entry = entry.clone();
             let tx = tx.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let result = fetch_host_refresh(&entry).await;
-                let _ = tx.send(result);
-            })
+                if tx.send(result).is_err() {
+                    tracing::debug!(
+                        host = %entry.id,
+                        "discarded session-refresh result because selector exited"
+                    );
+                }
+            });
+            PendingHostRefreshTask {
+                diagnostic_label,
+                handle,
+            }
         })
         .collect::<Vec<_>>();
     let remaining = tasks.len();
+    // Drop the parent sender so receiver close means every refresh task exited.
     drop(tx);
     PendingSessionRefresh {
         receiver,
@@ -518,7 +530,7 @@ fn start_session_refresh(fleet: &HostFleet, options: RefreshApplyOptions) -> Pen
 fn abort_pending_session_refresh(pending: &mut Option<PendingSessionRefresh>) {
     if let Some(refresh) = pending.take() {
         for task in refresh.tasks {
-            task.abort();
+            task.handle.abort();
         }
     }
 }
@@ -537,17 +549,24 @@ async fn apply_finished_session_refresh(
     let Some(refresh) = pending.as_mut() else {
         return Ok(None);
     };
-    let mut applied = false;
-    let mut suppress_detail_refresh = false;
+    let mut results = Vec::new();
     while let Ok(result) = refresh.receiver.try_recv() {
-        suppress_detail_refresh |= !refresh.options.allow_detail_refresh;
-        apply_host_refresh(fleet, app, result, refresh.options.clone()).await?;
-        refresh.remaining = refresh.remaining.saturating_sub(1);
-        applied = true;
+        results.push(result);
+    }
+    let applied = !results.is_empty();
+    let suppress_detail_refresh = applied && !refresh.options.allow_detail_refresh;
+    if applied {
+        refresh.remaining = refresh.remaining.saturating_sub(results.len());
+        apply_host_refreshes(fleet, app, results, refresh.options.clone()).await?;
     }
     if refresh.receiver.is_closed() && refresh.remaining > 0 {
-        refresh.remaining = 0;
-        app.status = StatusBanner::error("session refresh task failed");
+        let Some(refresh) = pending.take() else {
+            return Ok(None);
+        };
+        app.status = StatusBanner::error(session_refresh_task_failure_status(refresh.tasks).await);
+        return Ok(Some(SessionRefreshCompletion {
+            suppress_detail_refresh,
+        }));
     }
     if refresh.remaining == 0 {
         pending.take();
@@ -558,4 +577,27 @@ async fn apply_finished_session_refresh(
     Ok(Some(SessionRefreshCompletion {
         suppress_detail_refresh,
     }))
+}
+
+async fn session_refresh_task_failure_status(tasks: Vec<PendingHostRefreshTask>) -> String {
+    let mut failures = Vec::new();
+    for task in tasks {
+        match task.handle.await {
+            Ok(()) => {}
+            Err(err) if err.is_panic() => {
+                failures.push(format!("{} panicked", task.diagnostic_label));
+            }
+            Err(err) if err.is_cancelled() => {
+                failures.push(format!("{} cancelled", task.diagnostic_label));
+            }
+            Err(err) => {
+                failures.push(format!("{} failed: {err}", task.diagnostic_label));
+            }
+        }
+    }
+    if failures.is_empty() {
+        "session refresh task failed".to_string()
+    } else {
+        format!("session refresh task failed: {}", failures.join("; "))
+    }
 }

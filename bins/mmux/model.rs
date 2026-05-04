@@ -1018,7 +1018,6 @@ impl StatusBanner {
 }
 
 pub(crate) struct AppState {
-    pub(crate) fleet: HostFleet,
     pub(crate) layout: LayoutState,
     pub(crate) session_list: SessionListState,
     pub(crate) detail: DetailState,
@@ -1028,33 +1027,8 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    /// Single-host test constructor. Builds a fleet with one entry from the
-    /// given label/IP.
-    #[cfg(test)]
-    pub(crate) fn new(host_label: String, layout_mode: LayoutMode) -> Self {
-        Self::new_with_host_ip(host_label, "unknown".to_string(), layout_mode)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_host_ip(
-        host_label: String,
-        host_ip_address: String,
-        layout_mode: LayoutMode,
-    ) -> Self {
-        let entry = HostEntry {
-            id: HostId::local(),
-            alias: host_label.clone(),
-            label: host_label,
-            ip_address: host_ip_address,
-            handle: motlie_tmux::HostHandle::local(),
-        };
-        let fleet = HostFleet::from_entries(vec![entry]);
-        Self::with_fleet(fleet, layout_mode)
-    }
-
-    pub(crate) fn with_fleet(fleet: HostFleet, layout_mode: LayoutMode) -> Self {
+    pub(crate) fn new(layout_mode: LayoutMode) -> Self {
         Self {
-            fleet,
             layout: LayoutState {
                 mode: layout_mode,
                 focus: Focus::List,
