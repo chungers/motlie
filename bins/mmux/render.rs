@@ -355,14 +355,13 @@ fn char_width(text: &str) -> usize {
 fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let width = max(1, area.width.saturating_sub(2) as usize);
-    let visible = if !app.detail.lines.is_empty() {
-        app.detail.lines.join("\n")
+    let detail_text = if !app.detail.lines.is_empty() {
+        detail_lines_text_for_render(&app.detail.lines)
     } else if app.session_list.rows.is_empty() {
-        "press n to create a session".to_string()
+        detail_text_for_render("press n to create a session")
     } else {
-        String::new()
+        Text::default()
     };
-    let detail_text = detail_text_for_render(&visible);
     let total_rows = detail_total_wrapped_rows(&app.detail.lines, width);
     app.detail.last_known_view_height = max(1, height);
     app.detail.last_known_scroll_max = total_rows.saturating_sub(app.detail.last_known_view_height);
@@ -405,7 +404,7 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     }
 }
 
-fn detail_total_wrapped_rows(lines: &[String], width: usize) -> usize {
+pub(crate) fn detail_total_wrapped_rows(lines: &[String], width: usize) -> usize {
     lines
         .iter()
         .map(|line| wrapped_line_rows(line, width))
@@ -413,6 +412,9 @@ fn detail_total_wrapped_rows(lines: &[String], width: usize) -> usize {
 }
 
 fn wrapped_line_rows(line: &str, width: usize) -> usize {
+    // Mirrors ratatui's word-wrapping behavior for `Paragraph::wrap(Wrap {
+    // trim: false })`; scrollbar range and detail scroll limits depend on
+    // staying aligned with the rows ratatui renders.
     let width = max(1, width);
     let line = strip_ansi(line);
     let mut rows = 0;
@@ -487,11 +489,24 @@ pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
     ])
 }
 
-pub(crate) fn detail_text_for_render(text: &str) -> Text<'_> {
+pub(crate) fn detail_text_for_render(text: &str) -> Text<'static> {
     normalize_terminal_reset_colors(
         text.into_text()
             .unwrap_or_else(|_| Text::raw(strip_ansi(text))),
     )
+}
+
+pub(crate) fn detail_lines_text_for_render(lines: &[String]) -> Text<'static> {
+    let mut rendered = Vec::with_capacity(lines.len());
+    for line in lines {
+        let text = detail_text_for_render(line);
+        if text.lines.is_empty() {
+            rendered.push(Line::default());
+        } else {
+            rendered.extend(text.lines);
+        }
+    }
+    Text::from(rendered)
 }
 
 fn normalize_terminal_reset_colors(mut text: Text<'_>) -> Text<'_> {
