@@ -16,9 +16,10 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
-    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
-    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode, StatusBanner,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SelectionKey,
+    SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind,
+    SessionKeyValueModalUi, SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
+    StatusBanner,
 };
 
 const TAG_PREFIX: &str = "mmux";
@@ -26,6 +27,23 @@ const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
 const RESERVED_TAG_KEYS: &[&str] = &[SELECTED_TAG_KEY_OPTION];
 const SEND_KEYS_THEN_ENTER_SUFFIX: &str = "$$";
 const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
+
+pub(crate) struct HostRefreshResult {
+    host_id: HostId,
+    host_label: String,
+    diagnostic_label: String,
+    local_now: u64,
+    result: std::result::Result<HostSessionSnapshot, String>,
+}
+
+struct HostSessionSnapshot {
+    sessions: Vec<SessionInfo>,
+    selected_tags: HashMap<SessionId, SessionSelectedTag>,
+}
+
+pub(crate) struct FleetRefresh {
+    hosts: Vec<HostRefreshResult>,
+}
 
 /// Fan out `list_sessions()` across all configured hosts in parallel, merge
 /// into a flat `Vec<SessionRow>`, run the activity-tracker over the
@@ -40,42 +58,73 @@ const SEND_KEYS_ENTER_DELAY: Duration = Duration::from_millis(500);
 /// against `local_now` under the NTP-synced clock assumption. Tracker
 /// state is pruned to drop entries for sessions that have disappeared from
 /// the merged listing.
+#[cfg(test)]
 pub(crate) async fn fetch_fleet_rows(
     fleet: &HostFleet,
     tracker: &mut ActivityTracker,
 ) -> (Vec<SessionRow>, Vec<String>) {
-    let listings = futures::future::join_all(
-        fleet
-            .entries
-            .iter()
-            .map(|entry| async move { (entry, entry.handle.list_sessions().await) }),
-    )
-    .await;
+    let refresh = fetch_fleet_refresh(fleet).await;
+    let (rows, failures, keep_keys) = rows_from_fleet_refresh(tracker, &refresh, None);
+    tracker.retain(&keep_keys);
+    (rows, failures)
+}
 
-    // Capture local_now once per refresh so all rows in this tick agree on
-    // the operator-side observation time.
+pub(crate) async fn fetch_fleet_refresh(fleet: &HostFleet) -> FleetRefresh {
+    let hosts = futures::future::join_all(fleet.entries.iter().map(fetch_host_refresh)).await;
+    FleetRefresh { hosts }
+}
+
+pub(crate) async fn fetch_host_refresh(entry: &HostEntry) -> HostRefreshResult {
     let local_now = local_epoch_seconds();
+    let result = match entry.handle.list_sessions().await {
+        Ok(sessions) => {
+            let selected_tags = load_selected_session_tags(&entry.handle, &sessions).await;
+            Ok(HostSessionSnapshot {
+                sessions,
+                selected_tags,
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    };
+    HostRefreshResult {
+        host_id: entry.id.clone(),
+        host_label: entry.label.clone(),
+        diagnostic_label: entry.diagnostic_label(),
+        local_now,
+        result,
+    }
+}
+
+fn rows_from_fleet_refresh(
+    tracker: &mut ActivityTracker,
+    refresh: &FleetRefresh,
+    excluded: Option<&SelectionKey>,
+) -> (Vec<SessionRow>, Vec<String>, HashSet<SelectionKey>) {
     let mut rows = Vec::new();
     let mut failures = Vec::new();
-    let mut keep_keys: HashSet<(HostId, String)> = HashSet::new();
-    for (entry, listing) in listings {
-        match listing {
-            Ok(sessions) => {
-                let selected_tags = load_selected_session_tags(&entry.handle, &sessions).await;
-                for session in sessions {
-                    let key = (entry.id.clone(), session.id.as_str().to_string());
+    let mut keep_keys: HashSet<SelectionKey> = HashSet::new();
+    for host in &refresh.hosts {
+        match &host.result {
+            Ok(snapshot) => {
+                for session in snapshot.sessions.iter().cloned() {
+                    let key = (host.host_id.clone(), session.id.as_str().to_string());
+                    if excluded.is_some_and(|(host_id, session_id)| {
+                        host_id == &host.host_id && session_id.as_str() == session.id.as_str()
+                    }) {
+                        continue;
+                    }
                     let activity_observed_at_local = tracker.observe(
-                        &entry.id,
+                        &host.host_id,
                         session.id.as_str(),
                         session.activity,
-                        local_now,
+                        host.local_now,
                     );
-                    let selected_tag = selected_tags.get(&session.id).cloned();
+                    let selected_tag = snapshot.selected_tags.get(&session.id).cloned();
                     keep_keys.insert(key);
                     rows.push(SessionRow {
-                        host_id: entry.id.clone(),
-                        host_label: entry.label.clone(),
-                        local_now,
+                        host_id: host.host_id.clone(),
+                        host_label: host.host_label.clone(),
+                        local_now: host.local_now,
                         activity_observed_at_local,
                         session,
                         selected_tag,
@@ -83,12 +132,11 @@ pub(crate) async fn fetch_fleet_rows(
                 }
             }
             Err(err) => {
-                failures.push(format!("{}: {err}", entry.diagnostic_label()));
+                failures.push(format!("{}: {err}", host.diagnostic_label));
             }
         }
     }
-    tracker.retain(&keep_keys);
-    (rows, failures)
+    (rows, failures, keep_keys)
 }
 
 fn local_epoch_seconds() -> u64 {
@@ -139,11 +187,12 @@ pub(crate) async fn refresh_sessions_quiet(
     refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, false, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn refresh_sessions_preserving(
     fleet: &HostFleet,
     app: &mut AppState,
     force_detail: bool,
-    previous: Option<(HostId, String)>,
+    previous: Option<SelectionKey>,
 ) -> Result<()> {
     refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, true, None).await
 }
@@ -152,7 +201,7 @@ async fn refresh_sessions_excluding(
     fleet: &HostFleet,
     app: &mut AppState,
     force_detail: bool,
-    excluded: (HostId, String),
+    excluded: SelectionKey,
 ) -> Result<()> {
     let previous = current_selection_key(app);
     refresh_sessions_preserving_with_status(
@@ -166,7 +215,7 @@ async fn refresh_sessions_excluding(
     .await
 }
 
-fn current_selection_key(app: &AppState) -> Option<(HostId, String)> {
+fn current_selection_key(app: &AppState) -> Option<SelectionKey> {
     app.selected_session()
         .map(|session| (session.host_id.clone(), session.id().to_string()))
 }
@@ -175,19 +224,186 @@ async fn refresh_sessions_preserving_with_status(
     fleet: &HostFleet,
     app: &mut AppState,
     force_detail: bool,
-    previous: Option<(HostId, String)>,
+    previous: Option<SelectionKey>,
     update_status: bool,
-    excluded: Option<(HostId, String)>,
+    excluded: Option<SelectionKey>,
 ) -> Result<()> {
-    let (mut rows, failures) = fetch_fleet_rows(fleet, &mut app.activity_tracker).await;
-    if let Some((host_id, session_id)) = excluded.as_ref() {
-        rows.retain(|row| row.host_id != *host_id || row.session.id.as_str() != session_id);
+    let refresh = fetch_fleet_refresh(fleet).await;
+    apply_fleet_snapshot(
+        fleet,
+        app,
+        refresh,
+        RefreshApplyOptions::after_action(force_detail, previous, update_status, excluded),
+    )
+    .await
+}
+
+#[derive(Clone)]
+pub(crate) struct RefreshApplyOptions {
+    kind: RefreshApplyKind,
+}
+
+#[derive(Clone)]
+enum RefreshApplyKind {
+    Initial {
+        previous: Option<SelectionKey>,
+    },
+    Periodic,
+    HostConnected {
+        previous: Option<SelectionKey>,
+    },
+    AfterAction {
+        force_detail: bool,
+        previous: Option<SelectionKey>,
+        update_status: bool,
+        excluded: Option<SelectionKey>,
+    },
+}
+
+impl RefreshApplyOptions {
+    pub(crate) fn initial(previous: Option<SelectionKey>) -> Self {
+        Self {
+            kind: RefreshApplyKind::Initial { previous },
+        }
     }
+
+    pub(crate) fn periodic() -> Self {
+        Self {
+            kind: RefreshApplyKind::Periodic,
+        }
+    }
+
+    pub(crate) fn host_connected(previous: Option<SelectionKey>) -> Self {
+        Self {
+            kind: RefreshApplyKind::HostConnected { previous },
+        }
+    }
+
+    pub(crate) fn after_action(
+        force_detail: bool,
+        previous: Option<SelectionKey>,
+        update_status: bool,
+        excluded: Option<SelectionKey>,
+    ) -> Self {
+        Self {
+            kind: RefreshApplyKind::AfterAction {
+                force_detail,
+                previous,
+                update_status,
+                excluded,
+            },
+        }
+    }
+
+    pub(crate) fn allow_detail_refresh(&self) -> bool {
+        !matches!(self.kind, RefreshApplyKind::Initial { .. })
+    }
+
+    pub(crate) fn clear_previous_selection(&mut self) {
+        match &mut self.kind {
+            RefreshApplyKind::Initial { previous }
+            | RefreshApplyKind::HostConnected { previous }
+            | RefreshApplyKind::AfterAction { previous, .. } => *previous = None,
+            RefreshApplyKind::Periodic => {}
+        }
+    }
+
+    fn previous(&self) -> Option<SelectionKey> {
+        match &self.kind {
+            RefreshApplyKind::Initial { previous }
+            | RefreshApplyKind::HostConnected { previous }
+            | RefreshApplyKind::AfterAction { previous, .. } => previous.clone(),
+            RefreshApplyKind::Periodic => None,
+        }
+    }
+
+    fn excluded(&self) -> Option<&SelectionKey> {
+        match &self.kind {
+            RefreshApplyKind::AfterAction { excluded, .. } => excluded.as_ref(),
+            RefreshApplyKind::Initial { .. }
+            | RefreshApplyKind::Periodic
+            | RefreshApplyKind::HostConnected { .. } => None,
+        }
+    }
+
+    fn update_status(&self) -> bool {
+        match &self.kind {
+            RefreshApplyKind::Initial { .. } => true,
+            RefreshApplyKind::AfterAction { update_status, .. } => *update_status,
+            RefreshApplyKind::Periodic | RefreshApplyKind::HostConnected { .. } => false,
+        }
+    }
+
+    fn force_detail(&self) -> bool {
+        match &self.kind {
+            RefreshApplyKind::AfterAction { force_detail, .. } => *force_detail,
+            RefreshApplyKind::Initial { .. }
+            | RefreshApplyKind::Periodic
+            | RefreshApplyKind::HostConnected { .. } => false,
+        }
+    }
+}
+
+/// Replace the merged row list with a full fleet snapshot. Hosts that failed
+/// in this snapshot are removed from the merged list, so use this for complete
+/// reconciliation paths such as initial startup and user-triggered actions.
+pub(crate) async fn apply_fleet_snapshot(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    refresh: FleetRefresh,
+    options: RefreshApplyOptions,
+) -> Result<()> {
+    let (rows, failures, keep_keys) =
+        rows_from_fleet_refresh(&mut app.activity_tracker, &refresh, options.excluded());
+    app.activity_tracker.retain(&keep_keys);
+    apply_refreshed_rows(fleet, app, rows, failures, options).await
+}
+
+/// Apply a streaming subset of host results. Hosts that failed in this batch
+/// keep their prior rows visible, so transient host failures do not make rows
+/// blink out during the per-tick refresh path.
+pub(crate) async fn apply_streaming_host_results(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    refreshes: Vec<HostRefreshResult>,
+    options: RefreshApplyOptions,
+) -> Result<()> {
+    if refreshes.is_empty() {
+        return Ok(());
+    }
+    let succeeded_hosts = refreshes
+        .iter()
+        .filter_map(|refresh| refresh.result.is_ok().then_some(refresh.host_id.clone()))
+        .collect::<HashSet<_>>();
+    let refresh = FleetRefresh { hosts: refreshes };
+    let (host_rows, failures, _) =
+        rows_from_fleet_refresh(&mut app.activity_tracker, &refresh, options.excluded());
+    let mut rows = Vec::with_capacity(app.session_list.rows.len() + host_rows.len());
+    rows.extend(
+        app.session_list
+            .rows
+            .iter()
+            .filter(|row| !succeeded_hosts.contains(&row.host_id))
+            .cloned(),
+    );
+    rows.extend(host_rows);
+    app.activity_tracker.retain(&row_keys(&rows));
+    apply_refreshed_rows(fleet, app, rows, failures, options).await
+}
+
+async fn apply_refreshed_rows(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    rows: Vec<SessionRow>,
+    failures: Vec<String>,
+    options: RefreshApplyOptions,
+) -> Result<()> {
     let closed_monitored = closed_monitored_session(app, &rows);
-    let previous_key = previous.clone();
+    let previous_key = options.previous().or_else(|| current_selection_key(app));
+    let selection_key_before_refresh = previous_key.clone();
     app.session_list.set_rows_sorted(rows, fleet);
-    app.preserve_selection(previous);
-    if update_status {
+    app.preserve_selection(previous_key);
+    if options.update_status() {
         app.status = build_status(app, &failures);
     }
     let selected_key = current_selection_key(app);
@@ -210,11 +426,19 @@ async fn refresh_sessions_preserving_with_status(
     // activity in the row list lands a tick or more late. The main loop
     // owns the monitor refresh cadence (its 750 ms `refresh_detail` call);
     // session refresh does not need to drive it.
-    let selection_changed = previous_key != selected_key;
-    if force_detail || selection_changed || monitor_just_closed {
+    let selection_changed = selection_key_before_refresh != selected_key;
+    if options.allow_detail_refresh()
+        && (options.force_detail() || selection_changed || monitor_just_closed)
+    {
         refresh_detail(fleet, app, true).await?;
     }
     Ok(())
+}
+
+fn row_keys(rows: &[SessionRow]) -> HashSet<SelectionKey> {
+    rows.iter()
+        .map(|row| (row.host_id.clone(), row.session.id.as_str().to_string()))
+        .collect()
 }
 
 fn build_status(app: &AppState, failures: &[String]) -> StatusBanner {
@@ -380,7 +604,7 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
-        (KeyCode::Char('s'), _) => {
+        (KeyCode::Char('p'), _) => {
             if let Some(selected) = app.selected_session() {
                 app.modal = Some(ModalState::SendKeys {
                     session: selected,
@@ -462,22 +686,12 @@ pub(crate) async fn handle_key(
         }
         (KeyCode::Tab | KeyCode::Char('\t'), _) => app.focus_next(),
         (KeyCode::Char('l'), _) => app.toggle_layout(),
-        (KeyCode::Up, _) => match app.layout.focus {
-            Focus::List => {
-                if app.move_selection(-1) {
-                    reset_to_sample_detail(fleet, app).await?;
-                }
-            }
-            Focus::Detail => app.scroll_detail(1),
-        },
-        (KeyCode::Down, _) => match app.layout.focus {
-            Focus::List => {
-                if app.move_selection(1) {
-                    reset_to_sample_detail(fleet, app).await?;
-                }
-            }
-            Focus::Detail => app.scroll_detail(-1),
-        },
+        (KeyCode::Char('u'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            move_focused_pane_line(fleet, app, -1).await?;
+        }
+        (KeyCode::Char('b'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            move_focused_pane_line(fleet, app, 1).await?;
+        }
         (KeyCode::PageUp, _) => match app.layout.focus {
             Focus::List => {
                 if app.move_selection(-10) {
@@ -519,6 +733,21 @@ pub(crate) async fn handle_key(
     }
 
     Ok(KeyOutcome::Continue)
+}
+
+async fn move_list_selection(fleet: &HostFleet, app: &mut AppState, delta: isize) -> Result<()> {
+    if app.move_selection(delta) {
+        reset_to_sample_detail(fleet, app).await?;
+    }
+    Ok(())
+}
+
+async fn move_focused_pane_line(fleet: &HostFleet, app: &mut AppState, delta: isize) -> Result<()> {
+    match app.layout.focus {
+        Focus::List => move_list_selection(fleet, app, delta).await?,
+        Focus::Detail => app.scroll_detail(-delta),
+    }
+    Ok(())
 }
 
 fn is_resize_modifier(modifiers: KeyModifiers) -> bool {
@@ -814,8 +1043,9 @@ fn submit_send_keys_modal(
     if ui.focus == SendKeysFocus::Cancel {
         return ModalAction::Close;
     }
-    if ui.focus != SendKeysFocus::Ok && !(ui.focus == SendKeysFocus::Input && !ui.input.is_empty())
-    {
+    let can_submit =
+        ui.focus == SendKeysFocus::Ok || (ui.focus == SendKeysFocus::Input && !ui.input.is_empty());
+    if !can_submit {
         return ModalAction::None;
     }
     ModalAction::SendKeys {
@@ -877,10 +1107,24 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             }
             ModalAction::None
         }
+        KeyCode::Char('u')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(ui.focus, NewSessionFocus::EnvRow(_)) =>
+        {
+            move_new_session_env_row_focus_up(ui);
+            ModalAction::None
+        }
         KeyCode::Down => {
             if let Some(focus) = next_new_session_env_row_focus(ui.focus, ui.env_rows.len()) {
                 set_new_session_focus(ui, focus);
             }
+            ModalAction::None
+        }
+        KeyCode::Char('b')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(ui.focus, NewSessionFocus::EnvRow(_)) =>
+        {
+            move_new_session_env_row_focus_down(ui);
             ModalAction::None
         }
         KeyCode::Left => {
@@ -916,7 +1160,10 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             };
             ModalAction::UnsetNewSessionEnv { index }
         }
-        KeyCode::Char('u') if matches!(ui.focus, NewSessionFocus::EnvRow(_)) => {
+        KeyCode::Char('m')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(ui.focus, NewSessionFocus::EnvRow(_)) =>
+        {
             let NewSessionFocus::EnvRow(index) = ui.focus else {
                 return ModalAction::None;
             };
@@ -947,6 +1194,23 @@ fn edit_new_session_text_field(key: &KeyEvent, ui: &mut NewSessionModalUi) -> bo
         NewSessionFocus::EnvValue => edit_text_field(key, &mut ui.env_value_input),
         _ => false,
     }
+}
+
+fn move_new_session_env_row_focus_up(ui: &mut NewSessionModalUi) {
+    let NewSessionFocus::EnvRow(index) = ui.focus else {
+        return;
+    };
+    set_new_session_focus(ui, NewSessionFocus::EnvRow(index.saturating_sub(1)));
+}
+
+fn move_new_session_env_row_focus_down(ui: &mut NewSessionModalUi) {
+    let NewSessionFocus::EnvRow(index) = ui.focus else {
+        return;
+    };
+    set_new_session_focus(
+        ui,
+        NewSessionFocus::EnvRow(min(index + 1, ui.env_rows.len().saturating_sub(1))),
+    );
 }
 
 fn edit_focused_text_field(key: &KeyEvent, focused: bool, input: &mut String) -> bool {
@@ -1118,26 +1382,49 @@ fn handle_session_key_values_navigation(
             true
         }
         KeyCode::Up => {
-            *focus = match *focus {
-                SessionKeyValueFocus::Row(index) => {
-                    SessionKeyValueFocus::Row(index.saturating_sub(1))
-                }
-                _ if !rows.is_empty() => SessionKeyValueFocus::Row(rows.len() - 1),
-                _ => *focus,
-            };
+            move_session_key_value_focus_up(rows, focus);
+            true
+        }
+        KeyCode::Char('u')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(*focus, SessionKeyValueFocus::Row(_)) =>
+        {
+            move_session_key_value_focus_up(rows, focus);
             true
         }
         KeyCode::Down => {
-            *focus = match *focus {
-                SessionKeyValueFocus::Row(index) => {
-                    SessionKeyValueFocus::Row(min(index + 1, rows.len().saturating_sub(1)))
-                }
-                _ => *focus,
-            };
+            move_session_key_value_focus_down(rows, focus);
+            true
+        }
+        KeyCode::Char('b')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(*focus, SessionKeyValueFocus::Row(_)) =>
+        {
+            move_session_key_value_focus_down(rows, focus);
             true
         }
         _ => false,
     }
+}
+
+fn move_session_key_value_focus_up(rows: &[SessionKeyValueRow], focus: &mut SessionKeyValueFocus) {
+    *focus = match *focus {
+        SessionKeyValueFocus::Row(index) => SessionKeyValueFocus::Row(index.saturating_sub(1)),
+        _ if !rows.is_empty() => SessionKeyValueFocus::Row(rows.len() - 1),
+        _ => *focus,
+    };
+}
+
+fn move_session_key_value_focus_down(
+    rows: &[SessionKeyValueRow],
+    focus: &mut SessionKeyValueFocus,
+) {
+    *focus = match *focus {
+        SessionKeyValueFocus::Row(index) => {
+            SessionKeyValueFocus::Row(min(index + 1, rows.len().saturating_sub(1)))
+        }
+        _ => *focus,
+    };
 }
 
 fn handle_session_key_values_row_action(
@@ -1165,7 +1452,7 @@ fn handle_session_key_values_row_action(
                 index,
                 selected_key: ui.selected_key.clone(),
             }),
-        KeyCode::Char('u') => {
+        KeyCode::Char('m') => {
             if let Some(row) = ui.rows.get(index) {
                 ui.key_input = row.key.clone();
                 ui.value_input = row.value.clone();

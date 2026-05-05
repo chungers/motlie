@@ -188,7 +188,8 @@ be read, startup defaults to landscape layout.
 
 ## Multi-host Mode (issue #235)
 
-Pass two or more SSH URIs on the command line to enter multi-host mode:
+Pass one or more SSH URIs on the command line to enter multi-host mode.
+Localhost is always included automatically; CLI URIs are additional hosts:
 
 ```bash
 mmux ssh://a.example.com ssh://b.example.com
@@ -200,14 +201,15 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 | `len(ssh_uris)` | Mode |
 |---|---|
 | `0` | Single-host, target = localhost |
-| `1` | Single-host, target = the SSH host |
-| `≥ 2` | Multi-host, targets = all listed SSH hosts |
+| `≥ 1` | Multi-host, targets = localhost + all listed SSH hosts |
 
 **UX differences in multi-host mode:**
 
 - Top status bar shows a host-color legend after `mmux` instead of the usual
   `<hostname> | <ip>`, for example `mmux ■ alpha ■ beta`. Host labels are
   tmux's own `#{host}` values; SSH URI hostnames are retained only as aliases.
+  If an SSH host is not connected yet, its URI hostname remains in the legend
+  in red while mmux retries in the background.
 - Session list rows insert the host's compact colored square between the
   attached marker and the session name:
 
@@ -223,8 +225,8 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
   legend is the full host-name lookup for those row colors.
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
-- All command keys (`Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`,
-  `a`, `m`, `s`, `n`, `k`, `r`, `t`, `g`, `Ctrl-C`/`q`, `l`,
+- All command keys (`Up`/`Down`, `u`/`b`, `PgUp`/`PgDn`, `Home`/`End`,
+  `a`, `m`, `p`, `n`, `k`, `r`, `t`, `g`, `Ctrl-C`/`q`, `l`,
   `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
@@ -266,7 +268,7 @@ Main-view keys:
 
 | Key | List focused | Detail focused |
 |-----|--------------|----------------|
-| Up / Down | Move highlighted session | Scroll detail one line |
+| Up / Down, `u` / `b` | Move highlighted session | Scroll detail one line |
 | PgUp / PgDn | Page session list | Page detail buffer |
 | Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
 | Enter | Refresh one-shot sample detail | No-op |
@@ -277,7 +279,7 @@ Main-view keys:
 | `Ctrl-Up` / `Ctrl-Down`, `Shift-Up` / `Shift-Down`, Alt Up / Down | Resize T/B split (portrait only) | Resize T/B split (portrait only) |
 | `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
 | `m` | Monitor highlighted session | Monitor highlighted session |
-| `s` | Open Send Keys modal | Open Send Keys modal |
+| `p` | Open Send Keys modal | Open Send Keys modal |
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
 | `r` | Open Rename Session modal | No-op |
@@ -323,7 +325,7 @@ right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
 `d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
-Pressing `s` opens the `Send Keys` modal for the highlighted session. The modal
+Pressing `p` opens the `Send Keys` modal for the highlighted session. The modal
 has a compact text field labeled `To: <session> on <host>`, accepts
 `motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, wraps long
 input by growing the text field vertically while keeping its width fixed,
@@ -344,9 +346,9 @@ right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom dark blue status bar shows compact key hints and
 status text only. Its left hint is `tab ↑/↓`, covering pane focus cycling and
 selection/scroll movement. It orders command hints as `help`, `monitor`,
-`send`, `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, then
+`prompt`, `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, then
 mode-specific resize; the command shortcut letters
-`h`/`m`/`s`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
+`h`/`m`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
 bold coral in the TUI. It does not repeat the host/time, show focus/layout
 mode, or prefix the hints with a `keys` label.
 
@@ -357,7 +359,8 @@ Modal keys:
 | Left / Right | Choose Cancel or Ok in New Session, Kill Session, Rename Session, and Send Keys modals. No-op in Help and Session Tags. |
 | Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Send Keys, cycle text field, Ok, and Cancel. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
 | Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
-| `u` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
+| `u` / `b` | In New Session env rows and Session Tags, move focus up/down through rows. |
+| `m` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
 | `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
 | Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, Send Keys, or Session Tags; in Send Keys, also sends from the text field when it has content; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |

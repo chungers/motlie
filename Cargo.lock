@@ -5199,6 +5199,8 @@ dependencies = [
  "motlie-tmux",
  "ratatui",
  "tokio",
+ "tracing",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

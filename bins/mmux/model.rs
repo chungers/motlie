@@ -11,6 +11,13 @@ use crate::consts::{
 };
 use crate::detail::DetailSource;
 
+const SECONDS_PER_MINUTE: u64 = 60;
+const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
+const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
+const RECENCY_MINUTES_START: u64 = 1;
+const RECENCY_HOURS_START: u64 = RECENCY_MINUTES_START + 60;
+const RECENCY_DAYS_START: u64 = RECENCY_HOURS_START + 48;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutMode {
     Normal,
@@ -266,6 +273,8 @@ pub(crate) enum ModalBody {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct HostId(String);
 
+pub(crate) type SelectionKey = (HostId, String);
+
 impl HostId {
     pub(crate) fn local() -> Self {
         Self("localhost".to_string())
@@ -316,9 +325,98 @@ impl HostEntry {
     }
 }
 
-/// Collection of one or more configured hosts. Always has at least one entry
-/// (localhost when no SSH URIs are specified). Multi-host mode is implicit:
-/// `is_multi() == true` iff `len() > 1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostConnectionStatus {
+    Connecting,
+    Connected,
+    Failed(HostConnectFailure),
+}
+
+impl HostConnectionStatus {
+    pub(crate) fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+}
+
+/// Stable, user-visible equivalence class for SSH connection failures.
+///
+/// `PartialEq` intentionally compares both the typed phase and the display
+/// message. That keeps repeated identical retry failures from forcing redraws,
+/// while still updating the status if a host moves from one concrete failure
+/// mode to another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostConnectFailure {
+    phase: HostConnectFailurePhase,
+    message: String,
+}
+
+impl HostConnectFailure {
+    pub(crate) fn connect(message: String) -> Self {
+        Self {
+            phase: HostConnectFailurePhase::Connect,
+            message,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostConnectFailurePhase {
+    Connect,
+}
+
+#[derive(Clone)]
+pub(crate) struct HostSlot {
+    pub(crate) id: HostId,
+    pub(crate) label: String,
+    pub(crate) alias: String,
+    pub(crate) ip_address: String,
+    pub(crate) status: HostConnectionStatus,
+}
+
+impl HostSlot {
+    pub(crate) fn connecting(id: HostId, label: String, alias: String) -> Self {
+        Self {
+            id,
+            label,
+            alias,
+            ip_address: "unknown".to_string(),
+            status: HostConnectionStatus::Connecting,
+        }
+    }
+
+    pub(crate) fn connected(entry: &HostEntry) -> Self {
+        Self {
+            id: entry.id.clone(),
+            label: entry.label.clone(),
+            alias: entry.alias.clone(),
+            ip_address: entry.ip_address.clone(),
+            status: HostConnectionStatus::Connected,
+        }
+    }
+
+    fn update_connected(&mut self, entry: &HostEntry) -> bool {
+        let changed = self.label != entry.label
+            || self.alias != entry.alias
+            || self.ip_address != entry.ip_address
+            || self.status != HostConnectionStatus::Connected;
+        self.label = entry.label.clone();
+        self.alias = entry.alias.clone();
+        self.ip_address = entry.ip_address.clone();
+        self.status = HostConnectionStatus::Connected;
+        changed
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct HostLegendItem {
+    pub(crate) color: Color,
+    pub(crate) label: String,
+    pub(crate) failed: bool,
+}
+
+/// Collection of one or more configured hosts. Always has at least one
+/// configured host (localhost when no SSH URIs are specified). Multi-host mode
+/// is implicit: `is_multi() == true` iff more than one host is configured.
 ///
 /// This is **not** `motlie_tmux::Fleet` (`libs/tmux/src/fleet.rs`). That type
 /// is a monitoring/automation registry — it owns a shared `OutputBus`,
@@ -328,22 +426,43 @@ impl HostEntry {
 /// hosts with per-row metadata (label, ip) and 1 Hz fan-out polling via
 /// `HostHandle::list_sessions()`. See `docs/DESIGN.md` §Multi-host Mode →
 /// §Internal data model for the full rationale.
+///
+/// `hosts` is the authoritative configured-host order used for presentation
+/// and stable color assignment. `entries` is the connected-host routing cache
+/// with owned `HostHandle`s, keyed by the same `HostId`s. These two collections
+/// MUST be kept in sync: `entries` may contain only connected hosts that have a
+/// matching `hosts` slot, and connected `hosts` slots must have a matching
+/// `entries` route. Only `from_configured_hosts`, `upsert_connected`, and
+/// `mark_host_failed` mutate both sides of this invariant.
 #[derive(Clone, Default)]
 pub(crate) struct HostFleet {
+    hosts: Vec<HostSlot>,
     pub(crate) entries: Vec<HostEntry>,
 }
 
 impl HostFleet {
     pub(crate) fn from_entries(entries: Vec<HostEntry>) -> Self {
-        Self { entries }
+        let hosts = entries.iter().map(HostSlot::connected).collect();
+        Self { hosts, entries }
+    }
+
+    pub(crate) fn from_configured_hosts(entries: Vec<HostEntry>, hosts: Vec<HostSlot>) -> Self {
+        let mut fleet = Self {
+            hosts,
+            entries: Vec::new(),
+        };
+        for entry in entries {
+            fleet.upsert_connected(entry);
+        }
+        fleet
     }
 
     pub(crate) fn is_multi(&self) -> bool {
-        self.entries.len() > 1
+        self.hosts.len() > 1
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.hosts.len()
     }
 
     pub(crate) fn entry(&self, id: &HostId) -> Option<&HostEntry> {
@@ -354,15 +473,55 @@ impl HostFleet {
         self.entries.first()
     }
 
+    #[cfg(test)]
+    pub(crate) fn host_slot(&self, id: &HostId) -> Option<&HostSlot> {
+        self.hosts.iter().find(|host| &host.id == id)
+    }
+
+    pub(crate) fn upsert_connected(&mut self, entry: HostEntry) -> bool {
+        let mut changed = false;
+        match self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.id == entry.id)
+        {
+            Some(existing) => *existing = entry.clone(),
+            None => {
+                self.entries.push(entry.clone());
+                changed = true;
+            }
+        }
+        match self.hosts.iter_mut().find(|host| host.id == entry.id) {
+            Some(host) => changed |= host.update_connected(&entry),
+            None => {
+                self.hosts.push(HostSlot::connected(&entry));
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn mark_host_failed(&mut self, id: &HostId, failure: HostConnectFailure) -> bool {
+        let status = HostConnectionStatus::Failed(failure);
+        if let Some(host) = self.hosts.iter_mut().find(|host| &host.id == id) {
+            if host.status == status {
+                return false;
+            }
+            host.status = status;
+            return true;
+        }
+        false
+    }
+
     /// Color assigned to the given host in multi-host rows and legends.
     /// Returns `None` for single-host mode or an unknown host id.
     pub(crate) fn host_color(&self, id: &HostId) -> Option<Color> {
         if !self.is_multi() {
             return None;
         }
-        self.entries
+        self.hosts
             .iter()
-            .position(|entry| &entry.id == id)
+            .position(|host| &host.id == id)
             .map(host_color_for_index)
     }
 
@@ -376,23 +535,27 @@ impl HostFleet {
     }
 
     /// Host-color legend shown in the multi-host top status bar.
-    pub(crate) fn host_color_legend(&self) -> Option<Vec<(Color, String)>> {
+    pub(crate) fn host_color_legend(&self) -> Option<Vec<HostLegendItem>> {
         if !self.is_multi() {
             return None;
         }
         Some(
-            self.entries
+            self.hosts
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| (host_color_for_index(index), entry.label.clone()))
+                .map(|(index, host)| HostLegendItem {
+                    color: host_color_for_index(index),
+                    label: host.label.clone(),
+                    failed: host.status.is_failed(),
+                })
                 .collect(),
         )
     }
 
     pub(crate) fn host_sort_index(&self, id: &HostId) -> usize {
-        self.entries
+        self.hosts
             .iter()
-            .position(|entry| entry.id == *id)
+            .position(|host| host.id == *id)
             .unwrap_or(usize::MAX)
     }
 }
@@ -476,7 +639,7 @@ pub(crate) struct SessionSelectedTag {
 /// from the merged listing.
 #[derive(Default, Clone)]
 pub(crate) struct ActivityTracker {
-    last_seen: HashMap<(HostId, String), ActivityState>,
+    last_seen: HashMap<SelectionKey, ActivityState>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -521,7 +684,7 @@ impl ActivityTracker {
 
     /// Drop tracker entries that aren't in `keep`. Bounds memory across
     /// session create/destroy cycles.
-    pub(crate) fn retain(&mut self, keep: &std::collections::HashSet<(HostId, String)>) {
+    pub(crate) fn retain(&mut self, keep: &std::collections::HashSet<SelectionKey>) {
         self.last_seen.retain(|key, _| keep.contains(key));
     }
 
@@ -534,7 +697,7 @@ impl ActivityTracker {
 #[derive(Debug, Clone)]
 pub(crate) struct RetainedUiState {
     layout_mode: LayoutMode,
-    selected_key: Option<(HostId, String)>,
+    selected_key: Option<SelectionKey>,
     selected_index: usize,
     focus: Focus,
     left_percent: u16,
@@ -586,7 +749,7 @@ impl RetainedUiState {
         self.sort_mode = app.session_list.sort_mode;
     }
 
-    pub(crate) fn selected_session_key(&self) -> Option<(HostId, String)> {
+    pub(crate) fn selected_session_key(&self) -> Option<SelectionKey> {
         self.selected_key.clone()
     }
 }
@@ -615,14 +778,14 @@ pub(crate) enum SessionSortMode {
 }
 
 impl SessionListState {
-    /// Set the merged set of rows, sorted by activity descending across all
-    /// hosts. Tie-breaks: name, then session id, then host id.
+    /// Set the merged set of rows, sorted by visible activity recency across
+    /// all hosts. Tie-breaks: name, then session id, then host id.
     ///
-    /// Sort key is `activity_observed_at_local` (operator-side wall clock)
-    /// not the raw host `session.activity`. This keeps the merged-list order
-    /// consistent with the displayed activity column and is robust to host
-    /// clock skew across hosts in multi-host mode — a host whose clock is
-    /// minutes ahead of others doesn't pin its sessions to the top.
+    /// Sort key is the same coarse recency bucket rendered in the row, not the
+    /// raw host `session.activity` or exact observer timestamp. This keeps the
+    /// list stable when several active sessions all display `now`; otherwise
+    /// invisible one-second host refresh timing differences can reshuffle rows
+    /// on every poll.
     pub(crate) fn set_rows_sorted_by_activity(&mut self, mut rows: Vec<SessionRow>) {
         sort_rows_by_activity(&mut rows);
         self.rows = rows;
@@ -668,7 +831,7 @@ impl SessionListState {
 
     /// Try to keep the selection on the same `(host_id, session_id)` pair
     /// across a refresh. Falls back to clamping the existing index.
-    pub(crate) fn preserve_selection(&mut self, previous_key: Option<(HostId, String)>) {
+    pub(crate) fn preserve_selection(&mut self, previous_key: Option<SelectionKey>) {
         if self.rows.is_empty() {
             self.selected = 0;
             self.scroll = 0;
@@ -705,23 +868,18 @@ fn sort_rows_by_activity(rows: &mut [SessionRow]) {
 }
 
 fn activity_sort_order(left: &SessionRow, right: &SessionRow) -> Ordering {
-    right
-        .activity_observed_at_local
-        .cmp(&left.activity_observed_at_local)
+    activity_recency_bucket(left)
+        .cmp(&activity_recency_bucket(right))
         .then_with(|| left.session.name.cmp(&right.session.name))
         .then_with(|| left.session.id.as_str().cmp(right.session.id.as_str()))
         .then_with(|| left.host_id.as_str().cmp(right.host_id.as_str()))
 }
 
 fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
-    let group_activity = tag_group_activity(rows);
+    let group_activity = tag_group_activity_bucket(rows);
     rows.sort_by(|left, right| {
         tag_group_sort_order(left, right, &group_activity)
-            .then_with(|| {
-                right
-                    .activity_observed_at_local
-                    .cmp(&left.activity_observed_at_local)
-            })
+            .then_with(|| activity_recency_bucket(left).cmp(&activity_recency_bucket(right)))
             .then_with(|| {
                 fleet
                     .host_sort_index(&left.host_id)
@@ -734,16 +892,35 @@ fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
     });
 }
 
-fn tag_group_activity(rows: &[SessionRow]) -> HashMap<String, u64> {
+fn activity_recency_bucket(row: &SessionRow) -> u64 {
+    let seconds = row.local_now.saturating_sub(row.activity_observed_at_local);
+    // Recency buckets, smallest = most recent:
+    //   0        : less than a minute ("now")
+    //   1..=60   : one bucket per minute, up to 1 hour
+    //   61..=108 : one bucket per hour, up to 48 hours
+    //   109..    : one bucket per day, beyond 48 hours
+    if seconds < SECONDS_PER_MINUTE {
+        0
+    } else if seconds < SECONDS_PER_HOUR {
+        RECENCY_MINUTES_START + seconds / SECONDS_PER_MINUTE
+    } else if seconds < 48 * SECONDS_PER_HOUR {
+        RECENCY_HOURS_START + seconds / SECONDS_PER_HOUR
+    } else {
+        RECENCY_DAYS_START + seconds / SECONDS_PER_DAY
+    }
+}
+
+fn tag_group_activity_bucket(rows: &[SessionRow]) -> HashMap<String, u64> {
     let mut group_activity: HashMap<String, u64> = HashMap::new();
     for row in rows {
         let Some(value) = row.displayed_tag_value() else {
             continue;
         };
+        let bucket = activity_recency_bucket(row);
         group_activity
             .entry(value.to_string())
-            .and_modify(|activity| *activity = (*activity).max(row.activity_observed_at_local))
-            .or_insert(row.activity_observed_at_local);
+            .and_modify(|activity| *activity = (*activity).min(bucket))
+            .or_insert(bucket);
     }
     group_activity
 }
@@ -757,8 +934,8 @@ fn tag_group_sort_order(
         (Some(left_value), Some(right_value)) => {
             let left_activity = group_activity.get(left_value).copied().unwrap_or(0);
             let right_activity = group_activity.get(right_value).copied().unwrap_or(0);
-            right_activity
-                .cmp(&left_activity)
+            left_activity
+                .cmp(&right_activity)
                 .then_with(|| left_value.cmp(right_value))
         }
         (Some(_), None) => Ordering::Less,
@@ -769,10 +946,14 @@ fn tag_group_sort_order(
 
 pub(crate) struct DetailState {
     pub(crate) lines: Vec<String>,
+    /// Wrapped terminal rows scrolled back from the tail. The renderer owns the
+    /// current wrap width, feeds back `last_known_scroll_max`, and renders the
+    /// corresponding top-origin `Paragraph` offset.
     pub(crate) scroll: usize,
     /// Render-feedback cache used by next-tick scroll math. The renderer owns
     /// the actual viewport size; input handling uses this last known value.
     pub(crate) last_known_view_height: usize,
+    pub(crate) last_known_scroll_max: usize,
     pub(crate) source: DetailSource,
     pub(crate) auto_tail: bool,
 }
@@ -785,7 +966,7 @@ impl DetailState {
     }
 
     pub(crate) fn max_scroll(&self) -> usize {
-        self.lines.len().saturating_sub(self.last_known_view_height)
+        self.last_known_scroll_max
     }
 
     pub(crate) fn scroll(&mut self, delta: isize) -> bool {
@@ -851,7 +1032,6 @@ impl StatusBanner {
 }
 
 pub(crate) struct AppState {
-    pub(crate) fleet: HostFleet,
     pub(crate) layout: LayoutState,
     pub(crate) session_list: SessionListState,
     pub(crate) detail: DetailState,
@@ -861,33 +1041,8 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    /// Single-host test constructor. Builds a fleet with one entry from the
-    /// given label/IP.
-    #[cfg(test)]
-    pub(crate) fn new(host_label: String, layout_mode: LayoutMode) -> Self {
-        Self::new_with_host_ip(host_label, "unknown".to_string(), layout_mode)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_host_ip(
-        host_label: String,
-        host_ip_address: String,
-        layout_mode: LayoutMode,
-    ) -> Self {
-        let entry = HostEntry {
-            id: HostId::local(),
-            alias: host_label.clone(),
-            label: host_label,
-            ip_address: host_ip_address,
-            handle: motlie_tmux::HostHandle::local(),
-        };
-        let fleet = HostFleet::from_entries(vec![entry]);
-        Self::with_fleet(fleet, layout_mode)
-    }
-
-    pub(crate) fn with_fleet(fleet: HostFleet, layout_mode: LayoutMode) -> Self {
+    pub(crate) fn new(layout_mode: LayoutMode) -> Self {
         Self {
-            fleet,
             layout: LayoutState {
                 mode: layout_mode,
                 focus: Focus::List,
@@ -899,6 +1054,7 @@ impl AppState {
                 lines: Vec::new(),
                 scroll: 0,
                 last_known_view_height: 1,
+                last_known_scroll_max: 0,
                 source: DetailSource::sample(),
                 auto_tail: true,
             },
@@ -912,7 +1068,7 @@ impl AppState {
         self.session_list.selected_session()
     }
 
-    pub(crate) fn preserve_selection(&mut self, previous: Option<(HostId, String)>) {
+    pub(crate) fn preserve_selection(&mut self, previous: Option<SelectionKey>) {
         self.session_list.preserve_selection(previous);
     }
 
@@ -926,7 +1082,7 @@ impl AppState {
 
     pub(crate) fn scroll_detail(&mut self, delta: isize) {
         if self.detail.scroll(delta) {
-            self.status = StatusBanner::info(format!("detail offset {}", self.detail.scroll));
+            self.status = StatusBanner::info(format!("detail row offset {}", self.detail.scroll));
         }
     }
 

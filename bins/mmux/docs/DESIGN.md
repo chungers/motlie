@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-04 | @codex | Matched attached tmux status-bar background to the selected host's list-pane palette color in multi-host mode. |
 | 2026-05-03 | @codex | Added the `s` Send Keys modal and moved main-view pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
@@ -29,7 +30,7 @@ Draft.
 | 2026-05-02 | @codex | Added the list-pane `s` sort toggle: activity sort remains the default, and tag sort groups checked-tag rows before unchecked rows before falling back to activity, host code, and session name. |
 | 2026-05-02 | @codex | Addressed PR feedback for issue #241: selected-tag refresh is batched per host, Session Tags Cancel is reachable by Tab, modal session identity and tag UI state are grouped, and modal sizing arithmetic moved to the render layer. |
 | 2026-05-01 | @codex | Simplified issue #241 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal from `i` to `t`, and left `i` unassigned for this feature. |
-| 2026-05-01 | @codex | Updated issue #241 design after tmux unset research: tag deletion requires a `motlie-tmux` unset API over `set-option -u`, and the `i` modal now supports row focus with Up/Down plus `x` delete and `u` update actions for focused tag rows. |
+| 2026-05-01 | @codex | Updated issue #241 design after tmux unset research: tag deletion requires a `motlie-tmux` unset API over `set-option -u`, and the `i` modal now supports row focus with Up/Down plus `x` delete and `m` update actions for focused tag rows. |
 | 2026-05-01 | @codex | Started issue #241 design for session-list rename and mmux tag management modals: list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add modal on `i`, dispatch through the motlie-tmux session tag API, and stable `(host_id, session_id)` routing. |
 | 2026-04-29 | @opus47-macos-tmux | Swept stale DESIGN.md sections that still described removed contracts (`list_sessions_now()`, `SessionListing.now`, `host_clock_offset_secs`, `probe_host_clock()`, raw `SessionInfo.activity` sort): rewrote the recency-display section, transport/fan-out architecture, multi-host recency/resilience block, internal data-model snippet, refresh-loop pseudocode, and Live Session List section to match shipped behavior — `HostHandle::list_sessions()` plus binary-side `ActivityTracker`, `(host_id, session_id)` selection identity, and observer-relative sort. |
 | 2026-04-29 | @opus47-macos-tmux | Removed `server_epoch` and the per-host clock-offset cache: there is no portable, side-effect-free way to read the host clock on tmux ≤ 3.6 (`run-shell 'date +%s'` corrupts the operator's attached pane on older tmux). Activity stays observer-relative; age now uses operator-side `local_now` under an explicit NTP-synced clock assumption. Wildly skewed host clocks produce mildly inaccurate "age" text but no functional regression. Net: zero new public methods on `HostHandle` for this PR. |
@@ -136,8 +137,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - `L` and `R` are both scrollable. The `L` viewport scrolls automatically to
   keep the highlighted row visible when `len(sessions) > visible_rows`. A
   position indicator (e.g., `5/12`) is shown in the session-list chrome.
-- Up and Down move the highlighted session when focus is `L`. When focus is
-  `R`, Up/Down scroll the `R` content one line; `PgUp`/`PgDn` page through;
+- Up and Down move the highlighted session when focus is `L`; plain `u` and
+  `b` are aliases for Up and Down in both `L` and `R`. When focus is `R`,
+  Up/Down scroll the `R` content one line; `PgUp`/`PgDn` page through;
   `Home`/`End` jump to top/bottom of the buffer. When focus is `L`,
   `PgUp`/`PgDn` page through the session list and `Home`/`End` jump to
   first/last session.
@@ -168,7 +170,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode `%output` replay, because TUI programs rely on cursor movement,
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
-- Pressing `s` opens a centered `Send Keys` modal for the highlighted session.
+- Pressing `p` opens a centered `Send Keys` modal for the highlighted session.
   The modal shows a label `To: <session> on <host>` above a compact text field
   and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
   vertically while the input width stays fixed. `Tab` cycles the text field and
@@ -200,7 +202,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `t` opens a centered `Session Tags` modal for the highlighted
   session. It lists all `@mmux/<tag>` options for that session sorted
   lexicographically by stripped tag key. Existing tag rows are focusable with
-  Up/Down; `x` deletes the focused tag and `u` loads the focused tag into the
+  Up/Down; `u` and `b` are row-movement aliases while row focus is active.
+  `x` deletes the focused tag and `m` loads the focused tag into the
   update controls. The bottom of the modal shows visually distinct `Key` and
   `Value` fields. Enter in either field writes through the `motlie-tmux`
   session tag API only when `Value` is non-empty.
@@ -271,9 +274,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. The left hint is `tab ↑/↓`, covering pane focus cycling
   and selection/scroll movement, with shortcut letters rendered bold coral.
-  Always-on command hints are ordered as `help`, `monitor`, `send`, `attach`,
+  Always-on command hints are ordered as `help`, `monitor`, `prompt`, `attach`,
   `new`, `kill`, `rename`, `group`, `layout`, `quit`, then mode-specific
-  resize. The shortcut letters `h`/`m`/`s`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
+  resize. The shortcut letters `h`/`m`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
   bold coral in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `L`, `R`), or layout mode (`portrait`,
@@ -402,8 +405,8 @@ list-windows -a` runs in a single tmux invocation — single fork+exec).
 
 #### SSH target
 
-One **persistent SSH connection per host**, opened once at `connect_fleet`
-time and reused for every subsequent command:
+One **persistent SSH connection per connected host**, opened by the background
+host connector and reused for every subsequent command:
 
 ```text
 mmux process
@@ -640,15 +643,16 @@ Implemented selector state is split by concern:
 - `DetailState`: rendered lines, scroll state, source, and auto-tail behavior.
 - `StatusBanner`: typed loading/info/error status text for the bottom bar.
 
-`AppState` coordinates those pieces and owns modal state. Render feedback for
-detail-pane height is explicitly stored as `last_known_view_height` in
-`DetailState` so input handling can compute scroll bounds on the next tick.
-The main run loop is kept in `main.rs`. CLI parsing/layout detection,
-terminal lifecycle, ForceCommand bypass/reject handling, target-host identity
-resolution, detail sources, key handling/event refresh, and rendering live in
-`cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`, `detail.rs`,
-`controller.rs`, and `render.rs`; shared UI data structures live in
-`model.rs`.
+`AppState` coordinates those pieces and owns modal state. Detail scroll offsets
+are tracked in wrapped terminal rows from the tail, not logical captured lines.
+Render feedback for detail-pane height and max wrapped-row scroll is explicitly
+stored as `last_known_view_height` / `last_known_scroll_max` in `DetailState`
+so input handling can compute scroll bounds on the next tick. The main run
+loop is kept in `main.rs`. CLI parsing/layout detection, terminal lifecycle,
+ForceCommand bypass/reject handling, target-host identity resolution, detail
+sources, key handling/event refresh, and rendering live in `cli.rs`,
+`terminal.rs`, `forcecommand.rs`, `target_host.rs`, `detail.rs`,
+`controller.rs`, and `render.rs`; shared UI data structures live in `model.rs`.
 
 ## Layout
 
@@ -686,7 +690,7 @@ Main-selector keymap (focus-aware):
 
 | Key | `L` focused | `R` focused |
 |-----|-------------|-------------|
-| Up / Down | Move highlight; session viewport auto-scrolls | Scroll R one line; on scroll-past-top, sample mode resamples backwards (chunked); monitor mode pins viewport (auto-tail pauses) |
+| Up / Down, `u` / `b` | Move highlight; session viewport auto-scrolls | Scroll R one line |
 | PgUp / PgDn | Page through session list | Page through R buffer |
 | Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
 | Enter | Refresh one-shot sample detail for the highlighted session | No-op |
@@ -786,17 +790,16 @@ or `ForceCommand /usr/local/bin/mmux --landscape`).
 
 ### Multi-host Mode (issue #235)
 
-Multi-host mode is enabled implicitly when **two or more** SSH host arguments are
-passed on the command line. With one host (or none) the selector remains in the
-existing single-host mode unchanged.
+Multi-host mode is enabled implicitly when **one or more** SSH host arguments
+are passed on the command line. Localhost is always included automatically; SSH
+arguments are additional hosts.
 
 **Activation rule.**
 
 | `len(ssh_hosts)` | Mode |
 |---|---|
 | `0` | Single-host, target = localhost |
-| `1` | Single-host, target = the SSH host |
-| `≥ 2` | **Multi-host**, targets = all listed SSH hosts |
+| `≥ 1` | **Multi-host**, targets = localhost + all listed SSH hosts |
 
 **Functional differences in multi-host mode:**
 
@@ -813,7 +816,7 @@ existing single-host mode unchanged.
   Host-square column width is one character.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, `a` attach, `m` monitor, `s` send keys,
+- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `m` monitor, `p` prompt,
   `n` new, `k` kill, `r` rename, `t` tag list/add/update/delete,
   `Ctrl-C`/`q` exit, `l` toggle layout, Tab cycle panes, `Ctrl-←/→` and
   `Ctrl-↑/↓` resize) behave
@@ -875,15 +878,35 @@ pub(crate) struct HostEntry {
     pub(crate) handle: motlie_tmux::HostHandle,
 }
 
+pub(crate) enum HostConnectionStatus {
+    Connecting,
+    Connected,
+    Failed(HostConnectFailure),
+}
+
+pub(crate) struct HostConnectFailure {
+    // Stable typed phase plus display message; equality defines retry-event
+    // coalescing and redraw suppression for repeated failures.
+}
+
+pub(crate) struct HostSlot {
+    pub(crate) id: HostId,
+    pub(crate) label: String,
+    pub(crate) alias: String,
+    pub(crate) ip_address: String,
+    pub(crate) status: HostConnectionStatus,
+}
+
 pub(crate) struct HostFleet {
-    pub(crate) entries: Vec<HostEntry>,
+    hosts: Vec<HostSlot>,             // configured hosts; stable display/order
+    pub(crate) entries: Vec<HostEntry>, // connected-host routing cache
 }
 
 impl HostFleet {
-    pub(crate) fn is_multi(&self) -> bool { self.entries.len() > 1 }
+    pub(crate) fn is_multi(&self) -> bool { self.hosts.len() > 1 }
     pub(crate) fn host_color(&self, id: &HostId) -> Option<Color> { /* palette color */ }
     pub(crate) fn host_marker_width(&self) -> usize { /* square width */ }
-    pub(crate) fn host_color_legend(&self) -> Option<Vec<(Color, String)>> { /* square + host */ }
+    pub(crate) fn host_color_legend(&self) -> Option<Vec<HostLegendItem>> { /* square + host */ }
 }
 
 pub(crate) struct SessionRow {
@@ -904,6 +927,12 @@ pub(crate) struct SessionListState {
 }
 ```
 
+`HostFleet::hosts` and `HostFleet::entries` MUST be kept in sync. `entries`
+may contain only connected hosts that have matching `hosts` slots, and connected
+`hosts` slots must have matching `entries` routes. Only
+`from_configured_hosts`, `upsert_connected`, and `mark_host_failed` mutate both
+sides of this invariant.
+
 `target_host.rs` owns host identity probing. For SSH targets, it parses the URI
 hostname into `HostEntry.alias`, connects the `HostHandle`, then asks tmux for
 `start-server ; display-message -p '#{host}'` through
@@ -915,6 +944,16 @@ the operator-supplied routable name.
 
 `HostContext` is replaced by `HostFleet`; selection-by-id at the row level
 must compose `(host_id, session_id)` to remain stable across rename/reorder.
+`HostFleet.entries` contains only connected `HostHandle`s used for routing and
+refresh. `HostFleet.hosts` contains every configured host, including retrying
+or failed SSH targets, so the top status legend and host color assignment are
+stable before a remote connection succeeds.
+
+`HostFleet` lives in `main.rs` as the selector loop's live fleet; `AppState`
+does not own a duplicate fleet snapshot. Rendering, key handling, refresh, and
+attach paths receive `&HostFleet` explicitly. This keeps host connection state
+single-sourced while `AppState` remains the UI-state holder for layout,
+selection, detail, status, modal, and activity-tracker state.
 
 **Why a binary-side `HostFleet`, not `motlie_tmux::Fleet`?** The lib's `Fleet`
 (`libs/tmux/src/fleet.rs`) is the *monitoring/automation registry*. Its
@@ -1005,6 +1044,9 @@ from `HostFleet::host_marker_width()`. The host-color column is omitted when
 - Single: `<hostname> | <ip>                                     <time>`
 - Multi:  `mmux ■ <host-a> ■ <host-b>                          <time>`
 
+Failed SSH targets remain in the multi-host legend using the URI hostname and
+are highlighted in red until a background retry connects successfully.
+
 #### Scope and impact analysis
 
 **Library (`libs/tmux/`):** *No new public API surface required.* The existing
@@ -1021,11 +1063,11 @@ not required for v1.
 |---|---|
 | `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`). |
 | `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. |
-| `target_host.rs` | Rename / split: `connect_host(cli) → connect_fleet(cli) -> Result<HostFleet>`. Internally calls existing single-host connect for each entry. |
+| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost is connected immediately; SSH URIs become configured host slots and retry specs for background retry. |
 | `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
 | `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. Landscape always renders session list left and detail right. Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |
-| `main.rs` | Calls `connect_fleet` instead of `connect_host`. |
+| `main.rs` | Calls `connect_initial_fleet`, starts SSH retry tasks, and applies connected/failed host events to the selector fleet. |
 | `forcecommand.rs` | No change (ForceCommand stays single-host; multi-host is operator-mode). |
 | `tests.rs` | New tests for: multi-host CLI parsing; fleet construction; merge-and-sort across hosts; row host-color column; top-status legend switching; per-host failure resilience; selection-by-(host_id, session_id) preservation across reorders. |
 
@@ -1091,13 +1133,14 @@ existing stable-id dispatch model.
   available height. The edit row stays visible at the bottom and contains
   visually distinct key and value fields aligned to the list columns.
 - Up/Down move focus row-to-row through the visible tag list when a tag row is
-  focused. If focus is in the edit controls, Up returns focus to the last
-  visible tag row when one exists.
+  focused. Plain `u` and `b` are row-focus aliases for Up and Down. If focus is
+  in the edit controls, Up returns focus to the last visible tag row when one
+  exists.
 - `x` on a focused tag row removes the row from the modal draft and clears the
   draft checked key if it referenced the deleted row. If the deleted row was the
   last row, focus moves to the previous row or to the `Key` field when the list
   becomes empty.
-- `u` on a focused tag row copies that key/value into the bottom `Key` and
+- `m` on a focused tag row copies that key/value into the bottom `Key` and
   `Value` fields and focuses `Value`. Pressing Enter in either edit field then
   stages an update to the same key.
 - Enter in either edit field applies the bottom fields with this rule: non-empty
@@ -1280,13 +1323,22 @@ snapshot refresh path without changing the selector UI model.
 
 Single-poll reconcile loop driven by the main TUI loop:
 
-1. On startup, call `connect_fleet(cli)` to build the `HostFleet` (rejects
-   duplicate SSH URIs up-front), then run an initial fan-out
-   `controller::fetch_fleet_rows(fleet, &mut tracker)` and merge into the
+1. On startup, call `connect_initial_fleet(cli)` to build an `InitialHostFleet`
+   whose `fleet` contains localhost plus all configured SSH host slots
+   (rejecting duplicate SSH URIs up front). The TUI starts immediately with
+   localhost connected.
+2. Start one background retry task per `retry_specs` entry. A failed attempt marks that
+   host's legend entry red and retries after a short delay. A successful retry
+   inserts the connected `HostEntry`, clears the red state, and allows normal
+   refresh fan-out to include that host.
+3. Run an initial fan-out across currently connected entries and merge into
    `SessionListState` by stable `(host_id, session_id)` key.
-2. Every second, call `refresh_sessions_quiet(...)` which re-runs the
-   fan-out and updates rows + tracker state.
-3. For each snapshot:
+4. Every second, start a non-blocking fan-out refresh across currently
+   connected entries. The TUI loop drains ready host results without blocking,
+   batches all results currently available, and reconciles the merged list once
+   per drain. This preserves progressive display of fast hosts without cloning
+   and re-sorting the full row list once per host.
+5. For each snapshot:
    - feed each `SessionInfo.activity` through `ActivityTracker::observe`
      to compute the row's `activity_observed_at_local`
    - sort rows using `SessionSortMode`: activity mode sorts by
@@ -1305,6 +1357,8 @@ Single-poll reconcile loop driven by the main TUI loop:
      owns the live-monitor recapture cadence on its own 750 ms tick)
    - on per-host polling failure, surface the failed host's label in the
      status banner; other hosts continue to populate the merged list
+   - failed host refreshes keep the host's last-good rows visible; only
+     successful host results replace that host's existing rows
 4. Reconciliation must preserve the user's highlight when possible: if the
    highlighted `(host_id, session_id)` still exists, keep it highlighted;
    otherwise clamp to the previous index.
@@ -1465,9 +1519,11 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    (race), show stderr message and re-enter the TUI.
 5. Best-effort call `Target::status()`, snapshot the selected session's local
    `status-style`, `status-left`, and `status-left-length`, then apply
-   `SessionStatusOverrides` for `status-style bg=#002b55,fg=white`,
-   `status-left "#{=50:session_name}"`, and `status-left-length 50`. Failures
-   warn to stderr but do not block attach.
+   `SessionStatusOverrides` for a status style whose background matches the
+   selected host's list-pane palette color in multi-host mode, or the default
+   mmux status-bar blue in single-host mode. `status-left` is
+   `"#{=50:session_name}"` and `status-left-length` is `50`. Failures warn to
+   stderr but do not block attach.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited

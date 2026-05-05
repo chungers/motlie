@@ -32,7 +32,7 @@ host event stream backed by stable-id snapshot reconciliation.
 | 2026-05-02 | @codex | Addressed PR feedback: batched selected-tag metadata loads per host refresh, made Session Tags Cancel reachable, grouped modal session/tag UI state, moved modal sizing to render, and documented reserved tag keys. |
 | 2026-05-02 | @codex | Updated shipped multi-host rendering: top status is now the host-code legend (`mmux [A] <host> ...`) and session rows use compact host-code columns instead of hostname columns. |
 | 2026-05-01 | @codex | Simplified Phase 12 tag UX: removed the separate `t` tag-edit dialog, moved the unified tag list/add/update/delete modal to `t`, and left `i` unassigned for this feature. |
-| 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`) and expand the `i` modal with row focus, `x` delete, and `u` update flows. |
+| 2026-05-01 | @codex | Updated Phase 12 after tmux unset research: add a `motlie-tmux` tag delete API (`SessionTags::unset`) and expand the `i` modal with row focus, `x` delete, and `m` update flows. |
 | 2026-05-01 | @codex | Started Phase 12 for issue #241: branch `feature/mmux-241-session-modals`. Plan covers list-focus-only rename on `r`, selected-session tag edit on `t`, tag info/add on `i`, modal-specific focus state, stable `(host_id, session_id)` dispatch, motlie-tmux tag API usage, and focused tests. |
 | 2026-04-29 | @opus47-macos-tmux | Added Phase 11 for multi-host support (issue #235): branch `feature/mmux-multihost`. Phased work covers CLI multi-arg parsing, `HostFleet`/`HostEntry`/`SessionRow` data model, fan-out polling with per-host failure isolation, row host-code column gated on `fleet.is_multi()`, top status bar mode switch, MOTD pane suppression, attach/create/kill routing by row, and tests. No new library APIs required. |
 | 2026-04-28 | @gpt55-dgx | Opened and linked issue #232 for Phase 9.6 env-gated SSH/ForceCommand integration tests; clarified exact bypass value contract. |
@@ -297,7 +297,7 @@ References: [Layout](./DESIGN.md#layout),
   `<hostname> | <ip address>` and right-justified time; keep the Sessions pane
   title count-only as `Sessions [n]`; keep the dark blue bottom status bar to
   compact direction hints (`tab ↑/↓`), command hints ordered as `help`,
-  `monitor`, `send`, `attach`, `new`, `kill`, `rename`, `group`, `layout`,
+  `monitor`, `prompt`, `attach`, `new`, `kill`, `rename`, `group`, `layout`,
   `quit`, then resize, with shortcut letters bold coral and app status with no
   `keys`, host, time, focus, or layout-mode labels.
 - [x] 4.7 Add layout unit tests for 64x32 portrait mode, PTY auto-detection
@@ -452,27 +452,31 @@ it lands as a follow-up.
 
 - [ ] 11.1a Change `Cli.ssh_uri: Option<String>` to `Cli.ssh_uris: Vec<String>` in
   `bins/mmux/cli.rs`. Use `clap::Args` with `num_args = 0..` for the positional.
-- [ ] 11.1b Backward-compat: zero or one URI keeps existing single-host behavior.
+- [ ] 11.1b Backward-compat: zero URIs keeps existing single-host localhost
+  behavior; one or more URI arguments activates multi-host with localhost
+  included automatically.
 - [ ] 11.1c Reject malformed URIs at parse time using existing `SshConfig::parse`;
   surface a single error listing all failed URIs.
 - [ ] 11.1d Tests: zero, one, two, many URIs; mixed valid + invalid.
 
 ### 11.2 Connect fleet
 
-- [ ] 11.2a Rename `connect_host(cli) -> Result<(HostHandle, HostIdentity)>`
-  to `connect_fleet(cli) -> Result<HostFleet>`. Internally iterates and calls
-  the existing per-host connect logic.
-- [ ] 11.2b Connect concurrently via `tokio::try_join_all` to keep startup
-  latency O(slowest), not O(sum).
-- [ ] 11.2c Per-host connect failure surfaces in stderr but does not abort
-  startup if at least one host connects (operator can still use the rest).
+- [ ] 11.2a Rename / split `connect_host(cli) -> Result<(HostHandle, HostIdentity)>`
+  to `connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost
+  connects immediately; SSH URIs become configured host slots and retry specs.
+- [ ] 11.2b Connect SSH hosts in background retry tasks so startup is not gated
+  on remote SSH latency.
+- [ ] 11.2c Per-host connect failure remains visible in the top host legend and
+  does not abort startup; failed hosts continue retrying until connected.
 - [ ] 11.2d Tests: all-succeed, partial-fail, all-fail (the last exits non-zero).
 
 ### 11.3 Internal data model
 
 - [ ] 11.3a Add `HostId(String)`, `HostEntry`, `HostFleet`, `SessionRow` types
   in `bins/mmux/model.rs`.
-- [ ] 11.3b Replace `HostContext` with `HostFleet` on `AppState`.
+- [x] 11.3b Replace `HostContext` with a live `HostFleet` owned by the selector
+  loop; pass `&HostFleet` to render/key/refresh paths instead of duplicating it
+  on `AppState`.
 - [ ] 11.3c Change `SessionListState.sessions: Vec<SessionInfo>` to
   `SessionListState.rows: Vec<SessionRow>`.
 - [x] 11.3d Remove `MotdState` from `AppState`; single-host and multi-host use
@@ -629,11 +633,12 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
   the bottom `Key` field.
 - [x] 12.3d Render bottom edit controls: key/value edit fields and `Ok` /
   `Cancel` buttons.
-- [x] 12.3e Up/Down move focus row-to-row through existing tag rows; Up from
-  edit controls returns to the last visible tag row when present.
+- [x] 12.3e Up/Down move focus row-to-row through existing tag rows; `u` and
+  `b` are row-focus aliases. Up from edit controls returns to the last visible
+  tag row when present.
 - [x] 12.3f Pressing `x` on a focused tag row stages deletion in the modal
   draft and keeps the modal open.
-- [x] 12.3g Pressing `u` on a focused tag row copies that key/value into the
+- [x] 12.3g Pressing `m` on a focused tag row copies that key/value into the
   bottom `Key` and `Value` fields and focuses `Value`.
 - [x] 12.3h Enter in either edit field stages the non-empty-value rule. Existing
   keys are updated in the draft; new keys are added to the draft.

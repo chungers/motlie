@@ -8,38 +8,43 @@ use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
     mmux_attach_status_style, mmux_attach_window_style, APP_BASE_BG, APP_BASE_FG, BUILD_DATE,
     BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
-    LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_LEFT,
-    MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH,
-    MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG,
-    STATUS_BAR_MNEMONIC_FG,
+    HOST_CONNECTION_FAILED_FG, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
+    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING,
+    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
+    apply_fleet_snapshot, apply_streaming_host_results, fetch_fleet_refresh, fetch_host_refresh,
     handle_key, refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed,
-    KeyOutcome,
+    KeyOutcome, RefreshApplyOptions,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
 };
 use crate::model::{
-    AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalBody, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
-    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
-    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
+    AppState, Button, Focus, HostConnectFailure, HostConnectionStatus, HostEntry, HostFleet,
+    HostId, HostSlot, LayoutMode, ModalBody, ModalState, NewSessionFocus, NewSessionHostChoice,
+    NewSessionModalUi, SelectedSession, SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus,
+    SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow, SessionRow,
+    SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
-    detail_text_for_render, detail_title, draw, key_value_key_column_width, modal_content,
-    session_key_values_footer_line, session_list_line, session_recency_text, sessions_title,
-    short_build_git_sha, status_line, status_line_text, top_status_line,
+    detail_lines_text_for_render, detail_text_for_render, detail_title, detail_total_wrapped_rows,
+    draw, key_value_key_column_width, modal_content, session_key_values_footer_line,
+    session_list_line, session_recency_text, sessions_title, short_build_git_sha, status_line,
+    status_line_text, top_status_line,
 };
 use crate::target_host::resolve_ip_address;
 use crate::{
     prepare_attach_status, prepare_attach_styles, restore_attach_status, restore_attach_styles,
+    session_refresh_task_failure_status, PendingHostRefreshTask,
 };
 
 fn sid(id: &str) -> SessionId {
@@ -63,7 +68,7 @@ fn session_with_times(name: &str, id: &str, created: u64, activity: u64) -> Sess
 }
 
 fn app_with_session() -> AppState {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
     app
 }
@@ -97,11 +102,20 @@ fn make_row_at(session: SessionInfo, now: u64) -> SessionRow {
 }
 
 fn make_row_for_host(session: SessionInfo, host_id: HostId, host_label: &str) -> SessionRow {
+    make_row_for_host_at(session, host_id, host_label, u64::MAX)
+}
+
+fn make_row_for_host_at(
+    session: SessionInfo,
+    host_id: HostId,
+    host_label: &str,
+    now: u64,
+) -> SessionRow {
     let activity_observed_at_local = session.activity;
     SessionRow {
         host_id,
         host_label: host_label.to_string(),
-        local_now: u64::MAX,
+        local_now: now,
         activity_observed_at_local,
         session,
         selected_tag: None,
@@ -132,6 +146,16 @@ fn fleet_with(handle: HostHandle) -> HostFleet {
 
 fn local_fleet() -> HostFleet {
     fleet_with(HostHandle::local())
+}
+
+fn fleet_with_label_ip(label: &str, ip_address: &str) -> HostFleet {
+    HostFleet::from_entries(vec![HostEntry {
+        id: local_host_id(),
+        alias: label.to_string(),
+        label: label.to_string(),
+        ip_address: ip_address.to_string(),
+        handle: HostHandle::local(),
+    }])
 }
 
 fn make_selected(host_id: HostId, host_label: &str, id: &str, name: &str) -> SelectedSession {
@@ -200,15 +224,43 @@ fn render_to_string(app: &mut AppState, width: u16, height: u16) -> String {
     render_to_lines(app, width, height).join("")
 }
 
+fn render_to_string_with_fleet(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    width: u16,
+    height: u16,
+) -> String {
+    render_to_lines_with_fleet(fleet, app, width, height).join("")
+}
+
 fn render_to_lines(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
     render_to_lines_and_cursor(app, width, height).0
 }
 
+fn render_to_lines_with_fleet(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    render_to_lines_and_cursor_with_fleet(fleet, app, width, height).0
+}
+
 fn render_to_buffer(app: &mut AppState, width: u16, height: u16) -> Buffer {
+    let fleet = local_fleet();
+    render_to_buffer_with_fleet(&fleet, app, width, height)
+}
+
+fn render_to_buffer_with_fleet(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    width: u16,
+    height: u16,
+) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    terminal.draw(|frame| draw(frame, app)).unwrap();
+    terminal.draw(|frame| draw(frame, fleet, app)).unwrap();
     terminal.backend().buffer().clone()
 }
 
@@ -217,10 +269,20 @@ fn render_to_lines_and_cursor(
     width: u16,
     height: u16,
 ) -> (Vec<String>, Position) {
+    let fleet = local_fleet();
+    render_to_lines_and_cursor_with_fleet(&fleet, app, width, height)
+}
+
+fn render_to_lines_and_cursor_with_fleet(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    width: u16,
+    height: u16,
+) -> (Vec<String>, Position) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    terminal.draw(|frame| draw(frame, app)).unwrap();
+    terminal.draw(|frame| draw(frame, fleet, app)).unwrap();
     let cursor = terminal.backend_mut().get_cursor_position().unwrap();
     let lines = terminal
         .backend()
@@ -311,7 +373,11 @@ fn modal_clear_area_preserves_configured_base_background() {
 
 #[test]
 fn attach_styles_are_derived_from_mmux_theme() {
-    assert_eq!(mmux_attach_status_style(), "bg=#002b55,fg=white");
+    assert_eq!(mmux_attach_status_style(None), "bg=#002b55,fg=white");
+    assert_eq!(
+        mmux_attach_status_style(Some(HOST_COLOR_PALETTE[1])),
+        "bg=#ffc107,fg=black"
+    );
     assert_eq!(
         mmux_attach_window_style(),
         Some("bg=black,fg=white".to_string())
@@ -375,14 +441,14 @@ fn layout_auto_detection_uses_pty_aspect_ratio() {
 
 #[test]
 fn portrait_default_split_is_35_65() {
-    let app = AppState::new("host".to_string(), LayoutMode::Portrait);
+    let app = AppState::new(LayoutMode::Portrait);
 
     assert_eq!(app.layout.top_percent, 35);
 }
 
 #[test]
 fn status_line_omits_layout_mode() {
-    let normal = AppState::new("host".to_string(), LayoutMode::Normal);
+    let normal = AppState::new(LayoutMode::Normal);
     let normal_status = status_line_text(&normal);
     assert!(normal_status.contains(" tab ↑/↓"));
     assert!(!normal_status.contains(" ↑/↓ sel"));
@@ -396,7 +462,7 @@ fn status_line_omits_layout_mode() {
         &[
             "help",
             "monitor",
-            "send",
+            "prompt",
             "attach",
             "new",
             "kill",
@@ -411,7 +477,7 @@ fn status_line_omits_layout_mode() {
     assert!(!normal_status.contains("landscape"));
     assert!(!normal_status.contains("portrait"));
 
-    let portrait = AppState::new("host".to_string(), LayoutMode::Portrait);
+    let portrait = AppState::new(LayoutMode::Portrait);
     let portrait_status = status_line_text(&portrait);
     assert!(portrait_status.contains(" tab ↑/↓"));
     assert!(!portrait_status.contains(" ↑/↓ sel"));
@@ -421,7 +487,7 @@ fn status_line_omits_layout_mode() {
         &[
             "help",
             "monitor",
-            "send",
+            "prompt",
             "attach",
             "new",
             "kill",
@@ -436,7 +502,7 @@ fn status_line_omits_layout_mode() {
 
 #[test]
 fn status_line_styles_command_mnemonics() {
-    let app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let app = AppState::new(LayoutMode::Normal);
     let line = status_line(&app);
     let styled_mnemonics = line
         .spans
@@ -449,10 +515,10 @@ fn status_line_styles_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(styled_mnemonics, "hmsankrglq");
+    assert_eq!(styled_mnemonics, "hmpankrglq");
     assert_eq!(
         status_line_text(&app),
-        " tab ↑/↓ | help | monitor | send | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
+        " tab ↑/↓ | help | monitor | prompt | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
     );
 }
 
@@ -475,8 +541,8 @@ fn session_tags_footer_styles_tag_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(text, "[Cancel]   Ok  | update | x unset | check");
-    assert_eq!(styled_mnemonics, "uxc");
+    assert_eq!(text, "[Cancel]   Ok  | modify | x unset | check");
+    assert_eq!(styled_mnemonics, "mxc");
 }
 
 fn assert_status_order(status: &str, tokens: &[&str]) {
@@ -495,12 +561,8 @@ fn assert_status_order(status: &str, tokens: &[&str]) {
 
 #[test]
 fn top_status_includes_bold_host_and_right_justified_time() {
-    let app = AppState::new_with_host_ip(
-        "target-host".to_string(),
-        "192.0.2.10".to_string(),
-        LayoutMode::Normal,
-    );
-    let line = top_status_line(&app, "12:34:56", 40);
+    let fleet = fleet_with_label_ip("target-host", "192.0.2.10");
+    let line = top_status_line(&fleet, "12:34:56", 40);
     let rendered = line
         .spans
         .iter()
@@ -515,11 +577,7 @@ fn top_status_includes_bold_host_and_right_justified_time() {
 
 #[test]
 fn sessions_title_only_includes_count() {
-    let mut app = AppState::new_with_host_ip(
-        "target-host".to_string(),
-        "192.0.2.10".to_string(),
-        LayoutMode::Normal,
-    );
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![session("dev", "$1"), session("build", "$2")]);
 
     assert_eq!(sessions_title(&app), " Sessions [2] ");
@@ -566,7 +624,7 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
 
     refresh_sessions_quiet(&fleet, &mut app, false)
         .await
@@ -578,16 +636,195 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
     ));
 }
 
+#[tokio::test]
+async fn apply_fleet_snapshot_can_defer_initial_detail_capture() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_error("capture-pane", "initial detail must be deferred");
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::new(LayoutMode::Normal);
+
+    let refresh = fetch_fleet_refresh(&fleet).await;
+    apply_fleet_snapshot(
+        &fleet,
+        &mut app,
+        refresh,
+        RefreshApplyOptions::initial(None),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("dev".to_string())
+    );
+    assert!(app.detail.lines.is_empty());
+    assert_eq!(app.status.text(), "1 session(s)");
+}
+
+#[tokio::test]
+async fn apply_fleet_snapshot_without_previous_preserves_current_selection() {
+    let mock = MockTransport::new().with_response(
+        "list-sessions",
+        "__MOTLIE_S__ selected $1 10 0 1  100\n__MOTLIE_S__ fresh $2 20 0 1  500\n",
+    );
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![
+        session_with_times("selected", "$1", 10, 100),
+        session_with_times("fresh", "$2", 20, 50),
+    ]);
+    app.session_list.selected = 0;
+
+    let refresh = fetch_fleet_refresh(&fleet).await;
+    apply_fleet_snapshot(&fleet, &mut app, refresh, RefreshApplyOptions::periodic())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| row.session.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fresh", "selected"]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("selected".to_string())
+    );
+}
+
+#[tokio::test]
+async fn apply_streaming_host_results_batch_successes_and_keeps_failed_rows() {
+    let a_entry = ssh_host_entry(
+        "ssh://a",
+        "alpha",
+        "x",
+        HostHandle::new(
+            TransportKind::Mock(
+                MockTransport::new()
+                    .with_response("list-sessions", "__MOTLIE_S__ a-new $1 10 0 1  900\n"),
+            ),
+            None,
+        ),
+    );
+    let b_entry = ssh_host_entry(
+        "ssh://b",
+        "beta",
+        "y",
+        HostHandle::new(
+            TransportKind::Mock(
+                MockTransport::new().with_error("list-sessions", "transport: connection refused"),
+            ),
+            None,
+        ),
+    );
+    let fleet = HostFleet::from_entries(vec![a_entry.clone(), b_entry.clone()]);
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = vec![
+        make_row_for_host(
+            session_with_times("a-old", "$1", 10, 100),
+            ssh_host_id("ssh://a"),
+            "alpha",
+        ),
+        make_row_for_host(
+            session_with_times("b-stale", "$2", 20, 200),
+            ssh_host_id("ssh://b"),
+            "beta",
+        ),
+    ];
+    app.session_list.selected = 1;
+
+    let a_refresh = fetch_host_refresh(&a_entry).await;
+    let b_refresh = fetch_host_refresh(&b_entry).await;
+    apply_streaming_host_results(
+        &fleet,
+        &mut app,
+        vec![a_refresh, b_refresh],
+        RefreshApplyOptions::after_action(false, None, true, None),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        app.session_list
+            .rows
+            .iter()
+            .map(|row| (row.host_label.as_str(), row.session.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "a-new"), ("beta", "b-stale")]
+    );
+    assert_eq!(
+        app.selected_session()
+            .map(|session| session.name().to_string()),
+        Some("b-stale".to_string())
+    );
+    assert!(app.status.text().contains("host unreachable: beta"));
+}
+
+#[tokio::test]
+async fn failed_host_refresh_keeps_existing_rows_visible() {
+    let entry = ssh_host_entry(
+        "ssh://down",
+        "down-host",
+        "x",
+        HostHandle::new(
+            TransportKind::Mock(
+                MockTransport::new().with_error("list-sessions", "transport: connection refused"),
+            ),
+            None,
+        ),
+    );
+    let fleet = HostFleet::from_entries(vec![entry.clone()]);
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = vec![make_row_for_host(
+        session_with_times("stale", "$1", 10, 100),
+        ssh_host_id("ssh://down"),
+        "down-host",
+    )];
+
+    let refresh = fetch_host_refresh(&entry).await;
+    apply_streaming_host_results(
+        &fleet,
+        &mut app,
+        vec![refresh],
+        RefreshApplyOptions::after_action(false, None, true, None),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.session_list.rows.len(), 1);
+    assert_eq!(app.session_list.rows[0].session.name, "stale");
+    assert!(app.status.text().contains("host unreachable: down-host"));
+}
+
+#[tokio::test]
+async fn session_refresh_task_failure_status_names_panicked_host() {
+    let status = session_refresh_task_failure_status(vec![PendingHostRefreshTask {
+        diagnostic_label: "alpha".to_string(),
+        handle: tokio::spawn(async {
+            panic!("boom");
+        }),
+    }])
+    .await;
+
+    assert!(status.contains("session refresh task failed"));
+    assert!(status.contains("alpha panicked"));
+}
+
 #[test]
 fn session_list_sorts_most_recent_activity_first() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
 
-    app.session_list.set_rows_sorted_by_activity(to_rows(vec![
-        session_with_times("older", "$1", 10, 100),
-        session_with_times("fresh", "$2", 20, 300),
-        session_with_times("alpha", "$3", 30, 200),
-        session_with_times("beta", "$4", 40, 200),
-    ]));
+    app.session_list.set_rows_sorted_by_activity(vec![
+        make_row_at(session_with_times("older", "$1", 10, 100), 400),
+        make_row_at(session_with_times("fresh", "$2", 20, 300), 400),
+        make_row_at(session_with_times("alpha", "$3", 30, 200), 400),
+        make_row_at(session_with_times("beta", "$4", 40, 200), 400),
+    ]);
 
     let names = app
         .session_list
@@ -599,62 +836,87 @@ fn session_list_sorts_most_recent_activity_first() {
 }
 
 #[test]
+fn activity_sort_is_stable_within_visible_recency_bucket() {
+    let mut app = AppState::new(LayoutMode::Normal);
+
+    app.session_list.set_rows_sorted_by_activity(vec![
+        make_row_at(session_with_times("zeta", "$1", 10, 999), 1_000),
+        make_row_at(session_with_times("alpha", "$2", 10, 950), 1_000),
+    ]);
+
+    let names = app
+        .session_list
+        .rows
+        .iter()
+        .map(|row| row.session.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha", "zeta"]);
+}
+
+#[test]
 fn session_list_tag_group_orders_groups_by_recent_activity() {
     let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     let rows = vec![
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("no-tag-fresh", "$1", 10, 900),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("b-alpha-low", "$2", 10, 100),
                 ssh_host_id("ssh://b"),
                 "beta",
+                1_000,
             ),
             "alpha",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("a-alpha-high", "$3", 10, 300),
                 ssh_host_id("ssh://a"),
                 "alpha",
+                1_000,
             ),
             "alpha",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("b-same", "$4", 10, 400),
                 ssh_host_id("ssh://b"),
                 "beta",
+                1_000,
             ),
             "same",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("z-same", "$5", 10, 400),
                 ssh_host_id("ssh://a"),
                 "alpha",
+                1_000,
             ),
             "same",
         ),
         with_selected_tag(
-            make_row_for_host(
+            make_row_for_host_at(
                 session_with_times("empty-selected-tag", "$7", 10, 800),
                 ssh_host_id("ssh://a"),
                 "alpha",
+                1_000,
             ),
             "",
         ),
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("no-tag-old", "$6", 10, 100),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
     ];
 
@@ -682,7 +944,7 @@ fn session_list_tag_group_orders_groups_by_recent_activity() {
 
 #[test]
 fn activity_sort_preserves_selection_by_stable_id() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session_with_times("selected", "$1", 10, 100),
         session_with_times("other", "$2", 20, 200),
@@ -795,7 +1057,7 @@ async fn quiet_refresh_preserves_tag_group_mode() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.sort_mode = SessionSortMode::TagGroup;
 
     refresh_sessions_quiet(&fleet, &mut app, false)
@@ -808,7 +1070,7 @@ async fn quiet_refresh_preserves_tag_group_mode() {
             .iter()
             .map(|row| row.session.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["zed", "alpha"]
+        vec!["alpha", "zed"]
     );
 }
 
@@ -821,7 +1083,7 @@ async fn quiet_refresh_reorders_by_activity_without_overwriting_status() {
         )
         .with_response("capture-pane -ep", "fresh screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.status = crate::model::StatusBanner::info("keep this");
 
     let fleet = fleet_with(host);
@@ -845,7 +1107,7 @@ async fn refresh_forces_detail_when_selected_session_changes() {
         .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![session_with_times("gone", "$1", 10, 300)]);
     app.session_list.selected = 0;
     app.set_detail_text("stale screen".to_string());
@@ -874,7 +1136,7 @@ async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
         .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
         .with_response("capture-pane -ep", "replacement screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session_with_times("watched", "$1", 10, 300),
         session_with_times("replacement", "$2", 20, 200),
@@ -912,7 +1174,7 @@ async fn quiet_refresh_skips_monitor_recapture() {
         .with_response("list-sessions", "__MOTLIE_S__ live $1 10 1 1  800\n")
         .with_error("capture-pane", "this should not be called");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     // Seed the row list with the older activity (200) and select $1.
     app.session_list.rows = to_rows(vec![session_with_times("live", "$1", 10, 200)]);
     app.session_list.selected = 0;
@@ -1004,7 +1266,7 @@ fn resolve_ip_address_preserves_literal_ip() {
 
 #[test]
 fn selection_preserves_stable_id_after_rename() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("old", "$1"))];
     app.session_list.selected = 0;
     app.session_list.rows = vec![make_row(session("new", "$1"))];
@@ -1018,7 +1280,7 @@ fn selection_preserves_stable_id_after_rename() {
 
 #[test]
 fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![session("shell", "$1"), session("build", "$2")]);
     app.session_list.selected = 1;
     app.layout.focus = Focus::Detail;
@@ -1029,7 +1291,7 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
     let mut retained = crate::model::RetainedUiState::default();
     retained.update_from(&app);
 
-    let mut reentered = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut reentered = AppState::new(LayoutMode::Normal);
     retained.apply_to(&mut reentered);
     reentered.session_list.rows = to_rows(vec![session("build", "$2"), session("shell", "$1")]);
     reentered.preserve_selection(retained.selected_session_key());
@@ -1048,7 +1310,7 @@ fn retained_ui_state_restores_selection_layout_and_split_on_reentry() {
 
 #[test]
 fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = to_rows(vec![
         session("one", "$1"),
         session("gone", "$2"),
@@ -1059,7 +1321,7 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
     let mut retained = crate::model::RetainedUiState::default();
     retained.update_from(&app);
 
-    let mut reentered = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut reentered = AppState::new(LayoutMode::Normal);
     retained.apply_to(&mut reentered);
     reentered.session_list.rows = to_rows(vec![session("one", "$1"), session("three", "$3")]);
     reentered.preserve_selection(retained.selected_session_key());
@@ -1075,7 +1337,7 @@ fn retained_ui_state_falls_back_to_previous_index_when_session_disappears() {
 
 #[test]
 fn landscape_layout_renders_sessions_and_detail_without_motd() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
 
     let rendered = render_to_string(&mut app, 120, 30);
@@ -1088,7 +1350,7 @@ fn landscape_layout_renders_sessions_and_detail_without_motd() {
 
 #[test]
 fn portrait_layout_renders_sessions_and_detail_without_motd() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Portrait);
+    let mut app = AppState::new(LayoutMode::Portrait);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
 
     let rendered = render_to_string(&mut app, 100, 30);
@@ -1101,7 +1363,7 @@ fn portrait_layout_renders_sessions_and_detail_without_motd() {
 
 #[tokio::test]
 async fn closed_monitored_session_resets_detail_source() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
         session_id: Some("$1".to_string()),
         host_id: Some(local_host_id()),
@@ -1118,9 +1380,10 @@ async fn closed_monitored_session_resets_detail_source() {
 
 #[test]
 fn detail_scroll_up_moves_toward_older_content() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.detail.lines = (0..100).map(|n| format!("line {n}")).collect();
     app.detail.last_known_view_height = 10;
+    app.detail.last_known_scroll_max = 90;
 
     app.scroll_detail(1);
     assert_eq!(app.detail.scroll, 1);
@@ -1131,10 +1394,81 @@ fn detail_scroll_up_moves_toward_older_content() {
     assert!(app.detail.auto_tail);
 }
 
+#[test]
+fn detail_tail_view_accounts_for_wrapped_lines() {
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = vec![make_row(session("dev", "$1"))];
+    app.detail.lines = vec![
+        "older".to_string(),
+        "wide-content ".repeat(8),
+        "recent-1".to_string(),
+        "recent-2".to_string(),
+        "recent-3".to_string(),
+    ];
+
+    let rendered = render_to_string(&mut app, 42, 8);
+
+    assert!(rendered.contains("recent-1"));
+    assert!(rendered.contains("recent-2"));
+    assert!(rendered.contains("recent-3"));
+}
+
+#[test]
+fn detail_home_reaches_oldest_wrapped_content() {
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = vec![make_row(session("dev", "$1"))];
+    app.detail.lines = vec![
+        "oldest".to_string(),
+        "wide-content ".repeat(8),
+        "recent-1".to_string(),
+        "recent-2".to_string(),
+        "recent-3".to_string(),
+    ];
+
+    render_to_string(&mut app, 42, 8);
+    app.detail_home();
+    let rendered = render_to_string(&mut app, 42, 8);
+
+    assert!(rendered.contains("oldest"));
+}
+
+#[test]
+fn detail_wrapped_row_count_matches_ratatui_paragraph_wrap() {
+    let lines = vec![
+        "alpha beta gamma".to_string(),
+        "wide \x1b[32mgreen\x1b[0m end".to_string(),
+        "cjk 界界 done".to_string(),
+    ];
+    let width = 7;
+    let expected_rows = detail_total_wrapped_rows(&lines, width);
+    let backend = TestBackend::new(width as u16, (expected_rows + 3) as u16);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                Paragraph::new(detail_lines_text_for_render(&lines)).wrap(Wrap { trim: false }),
+                frame.area(),
+            );
+        })
+        .unwrap();
+
+    let rendered_rows = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(width)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .filter(|row| !row.trim().is_empty())
+        .count();
+
+    assert_eq!(rendered_rows, expected_rows);
+}
+
 #[tokio::test]
 async fn q_exits_like_ctrl_c() {
     let fleet = local_fleet();
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
 
     let outcome = handle_key(
         &fleet,
@@ -1161,6 +1495,77 @@ async fn a_attaches_selected_session() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Select(selected) if selected.name() == "dev"));
+}
+
+#[tokio::test]
+async fn u_and_b_move_list_selection_like_arrow_keys() {
+    let listing = "__MOTLIE_S__ top $1 10 0 1  100\n\
+                   __MOTLIE_S__ middle $2 10 0 1  100\n\
+                   __MOTLIE_S__ bottom $3 10 0 1  100\n";
+    let mock = MockTransport::new()
+        .with_response("list-sessions", listing)
+        .with_response("capture-pane -ep", "top screen\n")
+        .with_response("list-sessions", listing)
+        .with_response("capture-pane -ep", "middle screen\n");
+    let fleet = fleet_with(HostHandle::new(TransportKind::Mock(mock), None));
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.session_list.rows = to_rows(vec![
+        session("top", "$1"),
+        session("middle", "$2"),
+        session("bottom", "$3"),
+    ]);
+    app.session_list.selected = 1;
+    app.layout.focus = Focus::List;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.selected_session().unwrap().name(), "top");
+    assert_eq!(app.detail.lines, vec!["top screen".to_string()]);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.selected_session().unwrap().name(), "middle");
+    assert_eq!(app.detail.lines, vec!["middle screen".to_string()]);
+}
+
+#[tokio::test]
+async fn u_and_b_scroll_detail_like_arrow_keys() {
+    let fleet = local_fleet();
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.layout.focus = Focus::Detail;
+    app.detail.lines = (0..100).map(|n| format!("line {n}")).collect();
+    app.detail.last_known_view_height = 10;
+    app.detail.last_known_scroll_max = 90;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.detail.scroll, 1);
+    assert!(!app.detail.auto_tail);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.detail.scroll, 0);
+    assert!(app.detail.auto_tail);
 }
 
 #[tokio::test]
@@ -1209,7 +1614,7 @@ async fn attach_status_overrides_are_set_and_restored() {
         .with_response(
             &format!(
                 "set-option -t '$1' status-style '{}'",
-                mmux_attach_status_style()
+                mmux_attach_status_style(None)
             ),
             "",
         )
@@ -1231,7 +1636,7 @@ async fn attach_status_overrides_are_set_and_restored() {
     let target = host.session_by_id("$1").await.unwrap().unwrap();
 
     let status = target.status().await.unwrap();
-    let snapshot = prepare_attach_status(&status).await.unwrap();
+    let snapshot = prepare_attach_status(&status, None).await.unwrap();
     assert_eq!(
         snapshot.style,
         Some(StatusStyle::new("bg=green,fg=black").unwrap())
@@ -1248,6 +1653,34 @@ async fn attach_status_overrides_are_set_and_restored() {
 }
 
 #[tokio::test]
+async fn attach_status_uses_selected_host_color() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("show-option -q -t '$1' status-style", "")
+        .with_response("show-option -q -t '$1' status-left-length", "")
+        .with_response("show-option -q -t '$1' status-left", "")
+        .with_response("set-option -t '$1' status-style 'bg=#ffc107,fg=black'", "")
+        .with_response(
+            &format!("set-option -t '$1' status-left-length {MMUX_ATTACH_STATUS_LEFT_LENGTH}"),
+            "",
+        )
+        .with_response(
+            &format!("set-option -t '$1' status-left '{MMUX_ATTACH_STATUS_LEFT}'"),
+            "",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let target = host.session_by_id("$1").await.unwrap().unwrap();
+
+    let status = target.status().await.unwrap();
+    let snapshot = prepare_attach_status(&status, Some(HOST_COLOR_PALETTE[1]))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.style, None);
+    assert_eq!(snapshot.left, None);
+    assert_eq!(snapshot.left_length, None);
+}
+
+#[tokio::test]
 async fn attach_status_overrides_unset_when_no_previous_local_values() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
@@ -1257,7 +1690,7 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
         .with_response(
             &format!(
                 "set-option -t '$1' status-style '{}'",
-                mmux_attach_status_style()
+                mmux_attach_status_style(None)
             ),
             "",
         )
@@ -1276,7 +1709,7 @@ async fn attach_status_overrides_unset_when_no_previous_local_values() {
     let target = host.session_by_id("$1").await.unwrap().unwrap();
 
     let status = target.status().await.unwrap();
-    let snapshot = prepare_attach_status(&status).await.unwrap();
+    let snapshot = prepare_attach_status(&status, None).await.unwrap();
     assert_eq!(snapshot.style, None);
     assert_eq!(snapshot.left, None);
     assert_eq!(snapshot.left_length, None);
@@ -1305,7 +1738,7 @@ async fn attach_styles_apply_status_and_window_theme_then_restore() {
         .with_response(
             &format!(
                 "set-option -t '$1' status-style '{}'",
-                mmux_attach_status_style()
+                mmux_attach_status_style(None)
             ),
             "",
         )
@@ -1349,7 +1782,7 @@ async fn attach_styles_apply_status_and_window_theme_then_restore() {
     let status = target.status().await.unwrap();
     let window_styles = target.window_styles().await.unwrap();
 
-    let snapshot = prepare_attach_styles(Some(&status), Some(&window_styles)).await;
+    let snapshot = prepare_attach_styles(Some(&status), Some(&window_styles), None).await;
     assert!(snapshot.status.is_some());
     assert!(snapshot.window_styles.is_some());
     assert_eq!(
@@ -1361,7 +1794,7 @@ async fn attach_styles_apply_status_and_window_theme_then_restore() {
 }
 
 #[tokio::test]
-async fn s_no_longer_groups_sessions_and_opens_send_keys() {
+async fn p_opens_prompt_without_grouping_sessions() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.focus = Focus::List;
@@ -1369,7 +1802,7 @@ async fn s_no_longer_groups_sessions_and_opens_send_keys() {
     let outcome = handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -1405,10 +1838,15 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     let body = view.body_text();
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
+    assert!(body.contains("↑ (u) / ↓ (b) select session or scroll detail"));
     assert!(body.contains("Enter sample highlighted session (list pane)"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
-    assert!(body.contains("  u update focused tag"));
+    assert!(body.contains("  ↑ (u) / ↓ (b) move env row"));
+    assert!(body.contains("  m modify env row"));
+    assert!(body.contains("  x unset env row"));
+    assert!(body.contains("  ↑ (u) / ↓ (b) move focused tag"));
+    assert!(body.contains("  m modify focused tag"));
     assert!(body.contains("  x unset focused tag"));
     assert!(body.contains("  c toggle sort tag"));
     assert!(!body.contains("PgUp/PgDn page current pane"));
@@ -1745,7 +2183,7 @@ async fn new_session_modal_selects_host_in_multi_host_mode() {
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = vec![make_row_for_host(
         session("dev", "$1"),
         ssh_host_id("ssh://b"),
@@ -1817,7 +2255,7 @@ async fn new_session_modal_creates_on_selected_multi_host() {
         ssh_host_entry("ssh://a", "alpha", "x", alpha),
         ssh_host_entry("ssh://b", "beta", "y", beta),
     ]);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = vec![make_row_for_host(
         session("selected", "$1"),
         ssh_host_id("ssh://b"),
@@ -1885,7 +2323,7 @@ async fn kill_session_modal_clears_selected_multi_host_row() {
         ssh_host_entry("ssh://a", "alpha", "x", alpha),
         ssh_host_entry("ssh://b", "beta", "y", beta),
     ]);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.rows = vec![
         make_row_for_host(session("shell", "$1"), ssh_host_id("ssh://a"), "alpha"),
         make_row_for_host(session("build", "$7"), ssh_host_id("ssh://b"), "beta"),
@@ -1943,7 +2381,7 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
     let screen = screen_lines.join("");
     let footer = screen_lines
         .iter()
-        .find(|line| line.contains("Cancel") && line.contains("update"))
+        .find(|line| line.contains("Cancel") && line.contains("modify"))
         .expect("expected session tags footer");
 
     assert_eq!(
@@ -1966,7 +2404,7 @@ fn session_tags_modal_renders_list_and_distinct_input_row() {
     assert!(screen.contains("platform"));
     assert!(screen.contains("phase"));
     assert!(screen.contains("build"));
-    assert!(screen.contains("update"));
+    assert!(screen.contains("modify"));
     assert!(screen.contains("x unset"));
     assert!(screen.contains("check"));
     assert!(!screen.contains("+"));
@@ -2118,7 +2556,7 @@ async fn rename_modal_renames_changed_session_by_stable_id() {
 }
 
 #[tokio::test]
-async fn s_opens_send_keys_modal_for_selected_session() {
+async fn p_opens_send_keys_modal_for_selected_session() {
     let fleet = local_fleet();
     let mut app = app_with_session();
     app.layout.focus = Focus::Detail;
@@ -2126,7 +2564,7 @@ async fn s_opens_send_keys_modal_for_selected_session() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2155,7 +2593,7 @@ async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2207,7 +2645,7 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2251,7 +2689,7 @@ async fn send_keys_modal_does_not_force_refresh_in_monitor_mode() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2290,7 +2728,7 @@ async fn send_keys_modal_ctrl_enter_sends_keys_then_enter_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2330,7 +2768,7 @@ async fn send_keys_modal_suffix_shorthand_sends_keys_then_enter_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2369,7 +2807,7 @@ async fn send_keys_modal_suffix_only_sends_delayed_enter_and_closes() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2408,7 +2846,7 @@ async fn send_keys_modal_suffix_shorthand_only_applies_at_end() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2448,7 +2886,7 @@ async fn send_keys_modal_sends_explicit_special_key_sequence() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2483,7 +2921,7 @@ async fn send_keys_modal_escape_cancels_without_sending() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2515,7 +2953,7 @@ async fn send_keys_modal_invalid_sequence_stays_open() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2604,7 +3042,7 @@ async fn new_session_modal_applies_staged_initial_environment() {
         );
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
 
     handle_key(
         &fleet,
@@ -2735,6 +3173,78 @@ async fn new_session_modal_applies_staged_initial_environment() {
     .unwrap();
 
     assert_eq!(app.status.text(), "created session build");
+}
+
+#[tokio::test]
+async fn new_session_modal_u_and_b_move_env_rows_and_m_updates() {
+    let fleet = local_fleet();
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.modal = Some(test_new_session_modal("build", Button::Ok));
+    let Some(ModalState::NewSession { ui }) = app.modal.as_mut() else {
+        panic!("new session modal should be open");
+    };
+    ui.env_rows = vec![
+        SessionKeyValueRow {
+            key: "BUILD_ID".to_string(),
+            value: "42".to_string(),
+        },
+        SessionKeyValueRow {
+            key: "MOTLIE".to_string(),
+            value: "enabled".to_string(),
+        },
+    ];
+    ui.focus = NewSessionFocus::EnvRow(0);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui }) if ui.focus == NewSessionFocus::EnvRow(1)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui }) if ui.focus == NewSessionFocus::EnvRow(1)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui }) if ui.focus == NewSessionFocus::EnvRow(0)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.focus == NewSessionFocus::EnvValue
+                && ui.env_key_input == "BUILD_ID"
+                && ui.env_value_input == "42"
+    ));
 }
 
 #[tokio::test]
@@ -2955,7 +3465,7 @@ async fn session_tags_modal_update_uses_bottom_fields() {
     handle_key(
         &fleet,
         &mut app,
-        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
     )
     .await
     .unwrap();
@@ -2986,6 +3496,64 @@ async fn session_tags_modal_update_uses_bottom_fields() {
                 && ui.focus == SessionKeyValueFocus::Row(0)
     ));
     assert_eq!(app.status.text(), "staged tag owner on dev");
+}
+
+#[tokio::test]
+async fn session_tags_modal_u_and_b_move_rows_and_m_updates() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response(
+            "show-options -t '$1'",
+            "@mmux/a one\n@mmux/b two\n@mmux/c three\n",
+        );
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Row(1)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. }) if ui.focus == SessionKeyValueFocus::Row(0)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.key_input == "a" && ui.value_input == "one" && ui.focus == SessionKeyValueFocus::Value
+    ));
 }
 
 #[tokio::test]
@@ -3282,7 +3850,7 @@ async fn plain_left_and_right_do_not_cycle_panes() {
 #[tokio::test]
 async fn modified_arrow_keys_resize_layouts() {
     let fleet = local_fleet();
-    let mut landscape = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut landscape = AppState::new(LayoutMode::Normal);
     let initial = landscape.layout.left_percent;
 
     handle_key(
@@ -3314,7 +3882,7 @@ async fn modified_arrow_keys_resize_layouts() {
     .unwrap();
     assert_eq!(landscape.layout.left_percent, LANDSCAPE_MAX_LEFT_PERCENT);
 
-    let mut portrait = AppState::new("host".to_string(), LayoutMode::Portrait);
+    let mut portrait = AppState::new(LayoutMode::Portrait);
     portrait.layout.top_percent = 5;
     handle_key(
         &fleet,
@@ -3339,7 +3907,7 @@ async fn modified_arrow_keys_resize_layouts() {
 #[tokio::test]
 async fn word_arrow_fallback_sequences_resize_normal_layout() {
     let fleet = local_fleet();
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
+    let mut app = AppState::new(LayoutMode::Normal);
     let initial = app.layout.left_percent;
 
     handle_key(
@@ -3477,13 +4045,13 @@ fn cli_accepts_multiple_ssh_uris() {
 }
 
 #[tokio::test]
-async fn connect_fleet_rejects_duplicate_ssh_uris() {
-    use crate::target_host::connect_fleet;
+async fn connect_initial_fleet_rejects_duplicate_ssh_uris() {
+    use crate::target_host::connect_initial_fleet;
 
     let cli =
         Cli::try_parse_from(["mmux", "ssh://dchung@localhost", "ssh://dchung@localhost"]).unwrap();
 
-    let err = match connect_fleet(&cli).await {
+    let err = match connect_initial_fleet(&cli).await {
         Ok(_) => panic!("expected duplicate SSH URI to be rejected"),
         Err(err) => err,
     };
@@ -3491,6 +4059,32 @@ async fn connect_fleet_rejects_duplicate_ssh_uris() {
     assert!(
         msg.contains("duplicate SSH URI"),
         "expected duplicate-URI rejection, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn connect_initial_fleet_includes_localhost_and_defers_ssh_connect() {
+    use crate::target_host::connect_initial_fleet;
+
+    let cli = Cli::try_parse_from(["mmux", "ssh://remote.example.com"]).unwrap();
+
+    let initial_fleet = connect_initial_fleet(&cli).await.unwrap();
+    let fleet = initial_fleet.fleet;
+    let specs = initial_fleet.retry_specs;
+    let remote_id = ssh_host_id("ssh://remote.example.com");
+
+    assert!(fleet.is_multi());
+    assert_eq!(fleet.len(), 2);
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].id, remote_id);
+    assert!(fleet.entry(&local_host_id()).is_some());
+    assert!(
+        fleet.entry(&remote_id).is_none(),
+        "SSH host should not block startup by connecting during initial fleet setup"
+    );
+    assert_eq!(
+        fleet.host_slot(&remote_id).map(|slot| slot.label.as_str()),
+        Some("remote.example.com")
     );
 }
 
@@ -3541,6 +4135,124 @@ fn fleet_is_multi_only_with_two_or_more_entries() {
 }
 
 #[test]
+fn fleet_can_show_pending_ssh_host_without_connected_entry() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+
+    assert!(fleet.is_multi());
+    assert_eq!(fleet.len(), 2);
+    assert!(fleet.entry(&local_host_id()).is_some());
+    assert!(fleet.entry(&remote_id).is_none());
+    assert_eq!(
+        fleet.host_color(&local_host_id()),
+        Some(HOST_COLOR_PALETTE[0])
+    );
+    assert_eq!(fleet.host_color(&remote_id), Some(HOST_COLOR_PALETTE[1]));
+}
+
+#[test]
+fn connected_ssh_host_replaces_failed_slot_and_keeps_color_index() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let mut fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+    fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("network unreachable".to_string()),
+    );
+
+    let remote = ssh_host_entry(
+        "ssh://remote",
+        "remote-tmux",
+        "10.0.0.8",
+        HostHandle::local(),
+    );
+    fleet.upsert_connected(remote);
+
+    assert_eq!(
+        fleet.host_slot(&remote_id).map(|slot| &slot.status),
+        Some(&HostConnectionStatus::Connected)
+    );
+    assert_eq!(
+        fleet.host_color(&remote_id),
+        Some(HOST_COLOR_PALETTE[1]),
+        "reconnected host keeps its configured legend/row color"
+    );
+    assert_eq!(fleet.entry(&remote_id).unwrap().label, "remote-tmux");
+}
+
+#[test]
+fn repeated_host_failure_with_same_error_is_not_a_state_change() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let mut fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+
+    assert!(fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("connection refused".to_string())
+    ));
+    assert!(
+        !fleet.mark_host_failed(
+            &remote_id,
+            HostConnectFailure::connect("connection refused".to_string())
+        ),
+        "unchanged retry failure should not force a redraw"
+    );
+    assert!(fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("network unreachable".to_string())
+    ));
+}
+
+#[test]
 fn fleet_entry_lookup_by_host_id() {
     let fleet = HostFleet::from_entries(vec![
         HostEntry {
@@ -3570,13 +4282,12 @@ fn fleet_entry_lookup_by_host_id() {
 
 #[test]
 fn multi_host_top_status_shows_host_color_legend() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
-    app.fleet = HostFleet::from_entries(vec![
+    let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "10.0.0.1", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "10.0.0.2", HostHandle::local()),
         ssh_host_entry("ssh://c", "gamma", "10.0.0.3", HostHandle::local()),
     ]);
-    let line = top_status_line(&app, "12:34:56", 60);
+    let line = top_status_line(&fleet, "12:34:56", 60);
     let rendered = line
         .spans
         .iter()
@@ -3603,15 +4314,67 @@ fn multi_host_top_status_shows_host_color_legend() {
 }
 
 #[test]
+fn failed_multi_host_top_status_highlights_host_in_red() {
+    let local = HostEntry {
+        id: local_host_id(),
+        label: "local".to_string(),
+        alias: "local".to_string(),
+        ip_address: "127.0.0.1".to_string(),
+        handle: HostHandle::local(),
+    };
+    let remote_id = ssh_host_id("ssh://remote");
+    let mut fleet = HostFleet::from_configured_hosts(
+        vec![local.clone()],
+        vec![
+            HostSlot::connected(&local),
+            HostSlot::connecting(
+                remote_id.clone(),
+                "remote".to_string(),
+                "remote".to_string(),
+            ),
+        ],
+    );
+    fleet.mark_host_failed(
+        &remote_id,
+        HostConnectFailure::connect("connection refused".to_string()),
+    );
+
+    let line = top_status_line(&fleet, "12:34:56", 60);
+    let rendered = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(rendered.starts_with("mmux ■ local ■ remote"));
+    let remote_label = line
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == " remote ")
+        .expect("failed host label is rendered");
+    assert_eq!(remote_label.style.fg, Some(HOST_CONNECTION_FAILED_FG));
+
+    let square_colors = line
+        .spans
+        .iter()
+        .filter(|span| span.content.as_ref() == HOST_COLOR_SQUARE)
+        .map(|span| span.style.fg)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        square_colors,
+        vec![Some(HOST_COLOR_PALETTE[0]), Some(HOST_CONNECTION_FAILED_FG)]
+    );
+}
+
+#[test]
 fn multi_host_landscape_uses_same_sessions_detail_layout() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
-    app.fleet = HostFleet::from_entries(vec![
+    let mut app = AppState::new(LayoutMode::Normal);
+    let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
         ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
     ]);
     app.session_list.rows = vec![make_row(session("dev", "$1"))];
 
-    let rendered = render_to_string(&mut app, 120, 30);
+    let rendered = render_to_string_with_fleet(&fleet, &mut app, 120, 30);
     assert!(!rendered.contains("MOTD"));
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
     assert!(rendered.contains("mmux ■ alpha ■ beta"));
@@ -3744,31 +4507,31 @@ fn single_host_row_omits_hostname_column() {
 
 #[test]
 fn multi_host_sort_merges_rows_by_activity_across_hosts() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
-    app.fleet = HostFleet::from_entries(vec![
-        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
-        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
-    ]);
+    let mut app = AppState::new(LayoutMode::Normal);
     let rows = vec![
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("alpha-old", "$1", 10, 100),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("beta-fresh", "$2", 20, 500),
+        make_row_for_host_at(
+            session_with_times("beta-fresh", "$2", 20, 950),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("alpha-fresh", "$3", 30, 400),
+        make_row_for_host_at(
+            session_with_times("alpha-fresh", "$3", 30, 800),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("beta-old", "$4", 40, 200),
+        make_row_for_host_at(
+            session_with_times("beta-old", "$4", 40, 600),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
     ];
     app.session_list.set_rows_sorted_by_activity(rows);
@@ -3794,21 +4557,19 @@ fn multi_host_sort_merges_rows_by_activity_across_hosts() {
 
 #[test]
 fn selection_preserves_host_and_session_after_multi_host_reorder() {
-    let mut app = AppState::new("host".to_string(), LayoutMode::Normal);
-    app.fleet = HostFleet::from_entries(vec![
-        ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
-        ssh_host_entry("ssh://b", "beta", "y", HostHandle::local()),
-    ]);
+    let mut app = AppState::new(LayoutMode::Normal);
     app.session_list.set_rows_sorted_by_activity(vec![
-        make_row_for_host(
-            session_with_times("aa", "$1", 10, 200),
+        make_row_for_host_at(
+            session_with_times("aa", "$1", 10, 900),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
-        make_row_for_host(
+        make_row_for_host_at(
             session_with_times("bb", "$2", 20, 100),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
     ]);
     // First row by activity is alpha/$1.
@@ -3821,15 +4582,17 @@ fn selection_preserves_host_and_session_after_multi_host_reorder() {
 
     // Reorder: now bb is most active. Selection should preserve alpha/$1.
     app.session_list.set_rows_sorted_by_activity(vec![
-        make_row_for_host(
-            session_with_times("bb", "$2", 20, 500),
+        make_row_for_host_at(
+            session_with_times("bb", "$2", 20, 950),
             ssh_host_id("ssh://b"),
             "beta",
+            1_000,
         ),
-        make_row_for_host(
-            session_with_times("aa", "$1", 10, 200),
+        make_row_for_host_at(
+            session_with_times("aa", "$1", 10, 900),
             ssh_host_id("ssh://a"),
             "alpha",
+            1_000,
         ),
     ]);
     app.preserve_selection(Some(key));
