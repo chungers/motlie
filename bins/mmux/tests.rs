@@ -8,6 +8,7 @@ use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::cli::{is_portrait_pty, select_layout, Cli};
@@ -35,9 +36,10 @@ use crate::model::{
     SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
-    detail_text_for_render, detail_title, draw, key_value_key_column_width, modal_content,
-    session_key_values_footer_line, session_list_line, session_recency_text, sessions_title,
-    short_build_git_sha, status_line, status_line_text, top_status_line,
+    detail_lines_text_for_render, detail_text_for_render, detail_title, detail_total_wrapped_rows,
+    draw, key_value_key_column_width, modal_content, session_key_values_footer_line,
+    session_list_line, session_recency_text, sessions_title, short_build_git_sha, status_line,
+    status_line_text, top_status_line,
 };
 use crate::target_host::resolve_ip_address;
 use crate::{
@@ -1457,6 +1459,39 @@ fn detail_home_reaches_oldest_wrapped_content() {
     let rendered = render_to_string(&mut app, 42, 8);
 
     assert!(rendered.contains("oldest"));
+}
+
+#[test]
+fn detail_wrapped_row_count_matches_ratatui_paragraph_wrap() {
+    let lines = vec![
+        "alpha beta gamma".to_string(),
+        "wide \x1b[32mgreen\x1b[0m end".to_string(),
+        "cjk 界界 done".to_string(),
+    ];
+    let width = 7;
+    let expected_rows = detail_total_wrapped_rows(&lines, width);
+    let backend = TestBackend::new(width as u16, (expected_rows + 3) as u16);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                Paragraph::new(detail_lines_text_for_render(&lines)).wrap(Wrap { trim: false }),
+                frame.area(),
+            );
+        })
+        .unwrap();
+
+    let rendered_rows = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(width)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .filter(|row| !row.trim().is_empty())
+        .count();
+
+    assert_eq!(rendered_rows, expected_rows);
 }
 
 #[tokio::test]
