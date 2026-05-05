@@ -23,6 +23,11 @@ pub(crate) const STATUS_BAR_FG: Color = Color::White;
 pub(crate) const STATUS_BAR_BG: Color = Color::Rgb(0, 43, 85);
 pub(crate) const STATUS_BAR_MNEMONIC_FG: Color = Color::Rgb(255, 111, 97);
 pub(crate) const HOST_CONNECTION_FAILED_FG: Color = Color::Red;
+const REC601_LUMA_RED_WEIGHT: u32 = 299;
+const REC601_LUMA_GREEN_WEIGHT: u32 = 587;
+const REC601_LUMA_BLUE_WEIGHT: u32 = 114;
+const REC601_LUMA_WEIGHT_SCALE: u32 = 1000;
+const LIGHT_BACKGROUND_LUMA_THRESHOLD: u32 = 128;
 pub(crate) const MMUX_ATTACH_STATUS_LEFT: &str = "#{=50:session_name}";
 pub(crate) const MMUX_ATTACH_STATUS_LEFT_LENGTH: u32 = 50;
 pub(crate) const HOST_COLOR_SQUARE: &str = "■";
@@ -55,19 +60,29 @@ fn tmux_style(bg: Option<Color>, fg: Option<Color>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(","))
 }
 
+/// Pick a high-contrast foreground for an RGB status background using rec601
+/// luma. Non-RGB colors fall back to the default status foreground.
 fn status_foreground_for_bg(bg: Color) -> Color {
     match bg {
         Color::Rgb(red, green, blue) => {
-            let luma =
-                (u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114) / 1000;
-            if luma >= 128 {
+            let luma = (u32::from(red) * REC601_LUMA_RED_WEIGHT
+                + u32::from(green) * REC601_LUMA_GREEN_WEIGHT
+                + u32::from(blue) * REC601_LUMA_BLUE_WEIGHT)
+                / REC601_LUMA_WEIGHT_SCALE;
+            if luma >= LIGHT_BACKGROUND_LUMA_THRESHOLD {
                 Color::Black
             } else {
                 STATUS_BAR_FG
             }
         }
         Color::White => Color::Black,
-        _ => STATUS_BAR_FG,
+        _ => {
+            debug_assert!(
+                matches!(bg, Color::Rgb(..) | Color::White),
+                "host status colors should stay RGB so contrast can be computed"
+            );
+            STATUS_BAR_FG
+        }
     }
 }
 

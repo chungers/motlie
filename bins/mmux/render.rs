@@ -417,11 +417,7 @@ fn wrapped_line_rows(line: &str, width: usize) -> usize {
     // staying aligned with the rows ratatui renders.
     let width = max(1, width);
     let line = strip_ansi(line);
-    let mut rows = 0;
-    let mut line_width = 0;
-    let mut word_width = 0;
-    let mut whitespace_width = 0;
-    let mut non_whitespace_previous = false;
+    let mut state = WrapState::default();
 
     for ch in line.chars() {
         let Some(symbol_width) = ch.width() else {
@@ -430,47 +426,85 @@ fn wrapped_line_rows(line: &str, width: usize) -> usize {
         if symbol_width > width {
             continue;
         }
-        let is_whitespace = ch.is_whitespace();
-        let word_found = non_whitespace_previous && is_whitespace;
-        let untrimmed_overflow =
-            line_width == 0 && word_width + whitespace_width + symbol_width > width;
+        state.push_symbol(symbol_width, ch.is_whitespace(), width);
+    }
 
-        if word_found || untrimmed_overflow {
-            line_width += whitespace_width + word_width;
-            whitespace_width = 0;
-            word_width = 0;
+    state.finish()
+}
+
+#[derive(Default)]
+struct WrapState {
+    rows: usize,
+    line_width: usize,
+    word_width: usize,
+    whitespace_width: usize,
+    non_whitespace_previous: bool,
+}
+
+impl WrapState {
+    fn push_symbol(&mut self, symbol_width: usize, is_whitespace: bool, width: usize) {
+        if self.ends_word(is_whitespace) || self.untrimmed_overflows(symbol_width, width) {
+            self.commit_pending_word();
         }
 
-        let line_full = line_width >= width;
-        let pending_word_overflow =
-            symbol_width > 0 && line_width + whitespace_width + word_width >= width;
-        if line_full || pending_word_overflow {
-            rows += 1;
-            let mut remaining_width = width.saturating_sub(line_width);
-            line_width = 0;
-
-            while whitespace_width > 0 && remaining_width > 0 {
-                whitespace_width -= 1;
-                remaining_width -= 1;
-            }
-
-            if is_whitespace && whitespace_width == 0 {
-                continue;
+        if self.line_is_full(width) || self.pending_word_overflows(symbol_width, width) {
+            self.break_row(width);
+            if is_whitespace && self.whitespace_width == 0 {
+                return;
             }
         }
 
+        self.accumulate_symbol(symbol_width, is_whitespace);
+    }
+
+    fn ends_word(&self, is_whitespace: bool) -> bool {
+        self.non_whitespace_previous && is_whitespace
+    }
+
+    fn untrimmed_overflows(&self, symbol_width: usize, width: usize) -> bool {
+        self.line_width == 0 && self.word_width + self.whitespace_width + symbol_width > width
+    }
+
+    fn commit_pending_word(&mut self) {
+        self.line_width += self.whitespace_width + self.word_width;
+        self.whitespace_width = 0;
+        self.word_width = 0;
+    }
+
+    fn line_is_full(&self, width: usize) -> bool {
+        self.line_width >= width
+    }
+
+    fn pending_word_overflows(&self, symbol_width: usize, width: usize) -> bool {
+        symbol_width > 0 && self.line_width + self.whitespace_width + self.word_width >= width
+    }
+
+    fn break_row(&mut self, width: usize) {
+        self.rows += 1;
+        let mut remaining_width = width.saturating_sub(self.line_width);
+        self.line_width = 0;
+
+        while self.whitespace_width > 0 && remaining_width > 0 {
+            self.whitespace_width -= 1;
+            remaining_width -= 1;
+        }
+    }
+
+    fn accumulate_symbol(&mut self, symbol_width: usize, is_whitespace: bool) {
         if is_whitespace {
-            whitespace_width += symbol_width;
+            self.whitespace_width += symbol_width;
         } else {
-            word_width += symbol_width;
+            self.word_width += symbol_width;
         }
-        non_whitespace_previous = !is_whitespace;
+        self.non_whitespace_previous = !is_whitespace;
     }
 
-    if line_width > 0 || word_width > 0 || whitespace_width > 0 {
-        rows += 1;
+    fn finish(mut self) -> usize {
+        if self.line_width > 0 || self.word_width > 0 || self.whitespace_width > 0 {
+            self.rows += 1;
+        }
+        max(1, self.rows)
     }
-    max(1, rows)
 }
 
 fn saturating_u16(value: usize) -> u16 {
