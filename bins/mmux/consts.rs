@@ -115,6 +115,9 @@ p prompt highlighted session
   Ctrl-Enter send keys, wait, Enter
   $$ suffix same delayed Enter
 n create session
+  ↑ (u) / ↓ (b) move env row
+  m modify env row
+  x unset env row
 k kill highlighted session
 r rename highlighted session (list pane)
 t manage highlighted session tags
