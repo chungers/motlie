@@ -21,9 +21,9 @@ use crate::consts::{
     STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
-    apply_fleet_refresh, apply_host_refreshes, fetch_fleet_refresh, fetch_host_refresh, handle_key,
-    refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed, KeyOutcome,
-    RefreshApplyOptions,
+    apply_fleet_snapshot, apply_streaming_host_results, fetch_fleet_refresh, fetch_host_refresh,
+    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed,
+    KeyOutcome, RefreshApplyOptions,
 };
 use crate::detail::{
     DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
@@ -637,7 +637,7 @@ async fn refresh_sessions_loads_selected_tag_value_for_rows() {
 }
 
 #[tokio::test]
-async fn apply_fleet_refresh_can_defer_initial_detail_capture() {
+async fn apply_fleet_snapshot_can_defer_initial_detail_capture() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_error("capture-pane", "initial detail must be deferred");
@@ -645,17 +645,11 @@ async fn apply_fleet_refresh_can_defer_initial_detail_capture() {
     let mut app = AppState::new(LayoutMode::Normal);
 
     let refresh = fetch_fleet_refresh(&fleet).await;
-    apply_fleet_refresh(
+    apply_fleet_snapshot(
         &fleet,
         &mut app,
         refresh,
-        RefreshApplyOptions {
-            force_detail: false,
-            previous: None,
-            update_status: true,
-            excluded: None,
-            allow_detail_refresh: false,
-        },
+        RefreshApplyOptions::initial(None),
     )
     .await
     .unwrap();
@@ -670,7 +664,7 @@ async fn apply_fleet_refresh_can_defer_initial_detail_capture() {
 }
 
 #[tokio::test]
-async fn apply_fleet_refresh_without_previous_preserves_current_selection() {
+async fn apply_fleet_snapshot_without_previous_preserves_current_selection() {
     let mock = MockTransport::new().with_response(
         "list-sessions",
         "__MOTLIE_S__ selected $1 10 0 1  100\n__MOTLIE_S__ fresh $2 20 0 1  500\n",
@@ -684,20 +678,9 @@ async fn apply_fleet_refresh_without_previous_preserves_current_selection() {
     app.session_list.selected = 0;
 
     let refresh = fetch_fleet_refresh(&fleet).await;
-    apply_fleet_refresh(
-        &fleet,
-        &mut app,
-        refresh,
-        RefreshApplyOptions {
-            force_detail: false,
-            previous: None,
-            update_status: false,
-            excluded: None,
-            allow_detail_refresh: false,
-        },
-    )
-    .await
-    .unwrap();
+    apply_fleet_snapshot(&fleet, &mut app, refresh, RefreshApplyOptions::periodic())
+        .await
+        .unwrap();
 
     assert_eq!(
         app.session_list
@@ -715,7 +698,7 @@ async fn apply_fleet_refresh_without_previous_preserves_current_selection() {
 }
 
 #[tokio::test]
-async fn apply_host_refreshes_batch_successes_and_keeps_failed_rows() {
+async fn apply_streaming_host_results_batch_successes_and_keeps_failed_rows() {
     let a_entry = ssh_host_entry(
         "ssh://a",
         "alpha",
@@ -757,17 +740,11 @@ async fn apply_host_refreshes_batch_successes_and_keeps_failed_rows() {
 
     let a_refresh = fetch_host_refresh(&a_entry).await;
     let b_refresh = fetch_host_refresh(&b_entry).await;
-    apply_host_refreshes(
+    apply_streaming_host_results(
         &fleet,
         &mut app,
         vec![a_refresh, b_refresh],
-        RefreshApplyOptions {
-            force_detail: false,
-            previous: None,
-            update_status: true,
-            excluded: None,
-            allow_detail_refresh: false,
-        },
+        RefreshApplyOptions::after_action(false, None, true, None),
     )
     .await
     .unwrap();
@@ -810,17 +787,11 @@ async fn failed_host_refresh_keeps_existing_rows_visible() {
     )];
 
     let refresh = fetch_host_refresh(&entry).await;
-    apply_host_refreshes(
+    apply_streaming_host_results(
         &fleet,
         &mut app,
         vec![refresh],
-        RefreshApplyOptions {
-            force_detail: false,
-            previous: None,
-            update_status: true,
-            excluded: None,
-            allow_detail_refresh: false,
-        },
+        RefreshApplyOptions::after_action(false, None, true, None),
     )
     .await
     .unwrap();

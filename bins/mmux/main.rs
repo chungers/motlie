@@ -26,13 +26,13 @@ use consts::{
     MMUX_ATTACH_STATUS_LEFT_LENGTH,
 };
 use controller::{
-    apply_host_refreshes, fetch_host_refresh, handle_key, refresh_detail, stop_detail_source,
-    HostRefreshResult, KeyOutcome, RefreshApplyOptions,
+    apply_streaming_host_results, fetch_host_refresh, handle_key, refresh_detail,
+    stop_detail_source, HostRefreshResult, KeyOutcome, RefreshApplyOptions,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{
     AppState, HostConnectFailure, HostEntry, HostFleet, HostId, LayoutMode, RetainedUiState,
-    SelectedSession, StatusBanner,
+    SelectedSession, SelectionKey, StatusBanner,
 };
 use motlie_tmux::{
     AttachExit, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot,
@@ -323,13 +323,7 @@ async fn run_selector_once(
     let mut last_session_refresh = Instant::now();
     let mut pending_session_refresh = Some(start_session_refresh(
         fleet,
-        RefreshApplyOptions {
-            force_detail: false,
-            previous: ui_state.selected_session_key(),
-            update_status: true,
-            excluded: None,
-            allow_detail_refresh: false,
-        },
+        RefreshApplyOptions::initial(ui_state.selected_session_key()),
     ));
 
     loop {
@@ -338,13 +332,7 @@ async fn run_selector_once(
             abort_pending_session_refresh(&mut pending_session_refresh);
             pending_session_refresh = Some(start_session_refresh(
                 fleet,
-                RefreshApplyOptions {
-                    force_detail: false,
-                    previous: selected_session_key(&app),
-                    update_status: false,
-                    excluded: None,
-                    allow_detail_refresh: true,
-                },
+                RefreshApplyOptions::host_connected(selected_session_key(&app)),
             ));
             last_session_refresh = Instant::now();
         }
@@ -361,13 +349,7 @@ async fn run_selector_once(
         {
             pending_session_refresh = Some(start_session_refresh(
                 fleet,
-                RefreshApplyOptions {
-                    force_detail: false,
-                    previous: None,
-                    update_status: false,
-                    excluded: None,
-                    allow_detail_refresh: true,
-                },
+                RefreshApplyOptions::periodic(),
             ));
             last_session_refresh = Instant::now();
         }
@@ -487,7 +469,7 @@ fn apply_finished_host_connects(
     applied
 }
 
-fn selected_session_key(app: &AppState) -> Option<(HostId, String)> {
+fn selected_session_key(app: &AppState) -> Option<SelectionKey> {
     app.selected_session()
         .map(|session| (session.host_id.clone(), session.id().to_string()))
 }
@@ -537,7 +519,7 @@ fn abort_pending_session_refresh(pending: &mut Option<PendingSessionRefresh>) {
 
 fn clear_pending_previous_selection(pending: &mut Option<PendingSessionRefresh>) {
     if let Some(refresh) = pending {
-        refresh.options.previous = None;
+        refresh.options.clear_previous_selection();
     }
 }
 
@@ -549,34 +531,72 @@ async fn apply_finished_session_refresh(
     let Some(refresh) = pending.as_mut() else {
         return Ok(None);
     };
-    let mut results = Vec::new();
-    while let Ok(result) = refresh.receiver.try_recv() {
-        results.push(result);
-    }
-    let applied = !results.is_empty();
-    let suppress_detail_refresh = applied && !refresh.options.allow_detail_refresh;
-    if applied {
-        refresh.remaining = refresh.remaining.saturating_sub(results.len());
-        apply_host_refreshes(fleet, app, results, refresh.options.clone()).await?;
-    }
-    if refresh.receiver.is_closed() && refresh.remaining > 0 {
-        let Some(refresh) = pending.take() else {
-            return Ok(None);
-        };
-        app.status = StatusBanner::error(session_refresh_task_failure_status(refresh.tasks).await);
+    let (applied, suppress_detail_refresh) = {
+        let results = drain_session_refresh_results(refresh);
+        let applied = !results.is_empty();
+        let suppress_detail_refresh = applied && !refresh.options.allow_detail_refresh();
+        if applied {
+            apply_session_refresh_results(fleet, app, refresh, results).await?;
+        }
+        (applied, suppress_detail_refresh)
+    };
+
+    if recover_failed_session_refresh(app, pending).await {
         return Ok(Some(SessionRefreshCompletion {
             suppress_detail_refresh,
         }));
     }
-    if refresh.remaining == 0 {
-        pending.take();
-    }
+    clear_completed_session_refresh(pending);
     if !applied {
         return Ok(None);
     }
     Ok(Some(SessionRefreshCompletion {
         suppress_detail_refresh,
     }))
+}
+
+fn drain_session_refresh_results(refresh: &mut PendingSessionRefresh) -> Vec<HostRefreshResult> {
+    let mut results = Vec::new();
+    while let Ok(result) = refresh.receiver.try_recv() {
+        results.push(result);
+    }
+    results
+}
+
+async fn apply_session_refresh_results(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    refresh: &mut PendingSessionRefresh,
+    results: Vec<HostRefreshResult>,
+) -> Result<()> {
+    refresh.remaining = refresh.remaining.saturating_sub(results.len());
+    apply_streaming_host_results(fleet, app, results, refresh.options.clone()).await
+}
+
+async fn recover_failed_session_refresh(
+    app: &mut AppState,
+    pending: &mut Option<PendingSessionRefresh>,
+) -> bool {
+    let has_failed_task = pending
+        .as_ref()
+        .is_some_and(|refresh| refresh.receiver.is_closed() && refresh.remaining > 0);
+    if !has_failed_task {
+        return false;
+    }
+    let Some(refresh) = pending.take() else {
+        return false;
+    };
+    app.status = StatusBanner::error(session_refresh_task_failure_status(refresh.tasks).await);
+    true
+}
+
+fn clear_completed_session_refresh(pending: &mut Option<PendingSessionRefresh>) {
+    if pending
+        .as_ref()
+        .is_some_and(|refresh| refresh.remaining == 0)
+    {
+        pending.take();
+    }
 }
 
 async fn session_refresh_task_failure_status(tasks: Vec<PendingHostRefreshTask>) -> String {

@@ -16,9 +16,10 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SendKeysFocus,
-    SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi,
-    SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode, StatusBanner,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SelectionKey,
+    SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind,
+    SessionKeyValueModalUi, SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
+    StatusBanner,
 };
 
 const TAG_PREFIX: &str = "mmux";
@@ -97,11 +98,11 @@ pub(crate) async fn fetch_host_refresh(entry: &HostEntry) -> HostRefreshResult {
 fn rows_from_fleet_refresh(
     tracker: &mut ActivityTracker,
     refresh: &FleetRefresh,
-    excluded: Option<&(HostId, String)>,
-) -> (Vec<SessionRow>, Vec<String>, HashSet<(HostId, String)>) {
+    excluded: Option<&SelectionKey>,
+) -> (Vec<SessionRow>, Vec<String>, HashSet<SelectionKey>) {
     let mut rows = Vec::new();
     let mut failures = Vec::new();
-    let mut keep_keys: HashSet<(HostId, String)> = HashSet::new();
+    let mut keep_keys: HashSet<SelectionKey> = HashSet::new();
     for host in &refresh.hosts {
         match &host.result {
             Ok(snapshot) => {
@@ -191,7 +192,7 @@ pub(crate) async fn refresh_sessions_preserving(
     fleet: &HostFleet,
     app: &mut AppState,
     force_detail: bool,
-    previous: Option<(HostId, String)>,
+    previous: Option<SelectionKey>,
 ) -> Result<()> {
     refresh_sessions_preserving_with_status(fleet, app, force_detail, previous, true, None).await
 }
@@ -200,7 +201,7 @@ async fn refresh_sessions_excluding(
     fleet: &HostFleet,
     app: &mut AppState,
     force_detail: bool,
-    excluded: (HostId, String),
+    excluded: SelectionKey,
 ) -> Result<()> {
     let previous = current_selection_key(app);
     refresh_sessions_preserving_with_status(
@@ -214,7 +215,7 @@ async fn refresh_sessions_excluding(
     .await
 }
 
-fn current_selection_key(app: &AppState) -> Option<(HostId, String)> {
+fn current_selection_key(app: &AppState) -> Option<SelectionKey> {
     app.selected_session()
         .map(|session| (session.host_id.clone(), session.id().to_string()))
 }
@@ -223,51 +224,145 @@ async fn refresh_sessions_preserving_with_status(
     fleet: &HostFleet,
     app: &mut AppState,
     force_detail: bool,
-    previous: Option<(HostId, String)>,
+    previous: Option<SelectionKey>,
     update_status: bool,
-    excluded: Option<(HostId, String)>,
+    excluded: Option<SelectionKey>,
 ) -> Result<()> {
     let refresh = fetch_fleet_refresh(fleet).await;
-    apply_fleet_refresh(
+    apply_fleet_snapshot(
         fleet,
         app,
         refresh,
-        RefreshApplyOptions {
-            force_detail,
-            previous,
-            update_status,
-            excluded,
-            allow_detail_refresh: true,
-        },
+        RefreshApplyOptions::after_action(force_detail, previous, update_status, excluded),
     )
     .await
 }
 
 #[derive(Clone)]
 pub(crate) struct RefreshApplyOptions {
-    pub(crate) force_detail: bool,
-    pub(crate) previous: Option<(HostId, String)>,
-    pub(crate) update_status: bool,
-    pub(crate) excluded: Option<(HostId, String)>,
-    pub(crate) allow_detail_refresh: bool,
+    kind: RefreshApplyKind,
 }
 
-pub(crate) async fn apply_fleet_refresh(
+#[derive(Clone)]
+enum RefreshApplyKind {
+    Initial {
+        previous: Option<SelectionKey>,
+    },
+    Periodic,
+    HostConnected {
+        previous: Option<SelectionKey>,
+    },
+    AfterAction {
+        force_detail: bool,
+        previous: Option<SelectionKey>,
+        update_status: bool,
+        excluded: Option<SelectionKey>,
+    },
+}
+
+impl RefreshApplyOptions {
+    pub(crate) fn initial(previous: Option<SelectionKey>) -> Self {
+        Self {
+            kind: RefreshApplyKind::Initial { previous },
+        }
+    }
+
+    pub(crate) fn periodic() -> Self {
+        Self {
+            kind: RefreshApplyKind::Periodic,
+        }
+    }
+
+    pub(crate) fn host_connected(previous: Option<SelectionKey>) -> Self {
+        Self {
+            kind: RefreshApplyKind::HostConnected { previous },
+        }
+    }
+
+    pub(crate) fn after_action(
+        force_detail: bool,
+        previous: Option<SelectionKey>,
+        update_status: bool,
+        excluded: Option<SelectionKey>,
+    ) -> Self {
+        Self {
+            kind: RefreshApplyKind::AfterAction {
+                force_detail,
+                previous,
+                update_status,
+                excluded,
+            },
+        }
+    }
+
+    pub(crate) fn allow_detail_refresh(&self) -> bool {
+        !matches!(self.kind, RefreshApplyKind::Initial { .. })
+    }
+
+    pub(crate) fn clear_previous_selection(&mut self) {
+        match &mut self.kind {
+            RefreshApplyKind::Initial { previous }
+            | RefreshApplyKind::HostConnected { previous }
+            | RefreshApplyKind::AfterAction { previous, .. } => *previous = None,
+            RefreshApplyKind::Periodic => {}
+        }
+    }
+
+    fn previous(&self) -> Option<SelectionKey> {
+        match &self.kind {
+            RefreshApplyKind::Initial { previous }
+            | RefreshApplyKind::HostConnected { previous }
+            | RefreshApplyKind::AfterAction { previous, .. } => previous.clone(),
+            RefreshApplyKind::Periodic => None,
+        }
+    }
+
+    fn excluded(&self) -> Option<&SelectionKey> {
+        match &self.kind {
+            RefreshApplyKind::AfterAction { excluded, .. } => excluded.as_ref(),
+            RefreshApplyKind::Initial { .. }
+            | RefreshApplyKind::Periodic
+            | RefreshApplyKind::HostConnected { .. } => None,
+        }
+    }
+
+    fn update_status(&self) -> bool {
+        match &self.kind {
+            RefreshApplyKind::Initial { .. } => true,
+            RefreshApplyKind::AfterAction { update_status, .. } => *update_status,
+            RefreshApplyKind::Periodic | RefreshApplyKind::HostConnected { .. } => false,
+        }
+    }
+
+    fn force_detail(&self) -> bool {
+        match &self.kind {
+            RefreshApplyKind::AfterAction { force_detail, .. } => *force_detail,
+            RefreshApplyKind::Initial { .. }
+            | RefreshApplyKind::Periodic
+            | RefreshApplyKind::HostConnected { .. } => false,
+        }
+    }
+}
+
+/// Replace the merged row list with a full fleet snapshot. Hosts that failed
+/// in this snapshot are removed from the merged list, so use this for complete
+/// reconciliation paths such as initial startup and user-triggered actions.
+pub(crate) async fn apply_fleet_snapshot(
     fleet: &HostFleet,
     app: &mut AppState,
     refresh: FleetRefresh,
     options: RefreshApplyOptions,
 ) -> Result<()> {
-    let (rows, failures, keep_keys) = rows_from_fleet_refresh(
-        &mut app.activity_tracker,
-        &refresh,
-        options.excluded.as_ref(),
-    );
+    let (rows, failures, keep_keys) =
+        rows_from_fleet_refresh(&mut app.activity_tracker, &refresh, options.excluded());
     app.activity_tracker.retain(&keep_keys);
     apply_refreshed_rows(fleet, app, rows, failures, options).await
 }
 
-pub(crate) async fn apply_host_refreshes(
+/// Apply a streaming subset of host results. Hosts that failed in this batch
+/// keep their prior rows visible, so transient host failures do not make rows
+/// blink out during the per-tick refresh path.
+pub(crate) async fn apply_streaming_host_results(
     fleet: &HostFleet,
     app: &mut AppState,
     refreshes: Vec<HostRefreshResult>,
@@ -281,11 +376,8 @@ pub(crate) async fn apply_host_refreshes(
         .filter_map(|refresh| refresh.result.is_ok().then_some(refresh.host_id.clone()))
         .collect::<HashSet<_>>();
     let refresh = FleetRefresh { hosts: refreshes };
-    let (host_rows, failures, _) = rows_from_fleet_refresh(
-        &mut app.activity_tracker,
-        &refresh,
-        options.excluded.as_ref(),
-    );
+    let (host_rows, failures, _) =
+        rows_from_fleet_refresh(&mut app.activity_tracker, &refresh, options.excluded());
     let mut rows = Vec::with_capacity(app.session_list.rows.len() + host_rows.len());
     rows.extend(
         app.session_list
@@ -307,11 +399,11 @@ async fn apply_refreshed_rows(
     options: RefreshApplyOptions,
 ) -> Result<()> {
     let closed_monitored = closed_monitored_session(app, &rows);
-    let previous_key = options.previous.or_else(|| current_selection_key(app));
+    let previous_key = options.previous().or_else(|| current_selection_key(app));
     let selection_key_before_refresh = previous_key.clone();
     app.session_list.set_rows_sorted(rows, fleet);
     app.preserve_selection(previous_key);
-    if options.update_status {
+    if options.update_status() {
         app.status = build_status(app, &failures);
     }
     let selected_key = current_selection_key(app);
@@ -335,15 +427,15 @@ async fn apply_refreshed_rows(
     // owns the monitor refresh cadence (its 750 ms `refresh_detail` call);
     // session refresh does not need to drive it.
     let selection_changed = selection_key_before_refresh != selected_key;
-    if options.allow_detail_refresh
-        && (options.force_detail || selection_changed || monitor_just_closed)
+    if options.allow_detail_refresh()
+        && (options.force_detail() || selection_changed || monitor_just_closed)
     {
         refresh_detail(fleet, app, true).await?;
     }
     Ok(())
 }
 
-fn row_keys(rows: &[SessionRow]) -> HashSet<(HostId, String)> {
+fn row_keys(rows: &[SessionRow]) -> HashSet<SelectionKey> {
     rows.iter()
         .map(|row| (row.host_id.clone(), row.session.id.as_str().to_string()))
         .collect()

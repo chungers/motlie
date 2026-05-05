@@ -11,6 +11,13 @@ use crate::consts::{
 };
 use crate::detail::DetailSource;
 
+const SECONDS_PER_MINUTE: u64 = 60;
+const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
+const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
+const RECENCY_MINUTES_START: u64 = 1;
+const RECENCY_HOURS_START: u64 = RECENCY_MINUTES_START + 60;
+const RECENCY_DAYS_START: u64 = RECENCY_HOURS_START + 48;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LayoutMode {
     Normal,
@@ -265,6 +272,8 @@ pub(crate) enum ModalBody {
 /// SSH URI (for SSH targets) or the literal `"localhost"` (for the local host).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct HostId(String);
+
+pub(crate) type SelectionKey = (HostId, String);
 
 impl HostId {
     pub(crate) fn local() -> Self {
@@ -630,7 +639,7 @@ pub(crate) struct SessionSelectedTag {
 /// from the merged listing.
 #[derive(Default, Clone)]
 pub(crate) struct ActivityTracker {
-    last_seen: HashMap<(HostId, String), ActivityState>,
+    last_seen: HashMap<SelectionKey, ActivityState>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -675,7 +684,7 @@ impl ActivityTracker {
 
     /// Drop tracker entries that aren't in `keep`. Bounds memory across
     /// session create/destroy cycles.
-    pub(crate) fn retain(&mut self, keep: &std::collections::HashSet<(HostId, String)>) {
+    pub(crate) fn retain(&mut self, keep: &std::collections::HashSet<SelectionKey>) {
         self.last_seen.retain(|key, _| keep.contains(key));
     }
 
@@ -688,7 +697,7 @@ impl ActivityTracker {
 #[derive(Debug, Clone)]
 pub(crate) struct RetainedUiState {
     layout_mode: LayoutMode,
-    selected_key: Option<(HostId, String)>,
+    selected_key: Option<SelectionKey>,
     selected_index: usize,
     focus: Focus,
     left_percent: u16,
@@ -740,7 +749,7 @@ impl RetainedUiState {
         self.sort_mode = app.session_list.sort_mode;
     }
 
-    pub(crate) fn selected_session_key(&self) -> Option<(HostId, String)> {
+    pub(crate) fn selected_session_key(&self) -> Option<SelectionKey> {
         self.selected_key.clone()
     }
 }
@@ -822,7 +831,7 @@ impl SessionListState {
 
     /// Try to keep the selection on the same `(host_id, session_id)` pair
     /// across a refresh. Falls back to clamping the existing index.
-    pub(crate) fn preserve_selection(&mut self, previous_key: Option<(HostId, String)>) {
+    pub(crate) fn preserve_selection(&mut self, previous_key: Option<SelectionKey>) {
         if self.rows.is_empty() {
             self.selected = 0;
             self.scroll = 0;
@@ -885,14 +894,19 @@ fn sort_rows_by_tag_group(rows: &mut [SessionRow], fleet: &HostFleet) {
 
 fn activity_recency_bucket(row: &SessionRow) -> u64 {
     let seconds = row.local_now.saturating_sub(row.activity_observed_at_local);
-    if seconds < 60 {
+    // Recency buckets, smallest = most recent:
+    //   0        : less than a minute ("now")
+    //   1..=60   : one bucket per minute, up to 1 hour
+    //   61..=108 : one bucket per hour, up to 48 hours
+    //   109..    : one bucket per day, beyond 48 hours
+    if seconds < SECONDS_PER_MINUTE {
         0
-    } else if seconds < 60 * 60 {
-        1 + seconds / 60
-    } else if seconds < 48 * 60 * 60 {
-        61 + seconds / 60 / 60
+    } else if seconds < SECONDS_PER_HOUR {
+        RECENCY_MINUTES_START + seconds / SECONDS_PER_MINUTE
+    } else if seconds < 48 * SECONDS_PER_HOUR {
+        RECENCY_HOURS_START + seconds / SECONDS_PER_HOUR
     } else {
-        109 + seconds / 60 / 60 / 24
+        RECENCY_DAYS_START + seconds / SECONDS_PER_DAY
     }
 }
 
@@ -1054,7 +1068,7 @@ impl AppState {
         self.session_list.selected_session()
     }
 
-    pub(crate) fn preserve_selection(&mut self, previous: Option<(HostId, String)>) {
+    pub(crate) fn preserve_selection(&mut self, previous: Option<SelectionKey>) {
         self.session_list.preserve_selection(previous);
     }
 
