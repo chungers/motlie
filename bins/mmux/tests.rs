@@ -1842,6 +1842,9 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains("Enter sample highlighted session (list pane)"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
+    assert!(body.contains("  ↑ (u) / ↓ (b) move env row"));
+    assert!(body.contains("  m modify env row"));
+    assert!(body.contains("  x unset env row"));
     assert!(body.contains("  ↑ (u) / ↓ (b) move focused tag"));
     assert!(body.contains("  m modify focused tag"));
     assert!(body.contains("  x unset focused tag"));
@@ -3170,6 +3173,78 @@ async fn new_session_modal_applies_staged_initial_environment() {
     .unwrap();
 
     assert_eq!(app.status.text(), "created session build");
+}
+
+#[tokio::test]
+async fn new_session_modal_u_and_b_move_env_rows_and_m_updates() {
+    let fleet = local_fleet();
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.modal = Some(test_new_session_modal("build", Button::Ok));
+    let Some(ModalState::NewSession { ui }) = app.modal.as_mut() else {
+        panic!("new session modal should be open");
+    };
+    ui.env_rows = vec![
+        SessionKeyValueRow {
+            key: "BUILD_ID".to_string(),
+            value: "42".to_string(),
+        },
+        SessionKeyValueRow {
+            key: "MOTLIE".to_string(),
+            value: "enabled".to_string(),
+        },
+    ];
+    ui.focus = NewSessionFocus::EnvRow(0);
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui }) if ui.focus == NewSessionFocus::EnvRow(1)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui }) if ui.focus == NewSessionFocus::EnvRow(1)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui }) if ui.focus == NewSessionFocus::EnvRow(0)
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.focus == NewSessionFocus::EnvValue
+                && ui.env_key_input == "BUILD_ID"
+                && ui.env_value_input == "42"
+    ));
 }
 
 #[tokio::test]

@@ -1107,10 +1107,24 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             }
             ModalAction::None
         }
+        KeyCode::Char('u')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(ui.focus, NewSessionFocus::EnvRow(_)) =>
+        {
+            move_new_session_env_row_focus_up(ui);
+            ModalAction::None
+        }
         KeyCode::Down => {
             if let Some(focus) = next_new_session_env_row_focus(ui.focus, ui.env_rows.len()) {
                 set_new_session_focus(ui, focus);
             }
+            ModalAction::None
+        }
+        KeyCode::Char('b')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(ui.focus, NewSessionFocus::EnvRow(_)) =>
+        {
+            move_new_session_env_row_focus_down(ui);
             ModalAction::None
         }
         KeyCode::Left => {
@@ -1146,7 +1160,10 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             };
             ModalAction::UnsetNewSessionEnv { index }
         }
-        KeyCode::Char('u') if matches!(ui.focus, NewSessionFocus::EnvRow(_)) => {
+        KeyCode::Char('m')
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(ui.focus, NewSessionFocus::EnvRow(_)) =>
+        {
             let NewSessionFocus::EnvRow(index) = ui.focus else {
                 return ModalAction::None;
             };
@@ -1177,6 +1194,23 @@ fn edit_new_session_text_field(key: &KeyEvent, ui: &mut NewSessionModalUi) -> bo
         NewSessionFocus::EnvValue => edit_text_field(key, &mut ui.env_value_input),
         _ => false,
     }
+}
+
+fn move_new_session_env_row_focus_up(ui: &mut NewSessionModalUi) {
+    let NewSessionFocus::EnvRow(index) = ui.focus else {
+        return;
+    };
+    set_new_session_focus(ui, NewSessionFocus::EnvRow(index.saturating_sub(1)));
+}
+
+fn move_new_session_env_row_focus_down(ui: &mut NewSessionModalUi) {
+    let NewSessionFocus::EnvRow(index) = ui.focus else {
+        return;
+    };
+    set_new_session_focus(
+        ui,
+        NewSessionFocus::EnvRow(min(index + 1, ui.env_rows.len().saturating_sub(1))),
+    );
 }
 
 fn edit_focused_text_field(key: &KeyEvent, focused: bool, input: &mut String) -> bool {

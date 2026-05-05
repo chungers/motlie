@@ -359,7 +359,8 @@ Modal keys:
 | Left / Right | Choose Cancel or Ok in New Session, Kill Session, Rename Session, and Send Keys modals. No-op in Help and Session Tags. |
 | Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Send Keys, cycle text field, Ok, and Cancel. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
 | Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
-| `u` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
+| `u` / `b` | In New Session env rows and Session Tags, move focus up/down through rows. |
+| `m` | In New Session env rows and Session Tags, copy the focused row into the bottom Key/Value fields and focus Value. |
 | `c` | In Session Tags, stage the focused row as the checked key with `✓`; Ok persists it as `@mmux/__selected-key`. |
 | `x` | In New Session env rows, remove the staged variable; in Session Tags, stage deletion of the focused row. |
 | Enter | Close modal. Applies Ok when selected in New Session, Kill Session, Rename Session, Send Keys, or Session Tags; in Send Keys, also sends from the text field when it has content; stages the New Session env edit row or Session Tags edit row when Key or Value is focused; closes when Cancel is focused. |
