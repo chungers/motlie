@@ -15,17 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ensure_file_exists, resolved_native_source_dir, DynError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HarnessBackend {
+    #[default]
     Vz,
     Ch,
-}
-
-impl Default for HarnessBackend {
-    fn default() -> Self {
-        Self::Vz
-    }
 }
 
 impl fmt::Display for HarnessBackend {

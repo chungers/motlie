@@ -423,7 +423,7 @@ fn run_egress_loop(
                     }
                     guest_to_host_frames += 1;
                     if config.log_frames
-                        && (guest_to_host_frames <= 10 || guest_to_host_frames % 100 == 0)
+                        && (guest_to_host_frames <= 10 || guest_to_host_frames.is_multiple_of(100))
                     {
                         debug!(
                             frame = guest_to_host_frames,
@@ -445,7 +445,7 @@ fn run_egress_loop(
             for frame in frames {
                 host_to_guest_frames += 1;
                 if config.log_frames
-                    && (host_to_guest_frames <= 10 || host_to_guest_frames % 100 == 0)
+                    && (host_to_guest_frames <= 10 || host_to_guest_frames.is_multiple_of(100))
                 {
                     debug!(
                         frame = host_to_guest_frames,

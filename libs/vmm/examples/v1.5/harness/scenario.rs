@@ -257,29 +257,33 @@ impl From<ProvisioningError> for ScenarioDriverError {
     }
 }
 
+pub struct ScenarioFileRequest<'a> {
+    pub base_dir: &'a Path,
+    pub artifacts_dir: &'a Path,
+    pub backend: HarnessBackend,
+    pub instance: &'a HarnessInstance,
+    pub allocator_config: GuestNetAllocatorConfig,
+    pub terminal_backend: TerminalBackendKind,
+    pub path: &'a Path,
+    pub result_json_path: Option<&'a Path>,
+}
+
 pub async fn run_scenario_file(
-    base_dir: &Path,
-    artifacts_dir: &Path,
-    backend: HarnessBackend,
-    instance: &HarnessInstance,
-    allocator_config: GuestNetAllocatorConfig,
-    terminal_backend: TerminalBackendKind,
-    path: &Path,
-    result_json_path: Option<&Path>,
+    request: ScenarioFileRequest<'_>,
 ) -> Result<ScenarioRunResult, DynError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = std::fs::read(request.path)?;
     let definition: ScenarioDefinition = serde_json::from_slice(&bytes)?;
     let result = run_scenario_definition(
-        base_dir,
-        artifacts_dir,
-        backend,
-        instance,
-        allocator_config,
-        terminal_backend,
+        request.base_dir,
+        request.artifacts_dir,
+        request.backend,
+        request.instance,
+        request.allocator_config,
+        request.terminal_backend,
         definition,
     )
     .await?;
-    if let Some(path) = result_json_path {
+    if let Some(path) = request.result_json_path {
         persist_json(path, &result)?;
     }
     Ok(result)

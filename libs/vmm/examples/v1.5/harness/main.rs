@@ -530,16 +530,16 @@ async fn main() -> Result<(), DynError> {
         .await;
     }
     if let HarnessMode::Scenario(path) = &mode {
-        let result = scenario::run_scenario_file(
-            &base_dir,
-            &artifacts_dir,
-            harness_backend,
-            &instance,
+        let result = scenario::run_scenario_file(scenario::ScenarioFileRequest {
+            base_dir: &base_dir,
+            artifacts_dir: &artifacts_dir,
+            backend: harness_backend,
+            instance: &instance,
             allocator_config,
             terminal_backend,
             path,
-            result_json_path.as_deref(),
-        )
+            result_json_path: result_json_path.as_deref(),
+        })
         .await?;
         return scenario_exit(result);
     }
