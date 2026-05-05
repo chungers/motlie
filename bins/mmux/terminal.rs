@@ -12,7 +12,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::model::AppState;
+use crate::model::{AppState, HostFleet};
 use crate::render::draw;
 
 pub(crate) struct TerminalSession {
@@ -42,8 +42,8 @@ impl TerminalSession {
         })
     }
 
-    pub(crate) fn draw(&mut self, app: &mut AppState) -> Result<()> {
-        self.terminal.draw(|frame| draw(frame, app))?;
+    pub(crate) fn draw(&mut self, fleet: &HostFleet, app: &mut AppState) -> Result<()> {
+        self.terminal.draw(|frame| draw(frame, fleet, app))?;
         Ok(())
     }
 

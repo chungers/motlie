@@ -9,20 +9,23 @@ use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::consts::{
     APP_BASE_BG, APP_BASE_FG, BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_SQUARE,
-    MODAL_BUTTON_HEIGHT, MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_CONTENT_VERTICAL_PADDING,
-    MODAL_MIN_WIDTH, MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT, MODAL_TEXT_FIELD_HEIGHT,
-    MOTLIE_PLACEHOLDER, STATUS_BAR_BG, STATUS_BAR_FG, STATUS_BAR_MNEMONIC_FG,
+    HOST_CONNECTION_FAILED_FG, MODAL_BUTTON_HEIGHT, MODAL_CONTENT_HORIZONTAL_PADDING,
+    MODAL_CONTENT_VERTICAL_PADDING, MODAL_MIN_WIDTH, MODAL_OUTER_MARGIN, MODAL_SEPARATOR_HEIGHT,
+    MODAL_TEXT_FIELD_HEIGHT, MOTLIE_PLACEHOLDER, STATUS_BAR_BG, STATUS_BAR_FG,
+    STATUS_BAR_MNEMONIC_FG,
 };
 use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
-    AppState, Button, Focus, LayoutMode, ModalBody, ModalState, ModalView, NewSessionFocus,
-    SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionRow,
+    AppState, Button, Focus, HostFleet, LayoutMode, ModalBody, ModalState, ModalView,
+    NewSessionFocus, SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueRow,
+    SessionRow,
 };
 
-pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
+pub(crate) fn draw(frame: &mut Frame<'_>, fleet: &HostFleet, app: &mut AppState) {
     let area = frame.area();
     apply_app_base_style(frame, area);
 
@@ -35,10 +38,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
         ])
         .split(area);
 
-    draw_top_status(frame, chunks[0], app);
+    draw_top_status(frame, chunks[0], fleet);
     match app.layout.mode {
-        LayoutMode::Normal => draw_normal(frame, chunks[1], app),
-        LayoutMode::Portrait => draw_portrait(frame, chunks[1], app),
+        LayoutMode::Normal => draw_normal(frame, chunks[1], fleet, app),
+        LayoutMode::Portrait => draw_portrait(frame, chunks[1], fleet, app),
     }
     draw_status(frame, chunks[2], app);
     if let Some(modal) = &app.modal {
@@ -62,7 +65,7 @@ fn apply_app_base_style(frame: &mut Frame<'_>, area: Rect) {
     }
 }
 
-fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+fn draw_normal(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet, app: &mut AppState) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -71,11 +74,11 @@ fn draw_normal(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         ])
         .split(area);
 
-    draw_sessions(frame, columns[0], app);
+    draw_sessions(frame, columns[0], fleet, app);
     draw_detail(frame, columns[1], app);
 }
 
-fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+fn draw_portrait(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet, app: &mut AppState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -83,7 +86,7 @@ fn draw_portrait(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             Constraint::Percentage(100 - app.layout.top_percent),
         ])
         .split(area);
-    draw_sessions(frame, rows[0], app);
+    draw_sessions(frame, rows[0], fleet, app);
     draw_detail(frame, rows[1], app);
 }
 
@@ -99,14 +102,14 @@ pub(crate) fn sessions_title(app: &AppState) -> String {
     format!(" Sessions [{}] ", app.session_list.rows.len())
 }
 
-fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn draw_sessions(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet, app: &AppState) {
     let height = area.height.saturating_sub(2) as usize;
     let row_width = area.width.saturating_sub(2) as usize;
-    let host_marker_width = app.fleet.host_marker_width();
+    let host_marker_width = fleet.host_marker_width();
     let mut lines = Vec::new();
     if app.session_list.rows.is_empty() {
         lines.push(Line::from(TuiSpan::styled(
-            empty_session_list_message(app),
+            empty_session_list_message(fleet),
             Style::default().fg(Color::DarkGray),
         )));
     } else {
@@ -123,7 +126,7 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             .take(height)
         {
             let selected = idx == app.session_list.selected;
-            let host_color = app.fleet.host_color(&row.host_id);
+            let host_color = fleet.host_color(&row.host_id);
             lines.push(styled_session_list_line(
                 session_list_line(
                     row,
@@ -145,11 +148,11 @@ fn draw_sessions(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn empty_session_list_message(app: &AppState) -> String {
-    if app.fleet.is_multi() {
-        let n = app.fleet.len();
+fn empty_session_list_message(fleet: &HostFleet) -> String {
+    if fleet.is_multi() {
+        let n = fleet.len();
         format!("(no sessions across {n} hosts - press n to create)")
-    } else if let Some(entry) = app.fleet.first() {
+    } else if let Some(entry) = fleet.first() {
         format!("(no sessions on {} - press n to create)", entry.label)
     } else {
         "(no sessions - press n to create)".to_string()
@@ -346,27 +349,33 @@ fn pad_or_truncate(text: String, width: usize) -> String {
 }
 
 fn char_width(text: &str) -> usize {
-    text.chars().count()
+    UnicodeWidthStr::width(text)
 }
 
 fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let height = area.height.saturating_sub(2) as usize;
-    app.detail.last_known_view_height = max(1, height);
-    app.detail.scroll = app.detail.scroll.min(app.detail.max_scroll());
-    let total = app.detail.lines.len();
-    let end = total.saturating_sub(app.detail.scroll);
-    let start = end.saturating_sub(height);
-    let visible = if start < end {
-        app.detail.lines[start..end].join("\n")
+    let width = max(1, area.width.saturating_sub(2) as usize);
+    let detail_text = if !app.detail.lines.is_empty() {
+        detail_lines_text_for_render(&app.detail.lines)
     } else if app.session_list.rows.is_empty() {
-        "press n to create a session".to_string()
+        detail_text_for_render("press n to create a session")
     } else {
-        String::new()
+        Text::default()
     };
-    let position = if total == 0 {
+    let total_rows = detail_total_wrapped_rows(&app.detail.lines, width);
+    app.detail.last_known_view_height = max(1, height);
+    app.detail.last_known_scroll_max = total_rows.saturating_sub(app.detail.last_known_view_height);
+    app.detail.scroll = app.detail.scroll.min(app.detail.max_scroll());
+    let scroll_from_top = app.detail.max_scroll().saturating_sub(app.detail.scroll);
+    let position = if total_rows == 0 {
         "0/0".to_string()
     } else {
-        format!("{}-{}/{}", start + 1, end, total)
+        let start_row = scroll_from_top + 1;
+        let end_row = min(
+            total_rows,
+            scroll_from_top + app.detail.last_known_view_height,
+        );
+        format!("{start_row}-{end_row}/{total_rows}")
     };
     let title = detail_title(app.detail.source.mode(), &position);
     let block = Block::default()
@@ -374,16 +383,17 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         .borders(Borders::ALL)
         .border_style(focused_style(app, Focus::Detail));
     frame.render_widget(
-        Paragraph::new(detail_text_for_render(&visible))
+        Paragraph::new(detail_text)
             .block(block)
+            .scroll((saturating_u16(scroll_from_top), 0))
             .wrap(Wrap { trim: false }),
         area,
     );
 
-    if total > height {
-        let mut scrollbar_state = ScrollbarState::new(total)
-            .position(start)
-            .viewport_content_length(height);
+    if total_rows > app.detail.last_known_view_height {
+        let mut scrollbar_state = ScrollbarState::new(total_rows)
+            .position(scroll_from_top)
+            .viewport_content_length(app.detail.last_known_view_height);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .thumb_style(Style::default().fg(Color::Green))
@@ -392,6 +402,113 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             &mut scrollbar_state,
         );
     }
+}
+
+pub(crate) fn detail_total_wrapped_rows(lines: &[String], width: usize) -> usize {
+    lines
+        .iter()
+        .map(|line| wrapped_line_rows(line, width))
+        .sum()
+}
+
+fn wrapped_line_rows(line: &str, width: usize) -> usize {
+    // Mirrors ratatui's word-wrapping behavior for `Paragraph::wrap(Wrap {
+    // trim: false })`; scrollbar range and detail scroll limits depend on
+    // staying aligned with the rows ratatui renders.
+    let width = max(1, width);
+    let line = strip_ansi(line);
+    let mut state = WrapState::default();
+
+    for ch in line.chars() {
+        let Some(symbol_width) = ch.width() else {
+            continue;
+        };
+        if symbol_width > width {
+            continue;
+        }
+        state.push_symbol(symbol_width, ch.is_whitespace(), width);
+    }
+
+    state.finish()
+}
+
+#[derive(Default)]
+struct WrapState {
+    rows: usize,
+    line_width: usize,
+    word_width: usize,
+    whitespace_width: usize,
+    non_whitespace_previous: bool,
+}
+
+impl WrapState {
+    fn push_symbol(&mut self, symbol_width: usize, is_whitespace: bool, width: usize) {
+        if self.ends_word(is_whitespace) || self.untrimmed_overflows(symbol_width, width) {
+            self.commit_pending_word();
+        }
+
+        if self.line_is_full(width) || self.pending_word_overflows(symbol_width, width) {
+            self.break_row(width);
+            if is_whitespace && self.whitespace_width == 0 {
+                return;
+            }
+        }
+
+        self.accumulate_symbol(symbol_width, is_whitespace);
+    }
+
+    fn ends_word(&self, is_whitespace: bool) -> bool {
+        self.non_whitespace_previous && is_whitespace
+    }
+
+    fn untrimmed_overflows(&self, symbol_width: usize, width: usize) -> bool {
+        self.line_width == 0 && self.word_width + self.whitespace_width + symbol_width > width
+    }
+
+    fn commit_pending_word(&mut self) {
+        self.line_width += self.whitespace_width + self.word_width;
+        self.whitespace_width = 0;
+        self.word_width = 0;
+    }
+
+    fn line_is_full(&self, width: usize) -> bool {
+        self.line_width >= width
+    }
+
+    fn pending_word_overflows(&self, symbol_width: usize, width: usize) -> bool {
+        symbol_width > 0 && self.line_width + self.whitespace_width + self.word_width >= width
+    }
+
+    fn break_row(&mut self, width: usize) {
+        self.rows += 1;
+        let mut remaining_width = width.saturating_sub(self.line_width);
+        self.line_width = 0;
+
+        while self.whitespace_width > 0 && remaining_width > 0 {
+            self.whitespace_width -= 1;
+            remaining_width -= 1;
+        }
+    }
+
+    fn accumulate_symbol(&mut self, symbol_width: usize, is_whitespace: bool) {
+        if is_whitespace {
+            self.whitespace_width += symbol_width;
+        } else {
+            self.word_width += symbol_width;
+        }
+        self.non_whitespace_previous = !is_whitespace;
+    }
+
+    fn finish(mut self) -> usize {
+        if self.line_width > 0 || self.word_width > 0 || self.whitespace_width > 0 {
+            self.rows += 1;
+        }
+        max(1, self.rows)
+    }
+}
+
+fn saturating_u16(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
 }
 
 pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
@@ -406,11 +523,24 @@ pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
     ])
 }
 
-pub(crate) fn detail_text_for_render(text: &str) -> Text<'_> {
+pub(crate) fn detail_text_for_render(text: &str) -> Text<'static> {
     normalize_terminal_reset_colors(
         text.into_text()
             .unwrap_or_else(|_| Text::raw(strip_ansi(text))),
     )
+}
+
+pub(crate) fn detail_lines_text_for_render(lines: &[String]) -> Text<'static> {
+    let mut rendered = Vec::with_capacity(lines.len());
+    for line in lines {
+        let text = detail_text_for_render(line);
+        if text.lines.is_empty() {
+            rendered.push(Line::default());
+        } else {
+            rendered.extend(text.lines);
+        }
+    }
+    Text::from(rendered)
 }
 
 fn normalize_terminal_reset_colors(mut text: Text<'_>) -> Text<'_> {
@@ -442,18 +572,18 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_top_status(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn draw_top_status(frame: &mut Frame<'_>, area: Rect, fleet: &HostFleet) {
     let time = chrono::Local::now().format("%H:%M:%S").to_string();
-    let paragraph = Paragraph::new(top_status_line(app, &time, area.width as usize))
+    let paragraph = Paragraph::new(top_status_line(fleet, &time, area.width as usize))
         .style(Style::default().bg(STATUS_BAR_BG));
     frame.render_widget(paragraph, area);
 }
 
-pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<'static> {
+pub(crate) fn top_status_line(fleet: &HostFleet, time: &str, width: usize) -> Line<'static> {
     let time = format!(" {time} ");
     let time = truncate_chars(&time, min(time.chars().count(), width));
     let max_left_width = width.saturating_sub(time.chars().count());
-    let left_spans = top_status_left_spans(app, max_left_width);
+    let left_spans = top_status_left_spans(fleet, max_left_width);
     let left_width = spans_width(&left_spans);
     let time_width = time.chars().count();
     let padding_width = width.saturating_sub(left_width + time_width);
@@ -469,7 +599,7 @@ pub(crate) fn top_status_line(app: &AppState, time: &str, width: usize) -> Line<
     Line::from(spans)
 }
 
-fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'static>> {
+fn top_status_left_spans(fleet: &HostFleet, max_width: usize) -> Vec<TuiSpan<'static>> {
     if max_width == 0 {
         return Vec::new();
     }
@@ -477,22 +607,35 @@ fn top_status_left_spans(app: &AppState, max_width: usize) -> Vec<TuiSpan<'stati
         .fg(STATUS_BAR_FG)
         .bg(STATUS_BAR_BG)
         .add_modifier(Modifier::BOLD);
-    let spans = if app.fleet.is_multi() {
+    let spans = if fleet.is_multi() {
         let mut spans = vec![TuiSpan::styled("mmux ".to_string(), base_style)];
-        if let Some(legend) = app.fleet.host_color_legend() {
-            for (color, label) in legend {
+        if let Some(legend) = fleet.host_color_legend() {
+            for item in legend {
+                let label_style = if item.failed {
+                    Style::default()
+                        .fg(HOST_CONNECTION_FAILED_FG)
+                        .bg(STATUS_BAR_BG)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    base_style
+                };
+                let square_color = if item.failed {
+                    HOST_CONNECTION_FAILED_FG
+                } else {
+                    item.color
+                };
                 spans.push(TuiSpan::styled(
                     HOST_COLOR_SQUARE.to_string(),
                     Style::default()
-                        .fg(color)
+                        .fg(square_color)
                         .bg(STATUS_BAR_BG)
                         .add_modifier(Modifier::BOLD),
                 ));
-                spans.push(TuiSpan::styled(format!(" {label} "), base_style));
+                spans.push(TuiSpan::styled(format!(" {} ", item.label), label_style));
             }
         }
         spans
-    } else if let Some(entry) = app.fleet.first() {
+    } else if let Some(entry) = fleet.first() {
         vec![TuiSpan::styled(
             format!(" {} | {} ", entry.label, entry.ip_address),
             base_style,
@@ -549,7 +692,7 @@ pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "monitor", 'm');
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "send", 's');
+    push_status_command(&mut spans, "prompt", 'p');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "attach", 'a');
     push_status_separator(&mut spans);
@@ -607,7 +750,7 @@ pub(crate) fn session_key_values_footer_line(
 ) -> Line<'static> {
     let mut spans = vec![status_span(buttons.to_string())];
     push_status_separator(&mut spans);
-    push_status_command(&mut spans, "update", 'u');
+    push_status_command(&mut spans, "modify", 'm');
     push_status_separator(&mut spans);
     push_status_key_command(&mut spans, 'x', "unset");
     if kind.supports_checked_row() {
@@ -868,13 +1011,15 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
             draw_new_session_body(
                 frame,
                 area,
-                input,
-                host_label,
-                *host_count,
-                env_rows,
-                env_key_input,
-                env_value_input,
-                *focus,
+                NewSessionBody {
+                    input,
+                    host_label,
+                    host_count: *host_count,
+                    env_rows,
+                    env_key_input,
+                    env_value_input,
+                    focus: *focus,
+                },
             );
         }
         ModalBody::RenameSession { input } => {
@@ -898,39 +1043,41 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
             draw_session_key_values_body(
                 frame,
                 area,
-                *kind,
-                rows,
-                selected_key,
-                key_input,
-                value_input,
-                *focus,
+                SessionKeyValueBody {
+                    kind: *kind,
+                    rows,
+                    selected_key,
+                    key_input,
+                    value_input,
+                    focus: *focus,
+                },
             );
         }
     }
 }
 
-fn draw_new_session_body(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    input: &str,
-    host_label: &Option<String>,
+struct NewSessionBody<'a> {
+    input: &'a str,
+    host_label: &'a Option<String>,
     host_count: usize,
-    env_rows: &[crate::model::SessionKeyValueRow],
-    env_key_input: &str,
-    env_value_input: &str,
+    env_rows: &'a [SessionKeyValueRow],
+    env_key_input: &'a str,
+    env_value_input: &'a str,
     focus: NewSessionFocus,
-) {
+}
+
+fn draw_new_session_body(frame: &mut Frame<'_>, area: Rect, body: NewSessionBody<'_>) {
     let field_height = 1 + MODAL_TEXT_FIELD_HEIGHT;
     let mut y = area.y;
-    if let Some(host_label) = host_label {
+    if let Some(host_label) = body.host_label {
         let host_area = Rect::new(area.x, y, area.width, min(field_height, area.height));
         draw_labeled_select_field(
             frame,
             host_area,
             "Host",
             host_label,
-            host_count > 1,
-            focus == NewSessionFocus::Host,
+            body.host_count > 1,
+            body.focus == NewSessionFocus::Host,
         );
         y = y.saturating_add(field_height + 1);
     }
@@ -948,47 +1095,50 @@ fn draw_new_session_body(
         frame,
         session_area,
         "Session name",
-        input,
-        focus == NewSessionFocus::Name,
+        body.input,
+        body.focus == NewSessionFocus::Name,
     );
     y = session_y.saturating_add(field_height + 1);
     if y >= area.bottom() {
         return;
     }
-    let env_focus = match focus {
+    let env_focus = match body.focus {
         NewSessionFocus::EnvRow(index) => SessionKeyValueFocus::Row(index),
         NewSessionFocus::EnvKey => SessionKeyValueFocus::Key,
         NewSessionFocus::EnvValue => SessionKeyValueFocus::Value,
         _ => SessionKeyValueFocus::Cancel,
     };
+    let no_selected_key = None;
     draw_session_key_values_body(
         frame,
         Rect::new(area.x, y, area.width, area.bottom().saturating_sub(y)),
-        SessionKeyValueKind::Environment,
-        env_rows,
-        &None,
-        env_key_input,
-        env_value_input,
-        env_focus,
+        SessionKeyValueBody {
+            kind: SessionKeyValueKind::Environment,
+            rows: body.env_rows,
+            selected_key: &no_selected_key,
+            key_input: body.env_key_input,
+            value_input: body.env_value_input,
+            focus: env_focus,
+        },
     );
 }
 
-fn draw_session_key_values_body(
-    frame: &mut Frame<'_>,
-    area: Rect,
+struct SessionKeyValueBody<'a> {
     kind: SessionKeyValueKind,
-    rows: &[crate::model::SessionKeyValueRow],
-    selected_key: &Option<String>,
-    key_input: &str,
-    value_input: &str,
+    rows: &'a [SessionKeyValueRow],
+    selected_key: &'a Option<String>,
+    key_input: &'a str,
+    value_input: &'a str,
     focus: SessionKeyValueFocus,
-) {
+}
+
+fn draw_session_key_values_body(frame: &mut Frame<'_>, area: Rect, body: SessionKeyValueBody<'_>) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    let key_width = key_value_key_column_width(area.width, rows, key_input);
-    let indicator_width = if kind.supports_checked_row() {
+    let key_width = key_value_key_column_width(area.width, body.rows, body.key_input);
+    let indicator_width = if body.kind.supports_checked_row() {
         key_value_indicator_column_width(area.width)
     } else {
         0
@@ -1003,8 +1153,8 @@ fn draw_session_key_values_body(
         value_width,
         indicator_width,
     };
-    let max_rows = visible_session_key_value_rows(area.height, rows.len());
-    let selected_row = match focus {
+    let max_rows = visible_session_key_value_rows(area.height, body.rows.len());
+    let selected_row = match body.focus {
         SessionKeyValueFocus::Row(index) => Some(index),
         _ => None,
     };
@@ -1013,15 +1163,15 @@ fn draw_session_key_values_body(
         .unwrap_or(0);
     let mut lines = Vec::new();
 
-    if rows.is_empty() && max_rows > 0 {
-        lines.push(no_session_key_values_line(kind, columns));
+    if body.rows.is_empty() && max_rows > 0 {
+        lines.push(no_session_key_values_line(body.kind, columns));
     } else {
-        for (index, row) in rows.iter().enumerate().skip(start).take(max_rows) {
-            let focused = matches!(focus, SessionKeyValueFocus::Row(row) if row == index);
+        for (index, row) in body.rows.iter().enumerate().skip(start).take(max_rows) {
+            let focused = matches!(body.focus, SessionKeyValueFocus::Row(row) if row == index);
             lines.push(session_key_value_line(
-                kind,
+                body.kind,
                 row,
-                selected_key,
+                body.selected_key,
                 columns,
                 focused,
             ));
@@ -1048,9 +1198,9 @@ fn draw_session_key_values_body(
         draw_session_key_value_input_row(
             frame,
             Rect::new(area.x, row_y, area.width, 1),
-            key_input,
-            value_input,
-            focus,
+            body.key_input,
+            body.value_input,
+            body.focus,
             columns,
         );
     }
@@ -1097,7 +1247,7 @@ fn wrapped_line_count(input: &str, width: usize) -> u16 {
     } else {
         input
             .split('\n')
-            .map(|line| max(1, (line.chars().count() + width - 1) / width))
+            .map(|line| max(1, line.chars().count().div_ceil(width)))
             .sum()
     };
     min(rows, u16::MAX as usize) as u16

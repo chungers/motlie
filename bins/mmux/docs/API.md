@@ -299,15 +299,17 @@ struct SessionKeyValueModalUi {
 ```
 
 Implemented state is decomposed by concern: `HostFleet`, `LayoutState`,
-`SessionListState`, `DetailState`, and `StatusBanner`. `AppState`
-now coordinates those structs rather than owning one flat collection of UI,
-host, selection, detail, layout, and status fields. `main.rs` contains the
-entry/run loop. CLI parsing, terminal lifecycle, ForceCommand handling,
+`SessionListState`, `DetailState`, and `StatusBanner`. `main.rs` owns the live
+`HostFleet`; `AppState` owns UI state only and receives `&HostFleet` through
+rendering, key handling, refresh, and attach paths. This avoids a duplicated
+host snapshot inside app state while keeping layout, selection, detail, modal,
+status, and activity tracking together. `main.rs` contains the entry/run loop.
+CLI parsing, terminal lifecycle, ForceCommand handling,
 target-host identity, detail sources, key handling/event refresh, and rendering
 live in `cli.rs`, `terminal.rs`, `forcecommand.rs`, `target_host.rs`,
 `detail.rs`, `controller.rs`, and `render.rs`.
 
-The top status bar is derived from the app host identity and current local
+The top status bar is derived from the live `HostFleet` and current local
 clock: single-host mode renders `<hostname> | <ip address>` as bold
 left-justified text, while multi-host mode renders a compact host-color legend
 such as `mmux ■ alpha ■ beta`. Host display names come from
@@ -341,7 +343,7 @@ Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with `tab ↑/↓`, then `help`, `monitor`, `send`,
+the bottom status start with `tab ↑/↓`, then `help`, `monitor`, `prompt`,
 `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, and the
 mode-specific resize hint. Attach uses the `a` shortcut; command shortcut
 letters are rendered bold coral in command labels.
@@ -358,7 +360,7 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 `Session Name` field, and dispatches changed names through
 `HostHandle::session_by_id()` and `Target::rename()`.
 
-`s` opens `SendKeys` for the highlighted session from any pane focus. The modal
+`p` opens `SendKeys` for the highlighted session from any pane focus. The modal
 keeps focus explicit (`Input`, `Ok`, `Cancel`), renders a compact text field
 with `To: <session> on <host>`, wraps long input by growing the field height
 against a fixed input width, sends from either focused `Ok` or non-empty
@@ -389,8 +391,9 @@ stripped key, rendered without `@mmux/`, filtered to hide the internal
 keeps row focus and bottom field focus explicit with `SessionKeyValueFocus`; `Tab`
 cycles the bottom Key/Value cells, Ok, and Cancel button, `Shift-Tab` reverses
 that cycle. Enter on either edit field stages a non-empty, non-reserved key/value
-row in modal state; `x` stages deletion of the focused row; `u` preloads the
-bottom fields. Pressing `c` on a focused tag row stages the checked key and
+row in modal state; `x` stages deletion of the focused row; `m` preloads the
+bottom fields. Plain `u` and `b` move row focus while a tag row is focused.
+Pressing `c` on a focused tag row stages the checked key and
 renders `✓` in that row's marker column. The modal keeps the original rows and
 selected key alongside the draft; Enter on focused Ok diffs the draft and writes
 only the resulting `SessionTags::set`, `SessionTags::unset`, and
@@ -408,6 +411,12 @@ command in the new session.
 `fetch_fleet_rows()` enriches each `SessionRow` with the checked key/value by
 batch-listing `@mmux/` options once per host refresh, resolving
 `@mmux/__selected-key`, and copying the selected tag value into app state.
+The progressive refresh path drains all ready `HostRefreshResult`s into a
+batch before reconciling. Successful host results replace that host's rows,
+failed host results contribute status diagnostics while leaving last-good rows
+visible, and the merged list is sorted once per drain rather than once per host
+result. If a refresh task exits without sending a result, the selector awaits
+completed task handles and reports the host label in the status banner.
 `session_list_line()` renders
 that value in a right-aligned field after the session name. `i` is not assigned
 by this feature.
