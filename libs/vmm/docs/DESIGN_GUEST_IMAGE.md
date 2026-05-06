@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-05 | @vmm-cdx | Add the roadmap from a shared guest contract to per-arch OCI payloads and a final multi-arch OCI guest image artifact consumed by CH and VZ emitters |
 | 2026-05-04 | @codex-vz | Record the v1.5 host-runtime convergence boundary: CH and VZ keep external VM runners while VFS and egress/VNET services are embedded VMM runtime backends |
 | 2026-05-03 | @codex-vz | Define guest functionality conformance as VFS memfs views, apt-backed egress, and Codex/Claude startup in the shared v1.5 harness |
 | 2026-05-03 | @codex-vz | Add the Linux CH artifact emitter for the common v1.5 guest contract and make CH egress setup explicit v1.5 platform adaptation |
@@ -24,6 +25,8 @@ and VZ `v1.45`, but through:
 - one common seed schema
 - one common guest service graph
 - one common harness and scenario set
+- one published multi-arch OCI guest image reference once the common payload and
+  emitter path are stable
 
 Backend-specific code belongs at the emitter, host launcher, host runner, or
 host network adapter layer. It must not leak into guest-visible semantics unless
@@ -404,6 +407,93 @@ cloud-init
 not run package installs, npm repair, cargo builds, package-manager quiescence
 polling, egress certification, or full VFS/VNET validation.
 
+## Roadmap To A Shared OCI Guest Image
+
+The end state is one OCI image reference that resolves to a multi-arch OCI image
+index. That single published artifact name must describe one Motlie guest
+contract, even though the contained per-arch rootfs payloads are not byte
+identical.
+
+Example target:
+
+```text
+ghcr.io/chungers/motlie-guest:v1.5
+  -> linux/arm64 image
+  -> linux/amd64 image
+```
+
+This is the correct convergence target for CH and VZ. A single byte-identical
+rootfs blob cannot boot both Apple Silicon VZ guests and native x86_64 CH
+guests because the guest userspace, packages, and kernel payloads are
+architecture-specific before any boot script runs. The reusable unit is the
+guest contract plus per-arch payloads, not one architecture-agnostic filesystem
+blob.
+
+The roadmap is:
+
+1. Freeze one logical guest image and boot contract.
+   - Define typed schemas for guest users, package baseline, systemd units,
+     mount points, writable directories, SSH auto-provision behavior, and the
+     validation profile.
+   - Define the backend-neutral boot contract: kernel/initramfs expectations,
+     seed/cloud-init ownership, required boot metadata, and guest-visible
+     runtime paths.
+   - CH and VZ must both be describable from this one contract even if their
+     current emitters still differ.
+
+2. Build one common rootfs assembler.
+   - Move guest payload assembly behind one VMM-owned builder that installs the
+     shared package set, services, Motlie guest binaries, Codex/git/sudo
+     contract, and validation markers.
+   - Keep architecture-specific payload bits explicit in the builder. This
+     includes Linux packages and any arch-specific Motlie guest binaries.
+   - The output of this stage is a canonical assembled rootfs tree plus a
+     manifest with contract version and payload checksums.
+
+3. Publish per-arch OCI guest images from the common rootfs assembly.
+   - Treat OCI as the canonical distribution format for the guest payload, not
+     as a hypervisor-native boot format.
+   - Publish at least one OCI image per guest architecture:
+     `motlie-guest:arm64` and `motlie-guest:amd64`.
+   - Embed contract version, validation profile, and provenance labels so both
+     backend emitters consume the same payload definition.
+
+4. Make CH and VZ emitters consume the OCI payload.
+   - CH emitter: OCI payload -> CH boot artifacts.
+   - VZ emitter: OCI payload -> VZ boot artifacts.
+   - Backend-specific packaging remains allowed here, but it must be derived
+     from the same OCI payload and the same typed contract instead of from
+     backend-specific guest build scripts.
+   - This is the stage that gives true cross-backend image reuse in the product
+     sense: one source payload, two backend emitters.
+
+5. Require one harness validation matrix across both backends for the same OCI
+   digest.
+   - The saved scenarios for bootstrap, SSH auto-provision, VFS, VNET/egress,
+     PTY/Codex, and multi-guest operation must pass for CH and VZ from the same
+     logical image contract.
+   - Validation results should record the OCI digest, contract version, backend
+     kind, and emitted artifact metadata.
+
+6. Publish one multi-arch OCI image reference.
+   - After the per-arch OCI payloads and emitters are stable, publish one OCI
+     image index / manifest list as the canonical guest image reference.
+   - That one reference is the final externally visible artifact for the guest
+     image line. CH and VZ emitters select the correct per-arch payload from
+     the index and produce backend-local boot artifacts from it.
+
+This roadmap intentionally stops short of requiring one byte-identical final VM
+boot file for both backends. That stronger convergence would additionally
+require:
+
+- one shared guest architecture
+- one shared disk boot model
+- one shared partition and bootloader layout
+
+Those constraints do not hold for Apple Silicon VZ and native x86_64 CH. The
+right end state here is one logical guest contract and one multi-arch OCI image
+artifact, not one architecture-agnostic raw boot image.
+
 ## Success Criteria
 
 v1.5 succeeds when:
@@ -423,6 +513,10 @@ v1.5 succeeds when:
    certification work.
 9. v1.5 has no REPL example; manual, headless, external-SSH, and scenario e2e
    validation run through `harness_v1_5`.
+10. The guest-image roadmap is explicit: a shared typed contract, a common
+    rootfs assembler, per-arch OCI guest payloads, backend emitters that
+    consume those payloads, and a final published multi-arch OCI guest image
+    reference.
 
 ## Related Documents
 
