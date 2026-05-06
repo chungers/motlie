@@ -20,9 +20,10 @@ use crate::demo_support::{
 };
 use crate::terminal::{HarnessTerminalSession, TerminalBackendKind};
 use crate::{
-    build_guest_provisioner, print_instance_details, wait_for_egress_ready, DynError,
-    HarnessInstance, AGENT_CLI_START_COMMAND, APT_UPDATE_COMMAND,
-    PACKAGE_MANAGER_QUIESCENT_COMMAND, VFS_MEMFS_LAYER_COMMAND,
+    build_guest_provisioner, print_instance_details, wait_for_egress_ready,
+    wait_for_proxy_listener, DynError, HarnessInstance, AGENT_CLI_START_COMMAND,
+    APT_UPDATE_COMMAND, PACKAGE_MANAGER_QUIESCENT_COMMAND, SSH_PROXY_READY_TIMEOUT,
+    VFS_MEMFS_LAYER_COMMAND,
 };
 
 pub async fn run_shell(
@@ -65,6 +66,7 @@ pub async fn run_shell(
         )),
     };
     let mut proxy_task = spawn_proxy_task(proxy_config.clone(), Arc::clone(&guest_registry));
+    wait_for_proxy_listener(proxy_config.listen, SSH_PROXY_READY_TIMEOUT).await?;
     let mut proxy_restart_state = ProxyRestartState::new();
     print_instance_details(instance, &proxy_config);
     println!("  backend={backend}");

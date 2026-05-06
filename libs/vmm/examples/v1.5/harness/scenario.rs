@@ -23,9 +23,10 @@ use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
-    build_guest_provisioner, persist_json, print_instance_details, wait_for_egress_ready, DynError,
-    HarnessInstance, AGENT_CLI_START_COMMAND, APT_UPDATE_COMMAND,
-    PACKAGE_MANAGER_QUIESCENT_COMMAND, VFS_MEMFS_LAYER_COMMAND,
+    build_guest_provisioner, persist_json, print_instance_details, wait_for_egress_ready,
+    wait_for_proxy_listener, DynError, HarnessInstance, AGENT_CLI_START_COMMAND,
+    APT_UPDATE_COMMAND, PACKAGE_MANAGER_QUIESCENT_COMMAND, SSH_PROXY_READY_TIMEOUT,
+    VFS_MEMFS_LAYER_COMMAND,
 };
 
 #[derive(Debug, Deserialize)]
@@ -305,7 +306,8 @@ pub async fn run_scenario_definition(
         instance,
         allocator_config,
         terminal_backend,
-    )?;
+    )
+    .await?;
     let result = driver.run(definition).await;
     driver.shutdown_all().await;
     Ok(result)
@@ -323,7 +325,7 @@ struct ScenarioDriver {
 }
 
 impl ScenarioDriver {
-    fn new(
+    async fn new(
         base_dir: &Path,
         _artifacts_dir: &Path,
         backend: HarnessBackend,
@@ -355,6 +357,7 @@ impl ScenarioDriver {
             proxy_config.clone(),
             Arc::clone(&guest_registry),
         ));
+        wait_for_proxy_listener(proxy_config.listen, SSH_PROXY_READY_TIMEOUT).await?;
         print_instance_details(instance, &proxy_config);
         println!("  backend={backend}");
         println!("  terminal_backend={terminal_backend}");
