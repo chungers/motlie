@@ -279,7 +279,7 @@ Main-view keys:
 | `Ctrl-Up` / `Ctrl-Down`, `Shift-Up` / `Shift-Down`, Alt Up / Down | Resize T/B split (portrait only) | Resize T/B split (portrait only) |
 | `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
 | `m` | Monitor highlighted session | Monitor highlighted session |
-| `p` | Open Send Keys modal | Open Send Keys modal |
+| `p` / `@` | Open Send Keys modal | Open Send Keys modal |
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
 | `r` | Open Rename Session modal | No-op |
@@ -325,8 +325,8 @@ right-aligned with a small right margin. Durations use `now`, `m`, `h`, or
 `d`; days keep at most one decimal digit.
 Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 
-Pressing `p` opens the `Send Keys` modal for the highlighted session. The modal
-has a compact text field labeled `To: <session> on <host>`, accepts
+Pressing `p` or `@` opens the `Send Keys` modal for the highlighted session.
+The modal has a compact text field labeled `To: <session> on <host>`, accepts
 `motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, wraps long
 input by growing the text field vertically while keeping its width fixed,
 then sends the parsed input exactly through the highlighted session target.

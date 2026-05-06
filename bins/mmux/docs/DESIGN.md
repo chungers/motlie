@@ -170,9 +170,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode `%output` replay, because TUI programs rely on cursor movement,
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
-- Pressing `p` opens a centered `Send Keys` modal for the highlighted session.
-  The modal shows a label `To: <session> on <host>` above a compact text field
-  and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
+- Pressing `p` or `@` opens a centered `Send Keys` modal for the highlighted
+  session. The modal shows a label `To: <session> on <host>` above a compact
+  text field and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
   vertically while the input width stays fixed. `Tab` cycles the text field and
   buttons; Enter on focused `Ok`, or Enter from the text field after text has
   been entered, parses the field as a `KeySequence`, and sends that sequence
@@ -703,7 +703,7 @@ Main-selector keymap (focus-aware):
 | `n` | Open `New Session` modal | Same |
 | `k` | Open kill-confirmation modal | Same |
 | `r` | Open rename modal for highlight | No-op |
-| `s` | Open Send Keys modal for highlight | Same |
+| `p` / `@` | Open Send Keys modal for highlight | Same |
 | `t` | Open tag list/add/update/delete modal for highlight | Same |
 | `g` | Toggle activity/tag grouping | No-op |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same |
@@ -816,7 +816,7 @@ arguments are additional hosts.
   Host-square column width is one character.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `m` monitor, `p` prompt,
+- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `m` monitor, `p` / `@` prompt,
   `n` new, `k` kill, `r` rename, `t` tag list/add/update/delete,
   `Ctrl-C`/`q` exit, `l` toggle layout, Tab cycle panes, `Ctrl-←/→` and
   `Ctrl-↑/↓` resize) behave
