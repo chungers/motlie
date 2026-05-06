@@ -140,6 +140,13 @@ cloud-init
   -> motlie-control-plane-ready.service
 ```
 
+`motlie-vfs-guest.service` is installed under `cloud-init.target`, not
+`multi-user.target`. The guest mounter depends on `cloud-final.service` for the
+seeded user/home contract, so enabling it under `multi-user.target` creates an
+ordering cycle and blocks first-contact readiness on the CH path. Dependent
+units that order themselves after `motlie-vfs-guest.service`, such as
+`motlie-agent-state.service`, must stay on the same `cloud-init.target` path.
+
 First-contact SSH must wait only for interactive readiness. Full egress, CLI,
 package-manager, and VFS/VNET certification belongs in explicit harness
 validation, not in the first SSH path.
