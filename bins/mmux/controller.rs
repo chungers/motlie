@@ -604,7 +604,7 @@ pub(crate) async fn handle_key(
                 app.status = StatusBanner::info("no session selected");
             }
         }
-        (KeyCode::Char('p'), _) => {
+        (KeyCode::Char('p' | '@'), _) => {
             if let Some(selected) = app.selected_session() {
                 app.modal = Some(ModalState::SendKeys {
                     session: selected,

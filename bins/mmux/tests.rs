@@ -2580,6 +2580,30 @@ async fn p_opens_send_keys_modal_for_selected_session() {
 }
 
 #[tokio::test]
+async fn at_opens_send_keys_modal_for_selected_session() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.layout.focus = Focus::Detail;
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { session, ui })
+            if session.id() == "$1"
+                && session.name() == "dev"
+                && ui.input.is_empty()
+                && ui.focus == SendKeysFocus::Input
+    ));
+}
+
+#[tokio::test]
 async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")

@@ -111,7 +111,7 @@ Enter sample highlighted session (list pane)
 tab cycle panes
 l toggle layout
 m monitor highlighted session
-p prompt highlighted session
+p | @ prompt highlighted session
   Ctrl-Enter send keys, wait, Enter
   $$ suffix same delayed Enter
 n create session
