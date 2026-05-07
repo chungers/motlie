@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts so `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
 | 2026-05-04 | @codex | Matched attached tmux status-bar background to the selected host's list-pane palette color in multi-host mode. |
 | 2026-05-03 | @codex | Added the `s` Send Keys modal and moved main-view pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
@@ -170,6 +171,11 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   control-mode `%output` replay, because TUI programs rely on cursor movement,
   clearing, and repaint semantics. (Focus-independent: operates on the
   highlighted session regardless of which pane has focus.)
+- Pressing `$` then a digit `0` through `9` immediately sends that digit to
+  the highlighted session without opening a modal. Pressing `$` then `!`
+  immediately sends `{Esc}` to the highlighted session. These direct-send leader
+  shortcuts are list-pane only and reuse the same highlighted stable session
+  routing as the Send Keys modal.
 - Pressing `p` or `@` opens a centered `Send Keys` modal for the highlighted
   session. The modal shows a label `To: <session> on <host>` above a compact
   text field and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
@@ -704,6 +710,8 @@ Main-selector keymap (focus-aware):
 | `k` | Open kill-confirmation modal | Same |
 | `r` | Open rename modal for highlight | No-op |
 | `p` / `@` | Open Send Keys modal for highlight | Same |
+| `$` then `0…9` | Send a single digit immediately to highlight | No-op |
+| `$` then `!` | Send `{Esc}` immediately to highlight | No-op |
 | `t` | Open tag list/add/update/delete modal for highlight | Same |
 | `g` | Toggle activity/tag grouping | No-op |
 | `h` | Open help modal with logo, key functions, and build git SHA | Same |

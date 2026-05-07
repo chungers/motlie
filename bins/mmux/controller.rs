@@ -16,8 +16,8 @@ use crate::consts::{
 use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
-    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, SelectedSession, SelectionKey,
-    SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind,
+    NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, PendingListShortcut, SelectedSession,
+    SelectionKey, SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus, SessionKeyValueKind,
     SessionKeyValueModalUi, SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
     StatusBanner,
 };
@@ -560,6 +560,9 @@ pub(crate) async fn handle_key(
     if app.modal.is_some() {
         return handle_modal_key(fleet, app, key).await;
     }
+    if let Some(shortcut) = app.pending_list_shortcut.take() {
+        return handle_pending_list_shortcut(fleet, app, key, shortcut).await;
+    }
 
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -600,6 +603,13 @@ pub(crate) async fn handle_key(
             if let Some(selected) = app.selected_session() {
                 open_session_key_values_modal(fleet, app, selected, SessionKeyValueKind::Tags)
                     .await?;
+            } else {
+                app.status = StatusBanner::info("no session selected");
+            }
+        }
+        (KeyCode::Char('$'), _) if app.layout.focus == Focus::List => {
+            if app.selected_session().is_some() {
+                app.pending_list_shortcut = Some(PendingListShortcut::SendKeysImmediate);
             } else {
                 app.status = StatusBanner::info("no session selected");
             }
@@ -732,6 +742,44 @@ pub(crate) async fn handle_key(
         _ => {}
     }
 
+    Ok(KeyOutcome::Continue)
+}
+
+async fn handle_pending_list_shortcut(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    key: KeyEvent,
+    shortcut: PendingListShortcut,
+) -> Result<KeyOutcome> {
+    match shortcut {
+        PendingListShortcut::SendKeysImmediate => {
+            handle_send_keys_immediate_shortcut(fleet, app, key).await
+        }
+    }
+}
+
+async fn handle_send_keys_immediate_shortcut(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    key: KeyEvent,
+) -> Result<KeyOutcome> {
+    let Some(session) = app.selected_session() else {
+        app.status = StatusBanner::info("no session selected");
+        return Ok(KeyOutcome::Continue);
+    };
+    let keys = match key.code {
+        KeyCode::Char(ch) if ch.is_ascii_digit() => KeySequence::parse(&ch.to_string())
+            .expect("single ASCII digit parses as a literal KeySequence"),
+        KeyCode::Char('!') => {
+            KeySequence::parse("{Esc}").expect("{Esc} is a valid KeySequence literal")
+        }
+        KeyCode::Esc => return Ok(KeyOutcome::Continue),
+        _ => {
+            app.status = StatusBanner::error("invalid $ shortcut; use $0..$9 or $!");
+            return Ok(KeyOutcome::Continue);
+        }
+    };
+    send_keys_sequence(fleet, app, session, Some(keys), None).await?;
     Ok(KeyOutcome::Continue)
 }
 
@@ -1722,24 +1770,35 @@ async fn send_keys_from_modal(
             }
         }
     };
+    send_keys_sequence(fleet, app, session, keys, enter_keys).await?;
+    Ok(true)
+}
+
+async fn send_keys_sequence(
+    fleet: &HostFleet,
+    app: &mut AppState,
+    session: SelectedSession,
+    keys: Option<KeySequence>,
+    enter_keys: Option<KeySequence>,
+) -> Result<()> {
     let Some(host) = fleet_host(fleet, &session.host_id) else {
         app.status =
             StatusBanner::error(format!("host {} no longer connected", session.host_label));
-        return Ok(true);
+        return Ok(());
     };
     match host.session_by_id(session.id()).await? {
         Some(target) => {
             if let Some(keys) = keys.as_ref() {
                 if let Err(err) = target.send_keys(keys).await {
                     app.status = StatusBanner::error(format!("send keys failed: {err}"));
-                    return Ok(true);
+                    return Ok(());
                 }
             }
             if let Some(enter_keys) = enter_keys.as_ref() {
                 tokio::time::sleep(SEND_KEYS_ENTER_DELAY).await;
                 if let Err(err) = target.send_keys(enter_keys).await {
                     app.status = StatusBanner::error(format!("send Enter failed: {err}"));
-                    return Ok(true);
+                    return Ok(());
                 }
             }
             app.status = StatusBanner::info(if fleet.is_multi() {
@@ -1759,7 +1818,7 @@ async fn send_keys_from_modal(
             ));
         }
     }
-    Ok(true)
+    Ok(())
 }
 
 fn normalize_send_keys_input(
