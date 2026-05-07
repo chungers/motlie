@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | add the rootfs classifier API with data-driven `RootfsProfileSpec`, typed stable VMM/VFS/VNET findings, and `ready` / `compatible-with-adaptation` / `unsupported` status
 - 2026-05-07 | @vmm-cdx | tighten OCI whiteout safety: reject empty `.wh.` targets and propagate opaque-whiteout metadata errors instead of reporting success
 - 2026-05-07 | @vmm-cdx | add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache, producing importer-ready `OciLayerInput`s |
 - 2026-05-07 | @vmm-cdx | add the first rootfs importer API for digest-checked local OCI layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteout handling
@@ -605,15 +606,16 @@ roadmap. It records source identity and validation metadata, resolves
 OCI/Docker manifest indexes to immutable digests, parses selected platform
 manifests, fetches selected platform manifests and layer blobs into a
 content-addressed cache, and can unpack digest-checked local rootfs layer blobs
-into an empty assembly root. It does not yet classify the imported rootfs or emit
-CH/VZ artifacts.
+into an empty assembly root. It can also classify an imported rootfs against a
+data-driven profile before the Motlie compatibility layer mutates it. It does
+not yet emit CH/VZ artifacts.
 
 ```rust
 use motlie_vmm::backend::BackendKind;
 use motlie_vmm::image::{
     EmittedArtifactDigest, ExternalOciSource, GuestImageProfile, GuestImageValidationRecord,
     OciContentCache, OciDigest, OciImageReference, OciPlatform, OciRegistryClient,
-    OciRootfsImporter,
+    OciRootfsImporter, RootfsClassificationStatus, RootfsClassifier, RootfsProfileSpec,
 };
 
 let source = ExternalOciSource::ubuntu_systemd(
@@ -651,6 +653,9 @@ let cached = resolver
     .resolve_and_fetch_ubuntu_systemd_to_cache(OciPlatform::linux_amd64(), &cache)
     .await?;
 let imported = OciRootfsImporter::new().import_layers(&cached.layers, assembly_root)?;
+let classifier_spec = RootfsProfileSpec::for_profile(profile.clone());
+let classification = RootfsClassifier::new().classify(&imported.root, &classifier_spec)?;
+assert_ne!(classification.status, RootfsClassificationStatus::Unsupported);
 ```
 
 The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
@@ -707,6 +712,24 @@ Rootfs importer behavior:
   assembly roots, empty whiteout targets, and digest/size mismatches
 - propagates opaque-whiteout metadata/read errors except `NotFound`, so stale
   lower-layer content cannot be silently retained while reporting success
+
+Rootfs classifier behavior:
+
+- takes an imported rootfs path plus a `RootfsProfileSpec`
+- derives the built-in `RootfsProfileSpec` from `GuestImageProfile`, while
+  allowing admins/builders to customize package, mount-point, OS, init, binary,
+  VFS, and VNET requirements
+- keeps stable VMM/VFS/VNET invariants typed in Rust instead of baking v1.5
+  example package and mount choices into the classifier
+- classifies OS release, package manager, init capability, required binaries,
+  required packages, required mount points, `/dev`, FUSE runtime provisioning,
+  and VNET config-directory assumptions
+- returns machine-readable findings with `RootfsRequirementKind`,
+  `RootfsRequirementStatus`, optional path/package, and evidence
+- aggregates findings into `ready`, `compatible-with-adaptation`, or
+  `unsupported`
+- is read-only; compatibility-layer assembly and backend artifact emission are
+  separate later steps
 
 Resolver validation:
 

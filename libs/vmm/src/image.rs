@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -524,6 +525,286 @@ pub struct OciLayerImportRecord {
 pub struct ImportedOciRootfs {
     pub root: PathBuf,
     pub applied_layers: Vec<OciLayerImportRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootfsOsRequirement {
+    pub accepted_ids: Vec<String>,
+    pub accepted_version_ids: Vec<String>,
+}
+
+impl RootfsOsRequirement {
+    pub fn ubuntu_24_04() -> Self {
+        Self {
+            accepted_ids: vec!["ubuntu".to_string()],
+            accepted_version_ids: vec!["24.04".to_string()],
+        }
+    }
+
+    pub fn linux_any() -> Self {
+        Self {
+            accepted_ids: Vec::new(),
+            accepted_version_ids: Vec::new(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), RootfsClassificationError> {
+        if self.accepted_ids.iter().any(|id| id.trim().is_empty()) {
+            return Err(RootfsClassificationError::EmptyOsReleaseId);
+        }
+        if self
+            .accepted_version_ids
+            .iter()
+            .any(|version| version.trim().is_empty())
+        {
+            return Err(RootfsClassificationError::EmptyOsReleaseVersionId);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PackageManagerRequirement {
+    None,
+    AptDpkg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VfsGuestRequirements {
+    pub requires_dev_directory: bool,
+    pub requires_fuse_runtime_device: bool,
+}
+
+impl Default for VfsGuestRequirements {
+    fn default() -> Self {
+        Self {
+            requires_dev_directory: true,
+            requires_fuse_runtime_device: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VnetGuestRequirements {
+    pub requires_etc_directory: bool,
+}
+
+impl Default for VnetGuestRequirements {
+    fn default() -> Self {
+        Self {
+            requires_etc_directory: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootfsProfileSpec {
+    pub profile: GuestImageProfile,
+    pub os: RootfsOsRequirement,
+    pub package_manager: PackageManagerRequirement,
+    pub required_binaries: Vec<PathBuf>,
+    pub vfs: VfsGuestRequirements,
+    pub vnet: VnetGuestRequirements,
+}
+
+impl RootfsProfileSpec {
+    pub fn for_profile(profile: GuestImageProfile) -> Self {
+        let (os, package_manager, required_binaries) = match profile.init {
+            InitProfile::UbuntuSystemd => (
+                RootfsOsRequirement::ubuntu_24_04(),
+                PackageManagerRequirement::AptDpkg,
+                vec![PathBuf::from("/bin/sh")],
+            ),
+            _ => (
+                RootfsOsRequirement::linux_any(),
+                PackageManagerRequirement::None,
+                vec![PathBuf::from("/bin/sh")],
+            ),
+        };
+        Self {
+            profile,
+            os,
+            package_manager,
+            required_binaries,
+            vfs: VfsGuestRequirements::default(),
+            vnet: VnetGuestRequirements::default(),
+        }
+    }
+
+    pub fn ubuntu_systemd(source: ExternalOciSource) -> Self {
+        Self::for_profile(GuestImageProfile::ubuntu_systemd(source))
+    }
+
+    pub fn validate(&self) -> Result<(), RootfsClassificationError> {
+        self.profile.validate()?;
+        self.os.validate()?;
+        for path in &self.required_binaries {
+            validate_rootfs_requirement_path(path)?;
+        }
+        for path in &self.profile.required_mount_points {
+            validate_rootfs_requirement_path(path)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootfsClassificationStatus {
+    Ready,
+    CompatibleWithAdaptation,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootfsRequirementStatus {
+    Present,
+    MissingButInstallable,
+    NeedsCompatibilityLayer,
+    NeedsRuntimeProvisioning,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootfsRequirementKind {
+    RootDirectory,
+    OsRelease,
+    PackageManager,
+    InitSystem,
+    RequiredPackage,
+    RequiredBinary,
+    RequiredMountPoint,
+    VfsDevDirectory,
+    VfsFuseRuntimeDevice,
+    VnetConfigDirectory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootfsRequirementFinding {
+    pub kind: RootfsRequirementKind,
+    pub status: RootfsRequirementStatus,
+    pub path: Option<PathBuf>,
+    pub package: Option<String>,
+    pub evidence: String,
+}
+
+impl RootfsRequirementFinding {
+    fn new(
+        kind: RootfsRequirementKind,
+        status: RootfsRequirementStatus,
+        evidence: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            status,
+            path: None,
+            package: None,
+            evidence: evidence.into(),
+        }
+    }
+
+    fn with_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    fn with_package(mut self, package: impl Into<String>) -> Self {
+        self.package = Some(package.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootfsClassification {
+    pub root: PathBuf,
+    pub profile_name: String,
+    pub status: RootfsClassificationStatus,
+    pub findings: Vec<RootfsRequirementFinding>,
+}
+
+impl RootfsClassification {
+    pub fn is_supported_foundation(&self) -> bool {
+        self.status != RootfsClassificationStatus::Unsupported
+    }
+
+    pub fn findings_by_status(
+        &self,
+        status: RootfsRequirementStatus,
+    ) -> impl Iterator<Item = &RootfsRequirementFinding> {
+        self.findings
+            .iter()
+            .filter(move |finding| finding.status == status)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RootfsClassifier;
+
+impl RootfsClassifier {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn classify(
+        &self,
+        root: impl AsRef<Path>,
+        spec: &RootfsProfileSpec,
+    ) -> Result<RootfsClassification, RootfsClassificationError> {
+        spec.validate()?;
+        let root = root.as_ref();
+        let metadata = fs::metadata(root).map_err(|source| RootfsClassificationError::Io {
+            path: Some(root.to_path_buf()),
+            source,
+        })?;
+        if !metadata.is_dir() {
+            return Err(RootfsClassificationError::RootNotDirectory {
+                path: root.to_path_buf(),
+            });
+        }
+
+        let mut findings = vec![RootfsRequirementFinding::new(
+            RootfsRequirementKind::RootDirectory,
+            RootfsRequirementStatus::Present,
+            "rootfs assembly root is a directory",
+        )
+        .with_path("/")];
+
+        let os_release = read_rootfs_os_release(root)?;
+        findings.push(classify_os_release(&spec.os, os_release.as_ref()));
+
+        let package_manager = classify_package_manager(root, spec.package_manager)?;
+        findings.push(package_manager.finding.clone());
+
+        findings.extend(classify_init_system(
+            root,
+            spec.profile.init,
+            package_manager.available,
+        )?);
+        findings.extend(classify_required_binaries(root, &spec.required_binaries)?);
+        let installed_packages = read_installed_dpkg_packages(root)?;
+        findings.extend(classify_required_packages(
+            &spec.profile.required_packages,
+            &installed_packages,
+            package_manager.available,
+        ));
+        findings.extend(classify_required_mount_points(
+            root,
+            &spec.profile.required_mount_points,
+        )?);
+        findings.extend(classify_vfs_requirements(root, &spec.vfs)?);
+        findings.extend(classify_vnet_requirements(root, &spec.vnet)?);
+
+        let status = aggregate_classification_status(&findings);
+        Ok(RootfsClassification {
+            root: root.to_path_buf(),
+            profile_name: spec.profile.name.clone(),
+            status,
+            findings,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1178,6 +1459,26 @@ pub enum OciRootfsImportError {
     },
 }
 
+#[derive(Debug, Error)]
+pub enum RootfsClassificationError {
+    #[error(transparent)]
+    Contract(#[from] ImageContractError),
+    #[error("rootfs path is not a directory: {path:?}")]
+    RootNotDirectory { path: PathBuf },
+    #[error("rootfs OS release accepted IDs cannot contain an empty value")]
+    EmptyOsReleaseId,
+    #[error("rootfs OS release accepted VERSION_IDs cannot contain an empty value")]
+    EmptyOsReleaseVersionId,
+    #[error("invalid rootfs requirement path {path:?}: {reason}")]
+    InvalidRequirementPath { path: PathBuf, reason: String },
+    #[error("I/O error at {path:?}: {source}")]
+    Io {
+        path: Option<PathBuf>,
+        #[source]
+        source: io::Error,
+    },
+}
+
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const DOCKER_IMAGE_MANIFEST_MEDIA_TYPE: &str =
     "application/vnd.docker.distribution.manifest.v2+json";
@@ -1246,6 +1547,498 @@ struct BearerChallenge {
     realm: String,
     service: Option<String>,
     scope: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PackageManagerClassification {
+    available: bool,
+    finding: RootfsRequirementFinding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootfsPathKind {
+    Missing,
+    File,
+    Directory,
+    Other,
+}
+
+fn validate_rootfs_requirement_path(path: &Path) -> Result<(), RootfsClassificationError> {
+    if !path.is_absolute() {
+        return Err(RootfsClassificationError::InvalidRequirementPath {
+            path: path.to_path_buf(),
+            reason: "path must be absolute".to_string(),
+        });
+    }
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir | Component::Normal(_) => {}
+            Component::ParentDir => {
+                return Err(RootfsClassificationError::InvalidRequirementPath {
+                    path: path.to_path_buf(),
+                    reason: "parent traversal is not allowed".to_string(),
+                });
+            }
+            Component::Prefix(_) => {
+                return Err(RootfsClassificationError::InvalidRequirementPath {
+                    path: path.to_path_buf(),
+                    reason: "platform path prefixes are not allowed".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rootfs_path(root: &Path, absolute_path: &Path) -> Result<PathBuf, RootfsClassificationError> {
+    validate_rootfs_requirement_path(absolute_path)?;
+    let mut path = root.to_path_buf();
+    for component in absolute_path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(value) => path.push(value),
+            Component::ParentDir | Component::Prefix(_) => unreachable!("validated above"),
+        }
+    }
+    Ok(path)
+}
+
+fn classify_path_kind(
+    root: &Path,
+    absolute_path: &Path,
+) -> Result<RootfsPathKind, RootfsClassificationError> {
+    let path = rootfs_path(root, absolute_path)?;
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => Ok(RootfsPathKind::Directory),
+        Ok(metadata) if metadata.is_file() => Ok(RootfsPathKind::File),
+        Ok(_) => Ok(RootfsPathKind::Other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(RootfsPathKind::Missing),
+        Err(source) => Err(RootfsClassificationError::Io {
+            path: Some(path),
+            source,
+        }),
+    }
+}
+
+fn find_existing_rootfs_path(
+    root: &Path,
+    paths: &[&str],
+) -> Result<Option<PathBuf>, RootfsClassificationError> {
+    for path in paths {
+        let absolute = Path::new(path);
+        if classify_path_kind(root, absolute)? != RootfsPathKind::Missing {
+            return Ok(Some(PathBuf::from(path)));
+        }
+    }
+    Ok(None)
+}
+
+fn read_rootfs_file_optional(
+    root: &Path,
+    absolute_path: &Path,
+) -> Result<Option<String>, RootfsClassificationError> {
+    let path = rootfs_path(root, absolute_path)?;
+    match fs::read_to_string(&path) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(RootfsClassificationError::Io {
+            path: Some(path),
+            source,
+        }),
+    }
+}
+
+fn read_rootfs_os_release(
+    root: &Path,
+) -> Result<Option<HashMap<String, String>>, RootfsClassificationError> {
+    for path in ["/etc/os-release", "/usr/lib/os-release"] {
+        if let Some(contents) = read_rootfs_file_optional(root, Path::new(path))? {
+            return Ok(Some(parse_os_release(&contents)));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_os_release(contents: &str) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = raw_value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        values.insert(key.trim().to_string(), value);
+    }
+    values
+}
+
+fn classify_os_release(
+    requirement: &RootfsOsRequirement,
+    os_release: Option<&HashMap<String, String>>,
+) -> RootfsRequirementFinding {
+    let Some(os_release) = os_release else {
+        return RootfsRequirementFinding::new(
+            RootfsRequirementKind::OsRelease,
+            RootfsRequirementStatus::Unsupported,
+            "missing /etc/os-release and /usr/lib/os-release",
+        );
+    };
+    let id = os_release.get("ID").cloned().unwrap_or_default();
+    let version_id = os_release.get("VERSION_ID").cloned().unwrap_or_default();
+    let id_matches = requirement.accepted_ids.is_empty()
+        || requirement
+            .accepted_ids
+            .iter()
+            .any(|accepted| accepted == &id);
+    let version_matches = requirement.accepted_version_ids.is_empty()
+        || requirement
+            .accepted_version_ids
+            .iter()
+            .any(|accepted| accepted == &version_id);
+    if id_matches && version_matches {
+        RootfsRequirementFinding::new(
+            RootfsRequirementKind::OsRelease,
+            RootfsRequirementStatus::Present,
+            format!("ID={id}, VERSION_ID={version_id}"),
+        )
+    } else {
+        RootfsRequirementFinding::new(
+            RootfsRequirementKind::OsRelease,
+            RootfsRequirementStatus::Unsupported,
+            format!(
+                "ID={id}, VERSION_ID={version_id}; expected IDs {:?}, versions {:?}",
+                requirement.accepted_ids, requirement.accepted_version_ids
+            ),
+        )
+    }
+}
+
+fn classify_package_manager(
+    root: &Path,
+    requirement: PackageManagerRequirement,
+) -> Result<PackageManagerClassification, RootfsClassificationError> {
+    match requirement {
+        PackageManagerRequirement::None => Ok(PackageManagerClassification {
+            available: false,
+            finding: RootfsRequirementFinding::new(
+                RootfsRequirementKind::PackageManager,
+                RootfsRequirementStatus::Present,
+                "no package manager required by profile",
+            ),
+        }),
+        PackageManagerRequirement::AptDpkg => {
+            let apt_get = find_existing_rootfs_path(root, &["/usr/bin/apt-get", "/bin/apt-get"])?;
+            let dpkg = find_existing_rootfs_path(root, &["/usr/bin/dpkg", "/bin/dpkg"])?;
+            match (apt_get, dpkg) {
+                (Some(apt_get), Some(dpkg)) => Ok(PackageManagerClassification {
+                    available: true,
+                    finding: RootfsRequirementFinding::new(
+                        RootfsRequirementKind::PackageManager,
+                        RootfsRequirementStatus::Present,
+                        format!("apt-get at {apt_get:?}, dpkg at {dpkg:?}"),
+                    ),
+                }),
+                (apt_get, dpkg) => Ok(PackageManagerClassification {
+                    available: false,
+                    finding: RootfsRequirementFinding::new(
+                        RootfsRequirementKind::PackageManager,
+                        RootfsRequirementStatus::Unsupported,
+                        format!("apt-get={apt_get:?}, dpkg={dpkg:?}"),
+                    ),
+                }),
+            }
+        }
+    }
+}
+
+fn classify_init_system(
+    root: &Path,
+    init: InitProfile,
+    package_manager_available: bool,
+) -> Result<Vec<RootfsRequirementFinding>, RootfsClassificationError> {
+    let finding = match init {
+        InitProfile::UbuntuSystemd => {
+            let systemd = find_existing_rootfs_path(
+                root,
+                &[
+                    "/usr/lib/systemd/systemd",
+                    "/lib/systemd/systemd",
+                    "/sbin/init",
+                ],
+            )?;
+            if let Some(path) = systemd {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::InitSystem,
+                    RootfsRequirementStatus::Present,
+                    format!("systemd indicator at {path:?}"),
+                )
+            } else if package_manager_available {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::InitSystem,
+                    RootfsRequirementStatus::MissingButInstallable,
+                    "systemd not present; apt/dpkg can install profile init packages",
+                )
+            } else {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::InitSystem,
+                    RootfsRequirementStatus::Unsupported,
+                    "systemd not present and package manager is unavailable",
+                )
+            }
+        }
+        InitProfile::Unsupported => RootfsRequirementFinding::new(
+            RootfsRequirementKind::InitSystem,
+            RootfsRequirementStatus::Unsupported,
+            "profile declares unsupported init",
+        ),
+        other => RootfsRequirementFinding::new(
+            RootfsRequirementKind::InitSystem,
+            RootfsRequirementStatus::Unsupported,
+            format!("classifier support for init profile {other:?} is not implemented"),
+        ),
+    };
+    Ok(vec![finding])
+}
+
+fn classify_required_binaries(
+    root: &Path,
+    required_binaries: &[PathBuf],
+) -> Result<Vec<RootfsRequirementFinding>, RootfsClassificationError> {
+    required_binaries
+        .iter()
+        .map(|path| {
+            let kind = classify_path_kind(root, path)?;
+            let (status, evidence) = match kind {
+                RootfsPathKind::File => (
+                    RootfsRequirementStatus::Present,
+                    format!("required binary {path:?} exists"),
+                ),
+                RootfsPathKind::Missing => (
+                    RootfsRequirementStatus::Unsupported,
+                    format!("required binary {path:?} is missing"),
+                ),
+                RootfsPathKind::Directory | RootfsPathKind::Other => (
+                    RootfsRequirementStatus::Unsupported,
+                    format!("required binary {path:?} is not a regular file"),
+                ),
+            };
+            Ok(RootfsRequirementFinding::new(
+                RootfsRequirementKind::RequiredBinary,
+                status,
+                evidence,
+            )
+            .with_path(path.clone()))
+        })
+        .collect()
+}
+
+fn read_installed_dpkg_packages(
+    root: &Path,
+) -> Result<BTreeSet<String>, RootfsClassificationError> {
+    let Some(status) = read_rootfs_file_optional(root, Path::new("/var/lib/dpkg/status"))? else {
+        return Ok(BTreeSet::new());
+    };
+    Ok(parse_dpkg_status(&status))
+}
+
+fn parse_dpkg_status(contents: &str) -> BTreeSet<String> {
+    let mut packages = BTreeSet::new();
+    let mut package_name: Option<String> = None;
+    let mut installed = false;
+    for line in contents.lines().chain(std::iter::once("")) {
+        let line = line.trim();
+        if line.is_empty() {
+            if installed {
+                if let Some(name) = package_name.take() {
+                    packages.insert(name);
+                }
+            }
+            package_name = None;
+            installed = false;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("Package:") {
+            package_name = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Status:") {
+            installed = value.trim() == "install ok installed";
+        }
+    }
+    packages
+}
+
+fn classify_required_packages(
+    required_packages: &[String],
+    installed_packages: &BTreeSet<String>,
+    package_manager_available: bool,
+) -> Vec<RootfsRequirementFinding> {
+    required_packages
+        .iter()
+        .map(|package| {
+            if installed_packages.contains(package) {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::RequiredPackage,
+                    RootfsRequirementStatus::Present,
+                    format!("package {package} is installed"),
+                )
+                .with_package(package.clone())
+            } else if package_manager_available {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::RequiredPackage,
+                    RootfsRequirementStatus::MissingButInstallable,
+                    format!("package {package} is not installed but apt/dpkg is available"),
+                )
+                .with_package(package.clone())
+            } else {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::RequiredPackage,
+                    RootfsRequirementStatus::Unsupported,
+                    format!("package {package} is missing and no package manager is available"),
+                )
+                .with_package(package.clone())
+            }
+        })
+        .collect()
+}
+
+fn classify_required_mount_points(
+    root: &Path,
+    mount_points: &[PathBuf],
+) -> Result<Vec<RootfsRequirementFinding>, RootfsClassificationError> {
+    mount_points
+        .iter()
+        .map(|path| {
+            let kind = classify_path_kind(root, path)?;
+            let (status, evidence) = match kind {
+                RootfsPathKind::Directory => (
+                    RootfsRequirementStatus::Present,
+                    format!("mount point {path:?} exists as a directory"),
+                ),
+                RootfsPathKind::Missing => (
+                    RootfsRequirementStatus::NeedsCompatibilityLayer,
+                    format!("mount point {path:?} must be created by compatibility layer"),
+                ),
+                RootfsPathKind::File | RootfsPathKind::Other => (
+                    RootfsRequirementStatus::Unsupported,
+                    format!("mount point {path:?} exists but is not a directory"),
+                ),
+            };
+            Ok(RootfsRequirementFinding::new(
+                RootfsRequirementKind::RequiredMountPoint,
+                status,
+                evidence,
+            )
+            .with_path(path.clone()))
+        })
+        .collect()
+}
+
+fn classify_vfs_requirements(
+    root: &Path,
+    requirements: &VfsGuestRequirements,
+) -> Result<Vec<RootfsRequirementFinding>, RootfsClassificationError> {
+    let mut findings = Vec::new();
+    if requirements.requires_dev_directory {
+        findings.push(match classify_path_kind(root, Path::new("/dev"))? {
+            RootfsPathKind::Directory => RootfsRequirementFinding::new(
+                RootfsRequirementKind::VfsDevDirectory,
+                RootfsRequirementStatus::Present,
+                "/dev exists as a directory",
+            )
+            .with_path("/dev"),
+            RootfsPathKind::Missing => RootfsRequirementFinding::new(
+                RootfsRequirementKind::VfsDevDirectory,
+                RootfsRequirementStatus::NeedsCompatibilityLayer,
+                "/dev must be created by compatibility layer or backend emitter",
+            )
+            .with_path("/dev"),
+            RootfsPathKind::File | RootfsPathKind::Other => RootfsRequirementFinding::new(
+                RootfsRequirementKind::VfsDevDirectory,
+                RootfsRequirementStatus::Unsupported,
+                "/dev exists but is not a directory",
+            )
+            .with_path("/dev"),
+        });
+    }
+    if requirements.requires_fuse_runtime_device {
+        let fuse_status = match classify_path_kind(root, Path::new("/dev/fuse"))? {
+            RootfsPathKind::File | RootfsPathKind::Other => (
+                RootfsRequirementStatus::Present,
+                "/dev/fuse exists in the rootfs".to_string(),
+            ),
+            RootfsPathKind::Missing => (
+                RootfsRequirementStatus::NeedsRuntimeProvisioning,
+                "/dev/fuse must be supplied by backend runtime provisioning".to_string(),
+            ),
+            RootfsPathKind::Directory => (
+                RootfsRequirementStatus::Unsupported,
+                "/dev/fuse exists but is a directory".to_string(),
+            ),
+        };
+        findings.push(
+            RootfsRequirementFinding::new(
+                RootfsRequirementKind::VfsFuseRuntimeDevice,
+                fuse_status.0,
+                fuse_status.1,
+            )
+            .with_path("/dev/fuse"),
+        );
+    }
+    Ok(findings)
+}
+
+fn classify_vnet_requirements(
+    root: &Path,
+    requirements: &VnetGuestRequirements,
+) -> Result<Vec<RootfsRequirementFinding>, RootfsClassificationError> {
+    let mut findings = Vec::new();
+    if requirements.requires_etc_directory {
+        findings.push(match classify_path_kind(root, Path::new("/etc"))? {
+            RootfsPathKind::Directory => RootfsRequirementFinding::new(
+                RootfsRequirementKind::VnetConfigDirectory,
+                RootfsRequirementStatus::Present,
+                "/etc exists for resolver and network configuration",
+            )
+            .with_path("/etc"),
+            RootfsPathKind::Missing => RootfsRequirementFinding::new(
+                RootfsRequirementKind::VnetConfigDirectory,
+                RootfsRequirementStatus::Unsupported,
+                "/etc is missing; VNET resolver/routing configuration has no safe target",
+            )
+            .with_path("/etc"),
+            RootfsPathKind::File | RootfsPathKind::Other => RootfsRequirementFinding::new(
+                RootfsRequirementKind::VnetConfigDirectory,
+                RootfsRequirementStatus::Unsupported,
+                "/etc exists but is not a directory",
+            )
+            .with_path("/etc"),
+        });
+    }
+    Ok(findings)
+}
+
+fn aggregate_classification_status(
+    findings: &[RootfsRequirementFinding],
+) -> RootfsClassificationStatus {
+    if findings
+        .iter()
+        .any(|finding| finding.status == RootfsRequirementStatus::Unsupported)
+    {
+        RootfsClassificationStatus::Unsupported
+    } else if findings
+        .iter()
+        .any(|finding| finding.status != RootfsRequirementStatus::Present)
+    {
+        RootfsClassificationStatus::CompatibleWithAdaptation
+    } else {
+        RootfsClassificationStatus::Ready
+    }
 }
 
 async fn manifest_response_from_reqwest(
@@ -2026,6 +2819,71 @@ mod tests {
         path
     }
 
+    fn write_rootfs_file(root: &Path, absolute_path: &str, contents: &str) {
+        let path = root.join(absolute_path.trim_start_matches('/'));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    fn create_rootfs_dir(root: &Path, absolute_path: &str) {
+        fs::create_dir_all(root.join(absolute_path.trim_start_matches('/'))).unwrap();
+    }
+
+    fn write_dpkg_status(root: &Path, packages: &[&str]) {
+        let mut status = String::new();
+        for package in packages {
+            status.push_str(&format!(
+                "Package: {package}\nStatus: install ok installed\n\n"
+            ));
+        }
+        write_rootfs_file(root, "/var/lib/dpkg/status", &status);
+    }
+
+    fn ubuntu_classifier_source() -> ExternalOciSource {
+        ExternalOciSource::ubuntu_systemd(OciPlatform::linux_amd64(), digest('a'), digest('b'))
+    }
+
+    fn finding_by_kind(
+        classification: &RootfsClassification,
+        kind: RootfsRequirementKind,
+    ) -> &RootfsRequirementFinding {
+        classification
+            .findings
+            .iter()
+            .find(|finding| finding.kind == kind)
+            .unwrap_or_else(|| panic!("missing finding for {kind:?}"))
+    }
+
+    fn package_finding<'a>(
+        classification: &'a RootfsClassification,
+        package: &str,
+    ) -> &'a RootfsRequirementFinding {
+        classification
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.kind == RootfsRequirementKind::RequiredPackage
+                    && finding.package.as_deref() == Some(package)
+            })
+            .unwrap_or_else(|| panic!("missing package finding for {package}"))
+    }
+
+    fn path_finding<'a>(
+        classification: &'a RootfsClassification,
+        kind: RootfsRequirementKind,
+        path: &str,
+    ) -> &'a RootfsRequirementFinding {
+        classification
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.kind == kind && finding.path.as_deref() == Some(Path::new(path))
+            })
+            .unwrap_or_else(|| panic!("missing {kind:?} finding for {path}"))
+    }
+
     #[test]
     fn platform_defaults_follow_backend_contract() {
         assert_eq!(
@@ -2405,6 +3263,122 @@ mod tests {
     }
 
     #[test]
+    fn rootfs_classifier_marks_ubuntu_foundation_compatible_with_adaptation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        write_rootfs_file(root, "/etc/os-release", "ID=ubuntu\nVERSION_ID=\"24.04\"\n");
+        write_rootfs_file(root, "/usr/bin/apt-get", "");
+        write_rootfs_file(root, "/usr/bin/dpkg", "");
+        write_rootfs_file(root, "/bin/sh", "");
+        write_dpkg_status(root, &["base-files", "ca-certificates"]);
+        create_rootfs_dir(root, "/dev");
+
+        let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_eq!(
+            classification.status,
+            RootfsClassificationStatus::CompatibleWithAdaptation
+        );
+        assert!(classification.is_supported_foundation());
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::OsRelease).status,
+            RootfsRequirementStatus::Present
+        );
+        assert_eq!(
+            package_finding(&classification, "git").status,
+            RootfsRequirementStatus::MissingButInstallable
+        );
+        assert_eq!(
+            path_finding(
+                &classification,
+                RootfsRequirementKind::RequiredMountPoint,
+                "/workspace"
+            )
+            .status,
+            RootfsRequirementStatus::NeedsCompatibilityLayer
+        );
+        assert_eq!(
+            path_finding(
+                &classification,
+                RootfsRequirementKind::VfsFuseRuntimeDevice,
+                "/dev/fuse"
+            )
+            .status,
+            RootfsRequirementStatus::NeedsRuntimeProvisioning
+        );
+    }
+
+    #[test]
+    fn rootfs_classifier_rejects_wrong_os_for_ubuntu_profile() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        write_rootfs_file(root, "/etc/os-release", "ID=alpine\nVERSION_ID=\"3.20\"\n");
+        write_rootfs_file(root, "/usr/bin/apt-get", "");
+        write_rootfs_file(root, "/usr/bin/dpkg", "");
+        write_rootfs_file(root, "/bin/sh", "");
+        create_rootfs_dir(root, "/dev");
+
+        let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_eq!(
+            classification.status,
+            RootfsClassificationStatus::Unsupported
+        );
+        assert!(!classification.is_supported_foundation());
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::OsRelease).status,
+            RootfsRequirementStatus::Unsupported
+        );
+    }
+
+    #[test]
+    fn rootfs_classifier_honors_custom_profile_requirements() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        write_rootfs_file(root, "/etc/os-release", "ID=ubuntu\nVERSION_ID=\"24.04\"\n");
+        write_rootfs_file(root, "/usr/bin/apt-get", "");
+        write_rootfs_file(root, "/usr/bin/dpkg", "");
+        write_rootfs_file(root, "/usr/lib/systemd/systemd", "");
+        write_dpkg_status(root, &["base-files"]);
+        create_rootfs_dir(root, "/dev");
+        create_rootfs_dir(root, "/project");
+
+        let mut profile = GuestImageProfile::ubuntu_systemd(ubuntu_classifier_source());
+        profile.required_packages = vec!["base-files".to_string()];
+        profile.required_mount_points = vec![PathBuf::from("/project")];
+        let mut spec = RootfsProfileSpec::for_profile(profile);
+        spec.required_binaries.clear();
+        spec.vfs.requires_fuse_runtime_device = false;
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_eq!(classification.status, RootfsClassificationStatus::Ready);
+        assert_eq!(
+            package_finding(&classification, "base-files").status,
+            RootfsRequirementStatus::Present
+        );
+        assert!(
+            classification
+                .findings
+                .iter()
+                .all(|finding| finding.package.as_deref() != Some("git")),
+            "custom package set must not inherit v1.5 example package choices"
+        );
+    }
+
+    #[test]
+    fn rootfs_profile_spec_rejects_relative_binary_requirements() {
+        let mut spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        spec.required_binaries = vec![PathBuf::from("bin/sh")];
+
+        assert!(matches!(
+            spec.validate(),
+            Err(RootfsClassificationError::InvalidRequirementPath { .. })
+        ));
+    }
+
+    #[test]
     fn rootfs_importer_rejects_digest_mismatch() {
         let tempdir = tempfile::tempdir().unwrap();
         let layer_root = tempdir.path().join("layers");
@@ -2529,6 +3503,16 @@ mod tests {
             .unwrap();
         let os_release = fs::read_to_string(imported.root.join("etc/os-release")).unwrap();
         assert!(os_release.contains("ID=ubuntu"));
+        let profile = GuestImageProfile::ubuntu_systemd(cached.resolved.into_external_source());
+        let spec = RootfsProfileSpec::for_profile(profile);
+        let classification = RootfsClassifier::new()
+            .classify(&imported.root, &spec)
+            .unwrap();
+        assert!(classification.is_supported_foundation());
+        assert_ne!(
+            classification.status,
+            RootfsClassificationStatus::Unsupported
+        );
     }
 
     #[test]

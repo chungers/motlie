@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Implement the Phase 11 rootfs classifier API and mark the imported-rootfs classification gate complete for the first `ubuntu-systemd` profile |
+| 2026-05-07 | @vmm-cdx | Add the Phase 11 rootfs classifier slice: classify imported OCI rootfs paths using typed stable VMM/VFS/VNET invariants plus data-driven profile requirements before compatibility-layer assembly |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11 whiteout handling so empty whiteout targets are rejected and opaque-whiteout metadata errors fail closed |
 | 2026-05-07 | @vmm-cdx | Mark Phase 11 registry fetch/cache complete for selected platform manifests and layer blobs feeding importer-ready layer inputs |
 | 2026-05-07 | @vmm-cdx | Mark the first Phase 11 rootfs importer slice complete for selected platform manifest parsing, digest-checked local layer unpacking, deterministic assembly roots, and OCI whiteouts |
@@ -90,7 +92,11 @@ Current common guest-image implementation status:
       validate a freeform profile name against unrelated source metadata.
 - [x] Registry v2 manifest/index resolution is implemented for immutable
       image-index digest and selected platform-manifest digest discovery.
-- [ ] OCI layer/rootfs import is not implemented yet.
+- [x] OCI layer/rootfs import is implemented with digest/size checks,
+      deterministic empty-root assembly, gzip/plain tar support, OCI whiteouts,
+      and content-addressed layer cache input.
+- [x] Imported rootfs classification is implemented as the read-only gate before
+      Motlie compatibility-layer assembly.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
       than a Rust-owned OCI-derived rootfs assembly.
 
@@ -592,13 +598,21 @@ Tasks:
         before producing importer-ready layer inputs
   - [x] add ignored live-registry validation that fetches Ubuntu rootfs layers
         into cache and imports `/etc/os-release`
-- [ ] inspect and classify the imported image against the first
+- [x] inspect and classify the imported image against a data-driven
       `ubuntu-systemd` profile:
-  - [ ] OS release
-  - [ ] package manager
-  - [ ] init/systemd capability
-  - [ ] SSH/sudo/network tooling baseline
-  - [ ] `/dev/fuse` and mount-point assumptions
+  - [x] add `RootfsProfileSpec` derived from `GuestImageProfile` but overridable
+        by admins/builders for package, mount, OS, init, and binary requirements
+  - [x] report stable VMM/VFS/VNET invariants separately from profile-specific
+        requirements
+  - [x] classify OS release
+  - [x] classify package manager and installed/missing package state
+  - [x] classify init/systemd capability
+  - [x] classify SSH/sudo/network tooling baseline from profile-required
+        packages
+  - [x] classify `/dev`, FUSE runtime-device expectation, VNET config-path, and
+        mount-point assumptions
+  - [x] return machine-readable `ready`, `compatible-with-adaptation`, or
+        `unsupported` status with typed findings
 - [ ] apply the pre-boot Motlie compatibility layer:
   - [ ] Motlie guest binaries under `/opt/motlie/v1.5/guest/bin`
   - [ ] compatibility symlinks under `/usr/local/bin`
