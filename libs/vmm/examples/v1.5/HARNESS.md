@@ -116,6 +116,9 @@ under `cloud-init.target`. The guest mounter orders itself after
 `cloud-final.service`, and `motlie-agent-state.service` orders itself after the
 guest mounter, so enabling either one under `multi-user.target` creates an
 ordering cycle that prevents CH harness readiness from completing.
+This is an image-profile invariant for OCI-derived `ubuntu-systemd` guests, not
+a CH-only runtime workaround: image importers and backend emitters must preserve
+the same pre-boot service graph for both CH and VZ artifacts.
 
 The v1.5 builders bake smoke-image hardening during image assembly:
 

@@ -146,6 +146,9 @@ seeded user/home contract, so enabling it under `multi-user.target` creates an
 ordering cycle and blocks first-contact readiness on the CH path. Dependent
 units that order themselves after `motlie-vfs-guest.service`, such as
 `motlie-agent-state.service`, must stay on the same `cloud-init.target` path.
+This is now part of the OCI-derived `ubuntu-systemd` compatibility profile:
+builders and backend emitters must bake the target wiring before guest boot
+instead of repairing units through first-contact SSH or launcher mutation.
 
 First-contact SSH must wait only for interactive readiness. Full egress, CLI,
 package-manager, and VFS/VNET certification belongs in explicit harness

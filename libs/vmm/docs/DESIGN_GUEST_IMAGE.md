@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-06 | @vmm-cdx | Fold the CH `cloud-init.target` boot-graph fix into the OCI-derived `ubuntu-systemd` compatibility profile contract |
 | 2026-05-06 | @vmm-cdx | Clarify OCI source registry and digest semantics for cross-backend validation after PR feedback |
 | 2026-05-06 | @vmm-cdx | Reorder the OCI roadmap so the first contract slice starts from an Ubuntu OCI import profile and derives the Motlie guest contract from a real base image |
 | 2026-05-06 | @vmm-cdx | Refine emitter timing from static-only adaptation to pre-boot persistent or ephemeral emission and document Apple VZ storage constraints |
@@ -407,6 +408,19 @@ cloud-init
   -> motlie-control-plane-ready.service
 ```
 
+For the `ubuntu-systemd` profile, `motlie-vfs-guest.service` and
+`motlie-agent-state.service` are installed under `cloud-init.target`, not
+`multi-user.target`. The VFS guest mounter intentionally orders after
+`cloud-final.service` because it consumes seeded user, home, and mount
+configuration. Installing that unit, or a dependent unit such as
+`motlie-agent-state.service`, under `multi-user.target` creates a systemd
+ordering cycle on the CH path and prevents harness readiness from completing.
+
+This rule is part of the image compatibility profile. OCI importers and CH/VZ
+emitters must bake the target wiring into emitted artifacts before guest boot.
+They must not rely on privileged first-contact SSH, launcher-side unit repair,
+or backend-specific post-boot mutation to fix the service graph.
+
 `motlie-control-plane-ready.service` asserts interactive readiness only. It must
 not run package installs, npm repair, cargo builds, package-manager quiescence
 polling, egress certification, or full VFS/VNET validation.
@@ -583,6 +597,9 @@ Pre-boot adaptation owns:
 - installing Motlie guest binaries under `/opt/motlie/v1.5/guest/bin`
 - exposing compatibility paths under `/usr/local/bin`
 - installing systemd units or an approved Motlie init profile
+- enabling the common boot graph under `cloud-init.target` for the
+  `ubuntu-systemd` profile, including `motlie-vfs-guest.service` and
+  `motlie-agent-state.service`
 - creating stable mount point directories such as `/workspace`,
   `/agent-state`, and `/home/<user>` templates where the image policy requires
   them
