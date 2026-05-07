@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-06 | @vmm-cdx | Clarify OCI source registry and digest semantics for cross-backend validation after PR feedback |
 | 2026-05-06 | @vmm-cdx | Reorder the OCI roadmap so the first contract slice starts from an Ubuntu OCI import profile and derives the Motlie guest contract from a real base image |
 | 2026-05-06 | @vmm-cdx | Refine emitter timing from static-only adaptation to pre-boot persistent or ephemeral emission and document Apple VZ storage constraints |
 | 2026-05-06 | @vmm-cdx | Document OCI compatibility, static emitter adaptation, external Docker image import profiles, and VFS/VNET impact for CH and VZ |
@@ -435,18 +436,21 @@ blob.
 The roadmap starts from a real compatible OCI base image, then generalizes the
 Motlie contract from what the harness requires that base to provide.
 
-The first supported profile should be `ubuntu-systemd` over `ubuntu:24.04` or a
-newer supported Ubuntu LTS tag. Ubuntu is the right first foundation because
+The first supported profile should be `ubuntu-systemd` over
+`docker.io/library/ubuntu:24.04`. Ubuntu is the right first foundation because
 the current v1.5 harness contract already assumes an apt-based, systemd-capable
 guest with sudo, OpenSSH, common Linux networking tools, and coding-agent CLI
-startup checks.
+startup checks. The tag is only the discovery input. The imported source must
+be pinned by immutable OCI digests before it is accepted as a Motlie guest
+profile.
 
 The roadmap is:
 
 1. Import a concrete Ubuntu OCI image and derive the first Motlie compatibility
    profile.
-   - Resolve `ubuntu:24.04` or the selected Ubuntu LTS tag through its OCI image
-     index.
+   - Resolve `docker.io/library/ubuntu:24.04` through its OCI image index.
+   - Record the image reference, image-index digest, selected platform, and
+     selected platform-manifest digest.
    - Select `linux/amd64` for native CH-on-DGX validation and `linux/arm64` for
      Apple Silicon VZ validation.
    - Inspect the rootfs for OS release, package manager, init system, users,
@@ -456,6 +460,8 @@ The roadmap is:
      to pass.
    - Treat the required additions as the first concrete
      `ubuntu-systemd` Motlie guest contract.
+   - Treat a newer Ubuntu LTS as a new profile version unless the full harness
+     matrix has been rerun and the source digests have been updated explicitly.
 
 2. Freeze the typed guest image and boot contract from that profile.
    - Define typed schemas for guest users, package baseline, systemd units,
@@ -496,12 +502,13 @@ The roadmap is:
      sense: one source payload, two backend emitters.
 
 6. Require one harness validation matrix across both backends for the same OCI
-   digest.
+   image-index digest and declared platform variants.
    - The saved scenarios for bootstrap, SSH auto-provision, VFS, VNET/egress,
      PTY/Codex, and multi-guest operation must pass for CH and VZ from the same
      logical image contract.
-   - Validation results should record the OCI digest, contract version, backend
-     kind, and emitted artifact metadata.
+   - Validation results should record the OCI image-index digest, selected
+     platform, selected platform-manifest digest, contract version, backend
+     kind, emitted backend artifact digests, and emitted artifact metadata.
 
 7. Publish one multi-arch OCI image reference.
    - After the per-arch OCI payloads and emitters are stable, publish one OCI
@@ -695,9 +702,11 @@ import profile before VMM treats them as Motlie guest images.
 
 Good initial candidates:
 
-- `ubuntu:24.04` or another supported Ubuntu tag. Docker Hub publishes Ubuntu
-  as a Docker Official Image, and Canonical documents Ubuntu OCI images as
-  multi-architecture images built from minimal rootfs tarballs.
+- `docker.io/library/ubuntu:24.04` for the first `ubuntu-systemd` profile.
+  Docker Hub publishes Ubuntu as a Docker Official Image, and Canonical
+  documents Ubuntu OCI images as multi-architecture images built from minimal
+  rootfs tarballs. Newer Ubuntu LTS tags require a new profile version or an
+  explicit digest update with the full harness matrix rerun.
 - `alpine:3` or another supported Alpine tag for a smaller experimental
   profile. Docker Hub publishes Alpine as a Docker Official Image with
   `amd64` and `arm64v8` support, among other architectures.
@@ -722,14 +731,20 @@ The importer must classify each source image:
 ```text
 ExternalOciSource
   image_ref
-  digest
+  image_index_digest
   platform
+  platform_manifest_digest
   os_release
   libc_family
   package_manager
   init_profile
   motlie_compatibility_profile
 ```
+
+For the first profile, `image_ref` is `docker.io/library/ubuntu:24.04`. The
+profile must store the resolved image-index digest and the selected platform
+manifest digest. Tags are not sufficient for reproducible validation because
+registries can move them.
 
 Supported import profiles:
 
@@ -742,13 +757,13 @@ Supported import profiles:
   a Motlie guest without a profile that defines init, SSH, VFS, VNET, and
   validation behavior.
 
-The first implementation should use Ubuntu because the current v1.5 examples
-already assume apt, `sudo -n apt-get update`, systemd units, and coding-agent
-CLI startup checks. Alpine is feasible, but it is a separate profile because
-package names, init system, shell/coreutils behavior, and service management
-differ. The Motlie contract should emerge from the Ubuntu profile first, then
-be factored into profile-independent requirements and profile-specific
-requirements once a second base image is implemented.
+The first implementation should use Docker Hub's Ubuntu official image because
+the current v1.5 examples already assume apt, `sudo -n apt-get update`, systemd
+units, and coding-agent CLI startup checks. Alpine is feasible, but it is a
+separate profile because package names, init system, shell/coreutils behavior,
+and service management differ. The Motlie contract should emerge from the
+Ubuntu profile first, then be factored into profile-independent requirements
+and profile-specific requirements once a second base image is implemented.
 
 ## Success Criteria
 
