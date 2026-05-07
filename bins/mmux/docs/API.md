@@ -188,9 +188,8 @@ pub enum ScrollbackQuery {
 }
 ```
 
-`LinesRange` supports chunked backwards fetch for the R pane. It is used by
-both sample mode and monitor mode when the user scrolls older than the current
-buffer start.
+`LinesRange` supports chunked backwards fetch for the R/B pane when the user
+scrolls older than the current buffer start.
 
 Status: implemented in `motlie-tmux` capture paths and used by
 `mmux` PageUp detail fetches.
@@ -343,17 +342,15 @@ Durations use `now`, `m`, `h`, or `d`; day values keep at most one decimal
 digit.
 Bottom status text contains compact key hints and app status, not the host
 label, current time, layout/focus labels, or a `keys` prefix. Command hints in
-the bottom status start with `tab ↑/↓`, then `help`, `monitor`, `prompt`,
-`attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, and the
+the bottom status start with `tab ↑/↓`, then `help`, `prompt`, `attach`,
+`new`, `kill`, `rename`, `group`, `layout`, `quit`, and the
 mode-specific resize hint. Attach uses the `a` shortcut; command shortcut
 letters are rendered bold coral in command labels.
 Direction hints render as `↑/↓`.
 
-Plain Enter while the session list has focus resets the detail source to
-`Sample` and forces a one-shot capture for the highlighted session. This gives
-the operator a quick current-state refresh without entering continuous monitor
-mode; `m` remains the monitor command. The detail-pane title displays the
-active source mode as a bold `snapshot` or bold `monitor` label.
+Plain Enter while the session list has focus forces an immediate live-preview
+capture for the highlighted session. The detail-pane title displays a bold
+`live` label.
 
 `r` opens `RenameSession` only when the session list has focus. The modal
 captures `(host_id, session_id)` plus the current display name, prepopulates the
@@ -372,9 +369,8 @@ dispatches a second explicit `{Enter}` sequence through the same target.
 Submitted input ending in `$$` is normalized by stripping that suffix and using
 the same delayed Enter dispatch mode. If the suffix is the entire submitted
 input, mmux skips the initial key dispatch and sends only the delayed `{Enter}`.
-After a successful send, mmux forces `refresh_detail(..., true)` when the detail
-source is `Sample`; monitor mode keeps its existing cadence and is not
-recaptured from the send path.
+After a successful send, mmux forces `refresh_detail(..., true)` so the live
+preview reflects the target promptly.
 The modal accepts tmux key-name shorthand such as `{C-m}` for Enter because
 `KeySequence` passes valid raw key names through to tmux.
 Focused modal text inputs set the terminal cursor to the insertion point; the
@@ -445,53 +441,31 @@ the selected host id through `Ok` so create dispatches to that host.
 
 ## Detail Source Contract
 
-The R/B detail pane is decoupled from concrete data sources:
+The R/B detail pane is a selected-session active-pane live preview:
 
 ```rust
-trait SessionDetailSource {
-    async fn activate(
-        &mut self,
-        host: &motlie_tmux::HostHandle,
-        session: &SelectedSession,
-    ) -> anyhow::Result<()>;
+async fn render_live_preview(
+    host: &motlie_tmux::HostHandle,
+    session: &SelectedSession,
+) -> anyhow::Result<String>;
 
-    async fn tick(&mut self) -> anyhow::Result<Option<DetailDelta>>;
-
-    async fn fetch_older(
-        &mut self,
-        before_line: usize,
-        count: usize,
-    ) -> anyhow::Result<Vec<String>>;
-
-    async fn deactivate(&mut self) -> anyhow::Result<()>;
-}
-
-enum DetailDelta {
-    Append(String),
-    Replace(String),
-}
+async fn fetch_older_lines(
+    host: &motlie_tmux::HostHandle,
+    session: &SelectedSession,
+    before_line: usize,
+    count: usize,
+) -> anyhow::Result<String>;
 ```
 
-The implementation uses the stable Rust private async trait directly; no
-`async-trait` dependency is required. Shipped detail modes use a closed enum
-over `Box<dyn ...>`:
-
-```rust
-enum DetailMode {
-    Sample(SampleDetailSource),
-    Monitor(MonitorDetailSource),
-}
-```
-
-`SampleDetailSource` resolves the selected session by stable id and calls
-`sample_text_with_options(..., CaptureNormalizeMode::ScreenStable, None)` so
-normal detail mode can preserve ANSI color/style. `MonitorDetailSource`
-resolves the selected session by stable id, calls
-`capture_all_with_options(CaptureNormalizeMode::ScreenStable)`, and renders the
-visible content through `ansi-to-tui`'s VTE parser. Both modes parse the
-captured content before rendering so escape bytes do not leak into ratatui
-text, while monitor mode remains a rendered screen mirror suitable for TUI
-sessions instead of a raw `%output` control-mode transcript.
+`render_live_preview` resolves the selected session by stable id and calls
+`Target::capture_with_options(CaptureNormalizeMode::ScreenStable)`, which
+captures the active pane for a session-level target. mmux does not use the
+all-pane `capture_all_with_options()` path for default detail rendering because
+the current UI has no pane selector and the detail pane is designed around one
+active screen. `fetch_older_lines` uses
+`sample_text_with_options(... LinesRange ..., ScreenStable, None)` for chunked
+scrollback. Captured content is parsed through `ansi-to-tui` so escape bytes do
+not leak into ratatui text.
 
 ## Session Operations
 
@@ -604,9 +578,9 @@ API tests must cover:
 - host event stream notification mapping
 - `LinesRange` scrollback boundaries
 - session-id dispatch under rename race
-- detail source append/replace/fetch older behavior
-- sample color preservation, monitor screen capture, and ANSI/VTE parser
-  behavior
+- detail source render/fetch older behavior
+- active-pane color preservation, no all-pane listing for live preview, and
+  ANSI/VTE parser behavior
 - modified-arrow resize fallback behavior
 - `p` key focus-cycling behavior in landscape and portrait layouts
 - `l` key layout toggling and retained layout re-entry behavior
@@ -632,6 +606,6 @@ Current implementation coverage:
   auto-detection, `q` exit, `a` attach, detail scroll direction,
   modified-arrow resize fallbacks, Tab pane focus transitions, `l` layout
   toggle behavior, compact status hint rendering, landscape/portrait
-  session-list/detail rendering, sample color preservation, Help modal
-  key-function/display/close behavior, monitor screen capture, ANSI/VTE
-  parsing, and monitored-session-close reset.
+  session-list/detail rendering, active-pane color preservation, Help modal
+  key-function/display/close behavior, live detail capture, and ANSI/VTE
+  parsing.
