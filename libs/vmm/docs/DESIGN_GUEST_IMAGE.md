@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten resolver provenance so single-image manifests are rejected until config blob inspection verifies the requested platform |
+| 2026-05-07 | @vmm-cdx | Clarify v1.5 acceptance: functional parity with v1.4 CH and v1.45 VZ through the unified v1.5 harness, image builder, and OCI-derived guest image path |
+| 2026-05-07 | @vmm-cdx | Add the first OCI Registry v2 resolver implementation for image reference parsing, immutable index digest resolution, and platform manifest selection |
 | 2026-05-07 | @vmm-cdx | Tighten the initial OCI implementation contract so validation records embed the typed profile and full-length SHA digests are enforced |
 | 2026-05-07 | @vmm-cdx | Start the OCI import profile implementation with typed source/profile/platform/artifact metadata in `libs/vmm/src/image.rs` |
 | 2026-05-06 | @vmm-cdx | Fold the CH `cloud-init.target` boot-graph fix into the OCI-derived `ubuntu-systemd` compatibility profile contract |
@@ -786,14 +789,15 @@ and profile-specific requirements once a second base image is implemented.
 
 ### Current Implementation Slice
 
-`libs/vmm/src/image.rs` is the first Rust surface for this roadmap. It does not
-pull registry content or emit VM boot artifacts yet. It establishes the typed
-metadata that later importer, assembler, emitter, harness, and CI code must
-share:
+`libs/vmm/src/image.rs` is the first Rust surface for this roadmap. It resolves
+registry manifest metadata and establishes the typed metadata that later
+importer, assembler, emitter, harness, and CI code must share. It does not yet
+pull layer blobs, unpack rootfs layers, or emit VM boot artifacts.
 
 - `OciPlatform` and `GuestArchitecture` record the selected OCI platform.
 - `OciDigest` records immutable image-index, platform-manifest, and emitted
   artifact digests.
+- `OciImageReference` parses and normalizes Docker/OCI-style image references.
 - `ExternalOciSource` records the source image reference plus resolved
   immutable OCI identity.
 - `GuestImageProfile` records the Motlie compatibility profile derived from
@@ -801,6 +805,13 @@ share:
 - `GuestImageValidationRecord` embeds the typed `GuestImageProfile`, then
   records backend kind, contract version, and emitted artifact digests needed
   to prove which guest image/profile combination was validated.
+- `OciRegistryClient` resolves an image reference through Registry v2,
+  including Bearer auth challenge handling, local `sha256` digest computation
+  for the returned index/manifest body, optional `Docker-Content-Digest`
+  verification, and selected platform-manifest digest extraction from an OCI
+  image index or Docker manifest list. Single-image manifests are rejected until
+  the resolver fetches the manifest config blob and verifies `os` /
+  `architecture`.
 
 The current `ubuntu-systemd` profile validates against
 `docker.io/library/ubuntu:24.04` and `InitProfile::UbuntuSystemd`; validation
@@ -838,6 +849,37 @@ v1.5 succeeds when:
     rootfs assembler, per-arch OCI guest payloads, backend emitters that
     consume those payloads, and a final published multi-arch OCI guest image
     reference.
+
+## v1.5 Functional Parity Acceptance
+
+The v1.5 line is accepted only when it is functionally equivalent to the
+historical v1.4 CH path and v1.45 VZ path while using the unified v1.5
+implementation shape:
+
+- one v1.5 harness entrypoint and scenario matrix
+- one VMM-owned image builder contract
+- one OCI-derived guest image/profile flow
+- backend-specific emitters only for CH/VZ boot-artifact and launcher
+  differences
+
+The historical lines remain acceptance baselines, not the implementation
+target. v1.5 must preserve their guest-visible behavior:
+
+- multi-guest lifecycle and isolation
+- SSH first-contact and auto-provisioning
+- VFS mounts for home/workspace/agent-state semantics
+- VNET/egress DNS, HTTPS, and apt readiness
+- passwordless sudo where the validation profile requires it
+- PTY/TUI interaction, including Codex/Claude startup checks with no OS-level
+  execution errors
+- reproducible harness artifacts sufficient for later debugging
+
+Resolver and OCI-import tests are necessary sub-gates, not sufficient final
+acceptance. A resolver PR must run live registry validation when it changes
+source resolution. An importer/emitter PR must additionally prove that the
+resolved OCI payload flows through the unified image builder into CH and VZ
+artifacts. Final v1.5 acceptance requires the shared v1.5 harness matrix to
+pass against both CH and VZ from the OCI-derived guest image path.
 
 ## Related Documents
 

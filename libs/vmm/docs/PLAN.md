@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten Phase 11 resolver provenance so single-image manifests are rejected until config inspection can verify platform identity |
+| 2026-05-07 | @vmm-cdx | Clarify Phase 11 acceptance: v1.5 must prove v1.4 CH and v1.45 VZ functional parity through the unified v1.5 harness, image builder, and OCI guest image flow |
+| 2026-05-07 | @vmm-cdx | Mark Phase 11 registry digest resolution complete with the new Registry v2 resolver in `libs/vmm/src/image.rs` |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11's first slice so OCI validation records embed the typed profile and SHA digests validate full lengths |
 | 2026-05-07 | @vmm-cdx | Add Phase 11 for the OCI import profile implementation and mark the first typed image contract slice complete |
 | 2026-05-02 | @codex-vz | Record the v1.5 common guest image workstream and VMM ownership of guest image, seed schema, guest binary packaging, and `libs/vmm/src/guest` / `libs/vmm/bins` home |
@@ -82,7 +85,9 @@ Current common guest-image implementation status:
       artifact digests, and validation records.
 - [x] `GuestImageValidationRecord` embeds `GuestImageProfile` so a record cannot
       validate a freeform profile name against unrelated source metadata.
-- [ ] registry resolution and OCI layer/rootfs import are not implemented yet.
+- [x] Registry v2 manifest/index resolution is implemented for immutable
+      image-index digest and selected platform-manifest digest discovery.
+- [ ] OCI layer/rootfs import is not implemented yet.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
       than a Rust-owned OCI-derived rootfs assembly.
 
@@ -553,9 +558,20 @@ Tasks:
   - [x] `OciDigest`
   - [x] `GuestImageProfile`
   - [x] `GuestImageValidationRecord`
-- [ ] add a registry resolver that turns
+- [x] add a registry resolver that turns
       `docker.io/library/ubuntu:24.04` into immutable image-index and selected
       platform-manifest digests
+  - [x] parse Docker/OCI image references
+  - [x] normalize Docker Hub official images to `docker.io/library/...`
+  - [x] request OCI image index and Docker manifest list media types
+  - [x] handle Bearer auth challenge/token flow
+  - [x] compute and validate returned manifest/index body digest
+  - [x] select platform manifest digest for `linux/amd64` or `linux/arm64`
+        from OCI image indexes / Docker manifest lists
+  - [x] reject single-image manifests until config blob inspection verifies the
+        requested platform
+  - [x] add ignored live-registry validation for Ubuntu `linux/amd64` and
+        `linux/arm64` resolution
 - [ ] add a rootfs importer that unpacks the selected OCI platform layers into
       a deterministic assembly root
 - [ ] inspect and classify the imported image against the first
@@ -597,6 +613,22 @@ Acceptance:
   backend-neutral Motlie guest contract
 - the harness can report exactly which source digest, selected platform, and
   emitted backend artifacts were validated
+- live registry validation is mandatory for PRs that change source resolution:
+  `cargo test -p motlie-vmm resolves_ubuntu_systemd_source_from_registry --lib -- --ignored`
+- v1.5 final acceptance requires functional parity with the v1.4 CH path and
+  v1.45 VZ path, but through the unified v1.5 harness, unified image builder,
+  and OCI-derived guest image/profile flow
+- the v1.5 harness matrix must pass against both CH and VZ for the same logical
+  guest contract, including:
+  - [ ] multi-guest lifecycle and isolation
+  - [ ] SSH first-contact and auto-provisioning
+  - [ ] VFS home/workspace/agent-state semantics
+  - [ ] VNET/egress DNS, HTTPS, and apt readiness
+  - [ ] passwordless sudo for validation users
+  - [ ] PTY/TUI interaction and Codex/Claude startup checks
+  - [ ] reproducible run artifacts for debugging
+- v1.4 and v1.45 remain historical acceptance baselines; new v1.5 work must not
+  fork their harness or image-builder shapes forward
 
 ## Non-Goals for This Plan
 

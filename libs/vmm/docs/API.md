@@ -15,6 +15,9 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | tighten resolver provenance so single-image manifests are rejected until config blob inspection can verify the requested platform
+- 2026-05-07 | @vmm-cdx | document that resolver live tests are a PR sub-gate and v1.5 acceptance requires v1.4/v1.45 functional parity through the unified v1.5 harness/image-builder/OCI flow
+- 2026-05-07 | @vmm-cdx | add the first OCI Registry v2 resolver API for image reference parsing, manifest/index digest resolution, platform manifest selection, and bearer-token auth
 - 2026-05-07 | @vmm-cdx | tighten the guest-image contract so `sha256` digests must be full-length and validation records embed the typed profile instead of a freeform profile name
 - 2026-05-07 | @vmm-cdx | add the first guest-image OCI contract surface in `image.rs` for source digests, selected platform, import profile, and emitted artifact validation records
 - 2026-05-04 | @codex-vz | add `VzUserspaceEgress` to the reviewed runtime model so VZ egress is lifecycle-owned by VMM like CH Motlie VNET while the VZ runner remains a hypervisor adapter
@@ -62,6 +65,9 @@ High-level status:
   - [x] typed selected OCI platform
   - [x] typed import profile metadata for `ubuntu-systemd`
   - [x] typed validation records for backend-emitted artifacts
+  - [x] typed image reference parsing for Docker/OCI-style refs
+  - [x] OCI/Docker manifest index resolution through Registry v2
+  - [x] selected platform-manifest digest extraction
 
 Phase 1 convergence:
 
@@ -591,14 +597,16 @@ Default reviewed policy:
 ### `image.rs`
 
 The guest-image surface is the first host-runtime API for the OCI import
-roadmap. It records source identity and validation metadata; it does not yet
-pull OCI content, unpack rootfs layers, or emit CH/VZ artifacts.
+roadmap. It records source identity and validation metadata, and can resolve
+OCI/Docker manifest indexes to immutable digests. It does not yet unpack rootfs
+layers or emit CH/VZ artifacts.
 
 ```rust
 use motlie_vmm::backend::BackendKind;
 use motlie_vmm::image::{
     EmittedArtifactDigest, ExternalOciSource, GuestImageProfile,
-    GuestImageValidationRecord, OciDigest, OciPlatform,
+    GuestImageValidationRecord, OciDigest, OciImageReference, OciPlatform,
+    OciRegistryClient,
 };
 
 let source = ExternalOciSource::ubuntu_systemd(
@@ -621,6 +629,15 @@ let record = GuestImageValidationRecord {
     }],
 };
 record.validate()?;
+
+let image_ref: OciImageReference = "docker.io/library/ubuntu:24.04".parse()?;
+assert_eq!(image_ref.normalized(), "docker.io/library/ubuntu:24.04");
+
+let resolver = OciRegistryClient::new();
+let resolved_source = resolver
+    .resolve_ubuntu_systemd_source(OciPlatform::linux_amd64())
+    .await?;
+resolved_source.validate()?;
 ```
 
 The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
@@ -633,6 +650,39 @@ Validation rules intentionally reject short fake `sha256` values and enforce
 the current `ubuntu-systemd` profile/source coherence:
 `GuestImageValidationRecord` embeds `GuestImageProfile`, and the embedded
 profile must validate before emitted artifact digests are accepted.
+
+Resolver behavior:
+
+- parses Docker-style references such as `ubuntu:24.04`,
+  `docker.io/library/ubuntu:24.04`, and `registry:5000/team/repo@sha256:...`
+- normalizes Docker Hub official images to `docker.io/library/<name>:<tag>`
+- uses Registry v2 manifest requests with OCI and Docker media-type accept
+  headers
+- handles Bearer auth challenges for public Docker Hub-style registries
+- computes the returned manifest/index body digest locally and checks
+  `Docker-Content-Digest` when the registry provides it
+- selects the requested `OciPlatform` descriptor digest from an OCI image index
+  or Docker manifest list
+- rejects single-image manifests until config blob inspection verifies the
+  manifest's actual platform; unknown JSON without descriptors is rejected
+
+Resolver validation:
+
+```bash
+cargo test -p motlie-vmm image --lib
+cargo test -p motlie-vmm resolves_ubuntu_systemd_source_from_registry --lib -- --ignored
+```
+
+The ignored live-registry test is not part of default unit tests because it
+depends on external registry availability, DNS, and rate limits. It is still a
+required PR acceptance step for changes that affect source resolution.
+
+v1.5 acceptance is broader than this resolver API. The final v1.5 surface must
+prove v1.4 CH and v1.45 VZ guest-visible functional parity through the unified
+v1.5 harness, unified image builder, and OCI-derived guest image/profile flow.
+That parity includes multi-guest isolation, SSH auto-provisioning, VFS,
+VNET/egress, sudo/apt readiness, PTY/TUI operation, Codex/Claude startup
+checks, and reproducible run artifacts.
 
 ### SSH / CA Binding
 
