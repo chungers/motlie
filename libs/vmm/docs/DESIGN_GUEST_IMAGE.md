@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Harden the rootfs classifier trust boundary: path reads/classification use guest-root-aware symlink resolution, escaping symlinks are rejected, and `/sbin/init` is accepted only when it resolves to systemd |
 | 2026-05-07 | @vmm-cdx | Define the rootfs classifier requirements and design: stable VMM/VFS/VNET invariants stay typed in Rust while admin/profile package, mount, and init requirements are data driven |
 | 2026-05-07 | @vmm-cdx | Tighten OCI whiteout safety for the rootfs importer: empty `.wh.` targets are invalid and opaque-whiteout metadata errors fail closed |
 | 2026-05-07 | @vmm-cdx | Add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache that feeds importer-ready layer inputs |
@@ -845,6 +846,12 @@ boot artifacts.
   requirements remain profile data so production builders can change them
   without changing classifier code. Results are typed as `ready`,
   `compatible-with-adaptation`, or `unsupported`, with machine-readable findings.
+  Classifier path access is rootfs-safe: it uses symlink metadata, resolves
+  symlinks as guest paths, treats absolute symlink targets as guest-root-relative,
+  rejects parent traversal above the guest root, and caps symlink recursion.
+  `/sbin/init` is not a standalone systemd indicator; it is accepted only when it
+  resolves inside the rootfs to `/usr/lib/systemd/systemd` or
+  `/lib/systemd/systemd`.
 
 ### Rootfs Classifier Requirements And Design
 
@@ -872,6 +879,9 @@ Functional requirements:
 - Classification is read-only. It reports what exists, what can be installed by
   the compatibility layer, what must be provided by runtime provisioning, and
   what is unsupported.
+- Path classification and file reads must never follow host filesystem symlinks
+  out of the imported assembly root. Valid guest symlinks, including absolute
+  guest-root-relative links such as `/usr/lib/os-release`, are supported.
 - The result must be machine-readable for harness and CI use. It must include an
   overall status plus typed findings with requirement kind, status, path/package
   where relevant, and evidence.

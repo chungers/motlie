@@ -755,10 +755,16 @@ impl RootfsClassifier {
     ) -> Result<RootfsClassification, RootfsClassificationError> {
         spec.validate()?;
         let root = root.as_ref();
-        let metadata = fs::metadata(root).map_err(|source| RootfsClassificationError::Io {
-            path: Some(root.to_path_buf()),
-            source,
-        })?;
+        let metadata =
+            fs::symlink_metadata(root).map_err(|source| RootfsClassificationError::Io {
+                path: Some(root.to_path_buf()),
+                source,
+            })?;
+        if metadata.file_type().is_symlink() {
+            return Err(RootfsClassificationError::RootMayNotBeSymlink {
+                path: root.to_path_buf(),
+            });
+        }
         if !metadata.is_dir() {
             return Err(RootfsClassificationError::RootNotDirectory {
                 path: root.to_path_buf(),
@@ -1465,12 +1471,18 @@ pub enum RootfsClassificationError {
     Contract(#[from] ImageContractError),
     #[error("rootfs path is not a directory: {path:?}")]
     RootNotDirectory { path: PathBuf },
+    #[error("rootfs path may not be a symlink: {path:?}")]
+    RootMayNotBeSymlink { path: PathBuf },
     #[error("rootfs OS release accepted IDs cannot contain an empty value")]
     EmptyOsReleaseId,
     #[error("rootfs OS release accepted VERSION_IDs cannot contain an empty value")]
     EmptyOsReleaseVersionId,
     #[error("invalid rootfs requirement path {path:?}: {reason}")]
     InvalidRequirementPath { path: PathBuf, reason: String },
+    #[error("rootfs symlink {path:?} target {target:?} escapes the guest root")]
+    SymlinkEscapesRoot { path: PathBuf, target: PathBuf },
+    #[error("rootfs symlink resolution exceeded the limit while resolving {path:?}")]
+    SymlinkResolutionLimit { path: PathBuf },
     #[error("I/O error at {path:?}: {source}")]
     Io {
         path: Option<PathBuf>,
@@ -1563,6 +1575,8 @@ enum RootfsPathKind {
     Other,
 }
 
+const ROOTFS_SYMLINK_LIMIT: usize = 40;
+
 fn validate_rootfs_requirement_path(path: &Path) -> Result<(), RootfsClassificationError> {
     if !path.is_absolute() {
         return Err(RootfsClassificationError::InvalidRequirementPath {
@@ -1590,25 +1604,138 @@ fn validate_rootfs_requirement_path(path: &Path) -> Result<(), RootfsClassificat
     Ok(())
 }
 
-fn rootfs_path(root: &Path, absolute_path: &Path) -> Result<PathBuf, RootfsClassificationError> {
-    validate_rootfs_requirement_path(absolute_path)?;
-    let mut path = root.to_path_buf();
-    for component in absolute_path.components() {
+fn guest_path_components(path: &Path) -> Result<Vec<PathBuf>, RootfsClassificationError> {
+    validate_rootfs_requirement_path(path)?;
+    let mut components = Vec::new();
+    for component in path.components() {
         match component {
             Component::RootDir | Component::CurDir => {}
-            Component::Normal(value) => path.push(value),
+            Component::Normal(value) => components.push(PathBuf::from(value)),
             Component::ParentDir | Component::Prefix(_) => unreachable!("validated above"),
         }
     }
-    Ok(path)
+    Ok(components)
+}
+
+fn host_path_from_guest_components(root: &Path, components: &[PathBuf]) -> PathBuf {
+    let mut path = root.to_path_buf();
+    for component in components {
+        path.push(component);
+    }
+    path
+}
+
+fn push_symlink_target_components(
+    components: &mut Vec<PathBuf>,
+    target: &Path,
+    link_path: &Path,
+) -> Result<(), RootfsClassificationError> {
+    for component in target.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(value) => components.push(PathBuf::from(value)),
+            Component::ParentDir => {
+                if components.pop().is_none() {
+                    return Err(RootfsClassificationError::SymlinkEscapesRoot {
+                        path: link_path.to_path_buf(),
+                        target: target.to_path_buf(),
+                    });
+                }
+            }
+            Component::Prefix(_) => {
+                return Err(RootfsClassificationError::InvalidRequirementPath {
+                    path: target.to_path_buf(),
+                    reason: "platform path prefixes are not allowed in symlink targets".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_symlink_target_components(
+    parent_components: &[PathBuf],
+    target: &Path,
+    link_path: &Path,
+) -> Result<Vec<PathBuf>, RootfsClassificationError> {
+    let mut components = if target.is_absolute() {
+        Vec::new()
+    } else {
+        parent_components.to_vec()
+    };
+    push_symlink_target_components(&mut components, target, link_path)?;
+    Ok(components)
+}
+
+fn guest_absolute_path_from_components(components: &[PathBuf]) -> PathBuf {
+    let mut path = PathBuf::from("/");
+    for component in components {
+        path.push(component);
+    }
+    path
+}
+
+fn resolve_rootfs_path(
+    root: &Path,
+    absolute_path: &Path,
+) -> Result<Option<PathBuf>, RootfsClassificationError> {
+    let mut resolved = Vec::<PathBuf>::new();
+    let mut pending = guest_path_components(absolute_path)?;
+    let mut symlink_count = 0usize;
+
+    while !pending.is_empty() {
+        let component = pending.remove(0);
+        let mut candidate = resolved.clone();
+        candidate.push(component);
+        let candidate_host_path = host_path_from_guest_components(root, &candidate);
+        let metadata = match fs::symlink_metadata(&candidate_host_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(RootfsClassificationError::Io {
+                    path: Some(candidate_host_path),
+                    source,
+                });
+            }
+        };
+
+        if metadata.file_type().is_symlink() {
+            symlink_count += 1;
+            if symlink_count > ROOTFS_SYMLINK_LIMIT {
+                return Err(RootfsClassificationError::SymlinkResolutionLimit {
+                    path: absolute_path.to_path_buf(),
+                });
+            }
+            let target = fs::read_link(&candidate_host_path).map_err(|source| {
+                RootfsClassificationError::Io {
+                    path: Some(candidate_host_path),
+                    source,
+                }
+            })?;
+            let parent_components = &candidate[..candidate.len().saturating_sub(1)];
+            let mut target_components = resolve_symlink_target_components(
+                parent_components,
+                &target,
+                &guest_absolute_path_from_components(&candidate),
+            )?;
+            target_components.extend(pending);
+            pending = target_components;
+            resolved.clear();
+        } else {
+            resolved = candidate;
+        }
+    }
+    Ok(Some(host_path_from_guest_components(root, &resolved)))
 }
 
 fn classify_path_kind(
     root: &Path,
     absolute_path: &Path,
 ) -> Result<RootfsPathKind, RootfsClassificationError> {
-    let path = rootfs_path(root, absolute_path)?;
-    match fs::metadata(&path) {
+    let Some(path) = resolve_rootfs_path(root, absolute_path)? else {
+        return Ok(RootfsPathKind::Missing);
+    };
+    match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_dir() => Ok(RootfsPathKind::Directory),
         Ok(metadata) if metadata.is_file() => Ok(RootfsPathKind::File),
         Ok(_) => Ok(RootfsPathKind::Other),
@@ -1633,11 +1760,30 @@ fn find_existing_rootfs_path(
     Ok(None)
 }
 
+fn rootfs_path_resolves_to_any(
+    root: &Path,
+    path: &Path,
+    expected_paths: &[&str],
+) -> Result<Option<PathBuf>, RootfsClassificationError> {
+    let Some(resolved_path) = resolve_rootfs_path(root, path)? else {
+        return Ok(None);
+    };
+    for expected_path in expected_paths {
+        let expected_absolute = Path::new(expected_path);
+        if resolve_rootfs_path(root, expected_absolute)?.as_ref() == Some(&resolved_path) {
+            return Ok(Some(PathBuf::from(expected_path)));
+        }
+    }
+    Ok(None)
+}
+
 fn read_rootfs_file_optional(
     root: &Path,
     absolute_path: &Path,
 ) -> Result<Option<String>, RootfsClassificationError> {
-    let path = rootfs_path(root, absolute_path)?;
+    let Some(path) = resolve_rootfs_path(root, absolute_path)? else {
+        return Ok(None);
+    };
     match fs::read_to_string(&path) {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -1767,17 +1913,23 @@ fn classify_init_system(
         InitProfile::UbuntuSystemd => {
             let systemd = find_existing_rootfs_path(
                 root,
-                &[
-                    "/usr/lib/systemd/systemd",
-                    "/lib/systemd/systemd",
-                    "/sbin/init",
-                ],
+                &["/usr/lib/systemd/systemd", "/lib/systemd/systemd"],
             )?;
             if let Some(path) = systemd {
                 RootfsRequirementFinding::new(
                     RootfsRequirementKind::InitSystem,
                     RootfsRequirementStatus::Present,
                     format!("systemd indicator at {path:?}"),
+                )
+            } else if let Some(resolved) = rootfs_path_resolves_to_any(
+                root,
+                Path::new("/sbin/init"),
+                &["/usr/lib/systemd/systemd", "/lib/systemd/systemd"],
+            )? {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::InitSystem,
+                    RootfsRequirementStatus::Present,
+                    format!("/sbin/init resolves to systemd at {resolved:?}"),
                 )
             } else if package_manager_available {
                 RootfsRequirementFinding::new(
@@ -2781,6 +2933,8 @@ pub enum ImageContractError {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     fn digest(byte: char) -> OciDigest {
         OciDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -3306,6 +3460,92 @@ mod tests {
             )
             .status,
             RootfsRequirementStatus::NeedsRuntimeProvisioning
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootfs_classifier_rejects_symlink_escape_outside_root() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("rootfs");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(tempdir.path().join("outside-os-release"), "ID=ubuntu\n").unwrap();
+        symlink("../../outside-os-release", root.join("etc/os-release")).unwrap();
+
+        let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        let error = RootfsClassifier::new().classify(&root, &spec).unwrap_err();
+
+        assert!(
+            matches!(error, RootfsClassificationError::SymlinkEscapesRoot { .. }),
+            "expected symlink escape rejection, got {error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootfs_classifier_resolves_valid_in_root_ubuntu_symlinks() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        create_rootfs_dir(root, "/etc");
+        create_rootfs_dir(root, "/usr/bin");
+        create_rootfs_dir(root, "/usr/lib/systemd");
+        create_rootfs_dir(root, "/dev");
+        write_rootfs_file(
+            root,
+            "/usr/lib/os-release",
+            "ID=ubuntu\nVERSION_ID=\"24.04\"\n",
+        );
+        write_rootfs_file(root, "/usr/bin/apt-get", "");
+        write_rootfs_file(root, "/usr/bin/dpkg", "");
+        write_rootfs_file(root, "/usr/bin/sh", "");
+        write_rootfs_file(root, "/usr/lib/systemd/systemd", "");
+        symlink("/usr/lib/os-release", root.join("etc/os-release")).unwrap();
+        symlink("usr/bin", root.join("bin")).unwrap();
+        symlink("usr/lib", root.join("lib")).unwrap();
+
+        let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_ne!(
+            classification.status,
+            RootfsClassificationStatus::Unsupported
+        );
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::OsRelease).status,
+            RootfsRequirementStatus::Present
+        );
+        assert_eq!(
+            path_finding(
+                &classification,
+                RootfsRequirementKind::RequiredBinary,
+                "/bin/sh"
+            )
+            .status,
+            RootfsRequirementStatus::Present
+        );
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::InitSystem).status,
+            RootfsRequirementStatus::Present
+        );
+    }
+
+    #[test]
+    fn rootfs_classifier_does_not_accept_arbitrary_sbin_init_as_systemd() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        write_rootfs_file(root, "/etc/os-release", "ID=ubuntu\nVERSION_ID=\"24.04\"\n");
+        write_rootfs_file(root, "/usr/bin/apt-get", "");
+        write_rootfs_file(root, "/usr/bin/dpkg", "");
+        write_rootfs_file(root, "/bin/sh", "");
+        write_rootfs_file(root, "/sbin/init", "#!/bin/sh\n");
+        create_rootfs_dir(root, "/dev");
+
+        let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::InitSystem).status,
+            RootfsRequirementStatus::MissingButInstallable
         );
     }
 

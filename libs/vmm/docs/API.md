@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | harden rootfs classifier path access with guest-root-aware symlink resolution and reject escaping symlink targets before reading or classifying imported rootfs content
 - 2026-05-07 | @vmm-cdx | add the rootfs classifier API with data-driven `RootfsProfileSpec`, typed stable VMM/VFS/VNET findings, and `ready` / `compatible-with-adaptation` / `unsupported` status
 - 2026-05-07 | @vmm-cdx | tighten OCI whiteout safety: reject empty `.wh.` targets and propagate opaque-whiteout metadata errors instead of reporting success
 - 2026-05-07 | @vmm-cdx | add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache, producing importer-ready `OciLayerInput`s |
@@ -724,6 +725,12 @@ Rootfs classifier behavior:
 - classifies OS release, package manager, init capability, required binaries,
   required packages, required mount points, `/dev`, FUSE runtime provisioning,
   and VNET config-directory assumptions
+- resolves imported-rootfs symlinks with guest-root semantics before reading or
+  classifying paths; absolute symlink targets are treated as guest-root-relative,
+  valid in-root symlinks are accepted, symlink loops are capped, and parent
+  traversal above the guest root is rejected
+- only treats `/sbin/init` as systemd when it resolves inside the rootfs to
+  `/usr/lib/systemd/systemd` or `/lib/systemd/systemd`
 - returns machine-readable findings with `RootfsRequirementKind`,
   `RootfsRequirementStatus`, optional path/package, and evidence
 - aggregates findings into `ready`, `compatible-with-adaptation`, or
