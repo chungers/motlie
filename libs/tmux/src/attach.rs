@@ -3,6 +3,7 @@ use crate::error::{Error, Result};
 use crate::transport::{SshConfig, SSH_DEFAULT_PORT};
 use crate::types::{HostKeyPolicy, TmuxSocket};
 use std::ffi::OsString;
+use std::io::Write;
 use std::process::{ExitStatus, Stdio};
 
 /// Result of attaching the user's current PTY to a tmux target.
@@ -22,6 +23,18 @@ impl AttachExit {
     pub fn success(&self) -> bool {
         self.status.success()
     }
+}
+
+/// Options for attaching the current process PTY to a tmux target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttachOptions {
+    /// Best-effort cleanup of status text printed by attach clients during
+    /// detach/restore transitions.
+    ///
+    /// This is intended for selector-style applications that immediately
+    /// redraw their own TUI after the attach child exits. It leaves interactive
+    /// stdin/stdout/stderr inherited while the child is attached.
+    pub suppress_transition_output: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,13 +74,27 @@ pub(crate) fn local_attach_command(
     AttachCommand::new(tmux_bin, args)
 }
 
+#[cfg(test)]
 pub(crate) fn ssh_attach_command(
     config: &SshConfig,
     tmux_bin: &str,
     socket: Option<&TmuxSocket>,
     target: &str,
 ) -> AttachCommand {
+    ssh_attach_command_with_options(config, tmux_bin, socket, target, &AttachOptions::default())
+}
+
+pub(crate) fn ssh_attach_command_with_options(
+    config: &SshConfig,
+    tmux_bin: &str,
+    socket: Option<&TmuxSocket>,
+    target: &str,
+    options: &AttachOptions,
+) -> AttachCommand {
     let mut args = vec![OsString::from("-t")];
+    if options.suppress_transition_output {
+        args.push(OsString::from("-q"));
+    }
 
     if config.port() != SSH_DEFAULT_PORT {
         args.push(OsString::from("-p"));
@@ -101,8 +128,11 @@ pub(crate) fn ssh_attach_command(
     AttachCommand::new("ssh", args)
 }
 
-pub(crate) fn run_attach_command(command: AttachCommand) -> Result<AttachExit> {
-    run_attach_command_unix(command)
+pub(crate) fn run_attach_command_with_options(
+    command: AttachCommand,
+    options: AttachOptions,
+) -> Result<AttachExit> {
+    run_attach_command_unix(command, options)
 }
 
 fn tmux_socket_args(socket: Option<&TmuxSocket>) -> Vec<OsString> {
@@ -150,7 +180,7 @@ fn ssh_host(host: &str) -> String {
 }
 
 #[cfg(unix)]
-fn run_attach_command_unix(command: AttachCommand) -> Result<AttachExit> {
+fn run_attach_command_unix(command: AttachCommand, options: AttachOptions) -> Result<AttachExit> {
     use std::os::unix::process::CommandExt;
 
     let mut child = std::process::Command::new(&command.program)
@@ -168,7 +198,7 @@ fn run_attach_command_unix(command: AttachCommand) -> Result<AttachExit> {
             ))
         })?;
 
-    let _terminal_guard = match ForegroundProcessGroup::enter(child.id()) {
+    let terminal_guard = match ForegroundProcessGroup::enter(child.id()) {
         Ok(guard) => guard,
         Err(e) => {
             let _ = child.kill();
@@ -183,12 +213,16 @@ fn run_attach_command_unix(command: AttachCommand) -> Result<AttachExit> {
             e
         ))
     })?;
+    drop(terminal_guard);
+    if options.suppress_transition_output {
+        suppress_transition_output();
+    }
 
     Ok(AttachExit { status })
 }
 
 #[cfg(not(unix))]
-fn run_attach_command_unix(command: AttachCommand) -> Result<AttachExit> {
+fn run_attach_command_unix(command: AttachCommand, options: AttachOptions) -> Result<AttachExit> {
     let status = std::process::Command::new(&command.program)
         .args(&command.args)
         .stdin(Stdio::inherit())
@@ -202,7 +236,29 @@ fn run_attach_command_unix(command: AttachCommand) -> Result<AttachExit> {
                 e
             ))
         })?;
+    if options.suppress_transition_output {
+        suppress_transition_output();
+    }
     Ok(AttachExit { status })
+}
+
+fn suppress_transition_output() {
+    if !stderr_is_tty() {
+        return;
+    }
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(b"\r\x1b[2K\x1b[1A\r\x1b[2K");
+    let _ = stderr.flush();
+}
+
+#[cfg(unix)]
+fn stderr_is_tty() -> bool {
+    unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
+}
+
+#[cfg(not(unix))]
+fn stderr_is_tty() -> bool {
+    true
 }
 
 #[cfg(unix)]
@@ -406,6 +462,23 @@ mod tests {
                 "'/opt/tmux bin/tmux' -S '/tmp/tmux socket' attach-session -t '$7'",
             ]
         );
+    }
+
+    #[test]
+    fn quiet_ssh_attach_command_adds_quiet_flag_after_tty_flag() {
+        let config = SshConfig::new("example.com", "deploy");
+        let command = ssh_attach_command_with_options(
+            &config,
+            "tmux",
+            None,
+            "$7",
+            &AttachOptions {
+                suppress_transition_output: true,
+            },
+        );
+
+        assert_eq!(command.args_str()[0], "-t");
+        assert_eq!(command.args_str()[1], "-q");
     }
 
     #[test]

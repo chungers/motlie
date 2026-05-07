@@ -520,15 +520,21 @@ let overrides = motlie_tmux::SessionStatusOverrides {
     left_length: Some(motlie_tmux::StatusLeftLength::new(50)?),
 };
 status.apply(&overrides).await.ok();
-let exit = target.attach_current_pty().await;
+let exit = target
+    .attach_current_pty_with_options(&motlie_tmux::AttachOptions {
+        suppress_transition_output: true,
+    })
+    .await;
 let _ = status.restore(&snapshot).await;
 let exit = exit?;
 ```
 
 The exact `SessionVanished` error type belongs to the binary unless `motlie-tmux`
 already has a suitable structured error when implementation starts. The
-status override calls are best-effort in mmux: warnings go to stderr, but attach
-continues even if the remote tmux rejects setup or restoration.
+status override calls are best-effort in mmux: diagnostics are suppressed by
+default and attach continues even if the remote tmux rejects setup or
+restoration. Setting `MMUX_ATTACH_LOG=1` prints those diagnostics and disables
+transition-output cleanup for attach debugging.
 
 ## CLI Boundary
 

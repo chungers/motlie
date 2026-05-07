@@ -35,7 +35,7 @@ use model::{
     SelectedSession, SelectionKey, StatusBanner,
 };
 use motlie_tmux::{
-    AttachExit, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot,
+    AttachExit, AttachOptions, SessionStatus, SessionStatusOverrides, SessionStatusSnapshot,
     SessionWindowStyleOverrides, SessionWindowStyles, SessionWindowStylesSnapshot, StatusLeft,
     StatusLeftLength, StatusStyle, Target, WindowStyle,
 };
@@ -55,6 +55,13 @@ struct AttachStyleSnapshot {
 
 const HOST_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(5);
 const HOST_CONNECT_EVENT_BUFFER: usize = 64;
+const MMUX_ATTACH_LOG_ENV: &str = "MMUX_ATTACH_LOG";
+
+macro_rules! attach_transition_log {
+    ($($arg:tt)*) => {
+        log_attach_transition(format_args!($($arg)*))
+    };
+}
 
 enum HostConnectEvent {
     Connected(HostEntry),
@@ -139,19 +146,13 @@ async fn run() -> Result<i32> {
         }
 
         let Some(host) = fleet.entry(&selected.host_id) else {
-            eprintln!(
+            attach_transition_log!(
                 "mmux: host {} no longer connected; returning to selector",
                 selected.host_label
             );
             continue;
         };
-        let target = match host.handle.session_by_id(selected.id()).await? {
-            Some(target) => target,
-            None => {
-                eprintln!("mmux: selected session disappeared; returning to selector");
-                continue;
-            }
-        };
+        let target = host.handle.target_for_session_info(selected.info.clone());
         let exit =
             attach_current_pty_with_mmux_status(&target, fleet.host_color(&selected.host_id))
                 .await?;
@@ -167,22 +168,33 @@ async fn attach_current_pty_with_mmux_status(
     target: &Target,
     host_color: Option<Color>,
 ) -> Result<AttachExit> {
-    let status = match target.status().await {
+    let (status_result, window_styles_result) =
+        tokio::join!(target.status(), target.window_styles());
+    let status = match status_result {
         Ok(status) => Some(status),
         Err(err) => {
-            eprintln!("mmux: could not access tmux session status before attach: {err}");
+            attach_transition_log!(
+                "mmux: could not access tmux session status before attach: {err}"
+            );
             None
         }
     };
-    let window_styles = match target.window_styles().await {
+    let window_styles = match window_styles_result {
         Ok(styles) => Some(styles),
         Err(err) => {
-            eprintln!("mmux: could not access tmux window styles before attach: {err}");
+            attach_transition_log!(
+                "mmux: could not access tmux window styles before attach: {err}"
+            );
             None
         }
     };
     let snapshot = prepare_attach_styles(status.as_ref(), window_styles.as_ref(), host_color).await;
-    let exit = target.attach_current_pty().await;
+    let attach_options = AttachOptions {
+        suppress_transition_output: !attach_transition_logging_enabled(),
+    };
+    let exit = target
+        .attach_current_pty_with_options(&attach_options)
+        .await;
     restore_attach_styles(status.as_ref(), window_styles.as_ref(), snapshot).await;
     exit.map_err(Into::into)
 }
@@ -192,15 +204,22 @@ async fn prepare_attach_styles(
     window_styles: Option<&SessionWindowStyles<'_>>,
     host_color: Option<Color>,
 ) -> AttachStyleSnapshot {
-    AttachStyleSnapshot {
-        status: match status {
+    let prepare_status = async {
+        match status {
             Some(status) => prepare_attach_status(status, host_color).await,
             None => None,
-        },
-        window_styles: match window_styles {
+        }
+    };
+    let prepare_window_styles = async {
+        match window_styles {
             Some(window_styles) => prepare_attach_window_styles(window_styles).await,
             None => None,
-        },
+        }
+    };
+    let (status, window_styles) = tokio::join!(prepare_status, prepare_window_styles);
+    AttachStyleSnapshot {
+        status,
+        window_styles,
     }
 }
 
@@ -211,7 +230,9 @@ async fn prepare_attach_status(
     let snapshot = match status.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            eprintln!("mmux: could not read tmux status overrides before attach: {err}");
+            attach_transition_log!(
+                "mmux: could not read tmux status overrides before attach: {err}"
+            );
             return None;
         }
     };
@@ -227,7 +248,7 @@ async fn prepare_attach_status(
         left_length: Some(left_length),
     };
     if let Err(err) = status.apply(&overrides).await {
-        eprintln!("mmux: could not set tmux status overrides before attach: {err}");
+        attach_transition_log!("mmux: could not set tmux status overrides before attach: {err}");
     }
     Some(snapshot)
 }
@@ -244,7 +265,9 @@ async fn prepare_attach_window_styles(
     let snapshot = match window_styles.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            eprintln!("mmux: could not read tmux window style overrides before attach: {err}");
+            attach_transition_log!(
+                "mmux: could not read tmux window style overrides before attach: {err}"
+            );
             return None;
         }
     };
@@ -253,7 +276,9 @@ async fn prepare_attach_window_styles(
         active_style: Some(style),
     };
     if let Err(err) = window_styles.apply(&overrides).await {
-        eprintln!("mmux: could not set tmux window style overrides before attach: {err}");
+        attach_transition_log!(
+            "mmux: could not set tmux window style overrides before attach: {err}"
+        );
     }
     Some(snapshot)
 }
@@ -263,12 +288,21 @@ async fn restore_attach_styles(
     window_styles: Option<&SessionWindowStyles<'_>>,
     snapshot: AttachStyleSnapshot,
 ) {
-    if let (Some(window_styles), Some(snapshot)) = (window_styles, snapshot.window_styles) {
-        restore_attach_window_styles(window_styles, Some(snapshot)).await;
-    }
-    if let (Some(status), Some(snapshot)) = (status, snapshot.status) {
-        restore_attach_status(status, Some(snapshot)).await;
-    }
+    let AttachStyleSnapshot {
+        status: status_snapshot,
+        window_styles: window_styles_snapshot,
+    } = snapshot;
+    let restore_window_styles = async {
+        if let (Some(window_styles), Some(snapshot)) = (window_styles, window_styles_snapshot) {
+            restore_attach_window_styles(window_styles, Some(snapshot)).await;
+        }
+    };
+    let restore_status = async {
+        if let (Some(status), Some(snapshot)) = (status, status_snapshot) {
+            restore_attach_status(status, Some(snapshot)).await;
+        }
+    };
+    tokio::join!(restore_window_styles, restore_status);
 }
 
 async fn restore_attach_status(
@@ -279,7 +313,7 @@ async fn restore_attach_status(
         return;
     };
     if let Err(err) = status.restore(&snapshot).await {
-        eprintln!("mmux: could not restore tmux status overrides after attach: {err}");
+        attach_transition_log!("mmux: could not restore tmux status overrides after attach: {err}");
     }
 }
 
@@ -291,7 +325,25 @@ async fn restore_attach_window_styles(
         return;
     };
     if let Err(err) = window_styles.restore(&snapshot).await {
-        eprintln!("mmux: could not restore tmux window style overrides after attach: {err}");
+        attach_transition_log!(
+            "mmux: could not restore tmux window style overrides after attach: {err}"
+        );
+    }
+}
+
+fn attach_transition_logging_enabled() -> bool {
+    std::env::var_os(MMUX_ATTACH_LOG_ENV).is_some()
+}
+
+fn log_attach_transition(args: std::fmt::Arguments<'_>) {
+    if attach_transition_logging_enabled() {
+        eprintln!("{args}");
+    } else {
+        tracing::debug!(
+            message = %args,
+            env = MMUX_ATTACH_LOG_ENV,
+            "suppressed attach transition diagnostic"
+        );
     }
 }
 
