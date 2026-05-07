@@ -1,12 +1,14 @@
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 use crate::backend::BackendKind;
 
@@ -149,6 +151,14 @@ impl OciImageReference {
             }
         }
     }
+
+    pub fn with_digest(&self, digest: OciDigest) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            repository: self.repository.clone(),
+            reference: OciImageReferenceKind::Digest(digest),
+        }
+    }
 }
 
 impl std::fmt::Display for OciImageReference {
@@ -224,6 +234,13 @@ impl OciDigest {
         self.0
             .split_once(':')
             .map(|(algorithm, _)| algorithm)
+            .unwrap_or("")
+    }
+
+    pub fn encoded(&self) -> &str {
+        self.0
+            .split_once(':')
+            .map(|(_, encoded)| encoded)
             .unwrap_or("")
     }
 }
@@ -509,6 +526,97 @@ pub struct ImportedOciRootfs {
     pub applied_layers: Vec<OciLayerImportRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciContentCache {
+    root: PathBuf,
+}
+
+impl OciContentCache {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn blob_path(&self, digest: &OciDigest) -> PathBuf {
+        self.root
+            .join("blobs")
+            .join(digest.algorithm())
+            .join(digest.encoded())
+    }
+
+    pub fn cached_blob(
+        &self,
+        digest: &OciDigest,
+        expected_size: Option<u64>,
+    ) -> Result<Option<CachedOciBlob>, OciRegistryError> {
+        let path = self.blob_path(digest);
+        if !path.exists() {
+            return Ok(None);
+        }
+        verify_cached_blob(&path, digest, expected_size).map(Some)
+    }
+
+    pub fn store_blob(
+        &self,
+        digest: &OciDigest,
+        bytes: &[u8],
+    ) -> Result<CachedOciBlob, OciRegistryError> {
+        if let Some(blob) = self.cached_blob(digest, Some(bytes.len() as u64))? {
+            return Ok(blob);
+        }
+        let path = self.blob_path(digest);
+        let parent = path.parent().ok_or_else(|| OciRegistryError::CachePath {
+            path: path.clone(),
+            reason: "cache blob path has no parent".to_string(),
+        })?;
+        fs::create_dir_all(parent).map_err(|source| OciRegistryError::CacheIo {
+            path: Some(parent.to_path_buf()),
+            source,
+        })?;
+        let tmp_path = cache_tmp_path(&path)?;
+        let write_result = (|| {
+            let mut file = File::create(&tmp_path).map_err(|source| OciRegistryError::CacheIo {
+                path: Some(tmp_path.clone()),
+                source,
+            })?;
+            file.write_all(bytes)
+                .map_err(|source| OciRegistryError::CacheIo {
+                    path: Some(tmp_path.clone()),
+                    source,
+                })?;
+            file.sync_all()
+                .map_err(|source| OciRegistryError::CacheIo {
+                    path: Some(tmp_path.clone()),
+                    source,
+                })?;
+            Ok::<(), OciRegistryError>(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+        finalize_cache_write(&tmp_path, &path, digest, Some(bytes.len() as u64))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedOciBlob {
+    pub digest: OciDigest,
+    pub path: PathBuf,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedOciPlatform {
+    pub resolved: ResolvedOciManifest,
+    pub manifest_blob: CachedOciBlob,
+    pub manifest: OciPlatformManifest,
+    pub layers: Vec<OciLayerInput>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OciRootfsImporter;
 
@@ -603,6 +711,245 @@ impl OciRegistryClient {
             platform,
             platform_manifest_digest,
         })
+    }
+
+    pub async fn fetch_resolved_platform_to_cache(
+        &self,
+        resolved: &ResolvedOciManifest,
+        cache: &OciContentCache,
+    ) -> Result<CachedOciPlatform, OciRegistryError> {
+        let manifest_blob = self
+            .fetch_manifest_digest_to_cache(
+                &resolved.image_ref,
+                &resolved.platform_manifest_digest,
+                cache,
+            )
+            .await?;
+        let manifest_bytes =
+            fs::read(&manifest_blob.path).map_err(|source| OciRegistryError::CacheIo {
+                path: Some(manifest_blob.path.clone()),
+                source,
+            })?;
+        let manifest = OciPlatformManifest::from_json(&manifest_bytes)?;
+        let mut layers = Vec::with_capacity(manifest.layers.len());
+        for descriptor in &manifest.layers {
+            let cached = self
+                .fetch_blob_to_cache(
+                    &resolved.image_ref,
+                    &descriptor.digest,
+                    Some(descriptor.size),
+                    cache,
+                )
+                .await?;
+            layers.push(OciLayerInput::new(descriptor.clone(), cached.path));
+        }
+        Ok(CachedOciPlatform {
+            resolved: resolved.clone(),
+            manifest_blob,
+            manifest,
+            layers,
+        })
+    }
+
+    pub async fn resolve_and_fetch_ubuntu_systemd_to_cache(
+        &self,
+        platform: OciPlatform,
+        cache: &OciContentCache,
+    ) -> Result<CachedOciPlatform, OciRegistryError> {
+        let image_ref = OciImageReference::from_str(UBUNTU_SYSTEMD_SOURCE_REF)?;
+        let resolved = self.resolve_manifest(&image_ref, platform).await?;
+        self.fetch_resolved_platform_to_cache(&resolved, cache)
+            .await
+    }
+
+    async fn fetch_manifest_digest_to_cache(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        cache: &OciContentCache,
+    ) -> Result<CachedOciBlob, OciRegistryError> {
+        if let Some(blob) = cache.cached_blob(digest, None)? {
+            return Ok(blob);
+        }
+        let digest_ref = image_ref.with_digest(digest.clone());
+        let manifest = self.fetch_manifest(&digest_ref).await?;
+        let computed_digest = digest_from_bytes(&manifest.body)?;
+        if let Some(header_digest) = manifest.registry_digest {
+            if header_digest != computed_digest {
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: digest_ref.normalized(),
+                    header_digest,
+                    computed_digest,
+                });
+            }
+        }
+        if &computed_digest != digest {
+            return Err(OciRegistryError::ContentDigestMismatch {
+                image_ref: digest_ref.normalized(),
+                expected_digest: digest.clone(),
+                computed_digest,
+            });
+        }
+        cache.store_blob(digest, &manifest.body)
+    }
+
+    async fn fetch_blob_to_cache(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        expected_size: Option<u64>,
+        cache: &OciContentCache,
+    ) -> Result<CachedOciBlob, OciRegistryError> {
+        if let Some(blob) = cache.cached_blob(digest, expected_size)? {
+            return Ok(blob);
+        }
+        let mut response = self.fetch_blob_once(image_ref, digest, None).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| OciRegistryError::MissingAuthChallenge {
+                    image_ref: image_ref.normalized(),
+                })?;
+            let token = self.fetch_bearer_token(challenge, image_ref).await?;
+            response = self
+                .fetch_blob_once(image_ref, digest, Some(&token))
+                .await?;
+        }
+        self.cache_blob_response(image_ref, digest, expected_size, cache, response)
+            .await
+    }
+
+    async fn fetch_blob_once(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        bearer_token: Option<&str>,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let url = blob_url(image_ref, digest);
+        let mut request = self.client.get(&url);
+        if let Some(token) = bearer_token {
+            request = request.bearer_auth(token);
+        }
+        request
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
+    async fn cache_blob_response(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        expected_size: Option<u64>,
+        cache: &OciContentCache,
+        mut response: reqwest::Response,
+    ) -> Result<CachedOciBlob, OciRegistryError> {
+        let status = response.status();
+        let digest_header = response
+            .headers()
+            .get("Docker-Content-Digest")
+            .and_then(|value| value.to_str().ok())
+            .map(OciDigest::new)
+            .transpose()?;
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|source| OciRegistryError::Request {
+                    image_ref: image_ref.normalized(),
+                    source,
+                })?;
+            return Err(OciRegistryError::RegistryStatus {
+                image_ref: image_ref.normalized(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let path = cache.blob_path(digest);
+        let parent = path.parent().ok_or_else(|| OciRegistryError::CachePath {
+            path: path.clone(),
+            reason: "cache blob path has no parent".to_string(),
+        })?;
+        fs::create_dir_all(parent).map_err(|source| OciRegistryError::CacheIo {
+            path: Some(parent.to_path_buf()),
+            source,
+        })?;
+        let tmp_path = cache_tmp_path(&path)?;
+        let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|source| {
+            OciRegistryError::CacheIo {
+                path: Some(tmp_path.clone()),
+                source,
+            }
+        })?;
+        let mut hasher = Sha256::new();
+        let mut size = 0_u64;
+        let write_result = async {
+            while let Some(chunk) =
+                response
+                    .chunk()
+                    .await
+                    .map_err(|source| OciRegistryError::Request {
+                        image_ref: image_ref.normalized(),
+                        source,
+                    })?
+            {
+                size += chunk.len() as u64;
+                hasher.update(&chunk);
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|source| OciRegistryError::CacheIo {
+                        path: Some(tmp_path.clone()),
+                        source,
+                    })?;
+            }
+            file.sync_all()
+                .await
+                .map_err(|source| OciRegistryError::CacheIo {
+                    path: Some(tmp_path.clone()),
+                    source,
+                })?;
+            Ok::<(), OciRegistryError>(())
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+        let computed_digest = OciDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))?;
+        if let Some(header_digest) = digest_header {
+            if header_digest != computed_digest {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: image_ref.normalized(),
+                    header_digest,
+                    computed_digest,
+                });
+            }
+        }
+        if &computed_digest != digest {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(OciRegistryError::ContentDigestMismatch {
+                image_ref: image_ref.normalized(),
+                expected_digest: digest.clone(),
+                computed_digest,
+            });
+        }
+        if let Some(expected) = expected_size {
+            if size != expected {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(OciRegistryError::CacheSizeMismatch {
+                    path: tmp_path,
+                    expected,
+                    actual: size,
+                });
+            }
+        }
+        finalize_cache_write(&tmp_path, &path, digest, expected_size)
     }
 
     async fn fetch_manifest(
@@ -715,6 +1062,8 @@ impl OciRegistryClient {
 pub enum OciRegistryError {
     #[error(transparent)]
     Contract(#[from] ImageContractError),
+    #[error(transparent)]
+    Import(#[from] OciRootfsImportError),
     #[error("registry request for {image_ref} failed: {source}")]
     Request {
         image_ref: String,
@@ -747,6 +1096,12 @@ pub enum OciRegistryError {
         header_digest: OciDigest,
         computed_digest: OciDigest,
     },
+    #[error("registry content for {image_ref} was {computed_digest}, expected {expected_digest}")]
+    ContentDigestMismatch {
+        image_ref: String,
+        expected_digest: OciDigest,
+        computed_digest: OciDigest,
+    },
     #[error("manifest for {image_ref} does not contain platform {platform}")]
     PlatformNotFound {
         image_ref: String,
@@ -758,6 +1113,26 @@ pub enum OciRegistryError {
     UnverifiedSingleManifest {
         image_ref: String,
         platform: OciPlatform,
+    },
+    #[error("invalid OCI cache path {path:?}: {reason}")]
+    CachePath { path: PathBuf, reason: String },
+    #[error("OCI cache I/O error at {path:?}: {source}")]
+    CacheIo {
+        path: Option<PathBuf>,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cached OCI blob {path:?} digest was {actual}, expected {expected}")]
+    CacheDigestMismatch {
+        path: PathBuf,
+        expected: OciDigest,
+        actual: OciDigest,
+    },
+    #[error("cached OCI blob {path:?} size was {actual}, expected {expected}")]
+    CacheSizeMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
     },
 }
 
@@ -911,6 +1286,100 @@ fn manifest_url(image_ref: &OciImageReference) -> String {
         image_ref.repository,
         image_ref.reference.registry_reference()
     )
+}
+
+fn blob_url(image_ref: &OciImageReference, digest: &OciDigest) -> String {
+    format!(
+        "https://{}/v2/{}/blobs/{}",
+        image_ref.registry_api_host(),
+        image_ref.repository,
+        digest
+    )
+}
+
+fn cache_tmp_path(path: &Path) -> Result<PathBuf, OciRegistryError> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| OciRegistryError::CachePath {
+            path: path.to_path_buf(),
+            reason: "cache blob path has no file name".to_string(),
+        })?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    Ok(path.with_file_name(format!(".{file_name}.tmp-{}-{nanos}", std::process::id())))
+}
+
+fn finalize_cache_write(
+    tmp_path: &Path,
+    path: &Path,
+    digest: &OciDigest,
+    expected_size: Option<u64>,
+) -> Result<CachedOciBlob, OciRegistryError> {
+    if path.exists() {
+        let _ = fs::remove_file(tmp_path);
+        return verify_cached_blob(path, digest, expected_size);
+    }
+    fs::rename(tmp_path, path).map_err(|source| OciRegistryError::CacheIo {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    verify_cached_blob(path, digest, expected_size)
+}
+
+fn verify_cached_blob(
+    path: &Path,
+    digest: &OciDigest,
+    expected_size: Option<u64>,
+) -> Result<CachedOciBlob, OciRegistryError> {
+    let metadata = fs::metadata(path).map_err(|source| OciRegistryError::CacheIo {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Err(OciRegistryError::CachePath {
+            path: path.to_path_buf(),
+            reason: "cached blob path is not a regular file".to_string(),
+        });
+    }
+    if let Some(expected) = expected_size {
+        if metadata.len() != expected {
+            return Err(OciRegistryError::CacheSizeMismatch {
+                path: path.to_path_buf(),
+                expected,
+                actual: metadata.len(),
+            });
+        }
+    }
+    let actual = digest_from_file_for_cache(path)?;
+    if &actual != digest {
+        return Err(OciRegistryError::CacheDigestMismatch {
+            path: path.to_path_buf(),
+            expected: digest.clone(),
+            actual,
+        });
+    }
+    Ok(CachedOciBlob {
+        digest: digest.clone(),
+        path: path.to_path_buf(),
+        size: metadata.len(),
+    })
+}
+
+fn digest_from_file_for_cache(path: &Path) -> Result<OciDigest, OciRegistryError> {
+    let mut file = File::open(path).map_err(|source| OciRegistryError::CacheIo {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher).map_err(|source| OciRegistryError::CacheIo {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    OciDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+        .map_err(OciRegistryError::Contract)
 }
 
 fn parse_image_reference(value: &str) -> Result<OciImageReference, ImageContractError> {
@@ -1560,6 +2029,7 @@ mod tests {
     fn digest_requires_algorithm_encoded_shape() {
         let digest = OciDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
         assert_eq!(digest.algorithm(), "sha256");
+        assert_eq!(digest.encoded(), "a".repeat(64));
         assert!(matches!(
             OciDigest::new("sha256:not/valid"),
             Err(ImageContractError::InvalidDigest { .. })
@@ -1571,6 +2041,21 @@ mod tests {
         assert!(matches!(
             OciDigest::new("missing-colon"),
             Err(ImageContractError::InvalidDigest { .. })
+        ));
+    }
+
+    #[test]
+    fn image_reference_can_be_rewritten_to_digest_reference() {
+        let image_ref = OciImageReference::from_str("ubuntu:24.04").unwrap();
+        let digest_ref = image_ref.with_digest(digest('a'));
+
+        assert_eq!(
+            digest_ref.normalized(),
+            format!("docker.io/library/ubuntu@{}", digest('a'))
+        );
+        assert!(matches!(
+            digest_ref.reference,
+            OciImageReferenceKind::Digest(ref value) if value == &digest('a')
         ));
     }
 
@@ -1726,6 +2211,46 @@ mod tests {
             challenge.scope.as_deref(),
             Some("repository:library/ubuntu:pull")
         );
+    }
+
+    #[test]
+    fn content_cache_uses_digest_addressed_paths_and_reuses_blobs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = OciContentCache::new(tempdir.path().join("cache"));
+        let bytes = b"cached layer bytes";
+        let digest = digest_from_bytes(bytes).unwrap();
+
+        let stored = cache.store_blob(&digest, bytes).unwrap();
+        let cached = cache
+            .cached_blob(&digest, Some(bytes.len() as u64))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(stored, cached);
+        assert_eq!(
+            stored.path,
+            cache
+                .root()
+                .join("blobs")
+                .join("sha256")
+                .join(digest.encoded())
+        );
+        assert_eq!(fs::read(stored.path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn content_cache_rejects_corrupt_cached_blobs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = OciContentCache::new(tempdir.path().join("cache"));
+        let digest = digest_from_bytes(b"expected").unwrap();
+        let path = cache.blob_path(&digest);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"actual").unwrap();
+
+        assert!(matches!(
+            cache.cached_blob(&digest, Some("actual".len() as u64)),
+            Err(OciRegistryError::CacheDigestMismatch { .. })
+        ));
     }
 
     #[test]
@@ -1933,6 +2458,35 @@ mod tests {
             );
             source.validate().unwrap();
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads Ubuntu OCI layer blobs and unpacks the rootfs"]
+    async fn fetches_ubuntu_platform_layers_to_cache_and_imports_rootfs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = OciContentCache::new(tempdir.path().join("cache"));
+        let resolver = OciRegistryClient::new();
+        let cached = resolver
+            .resolve_and_fetch_ubuntu_systemd_to_cache(OciPlatform::linux_amd64(), &cache)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cached.resolved.image_ref.normalized(),
+            UBUNTU_SYSTEMD_SOURCE_REF
+        );
+        assert!(!cached.layers.is_empty());
+        assert!(cached.manifest_blob.path.exists());
+        for layer in &cached.layers {
+            assert!(layer.path.exists());
+            verify_layer_blob(&layer.path, &layer.descriptor).unwrap();
+        }
+
+        let imported = OciRootfsImporter::new()
+            .import_layers(&cached.layers, tempdir.path().join("rootfs"))
+            .unwrap();
+        let os_release = fs::read_to_string(imported.root.join("etc/os-release")).unwrap();
+        assert!(os_release.contains("ID=ubuntu"));
     }
 
     #[test]

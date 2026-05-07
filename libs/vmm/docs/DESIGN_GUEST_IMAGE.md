@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache that feeds importer-ready layer inputs |
 | 2026-05-07 | @vmm-cdx | Add the first rootfs importer implementation slice: selected platform manifest parsing, digest-checked local layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteouts |
 | 2026-05-07 | @vmm-cdx | Tighten resolver provenance so single-image manifests are rejected until config blob inspection verifies the requested platform |
 | 2026-05-07 | @vmm-cdx | Clarify v1.5 acceptance: functional parity with v1.4 CH and v1.45 VZ through the unified v1.5 harness, image builder, and OCI-derived guest image path |
@@ -791,11 +792,12 @@ and profile-specific requirements once a second base image is implemented.
 ### Current Implementation Slice
 
 `libs/vmm/src/image.rs` is the first Rust surface for this roadmap. It resolves
-registry manifest metadata, parses selected platform manifests, and unpacks
-digest-checked local rootfs layer blobs into a deterministic assembly root. It
-establishes the typed metadata that later registry blob download/cache,
-assembler, emitter, harness, and CI code must share. It does not yet pull layer
-blobs from a registry or emit VM boot artifacts.
+registry manifest metadata, fetches selected platform manifests and layer blobs
+into a content-addressed cache, parses selected platform manifests, and unpacks
+digest-checked rootfs layer blobs into a deterministic assembly root. It
+establishes the typed metadata that later classifier, assembler, emitter,
+harness, and CI code must share. It does not yet classify the imported rootfs or
+emit VM boot artifacts.
 
 - `OciPlatform` and `GuestArchitecture` record the selected OCI platform.
 - `OciDigest` records immutable image-index, platform-manifest, and emitted
@@ -815,6 +817,14 @@ blobs from a registry or emit VM boot artifacts.
   image index or Docker manifest list. Single-image manifests are rejected until
   the resolver fetches the manifest config blob and verifies `os` /
   `architecture`.
+- `OciContentCache` stores selected platform manifests and layer blobs under
+  `blobs/<algorithm>/<encoded>`. Cache hits are revalidated by digest and, for
+  layer descriptors, expected size. Corrupt cache entries fail closed rather than
+  being silently overwritten.
+- `OciRegistryClient::fetch_resolved_platform_to_cache(...)` fetches the selected
+  platform manifest by immutable digest, parses it, fetches all rootfs layer
+  blobs by digest, validates `Docker-Content-Digest` when present, and returns
+  importer-ready `OciLayerInput` values pointing at verified cached content.
 - `OciPlatformManifest` parses the selected platform manifest into config digest
   and layer descriptors.
 - `OciRootfsImporter` applies caller-provided local layer blobs after validating
@@ -824,10 +834,8 @@ blobs from a registry or emit VM boot artifacts.
   supports `sha256` layer descriptors only; other digest algorithms must be added
   deliberately rather than silently producing a mismatched hash.
 
-Registry blob download/cache is deliberately separate from this first importer
-slice. The next slice should fetch the selected platform manifest and layer
-blobs by digest, place them in a content-addressed cache, then feed those local
-paths into `OciRootfsImporter`.
+The next slice should classify the imported rootfs against the first
+`ubuntu-systemd` profile before any Motlie compatibility layer is applied.
 
 The current `ubuntu-systemd` profile validates against
 `docker.io/library/ubuntu:24.04` and `InitProfile::UbuntuSystemd`; validation

@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache, producing importer-ready `OciLayerInput`s |
 - 2026-05-07 | @vmm-cdx | add the first rootfs importer API for digest-checked local OCI layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteout handling
 - 2026-05-07 | @vmm-cdx | tighten resolver provenance so single-image manifests are rejected until config blob inspection can verify the requested platform
 - 2026-05-07 | @vmm-cdx | document that resolver live tests are a PR sub-gate and v1.5 acceptance requires v1.4/v1.45 functional parity through the unified v1.5 harness/image-builder/OCI flow
@@ -69,6 +70,7 @@ High-level status:
   - [x] typed image reference parsing for Docker/OCI-style refs
   - [x] OCI/Docker manifest index resolution through Registry v2
   - [x] selected platform-manifest digest extraction
+  - [x] content-addressed fetch/cache for selected platform manifests and rootfs layers
 
 Phase 1 convergence:
 
@@ -600,16 +602,17 @@ Default reviewed policy:
 The guest-image surface is the first host-runtime API for the OCI import
 roadmap. It records source identity and validation metadata, resolves
 OCI/Docker manifest indexes to immutable digests, parses selected platform
-manifests, and can unpack digest-checked local rootfs layer blobs into an empty
-assembly root. It does not yet pull layer blobs from a registry or emit CH/VZ
-artifacts.
+manifests, fetches selected platform manifests and layer blobs into a
+content-addressed cache, and can unpack digest-checked local rootfs layer blobs
+into an empty assembly root. It does not yet classify the imported rootfs or emit
+CH/VZ artifacts.
 
 ```rust
 use motlie_vmm::backend::BackendKind;
 use motlie_vmm::image::{
     EmittedArtifactDigest, ExternalOciSource, GuestImageProfile, GuestImageValidationRecord,
-    OciDigest, OciImageReference, OciLayerInput, OciPlatform, OciPlatformManifest,
-    OciRegistryClient, OciRootfsImporter,
+    OciContentCache, OciDigest, OciImageReference, OciPlatform, OciRegistryClient,
+    OciRootfsImporter,
 };
 
 let source = ExternalOciSource::ubuntu_systemd(
@@ -642,16 +645,11 @@ let resolved_source = resolver
     .await?;
 resolved_source.validate()?;
 
-let platform_manifest = OciPlatformManifest::from_json(platform_manifest_json)?;
-let layer_inputs = platform_manifest
-    .layers
-    .into_iter()
-    .map(|descriptor| {
-        let path = layer_cache.join(descriptor.digest.as_ref().replace(':', "_"));
-        OciLayerInput::new(descriptor, path)
-    })
-    .collect::<Vec<_>>();
-let imported = OciRootfsImporter::new().import_layers(&layer_inputs, assembly_root)?;
+let cache = OciContentCache::new("/tmp/motlie-vmm-oci-cache");
+let cached = resolver
+    .resolve_and_fetch_ubuntu_systemd_to_cache(OciPlatform::linux_amd64(), &cache)
+    .await?;
+let imported = OciRootfsImporter::new().import_layers(&cached.layers, assembly_root)?;
 ```
 
 The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
@@ -680,6 +678,18 @@ Resolver behavior:
 - rejects single-image manifests until config blob inspection verifies the
   manifest's actual platform; unknown JSON without descriptors is rejected
 
+Fetch/cache behavior:
+
+- fetches the selected platform manifest by immutable digest and validates the
+  body digest before caching
+- fetches each rootfs layer blob by immutable digest and validates body digest,
+  descriptor size, and `Docker-Content-Digest` when present
+- stores content under `blobs/<algorithm>/<encoded>` so repeated imports reuse
+  verified content without rediscovering paths
+- treats corrupt cached content as an error rather than silently overwriting it
+- produces importer-ready `OciLayerInput` values whose paths point at verified
+  cached blobs
+
 Rootfs importer behavior:
 
 - parses selected OCI/Docker platform manifests into config and layer metadata
@@ -700,11 +710,13 @@ Resolver validation:
 ```bash
 cargo test -p motlie-vmm image --lib
 cargo test -p motlie-vmm resolves_ubuntu_systemd_source_from_registry --lib -- --ignored
+cargo test -p motlie-vmm fetches_ubuntu_platform_layers_to_cache_and_imports_rootfs --lib -- --ignored
 ```
 
-The ignored live-registry test is not part of default unit tests because it
-depends on external registry availability, DNS, and rate limits. It is still a
-required PR acceptance step for changes that affect source resolution.
+The ignored live-registry tests are not part of default unit tests because they
+depend on external registry availability, DNS, layer download time, and rate
+limits. They are still required PR acceptance steps for changes that affect
+source resolution, registry blob fetch, cache layout, or rootfs import.
 
 v1.5 acceptance is broader than this resolver API. The final v1.5 surface must
 prove v1.4 CH and v1.45 VZ guest-visible functional parity through the unified

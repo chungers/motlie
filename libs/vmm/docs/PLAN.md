@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Mark Phase 11 registry fetch/cache complete for selected platform manifests and layer blobs feeding importer-ready layer inputs |
 | 2026-05-07 | @vmm-cdx | Mark the first Phase 11 rootfs importer slice complete for selected platform manifest parsing, digest-checked local layer unpacking, deterministic assembly roots, and OCI whiteouts |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11 resolver provenance so single-image manifests are rejected until config inspection can verify platform identity |
 | 2026-05-07 | @vmm-cdx | Clarify Phase 11 acceptance: v1.5 must prove v1.4 CH and v1.45 VZ functional parity through the unified v1.5 harness, image builder, and OCI guest image flow |
@@ -582,8 +583,12 @@ Tasks:
   - [x] support OCI plain tar, OCI gzip tar, and Docker gzip rootfs diff layers
   - [x] apply OCI whiteouts and opaque directory whiteouts
   - [x] reject non-empty assembly roots and unsafe layer paths
-  - [ ] fetch selected platform manifest and layer blobs from the registry into a
+  - [x] fetch selected platform manifest and layer blobs from the registry into a
         content-addressed local cache
+  - [x] validate cached platform manifest and layer blobs by immutable digest
+        before producing importer-ready layer inputs
+  - [x] add ignored live-registry validation that fetches Ubuntu rootfs layers
+        into cache and imports `/etc/os-release`
 - [ ] inspect and classify the imported image against the first
       `ubuntu-systemd` profile:
   - [ ] OS release
