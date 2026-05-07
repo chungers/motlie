@@ -107,10 +107,9 @@ pub(crate) const BUILD_GIT_SHA: &str = env!("MMUX_GIT_SHA");
 pub(crate) const BUILD_DATE: &str = env!("MMUX_BUILD_DATE");
 pub(crate) const HELP_KEY_FUNCTIONS: &str = r#"Keys:
 ↑ (u) / ↓ (b) select session or scroll detail
-Enter sample highlighted session (list pane)
+Enter refresh highlighted session preview (list pane)
 tab cycle panes
 l toggle layout
-m monitor highlighted session
 p | @ prompt highlighted session
   $0..$9 send digit to highlight
   $! send Escape to highlight

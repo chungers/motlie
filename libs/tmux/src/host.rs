@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
 
-use crate::attach::{self, AttachCommand};
+use crate::attach::{self, AttachCommand, AttachOptions};
 use crate::capture;
 use crate::control;
 use crate::discovery;
@@ -2403,11 +2403,25 @@ impl Target {
 
     /// Attach the current process PTY to this tmux session.
     pub async fn attach_current_pty(&self) -> Result<crate::AttachExit> {
-        let command = self.attach_command().await?;
-        tokio::task::spawn_blocking(move || attach::run_attach_command(command)).await?
+        self.attach_current_pty_with_options(&AttachOptions::default())
+            .await
     }
 
-    async fn attach_command(&self) -> Result<AttachCommand> {
+    /// Attach the current process PTY to this tmux session with explicit
+    /// attach options.
+    pub async fn attach_current_pty_with_options(
+        &self,
+        options: &AttachOptions,
+    ) -> Result<crate::AttachExit> {
+        let command = self.attach_command_with_options(options).await?;
+        let options = *options;
+        tokio::task::spawn_blocking(move || {
+            attach::run_attach_command_with_options(command, options)
+        })
+        .await?
+    }
+
+    async fn attach_command_with_options(&self, options: &AttachOptions) -> Result<AttachCommand> {
         let session = match &self.address {
             TargetAddress::Session(session) => session,
             TargetAddress::Window(_) => {
@@ -2432,11 +2446,12 @@ impl Target {
                 self.inner.socket.as_ref(),
                 target,
             )),
-            TransportKind::Ssh(ssh) => Ok(attach::ssh_attach_command(
+            TransportKind::Ssh(ssh) => Ok(attach::ssh_attach_command_with_options(
                 ssh.config(),
                 &tmux_bin,
                 self.inner.socket.as_ref(),
                 target,
+                options,
             )),
             TransportKind::Mock(_) => Err(Error::State(
                 "attach_current_pty is not supported for mock transports".to_string(),
