@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten Phase 11 whiteout handling so empty whiteout targets are rejected and opaque-whiteout metadata errors fail closed |
+| 2026-05-07 | @vmm-cdx | Mark Phase 11 registry fetch/cache complete for selected platform manifests and layer blobs feeding importer-ready layer inputs |
+| 2026-05-07 | @vmm-cdx | Mark the first Phase 11 rootfs importer slice complete for selected platform manifest parsing, digest-checked local layer unpacking, deterministic assembly roots, and OCI whiteouts |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11 resolver provenance so single-image manifests are rejected until config inspection can verify platform identity |
 | 2026-05-07 | @vmm-cdx | Clarify Phase 11 acceptance: v1.5 must prove v1.4 CH and v1.45 VZ functional parity through the unified v1.5 harness, image builder, and OCI guest image flow |
 | 2026-05-07 | @vmm-cdx | Mark Phase 11 registry digest resolution complete with the new Registry v2 resolver in `libs/vmm/src/image.rs` |
@@ -572,8 +575,23 @@ Tasks:
         requested platform
   - [x] add ignored live-registry validation for Ubuntu `linux/amd64` and
         `linux/arm64` resolution
-- [ ] add a rootfs importer that unpacks the selected OCI platform layers into
+- [x] add a rootfs importer that unpacks the selected OCI platform layers into
       a deterministic assembly root
+  - [x] parse selected platform manifests into config and layer descriptors
+  - [x] validate local layer blob size and digest before extraction
+  - [x] reject non-`sha256` layer digests until additional algorithms are
+        explicitly implemented
+  - [x] support OCI plain tar, OCI gzip tar, and Docker gzip rootfs diff layers
+  - [x] apply OCI whiteouts and opaque directory whiteouts
+  - [x] reject empty whiteout targets and fail closed on opaque-whiteout metadata
+        errors
+  - [x] reject non-empty assembly roots and unsafe layer paths
+  - [x] fetch selected platform manifest and layer blobs from the registry into a
+        content-addressed local cache
+  - [x] validate cached platform manifest and layer blobs by immutable digest
+        before producing importer-ready layer inputs
+  - [x] add ignored live-registry validation that fetches Ubuntu rootfs layers
+        into cache and imports `/etc/os-release`
 - [ ] inspect and classify the imported image against the first
       `ubuntu-systemd` profile:
   - [ ] OS release
