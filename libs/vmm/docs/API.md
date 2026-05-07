@@ -15,6 +15,8 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | tighten the guest-image contract so `sha256` digests must be full-length and validation records embed the typed profile instead of a freeform profile name
+- 2026-05-07 | @vmm-cdx | add the first guest-image OCI contract surface in `image.rs` for source digests, selected platform, import profile, and emitted artifact validation records
 - 2026-05-04 | @codex-vz | add `VzUserspaceEgress` to the reviewed runtime model so VZ egress is lifecycle-owned by VMM like CH Motlie VNET while the VZ runner remains a hypervisor adapter
 - 2026-04-08 | @codex | add `wait_egress_ready` as a first-class harness/scenario readiness primitive so saved validations and manual certification can block on DNS + outbound HTTPS readiness instead of one opportunistic probe
 - 2026-04-08 | @codex | address PR 140 review drift: remove the dead `VmBackend` / `BackendSet` transitional story, update `GuestSpec` / `PreparedGuest` / shutdown snippets to match code, and record typed `OverlaySize`, namespace-sensitive socket paths, and shutdown-cleanup failure reporting
@@ -54,6 +56,12 @@ High-level status:
   - [x] `ControlPlaneBacking`
   - [ ] `VmSpec`
   - [ ] simple CH “hello world” example over the same lifecycle API
+- [x] first guest-image OCI contract module added in code:
+  - [x] `image.rs`
+  - [x] typed source reference and immutable digest metadata
+  - [x] typed selected OCI platform
+  - [x] typed import profile metadata for `ubuntu-systemd`
+  - [x] typed validation records for backend-emitted artifacts
 
 Phase 1 convergence:
 
@@ -579,6 +587,52 @@ Default reviewed policy:
 - `cid = first_cid + slot`
 - admin and egress MAC addresses are derived from the slot, not truncated to
   one byte
+
+### `image.rs`
+
+The guest-image surface is the first host-runtime API for the OCI import
+roadmap. It records source identity and validation metadata; it does not yet
+pull OCI content, unpack rootfs layers, or emit CH/VZ artifacts.
+
+```rust
+use motlie_vmm::backend::BackendKind;
+use motlie_vmm::image::{
+    EmittedArtifactDigest, ExternalOciSource, GuestImageProfile,
+    GuestImageValidationRecord, OciDigest, OciPlatform,
+};
+
+let source = ExternalOciSource::ubuntu_systemd(
+    OciPlatform::linux_amd64(),
+    OciDigest::new("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?,
+    OciDigest::new("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?,
+);
+
+let profile = GuestImageProfile::ubuntu_systemd(source.clone());
+profile.validate()?;
+
+let record = GuestImageValidationRecord {
+    profile: profile.clone(),
+    contract_version: "v1.5".to_string(),
+    backend_kind: BackendKind::ChShell,
+    emitted_artifacts: vec![EmittedArtifactDigest {
+        label: "rootfs".to_string(),
+        path: "artifacts/base/rootfs.squashfs".into(),
+        digest: OciDigest::new("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")?,
+    }],
+};
+record.validate()?;
+```
+
+The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
+the current validation-lab default: CH maps to `linux/amd64` for DGX validation
+and VZ maps to `linux/arm64` for Apple Silicon validation. It is not a backend
+invariant; callers should pass an explicit `OciPlatform` when the host or guest
+architecture differs.
+
+Validation rules intentionally reject short fake `sha256` values and enforce
+the current `ubuntu-systemd` profile/source coherence:
+`GuestImageValidationRecord` embeds `GuestImageProfile`, and the embedded
+profile must validate before emitted artifact digests are accepted.
 
 ### SSH / CA Binding
 

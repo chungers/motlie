@@ -111,6 +111,7 @@ use motlie_vfs::core::overlay::OverlayAttrs;
 use motlie_vfs::core::server::FsServer;
 use motlie_vfs::vsock::handler::VsockConnectionHandler;
 use motlie_vmm::ca::SshCa;
+use motlie_vmm::spec::GuestSshAccess;
 use motlie_vmm::ssh::{self, GuestRegistry, SshProxyConfig};
 use motlie_vnet::{VnetBackend, VnetConfig, VnetHandle};
 
@@ -1798,12 +1799,17 @@ fn dispatch_command(admin: &mut AdminState, line: &str) -> ControlFlow {
                                     let bridge_ca = Arc::clone(&admin.ssh_ca);
                                     let bridge_reg = Arc::clone(&admin.guest_registry);
                                     let bridge_name = guest_name.to_string();
+                                    let bridge_ssh_access = GuestSshAccess {
+                                        principal: bridge_name.clone(),
+                                        login_user: bridge_name.clone(),
+                                    };
                                     admin.runtime.spawn(async move {
                                         ssh::run_guest_ssh_bridge(
                                             listener,
                                             uds_path,
                                             bridge_ca,
                                             bridge_name,
+                                            bridge_ssh_access,
                                             bridge_reg,
                                         )
                                         .await;
