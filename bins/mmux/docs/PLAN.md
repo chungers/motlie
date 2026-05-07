@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-06 | @codex-tts | Added list-only `$` direct-send follow-ons for Send Keys: `$0`..`$9` dispatch digits immediately and `$!` dispatches `{Esc}` to the highlighted session. |
 | 2026-05-03 | @codex | Added Phase 13 for the `s` Send Keys modal and moved pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Refactored attach status setup to use motlie-tmux `SessionStatus` snapshot/apply/restore semantics. |
@@ -697,6 +698,11 @@ new scoped unset method below. Do not add direct tmux shell commands to `mmux`.
 - [x] 13.5b A trailing `$$` suffix in Send Keys input is stripped and uses the
   same delayed follow-up `{Enter}` behavior; `$$` alone sends only delayed
   `{Enter}`.
+- [x] 13.5c In the list pane only, typing `$` then `0`..`9` dispatches that
+  single digit immediately to the highlighted session through the same stable
+  `Target::send_keys` path without opening the modal.
+- [x] 13.5d In the list pane only, typing `$` then `!` dispatches `{Esc}`
+  immediately to the highlighted session through the same stable send path.
 - [x] 13.6 `Esc` and focused `Cancel` close without sending; invalid key syntax
   keeps the modal open for correction.
 - [x] 13.7 Add modal rendering, open/cancel/send/invalid-sequence tests and
