@@ -918,7 +918,7 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Scenar
             message: error.to_string(),
         },
         RuntimeError::Ssh(ssh) => classify_ssh_failure(stage, ssh),
-        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) => ScenarioFailure {
+        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) | RuntimeError::VzEgress(_) => ScenarioFailure {
             class: FailureClass::Network,
             stage,
             code: "vnet_failed",
@@ -940,6 +940,7 @@ fn classify_backend_failure(stage: &'static str, error: &BackendError) -> Scenar
         code: match error {
             BackendError::CreateRuntimeDir { .. } => "backend_runtime_dir_failed",
             BackendError::ChShell(_) => "backend_ch_shell_failed",
+            BackendError::VzShell(_) => "backend_vz_shell_failed",
             BackendError::UnsupportedBackend(_) => "backend_unsupported",
             BackendError::HandleKindMismatch { .. } => "backend_handle_mismatch",
         },

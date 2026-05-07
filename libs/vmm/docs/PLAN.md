@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Add Phase 11 for the OCI import profile implementation and mark the first typed image contract slice complete |
 | 2026-05-02 | @codex-vz | Record the v1.5 common guest image workstream and VMM ownership of guest image, seed schema, guest binary packaging, and `libs/vmm/src/guest` / `libs/vmm/bins` home |
 | 2026-04-25 | @codex-vz | Add `CONVERGENCE.md` as the findable guest boot/provisioning contract for CH/Vz parity and record that v1.45 Vz first-contact SSH must gate on interactive readiness, not hidden package/build/validation work |
 | 2026-04-12 | @codex-vmm | Refresh PLAN from current merged reality: `v1.4` harness is proven, PR #159 auto-provisioning is complete and independently validated, and the next work is Phase 8 extraction of reusable harness/validation core plus the standard guest-path follow-up |
@@ -70,6 +71,17 @@ What is still missing for a polished, reusable harness:
   visibility
 - a broader standard guest path that does not depend on Motlie backing
 - a practical single-binary distribution prototype for the curated guest image
+
+Current common guest-image implementation status:
+
+- [x] `DESIGN_GUEST_IMAGE.md` defines the OCI roadmap from an external Ubuntu
+      source profile to a multi-arch Motlie guest image artifact.
+- [x] `libs/vmm/src/image.rs` defines the first typed host-runtime contract for
+      OCI source identity, selected platform, import profile metadata, emitted
+      artifact digests, and validation records.
+- [ ] registry resolution and OCI layer/rootfs import are not implemented yet.
+- [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
+      than a Rust-owned OCI-derived rootfs assembly.
 
 Independent end-to-end validation already performed for the merged line:
 
@@ -517,6 +529,70 @@ Acceptance:
   - [ ] guest-OS-visible metrics
 - future debugging of performance or isolation regressions can start from one
   stable reporting command rather than ad hoc shell commands
+
+## Phase 11: OCI Import Profile And Common Guest Image Builder
+
+Design reference:
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#roadmap-to-a-shared-oci-guest-image`
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#external-dockeroci-image-import-profiles`
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#current-implementation-slice`
+
+Goal:
+- implement the Ubuntu-first external OCI import profile from
+  `DESIGN_GUEST_IMAGE.md`, then use it as the entry point to the common CH/VZ
+  image builder
+
+Tasks:
+- [x] add typed source/profile/platform/artifact metadata in
+      `libs/vmm/src/image.rs`
+  - [x] `ExternalOciSource`
+  - [x] `OciPlatform`
+  - [x] `OciDigest`
+  - [x] `GuestImageProfile`
+  - [x] `GuestImageValidationRecord`
+- [ ] add a registry resolver that turns
+      `docker.io/library/ubuntu:24.04` into immutable image-index and selected
+      platform-manifest digests
+- [ ] add a rootfs importer that unpacks the selected OCI platform layers into
+      a deterministic assembly root
+- [ ] inspect and classify the imported image against the first
+      `ubuntu-systemd` profile:
+  - [ ] OS release
+  - [ ] package manager
+  - [ ] init/systemd capability
+  - [ ] SSH/sudo/network tooling baseline
+  - [ ] `/dev/fuse` and mount-point assumptions
+- [ ] apply the pre-boot Motlie compatibility layer:
+  - [ ] Motlie guest binaries under `/opt/motlie/v1.5/guest/bin`
+  - [ ] compatibility symlinks under `/usr/local/bin`
+  - [ ] VFS mount configuration schema
+  - [ ] SSH CA/principal seed schema
+  - [ ] `ubuntu-systemd` service graph under `cloud-init.target`
+  - [ ] required mount-point directories
+- [ ] emit backend artifacts from the same assembled rootfs:
+  - [ ] CH kernel/rootfs/seed artifacts
+  - [ ] VZ disk/boot artifacts
+  - [ ] backend artifact manifest with digests
+- [ ] write and preserve `GuestImageValidationRecord` with:
+  - [ ] source image reference
+  - [ ] image-index digest
+  - [ ] selected platform
+  - [ ] selected platform-manifest digest
+  - [ ] contract version
+  - [ ] backend kind
+  - [ ] emitted artifact digests
+- [ ] run the shared v1.5 harness matrix against emitted CH and VZ artifacts
+      before accepting a source digest update
+
+Acceptance:
+- the first supported input is the Ubuntu official OCI image
+  `docker.io/library/ubuntu:24.04`, pinned by immutable digests
+- CH and VZ artifacts are derived from the same typed profile and assembled
+  rootfs contract
+- profile-specific Ubuntu/systemd behavior is not confused with the
+  backend-neutral Motlie guest contract
+- the harness can report exactly which source digest, selected platform, and
+  emitted backend artifacts were validated
 
 ## Non-Goals for This Plan
 

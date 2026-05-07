@@ -1147,6 +1147,7 @@ fn classify_backend_failure(stage: &'static str, error: &BackendError) -> Driver
         code: match error {
             BackendError::CreateRuntimeDir { .. } => "backend_runtime_dir_failed",
             BackendError::ChShell(_) => "backend_ch_shell_failed",
+            BackendError::VzShell(_) => "backend_vz_shell_failed",
             BackendError::UnsupportedBackend(_) => "backend_unsupported",
             BackendError::HandleKindMismatch { .. } => "backend_handle_mismatch",
         },
@@ -1172,7 +1173,7 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Driver
             message: error.to_string(),
         },
         RuntimeError::Ssh(ssh) => classify_ssh_failure(stage, ssh),
-        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) => DriverFailure {
+        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) | RuntimeError::VzEgress(_) => DriverFailure {
             class: DriverFailureClass::Network,
             stage,
             code: "vnet_failed",

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Start the OCI import profile implementation with typed source/profile/platform/artifact metadata in `libs/vmm/src/image.rs` |
 | 2026-05-06 | @vmm-cdx | Fold the CH `cloud-init.target` boot-graph fix into the OCI-derived `ubuntu-systemd` compatibility profile contract |
 | 2026-05-06 | @vmm-cdx | Clarify OCI source registry and digest semantics for cross-backend validation after PR feedback |
 | 2026-05-06 | @vmm-cdx | Reorder the OCI roadmap so the first contract slice starts from an Ubuntu OCI import profile and derives the Motlie guest contract from a real base image |
@@ -781,6 +782,31 @@ separate profile because package names, init system, shell/coreutils behavior,
 and service management differ. The Motlie contract should emerge from the
 Ubuntu profile first, then be factored into profile-independent requirements
 and profile-specific requirements once a second base image is implemented.
+
+### Current Implementation Slice
+
+`libs/vmm/src/image.rs` is the first Rust surface for this roadmap. It does not
+pull registry content or emit VM boot artifacts yet. It establishes the typed
+metadata that later importer, assembler, emitter, harness, and CI code must
+share:
+
+- `OciPlatform` and `GuestArchitecture` record the selected OCI platform.
+- `OciDigest` records immutable image-index, platform-manifest, and emitted
+  artifact digests.
+- `ExternalOciSource` records the source image reference plus resolved
+  immutable OCI identity.
+- `GuestImageProfile` records the Motlie compatibility profile derived from
+  the external source, starting with `ubuntu-systemd`.
+- `GuestImageValidationRecord` records the backend, contract version, source
+  digests, and emitted artifact digests needed to prove which guest image was
+  validated.
+
+The current helper
+`OciPlatform::default_for_v1_5_validation_backend(BackendKind)` is only a lab
+default: CH validation currently targets native amd64 DGX hosts and VZ
+validation currently targets Apple Silicon arm64 hosts. The selected platform
+remains explicit in `ExternalOciSource` and must be supplied by callers when a
+different CH or VZ host architecture is used.
 
 ## Success Criteria
 

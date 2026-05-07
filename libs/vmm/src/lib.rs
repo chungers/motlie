@@ -20,6 +20,8 @@ pub mod guest;
 #[cfg(feature = "host-runtime")]
 pub mod guestfs;
 #[cfg(feature = "host-runtime")]
+pub mod image;
+#[cfg(feature = "host-runtime")]
 pub mod network;
 #[cfg(feature = "host-runtime")]
 pub mod network_alloc;
