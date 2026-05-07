@@ -627,6 +627,13 @@ pub enum OciRegistryError {
         image_ref: String,
         platform: OciPlatform,
     },
+    #[error(
+        "manifest for {image_ref} is a single-platform image manifest; platform {platform} cannot be verified without config inspection"
+    )]
+    UnverifiedSingleManifest {
+        image_ref: String,
+        platform: OciPlatform,
+    },
 }
 
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -875,7 +882,10 @@ fn select_platform_manifest_digest(
     let media_type = manifest.media_type.as_deref();
     let manifests = manifest.manifests.unwrap_or_default();
     if is_single_manifest_media_type(media_type) {
-        return digest_from_bytes(bytes).map_err(OciRegistryError::Contract);
+        return Err(OciRegistryError::UnverifiedSingleManifest {
+            image_ref: image_ref.normalized(),
+            platform,
+        });
     }
     if manifests.is_empty() {
         return Err(OciRegistryError::PlatformNotFound {
@@ -1175,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn single_manifest_uses_body_digest_as_platform_manifest_digest() {
+    fn single_manifest_is_rejected_until_config_platform_is_verified() {
         let image_ref = OciImageReference::from_str(UBUNTU_SYSTEMD_SOURCE_REF).unwrap();
         let manifest = br#"{
             "schemaVersion": 2,
@@ -1184,11 +1194,10 @@ mod tests {
             "layers": []
         }"#;
 
-        let selected =
-            select_platform_manifest_digest(manifest, OciPlatform::linux_amd64(), &image_ref)
-                .unwrap();
-
-        assert_eq!(selected, digest_from_bytes(manifest).unwrap());
+        assert!(matches!(
+            select_platform_manifest_digest(manifest, OciPlatform::linux_amd64(), &image_ref),
+            Err(OciRegistryError::UnverifiedSingleManifest { .. })
+        ));
     }
 
     #[test]
@@ -1229,10 +1238,12 @@ mod tests {
             assert_eq!(source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
             assert_eq!(source.platform, platform);
             assert!(source.image_index_digest.as_ref().starts_with("sha256:"));
-            assert!(source
-                .platform_manifest_digest
-                .as_ref()
-                .starts_with("sha256:"));
+            assert!(
+                source
+                    .platform_manifest_digest
+                    .as_ref()
+                    .starts_with("sha256:")
+            );
             source.validate().unwrap();
         }
     }
@@ -1246,14 +1257,18 @@ mod tests {
         assert_eq!(profile.name, UBUNTU_SYSTEMD_PROFILE);
         assert_eq!(profile.source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
         assert_eq!(profile.source.platform.to_string(), "linux/amd64");
-        assert!(profile
-            .required_packages
-            .iter()
-            .any(|pkg| pkg == "openssh-server"));
-        assert!(profile
-            .required_mount_points
-            .iter()
-            .any(|path| path == &PathBuf::from("/workspace")));
+        assert!(
+            profile
+                .required_packages
+                .iter()
+                .any(|pkg| pkg == "openssh-server")
+        );
+        assert!(
+            profile
+                .required_mount_points
+                .iter()
+                .any(|path| path == &PathBuf::from("/workspace"))
+        );
         profile.validate().unwrap();
     }
 

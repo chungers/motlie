@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten resolver provenance so single-image manifests are rejected until config blob inspection verifies the requested platform |
 | 2026-05-07 | @vmm-cdx | Clarify v1.5 acceptance: functional parity with v1.4 CH and v1.45 VZ through the unified v1.5 harness, image builder, and OCI-derived guest image path |
 | 2026-05-07 | @vmm-cdx | Add the first OCI Registry v2 resolver implementation for image reference parsing, immutable index digest resolution, and platform manifest selection |
 | 2026-05-07 | @vmm-cdx | Tighten the initial OCI implementation contract so validation records embed the typed profile and full-length SHA digests are enforced |
@@ -807,7 +808,10 @@ pull layer blobs, unpack rootfs layers, or emit VM boot artifacts.
 - `OciRegistryClient` resolves an image reference through Registry v2,
   including Bearer auth challenge handling, local `sha256` digest computation
   for the returned index/manifest body, optional `Docker-Content-Digest`
-  verification, and selected platform-manifest digest extraction.
+  verification, and selected platform-manifest digest extraction from an OCI
+  image index or Docker manifest list. Single-image manifests are rejected until
+  the resolver fetches the manifest config blob and verifies `os` /
+  `architecture`.
 
 The current `ubuntu-systemd` profile validates against
 `docker.io/library/ubuntu:24.04` and `InitProfile::UbuntuSystemd`; validation

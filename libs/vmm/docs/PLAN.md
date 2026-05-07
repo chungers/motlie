@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten Phase 11 resolver provenance so single-image manifests are rejected until config inspection can verify platform identity |
 | 2026-05-07 | @vmm-cdx | Clarify Phase 11 acceptance: v1.5 must prove v1.4 CH and v1.45 VZ functional parity through the unified v1.5 harness, image builder, and OCI guest image flow |
 | 2026-05-07 | @vmm-cdx | Mark Phase 11 registry digest resolution complete with the new Registry v2 resolver in `libs/vmm/src/image.rs` |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11's first slice so OCI validation records embed the typed profile and SHA digests validate full lengths |
@@ -566,6 +567,9 @@ Tasks:
   - [x] handle Bearer auth challenge/token flow
   - [x] compute and validate returned manifest/index body digest
   - [x] select platform manifest digest for `linux/amd64` or `linux/arm64`
+        from OCI image indexes / Docker manifest lists
+  - [x] reject single-image manifests until config blob inspection verifies the
+        requested platform
   - [x] add ignored live-registry validation for Ubuntu `linux/amd64` and
         `linux/arm64` resolution
 - [ ] add a rootfs importer that unpacks the selected OCI platform layers into

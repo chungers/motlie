@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | tighten resolver provenance so single-image manifests are rejected until config blob inspection can verify the requested platform
 - 2026-05-07 | @vmm-cdx | document that resolver live tests are a PR sub-gate and v1.5 acceptance requires v1.4/v1.45 functional parity through the unified v1.5 harness/image-builder/OCI flow
 - 2026-05-07 | @vmm-cdx | add the first OCI Registry v2 resolver API for image reference parsing, manifest/index digest resolution, platform manifest selection, and bearer-token auth
 - 2026-05-07 | @vmm-cdx | tighten the guest-image contract so `sha256` digests must be full-length and validation records embed the typed profile instead of a freeform profile name
@@ -662,8 +663,8 @@ Resolver behavior:
   `Docker-Content-Digest` when the registry provides it
 - selects the requested `OciPlatform` descriptor digest from an OCI image index
   or Docker manifest list
-- treats a known single-image manifest as both the source digest and selected
-  platform-manifest digest; unknown JSON without descriptors is rejected
+- rejects single-image manifests until config blob inspection verifies the
+  manifest's actual platform; unknown JSON without descriptors is rejected
 
 Resolver validation:
 
