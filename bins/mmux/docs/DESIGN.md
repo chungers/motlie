@@ -133,7 +133,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 
 - The TUI body is split into a left pane `L` and right pane `R`.
 - `L` lists tmux sessions on the target host and has default focus.
-- `R` shows sampled or monitored detail for the highlighted session.
+- `R` shows a live active-pane preview for the highlighted session.
 - `L` and `R` participate in pane focus cycling in landscape mode.
 - `L` and `R` are both scrollable. The `L` viewport scrolls automatically to
   keep the highlighted row visible when `len(sessions) > visible_rows`. A
@@ -151,26 +151,19 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   validation observed `Shift-Left` and `Shift-Right` for L/R resize. Plain
   Left/Right do not change pane focus in the main view.
 - Pressing Tab cycles focus `L -> R -> L` in landscape mode.
-- `R` initially shows sampled detail for the highlighted session.
-- `R` detail is supplied through a trait so future view models can summarize or
-  otherwise transform session content.
-- When focus is `R` in sample mode
-  and the user scrolls past the top of the currently sampled buffer, the
-  detail source must resample backwards: fetch additional scrollback for the
-  highlighted session, prepend it to the buffer, and anchor the viewport so
-  the user's scroll position stays on the same line of content (no visual
-  jump). Per-page fetches must be chunked, not full-buffer rebuilds.
-- When focus is `R` in monitor
-  mode and the user scrolls up, auto-tail pauses; newly received history is
-  appended to the buffer but the viewport stays anchored at the user's
-  position. `End` (or jump-to-bottom key) re-engages auto-tail.
-- Pressing `m` puts `R` into monitoring mode for the highlighted session, using
-  `motlie-tmux` rendered screen capture (`capture_all_with_options` with
-  `CaptureNormalizeMode::ScreenStable`) plus VTE/ANSI parsing to show live
-  screen snapshots. This is intentionally a screen mirror, not raw tmux
-  control-mode `%output` replay, because TUI programs rely on cursor movement,
-  clearing, and repaint semantics. (Focus-independent: operates on the
-  highlighted session regardless of which pane has focus.)
+- `R` initially shows the highlighted session's active pane and refreshes it on
+  the live-preview cadence.
+- `R` detail uses `Target::capture_with_options(ScreenStable)` for active-pane
+  capture. mmux deliberately does not capture every pane in the selected
+  session because the UI has no pane selector and multi-pane content does not
+  fit the current detail-pane layout.
+- When focus is `R` and the user scrolls up, live tailing pauses so the
+  viewport stays anchored. `End` (or jump-to-bottom key) re-engages live tail.
+- When focus is `R` and the user scrolls past the top of the current buffer,
+  the detail source fetches older scrollback for the highlighted session,
+  prepends it, and anchors the viewport so the user's scroll position stays on
+  the same line of content. Per-page fetches must be chunked, not full-buffer
+  rebuilds.
 - Pressing `$` then a digit `0` through `9` immediately sends that digit to
   the highlighted session without opening a modal. Pressing `$` then `!`
   immediately sends `{Esc}` to the highlighted session. These direct-send leader
@@ -188,8 +181,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   stripped from submitted input and uses the same delayed Enter mode. Otherwise,
   Enter must be written explicitly as `{Enter}` or `{C-m}` when needed. If `$$`
   is the entire submitted input, mmux sends only the delayed `{Enter}`. A
-  successful send refreshes the detail pane only when it is in snapshot mode;
-  monitor mode keeps its own refresh cadence. `Esc` or focused `Cancel` closes
+  successful send refreshes the detail pane immediately. `Esc` or focused `Cancel` closes
   without sending. Focused text inputs in mmux set the terminal cursor to the
   insertion point and use a blinking bar cursor while the TUI owns the screen.
 - Pressing `n` opens a centered `New Session` modal with padded content, a
@@ -245,7 +237,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 - Pressing `q` exits the selector without attach, equivalent to `Ctrl-C` in
   the main selector view.
 - The binary accepts an optional SSH URI / host target. Omitted means local host.
-- For SSH targets, listing, sampling, create, kill, monitor, and attach
+- For SSH targets, listing, live preview, create, kill, and attach
   all operate against the SSH target.
 - For SSH targets, attach must open an interactive SSH PTY to the target host
   and attach that remote PTY to the selected remote tmux session.
@@ -280,9 +272,9 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   Key hints must use arrow symbols instead of spelling out `up`, `down`,
   `left`, or `right`. The left hint is `tab ↑/↓`, covering pane focus cycling
   and selection/scroll movement, with shortcut letters rendered bold coral.
-  Always-on command hints are ordered as `help`, `monitor`, `prompt`, `attach`,
-  `new`, `kill`, `rename`, `group`, `layout`, `quit`, then mode-specific
-  resize. The shortcut letters `h`/`m`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
+  Always-on command hints are ordered as `help`, `prompt`, `attach`, `new`,
+  `kill`, `rename`, `group`, `layout`, `quit`, then mode-specific resize. The
+  shortcut letters `h`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
   bold coral in the TUI. The
   bottom status bar must not show a `keys` label, time, host,
   focus (`list`, `detail`, `L`, `R`), or layout mode (`portrait`,
@@ -308,8 +300,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   renders a compact layout optimized for 32 rows x ~64
   columns: the body splits vertically into Top (`T`, default focus, lists
   sessions) and Bottom (`B`, detail pane) at a 35:65 ratio.
-  All command keys (`Tab` focus cycling, `l` layout toggle, `Esc`/`m`/`s`/`n`/`k`/`a`/`q`/`Ctrl-C`), modal
-  behavior, focus model semantics, and detail-source trait usage are
+  All command keys (`Tab` focus cycling, `l` layout toggle, `Esc`/`p`/`@`/`n`/`k`/`a`/`q`/`Ctrl-C`), modal
+  behavior, focus model semantics, and detail-source usage are
   identical to normal mode (mapping `T` ↔ `L` and `B` ↔ `R`). Resize keys
   differ by mode: portrait mode uses `Ctrl-Up`/`Ctrl-Down` to resize `T`/`B`;
   normal mode uses `Ctrl-Left`/`Ctrl-Right` to resize `L`/`R`, with
@@ -329,10 +321,7 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
 
 - Terminal state must be restored on normal exit, attach, error, `q`/`Ctrl-C`, and
   panic paths.
-- Monitor handles and subscriptions must be stopped/unsubscribed when leaving
-  monitoring mode, changing monitored session, killing the monitored session, or
-  exiting the TUI.
-- UI redraws must remain responsive while sampling or monitoring remote sessions.
+- UI redraws must remain responsive while live-previewing remote sessions.
 - Session create/kill failures must be shown inline without corrupting the
   terminal state.
 - The app must be usable as an SSH `ForceCommand` entrypoint.
@@ -342,8 +331,8 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   the user's controlling terminal directly to the attached `tmux` (or
   `ssh tmux`) process. The selector binary must not run a nested terminal
   emulator, VTE buffer, or byte-proxy between the user's PTY and the
-  attached process. Concretely: before handoff the selector stops monitor
-  state, leaves the alternate screen, and restores termios; for local
+  attached process. Concretely: before handoff the selector leaves the
+  alternate screen and restores termios; for local
   targets it spawns `tmux attach-session -t <name>` as a child with
   inherited stdio (`stdin`/`stdout`/`stderr`); for SSH targets it spawns
   `ssh -t [...] tmux attach-session -t <name>` with inherited stdio. No
@@ -353,10 +342,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   must be chunked per page, not full-buffer rebuilds, so SSH-target detail
   panes remain responsive on long-lived sessions. See §Accepted Library
   Gaps → ScrollbackQuery::LinesRange.
-- Monitor mode is bounded to the rendered current screen. It does not retain a
-  raw control-mode transcript in the selector binary, preventing unbounded
-  memory growth on busy sessions. Older detail requests use chunked tmux
-  scrollback fetches via `LinesRange`.
+- Live preview is bounded to the selected session's rendered active pane. It
+  does not retain a raw control-mode transcript in the selector binary,
+  preventing unbounded memory growth on busy sessions. Older detail requests
+  use chunked tmux scrollback fetches via `LinesRange`.
 
 ## System Design
 
@@ -378,8 +367,8 @@ mmux binary
         |          .kill().await?
         |
         +-- DetailPane
-        |      +-- SampleDetailSource
-        |      +-- MonitorDetailSource
+        |      +-- render_live_preview()     // active-pane live preview
+        |      +-- fetch_older_lines()
         |
         +-- Attach
                +-- Target::attach_current_pty()  [accepted motlie-tmux gap]
@@ -674,7 +663,7 @@ The body area is split horizontally into `L` and `R`.
   Rows render display names, attachment markers, optional checked-tag values,
   and optional multi-host markers; stable tmux session ids are retained in state
   for dispatch but not shown.
-- `R`: detail pane for sampled or monitored session output.
+- `R`: detail pane for selected-session active-pane live preview.
 
 **Focus model.** The landscape main view has two focus states: `L` (default)
 and `R`. Focus transitions are explicit:
@@ -698,14 +687,13 @@ Main-selector keymap (focus-aware):
 |-----|-------------|-------------|
 | Up / Down, `u` / `b` | Move highlight; session viewport auto-scrolls | Scroll R one line |
 | PgUp / PgDn | Page through session list | Page through R buffer |
-| Home / End | First / last session | Top / bottom of buffer; `End` re-engages monitor auto-tail |
-| Enter | Refresh one-shot sample detail for the highlighted session | No-op |
+| Home / End | First / last session | Top / bottom of buffer; `End` re-engages live tail |
+| Enter | Refresh live preview now for the highlighted session | No-op |
 | Tab | Focus → `R` | Focus → `L` |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus → `L` outside modal; `Cancel` inside modal | Focus → `L` outside modal; `Cancel` inside modal |
 | Modified Left / Right | Resize `L`/`R` split (normal mode only; `Ctrl`, Alt, Shift, and word-arrow fallbacks accepted when terminals remap Ctrl-arrow) | Resize `L`/`R` split (normal mode only; focus-independent) |
 | `l` | Toggle portrait/landscape layout | Same |
-| `m` | Start/switch monitoring on highlight | Same |
 | `n` | Open `New Session` modal | Same |
 | `k` | Open kill-confirmation modal | Same |
 | `r` | Open rename modal for highlight | No-op |
@@ -725,8 +713,7 @@ fallbacks; on macOS iTerm2 the observed fallback is `Shift-Left` /
 `Shift-Right`. Portrait mode advertises `Ctrl-Up`/`Ctrl-Down` for the T/B split
 and accepts the same modifier family. Resize bounds are mode-specific:
 landscape L/R clamps at 25/75, while portrait T/B clamps at 15/85.
-The detail-pane title renders the current source mode as a bold `snapshot` or
-bold `monitor` label next to the scroll position.
+The detail-pane title renders a bold `live` label next to the scroll position.
 
 Modal keymaps override the main keymap. In modals: Left/Right move between
 `Cancel` and `Ok` where applicable; kill confirmation also accepts `Tab` /
@@ -735,8 +722,8 @@ to cycle `Input -> Ok -> Cancel`; `Enter` exits and applies `Ok` if selected,
 or sends from non-empty Send Keys input; Send Keys Ctrl-Enter sends the input
 and follows with `{Enter}` after 500 ms; a trailing `$$` suffix on Send Keys
 input requests the same follow-up Enter; `$$` alone sends only the delayed
-Enter; successful Send Keys submissions refresh snapshot detail but not monitor
-detail; `Esc` is `Cancel`.
+Enter; successful Send Keys submissions refresh live preview immediately;
+`Esc` is `Cancel`.
 
 ### Portrait Mode
 
@@ -755,11 +742,11 @@ at smaller sizes but is tuned for this target.
 - `T` = session list. Equivalent to `L` in landscape mode (same scrolling,
   same position indicator, same auto-scroll-to-keep-highlight-visible
   behavior). Default focus.
-- `B` = detail pane. Equivalent to `R` in landscape mode (same trait-backed
-  sample/monitor sources, same scroll-back-on-up, same monitor tail-pause).
+- `B` = detail pane. Equivalent to `R` in landscape mode (same active-pane live
+  preview, same scroll-back-on-up, same live-tail pause).
 - Status-bar key hints remain compact enough to fit ~64 cols. Use compact
   symbol labels for directional keys,
-  e.g., `tab ↑/↓ | (h)elp | (m)onitor | (s)end | (a)ttach | (n)ew | (k)ill | (q)uit | (l)ayout`.
+  e.g., `tab ↑/↓ | help | prompt | attach | new | kill | rename | group | layout | quit`.
 
 **Focus model:** Same semantics as landscape mode; Tab cycles between `T` and
 `B`:
@@ -779,7 +766,7 @@ at smaller sizes but is tuned for this target.
 | Plain arrows (no Ctrl) | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view | Navigation/scroll per focus-aware keymap above; Left/Right no-op in main view |
 
 **All other keys and modal behavior:** identical to normal mode (see the
-focus-aware keymap above). `m`, `n`, `k`, `t`, `a`, and `q`/`Ctrl-C`
+focus-aware keymap above). `p`/`@`, `n`, `k`, `t`, `a`, and `q`/`Ctrl-C`
 are focus-independent and behave the same; `r` remains
 list-focus-only (`T` in portrait). `q`/`Ctrl-C` exits without attaching. Modal
 keymap (Left/Right for button selection, Enter to apply, Esc to Cancel) is
@@ -824,7 +811,7 @@ arguments are additional hosts.
   Host-square column width is one character.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `m` monitor, `p` / `@` prompt, `$` then `0`…`9` direct digit send, `$` then `!` direct `{Esc}` send,
+- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `p` / `@` prompt, `$` then `0`…`9` direct digit send, `$` then `!` direct `{Esc}` send,
   `n` new, `k` kill, `r` rename, `t` tag list/add/update/delete,
   `Ctrl-C`/`q` exit, `l` toggle layout, Tab cycle panes, `Ctrl-←/→` and
   `Ctrl-↑/↓` resize) behave
@@ -862,9 +849,8 @@ the per-host failure count without blocking the rest of the UI.
 
 **Detail pane (R / B)** continues to operate on the highlighted row's session,
 with the dispatch routed through `row.host_id → fleet.entries[id].handle`.
-The `SessionDetailSource` trait does not change shape — it still takes
-`(host: &HostHandle, session: &SelectedSession)`. The binary just resolves
-`host` from the highlighted row instead of using a single global handle.
+The active-pane preview resolves the highlighted row into
+`(host: &HostHandle, session: &SelectedSession)` before capture.
 
 **Per-host failure semantics for the detail pane:** if the highlighted row's
 host becomes unreachable, the detail pane shows a transient error string and
@@ -1095,7 +1081,7 @@ existing stable-id dispatch model.
 - `r` is active only when the list pane is focused (`LB` in landscape, `T` in
   portrait). This avoids stealing `r` from detail-pane scrolling or future
   detail-pane commands.
-- `t` is a selected-session action like `m` and `k`; it operates on the
+- `t` is a selected-session action like `p`/`@` and `k`; it operates on the
   highlighted row regardless of pane focus. This feature does not bind `i`.
 - Each modal captures `(host_id, session_id, current_session_name)` on open.
   Apply paths re-resolve `HostFleet::entry(host_id)` and
@@ -1193,8 +1179,10 @@ The mock is conceptual; current implementation uses Tab to cycle focus through
 
 ## R Pane Detail Source
 
-The `R` pane should depend on a trait, not directly on sampling or monitoring
-implementation details.
+The `R`/`B` pane is a selected-session live active-pane preview. It uses the
+highlighted row's stable session id to resolve a `Target`, then captures the
+tmux active pane for that session with
+`Target::capture_with_options(CaptureNormalizeMode::ScreenStable)`.
 
 ```rust
 pub struct SelectedSession {
@@ -1208,78 +1196,26 @@ impl SelectedSession {
     pub fn name(&self) -> &str;
 }
 
-#[async_trait::async_trait]
-trait SessionDetailSource {
-    async fn activate(
-        &mut self,
-        host: &motlie_tmux::HostHandle,
-        session: &SelectedSession,
-    ) -> anyhow::Result<()>;
+async fn render_live_preview(
+    host: &motlie_tmux::HostHandle,
+    session: &SelectedSession,
+) -> anyhow::Result<String>;
 
-    // DetailDelta replaces the
-    // bare Option<String> so monitor mode can express "append" vs "replace"
-    // semantics, and so the UI can know whether to scroll the viewport.
-    // Some(Append(text))  — new content arrived (monitor); append at tail.
-    // Some(Replace(text)) — full re-render (sample re-fetched on highlight).
-    // None                — no change since last tick.
-    async fn tick(&mut self) -> anyhow::Result<Option<DetailDelta>>;
-
-    // Resample-backwards entry
-    // point. UI calls this when focus is `R` and the user scrolls past the
-    // top of the currently rendered buffer. Returns lines older than
-    // `before_line` (where `before_line` is an index into the source's
-    // current buffer's oldest line); up to `count` lines. Empty Vec means
-    // "no more history available." `SampleDetailSource` implements this via
-    // `Target::sample_text_with_options(&ScrollbackQuery::LinesRange { ... },
-    // ScreenStable, None)` — see §Accepted Library Gaps.
-    async fn fetch_older(
-        &mut self,
-        before_line: usize,
-        count: usize,
-    ) -> anyhow::Result<Vec<String>>;
-
-    async fn deactivate(&mut self) -> anyhow::Result<()>;
-}
-
-pub enum DetailDelta {
-    Append(String),
-    Replace(String),
-}
+async fn fetch_older_lines(
+    host: &motlie_tmux::HostHandle,
+    session: &SelectedSession,
+    older_than_lines: usize,
+    count: usize,
+) -> anyhow::Result<String>;
 ```
 
-Initial shipped implementations:
-
-- `SampleDetailSource`: resolves the selected session by stable id, captures
-  session content with `sample_text_with_options(..., ScreenStable, ...)` so
-  ANSI color/style escapes are preserved, then renders through
-  `ansi-to-tui`'s VTE parser in `R`.
-  `fetch_older` issues
-  `Target::sample_text_with_options(&ScrollbackQuery::LinesRange { older_than_lines, count }, ScreenStable, None)`
-  for paginated backwards fetch (see §Accepted Library Gaps →
-  ScrollbackQuery::LinesRange).
-- `MonitorDetailSource`: resolves the selected session by stable id, captures
-  the rendered current screen for all panes through `capture_all_with_options`
-  using `CaptureNormalizeMode::ScreenStable`, and renders ANSI with
-  `ansi-to-tui`'s VTE parser in `R`. When the user scrolls up in monitor mode,
-  auto-tail pauses; refreshes continue, but the UI viewport stays anchored at
-  the user's position. `fetch_older` for monitor mode falls back to a one-shot
-  `Target::sample_text_with_options(&LinesRange { ... }, ScreenStable, None)`
-  against the same target. The
-  monitor screen mirror is a current-screen source, not a rolling transcript
-  source.
-
-Implementation should prefer static dispatch for shipped modes:
-
-```rust
-enum DetailMode {
-    Sample(SampleDetailSource),
-    Monitor(MonitorDetailSource),
-}
-```
-
-`DetailMode` can implement `SessionDetailSource`. This preserves a trait
-boundary for future summary providers without forcing dynamic dispatch into the
-initial hot path.
+`render_live_preview` is current-screen live preview only. `fetch_older_lines` is a separate
+history path and uses
+`Target::sample_text_with_options(&ScrollbackQuery::LinesRange { older_than_lines, count }, ScreenStable, None)`
+for paginated backwards fetch (see §Accepted Library Gaps →
+ScrollbackQuery::LinesRange). Captured ANSI escapes are preserved and rendered
+through `ansi-to-tui`'s VTE parser so escape bytes do not leak into ratatui
+text.
 
 ## Data Flow
 
@@ -1295,7 +1231,7 @@ initial hot path.
    keep the current snapshot and show an inline error status.
 5. Initialize UI state with the session list focused and first session
    highlighted.
-6. Render sample detail for the highlighted session, if any.
+6. Render live active-pane detail for the highlighted session, if any.
 
 ### Live Session List
 
@@ -1309,8 +1245,8 @@ stable session id, runs the `ActivityTracker` to update each row's
 observer-side `activity_observed_at_local`, re-sorts rows by that mark
 descending across all hosts, preserves the highlight by `(host_id,
 session_id)`, and only triggers a detail re-render when the highlighted
-row moved, the caller forced it, or the monitored session just closed
-(see §Refresh path below). On transient refresh failure, the TUI keeps
+row moved or the caller forced it (see §Refresh path below). On transient
+refresh failure, the TUI keeps
 running and reports the error in the status bar.
 
 Issue #229 library support adds `SessionInfo.activity` and
@@ -1356,13 +1292,10 @@ Single-poll reconcile loop driven by the main TUI loop:
      rows within each group by activity time, host order, and session name
    - preserve highlight by `(host_id, session_id)`, falling back to the
      clamped index if the session disappeared
-   - if the monitored session id is absent, stop monitor mode, switch the
-     detail source back to Sample, and report that the monitored session
-     closed
    - call `refresh_detail` **only** when the caller forced it, the
-     selection actually moved, or monitor was just closed; quiet refreshes
-     that find nothing changed leave the detail pane alone (the main loop
-     owns the live-monitor recapture cadence on its own 750 ms tick)
+     selection actually moved; quiet refreshes that find nothing changed leave
+     the detail pane alone (the main loop owns the live-preview recapture
+     cadence on its own 750 ms tick)
    - on per-host polling failure, surface the failed host's label in the
      status banner; other hosts continue to populate the merged list
    - failed host refreshes keep the host's last-good rows visible; only
@@ -1389,7 +1322,7 @@ selector re-entry):
    to create)`.
 2. `R` renders nothing (or an inline hint mirroring the same `n to create`
    message).
-3. Highlight is unset; `m`, `k`, `r`, `t`, and `a` are all no-ops in
+3. Highlight is unset; `p`/`@`, `k`, `r`, `t`, `$`, and `a` are all no-ops in
    this state.
 4. `n` remains active and opens the New Session modal as usual.
 5. ForceCommand mode treats this as the normal first-run path: the user
@@ -1400,28 +1333,21 @@ selector re-entry):
 
 1. Up/Down (when focus is the session list) updates selected session index. The list
    viewport scrolls to keep the highlighted row visible.
-2. If `R` is in sample mode, refresh sample detail for the new session
-   (replace buffer).
-3. If `R` is in monitoring mode, keep monitoring the previous monitored session
-   until the user presses `m` again. This avoids implicit monitor teardown when
-   the user is only browsing.
-4. When focus is `R`, Up/Down
+2. Refresh live active-pane detail for the new session (replace buffer).
+3. When focus is `R`, Up/Down
    scroll the `R` content (no list highlight movement). See §Layout keymap
    table.
 
-### Monitoring Mode
+### Live Preview
 
-1. Pressing `m` stops any existing monitor/detail source.
-2. Start monitoring the highlighted session.
-3. Resolve the highlighted session by stable id and capture its rendered screen
-   using `capture_all_with_options(CaptureNormalizeMode::ScreenStable)`.
-   Render ANSI through the VTE parser so TUI screen snapshots display without
+1. Resolve the highlighted session by stable id.
+2. Capture its active pane with
+   `Target::capture_with_options(CaptureNormalizeMode::ScreenStable)`.
+3. Render ANSI through the VTE parser so TUI screen snapshots display without
    raw escape bytes.
-4. Status bar shows the monitored session.
-5. When focus is `R`, scrolling
-   up pauses auto-tail; refreshes still replace the source's current-screen
-   buffer but the viewport stays anchored. `End` re-engages auto-tail.
-6. Killing the monitored session or exiting the TUI stops monitor state.
+4. The main loop refreshes this preview on its detail cadence and refreshes it
+   immediately after successful Send Keys submissions.
+5. When focus is `R`, scrolling up pauses live tail; `End` re-engages it.
 
 ### New Session
 
@@ -1452,12 +1378,11 @@ selector re-entry):
 5. Call `Target::kill()`. On error (already gone, connection dropped,
    permission), show
    inline error without corrupting terminal state.
-6. Stop monitor state if it was monitoring that session.
-7. Refresh immediately after a successful kill for responsive feedback, while
+6. Refresh immediately after a successful kill for responsive feedback, while
    filtering the killed `(host_id, session_id)` from that refresh so a stale
    tmux listing cannot keep the row visible. The polling-backed host-event
    stream will reconcile the same state on its next tick as a backstop.
-8. Move highlight to the next valid row. If the killed session was the only
+7. Move highlight to the next valid row. If the killed session was the only
    one, transition to §Empty Session List state.
 
 ### Rename Session
@@ -1514,8 +1439,7 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
 
 1. Pressing `a` in the main selector (any focus) records the
    highlighted session id.
-2. Stop monitor/detail state. Drop the active host-event subscription; re-entry
-   starts from a fresh session snapshot.
+2. Drop pending refresh work; re-entry starts from a fresh session snapshot.
    The parent process also snapshots a small amount of UI state in memory:
    selected session id, selected list index, layout mode, focused pane, and
    the current layout split percentages. This state is only for the current
@@ -1704,10 +1628,9 @@ Semantics: return up to `count` lines older than `older_than_lines`, where
 `older_than_lines` is anchored at the current capture tail. If the detail pane
 already has 200 lines loaded and needs the previous page, it requests
 `LinesRange { older_than_lines: 200, count: page_size }`. Empty result means
-"no more history available." Used by `SampleDetailSource::fetch_older` and
-`MonitorDetailSource::fetch_older`; monitor mode uses the same tmux capture
-history anchor and does not treat the rolling monitor buffer as the source of
-truth for historical fetches.
+"no more history available." Used by `fetch_older_lines`; live preview
+uses the same tmux capture history anchor and does not treat the current-screen
+buffer as the source of truth for historical fetches.
 
 ### Stable Session-Id Dispatch
 
@@ -1744,7 +1667,7 @@ Operational behavior:
 2. `sshd` starts `mmux` instead of the login shell.
 3. The selector targets the local host unless deployment passes an allowed SSH
    target argument.
-4. User selects, monitors, creates, kills, or attaches.
+4. User selects, live-previews, creates, kills, or attaches.
 5. On attach, the selector restores terminal state and hands the PTY to the
    selected tmux session.
 
@@ -1828,8 +1751,7 @@ detail.
 |------------|-----|----------|
 | `ratatui` | layout/widgets/rendering | Use. Already used by tmux examples and driver frontend. |
 | `crossterm` | terminal raw mode, alternate screen, key events | Use. Already paired with ratatui in repo. |
-| `ansi-to-tui` | ANSI/VTE rendering for captured/monitored pane content | Adopted for sample and monitor modes so ANSI-preserving captures render color/style without leaking escape bytes into ratatui text. |
-| `async-trait` | async detail-source trait | Use if a trait object or async trait implementation is needed. Already used in repo. |
+| `ansi-to-tui` | ANSI/VTE rendering for captured pane content | Adopted so ANSI-preserving active-pane captures render color/style without leaking escape bytes into ratatui text. |
 
 ## Testing Strategy
 
@@ -1851,7 +1773,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - `l` toggles layout mode while preserving list/detail focus
 - Unit tests for state transitions:
   - highlight movement
-  - sample vs monitor mode
+  - live preview refresh
   - modal button selection
   - create/kill success and error paths
   - Help modal opens on `h`, shows the logo, build date, last 8 characters of
@@ -1864,8 +1786,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
   - focused pane border style differs from unfocused pane border style
 - Mock-backed tests through `motlie-tmux`:
   - session list rendering
-  - detail source rendering, including ANSI color preservation in sample and
-    monitor modes
+  - detail source rendering, including ANSI color preservation and active-pane
+    capture without all-pane listing
   - create session refresh and highlight
   - kill session refresh and highlight
   - host-event reconciliation:
@@ -1873,9 +1795,9 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     assert `LB` state matches expected; reconciliation by id (rename keeps
     highlight on same id even when display name changes)
   - scrollback windowing:
-    `SampleDetailSource::fetch_older` issues `LinesRange` and prepends
+    `fetch_older_lines` issues `LinesRange` and prepends
     correctly; viewport anchor preserved
-  - monitor tail-pause: scroll-up
+  - live tail-pause: scroll-up
     pins viewport; `End` re-engages auto-tail
 - Terminal smoke tests:
   - raw mode and alternate-screen restoration
@@ -1888,8 +1810,8 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
     process group via `setpgid` + `tcsetpgrp`; SIGINT/SIGWINCH route to child
 - Localhost integration:
   - create temporary session
-  - list and sample it
-  - monitor it
+  - list it
+  - live-preview it
   - kill it
   - `--script` contract:
     stdout is exactly `<name>\n` on selection; empty on cancel; exit code 0
@@ -1912,7 +1834,7 @@ DESIGN identifies the test surfaces; PLAN must make these concrete.
 - SSH integration:
   - target an SSH URI
   - list remote sessions
-  - monitor remote session
+  - live-preview remote session
   - attach to remote selected session through an interactive PTY
   - `SSH_ORIGINAL_COMMAND` is
     rejected in default mode; bypassed (exec'd via shell) when
@@ -1929,9 +1851,6 @@ that remain speculative stay explicitly open.
   `--target` flag in v1. Revisit if PLAN finds positional friction.
 - **Modal `Esc`** — `Esc` in any modal is equivalent to `Cancel`.
 - **`Esc` outside modal** — Return focus to the session-list pane.
-- **Monitor follow on highlight change** — No automatic follow. Monitor only
-  switches when the user explicitly presses `m` on a different highlight.
-  (Unchanged from initial DESIGN; reaffirmed.)
 - **`New Session` options in v1** — Defaults only (no window size / history
   flags). Future enhancement.
 - **Remote targets in ForceCommand** — Local-only ForceCommand initially.
@@ -1947,9 +1866,9 @@ that remain speculative stay explicitly open.
 - **Portrait-mode status hints** — ASCII-first compact labels. Unicode affordance
   glyphs can be considered later, but v1 must render predictably in narrow
   SSH clients and IDE terminals.
-- **Monitor history bound** — Superseded by screen-mirror monitor mode. The
-  selector keeps only the current rendered screen in monitor mode; historical
-  fetch remains chunked through tmux scrollback.
+- **Live preview bound** — The selector keeps only the current rendered active
+  pane for the highlighted session; historical fetch remains chunked through
+  tmux scrollback.
 
 ### Still Open
 

@@ -27,7 +27,7 @@ use consts::{
 };
 use controller::{
     apply_streaming_host_results, fetch_host_refresh, handle_key, refresh_detail,
-    stop_detail_source, HostRefreshResult, KeyOutcome, RefreshApplyOptions,
+    HostRefreshResult, KeyOutcome, RefreshApplyOptions,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{
@@ -372,14 +372,12 @@ async fn run_selector_once(
                 KeyOutcome::Select(selected) => {
                     ui_state.update_from(&app);
                     abort_pending_session_refresh(&mut pending_session_refresh);
-                    stop_detail_source(&mut app).await;
                     terminal.restore()?;
                     return Ok(SelectorOutcome::Selected(selected));
                 }
                 KeyOutcome::Cancel => {
                     ui_state.update_from(&app);
                     abort_pending_session_refresh(&mut pending_session_refresh);
-                    stop_detail_source(&mut app).await;
                     terminal.restore()?;
                     return Ok(SelectorOutcome::Cancelled);
                 }

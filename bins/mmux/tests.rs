@@ -22,12 +22,10 @@ use crate::consts::{
 };
 use crate::controller::{
     apply_fleet_snapshot, apply_streaming_host_results, fetch_fleet_refresh, fetch_host_refresh,
-    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, stop_monitor_if_closed,
-    KeyOutcome, RefreshApplyOptions,
+    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, KeyOutcome,
+    RefreshApplyOptions,
 };
-use crate::detail::{
-    DetailMode, DetailSource, MonitorDetailSource, SampleDetailSource, SessionDetailSource,
-};
+use crate::detail::render_live_preview;
 use crate::model::{
     AppState, Button, Focus, HostConnectFailure, HostConnectionStatus, HostEntry, HostFleet,
     HostId, HostSlot, LayoutMode, ModalBody, ModalState, NewSessionFocus, NewSessionHostChoice,
@@ -461,7 +459,6 @@ fn status_line_omits_layout_mode() {
         &normal_status,
         &[
             "help",
-            "monitor",
             "prompt",
             "attach",
             "new",
@@ -486,7 +483,6 @@ fn status_line_omits_layout_mode() {
         &portrait_status,
         &[
             "help",
-            "monitor",
             "prompt",
             "attach",
             "new",
@@ -515,10 +511,10 @@ fn status_line_styles_command_mnemonics() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(styled_mnemonics, "hmpankrglq");
+    assert_eq!(styled_mnemonics, "hpankrglq");
     assert_eq!(
         status_line_text(&app),
-        " tab ↑/↓ | help | monitor | prompt | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
+        " tab ↑/↓ | help | prompt | attach | new | kill | rename | group | layout | quit | mod-←/→ resize "
     );
 }
 
@@ -1131,58 +1127,14 @@ async fn refresh_forces_detail_when_selected_session_changes() {
 }
 
 #[tokio::test]
-async fn quiet_refresh_stops_monitor_when_monitored_session_closes() {
-    let mock = MockTransport::new()
-        .with_response("list-sessions", "__MOTLIE_S__ replacement $2 20 0 1  400\n")
-        .with_response("capture-pane -ep", "replacement screen\n");
-    let host = HostHandle::new(TransportKind::Mock(mock), None);
-    let mut app = AppState::new(LayoutMode::Normal);
-    app.session_list.rows = to_rows(vec![
-        session_with_times("watched", "$1", 10, 300),
-        session_with_times("replacement", "$2", 20, 200),
-    ]);
-    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
-        session_id: Some("$1".to_string()),
-        host_id: Some(local_host_id()),
-    }));
-    app.detail.lines = vec!["live".to_string()];
-
-    let fleet = fleet_with(host.clone());
-    refresh_sessions_quiet(&fleet, &mut app, false)
-        .await
-        .unwrap();
-
-    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
-    assert_eq!(app.status.text(), "monitored session watched closed");
-    assert_eq!(app.detail.lines, vec!["replacement screen".to_string()]);
-}
-
-#[tokio::test]
-async fn quiet_refresh_skips_monitor_recapture() {
-    // Reviewer regression test: when monitor mode is active and a quiet
-    // session refresh sees newer `session_activity`, the row list must
-    // update without re-rendering the monitor detail. The previous
-    // behavior unconditionally called `refresh_detail` after every quiet
-    // refresh; in `Monitor` mode that recaptures the pane every tick,
-    // blocking the next draw and making the row activity look stale.
-    //
-    // Setup: monitor is active on the highlighted session $1. list-sessions
-    // returns a fresher `session_activity` for $1 (200 → 800). capture-pane
-    // is set with_error so any call triggered by refresh_detail would land
-    // a visible "monitor error" string in detail.lines.
+async fn quiet_refresh_skips_live_preview_recapture() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ live $1 10 1 1  800\n")
         .with_error("capture-pane", "this should not be called");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let mut app = AppState::new(LayoutMode::Normal);
-    // Seed the row list with the older activity (200) and select $1.
     app.session_list.rows = to_rows(vec![session_with_times("live", "$1", 10, 200)]);
     app.session_list.selected = 0;
-    // Activate monitor mode on $1 with non-empty pre-existing detail lines.
-    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
-        session_id: Some("$1".to_string()),
-        host_id: Some(local_host_id()),
-    }));
     app.detail.lines = vec!["pre-existing live capture".to_string()];
 
     let fleet = fleet_with(host);
@@ -1190,16 +1142,12 @@ async fn quiet_refresh_skips_monitor_recapture() {
         .await
         .unwrap();
 
-    // Row activity reflects the newer list-sessions snapshot.
     assert_eq!(app.session_list.rows.len(), 1);
     assert_eq!(app.session_list.rows[0].session.activity, 800);
-    // Monitor mode is still active and the detail lines are untouched —
-    // refresh_detail was not called from the session-refresh path.
-    assert_eq!(app.detail.source.mode(), DetailMode::Monitor);
     assert_eq!(
         app.detail.lines,
         vec!["pre-existing live capture".to_string()],
-        "monitor detail must not be recaptured by a quiet session refresh"
+        "live preview must not be recaptured by a quiet session refresh"
     );
 }
 
@@ -1359,23 +1307,6 @@ fn portrait_layout_renders_sessions_and_detail_without_motd() {
     assert!(rendered.contains("Detail"));
     assert!(!rendered.contains("MOTD"));
     assert!(!rendered.contains(MOTLIE_PLACEHOLDER));
-}
-
-#[tokio::test]
-async fn closed_monitored_session_resets_detail_source() {
-    let mut app = AppState::new(LayoutMode::Normal);
-    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
-        session_id: Some("$1".to_string()),
-        host_id: Some(local_host_id()),
-    }));
-    app.detail.lines = vec!["live".to_string()];
-
-    let host_id = local_host_id();
-    let closed = stop_monitor_if_closed(&mut app, &host_id, "$1", "dev".to_string()).await;
-
-    assert_eq!(closed, Some("dev".to_string()));
-    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
-    assert!(app.detail.lines.is_empty());
 }
 
 #[test]
@@ -1569,18 +1500,14 @@ async fn u_and_b_scroll_detail_like_arrow_keys() {
 }
 
 #[tokio::test]
-async fn enter_from_list_refreshes_sample_detail_without_attaching() {
+async fn enter_from_list_refreshes_live_preview_without_attaching() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
         .with_response("capture-pane -ep", "current screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
-    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
-        session_id: Some("$1".to_string()),
-        host_id: Some(local_host_id()),
-    }));
-    app.set_detail_text("stale monitor screen".to_string());
+    app.set_detail_text("stale screen".to_string());
 
     let outcome = handle_key(
         &fleet,
@@ -1591,7 +1518,6 @@ async fn enter_from_list_refreshes_sample_detail_without_attaching() {
     .unwrap();
 
     assert!(matches!(outcome, KeyOutcome::Continue));
-    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
     assert_eq!(app.detail.lines, vec!["current screen".to_string()]);
 }
 
@@ -1839,7 +1765,8 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains(MOTLIE_PLACEHOLDER));
     assert!(body.contains(HELP_KEY_FUNCTIONS));
     assert!(body.contains("↑ (u) / ↓ (b) select session or scroll detail"));
-    assert!(body.contains("Enter sample highlighted session (list pane)"));
+    assert!(body.contains("Enter refresh highlighted session preview (list pane)"));
+    assert!(!body.contains("monitor highlighted session"));
     assert!(body.contains("  $0..$9 send digit to highlight"));
     assert!(body.contains("  $! send Escape to highlight"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
@@ -1893,6 +1820,25 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     .unwrap();
     assert!(matches!(outcome, KeyOutcome::Continue));
     assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn m_no_longer_starts_monitoring() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, KeyOutcome::Continue));
+    assert!(app.modal.is_none());
+    assert!(app.detail.lines.is_empty());
+    assert_eq!(app.status.text(), "loading sessions");
 }
 
 #[tokio::test]
@@ -2848,19 +2794,15 @@ async fn send_keys_modal_enter_from_input_sends_keys_and_closes() {
 }
 
 #[tokio::test]
-async fn send_keys_modal_does_not_force_refresh_in_monitor_mode() {
+async fn send_keys_modal_refreshes_live_preview_after_success() {
     let mock = MockTransport::new()
-        .with_error("capture-pane -ep", "snapshot capture should not run")
         .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
-        .with_response("send-keys -l -t '$1' 1", "");
+        .with_response("send-keys -l -t '$1' 1", "")
+        .with_response("capture-pane -ep", "updated live screen\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let fleet = fleet_with(host);
     let mut app = app_with_session();
-    app.detail.source = DetailSource::Monitor(Box::new(MonitorDetailSource {
-        session_id: Some("$1".to_string()),
-        host_id: Some(local_host_id()),
-    }));
-    app.set_detail_text("monitor screen".to_string());
+    app.set_detail_text("stale screen".to_string());
 
     handle_key(
         &fleet,
@@ -2886,8 +2828,7 @@ async fn send_keys_modal_does_not_force_refresh_in_monitor_mode() {
 
     assert!(app.modal.is_none());
     assert_eq!(app.status.text(), "sent keys to dev");
-    assert_eq!(app.detail.source.mode(), DetailMode::Monitor);
-    assert_eq!(app.detail.lines, vec!["monitor screen".to_string()]);
+    assert_eq!(app.detail.lines, vec!["updated live screen".to_string()]);
 }
 
 #[tokio::test]
@@ -3724,7 +3665,6 @@ async fn session_tags_modal_u_and_b_move_rows_and_m_updates() {
     )
     .await
     .unwrap();
-    assert_eq!(app.detail.source.mode(), DetailMode::Sample);
     assert!(matches!(
         app.modal.as_ref(),
         Some(ModalState::SessionKeyValues { ui, .. })
@@ -4119,59 +4059,42 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
 }
 
 #[test]
-fn detail_title_marks_snapshot_or_monitor_mode_in_bold() {
-    let snapshot = detail_title(DetailMode::Sample, "1-3/3");
+fn detail_title_marks_live_mode_in_bold() {
+    let title = detail_title("1-3/3");
     assert_eq!(
-        snapshot
+        title
             .spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>(),
-        " Detail snapshot 1-3/3 "
+        " Detail live 1-3/3 "
     );
-    assert!(snapshot.spans[1]
-        .style
-        .add_modifier
-        .contains(Modifier::BOLD));
-
-    let monitor = detail_title(DetailMode::Monitor, "2-4/9");
-    assert_eq!(
-        monitor
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>(),
-        " Detail monitor 2-4/9 "
-    );
-    assert!(monitor.spans[1].style.add_modifier.contains(Modifier::BOLD));
+    assert!(title.spans[1].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[tokio::test]
-async fn sample_detail_preserves_ansi_color_for_detail_pane() {
+async fn live_detail_preserves_ansi_color_for_detail_pane() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dev $7 0 0 1  0\n")
         .with_response("capture-pane -ep", "\x1b[34mBLUE\x1b[0m\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let selected = make_selected(local_host_id(), "host", "$7", "dev");
-    let mut source = SampleDetailSource;
 
-    let rendered = source.render(&host, &selected).await.unwrap();
+    let rendered = render_live_preview(&host, &selected).await.unwrap();
 
     assert!(rendered.contains("\x1b[34mBLUE\x1b[0m"));
 }
 
 #[tokio::test]
-async fn monitor_detail_captures_rendered_screen_with_ansi() {
+async fn live_detail_captures_active_pane_without_listing_panes() {
     let mock = MockTransport::new()
         .with_response("list-sessions", "__MOTLIE_S__ dash $7 0 0 1  0\n")
-        .with_response("list-panes", "%0 dash 0 0 main bash 100 80 24 1\n")
+        .with_error("list-panes", "live detail should not list panes")
         .with_response("capture-pane -ep", "\x1b[32mREADY\x1b[0m\n");
     let host = HostHandle::new(TransportKind::Mock(mock), None);
     let selected = make_selected(local_host_id(), "host", "$7", "dash");
-    let mut source = MonitorDetailSource::new();
 
-    source.activate(&host, &selected).await.unwrap();
-    let rendered = source.render(&host, &selected).await.unwrap();
+    let rendered = render_live_preview(&host, &selected).await.unwrap();
 
     assert!(rendered.contains("\x1b[32mREADY\x1b[0m"));
     assert!(!rendered.contains("%output"));
