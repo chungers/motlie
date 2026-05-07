@@ -10,4 +10,4 @@ ExecStart=/usr/local/bin/motlie-agent-state-setup
 RemainAfterExit=yes
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=cloud-init.target

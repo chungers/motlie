@@ -51,6 +51,7 @@ pub(crate) const EGRESS_READY_COMMAND: &str = "/bin/sh -lc 'set -eu; getent host
 pub(crate) const VFS_MEMFS_LAYER_COMMAND: &str = r#"/bin/sh -lc 'set -eu; user=$(id -un); home_dir=$(getent passwd "$user" | cut -d: -f6); for path in "$home_dir" /workspace /agent-state; do test -d "$path"; grep -E "^[^ ]+ ${path} fuse " /proc/mounts >/dev/null; test -w "$path"; done; test -f "$home_dir/.env"; test -f /workspace/README.md; test -f /agent-state/README.md; printf "vfs-home-%s\n" "$user" > "$home_dir/.motlie-vfs-write-test"; printf "vfs-workspace-%s\n" "$user" > /workspace/.motlie-vfs-write-test; printf "vfs-agent-state-%s\n" "$user" > /agent-state/.motlie-vfs-write-test; grep -q "vfs-home-$user" "$home_dir/.motlie-vfs-write-test"; grep -q "vfs-workspace-$user" /workspace/.motlie-vfs-write-test; grep -q "vfs-agent-state-$user" /agent-state/.motlie-vfs-write-test; echo VFS_MEMFS_OK'"#;
 pub(crate) const APT_UPDATE_COMMAND: &str = r#"/bin/sh -lc 'set -eu; log=/tmp/motlie-vmm-apt-update.log; if sudo -n timeout --signal=TERM --kill-after=10 75s apt-get update -o Acquire::Retries=0 >"$log" 2>&1; then echo APT_OK; else cat "$log"; exit 1; fi'"#;
 pub(crate) const AGENT_CLI_START_COMMAND: &str = r#"/bin/sh -lc 'set -eu; export TERM=dumb; export CI=1; command -v codex >/dev/null; command -v claude >/dev/null; codex_out="$(timeout 20s codex --version 2>&1)" || { printf "%s\n" "$codex_out"; exit 1; }; claude_out="$(timeout 20s claude --version 2>&1)" || { printf "%s\n" "$claude_out"; exit 1; }; combined="$(printf "%s\n%s\n" "$codex_out" "$claude_out")"; if printf "%s\n" "$combined" | grep -Eiq "os error|operation not permitted|permission denied|no such file|enoent|eacces"; then printf "%s\n" "$combined"; exit 1; fi; printf "%s\n" "$combined"; echo AGENT_CLI_OK'"#;
+pub(crate) const SSH_PROXY_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn resolved_native_source_dir(base_dir: &Path) -> PathBuf {
     if let Some(path) = std::env::var_os("MOTLIE_VZ_BASE_VM_DIR").map(PathBuf::from) {
@@ -63,6 +64,33 @@ pub(crate) fn resolved_native_source_dir(base_dir: &Path) -> PathBuf {
         local
     } else {
         base_dir.join("../v1.35/artifacts/source-base.vm")
+    }
+}
+
+pub(crate) async fn wait_for_proxy_listener(
+    listen: SocketAddr,
+    timeout: Duration,
+) -> Result<(), DynError> {
+    let started = std::time::Instant::now();
+
+    loop {
+        match tokio::net::TcpStream::connect(listen).await {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(err) => {
+                if started.elapsed() >= timeout {
+                    return Err(format!(
+                        "SSH proxy on {listen} did not become ready within {}s: {}",
+                        timeout.as_secs_f32(),
+                        err
+                    )
+                    .into());
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
     }
 }
 
@@ -567,6 +595,7 @@ async fn main() -> Result<(), DynError> {
         proxy_config.clone(),
         Arc::clone(&guest_registry),
     ));
+    wait_for_proxy_listener(proxy_config.listen, SSH_PROXY_READY_TIMEOUT).await?;
     print_instance_details(&instance, &proxy_config);
     println!("  backend={harness_backend}");
     println!("  terminal_backend={terminal_backend}");

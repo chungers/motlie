@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-05 | @vmm-cdx | Fix CH guest boot-graph cycles by moving the VFS/agent-state units under `cloud-init.target`, and update the PTY Codex welcome assertion to the current footer text |
 | 2026-05-04 | @codex-vz | Remove the standalone `vz_egress_helper_v1_5`; VZ egress is hosted by `harness_v1_5` either as embedded runtime state or the `vz-egress` image-build subcommand |
 | 2026-05-04 | @codex-vz | Move default VZ userspace egress into the VMM runtime/harness path and make `launch-vz.sh` consume, not own, the egress socket |
 | 2026-05-03 | @codex-vz | Promote guest-level VFS memfs views, apt-backed egress, and Codex/Claude startup into the v1.5 conformance scenario and harness validation surface |
@@ -109,6 +110,15 @@ The guest contract metadata must record:
 - `--no-default-features --features guest-vfs`
 - VMM-owned guest binary paths under `/opt/motlie/v1.5/guest/bin` and
   `/usr/local/bin`
+
+`motlie-vfs-guest.service` and `motlie-agent-state.service` must be installed
+under `cloud-init.target`. The guest mounter orders itself after
+`cloud-final.service`, and `motlie-agent-state.service` orders itself after the
+guest mounter, so enabling either one under `multi-user.target` creates an
+ordering cycle that prevents CH harness readiness from completing.
+This is an image-profile invariant for OCI-derived `ubuntu-systemd` guests, not
+a CH-only runtime workaround: image importers and backend emitters must preserve
+the same pre-boot service graph for both CH and VZ artifacts.
 
 The v1.5 builders bake smoke-image hardening during image assembly:
 
