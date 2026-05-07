@@ -4,6 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten rootfs classifier executable probes so package-manager and systemd indicators require resolved regular files, not merely existing paths |
+| 2026-05-07 | @vmm-cdx | Harden the rootfs classifier trust boundary: path reads/classification use guest-root-aware symlink resolution, escaping symlinks are rejected, and `/sbin/init` is accepted only when it resolves to systemd |
+| 2026-05-07 | @vmm-cdx | Define the rootfs classifier requirements and design: stable VMM/VFS/VNET invariants stay typed in Rust while admin/profile package, mount, and init requirements are data driven |
 | 2026-05-07 | @vmm-cdx | Tighten OCI whiteout safety for the rootfs importer: empty `.wh.` targets are invalid and opaque-whiteout metadata errors fail closed |
 | 2026-05-07 | @vmm-cdx | Add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache that feeds importer-ready layer inputs |
 | 2026-05-07 | @vmm-cdx | Add the first rootfs importer implementation slice: selected platform manifest parsing, digest-checked local layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteouts |
@@ -797,8 +800,9 @@ registry manifest metadata, fetches selected platform manifests and layer blobs
 into a content-addressed cache, parses selected platform manifests, and unpacks
 digest-checked rootfs layer blobs into a deterministic assembly root. It
 establishes the typed metadata that later classifier, assembler, emitter,
-harness, and CI code must share. It does not yet classify the imported rootfs or
-emit VM boot artifacts.
+harness, and CI code must share. It now classifies the imported rootfs against a
+data-driven profile before compatibility-layer assembly. It does not yet emit VM
+boot artifacts.
 
 - `OciPlatform` and `GuestArchitecture` record the selected OCI platform.
 - `OciDigest` records immutable image-index, platform-manifest, and emitted
@@ -837,9 +841,67 @@ emit VM boot artifacts.
   targets are invalid, and opaque-whiteout metadata errors other than `NotFound`
   fail closed instead of reporting a successful import with stale lower-layer
   content.
+- `RootfsProfileSpec` and `RootfsClassifier` classify an imported rootfs before
+  mutation. The built-in `ubuntu-systemd` spec is derived from
+  `GuestImageProfile`, but package, mount, OS, init, binary, VFS, and VNET
+  requirements remain profile data so production builders can change them
+  without changing classifier code. Results are typed as `ready`,
+  `compatible-with-adaptation`, or `unsupported`, with machine-readable findings.
+  Classifier path access is rootfs-safe: it uses symlink metadata, resolves
+  symlinks as guest paths, treats absolute symlink targets as guest-root-relative,
+  rejects parent traversal above the guest root, and caps symlink recursion.
+  `/sbin/init` is not a standalone systemd indicator; it is accepted only when it
+  resolves inside the rootfs to `/usr/lib/systemd/systemd` or
+  `/lib/systemd/systemd`. Package-manager and systemd indicator probes require
+  resolved regular files; directories or other non-file path types are not
+  accepted as present.
 
-The next slice should classify the imported rootfs against the first
-`ubuntu-systemd` profile before any Motlie compatibility layer is applied.
+### Rootfs Classifier Requirements And Design
+
+The image-builder gate after OCI import is a non-mutating rootfs classifier. It
+inspects an imported OCI rootfs and answers whether that rootfs is a supported
+foundation for the selected Motlie guest profile before any Motlie compatibility
+layer is applied.
+
+Functional requirements:
+
+- The classifier input is an imported rootfs path plus a typed
+  `RootfsProfileSpec`.
+- `RootfsProfileSpec` is data driven. It is derived from `GuestImageProfile` for
+  the built-in `ubuntu-systemd` profile, but admins and production builders can
+  provide different package, mount-point, distro/version, and init requirements
+  without changing classifier code.
+- The classifier must not bake v1.5 example choices such as demo users,
+  demo-only packages, or demo mount layout as product invariants.
+- Stable Motlie/VMM invariants stay typed in Rust: safe absolute rootfs paths,
+  Linux filesystem shape, VFS mount-point and `/dev` assumptions, FUSE runtime
+  device expectation, and VNET/egress configuration path assumptions.
+- Profile requirements are explicit data: accepted OS release IDs/versions,
+  init profile, required packages, required binaries, required mount points, and
+  later required users/services.
+- Classification is read-only. It reports what exists, what can be installed by
+  the compatibility layer, what must be provided by runtime provisioning, and
+  what is unsupported.
+- Path classification and file reads must never follow host filesystem symlinks
+  out of the imported assembly root. Valid guest symlinks, including absolute
+  guest-root-relative links such as `/usr/lib/os-release`, are supported.
+- The result must be machine-readable for harness and CI use. It must include an
+  overall status plus typed findings with requirement kind, status, path/package
+  where relevant, and evidence.
+
+The first status model is:
+
+- `ready`: every requirement inspected from the rootfs is already present.
+- `compatible-with-adaptation`: the rootfs is a supported foundation, but needs
+  pre-boot Motlie compatibility work, package installation, mount directory
+  creation, or runtime device provisioning.
+- `unsupported`: at least one stable invariant or selected profile requirement
+  cannot be satisfied safely by the builder.
+
+This keeps the classifier general. For example, the v1.5 example profile may
+require `git`, `openssh-server`, and `/workspace`, while a production profile may
+choose a different package set and mount layout. Both profiles still share the
+same VFS/VNET invariants and the same typed classification result.
 
 The current `ubuntu-systemd` profile validates against
 `docker.io/library/ubuntu:24.04` and `InitProfile::UbuntuSystemd`; validation
