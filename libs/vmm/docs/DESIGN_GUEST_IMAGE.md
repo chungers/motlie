@@ -4,6 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-06 | @vmm-cdx | Clarify OCI source registry and digest semantics for cross-backend validation after PR feedback |
+| 2026-05-06 | @vmm-cdx | Reorder the OCI roadmap so the first contract slice starts from an Ubuntu OCI import profile and derives the Motlie guest contract from a real base image |
+| 2026-05-06 | @vmm-cdx | Refine emitter timing from static-only adaptation to pre-boot persistent or ephemeral emission and document Apple VZ storage constraints |
+| 2026-05-06 | @vmm-cdx | Document OCI compatibility, static emitter adaptation, external Docker image import profiles, and VFS/VNET impact for CH and VZ |
+| 2026-05-05 | @vmm-cdx | Add the roadmap from a shared guest contract to per-arch OCI payloads and a final multi-arch OCI guest image artifact consumed by CH and VZ emitters |
 | 2026-05-04 | @codex-vz | Record the v1.5 host-runtime convergence boundary: CH and VZ keep external VM runners while VFS and egress/VNET services are embedded VMM runtime backends |
 | 2026-05-03 | @codex-vz | Define guest functionality conformance as VFS memfs views, apt-backed egress, and Codex/Claude startup in the shared v1.5 harness |
 | 2026-05-03 | @codex-vz | Add the Linux CH artifact emitter for the common v1.5 guest contract and make CH egress setup explicit v1.5 platform adaptation |
@@ -24,6 +29,8 @@ and VZ `v1.45`, but through:
 - one common seed schema
 - one common guest service graph
 - one common harness and scenario set
+- one published multi-arch OCI guest image reference once the common payload and
+  emitter path are stable
 
 Backend-specific code belongs at the emitter, host launcher, host runner, or
 host network adapter layer. It must not leak into guest-visible semantics unless
@@ -404,6 +411,360 @@ cloud-init
 not run package installs, npm repair, cargo builds, package-manager quiescence
 polling, egress certification, or full VFS/VNET validation.
 
+## Roadmap To A Shared OCI Guest Image
+
+The end state is one OCI image reference that resolves to a multi-arch OCI image
+index. That single published artifact name must describe one Motlie guest
+contract, even though the contained per-arch rootfs payloads are not byte
+identical.
+
+Example target:
+
+```text
+ghcr.io/chungers/motlie-guest:v1.5
+  -> linux/arm64 image
+  -> linux/amd64 image
+```
+
+This is the correct convergence target for CH and VZ. A single byte-identical
+rootfs blob cannot boot both Apple Silicon VZ guests and native x86_64 CH
+guests because the guest userspace, packages, and kernel payloads are
+architecture-specific before any boot script runs. The reusable unit is the
+guest contract plus per-arch payloads, not one architecture-agnostic filesystem
+blob.
+
+The roadmap starts from a real compatible OCI base image, then generalizes the
+Motlie contract from what the harness requires that base to provide.
+
+The first supported profile should be `ubuntu-systemd` over
+`docker.io/library/ubuntu:24.04`. Ubuntu is the right first foundation because
+the current v1.5 harness contract already assumes an apt-based, systemd-capable
+guest with sudo, OpenSSH, common Linux networking tools, and coding-agent CLI
+startup checks. The tag is only the discovery input. The imported source must
+be pinned by immutable OCI digests before it is accepted as a Motlie guest
+profile.
+
+The roadmap is:
+
+1. Import a concrete Ubuntu OCI image and derive the first Motlie compatibility
+   profile.
+   - Resolve `docker.io/library/ubuntu:24.04` through its OCI image index.
+   - Record the image reference, image-index digest, selected platform, and
+     selected platform-manifest digest.
+   - Select `linux/amd64` for native CH-on-DGX validation and `linux/arm64` for
+     Apple Silicon VZ validation.
+   - Inspect the rootfs for OS release, package manager, init system, users,
+     network tooling, SSH, sudo, `/dev/fuse` assumptions, and package-manager
+     state.
+   - Apply the Motlie compatibility layer needed for the current v1.5 harness
+     to pass.
+   - Treat the required additions as the first concrete
+     `ubuntu-systemd` Motlie guest contract.
+   - Treat a newer Ubuntu LTS as a new profile version unless the full harness
+     matrix has been rerun and the source digests have been updated explicitly.
+
+2. Freeze the typed guest image and boot contract from that profile.
+   - Define typed schemas for guest users, package baseline, systemd units,
+     mount points, writable directories, SSH auto-provision behavior, and the
+     validation profile.
+   - Define the backend-neutral boot contract: kernel/initramfs expectations,
+     seed/cloud-init ownership, required boot metadata, and guest-visible
+     runtime paths.
+   - CH and VZ must both be describable from this one contract even if their
+     current emitters still differ.
+   - Keep Ubuntu-specific requirements in the `ubuntu-systemd` profile instead
+     of confusing them with the whole VMM image contract.
+
+3. Build one common rootfs assembler.
+   - Move guest payload assembly behind one VMM-owned builder that installs the
+     shared package set, services, Motlie guest binaries, Codex/git/sudo
+     contract, and validation markers.
+   - Keep architecture-specific payload bits explicit in the builder. This
+     includes Linux packages and any arch-specific Motlie guest binaries.
+   - The output of this stage is a canonical assembled rootfs tree plus a
+     manifest with contract version and payload checksums.
+
+4. Publish per-arch OCI guest images from the common rootfs assembly.
+   - Treat OCI as the canonical distribution format for the guest payload, not
+     as a hypervisor-native boot format.
+   - Publish at least one OCI image per guest architecture:
+     `motlie-guest:arm64` and `motlie-guest:amd64`.
+   - Embed contract version, validation profile, and provenance labels so both
+     backend emitters consume the same payload definition.
+
+5. Make CH and VZ emitters consume the OCI payload.
+   - CH emitter: OCI payload -> CH boot artifacts.
+   - VZ emitter: OCI payload -> VZ boot artifacts.
+   - Backend-specific packaging remains allowed here, but it must be derived
+     from the same OCI payload and the same typed contract instead of from
+     backend-specific guest build scripts.
+   - This is the stage that gives true cross-backend image reuse in the product
+     sense: one source payload, two backend emitters.
+
+6. Require one harness validation matrix across both backends for the same OCI
+   image-index digest and declared platform variants.
+   - The saved scenarios for bootstrap, SSH auto-provision, VFS, VNET/egress,
+     PTY/Codex, and multi-guest operation must pass for CH and VZ from the same
+     logical image contract.
+   - Validation results should record the OCI image-index digest, selected
+     platform, selected platform-manifest digest, contract version, backend
+     kind, emitted backend artifact digests, and emitted artifact metadata.
+
+7. Publish one multi-arch OCI image reference.
+   - After the per-arch OCI payloads and emitters are stable, publish one OCI
+     image index / manifest list as the canonical guest image reference.
+   - That one reference is the final externally visible artifact for the guest
+     image line. CH and VZ emitters select the correct per-arch payload from
+     the index and produce backend-local boot artifacts from it.
+
+This roadmap intentionally stops short of requiring one byte-identical final VM
+boot file for both backends. That stronger convergence would additionally
+require:
+
+- one shared guest architecture
+- one shared disk boot model
+- one shared partition and bootloader layout
+
+Those constraints do not hold for Apple Silicon VZ and native x86_64 CH. The
+right end state here is one logical guest contract and one multi-arch OCI image
+artifact, not one architecture-agnostic raw boot image.
+
+### OCI Compatibility Model
+
+OCI is the distribution format for the guest payload, not the native VM boot
+format. The OCI image specification defines image manifests, image indexes, and
+layers. The index is the multi-platform object: it points to image manifests for
+specific operating system and architecture variants. Docker documents the same
+model as a manifest list where one image name selects the correct platform
+variant at pull time.
+
+References:
+
+- OCI image specification: image manifest, image index, and layer model:
+  `https://oci-playground.github.io/specs-latest/specs/image/v1.0.0/oci-image-spec.html`
+- OCI layer specification: layers are filesystem changesets with additions,
+  modifications, removals, and whiteouts:
+  `https://raw.githubusercontent.com/opencontainers/image-spec/main/layer.md`
+- Docker multi-platform images: one image name can resolve to per-platform
+  manifests such as `linux/amd64` and `linux/arm64`:
+  `https://docs.docker.com/build/building/multi-platform/`
+
+The VMM image builder must therefore treat OCI as:
+
+```text
+OCI image index
+  -> platform manifest
+  -> rootfs layers + config
+  -> Motlie compatibility adaptation
+  -> backend emitter
+  -> CH or VZ boot artifacts
+```
+
+The OCI payload does not remove the need for backend emitters. The emitters
+still own kernel/initramfs or disk boot metadata, seed/cloud-init material,
+runtime overlays, launch manifests, and platform-specific host artifacts.
+
+### Pre-Boot Emitter Adaptation Versus Post-Boot Mutation
+
+Emitter adaptation happens before the VM boots into the guest. It may be
+persistent or ephemeral. The builder resolves an OCI platform variant, assembles
+the rootfs, applies a Motlie compatibility layer, verifies the guest contract,
+and emits backend boot artifacts before handing control to CH or VZ.
+
+Pre-boot emitted artifacts may live in:
+
+- a persistent artifact directory for reuse and inspection
+- a temporary directory under the harness runtime root
+- tmpfs or another RAM-backed filesystem when the host/backend supports it
+- a backend-specific file-handle path when the backend API accepts file handles
+
+Pre-boot adaptation owns:
+
+- installing Motlie guest binaries under `/opt/motlie/v1.5/guest/bin`
+- exposing compatibility paths under `/usr/local/bin`
+- installing systemd units or an approved Motlie init profile
+- creating stable mount point directories such as `/workspace`,
+  `/agent-state`, and `/home/<user>` templates where the image policy requires
+  them
+- installing baseline packages required by the selected validation profile
+- installing backend-neutral config schemas such as
+  `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
+- enabling the CH egress setup service only in CH-emitted artifacts when CH
+  requires guest-side route/DNS programming
+
+Dynamic boot-time configuration should be limited to per-guest state:
+
+- username, uid, gid, hostname, and SSH principal material
+- per-guest mount declarations and host-backed mount identities
+- per-guest egress addresses, MACs, and route/DNS values where the backend
+  requires them
+- runtime socket paths and control-plane readiness files
+
+Privileged SSH or TTY mutation after boot is allowed only as a diagnostic or
+transitional importer path. It must not be the normal product contract because
+it requires the guest to already be bootable, reachable, privileged, and
+partially configured. If an OCI image needs Motlie packages, units, mount
+points, or network tooling, the supported path is to adapt the image before
+guest boot, whether that adapted artifact is persistent or ephemeral.
+
+The hard product boundary is not "disk versus RAM." It is "before guest boot
+versus after guest boot." On-demand emission during harness startup is valid if
+the guest sees a complete Motlie contract when it starts.
+
+### Apple VZ Storage And Ephemeral Artifact Constraints
+
+Apple Virtualization.framework supports path-backed and file-handle-backed
+storage, but the concrete APIs matter when deciding whether an emitter can use
+tmpfs, memfd, or a normal disk file.
+
+Relevant Apple APIs:
+
+- `VZDiskImageStorageDeviceAttachment` attaches a disk image by URL. Apple
+  documents support for RAW and ASIF disk images, and the initializer takes a
+  local file URL.
+- `VZDiskBlockDeviceStorageDeviceAttachment` attaches an actual disk through a
+  file handle.
+- `VZLinuxBootLoader` takes kernel and optional initial RAM disk URLs.
+- `VZFileHandleNetworkDeviceAttachment` accepts a file handle for a connected
+  datagram socket. This supports the current VZ userspace egress shape, but it
+  is a network-device API, not a disk-image API.
+
+References:
+
+- Apple `VZDiskImageStorageDeviceAttachment`:
+  `https://developer.apple.com/documentation/virtualization/vzdiskimagestoragedeviceattachment`
+- Apple `VZDiskBlockDeviceStorageDeviceAttachment`:
+  `https://developer.apple.com/documentation/virtualization/vzdiskblockdevicestoragedeviceattachment`
+- Apple `VZLinuxBootLoader`:
+  `https://developer.apple.com/documentation/virtualization/vzlinuxbootloader`
+- Apple `VZFileHandleNetworkDeviceAttachment`:
+  `https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment`
+
+Implications for VZ:
+
+- A VZ emitter can generate RAW or ASIF disk artifacts on demand before launch.
+- A normal local file path is the most compatible VZ storage target because
+  `VZDiskImageStorageDeviceAttachment` is URL-based.
+- RAM-backed path storage is acceptable if the host exposes it as a normal
+  local file path that VZ can open for the lifetime of the VM.
+- Linux `memfd` is not a portable VZ artifact target by itself. It has no stable
+  macOS equivalent, and the URL-based disk-image API expects a file path.
+- A file-handle storage path may be possible through
+  `VZDiskBlockDeviceStorageDeviceAttachment`, but that is a different backend
+  contract and should be designed explicitly before becoming the default.
+
+Implications for CH:
+
+- CH can support on-demand pre-boot emission to persistent files, temporary
+  files, or Linux tmpfs-backed files.
+- Raw `memfd` may be possible only if the CH launcher path can pass a usable
+  file descriptor or `/proc/self/fd/...` path for the specific artifact. The
+  conservative portable path is still a normal file path, possibly on tmpfs.
+
+The default cross-backend emitter contract should therefore be path-oriented:
+emit a complete backend artifact set under a managed artifact root, where that
+root may be persistent or ephemeral. Backend-specific file-descriptor storage is
+an optimization, not the base contract.
+
+The demo mount points and package choices in `examples/v1.1` through `v1.5`
+are product-level example configuration. They should not become global VMM
+defaults. The reusable contract is the mechanism: image profiles declare which
+paths, packages, users, services, and validation scenarios are required for a
+particular product guest.
+
+### VFS And VNET Compatibility With OCI Payloads
+
+OCI payloads do not break VFS memfs semantics. `motlie-vfs` controls only paths
+inside trees mounted through its FUSE/vsock/RPC client; it does not mutate
+arbitrary rootfs paths outside those mounts. Memfs layers already sit above a
+base layer and can add content, synthetic directories, and whiteouts. The
+compatibility requirement is that the booted image provides the guest-side
+mount runner, `/dev/fuse`, mount configuration, and the target mount points
+required by the selected profile.
+
+If an imported OCI image already contains meaningful files under a path that
+Motlie later mounts over, the mount hides the underlying rootfs path. That is
+normal Linux mount behavior and must be handled by the image profile. Profiles
+can reserve those paths, import selected lower-rootfs content into the VFS base
+layer, or choose different mount points.
+
+OCI payloads also do not break VNET/libslirp egress. The egress service is
+host-side. The guest contract is limited to the network device, route, DNS, and
+tooling needed to use that egress path. CH may need a guest-side service that
+finds the egress NIC and programs route/DNS state. VZ may obtain route/DNS from
+the VZ userspace egress path. Both remain compatible with the same OCI-derived
+rootfs if the selected profile installs the required guest-side tooling.
+
+### External Docker/OCI Image Import Profiles
+
+Already available OCI images can be useful foundations, but they must pass an
+import profile before VMM treats them as Motlie guest images.
+
+Good initial candidates:
+
+- `docker.io/library/ubuntu:24.04` for the first `ubuntu-systemd` profile.
+  Docker Hub publishes Ubuntu as a Docker Official Image, and Canonical
+  documents Ubuntu OCI images as multi-architecture images built from minimal
+  rootfs tarballs. Newer Ubuntu LTS tags require a new profile version or an
+  explicit digest update with the full harness matrix rerun.
+- `alpine:3` or another supported Alpine tag for a smaller experimental
+  profile. Docker Hub publishes Alpine as a Docker Official Image with
+  `amd64` and `arm64v8` support, among other architectures.
+
+References:
+
+- Ubuntu Docker Official Image:
+  `https://hub.docker.com/_/ubuntu`
+- Ubuntu OCI image configuration, including minimal rootfs layers and
+  multi-architecture image index:
+  `https://documentation.ubuntu.com/oci-registries/oci-reference/oci-image-configuration/`
+- Alpine Docker Official Image, including supported architectures:
+  `https://hub.docker.com/_/alpine`
+
+These images are foundations, not ready Motlie VM guests. Most container images
+are optimized for a container runtime and may not include systemd, sshd, sudo,
+cloud-init, `/dev/fuse` assumptions, DHCP/network tooling, or package-manager
+state suitable for a VM boot contract.
+
+The importer must classify each source image:
+
+```text
+ExternalOciSource
+  image_ref
+  image_index_digest
+  platform
+  platform_manifest_digest
+  os_release
+  libc_family
+  package_manager
+  init_profile
+  motlie_compatibility_profile
+```
+
+For the first profile, `image_ref` is `docker.io/library/ubuntu:24.04`. The
+profile must store the resolved image-index digest and the selected platform
+manifest digest. Tags are not sufficient for reproducible validation because
+registries can move them.
+
+Supported import profiles:
+
+- `ubuntu-systemd`: apt-based, systemd-capable, expected to support the full
+  v1.5 agent validation profile after pre-boot adaptation.
+- `alpine-openrc` or `alpine-motlie-init`: apk-based, smaller profile, likely
+  requires a Motlie-owned init service path instead of assuming the current
+  systemd service graph.
+- `unsupported`: image can be unpacked for inspection, but cannot be emitted as
+  a Motlie guest without a profile that defines init, SSH, VFS, VNET, and
+  validation behavior.
+
+The first implementation should use Docker Hub's Ubuntu official image because
+the current v1.5 examples already assume apt, `sudo -n apt-get update`, systemd
+units, and coding-agent CLI startup checks. Alpine is feasible, but it is a
+separate profile because package names, init system, shell/coreutils behavior,
+and service management differ. The Motlie contract should emerge from the
+Ubuntu profile first, then be factored into profile-independent requirements
+and profile-specific requirements once a second base image is implemented.
+
 ## Success Criteria
 
 v1.5 succeeds when:
@@ -423,6 +784,10 @@ v1.5 succeeds when:
    certification work.
 9. v1.5 has no REPL example; manual, headless, external-SSH, and scenario e2e
    validation run through `harness_v1_5`.
+10. The guest-image roadmap is explicit: a shared typed contract, a common
+    rootfs assembler, per-arch OCI guest payloads, backend emitters that
+    consume those payloads, and a final published multi-arch OCI guest image
+    reference.
 
 ## Related Documents
 
