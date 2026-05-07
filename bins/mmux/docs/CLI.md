@@ -227,7 +227,7 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
 - All command keys (`Up`/`Down`, `u`/`b`, `PgUp`/`PgDn`, `Home`/`End`,
-  `a`, `m`, `p`, `n`, `k`, `r`, `t`, `g`, `Ctrl-C`/`q`, `l`,
+  `a`, `m`, `p`, `n`, `k`, `r`, `t`, `g`, `$` then `0`…`9`, `$` then `!`, `Ctrl-C`/`q`, `l`,
   `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.

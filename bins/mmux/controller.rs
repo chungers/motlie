@@ -560,15 +560,22 @@ pub(crate) async fn handle_key(
     if app.modal.is_some() {
         return handle_modal_key(fleet, app, key).await;
     }
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.pending_list_shortcut = None;
+            return Ok(KeyOutcome::Cancel);
+        }
+        (KeyCode::Char('q'), _) => {
+            app.pending_list_shortcut = None;
+            return Ok(KeyOutcome::Cancel);
+        }
+        _ => {}
+    }
     if let Some(shortcut) = app.pending_list_shortcut.take() {
         return handle_pending_list_shortcut(fleet, app, key, shortcut).await;
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            return Ok(KeyOutcome::Cancel);
-        }
-        (KeyCode::Char('q'), _) => return Ok(KeyOutcome::Cancel),
         (KeyCode::Esc, _) => app.layout.focus = Focus::List,
         (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
         (KeyCode::Char('m'), _) => start_monitor(fleet, app).await?,
