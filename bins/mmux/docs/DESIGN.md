@@ -1446,31 +1446,35 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
    `mmux` process and is not written to disk.
 3. Restore raw mode and leave the alternate screen. Restore termios to
    canonical state.
-4. Resolve the highlighted session id to a `Target` via the stable-id
-   library path. If the session vanished between selection and resolve
-   (race), show stderr message and re-enter the TUI.
-5. Best-effort call `Target::status()`, snapshot the selected session's local
-   `status-style`, `status-left`, and `status-left-length`, then apply
-   `SessionStatusOverrides` for a status style whose background matches the
-   selected host's list-pane palette color in multi-host mode, or the default
-   mmux status-bar blue in single-host mode. `status-left` is
-   `"#{=50:session_name}"` and `status-left-length` is `50`. Failures warn to
-   stderr but do not block attach.
+4. Build the attach `Target` from the `SessionInfo` already carried by the
+   highlighted row. This avoids a redundant `list_sessions()` call in the
+   transition path; the session is still addressed by stable tmux session id.
+   If the host entry vanished between selection and attach, re-enter the TUI
+   without printing to the caller's shell.
+5. Best-effort call `Target::status()` and `Target::window_styles()` in
+   parallel, then snapshot/apply the selected session's local `status-style`,
+   `status-left`, `status-left-length`, and configured per-window styles.
+   Status style background matches the selected host's list-pane palette color
+   in multi-host mode, or the default mmux status-bar blue in single-host mode.
+   `status-left` is `"#{=50:session_name}"` and `status-left-length` is `50`.
+   Failures are quiet by default and do not block attach; setting
+   `MMUX_ATTACH_LOG=1` prints diagnostics to stderr for debugging.
 6. **Spawn-and-wait** with inherited stdio:
    - Local target: spawn `tmux attach-session -t <name>` (using socket /
      resolved tmux binary as needed) as a child with inherited
      stdin/stdout/stderr. No `pipe()`. No proxy.
-   - SSH target: spawn `ssh -t [opts] <host> tmux attach-session -t <name>`
-     with inherited stdio.
+   - SSH target: spawn `ssh -t -q [opts] <host> tmux attach-session -t <name>`
+     with inherited stdio while transition-output suppression is enabled.
    - Put the child in its own process group via `setpgid` immediately after
      fork (or via `Command::process_group(0)`). Set the foreground process
      group via `tcsetpgrp` so foreground signals (`SIGINT`, `SIGTSTP`,
      `SIGWINCH`) reach the child, not the parent.
 7. Call `wait()` (parent blocks while child holds the terminal).
-8. Restore the previous local status values through `SessionStatus::restore()`.
+8. Restore the previous local status/window values through
+   `SessionStatus::restore()` and `SessionWindowStyles::restore()` in parallel.
    Present snapshot values are written back; absent values unset the local
-   overrides. Restore failures warn to stderr and do not change attach exit
-   handling.
+   overrides. Restore failures are quiet by default and do not change attach
+   exit handling.
 9. On `wait()` return, branch on mode and child exit status:
 
    ```text
@@ -1499,15 +1503,27 @@ the spawned tmux (or `ssh tmux`) child. **No VTE-in-the-middle.**
                                  binary with code 0 (user-initiated).
    ```
 
-8. Detach status is treated conservatively. Some tmux/SSH attach paths can
+10. Detach status is treated conservatively. Some tmux/SSH attach paths can
    report non-zero even when the user detached and the selected session still
    exists. Default mode therefore uses child success as sufficient for
    re-entry, and for non-zero exits probes the selected session id before
    deciding whether to re-enter or propagate the child status.
 
-9. Process count footprint: two processes are resident during the attach window
+11. Process count footprint: two processes are resident during the attach window
    (selector + child). Under exec-replace this would be one, but exec-replace
    forecloses recovery, observability, and testability — rejected.
+
+Transition latency analysis:
+
+- The selector no longer recomputes the selected target through
+  `session_by_id()` immediately before attach; it reuses the selected row's
+  `SessionInfo` and stable session id.
+- Independent status and window-style preparation runs concurrently before
+  attach, and restore runs concurrently after detach.
+- The remaining avoidable cost is inside the style APIs themselves: snapshot,
+  apply, and restore still issue several tmux option commands. A future
+  `motlie-tmux` batch status/window-style API could reduce round trips further,
+  especially for SSH targets, without changing mmux's attach state machine.
 
 ## Accepted motlie-tmux Library Gaps
 
@@ -1522,8 +1538,16 @@ pub struct AttachExit {
     pub status: std::process::ExitStatus,
 }
 
+pub struct AttachOptions {
+    pub suppress_transition_output: bool,
+}
+
 impl Target {
     pub async fn attach_current_pty(&self) -> Result<AttachExit>;
+    pub async fn attach_current_pty_with_options(
+        &self,
+        options: &AttachOptions,
+    ) -> Result<AttachExit>;
 }
 ```
 
@@ -1537,6 +1561,9 @@ Required semantics:
   resolved-binary behavior.
 - SSH targets open an interactive SSH PTY to the remote host and run the correct
   remote tmux attach path there.
+- `AttachOptions::suppress_transition_output` leaves child stdio inherited
+  while attached, then best-effort clears transition-only detach status text
+  before control returns to the selector. SSH attach adds `-q` under this option.
 - The API owns tmux and SSH command construction; the binary does not.
 - Implementation must be
   spawn-and-wait, not exec-replace: spawn the child with inherited stdio,

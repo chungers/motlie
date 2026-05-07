@@ -118,8 +118,15 @@ without attach.
 
 Before attach, mmux best-effort sets the selected session's local tmux
 `status-style` to `bg=#002b55,fg=white`. After detach, it restores the previous
-local style or unsets the local override when none existed. If style setup or
-restore fails, mmux prints a warning and keeps the attach flow working.
+local style or unsets the local override when none existed. Style setup and
+restore diagnostics are quiet by default so attach/detach transitions do not
+leave warning text in the caller's shell. Set `MMUX_ATTACH_LOG=1` to print those
+diagnostics to stderr while debugging attach transitions.
+
+mmux uses `AttachOptions::suppress_transition_output` by default in attach mode.
+This keeps the attach child interactive while best-effort clearing transient
+tmux/SSH detach status text before the selector redraws. `MMUX_ATTACH_LOG=1`
+disables that cleanup.
 
 During default attach/re-entry, the parent `mmux` process keeps a small
 in-memory UI snapshot. On return from tmux detach, the selector restores the
@@ -445,4 +452,5 @@ Env-gated SSH/ForceCommand integration coverage is tracked in
 - stdout is reserved for `--script` selected-session output.
 - stderr carries TUI rendering, status, diagnostics, and errors.
 - default attach mode inherits stdio for the attach child after terminal
-  cleanup.
+  cleanup, then suppresses transition-only attach/detach status text unless
+  `MMUX_ATTACH_LOG=1` is set.
