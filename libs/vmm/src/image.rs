@@ -1747,20 +1747,29 @@ fn classify_path_kind(
     }
 }
 
-fn find_existing_rootfs_path(
+fn find_existing_rootfs_file(
     root: &Path,
     paths: &[&str],
 ) -> Result<Option<PathBuf>, RootfsClassificationError> {
     for path in paths {
         let absolute = Path::new(path);
-        if classify_path_kind(root, absolute)? != RootfsPathKind::Missing {
+        if classify_path_kind(root, absolute)? == RootfsPathKind::File {
             return Ok(Some(PathBuf::from(path)));
         }
     }
     Ok(None)
 }
 
-fn rootfs_path_resolves_to_any(
+fn rootfs_resolved_path_is_file(path: &Path) -> Result<bool, RootfsClassificationError> {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_file())
+        .map_err(|source| RootfsClassificationError::Io {
+            path: Some(path.to_path_buf()),
+            source,
+        })
+}
+
+fn rootfs_file_resolves_to_any(
     root: &Path,
     path: &Path,
     expected_paths: &[&str],
@@ -1768,9 +1777,14 @@ fn rootfs_path_resolves_to_any(
     let Some(resolved_path) = resolve_rootfs_path(root, path)? else {
         return Ok(None);
     };
+    if !rootfs_resolved_path_is_file(&resolved_path)? {
+        return Ok(None);
+    }
     for expected_path in expected_paths {
         let expected_absolute = Path::new(expected_path);
-        if resolve_rootfs_path(root, expected_absolute)?.as_ref() == Some(&resolved_path) {
+        if classify_path_kind(root, expected_absolute)? == RootfsPathKind::File
+            && resolve_rootfs_path(root, expected_absolute)?.as_ref() == Some(&resolved_path)
+        {
             return Ok(Some(PathBuf::from(expected_path)));
         }
     }
@@ -1880,8 +1894,8 @@ fn classify_package_manager(
             ),
         }),
         PackageManagerRequirement::AptDpkg => {
-            let apt_get = find_existing_rootfs_path(root, &["/usr/bin/apt-get", "/bin/apt-get"])?;
-            let dpkg = find_existing_rootfs_path(root, &["/usr/bin/dpkg", "/bin/dpkg"])?;
+            let apt_get = find_existing_rootfs_file(root, &["/usr/bin/apt-get", "/bin/apt-get"])?;
+            let dpkg = find_existing_rootfs_file(root, &["/usr/bin/dpkg", "/bin/dpkg"])?;
             match (apt_get, dpkg) {
                 (Some(apt_get), Some(dpkg)) => Ok(PackageManagerClassification {
                     available: true,
@@ -1911,7 +1925,7 @@ fn classify_init_system(
 ) -> Result<Vec<RootfsRequirementFinding>, RootfsClassificationError> {
     let finding = match init {
         InitProfile::UbuntuSystemd => {
-            let systemd = find_existing_rootfs_path(
+            let systemd = find_existing_rootfs_file(
                 root,
                 &["/usr/lib/systemd/systemd", "/lib/systemd/systemd"],
             )?;
@@ -1921,7 +1935,7 @@ fn classify_init_system(
                     RootfsRequirementStatus::Present,
                     format!("systemd indicator at {path:?}"),
                 )
-            } else if let Some(resolved) = rootfs_path_resolves_to_any(
+            } else if let Some(resolved) = rootfs_file_resolves_to_any(
                 root,
                 Path::new("/sbin/init"),
                 &["/usr/lib/systemd/systemd", "/lib/systemd/systemd"],
@@ -3538,6 +3552,50 @@ mod tests {
         write_rootfs_file(root, "/usr/bin/dpkg", "");
         write_rootfs_file(root, "/bin/sh", "");
         write_rootfs_file(root, "/sbin/init", "#!/bin/sh\n");
+        create_rootfs_dir(root, "/dev");
+
+        let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::InitSystem).status,
+            RootfsRequirementStatus::MissingButInstallable
+        );
+    }
+
+    #[test]
+    fn rootfs_classifier_rejects_package_manager_directories() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        write_rootfs_file(root, "/etc/os-release", "ID=ubuntu\nVERSION_ID=\"24.04\"\n");
+        create_rootfs_dir(root, "/usr/bin/apt-get");
+        create_rootfs_dir(root, "/usr/bin/dpkg");
+        write_rootfs_file(root, "/bin/sh", "");
+        write_rootfs_file(root, "/usr/lib/systemd/systemd", "");
+        create_rootfs_dir(root, "/dev");
+
+        let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::PackageManager).status,
+            RootfsRequirementStatus::Unsupported
+        );
+        assert_eq!(
+            classification.status,
+            RootfsClassificationStatus::Unsupported
+        );
+    }
+
+    #[test]
+    fn rootfs_classifier_does_not_accept_systemd_directory() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        write_rootfs_file(root, "/etc/os-release", "ID=ubuntu\nVERSION_ID=\"24.04\"\n");
+        write_rootfs_file(root, "/usr/bin/apt-get", "");
+        write_rootfs_file(root, "/usr/bin/dpkg", "");
+        write_rootfs_file(root, "/bin/sh", "");
+        create_rootfs_dir(root, "/usr/lib/systemd/systemd");
         create_rootfs_dir(root, "/dev");
 
         let spec = RootfsProfileSpec::ubuntu_systemd(ubuntu_classifier_source());

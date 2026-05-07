@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | tighten rootfs classifier executable probes so apt/dpkg and systemd indicators require resolved regular files, not directories or other existing paths
 - 2026-05-07 | @vmm-cdx | harden rootfs classifier path access with guest-root-aware symlink resolution and reject escaping symlink targets before reading or classifying imported rootfs content
 - 2026-05-07 | @vmm-cdx | add the rootfs classifier API with data-driven `RootfsProfileSpec`, typed stable VMM/VFS/VNET findings, and `ready` / `compatible-with-adaptation` / `unsupported` status
 - 2026-05-07 | @vmm-cdx | tighten OCI whiteout safety: reject empty `.wh.` targets and propagate opaque-whiteout metadata errors instead of reporting success
@@ -731,6 +732,9 @@ Rootfs classifier behavior:
   traversal above the guest root is rejected
 - only treats `/sbin/init` as systemd when it resolves inside the rootfs to
   `/usr/lib/systemd/systemd` or `/lib/systemd/systemd`
+- requires executable probes such as `apt-get`, `dpkg`, and systemd indicators
+  to resolve to regular files; directories or other existing path types are not
+  accepted as present
 - returns machine-readable findings with `RootfsRequirementKind`,
   `RootfsRequirementStatus`, optional path/package, and evidence
 - aggregates findings into `ready`, `compatible-with-adaptation`, or

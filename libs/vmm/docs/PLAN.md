@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten Phase 11 classifier presence checks so apt/dpkg and systemd probes require resolved regular files |
 | 2026-05-07 | @vmm-cdx | Harden Phase 11 rootfs classifier path handling against host symlink escape and tighten systemd detection so `/sbin/init` must resolve to a real systemd path |
 | 2026-05-07 | @vmm-cdx | Implement the Phase 11 rootfs classifier API and mark the imported-rootfs classification gate complete for the first `ubuntu-systemd` profile |
 | 2026-05-07 | @vmm-cdx | Add the Phase 11 rootfs classifier slice: classify imported OCI rootfs paths using typed stable VMM/VFS/VNET invariants plus data-driven profile requirements before compatibility-layer assembly |
@@ -616,6 +617,8 @@ Tasks:
         targets that escape the assembly root
   - [x] require `/sbin/init` to resolve to `/usr/lib/systemd/systemd` or
         `/lib/systemd/systemd` before counting it as systemd
+  - [x] require package-manager and systemd indicator probes to resolve to
+        regular files, not directories or other path types
   - [x] return machine-readable `ready`, `compatible-with-adaptation`, or
         `unsupported` status with typed findings
 - [ ] apply the pre-boot Motlie compatibility layer:

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten rootfs classifier executable probes so package-manager and systemd indicators require resolved regular files, not merely existing paths |
 | 2026-05-07 | @vmm-cdx | Harden the rootfs classifier trust boundary: path reads/classification use guest-root-aware symlink resolution, escaping symlinks are rejected, and `/sbin/init` is accepted only when it resolves to systemd |
 | 2026-05-07 | @vmm-cdx | Define the rootfs classifier requirements and design: stable VMM/VFS/VNET invariants stay typed in Rust while admin/profile package, mount, and init requirements are data driven |
 | 2026-05-07 | @vmm-cdx | Tighten OCI whiteout safety for the rootfs importer: empty `.wh.` targets are invalid and opaque-whiteout metadata errors fail closed |
@@ -851,7 +852,9 @@ boot artifacts.
   rejects parent traversal above the guest root, and caps symlink recursion.
   `/sbin/init` is not a standalone systemd indicator; it is accepted only when it
   resolves inside the rootfs to `/usr/lib/systemd/systemd` or
-  `/lib/systemd/systemd`.
+  `/lib/systemd/systemd`. Package-manager and systemd indicator probes require
+  resolved regular files; directories or other non-file path types are not
+  accepted as present.
 
 ### Rootfs Classifier Requirements And Design
 
