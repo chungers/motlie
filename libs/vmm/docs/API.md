@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | add the first rootfs importer API for digest-checked local OCI layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteout handling
 - 2026-05-07 | @vmm-cdx | tighten resolver provenance so single-image manifests are rejected until config blob inspection can verify the requested platform
 - 2026-05-07 | @vmm-cdx | document that resolver live tests are a PR sub-gate and v1.5 acceptance requires v1.4/v1.45 functional parity through the unified v1.5 harness/image-builder/OCI flow
 - 2026-05-07 | @vmm-cdx | add the first OCI Registry v2 resolver API for image reference parsing, manifest/index digest resolution, platform manifest selection, and bearer-token auth
@@ -597,16 +598,18 @@ Default reviewed policy:
 ### `image.rs`
 
 The guest-image surface is the first host-runtime API for the OCI import
-roadmap. It records source identity and validation metadata, and can resolve
-OCI/Docker manifest indexes to immutable digests. It does not yet unpack rootfs
-layers or emit CH/VZ artifacts.
+roadmap. It records source identity and validation metadata, resolves
+OCI/Docker manifest indexes to immutable digests, parses selected platform
+manifests, and can unpack digest-checked local rootfs layer blobs into an empty
+assembly root. It does not yet pull layer blobs from a registry or emit CH/VZ
+artifacts.
 
 ```rust
 use motlie_vmm::backend::BackendKind;
 use motlie_vmm::image::{
-    EmittedArtifactDigest, ExternalOciSource, GuestImageProfile,
-    GuestImageValidationRecord, OciDigest, OciImageReference, OciPlatform,
-    OciRegistryClient,
+    EmittedArtifactDigest, ExternalOciSource, GuestImageProfile, GuestImageValidationRecord,
+    OciDigest, OciImageReference, OciLayerInput, OciPlatform, OciPlatformManifest,
+    OciRegistryClient, OciRootfsImporter,
 };
 
 let source = ExternalOciSource::ubuntu_systemd(
@@ -638,6 +641,17 @@ let resolved_source = resolver
     .resolve_ubuntu_systemd_source(OciPlatform::linux_amd64())
     .await?;
 resolved_source.validate()?;
+
+let platform_manifest = OciPlatformManifest::from_json(platform_manifest_json)?;
+let layer_inputs = platform_manifest
+    .layers
+    .into_iter()
+    .map(|descriptor| {
+        let path = layer_cache.join(descriptor.digest.as_ref().replace(':', "_"));
+        OciLayerInput::new(descriptor, path)
+    })
+    .collect::<Vec<_>>();
+let imported = OciRootfsImporter::new().import_layers(&layer_inputs, assembly_root)?;
 ```
 
 The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
@@ -665,6 +679,21 @@ Resolver behavior:
   or Docker manifest list
 - rejects single-image manifests until config blob inspection verifies the
   manifest's actual platform; unknown JSON without descriptors is rejected
+
+Rootfs importer behavior:
+
+- parses selected OCI/Docker platform manifests into config and layer metadata
+- requires each local layer blob to match the descriptor size and `sha256`
+  digest before extraction; non-`sha256` layer digests are rejected until another
+  algorithm is explicitly implemented
+- supports plain OCI tar layers, OCI `tar+gzip` layers, and Docker gzip rootfs
+  diff layers
+- requires the assembly root to be empty or absent before import, so repeated
+  imports cannot accidentally merge stale state
+- applies normal OCI whiteouts (`.wh.<name>`) and opaque directory whiteouts
+  (`.wh..wh..opq`)
+- rejects absolute paths, parent traversal, unsupported media types, non-empty
+  assembly roots, and digest/size mismatches
 
 Resolver validation:
 

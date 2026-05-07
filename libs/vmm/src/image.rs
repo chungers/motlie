@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -216,6 +219,13 @@ impl OciDigest {
     pub fn validate(&self) -> Result<(), ImageContractError> {
         Self::new(self.0.clone()).map(|_| ())
     }
+
+    pub fn algorithm(&self) -> &str {
+        self.0
+            .split_once(':')
+            .map(|(algorithm, _)| algorithm)
+            .unwrap_or("")
+    }
 }
 
 impl Serialize for OciDigest {
@@ -420,6 +430,121 @@ impl ResolvedOciManifest {
             platform: self.platform,
             platform_manifest_digest: self.platform_manifest_digest,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciLayerDescriptor {
+    pub media_type: String,
+    pub digest: OciDigest,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciPlatformManifest {
+    pub media_type: String,
+    pub config_digest: OciDigest,
+    pub layers: Vec<OciLayerDescriptor>,
+}
+
+impl OciPlatformManifest {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, OciRootfsImportError> {
+        let manifest: RegistryPlatformManifest =
+            serde_json::from_slice(bytes).map_err(OciRootfsImportError::Json)?;
+        let media_type = manifest.media_type.ok_or_else(|| {
+            OciRootfsImportError::InvalidPlatformManifest(
+                "platform manifest missing mediaType".to_string(),
+            )
+        })?;
+        if !is_single_manifest_media_type(Some(&media_type)) {
+            return Err(OciRootfsImportError::InvalidPlatformManifest(format!(
+                "unsupported platform manifest mediaType {media_type}"
+            )));
+        }
+        let layers = manifest
+            .layers
+            .into_iter()
+            .map(|layer| OciLayerDescriptor {
+                media_type: layer.media_type,
+                digest: layer.digest,
+                size: layer.size,
+            })
+            .collect::<Vec<_>>();
+        if layers.is_empty() {
+            return Err(OciRootfsImportError::NoRootfsLayers);
+        }
+        Ok(Self {
+            media_type,
+            config_digest: manifest.config.digest,
+            layers,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciLayerInput {
+    pub descriptor: OciLayerDescriptor,
+    pub path: PathBuf,
+}
+
+impl OciLayerInput {
+    pub fn new(descriptor: OciLayerDescriptor, path: impl Into<PathBuf>) -> Self {
+        Self {
+            descriptor,
+            path: path.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciLayerImportRecord {
+    pub media_type: String,
+    pub digest: OciDigest,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportedOciRootfs {
+    pub root: PathBuf,
+    pub applied_layers: Vec<OciLayerImportRecord>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OciRootfsImporter;
+
+impl OciRootfsImporter {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn import_layers(
+        &self,
+        layers: &[OciLayerInput],
+        assembly_root: impl AsRef<Path>,
+    ) -> Result<ImportedOciRootfs, OciRootfsImportError> {
+        if layers.is_empty() {
+            return Err(OciRootfsImportError::NoRootfsLayers);
+        }
+        let assembly_root = assembly_root.as_ref();
+        ensure_empty_assembly_root(assembly_root)?;
+
+        let mut applied_layers = Vec::with_capacity(layers.len());
+        for layer in layers {
+            layer.descriptor.digest.validate()?;
+            let compression = layer_compression(&layer.descriptor.media_type)?;
+            verify_layer_blob(&layer.path, &layer.descriptor)?;
+            apply_layer_blob(&layer.path, assembly_root, compression)?;
+            applied_layers.push(OciLayerImportRecord {
+                media_type: layer.descriptor.media_type.clone(),
+                digest: layer.descriptor.digest.clone(),
+                size: layer.descriptor.size,
+            });
+        }
+
+        Ok(ImportedOciRootfs {
+            root: assembly_root.to_path_buf(),
+            applied_layers,
+        })
     }
 }
 
@@ -636,9 +761,54 @@ pub enum OciRegistryError {
     },
 }
 
+#[derive(Debug, Error)]
+pub enum OciRootfsImportError {
+    #[error(transparent)]
+    Contract(#[from] ImageContractError),
+    #[error("platform manifest JSON is invalid: {0}")]
+    Json(#[source] serde_json::Error),
+    #[error("invalid platform manifest: {0}")]
+    InvalidPlatformManifest(String),
+    #[error("OCI rootfs import requires at least one layer")]
+    NoRootfsLayers,
+    #[error("unsupported OCI layer media type {media_type}")]
+    UnsupportedLayerMediaType { media_type: String },
+    #[error("assembly root is not a directory: {path:?}")]
+    AssemblyRootNotDirectory { path: PathBuf },
+    #[error("assembly root must be empty before import: {path:?}")]
+    AssemblyRootNotEmpty { path: PathBuf },
+    #[error("unsafe OCI layer path {path:?}: {reason}")]
+    UnsafeLayerPath { path: PathBuf, reason: String },
+    #[error("layer blob {path:?} size was {actual}, expected {expected}")]
+    LayerSizeMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("layer blob {path:?} digest was {actual}, expected {expected}")]
+    LayerDigestMismatch {
+        path: PathBuf,
+        expected: OciDigest,
+        actual: OciDigest,
+    },
+    #[error(
+        "unsupported layer digest algorithm {algorithm} for {path:?}; only sha256 is currently supported"
+    )]
+    UnsupportedLayerDigestAlgorithm { path: PathBuf, algorithm: String },
+    #[error("I/O error at {path:?}: {source}")]
+    Io {
+        path: Option<PathBuf>,
+        #[source]
+        source: io::Error,
+    },
+}
+
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const DOCKER_IMAGE_MANIFEST_MEDIA_TYPE: &str =
     "application/vnd.docker.distribution.manifest.v2+json";
+const OCI_LAYER_TAR_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
+const OCI_LAYER_GZIP_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
+const DOCKER_LAYER_GZIP_MEDIA_TYPE: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 const OCI_MANIFEST_ACCEPT: &str = concat!(
     "application/vnd.oci.image.index.v1+json, ",
     "application/vnd.docker.distribution.manifest.list.v2+json, ",
@@ -677,6 +847,22 @@ struct RegistryManifestDescriptor {
 struct RegistryManifestPlatform {
     os: String,
     architecture: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryPlatformManifest {
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
+    config: RegistryContentDescriptor,
+    layers: Vec<RegistryContentDescriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryContentDescriptor {
+    #[serde(rename = "mediaType")]
+    media_type: String,
+    digest: OciDigest,
+    size: u64,
 }
 
 #[derive(Debug)]
@@ -869,6 +1055,288 @@ fn digest_from_bytes(bytes: &[u8]) -> Result<OciDigest, ImageContractError> {
     OciDigest::new(format!("sha256:{}", hex::encode(digest)))
 }
 
+fn digest_from_reader(reader: &mut impl Read) -> Result<OciDigest, OciRootfsImportError> {
+    let mut hasher = Sha256::new();
+    io::copy(reader, &mut hasher)
+        .map_err(|source| OciRootfsImportError::Io { path: None, source })?;
+    OciDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+        .map_err(OciRootfsImportError::Contract)
+}
+
+fn verify_layer_blob(
+    path: &Path,
+    descriptor: &OciLayerDescriptor,
+) -> Result<(), OciRootfsImportError> {
+    if descriptor.digest.algorithm() != "sha256" {
+        return Err(OciRootfsImportError::UnsupportedLayerDigestAlgorithm {
+            path: path.to_path_buf(),
+            algorithm: descriptor.digest.algorithm().to_string(),
+        });
+    }
+    let metadata = fs::metadata(path).map_err(|source| OciRootfsImportError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    if metadata.len() != descriptor.size {
+        return Err(OciRootfsImportError::LayerSizeMismatch {
+            path: path.to_path_buf(),
+            expected: descriptor.size,
+            actual: metadata.len(),
+        });
+    }
+    let mut file = File::open(path).map_err(|source| OciRootfsImportError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    let actual = digest_from_reader(&mut file)?;
+    if actual != descriptor.digest {
+        return Err(OciRootfsImportError::LayerDigestMismatch {
+            path: path.to_path_buf(),
+            expected: descriptor.digest.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_empty_assembly_root(root: &Path) -> Result<(), OciRootfsImportError> {
+    if root.exists() {
+        if !root.is_dir() {
+            return Err(OciRootfsImportError::AssemblyRootNotDirectory {
+                path: root.to_path_buf(),
+            });
+        }
+        if fs::read_dir(root)
+            .map_err(|source| OciRootfsImportError::Io {
+                path: Some(root.to_path_buf()),
+                source,
+            })?
+            .next()
+            .is_some()
+        {
+            return Err(OciRootfsImportError::AssemblyRootNotEmpty {
+                path: root.to_path_buf(),
+            });
+        }
+    } else {
+        fs::create_dir_all(root).map_err(|source| OciRootfsImportError::Io {
+            path: Some(root.to_path_buf()),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OciLayerCompression {
+    Tar,
+    GzipTar,
+}
+
+fn layer_compression(media_type: &str) -> Result<OciLayerCompression, OciRootfsImportError> {
+    match media_type {
+        OCI_LAYER_TAR_MEDIA_TYPE => Ok(OciLayerCompression::Tar),
+        OCI_LAYER_GZIP_MEDIA_TYPE | DOCKER_LAYER_GZIP_MEDIA_TYPE => {
+            Ok(OciLayerCompression::GzipTar)
+        }
+        _ => Err(OciRootfsImportError::UnsupportedLayerMediaType {
+            media_type: media_type.to_string(),
+        }),
+    }
+}
+
+fn apply_layer_blob(
+    path: &Path,
+    root: &Path,
+    compression: OciLayerCompression,
+) -> Result<(), OciRootfsImportError> {
+    let file = File::open(path).map_err(|source| OciRootfsImportError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    match compression {
+        OciLayerCompression::Tar => apply_tar_layer(file, root, path),
+        OciLayerCompression::GzipTar => apply_tar_layer(GzDecoder::new(file), root, path),
+    }
+}
+
+fn apply_tar_layer(
+    reader: impl Read,
+    root: &Path,
+    layer_path: &Path,
+) -> Result<(), OciRootfsImportError> {
+    let mut archive = tar::Archive::new(reader);
+    for entry in archive
+        .entries()
+        .map_err(|source| OciRootfsImportError::Io {
+            path: Some(layer_path.to_path_buf()),
+            source,
+        })?
+    {
+        let mut entry = entry.map_err(|source| OciRootfsImportError::Io {
+            path: Some(layer_path.to_path_buf()),
+            source,
+        })?;
+        let raw_path = entry
+            .path()
+            .map_err(|source| OciRootfsImportError::Io {
+                path: Some(layer_path.to_path_buf()),
+                source,
+            })?
+            .into_owned();
+        let relative_path = sanitize_layer_path(&raw_path)?;
+        if apply_whiteout(root, &relative_path)? {
+            continue;
+        }
+        if !entry
+            .unpack_in(root)
+            .map_err(|source| OciRootfsImportError::Io {
+                path: Some(layer_path.to_path_buf()),
+                source,
+            })?
+        {
+            return Err(OciRootfsImportError::UnsafeLayerPath {
+                path: raw_path,
+                reason: "tar entry would unpack outside the assembly root".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn sanitize_layer_path(path: &Path) -> Result<PathBuf, OciRootfsImportError> {
+    let mut sanitized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => sanitized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(OciRootfsImportError::UnsafeLayerPath {
+                    path: path.to_path_buf(),
+                    reason: "absolute paths, prefixes, and parent traversal are not allowed"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    if sanitized.as_os_str().is_empty() {
+        return Err(OciRootfsImportError::UnsafeLayerPath {
+            path: path.to_path_buf(),
+            reason: "empty layer path".to_string(),
+        });
+    }
+    Ok(sanitized)
+}
+
+fn apply_whiteout(root: &Path, relative_path: &Path) -> Result<bool, OciRootfsImportError> {
+    let Some(file_name) = relative_path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(false);
+    };
+    if file_name == ".wh..wh..opq" {
+        let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+        remove_directory_contents(root, parent)?;
+        return Ok(true);
+    }
+    let Some(target_name) = file_name.strip_prefix(".wh.") else {
+        return Ok(false);
+    };
+    let mut target = relative_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    target.push(target_name);
+    remove_path_if_exists(root, &target)?;
+    Ok(true)
+}
+
+fn remove_directory_contents(root: &Path, relative_dir: &Path) -> Result<(), OciRootfsImportError> {
+    ensure_relative_parent_has_no_symlink(root, relative_dir)?;
+    let target = root.join(relative_dir);
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(OciRootfsImportError::UnsafeLayerPath {
+                path: relative_dir.to_path_buf(),
+                reason: "opaque whiteout target is a symlink".to_string(),
+            });
+        }
+        Ok(metadata) if metadata.is_dir() => {
+            for entry in fs::read_dir(&target).map_err(|source| OciRootfsImportError::Io {
+                path: Some(target.clone()),
+                source,
+            })? {
+                let entry = entry.map_err(|source| OciRootfsImportError::Io {
+                    path: Some(target.clone()),
+                    source,
+                })?;
+                remove_path(&entry.path())?;
+            }
+        }
+        Ok(_) | Err(_) => {}
+    }
+    Ok(())
+}
+
+fn remove_path_if_exists(root: &Path, relative_path: &Path) -> Result<(), OciRootfsImportError> {
+    ensure_relative_parent_has_no_symlink(root, relative_path)?;
+    let target = root.join(relative_path);
+    match fs::symlink_metadata(&target) {
+        Ok(_) => remove_path(&target),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(OciRootfsImportError::Io {
+            path: Some(target),
+            source,
+        }),
+    }
+}
+
+fn ensure_relative_parent_has_no_symlink(
+    root: &Path,
+    relative_path: &Path,
+) -> Result<(), OciRootfsImportError> {
+    let Some(parent) = relative_path.parent() else {
+        return Ok(());
+    };
+    let mut current = root.to_path_buf();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(OciRootfsImportError::UnsafeLayerPath {
+                    path: relative_path.to_path_buf(),
+                    reason: "whiteout parent resolves through a symlink".to_string(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(OciRootfsImportError::Io {
+                    path: Some(current),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<(), OciRootfsImportError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| OciRootfsImportError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path).map_err(|source| OciRootfsImportError::Io {
+            path: Some(path.to_path_buf()),
+            source,
+        })
+    } else {
+        fs::remove_file(path).map_err(|source| OciRootfsImportError::Io {
+            path: Some(path.to_path_buf()),
+            source,
+        })
+    }
+}
+
 fn select_platform_manifest_digest(
     bytes: &[u8],
     platform: OciPlatform,
@@ -1037,9 +1505,43 @@ pub enum ImageContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn digest(byte: char) -> OciDigest {
         OciDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    fn tar_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, contents) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(contents.len() as u64);
+            header.set_cksum();
+            builder.append_data(&mut header, *path, *contents).unwrap();
+        }
+        builder.finish().unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn layer_descriptor(media_type: &str, bytes: &[u8]) -> OciLayerDescriptor {
+        OciLayerDescriptor {
+            media_type: media_type.to_string(),
+            digest: digest_from_bytes(bytes).unwrap(),
+            size: bytes.len() as u64,
+        }
+    }
+
+    fn write_blob(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = root.join(name);
+        fs::write(&path, bytes).unwrap();
+        path
     }
 
     #[test]
@@ -1056,7 +1558,8 @@ mod tests {
 
     #[test]
     fn digest_requires_algorithm_encoded_shape() {
-        assert!(OciDigest::new(format!("sha256:{}", "a".repeat(64))).is_ok());
+        let digest = OciDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+        assert_eq!(digest.algorithm(), "sha256");
         assert!(matches!(
             OciDigest::new("sha256:not/valid"),
             Err(ImageContractError::InvalidDigest { .. })
@@ -1223,6 +1726,190 @@ mod tests {
             challenge.scope.as_deref(),
             Some("repository:library/ubuntu:pull")
         );
+    }
+
+    #[test]
+    fn platform_manifest_records_rootfs_layers() {
+        let manifest = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "{OCI_IMAGE_MANIFEST_MEDIA_TYPE}",
+                "config": {{
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": "{}",
+                    "size": 12
+                }},
+                "layers": [
+                    {{
+                        "mediaType": "{OCI_LAYER_GZIP_MEDIA_TYPE}",
+                        "digest": "{}",
+                        "size": 34
+                    }}
+                ]
+            }}"#,
+            digest('c'),
+            digest('d')
+        );
+
+        let parsed = OciPlatformManifest::from_json(manifest.as_bytes()).unwrap();
+
+        assert_eq!(parsed.media_type, OCI_IMAGE_MANIFEST_MEDIA_TYPE);
+        assert_eq!(parsed.config_digest, digest('c'));
+        assert_eq!(parsed.layers.len(), 1);
+        assert_eq!(parsed.layers[0].digest, digest('d'));
+        assert_eq!(parsed.layers[0].media_type, OCI_LAYER_GZIP_MEDIA_TYPE);
+        assert_eq!(parsed.layers[0].size, 34);
+    }
+
+    #[test]
+    fn rootfs_importer_applies_gzip_layers_and_whiteouts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let layer_root = tempdir.path().join("layers");
+        fs::create_dir(&layer_root).unwrap();
+        let rootfs = tempdir.path().join("rootfs");
+        let first = gzip_bytes(&tar_bytes(&[
+            ("etc/os-release", b"ID=ubuntu\n" as &[u8]),
+            ("var/cache/apt/pkg", b"stale"),
+        ]));
+        let second = gzip_bytes(&tar_bytes(&[
+            ("var/cache/apt/.wh.pkg", b""),
+            ("workspace/.keep", b""),
+        ]));
+        let first_path = write_blob(&layer_root, "layer1.tar.gz", &first);
+        let second_path = write_blob(&layer_root, "layer2.tar.gz", &second);
+        let layers = vec![
+            OciLayerInput::new(
+                layer_descriptor(OCI_LAYER_GZIP_MEDIA_TYPE, &first),
+                first_path,
+            ),
+            OciLayerInput::new(
+                layer_descriptor(OCI_LAYER_GZIP_MEDIA_TYPE, &second),
+                second_path,
+            ),
+        ];
+
+        let imported = OciRootfsImporter::new()
+            .import_layers(&layers, &rootfs)
+            .unwrap();
+
+        assert_eq!(imported.root, rootfs);
+        assert_eq!(imported.applied_layers.len(), 2);
+        assert_eq!(
+            fs::read_to_string(imported.root.join("etc/os-release")).unwrap(),
+            "ID=ubuntu\n"
+        );
+        assert!(imported.root.join("workspace/.keep").exists());
+        assert!(!imported.root.join("var/cache/apt/pkg").exists());
+    }
+
+    #[test]
+    fn rootfs_importer_applies_opaque_whiteout() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let layer_root = tempdir.path().join("layers");
+        fs::create_dir(&layer_root).unwrap();
+        let rootfs = tempdir.path().join("rootfs");
+        let first = tar_bytes(&[("var/lib/app/a", b"a" as &[u8]), ("var/lib/app/b", b"b")]);
+        let second = tar_bytes(&[("var/lib/app/.wh..wh..opq", b""), ("var/lib/app/c", b"c")]);
+        let first_path = write_blob(&layer_root, "layer1.tar", &first);
+        let second_path = write_blob(&layer_root, "layer2.tar", &second);
+        let layers = vec![
+            OciLayerInput::new(
+                layer_descriptor(OCI_LAYER_TAR_MEDIA_TYPE, &first),
+                first_path,
+            ),
+            OciLayerInput::new(
+                layer_descriptor(OCI_LAYER_TAR_MEDIA_TYPE, &second),
+                second_path,
+            ),
+        ];
+
+        let imported = OciRootfsImporter::new()
+            .import_layers(&layers, &rootfs)
+            .unwrap();
+
+        assert!(!imported.root.join("var/lib/app/a").exists());
+        assert!(!imported.root.join("var/lib/app/b").exists());
+        assert_eq!(
+            fs::read_to_string(imported.root.join("var/lib/app/c")).unwrap(),
+            "c"
+        );
+    }
+
+    #[test]
+    fn rootfs_importer_rejects_digest_mismatch() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let layer_root = tempdir.path().join("layers");
+        fs::create_dir(&layer_root).unwrap();
+        let rootfs = tempdir.path().join("rootfs");
+        let layer = tar_bytes(&[("etc/os-release", b"ID=ubuntu\n" as &[u8])]);
+        let layer_path = write_blob(&layer_root, "layer.tar", &layer);
+        let descriptor = OciLayerDescriptor {
+            media_type: OCI_LAYER_TAR_MEDIA_TYPE.to_string(),
+            digest: digest('e'),
+            size: layer.len() as u64,
+        };
+
+        assert!(matches!(
+            OciRootfsImporter::new()
+                .import_layers(&[OciLayerInput::new(descriptor, layer_path)], &rootfs),
+            Err(OciRootfsImportError::LayerDigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rootfs_importer_rejects_unsupported_layer_digest_algorithm() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let layer_root = tempdir.path().join("layers");
+        fs::create_dir(&layer_root).unwrap();
+        let rootfs = tempdir.path().join("rootfs");
+        let layer = tar_bytes(&[("etc/os-release", b"ID=ubuntu\n" as &[u8])]);
+        let layer_path = write_blob(&layer_root, "layer.tar", &layer);
+        let descriptor = OciLayerDescriptor {
+            media_type: OCI_LAYER_TAR_MEDIA_TYPE.to_string(),
+            digest: OciDigest::new(format!("sha512:{}", "a".repeat(128))).unwrap(),
+            size: layer.len() as u64,
+        };
+
+        assert!(matches!(
+            OciRootfsImporter::new()
+                .import_layers(&[OciLayerInput::new(descriptor, layer_path)], &rootfs),
+            Err(OciRootfsImportError::UnsupportedLayerDigestAlgorithm { .. })
+        ));
+    }
+
+    #[test]
+    fn rootfs_importer_rejects_unsafe_layer_paths() {
+        assert!(matches!(
+            sanitize_layer_path(Path::new("../escape")),
+            Err(OciRootfsImportError::UnsafeLayerPath { .. })
+        ));
+        assert!(matches!(
+            sanitize_layer_path(Path::new("/absolute")),
+            Err(OciRootfsImportError::UnsafeLayerPath { .. })
+        ));
+    }
+
+    #[test]
+    fn rootfs_importer_requires_empty_assembly_root() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let layer_root = tempdir.path().join("layers");
+        fs::create_dir(&layer_root).unwrap();
+        let rootfs = tempdir.path().join("rootfs");
+        fs::create_dir(&rootfs).unwrap();
+        fs::write(rootfs.join("stale"), b"stale").unwrap();
+        let layer = tar_bytes(&[("etc/os-release", b"ID=ubuntu\n" as &[u8])]);
+        let layer_path = write_blob(&layer_root, "layer.tar", &layer);
+
+        assert!(matches!(
+            OciRootfsImporter::new().import_layers(
+                &[OciLayerInput::new(
+                    layer_descriptor(OCI_LAYER_TAR_MEDIA_TYPE, &layer),
+                    layer_path,
+                )],
+                &rootfs
+            ),
+            Err(OciRootfsImportError::AssemblyRootNotEmpty { .. })
+        ));
     }
 
     #[tokio::test]

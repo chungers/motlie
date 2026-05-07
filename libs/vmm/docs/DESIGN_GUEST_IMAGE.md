@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Add the first rootfs importer implementation slice: selected platform manifest parsing, digest-checked local layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteouts |
 | 2026-05-07 | @vmm-cdx | Tighten resolver provenance so single-image manifests are rejected until config blob inspection verifies the requested platform |
 | 2026-05-07 | @vmm-cdx | Clarify v1.5 acceptance: functional parity with v1.4 CH and v1.45 VZ through the unified v1.5 harness, image builder, and OCI-derived guest image path |
 | 2026-05-07 | @vmm-cdx | Add the first OCI Registry v2 resolver implementation for image reference parsing, immutable index digest resolution, and platform manifest selection |
@@ -790,9 +791,11 @@ and profile-specific requirements once a second base image is implemented.
 ### Current Implementation Slice
 
 `libs/vmm/src/image.rs` is the first Rust surface for this roadmap. It resolves
-registry manifest metadata and establishes the typed metadata that later
-importer, assembler, emitter, harness, and CI code must share. It does not yet
-pull layer blobs, unpack rootfs layers, or emit VM boot artifacts.
+registry manifest metadata, parses selected platform manifests, and unpacks
+digest-checked local rootfs layer blobs into a deterministic assembly root. It
+establishes the typed metadata that later registry blob download/cache,
+assembler, emitter, harness, and CI code must share. It does not yet pull layer
+blobs from a registry or emit VM boot artifacts.
 
 - `OciPlatform` and `GuestArchitecture` record the selected OCI platform.
 - `OciDigest` records immutable image-index, platform-manifest, and emitted
@@ -812,6 +815,19 @@ pull layer blobs, unpack rootfs layers, or emit VM boot artifacts.
   image index or Docker manifest list. Single-image manifests are rejected until
   the resolver fetches the manifest config blob and verifies `os` /
   `architecture`.
+- `OciPlatformManifest` parses the selected platform manifest into config digest
+  and layer descriptors.
+- `OciRootfsImporter` applies caller-provided local layer blobs after validating
+  descriptor size and digest. The importer requires an empty assembly root,
+  supports OCI plain tar, OCI gzip tar, and Docker gzip rootfs diff layers, and
+  applies OCI whiteout and opaque-directory semantics. The first implementation
+  supports `sha256` layer descriptors only; other digest algorithms must be added
+  deliberately rather than silently producing a mismatched hash.
+
+Registry blob download/cache is deliberately separate from this first importer
+slice. The next slice should fetch the selected platform manifest and layer
+blobs by digest, place them in a content-addressed cache, then feed those local
+paths into `OciRootfsImporter`.
 
 The current `ubuntu-systemd` profile validates against
 `docker.io/library/ubuntu:24.04` and `InitProfile::UbuntuSystemd`; validation
