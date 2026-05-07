@@ -5,7 +5,7 @@ use crate::model::LayoutMode;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "mmux")]
-#[command(about = "Select, preview, monitor, and attach tmux sessions")]
+#[command(about = "Select, live-preview, and attach tmux sessions")]
 pub(crate) struct Cli {
     /// Force portrait layout instead of auto-detecting from the current PTY.
     #[arg(short = 'p', long, conflicts_with = "landscape")]

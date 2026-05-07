@@ -95,7 +95,7 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 | Form | Behavior |
 |------|----------|
 | no `ssh-uri` | Operate on the local host. |
-| `[ssh-uri]` | Operate on the remote SSH target for session list, sampling, monitor, create, kill, and attach. |
+| `[ssh-uri]` | Operate on the remote SSH target for session list, live preview, create, kill, and attach. |
 | `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. Mutually exclusive with `--landscape` / `-l`. |
 | `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L` session list and `R` detail pane. Mutually exclusive with `--portrait` / `-p`. |
 | `--script` | Select a session, print exactly `<name>\n` to stdout, and exit 0 without attaching. Cancel exits non-zero with empty stdout. |
@@ -118,8 +118,15 @@ without attach.
 
 Before attach, mmux best-effort sets the selected session's local tmux
 `status-style` to `bg=#002b55,fg=white`. After detach, it restores the previous
-local style or unsets the local override when none existed. If style setup or
-restore fails, mmux prints a warning and keeps the attach flow working.
+local style or unsets the local override when none existed. Style setup and
+restore diagnostics are quiet by default so attach/detach transitions do not
+leave warning text in the caller's shell. Set `MMUX_ATTACH_LOG=1` to print those
+diagnostics to stderr while debugging attach transitions.
+
+mmux uses `AttachOptions::suppress_transition_output` by default in attach mode.
+This keeps the attach child interactive while best-effort clearing transient
+tmux/SSH detach status text before the selector redraws. `MMUX_ATTACH_LOG=1`
+disables that cleanup.
 
 During default attach/re-entry, the parent `mmux` process keeps a small
 in-memory UI snapshot. On return from tmux detach, the selector restores the
@@ -227,7 +234,7 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 - Sort is `SessionInfo.activity` descending, applied to the **merged** list
   across all hosts.
 - All command keys (`Up`/`Down`, `u`/`b`, `PgUp`/`PgDn`, `Home`/`End`,
-  `a`, `m`, `p`, `n`, `k`, `r`, `t`, `g`, `$` then `0`…`9`, `$` then `!`, `Ctrl-C`/`q`, `l`,
+  `a`, `p`, `n`, `k`, `r`, `t`, `g`, `$` then `0`…`9`, `$` then `!`, `Ctrl-C`/`q`, `l`,
   `Ctrl-←/→`, `Ctrl-↑/↓`) behave the
   same as single-host. Each applies to the **highlighted row** and dispatches
   against that row's host.
@@ -271,15 +278,14 @@ Main-view keys:
 |-----|--------------|----------------|
 | Up / Down, `u` / `b` | Move highlighted session | Scroll detail one line |
 | PgUp / PgDn | Page session list | Page detail buffer |
-| Home / End | First / last session | Top / bottom detail; End resumes monitor tail |
-| Enter | Refresh one-shot sample detail | No-op |
+| Home / End | First / last session | Top / bottom detail; End resumes live tail |
+| Enter | Refresh live preview now | No-op |
 | Tab | Focus detail pane | Focus session list |
 | Left / Right | No-op | No-op |
 | `Esc` | Focus session list | Focus session list |
 | `Ctrl-Left` / `Ctrl-Right`, `Shift-Left` / `Shift-Right`, Alt Left / Right, or terminal word-left/word-right fallback | Resize L/R split (landscape only) | Resize L/R split (landscape only) |
 | `Ctrl-Up` / `Ctrl-Down`, `Shift-Up` / `Shift-Down`, Alt Up / Down | Resize T/B split (portrait only) | Resize T/B split (portrait only) |
 | `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
-| `m` | Monitor highlighted session | Monitor highlighted session |
 | `p` / `@` | Open Send Keys modal | Open Send Keys modal |
 | `$` then `0…9` | Send digit immediately to highlighted session | No-op |
 | `$` then `!` | Send `{Esc}` immediately to highlighted session | No-op |
@@ -294,8 +300,8 @@ Main-view keys:
 
 Landscape mode uses the L/R split and clamps resize to 25/75. Portrait mode
 uses the T/B split and clamps resize to 15/85. Tab cycles between the two
-visible panes in both modes. The detail pane title shows bold `snapshot` for
-one-shot samples and bold `monitor` for continuous monitoring.
+visible panes in both modes. The detail pane title shows bold `live` for the
+selected session's active-pane preview.
 
 On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.
@@ -342,7 +348,7 @@ text field or focused `Ok` first sends the parsed input exactly, then waits
 500 ms and sends a separate `{Enter}` key. A trailing `$$` suffix is stripped
 from the input and uses that same delayed Enter behavior; when the input is only
 `$$`, mmux sends only the delayed `{Enter}` key. After a successful send, the
-detail pane refreshes when it is in snapshot mode. `Esc` or focused `Cancel`
+detail pane refreshes immediately. `Esc` or focused `Cancel`
 dismisses without sending.
 
 The top status bar uses the same dark blue background as the bottom status bar. It
@@ -350,10 +356,10 @@ shows `<hostname> | <ip address>` in bold at the left and the current time
 right-justified. The Sessions pane title uses `Sessions [n]`, where `n` is the
 current session count. The bottom dark blue status bar shows compact key hints and
 status text only. Its left hint is `tab ↑/↓`, covering pane focus cycling and
-selection/scroll movement. It orders command hints as `help`, `monitor`,
-`prompt`, `attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, then
+selection/scroll movement. It orders command hints as `help`, `prompt`,
+`attach`, `new`, `kill`, `rename`, `group`, `layout`, `quit`, then
 mode-specific resize; the command shortcut letters
-`h`/`m`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
+`h`/`p`/`a`/`n`/`k`/`r`/`g`/`l`/`q` are
 bold coral in the TUI. It does not repeat the host/time, show focus/layout
 mode, or prefix the hints with a `keys` label.
 
@@ -446,4 +452,5 @@ Env-gated SSH/ForceCommand integration coverage is tracked in
 - stdout is reserved for `--script` selected-session output.
 - stderr carries TUI rendering, status, diagnostics, and errors.
 - default attach mode inherits stdio for the attach child after terminal
-  cleanup.
+  cleanup, then suppresses transition-only attach/detach status text unless
+  `MMUX_ATTACH_LOG=1` is set.

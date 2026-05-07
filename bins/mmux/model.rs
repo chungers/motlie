@@ -9,7 +9,6 @@ use crate::consts::{
     LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT, PORTRAIT_MAX_TOP_PERCENT,
     PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_FG,
 };
-use crate::detail::DetailSource;
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
@@ -570,7 +569,7 @@ fn host_color_for_index(index: usize) -> Color {
 }
 
 /// Identity of a session as returned to callers from the highlighted row.
-/// Carries the host id and label so dispatch (attach/kill/monitor) can route
+/// Carries the host id and label so dispatch (attach/kill/detail) can route
 /// to the correct `HostHandle` and render messages with the host context.
 #[derive(Debug, Clone)]
 pub(crate) struct SelectedSession {
@@ -959,7 +958,6 @@ pub(crate) struct DetailState {
     /// the actual viewport size; input handling uses this last known value.
     pub(crate) last_known_view_height: usize,
     pub(crate) last_known_scroll_max: usize,
-    pub(crate) source: DetailSource,
     pub(crate) auto_tail: bool,
 }
 
@@ -1061,7 +1059,6 @@ impl AppState {
                 scroll: 0,
                 last_known_view_height: 1,
                 last_known_scroll_max: 0,
-                source: DetailSource::sample(),
                 auto_tail: true,
             },
             status: StatusBanner::loading("loading sessions"),

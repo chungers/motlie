@@ -1,10 +1,10 @@
 # mmux
 
-Host-wide tmux session selector. Pick a session, preview or monitor it, then attach.
+Host-wide tmux session selector. Pick a session, live-preview it, then attach.
 
 ## Overview
 
-`mmux` is a focused TUI binary that lists tmux sessions on a target host, previews or live-monitors the highlighted session, and attaches the user's terminal to the chosen session with a clean PTY handoff. It is designed to be used both interactively from the operator's machine (against a local or remote tmux server) and as the host-wide login entry point via SSH `ForceCommand`.
+`mmux` is a focused TUI binary that lists tmux sessions on a target host, live-previews the highlighted session's active pane, and attaches the user's terminal to the chosen session with a clean PTY handoff. It is designed to be used both interactively from the operator's machine (against a local or remote tmux server) and as the host-wide login entry point via SSH `ForceCommand`.
 
 The selector is built on `motlie-tmux` and never embeds shell or tmux command construction in the binary; all tmux/SSH operations go through typed library APIs.
 
