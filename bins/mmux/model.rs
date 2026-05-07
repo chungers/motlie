@@ -37,6 +37,11 @@ pub(crate) enum Button {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingListShortcut {
+    SendKeysImmediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionKeyValueFocus {
     Row(usize),
     Key,
@@ -1038,6 +1043,7 @@ pub(crate) struct AppState {
     pub(crate) status: StatusBanner,
     pub(crate) modal: Option<ModalState>,
     pub(crate) activity_tracker: ActivityTracker,
+    pub(crate) pending_list_shortcut: Option<PendingListShortcut>,
 }
 
 impl AppState {
@@ -1061,6 +1067,7 @@ impl AppState {
             status: StatusBanner::loading("loading sessions"),
             modal: None,
             activity_tracker: ActivityTracker::default(),
+            pending_list_shortcut: None,
         }
     }
 

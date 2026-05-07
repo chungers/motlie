@@ -31,9 +31,9 @@ use crate::detail::{
 use crate::model::{
     AppState, Button, Focus, HostConnectFailure, HostConnectionStatus, HostEntry, HostFleet,
     HostId, HostSlot, LayoutMode, ModalBody, ModalState, NewSessionFocus, NewSessionHostChoice,
-    NewSessionModalUi, SelectedSession, SendKeysFocus, SendKeysModalUi, SessionKeyValueFocus,
-    SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow, SessionRow,
-    SessionSelectedTag, SessionSortMode,
+    NewSessionModalUi, PendingListShortcut, SelectedSession, SendKeysFocus, SendKeysModalUi,
+    SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueModalUi, SessionKeyValueRow,
+    SessionRow, SessionSelectedTag, SessionSortMode,
 };
 use crate::render::{
     detail_lines_text_for_render, detail_text_for_render, detail_title, detail_total_wrapped_rows,
@@ -1840,6 +1840,8 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains(HELP_KEY_FUNCTIONS));
     assert!(body.contains("↑ (u) / ↓ (b) select session or scroll detail"));
     assert!(body.contains("Enter sample highlighted session (list pane)"));
+    assert!(body.contains("  $0..$9 send digit to highlight"));
+    assert!(body.contains("  $! send Escape to highlight"));
     assert!(body.contains("  Ctrl-Enter send keys, wait, Enter"));
     assert!(body.contains("  $$ suffix same delayed Enter"));
     assert!(body.contains("  ↑ (u) / ↓ (b) move env row"));
@@ -2601,6 +2603,156 @@ async fn at_opens_send_keys_modal_for_selected_session() {
                 && ui.input.is_empty()
                 && ui.focus == SendKeysFocus::Input
     ));
+}
+
+#[tokio::test]
+async fn dollar_prefix_digit_sends_immediately_to_highlighted_session() {
+    let mock = MockTransport::new()
+        .with_error(
+            "send-keys -t '$1' Enter",
+            "digit shortcut should not send Enter",
+        )
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -l -t '$1' 7", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        app.pending_list_shortcut,
+        Some(PendingListShortcut::SendKeysImmediate)
+    );
+    assert!(app.modal.is_none());
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.pending_list_shortcut, None);
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.lines, vec!["updated screen".to_string()]);
+}
+
+#[tokio::test]
+async fn dollar_prefix_bang_sends_escape_immediately_to_highlighted_session() {
+    let mock = MockTransport::new()
+        .with_response("list-sessions", "__MOTLIE_S__ dev $1 10 0 1  100\n")
+        .with_response("send-keys -t '$1' Escape", "")
+        .with_response("capture-pane -ep", "updated screen\n");
+    let host = HostHandle::new(TransportKind::Mock(mock), None);
+    let fleet = fleet_with(host);
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.pending_list_shortcut, None);
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "sent keys to dev");
+    assert_eq!(app.detail.lines, vec!["updated screen".to_string()]);
+}
+
+#[tokio::test]
+async fn dollar_prefix_invalid_shortcut_consumes_prefix_and_stays_in_main_view() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.pending_list_shortcut, None);
+    assert!(app.modal.is_none());
+    assert_eq!(app.status.text(), "invalid $ shortcut; use $0..$9 or $!");
+}
+
+#[tokio::test]
+async fn dollar_prefix_q_still_exits() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, KeyOutcome::Continue));
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, KeyOutcome::Cancel));
+    assert_eq!(app.pending_list_shortcut, None);
+}
+
+#[tokio::test]
+async fn dollar_prefix_ctrl_c_still_exits() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, KeyOutcome::Continue));
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, KeyOutcome::Cancel));
+    assert_eq!(app.pending_list_shortcut, None);
 }
 
 #[tokio::test]
