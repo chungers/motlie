@@ -2704,6 +2704,58 @@ async fn dollar_prefix_invalid_shortcut_consumes_prefix_and_stays_in_main_view()
 }
 
 #[tokio::test]
+async fn dollar_prefix_q_still_exits() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, KeyOutcome::Continue));
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, KeyOutcome::Cancel));
+    assert_eq!(app.pending_list_shortcut, None);
+}
+
+#[tokio::test]
+async fn dollar_prefix_ctrl_c_still_exits() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, KeyOutcome::Continue));
+
+    let outcome = handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(outcome, KeyOutcome::Cancel));
+    assert_eq!(app.pending_list_shortcut, None);
+}
+
+#[tokio::test]
 async fn send_keys_modal_tab_ok_sends_keys_and_closes() {
     let mock = MockTransport::new()
         .with_error("send-keys -t '$1' Enter", "should not send implicit Enter")

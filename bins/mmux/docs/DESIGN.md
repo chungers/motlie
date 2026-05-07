@@ -824,7 +824,7 @@ arguments are additional hosts.
   Host-square column width is one character.
 - Sorting remains `SessionInfo.activity` descending — but applied to the
   **merged** list of (host, session) rows across all hosts, not per-host.
-- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `m` monitor, `p` / `@` prompt,
+- All command keys (`Up`/`Down`, `u`/`b` list movement, `a` attach, `m` monitor, `p` / `@` prompt, `$` then `0`…`9` direct digit send, `$` then `!` direct `{Esc}` send,
   `n` new, `k` kill, `r` rename, `t` tag list/add/update/delete,
   `Ctrl-C`/`q` exit, `l` toggle layout, Tab cycle panes, `Ctrl-←/→` and
   `Ctrl-↑/↓` resize) behave
