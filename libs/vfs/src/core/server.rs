@@ -2204,12 +2204,26 @@ fn lock_conflicts(existing_typ: i32, requested_typ: i32) -> bool {
 
 #[inline]
 fn unlocked_lock_type() -> i32 {
-    libc::F_UNLCK
+    #[cfg(target_os = "macos")]
+    {
+        i32::from(libc::F_UNLCK)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        libc::F_UNLCK
+    }
 }
 
 #[inline]
 fn write_lock_type() -> i32 {
-    libc::F_WRLCK
+    #[cfg(target_os = "macos")]
+    {
+        i32::from(libc::F_WRLCK)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        libc::F_WRLCK
+    }
 }
 
 fn find_conflict(
