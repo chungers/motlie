@@ -131,7 +131,17 @@ impl OciDigest {
                 reason: "digest encoded value contains unsupported characters".to_string(),
             });
         }
+        match algorithm {
+            "sha256" => validate_hex_digest(&value, encoded, 64, algorithm)?,
+            "sha384" => validate_hex_digest(&value, encoded, 96, algorithm)?,
+            "sha512" => validate_hex_digest(&value, encoded, 128, algorithm)?,
+            _ => {}
+        }
         Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn validate(&self) -> Result<(), ImageContractError> {
+        Self::new(self.0.clone()).map(|_| ())
     }
 }
 
@@ -173,6 +183,8 @@ impl ExternalOciSource {
         if self.image_ref.trim().is_empty() {
             return Err(ImageContractError::EmptyImageRef);
         }
+        self.image_index_digest.validate()?;
+        self.platform_manifest_digest.validate()?;
         Ok(())
     }
 }
@@ -222,6 +234,22 @@ impl GuestImageProfile {
             return Err(ImageContractError::EmptyProfileName);
         }
         self.source.validate()?;
+        if self.name == UBUNTU_SYSTEMD_PROFILE {
+            if self.init != InitProfile::UbuntuSystemd {
+                return Err(ImageContractError::ProfileInitMismatch {
+                    profile: self.name.clone(),
+                    expected: InitProfile::UbuntuSystemd,
+                    actual: self.init,
+                });
+            }
+            if self.source.image_ref != UBUNTU_SYSTEMD_SOURCE_REF {
+                return Err(ImageContractError::ProfileSourceMismatch {
+                    profile: self.name.clone(),
+                    expected_image_ref: UBUNTU_SYSTEMD_SOURCE_REF.to_string(),
+                    actual_image_ref: self.source.image_ref.clone(),
+                });
+            }
+        }
         if self
             .required_packages
             .iter()
@@ -256,22 +284,18 @@ pub struct EmittedArtifactDigest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestImageValidationRecord {
-    pub profile_name: String,
+    pub profile: GuestImageProfile,
     pub contract_version: String,
-    pub source: ExternalOciSource,
     pub backend_kind: BackendKind,
     pub emitted_artifacts: Vec<EmittedArtifactDigest>,
 }
 
 impl GuestImageValidationRecord {
     pub fn validate(&self) -> Result<(), ImageContractError> {
-        if self.profile_name.trim().is_empty() {
-            return Err(ImageContractError::EmptyProfileName);
-        }
+        self.profile.validate()?;
         if self.contract_version.trim().is_empty() {
             return Err(ImageContractError::EmptyContractVersion);
         }
-        self.source.validate()?;
         if self.emitted_artifacts.is_empty() {
             return Err(ImageContractError::MissingEmittedArtifacts);
         }
@@ -282,9 +306,25 @@ impl GuestImageValidationRecord {
             if artifact.path.as_os_str().is_empty() {
                 return Err(ImageContractError::EmptyArtifactPath);
             }
+            artifact.digest.validate()?;
         }
         Ok(())
     }
+}
+
+fn validate_hex_digest(
+    value: &str,
+    encoded: &str,
+    expected_len: usize,
+    algorithm: &str,
+) -> Result<(), ImageContractError> {
+    if encoded.len() != expected_len || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ImageContractError::InvalidDigest {
+            value: value.to_string(),
+            reason: format!("{algorithm} digest must be {expected_len} hexadecimal characters"),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -297,6 +337,20 @@ pub enum ImageContractError {
     InvalidDigest { value: String, reason: String },
     #[error("guest image profile name cannot be empty")]
     EmptyProfileName,
+    #[error("guest image profile '{profile}' expected init {expected:?}, got {actual:?}")]
+    ProfileInitMismatch {
+        profile: String,
+        expected: InitProfile,
+        actual: InitProfile,
+    },
+    #[error(
+        "guest image profile '{profile}' expected source image '{expected_image_ref}', got '{actual_image_ref}'"
+    )]
+    ProfileSourceMismatch {
+        profile: String,
+        expected_image_ref: String,
+        actual_image_ref: String,
+    },
     #[error("guest image contract version cannot be empty")]
     EmptyContractVersion,
     #[error("guest image profile contains an empty required package")]
@@ -335,9 +389,13 @@ mod tests {
 
     #[test]
     fn digest_requires_algorithm_encoded_shape() {
-        assert!(OciDigest::new("sha256:0123456789abcdef").is_ok());
+        assert!(OciDigest::new(format!("sha256:{}", "a".repeat(64))).is_ok());
         assert!(matches!(
             OciDigest::new("sha256:not/valid"),
+            Err(ImageContractError::InvalidDigest { .. })
+        ));
+        assert!(matches!(
+            OciDigest::new("sha256:0123456789abcdef"),
             Err(ImageContractError::InvalidDigest { .. })
         ));
         assert!(matches!(
@@ -384,15 +442,56 @@ mod tests {
     }
 
     #[test]
+    fn ubuntu_profile_rejects_mismatched_source() {
+        let mut source =
+            ExternalOciSource::ubuntu_systemd(OciPlatform::linux_amd64(), digest('a'), digest('b'));
+        source.image_ref = "docker.io/library/alpine:3".to_string();
+        let profile = GuestImageProfile::ubuntu_systemd(source);
+
+        assert_eq!(
+            profile.validate().unwrap_err(),
+            ImageContractError::ProfileSourceMismatch {
+                profile: UBUNTU_SYSTEMD_PROFILE.to_string(),
+                expected_image_ref: UBUNTU_SYSTEMD_SOURCE_REF.to_string(),
+                actual_image_ref: "docker.io/library/alpine:3".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validation_record_revalidates_embedded_profile_digests() {
+        let mut profile = GuestImageProfile::ubuntu_systemd(ExternalOciSource::ubuntu_systemd(
+            OciPlatform::linux_arm64(),
+            digest('a'),
+            digest('b'),
+        ));
+        profile.source.image_index_digest = OciDigest("sha256:0123456789abcdef".to_string());
+        let record = GuestImageValidationRecord {
+            profile,
+            contract_version: "v1.5".to_string(),
+            backend_kind: BackendKind::Vz,
+            emitted_artifacts: vec![EmittedArtifactDigest {
+                label: "rootfs".to_string(),
+                path: PathBuf::from("artifacts/base/rootfs.squashfs"),
+                digest: digest('c'),
+            }],
+        };
+
+        assert!(matches!(
+            record.validate(),
+            Err(ImageContractError::InvalidDigest { .. })
+        ));
+    }
+
+    #[test]
     fn validation_record_requires_backend_artifact_digests() {
         let record = GuestImageValidationRecord {
-            profile_name: UBUNTU_SYSTEMD_PROFILE.to_string(),
-            contract_version: "v1.5".to_string(),
-            source: ExternalOciSource::ubuntu_systemd(
+            profile: GuestImageProfile::ubuntu_systemd(ExternalOciSource::ubuntu_systemd(
                 OciPlatform::linux_arm64(),
                 digest('a'),
                 digest('b'),
-            ),
+            )),
+            contract_version: "v1.5".to_string(),
             backend_kind: BackendKind::Vz,
             emitted_artifacts: vec![],
         };

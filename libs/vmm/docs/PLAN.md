@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten Phase 11's first slice so OCI validation records embed the typed profile and SHA digests validate full lengths |
 | 2026-05-07 | @vmm-cdx | Add Phase 11 for the OCI import profile implementation and mark the first typed image contract slice complete |
 | 2026-05-02 | @codex-vz | Record the v1.5 common guest image workstream and VMM ownership of guest image, seed schema, guest binary packaging, and `libs/vmm/src/guest` / `libs/vmm/bins` home |
 | 2026-04-25 | @codex-vz | Add `CONVERGENCE.md` as the findable guest boot/provisioning contract for CH/Vz parity and record that v1.45 Vz first-contact SSH must gate on interactive readiness, not hidden package/build/validation work |
@@ -79,6 +80,8 @@ Current common guest-image implementation status:
 - [x] `libs/vmm/src/image.rs` defines the first typed host-runtime contract for
       OCI source identity, selected platform, import profile metadata, emitted
       artifact digests, and validation records.
+- [x] `GuestImageValidationRecord` embeds `GuestImageProfile` so a record cannot
+      validate a freeform profile name against unrelated source metadata.
 - [ ] registry resolution and OCI layer/rootfs import are not implemented yet.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
       than a Rust-owned OCI-derived rootfs assembly.
@@ -574,6 +577,7 @@ Tasks:
   - [ ] VZ disk/boot artifacts
   - [ ] backend artifact manifest with digests
 - [ ] write and preserve `GuestImageValidationRecord` with:
+  - [ ] typed `GuestImageProfile`
   - [ ] source image reference
   - [ ] image-index digest
   - [ ] selected platform

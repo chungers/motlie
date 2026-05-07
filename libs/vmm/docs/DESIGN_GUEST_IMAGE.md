@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten the initial OCI implementation contract so validation records embed the typed profile and full-length SHA digests are enforced |
 | 2026-05-07 | @vmm-cdx | Start the OCI import profile implementation with typed source/profile/platform/artifact metadata in `libs/vmm/src/image.rs` |
 | 2026-05-06 | @vmm-cdx | Fold the CH `cloud-init.target` boot-graph fix into the OCI-derived `ubuntu-systemd` compatibility profile contract |
 | 2026-05-06 | @vmm-cdx | Clarify OCI source registry and digest semantics for cross-backend validation after PR feedback |
@@ -797,9 +798,15 @@ share:
   immutable OCI identity.
 - `GuestImageProfile` records the Motlie compatibility profile derived from
   the external source, starting with `ubuntu-systemd`.
-- `GuestImageValidationRecord` records the backend, contract version, source
-  digests, and emitted artifact digests needed to prove which guest image was
-  validated.
+- `GuestImageValidationRecord` embeds the typed `GuestImageProfile`, then
+  records backend kind, contract version, and emitted artifact digests needed
+  to prove which guest image/profile combination was validated.
+
+The current `ubuntu-systemd` profile validates against
+`docker.io/library/ubuntu:24.04` and `InitProfile::UbuntuSystemd`; validation
+must fail if a caller combines the Ubuntu profile name with a different source
+image or init profile. SHA-family OCI digests must be full-length digests, not
+short placeholders, because validation records are provenance artifacts.
 
 The current helper
 `OciPlatform::default_for_v1_5_validation_backend(BackendKind)` is only a lab
