@@ -112,6 +112,8 @@ tab cycle panes
 l toggle layout
 m monitor highlighted session
 p | @ prompt highlighted session
+  $0..$9 send digit to highlight
+  $! send Escape to highlight
   Ctrl-Enter send keys, wait, Enter
   $$ suffix same delayed Enter
 n create session

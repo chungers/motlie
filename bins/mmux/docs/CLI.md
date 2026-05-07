@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts: `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
 | 2026-05-03 | @codex | Added the `s` Send Keys modal for highlighted sessions and moved main-view pane cycling to `Tab`. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply to tmux only when Ok closes the dialog; Cancel/Esc discard staged edits. |
 | 2026-05-02 | @codex | Moved environment-variable entry into the New Session modal and apply staged variables at creation time through `CreateSessionOptions::initial_environment`; removed the `e` shortcut. |
@@ -280,6 +281,8 @@ Main-view keys:
 | `l` | Toggle portrait/landscape layout | Toggle portrait/landscape layout |
 | `m` | Monitor highlighted session | Monitor highlighted session |
 | `p` / `@` | Open Send Keys modal | Open Send Keys modal |
+| `$` then `0…9` | Send digit immediately to highlighted session | No-op |
+| `$` then `!` | Send `{Esc}` immediately to highlighted session | No-op |
 | `n` | Open New Session modal | Open New Session modal |
 | `k` | Open Kill Session modal | Open Kill Session modal |
 | `r` | Open Rename Session modal | No-op |
@@ -296,6 +299,8 @@ one-shot samples and bold `monitor` for continuous monitoring.
 
 On macOS iTerm2, the resize keys observed during validation are
 `Shift-Left` and `Shift-Right` for the normal-mode `L`/`R` split.
+
+Pressing `$` then a digit `0` through `9` immediately sends that single digit to the highlighted session without opening a modal. Pressing `$` then `!` immediately sends `{Esc}` to the highlighted session. These leader shortcuts are list-pane only.
 
 The session list auto-refreshes through one selector-owned poll-backed path.
 Visible rows are quietly refreshed once per second with `list_sessions()`,
