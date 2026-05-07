@@ -16,13 +16,16 @@ debug-trace = []
 host-runtime = [
     "dep:bytes",
     "dep:futures",
+    "dep:hex",
     "dep:libc",
     "dep:motlie-vfs",
     "dep:motlie-vnet",
     "dep:rand",
+    "dep:reqwest",
     "dep:russh",
     "dep:serde",
     "dep:serde_json",
+    "dep:sha2",
     "dep:shadow-terminal",
     "dep:thiserror",
     "dep:tokio",
@@ -53,6 +56,9 @@ tokio-vsock = { version = "0.7", optional = true }
 
 bytes = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
+hex = { version = "0.4", optional = true }
+reqwest = { version = "0.13.2", features = ["json"], optional = true }
+sha2 = { version = "0.10", optional = true }
 
 # Async
 futures = { version = "0.3", optional = true }
