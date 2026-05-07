@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten OCI whiteout safety for the rootfs importer: empty `.wh.` targets are invalid and opaque-whiteout metadata errors fail closed |
 | 2026-05-07 | @vmm-cdx | Add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache that feeds importer-ready layer inputs |
 | 2026-05-07 | @vmm-cdx | Add the first rootfs importer implementation slice: selected platform manifest parsing, digest-checked local layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteouts |
 | 2026-05-07 | @vmm-cdx | Tighten resolver provenance so single-image manifests are rejected until config blob inspection verifies the requested platform |
@@ -832,7 +833,10 @@ emit VM boot artifacts.
   supports OCI plain tar, OCI gzip tar, and Docker gzip rootfs diff layers, and
   applies OCI whiteout and opaque-directory semantics. The first implementation
   supports `sha256` layer descriptors only; other digest algorithms must be added
-  deliberately rather than silently producing a mismatched hash.
+  deliberately rather than silently producing a mismatched hash. Empty `.wh.`
+  targets are invalid, and opaque-whiteout metadata errors other than `NotFound`
+  fail closed instead of reporting a successful import with stale lower-layer
+  content.
 
 The next slice should classify the imported rootfs against the first
 `ubuntu-systemd` profile before any Motlie compatibility layer is applied.

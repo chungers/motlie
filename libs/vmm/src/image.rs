@@ -1709,6 +1709,12 @@ fn apply_whiteout(root: &Path, relative_path: &Path) -> Result<bool, OciRootfsIm
     let Some(target_name) = file_name.strip_prefix(".wh.") else {
         return Ok(false);
     };
+    if target_name.is_empty() {
+        return Err(OciRootfsImportError::UnsafeLayerPath {
+            path: relative_path.to_path_buf(),
+            reason: "whiteout target cannot be empty".to_string(),
+        });
+    }
     let mut target = relative_path
         .parent()
         .map(Path::to_path_buf)
@@ -1740,7 +1746,14 @@ fn remove_directory_contents(root: &Path, relative_dir: &Path) -> Result<(), Oci
                 remove_path(&entry.path())?;
             }
         }
-        Ok(_) | Err(_) => {}
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(OciRootfsImportError::Io {
+                path: Some(target),
+                source,
+            });
+        }
     }
     Ok(())
 }
@@ -2361,6 +2374,37 @@ mod tests {
     }
 
     #[test]
+    fn rootfs_importer_rejects_empty_whiteout_targets() {
+        for whiteout_path in [".wh.", "dir/.wh."] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let layer_root = tempdir.path().join("layers");
+            fs::create_dir(&layer_root).unwrap();
+            let rootfs = tempdir.path().join("rootfs");
+            let layer = tar_bytes(&[(whiteout_path, b"" as &[u8])]);
+            let layer_path = write_blob(&layer_root, "layer.tar", &layer);
+
+            let error = OciRootfsImporter::new()
+                .import_layers(
+                    &[OciLayerInput::new(
+                        layer_descriptor(OCI_LAYER_TAR_MEDIA_TYPE, &layer),
+                        layer_path,
+                    )],
+                    &rootfs,
+                )
+                .unwrap_err();
+
+            assert!(
+                matches!(error, OciRootfsImportError::UnsafeLayerPath { .. }),
+                "expected UnsafeLayerPath for {whiteout_path}, got {error:?}"
+            );
+            assert!(
+                rootfs.exists(),
+                "empty whiteout target must not remove rootfs for {whiteout_path}"
+            );
+        }
+    }
+
+    #[test]
     fn rootfs_importer_rejects_digest_mismatch() {
         let tempdir = tempfile::tempdir().unwrap();
         let layer_root = tempdir.path().join("layers");
@@ -2450,12 +2494,10 @@ mod tests {
             assert_eq!(source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
             assert_eq!(source.platform, platform);
             assert!(source.image_index_digest.as_ref().starts_with("sha256:"));
-            assert!(
-                source
-                    .platform_manifest_digest
-                    .as_ref()
-                    .starts_with("sha256:")
-            );
+            assert!(source
+                .platform_manifest_digest
+                .as_ref()
+                .starts_with("sha256:"));
             source.validate().unwrap();
         }
     }
@@ -2498,18 +2540,14 @@ mod tests {
         assert_eq!(profile.name, UBUNTU_SYSTEMD_PROFILE);
         assert_eq!(profile.source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
         assert_eq!(profile.source.platform.to_string(), "linux/amd64");
-        assert!(
-            profile
-                .required_packages
-                .iter()
-                .any(|pkg| pkg == "openssh-server")
-        );
-        assert!(
-            profile
-                .required_mount_points
-                .iter()
-                .any(|path| path == &PathBuf::from("/workspace"))
-        );
+        assert!(profile
+            .required_packages
+            .iter()
+            .any(|pkg| pkg == "openssh-server"));
+        assert!(profile
+            .required_mount_points
+            .iter()
+            .any(|path| path == &PathBuf::from("/workspace")));
         profile.validate().unwrap();
     }
 

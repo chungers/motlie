@@ -1380,13 +1380,7 @@ impl FsServer {
                     buf.resize(end, 0);
                 }
                 buf[start..end].copy_from_slice(data);
-                let _ = overlay.put_with_attrs(
-                    &layer,
-                    &tag,
-                    &path,
-                    attrs,
-                    bytes::Bytes::from(buf),
-                );
+                let _ = overlay.put_with_attrs(&layer, &tag, &path, attrs, bytes::Bytes::from(buf));
                 return FsResult::Written {
                     size: data.len() as u32,
                 };
@@ -1587,7 +1581,10 @@ impl FsServer {
             if let Some(layer) = self.writable_layer(&mount.tag, &parent_path) {
                 if let Some(overlay) = &self.overlay {
                     let ov_attrs = super::overlay::OverlayAttrs { mode, uid, gid };
-                    if overlay.create_dir(&layer, &mount.tag, &rel_path, ov_attrs).is_err() {
+                    if overlay
+                        .create_dir(&layer, &mount.tag, &rel_path, ov_attrs)
+                        .is_err()
+                    {
                         return FsResult::Error { errno: libc::EIO };
                     }
                     let now = SystemTime::now();
@@ -1818,19 +1815,14 @@ impl FsServer {
         match (src_overlay.is_some(), dst_is_overlay) {
             // Overlay → overlay (same layer check done implicitly)
             (true, true) => {
-                if let Some((src_layer, OverlayEntryKind::Content(content), attrs)) =
-                    self.overlay
-                        .as_ref()
-                        .and_then(|o| o.resolve_attrs(&mount.tag, &src_path))
+                if let Some((src_layer, OverlayEntryKind::Content(content), attrs)) = self
+                    .overlay
+                    .as_ref()
+                    .and_then(|o| o.resolve_attrs(&mount.tag, &src_path))
                 {
                     if let Some(overlay) = &self.overlay {
-                        let _ = overlay.put_with_attrs(
-                            &src_layer,
-                            &mount.tag,
-                            &dst_path,
-                            attrs,
-                            content,
-                        );
+                        let _ = overlay
+                            .put_with_attrs(&src_layer, &mount.tag, &dst_path, attrs, content);
                         let _ = overlay.remove(&src_layer, &mount.tag, &src_path);
                         let mut table = mount.inode_table.lock();
                         if let Some(inode) = table.rename_path(&src_path, &dst_path) {
@@ -2212,12 +2204,12 @@ fn lock_conflicts(existing_typ: i32, requested_typ: i32) -> bool {
 
 #[inline]
 fn unlocked_lock_type() -> i32 {
-    libc::F_UNLCK as i32
+    libc::F_UNLCK
 }
 
 #[inline]
 fn write_lock_type() -> i32 {
-    libc::F_WRLCK as i32
+    libc::F_WRLCK
 }
 
 fn find_conflict(
@@ -2319,16 +2311,8 @@ fn get_xattr(path: &Path, name: &str) -> Result<Vec<u8>, i32> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
     let name = CString::new(name).map_err(|_| libc::EINVAL)?;
     #[cfg(target_os = "macos")]
-    let size = unsafe {
-        libc::getxattr(
-            path.as_ptr(),
-            name.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-        )
-    };
+    let size =
+        unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
     #[cfg(not(target_os = "macos"))]
     let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
@@ -2441,17 +2425,12 @@ fn normalize_guest_xattr_errno(errno: i32) -> i32 {
     errno
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn should_filter_macos_xattr(name: &str) -> bool {
     name.starts_with("com.apple.")
 }
 
-#[cfg(not(target_os = "macos"))]
-fn should_filter_macos_xattr(_name: &str) -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn filter_macos_xattr_list(data: Vec<u8>) -> Vec<u8> {
     let mut filtered = Vec::new();
     for raw_name in data.split(|byte| *byte == 0) {
@@ -2467,11 +2446,6 @@ fn filter_macos_xattr_list(data: Vec<u8>) -> Vec<u8> {
         filtered.push(0);
     }
     filtered
-}
-
-#[cfg(not(target_os = "macos"))]
-fn filter_macos_xattr_list(data: Vec<u8>) -> Vec<u8> {
-    data
 }
 
 #[cfg(unix)]
@@ -3246,8 +3220,16 @@ mod tests {
         let meta = fs::metadata(&path).unwrap();
         let owner_uid = meta.uid();
         let owner_gid = meta.gid();
-        let other_uid = if owner_uid == u32::MAX { owner_uid - 1 } else { owner_uid + 1 };
-        let other_gid = if owner_gid == u32::MAX { owner_gid - 1 } else { owner_gid + 1 };
+        let other_uid = if owner_uid == u32::MAX {
+            owner_uid - 1
+        } else {
+            owner_uid + 1
+        };
+        let other_gid = if owner_gid == u32::MAX {
+            owner_gid - 1
+        } else {
+            owner_gid + 1
+        };
 
         let server = build_test_server(dir.path());
         let inode = match server.handle_op(
@@ -3360,7 +3342,15 @@ mod tests {
         };
 
         assert!(matches!(
-            server.handle_op("test", FsOp::Access { inode, mask: libc::X_OK, uid: 1000, gid: 1000 }),
+            server.handle_op(
+                "test",
+                FsOp::Access {
+                    inode,
+                    mask: libc::X_OK,
+                    uid: 1000,
+                    gid: 1000
+                }
+            ),
             FsResult::Ok
         ));
         assert!(matches!(
@@ -4683,7 +4673,12 @@ mod tests {
             FsResult::Entry { inode, .. } => inode,
             other => panic!("expected Entry, got {:?}", other),
         };
-        match server.handle_op("test", FsOp::Getattr { inode: target_inode }) {
+        match server.handle_op(
+            "test",
+            FsOp::Getattr {
+                inode: target_inode,
+            },
+        ) {
             FsResult::Attr { attrs, .. } => {
                 assert_eq!(attrs.uid, src_meta.uid());
                 assert_eq!(attrs.gid, src_meta.gid());

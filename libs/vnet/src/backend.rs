@@ -7,13 +7,13 @@
 // Thread 1 (vhost-user worker, epoll): virtqueue processing
 // Thread 2 (slirp, poll): libslirp event loop + frame translation
 
+use std::collections::VecDeque;
 use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "debug-trace")]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -21,17 +21,19 @@ use std::time::Duration;
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::{Error as VhostUserError, Listener};
 use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, VringRwLock, VringT};
-use virtio_bindings::virtio_net::*;
 use virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
+use virtio_bindings::virtio_net::*;
 use virtio_queue::QueueT;
-use vm_memory::{Address, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap, Bytes};
+use vm_memory::{Address, Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
-use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
+use vmm_sys_util::event::{
+    new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
+};
 use vmm_sys_util::eventfd::EventFd;
 
-use crate::slirp::{SlirpConfig, SlirpInstance};
 use crate::config::VnetConfig;
 use crate::error::VnetError;
+use crate::slirp::{SlirpConfig, SlirpInstance};
 
 type VnetMemory = GuestMemoryAtomic<GuestMemoryMmap>;
 
@@ -110,9 +112,8 @@ impl VnetVhostBackend {
     ) -> Result<(Self, EventNotifier), VnetError> {
         // Pre-create the exit event and clone all needed copies up front.
         // This ensures exit_event() cannot fail at call time.
-        let (exit_consumer, exit_notifier) =
-            new_event_consumer_and_notifier(EventFlag::empty())
-                .map_err(|e| VnetError::BackendInit(format!("exit event: {}", e)))?;
+        let (exit_consumer, exit_notifier) = new_event_consumer_and_notifier(EventFlag::empty())
+            .map_err(|e| VnetError::BackendInit(format!("exit event: {}", e)))?;
 
         // Clone for the framework (returned by exit_event).
         let framework_consumer = exit_consumer
@@ -136,9 +137,10 @@ impl VnetVhostBackend {
             acked_features: Arc::new(RwLock::new(0)),
             mem: Arc::new(RwLock::new(mem)),
             mac: config.mac,
-            framework_exit_events: Arc::new(Mutex::new(vec![
-                (framework_consumer, framework_notifier),
-            ])),
+            framework_exit_events: Arc::new(Mutex::new(vec![(
+                framework_consumer,
+                framework_notifier,
+            )])),
             #[cfg(feature = "debug-trace")]
             tx_debug_budget: Arc::new(AtomicUsize::new(8)),
             #[cfg(feature = "debug-trace")]
@@ -156,12 +158,12 @@ impl VnetVhostBackend {
     fn process_tx(&self, vring: &VringRwLock) -> std::io::Result<()> {
         let tx_lock = self.tx_sender.lock().map_err(|e| {
             tracing::error!("tx lock poisoned, backend fatally degraded: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, "tx lock poisoned")
+            std::io::Error::other("tx lock poisoned")
         })?;
 
         let mem_atomic = self.mem.read().map_err(|e| {
             tracing::error!("memory lock poisoned, backend fatally degraded: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, "memory lock poisoned")
+            std::io::Error::other("memory lock poisoned")
         })?;
         let mem_guard = mem_atomic.memory();
         let mem = mem_guard.deref();
@@ -190,7 +192,7 @@ impl VnetVhostBackend {
             let mut first = true;
             let mut read_failed = false;
 
-            'tx_desc: while let Some(desc) = desc_chain.next() {
+            'tx_desc: for desc in desc_chain.by_ref() {
                 let addr = desc.addr();
                 let len = desc.len() as usize;
 
@@ -213,7 +215,11 @@ impl VnetVhostBackend {
                                 data_len,
                                 e
                             );
-                            tracing::warn!("tx: guest memory read failed at {}: {}", data_addr.raw_value(), e);
+                            tracing::warn!(
+                                "tx: guest memory read failed at {}: {}",
+                                data_addr.raw_value(),
+                                e
+                            );
                             read_failed = true;
                             break 'tx_desc;
                         }
@@ -231,7 +237,11 @@ impl VnetVhostBackend {
                                 len,
                                 e
                             );
-                            tracing::warn!("tx: guest memory read failed at {}: {}", addr.raw_value(), e);
+                            tracing::warn!(
+                                "tx: guest memory read failed at {}: {}",
+                                addr.raw_value(),
+                                e
+                            );
                             read_failed = true;
                             break 'tx_desc;
                         }
@@ -285,10 +295,7 @@ impl VnetVhostBackend {
         if Self::debug_budget_tick(&self.tx_event_debug_budget) {
             eprintln!(
                 "motlie-vnet tx-event: saw_desc={} returned_any={} sent_any={} call_present={}",
-                saw_desc,
-                returned_any,
-                sent,
-                call_present
+                saw_desc, returned_any, sent, call_present
             );
         }
 
@@ -316,11 +323,11 @@ impl VnetVhostBackend {
 
         let rx_lock = self.rx_receiver.lock().map_err(|e| {
             tracing::error!("rx lock poisoned, backend fatally degraded: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, "rx lock poisoned")
+            std::io::Error::other("rx lock poisoned")
         })?;
         let mut pending_rx = self.pending_rx.lock().map_err(|e| {
             tracing::error!("pending rx lock poisoned, backend fatally degraded: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, "pending rx lock poisoned")
+            std::io::Error::other("pending rx lock poisoned")
         })?;
 
         while let Ok(frame) = rx_lock.try_recv() {
@@ -329,7 +336,7 @@ impl VnetVhostBackend {
 
         let mem_atomic = self.mem.read().map_err(|e| {
             tracing::error!("memory lock poisoned, backend fatally degraded: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, "memory lock poisoned")
+            std::io::Error::other("memory lock poisoned")
         })?;
         let mem_guard = mem_atomic.memory();
         let mem = mem_guard.deref();
@@ -369,7 +376,7 @@ impl VnetVhostBackend {
                 let mut offset = 0usize;
                 let mut write_failed = false;
 
-                'desc: while let Some(desc) = desc_chain.next() {
+                'desc: for desc in desc_chain.by_ref() {
                     if !desc.is_write_only() {
                         continue;
                     }
@@ -382,7 +389,11 @@ impl VnetVhostBackend {
                         let hdr_write = hdr_remaining.min(avail);
                         let zeros = vec![0u8; hdr_write];
                         if let Err(e) = mem.write(&zeros, addr) {
-                            tracing::warn!("rx: header write failed at {}: {}", addr.raw_value(), e);
+                            tracing::warn!(
+                                "rx: header write failed at {}: {}",
+                                addr.raw_value(),
+                                e
+                            );
                             write_failed = true;
                             break 'desc;
                         }
@@ -390,15 +401,19 @@ impl VnetVhostBackend {
 
                         if hdr_write < avail && offset >= VIRTIO_NET_HDR_SIZE {
                             let frame_offset = offset - VIRTIO_NET_HDR_SIZE;
-                            let data_write = (avail - hdr_write)
-                                .min(frame.len().saturating_sub(frame_offset));
+                            let data_write =
+                                (avail - hdr_write).min(frame.len().saturating_sub(frame_offset));
                             if data_write > 0 {
                                 let write_addr = addr.unchecked_add(hdr_write as u64);
                                 if let Err(e) = mem.write(
                                     &frame[frame_offset..frame_offset + data_write],
                                     write_addr,
                                 ) {
-                                    tracing::warn!("rx: payload write failed at {}: {}", write_addr.raw_value(), e);
+                                    tracing::warn!(
+                                        "rx: payload write failed at {}: {}",
+                                        write_addr.raw_value(),
+                                        e
+                                    );
                                     write_failed = true;
                                     break 'desc;
                                 }
@@ -409,11 +424,14 @@ impl VnetVhostBackend {
                         let frame_offset = offset - VIRTIO_NET_HDR_SIZE;
                         if frame_offset < frame.len() {
                             let data_write = avail.min(frame.len() - frame_offset);
-                            if let Err(e) = mem.write(
-                                &frame[frame_offset..frame_offset + data_write],
-                                addr,
-                            ) {
-                                tracing::warn!("rx: payload write failed at {}: {}", addr.raw_value(), e);
+                            if let Err(e) =
+                                mem.write(&frame[frame_offset..frame_offset + data_write], addr)
+                            {
+                                tracing::warn!(
+                                    "rx: payload write failed at {}: {}",
+                                    addr.raw_value(),
+                                    e
+                                );
                                 write_failed = true;
                                 break 'desc;
                             }
@@ -427,7 +445,11 @@ impl VnetVhostBackend {
                 // guest sees a truncated or empty frame rather than stale data.
                 // Publish only the bytes actually written. On write failure,
                 // offset reflects the last successful write position.
-                let used_len = if write_failed && offset == 0 { 0 } else { offset as u32 };
+                let used_len = if write_failed && offset == 0 {
+                    0
+                } else {
+                    offset as u32
+                };
                 if let Err(e) = queue.add_used(mem, desc_idx, used_len) {
                     tracing::warn!("rx: add_used failed for desc {}: {}", desc_idx, e);
                 }
@@ -484,7 +506,7 @@ impl VhostUserBackend for VnetVhostBackend {
     }
 
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
-        let mut config = vec![0u8; 6];
+        let mut config = [0u8; 6];
         config.copy_from_slice(&self.mac);
         let end = (offset as usize + size as usize).min(config.len());
         let start = (offset as usize).min(end);
@@ -493,10 +515,7 @@ impl VhostUserBackend for VnetVhostBackend {
 
     fn set_event_idx(&self, _enabled: bool) {}
 
-    fn update_memory(
-        &self,
-        atomic_mem: VnetMemory,
-    ) -> std::io::Result<()> {
+    fn update_memory(&self, atomic_mem: VnetMemory) -> std::io::Result<()> {
         match self.mem.write() {
             Ok(mut guard) => {
                 *guard = atomic_mem;
@@ -504,10 +523,7 @@ impl VhostUserBackend for VnetVhostBackend {
             }
             Err(e) => {
                 tracing::error!("memory lock poisoned during update_memory: {}", e);
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "memory lock poisoned",
-                ))
+                Err(std::io::Error::other("memory lock poisoned"))
             }
         }
     }
@@ -525,7 +541,9 @@ impl VhostUserBackend for VnetVhostBackend {
             });
         let pair = guard.pop();
         if pair.is_none() {
-            tracing::error!("exit_event called but no pre-cloned pair available — worker thread will not have an exit signal");
+            tracing::error!(
+                "exit_event called but no pre-cloned pair available — worker thread will not have an exit signal"
+            );
         }
         pair
     }
@@ -660,7 +678,8 @@ impl VnetBackend {
 
         let rx_eventfd = EventFd::new(libc::EFD_NONBLOCK)
             .map_err(|e| VnetError::BackendInit(format!("rx eventfd: {}", e)))?;
-        let rx_eventfd_for_slirp = rx_eventfd.try_clone()
+        let rx_eventfd_for_slirp = rx_eventfd
+            .try_clone()
             .map_err(|e| VnetError::BackendInit(format!("rx eventfd clone: {}", e)))?;
         let tx_wake_eventfd = EventFd::new(libc::EFD_NONBLOCK)
             .map_err(|e| VnetError::BackendInit(format!("tx wake eventfd: {}", e)))?;
@@ -678,21 +697,19 @@ impl VnetBackend {
             mem.clone(),
         )?;
 
-        let mut daemon = VhostUserDaemon::new(
-            "motlie-vnet".to_string(),
-            backend,
-            mem,
-        )
-        .map_err(|e| VnetError::BackendInit(format!("daemon: {}", e)))?;
+        let mut daemon = VhostUserDaemon::new("motlie-vnet".to_string(), backend, mem)
+            .map_err(|e| VnetError::BackendInit(format!("daemon: {}", e)))?;
 
         // Register the rx eventfd in the vhost-user epoll.
         let handlers = daemon.get_epoll_handlers();
         if let Some(handler) = handlers.into_iter().next() {
-            handler.register_listener(
-                rx_eventfd_for_slirp.as_raw_fd(),
-                EventSet::IN,
-                SLIRP_RX_TOKEN as u64,
-            ).map_err(|e| VnetError::BackendInit(format!("register rx eventfd: {}", e)))?;
+            handler
+                .register_listener(
+                    rx_eventfd_for_slirp.as_raw_fd(),
+                    EventSet::IN,
+                    SLIRP_RX_TOKEN as u64,
+                )
+                .map_err(|e| VnetError::BackendInit(format!("register rx eventfd: {}", e)))?;
         }
 
         // Spawn slirp thread with readiness barrier.
@@ -717,18 +734,17 @@ impl VnetBackend {
 
         // Helper: shut down the slirp thread and return its panic if one occurred.
         // Used in both pre-readiness and post-readiness failure paths.
-        let stop_slirp = |shutdown: &Arc<AtomicBool>,
-                          slirp_handle: JoinHandle<()>|
-         -> Option<VnetError> {
-            shutdown.store(true, Ordering::Relaxed);
-            match slirp_handle.join() {
-                Ok(()) => None,
-                Err(panic_payload) => Some(VnetError::BackendInit(format!(
-                    "slirp thread panicked: {:?}",
-                    panic_payload
-                ))),
-            }
-        };
+        let stop_slirp =
+            |shutdown: &Arc<AtomicBool>, slirp_handle: JoinHandle<()>| -> Option<VnetError> {
+                shutdown.store(true, Ordering::Relaxed);
+                match slirp_handle.join() {
+                    Ok(()) => None,
+                    Err(panic_payload) => Some(VnetError::BackendInit(format!(
+                        "slirp thread panicked: {:?}",
+                        panic_payload
+                    ))),
+                }
+            };
 
         // Wait for slirp readiness. Prefer slirp panic over readiness error
         // if both occurred.
@@ -750,10 +766,10 @@ impl VnetBackend {
                 shutdown.store(true, Ordering::Relaxed);
                 let cleanup_failed = match thread::Builder::new()
                     .name("motlie-vnet-slirp-cleanup".into())
-                    .spawn(move || {
-                        match slirp_handle.join() {
-                            Ok(()) => {}
-                            Err(p) => tracing::error!("slirp thread panicked during timeout cleanup: {:?}", p),
+                    .spawn(move || match slirp_handle.join() {
+                        Ok(()) => {}
+                        Err(p) => {
+                            tracing::error!("slirp thread panicked during timeout cleanup: {:?}", p)
                         }
                     }) {
                     Ok(_) => None,
@@ -784,7 +800,10 @@ impl VnetBackend {
                 if let Some(slirp_err) = stop_slirp(&shutdown, slirp_handle) {
                     return Err(slirp_err);
                 }
-                return Err(VnetError::SocketBind(std::io::Error::other(format!("{}", e))));
+                return Err(VnetError::SocketBind(std::io::Error::other(format!(
+                    "{}",
+                    e
+                ))));
             }
         };
         tracing::info!("vnet socket bound: {}", socket_path.display());
@@ -793,9 +812,9 @@ impl VnetBackend {
         let daemon_handle: JoinHandle<Result<(), VnetError>> = match thread::Builder::new()
             .name("motlie-vnet-daemon".into())
             .spawn(move || {
-                daemon.start(&mut listener).map_err(|e| {
-                    VnetError::BackendInit(format!("daemon accept: {}", e))
-                })?;
+                daemon
+                    .start(&mut listener)
+                    .map_err(|e| VnetError::BackendInit(format!("daemon accept: {}", e)))?;
                 match daemon.wait() {
                     Ok(()) => Ok(()),
                     Err(e) => {
@@ -881,7 +900,8 @@ impl VnetHandle {
                     tracing::warn!("socket cleanup failed during slirp panic recovery: {}", e);
                 }
                 return Err(VnetError::BackendInit(format!(
-                    "slirp thread panicked: {:?}", panic_payload
+                    "slirp thread panicked: {:?}",
+                    panic_payload
                 )));
             }
         }
@@ -892,16 +912,23 @@ impl VnetHandle {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     if let Err(ce) = std::fs::remove_file(&self.socket_path) {
-                        tracing::warn!("socket cleanup failed during daemon error recovery: {}", ce);
+                        tracing::warn!(
+                            "socket cleanup failed during daemon error recovery: {}",
+                            ce
+                        );
                     }
                     return Err(e);
                 }
                 Err(panic_payload) => {
                     if let Err(ce) = std::fs::remove_file(&self.socket_path) {
-                        tracing::warn!("socket cleanup failed during daemon panic recovery: {}", ce);
+                        tracing::warn!(
+                            "socket cleanup failed during daemon panic recovery: {}",
+                            ce
+                        );
                     }
                     return Err(VnetError::BackendInit(format!(
-                        "daemon thread panicked: {:?}", panic_payload
+                        "daemon thread panicked: {:?}",
+                        panic_payload
                     )));
                 }
             }
@@ -932,9 +959,9 @@ mod tests {
     use crate::config::VnetConfig;
     use std::os::fd::FromRawFd;
     use std::os::unix::io::IntoRawFd;
-    use virtio_queue::mock::MockSplitQueue;
     use virtio_queue::desc::split::Descriptor;
     use virtio_queue::desc::RawDescriptor;
+    use virtio_queue::mock::MockSplitQueue;
     use vm_memory::GuestAddress;
 
     fn init_logging() {
@@ -1033,7 +1060,10 @@ mod tests {
         assert!(socket_path.exists(), "socket should exist after start()");
 
         handle.shutdown().unwrap();
-        assert!(!socket_path.exists(), "socket should be removed after shutdown()");
+        assert!(
+            !socket_path.exists(),
+            "socket should be removed after shutdown()"
+        );
     }
 
     #[test]
@@ -1067,7 +1097,9 @@ mod tests {
         let header_addr = GuestAddress(0x1000);
         let payload_addr = GuestAddress(0x2000);
         let payload = [0xAA, 0xBB, 0xCC, 0xDD];
-        queue_mem.write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr).unwrap();
+        queue_mem
+            .write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr)
+            .unwrap();
         queue_mem.write(&payload, payload_addr).unwrap();
 
         // Build a descriptor chain: header desc → payload desc.
@@ -1099,7 +1131,10 @@ mod tests {
         let (tx_sender, tx_receiver) = mpsc::channel();
         let (_rx_sender, rx_receiver) = mpsc::channel();
         let (backend, _exit_notifier) = VnetVhostBackend::new(
-            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            &VnetConfig::builder()
+                .socket_path("/tmp/test.sock")
+                .build()
+                .unwrap(),
             tx_sender,
             rx_receiver,
             EventFd::new(libc::EFD_NONBLOCK).unwrap(),
@@ -1160,7 +1195,10 @@ mod tests {
         eventfd.write(1).unwrap();
 
         let (backend, _exit_notifier) = VnetVhostBackend::new(
-            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            &VnetConfig::builder()
+                .socket_path("/tmp/test.sock")
+                .build()
+                .unwrap(),
             mpsc::channel().0,
             rx_receiver,
             eventfd,
@@ -1204,7 +1242,10 @@ mod tests {
         eventfd.write(1).unwrap();
 
         let (backend, _exit_notifier) = VnetVhostBackend::new(
-            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            &VnetConfig::builder()
+                .socket_path("/tmp/test.sock")
+                .build()
+                .unwrap(),
             mpsc::channel().0,
             rx_receiver,
             eventfd,
@@ -1238,7 +1279,9 @@ mod tests {
         mock_queue.build_desc_chain(&descs).unwrap();
 
         // RX queue kick should retry pending delivery.
-        backend.handle_event(RX_QUEUE, EventSet::IN, &[vring.clone(), vring.clone()], 0).unwrap();
+        backend
+            .handle_event(RX_QUEUE, EventSet::IN, &[vring.clone(), vring.clone()], 0)
+            .unwrap();
 
         let mut payload_out = [0u8; 4];
         queue_mem.read(&mut payload_out, payload_addr).unwrap();
@@ -1262,7 +1305,9 @@ mod tests {
 
         // First descriptor: valid header at a good address.
         let header_addr = GuestAddress(0x1000);
-        queue_mem.write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr).unwrap();
+        queue_mem
+            .write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr)
+            .unwrap();
 
         // Second descriptor: payload at an address PAST the end of guest memory.
         // mem.read() will fail on this address → frame should be dropped.
@@ -1275,12 +1320,7 @@ mod tests {
                 0,
                 0,
             )),
-            RawDescriptor::from(Descriptor::new(
-                bad_addr.raw_value(),
-                64,
-                0,
-                0,
-            )),
+            RawDescriptor::from(Descriptor::new(bad_addr.raw_value(), 64, 0, 0)),
         ];
         mock_queue.build_desc_chain(&descs).unwrap();
 
@@ -1289,7 +1329,10 @@ mod tests {
         let (tx_sender, tx_receiver) = mpsc::channel();
         let (_rx_sender, rx_receiver) = mpsc::channel();
         let (backend, _exit_notifier) = VnetVhostBackend::new(
-            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            &VnetConfig::builder()
+                .socket_path("/tmp/test.sock")
+                .build()
+                .unwrap(),
             tx_sender,
             rx_receiver,
             EventFd::new(libc::EFD_NONBLOCK).unwrap(),
@@ -1329,7 +1372,9 @@ mod tests {
         let mock_queue = MockSplitQueue::new(queue_mem, QUEUE_SIZE as u16);
 
         let header_addr = GuestAddress(0x1000);
-        queue_mem.write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr).unwrap();
+        queue_mem
+            .write(&[0u8; VIRTIO_NET_HDR_SIZE], header_addr)
+            .unwrap();
         let bad_addr = GuestAddress(0x30000);
 
         let descs = [
@@ -1339,12 +1384,7 @@ mod tests {
                 0,
                 0,
             )),
-            RawDescriptor::from(Descriptor::new(
-                bad_addr.raw_value(),
-                64,
-                0,
-                0,
-            )),
+            RawDescriptor::from(Descriptor::new(bad_addr.raw_value(), 64, 0, 0)),
         ];
         mock_queue.build_desc_chain(&descs).unwrap();
 
@@ -1358,7 +1398,10 @@ mod tests {
         let (tx_sender, tx_receiver) = mpsc::channel();
         let (_rx_sender, rx_receiver) = mpsc::channel();
         let (backend, _exit_notifier) = VnetVhostBackend::new(
-            &VnetConfig::builder().socket_path("/tmp/test.sock").build().unwrap(),
+            &VnetConfig::builder()
+                .socket_path("/tmp/test.sock")
+                .build()
+                .unwrap(),
             tx_sender,
             rx_receiver,
             EventFd::new(libc::EFD_NONBLOCK).unwrap(),
@@ -1369,7 +1412,10 @@ mod tests {
 
         backend.process_tx(&vring).unwrap();
 
-        assert!(tx_receiver.try_recv().is_err(), "truncated frame should be dropped");
+        assert!(
+            tx_receiver.try_recv().is_err(),
+            "truncated frame should be dropped"
+        );
         call_consumer.consume().unwrap();
         assert_eq!(mock_queue.used().idx().load(), 1);
     }

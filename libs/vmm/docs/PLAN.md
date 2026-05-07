@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Tighten Phase 11 whiteout handling so empty whiteout targets are rejected and opaque-whiteout metadata errors fail closed |
 | 2026-05-07 | @vmm-cdx | Mark Phase 11 registry fetch/cache complete for selected platform manifests and layer blobs feeding importer-ready layer inputs |
 | 2026-05-07 | @vmm-cdx | Mark the first Phase 11 rootfs importer slice complete for selected platform manifest parsing, digest-checked local layer unpacking, deterministic assembly roots, and OCI whiteouts |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11 resolver provenance so single-image manifests are rejected until config inspection can verify platform identity |
@@ -582,6 +583,8 @@ Tasks:
         explicitly implemented
   - [x] support OCI plain tar, OCI gzip tar, and Docker gzip rootfs diff layers
   - [x] apply OCI whiteouts and opaque directory whiteouts
+  - [x] reject empty whiteout targets and fail closed on opaque-whiteout metadata
+        errors
   - [x] reject non-empty assembly roots and unsafe layer paths
   - [x] fetch selected platform manifest and layer blobs from the registry into a
         content-addressed local cache

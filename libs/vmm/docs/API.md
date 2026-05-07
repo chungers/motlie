@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | tighten OCI whiteout safety: reject empty `.wh.` targets and propagate opaque-whiteout metadata errors instead of reporting success
 - 2026-05-07 | @vmm-cdx | add Registry v2 platform-manifest and layer-blob fetch into a content-addressed cache, producing importer-ready `OciLayerInput`s |
 - 2026-05-07 | @vmm-cdx | add the first rootfs importer API for digest-checked local OCI layer inputs, deterministic empty assembly roots, gzip/plain tar extraction, and OCI whiteout handling
 - 2026-05-07 | @vmm-cdx | tighten resolver provenance so single-image manifests are rejected until config blob inspection can verify the requested platform
@@ -703,7 +704,9 @@ Rootfs importer behavior:
 - applies normal OCI whiteouts (`.wh.<name>`) and opaque directory whiteouts
   (`.wh..wh..opq`)
 - rejects absolute paths, parent traversal, unsupported media types, non-empty
-  assembly roots, and digest/size mismatches
+  assembly roots, empty whiteout targets, and digest/size mismatches
+- propagates opaque-whiteout metadata/read errors except `NotFound`, so stale
+  lower-layer content cannot be silently retained while reporting success
 
 Resolver validation:
 
