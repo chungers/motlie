@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-08 | @vmm-cdx | Address PR #270 feedback in the rootfs assembler contract: install SSHD CA trust directives, make the vsock SSH loop consume backend.env, and require strict mount YAML-safe tag/path values |
 | 2026-05-07 | @vmm-cdx | Add the first rootfs compatibility assembler design: mutate imported rootfs trees with v1.5 Motlie files, emit a machine-readable manifest, and record package/runtime requirements still pending for later builder/emitter stages |
 | 2026-05-07 | @vmm-cdx | Tighten rootfs classifier executable probes so package-manager and systemd indicators require resolved regular files, not merely existing paths |
 | 2026-05-07 | @vmm-cdx | Harden the rootfs classifier trust boundary: path reads/classification use guest-root-aware symlink resolution, escaping symlinks are rejected, and `/sbin/init` is accepted only when it resolves to systemd |
@@ -949,6 +950,19 @@ Functional requirements:
   VFS/FUSE support, networking/debugging tools, `socat` for the vsock SSH loop,
   and coding-agent CLI prerequisites such as `git` and `npm`. Production
   builders can supply a different package set through `RootfsProfileSpec`.
+- SSH CA auto-provisioning must be complete in the rootfs, not only partially
+  seeded. When a user CA key is supplied, the assembler writes both
+  `/etc/ssh/ca/user_ca.pub` and an OpenSSH drop-in at
+  `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` with `TrustedUserCAKeys` and
+  `AuthorizedPrincipalsFile` directives.
+- The vsock SSH loop consumes `/etc/motlie/v1.5/backend.env` at runtime so
+  `MOTLIE_SSH_VSOCK_PORT` in the manifest/env contract is the value used by the
+  guest bridge. The default remains port `2222`.
+- Mount config rendering stays manual for this first slice, but it is not
+  freeform: mount tags and mount guest-path components must be ASCII tokens
+  using only letters, digits, `_`, `-`, or `.`. Guest mount paths must be
+  absolute, non-root paths. This keeps the YAML surface deterministic until a
+  later typed config serializer is introduced.
 - Runtime requirements such as `/dev/fuse` stay visible as pending runtime
   provisioning rather than being hidden by rootfs mutation.
 - All writes must stay inside the imported rootfs. Parent path symlinks are

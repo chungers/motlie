@@ -26,6 +26,7 @@ pub const MOTLIE_V15_GUEST_BIN_OPT: &str = "/opt/motlie/v1.5/guest/bin/motlie-vf
 pub const MOTLIE_V15_GUEST_BIN_COMPAT: &str = "/usr/local/bin/motlie-vfs-guest";
 pub const MOTLIE_V15_BACKEND_ENV_PATH: &str = "/etc/motlie/v1.5/backend.env";
 pub const MOTLIE_V15_MOUNTS_PATH: &str = "/etc/motlie-vfs/mounts.yaml";
+pub const MOTLIE_V15_SSHD_CA_CONFIG_PATH: &str = "/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf";
 pub const MOTLIE_V15_VFS_HOST_CID: u32 = 2;
 pub const MOTLIE_V15_VFS_PORT: u16 = 5000;
 pub const MOTLIE_V15_SSH_VSOCK_PORT: u16 = 2222;
@@ -898,9 +899,9 @@ impl RootfsCompatibilityBackendEnv {
     }
 
     fn validate(&self) -> Result<(), RootfsCompatibilityError> {
-        validate_config_value("MOTLIE_BACKEND", &self.motlie_backend)?;
-        validate_config_value("MOTLIE_VFS_TRANSPORT", &self.motlie_vfs_transport)?;
-        validate_config_value("MOTLIE_NET_BACKEND", &self.motlie_net_backend)?;
+        validate_env_token("MOTLIE_BACKEND", &self.motlie_backend)?;
+        validate_env_token("MOTLIE_VFS_TRANSPORT", &self.motlie_vfs_transport)?;
+        validate_env_token("MOTLIE_NET_BACKEND", &self.motlie_net_backend)?;
         Ok(())
     }
 }
@@ -1017,11 +1018,8 @@ impl RootfsCompatibilityLayerSpec {
             return Err(RootfsCompatibilityError::MissingGuestBinaryPayload);
         }
         for mount in &self.mounts {
-            validate_config_value("mount tag", &mount.tag)?;
-            map_install_path_error(
-                &mount.guest_path,
-                validate_rootfs_requirement_path(&mount.guest_path),
-            )?;
+            validate_mount_tag(&mount.tag)?;
+            validate_mount_guest_path(&mount.guest_path)?;
         }
         for payload in &self.guest_binaries {
             map_install_path_error(
@@ -2096,8 +2094,15 @@ done
 const MOTLIE_VMM_VSOCK_SSH_LOOP_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 
+BACKEND_ENV="${MOTLIE_BACKEND_ENV:-/etc/motlie/v1.5/backend.env}"
+if [ -f "$BACKEND_ENV" ]; then
+    . "$BACKEND_ENV"
+fi
+SSH_HOST_CID="${MOTLIE_SSH_HOST_CID:-${MOTLIE_VFS_HOST_CID:-2}}"
+SSH_VSOCK_PORT="${MOTLIE_SSH_VSOCK_PORT:-2222}"
+
 while true; do
-    /usr/bin/socat VSOCK-CONNECT:2:2222 TCP:127.0.0.1:22 || true
+    /usr/bin/socat "VSOCK-CONNECT:${SSH_HOST_CID}:${SSH_VSOCK_PORT}" TCP:127.0.0.1:22 || true
     sleep 1
 done
 "#;
@@ -2181,6 +2186,9 @@ const MOTLIE_DOTENV_PROFILE: &str = r#"if [ -f "$HOME/.env" ]; then
 fi
 "#;
 const MOTLIE_APT_FORCE_IPV4: &str = r#"Acquire::ForceIPv4 "true";
+"#;
+const MOTLIE_SSHD_CA_CONFIG: &str = r#"TrustedUserCAKeys /etc/ssh/ca/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
 "#;
 
 fn validate_rootfs_requirement_path(path: &Path) -> Result<(), RootfsClassificationError> {
@@ -2494,6 +2502,7 @@ fn install_required_directories(
     }
     if spec.ssh_user_ca_pubkey.is_some() {
         dirs.insert(PathBuf::from("/etc/ssh/ca"));
+        dirs.insert(PathBuf::from("/etc/ssh/sshd_config.d"));
     }
     if spec.users.iter().any(|user| user.ssh_principal.is_some()) {
         dirs.insert(PathBuf::from("/etc/ssh/auth_principals"));
@@ -2533,7 +2542,7 @@ fn install_guest_payloads(
         );
 
         let mut link_paths = payload.link_paths.clone();
-        if payload.guest_path == PathBuf::from(MOTLIE_V15_GUEST_BIN_OPT)
+        if payload.guest_path.as_path() == Path::new(MOTLIE_V15_GUEST_BIN_OPT)
             && !link_paths
                 .iter()
                 .any(|path| path == Path::new(MOTLIE_V15_GUEST_BIN_COMPAT))
@@ -2743,6 +2752,17 @@ fn install_ssh_and_user_seeds(
             "/etc/ssh/ca/user_ca.pub",
             Some(0o644),
         ));
+        rootfs_write_file(
+            root,
+            Path::new(MOTLIE_V15_SSHD_CA_CONFIG_PATH),
+            MOTLIE_SSHD_CA_CONFIG.as_bytes(),
+            0o644,
+        )?;
+        installed.push(RootfsCompatibilityInstallRecord::new(
+            RootfsCompatibilityInstallKind::SshSeed,
+            MOTLIE_V15_SSHD_CA_CONFIG_PATH,
+            Some(0o644),
+        ));
     }
 
     let sudoers = render_sudoers(&spec.users)?;
@@ -2841,11 +2861,8 @@ fn render_rootfs_mounts_yaml(
 ) -> Result<String, RootfsCompatibilityError> {
     let mut out = String::from("mounts:\n");
     for mount in mounts {
-        validate_config_value("mount tag", &mount.tag)?;
-        map_install_path_error(
-            &mount.guest_path,
-            validate_rootfs_requirement_path(&mount.guest_path),
-        )?;
+        validate_mount_tag(&mount.tag)?;
+        validate_mount_guest_path(&mount.guest_path)?;
         writeln!(&mut out, "  - tag: {}", mount.tag).expect("writing to String cannot fail");
         writeln!(&mut out, "    guest_path: {}", mount.guest_path.display())
             .expect("writing to String cannot fail");
@@ -2923,6 +2940,78 @@ fn validate_env_key(value: &str) -> Result<(), RootfsCompatibilityError> {
             field: "env key".to_string(),
             value: value.to_string(),
             reason: "environment keys must be shell-safe identifiers".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_env_token(field: &str, value: &str) -> Result<(), RootfsCompatibilityError> {
+    validate_config_value(field, value)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(RootfsCompatibilityError::InvalidConfigValue {
+            field: field.to_string(),
+            value: value.to_string(),
+            reason: "value must be an ASCII token containing only letters, digits, '_', '-' or '.'"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_mount_tag(value: &str) -> Result<(), RootfsCompatibilityError> {
+    validate_config_value("mount tag", value)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(RootfsCompatibilityError::InvalidConfigValue {
+            field: "mount tag".to_string(),
+            value: value.to_string(),
+            reason:
+                "mount tags must be ASCII tokens containing only letters, digits, '_', '-' or '.'"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_mount_guest_path(path: &Path) -> Result<(), RootfsCompatibilityError> {
+    map_install_path_error(path, validate_rootfs_requirement_path(path))?;
+    let components = install_path_components(path)?;
+    if components.is_empty() {
+        return Err(RootfsCompatibilityError::InvalidInstallPath {
+            path: path.to_path_buf(),
+            reason: "mount guest path cannot be the guest root".to_string(),
+        });
+    }
+    for component in components {
+        let Some(value) = component.to_str() else {
+            return Err(RootfsCompatibilityError::InvalidInstallPath {
+                path: path.to_path_buf(),
+                reason: "mount guest path components must be UTF-8".to_string(),
+            });
+        };
+        validate_mount_path_component(path, value)?;
+    }
+    Ok(())
+}
+
+fn validate_mount_path_component(
+    path: &Path,
+    component: &str,
+) -> Result<(), RootfsCompatibilityError> {
+    if component.is_empty()
+        || !component
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(RootfsCompatibilityError::InvalidInstallPath {
+            path: path.to_path_buf(),
+            reason: "mount guest path components must use only letters, digits, '_', '-' or '.'"
+                .to_string(),
         });
     }
     Ok(())
@@ -5125,6 +5214,10 @@ mod tests {
                 .unwrap()
                 .contains("CODEX_HOME")
         );
+        let sshd_ca_config =
+            fs::read_to_string(rootfs_path(&root, MOTLIE_V15_SSHD_CA_CONFIG_PATH)).unwrap();
+        assert!(sshd_ca_config.contains("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub"));
+        assert!(sshd_ca_config.contains("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u"));
         assert_eq!(
             fs::read_to_string(rootfs_path(&root, "/etc/ssh/auth_principals/alice")).unwrap(),
             "alice\n"
@@ -5143,6 +5236,65 @@ mod tests {
                         )
             }),
             "CH egress service enablement should be recorded when requested"
+        );
+    }
+
+    #[test]
+    fn rootfs_assembler_uses_backend_env_for_ssh_vsock_port() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("rootfs");
+        fs::create_dir(&root).unwrap();
+        write_ubuntu_systemd_foundation(&root, &installed_ubuntu_packages());
+        let binary = fake_guest_binary(tempdir.path());
+        let mut spec = rootfs_assembly_spec(&binary);
+        spec.backend_env.motlie_ssh_vsock_port = 2444;
+
+        RootfsCompatibilityAssembler::new()
+            .assemble(&root, &spec)
+            .unwrap();
+
+        let backend_env =
+            fs::read_to_string(rootfs_path(&root, MOTLIE_V15_BACKEND_ENV_PATH)).unwrap();
+        assert!(backend_env.contains("MOTLIE_SSH_VSOCK_PORT=2444\n"));
+        let loop_script = fs::read_to_string(rootfs_path(
+            &root,
+            "/opt/motlie/v1.5/guest/bin/motlie-vmm-vsock-ssh-loop",
+        ))
+        .unwrap();
+        assert!(loop_script.contains("SSH_VSOCK_PORT=\"${MOTLIE_SSH_VSOCK_PORT:-2222}\""));
+        assert!(loop_script.contains("VSOCK-CONNECT:${SSH_HOST_CID}:${SSH_VSOCK_PORT}"));
+        assert!(
+            !loop_script.contains("VSOCK-CONNECT:2:2222"),
+            "script must not hardcode the default SSH vsock port"
+        );
+    }
+
+    #[test]
+    fn rootfs_assembler_rejects_unsafe_mount_yaml_values() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("rootfs");
+        fs::create_dir(&root).unwrap();
+        write_ubuntu_systemd_foundation(&root, &installed_ubuntu_packages());
+        let binary = fake_guest_binary(tempdir.path());
+
+        let mut bad_tag = rootfs_assembly_spec(&binary);
+        bad_tag.mounts[0].tag = "alice:home".to_string();
+        let error = RootfsCompatibilityAssembler::new()
+            .assemble(&root, &bad_tag)
+            .unwrap_err();
+        assert!(
+            matches!(error, RootfsCompatibilityError::InvalidConfigValue { .. }),
+            "expected strict mount tag validation, got {error:?}"
+        );
+
+        let mut bad_path = rootfs_assembly_spec(&binary);
+        bad_path.mounts[0].guest_path = PathBuf::from("/home/alice workspace");
+        let error = RootfsCompatibilityAssembler::new()
+            .assemble(&root, &bad_path)
+            .unwrap_err();
+        assert!(
+            matches!(error, RootfsCompatibilityError::InvalidInstallPath { .. }),
+            "expected strict mount guest path validation, got {error:?}"
         );
     }
 

@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-08 | @vmm-cdx | address PR #270 assembler feedback by documenting SSHD CA trust drop-in installation, backend.env-driven SSH vsock port handling, and strict mount YAML-safe value validation
 - 2026-05-07 | @vmm-cdx | add the rootfs compatibility assembler API that installs the v1.5 Motlie pre-boot layer into supported imported rootfs trees and emits installed/pending manifest evidence
 - 2026-05-07 | @vmm-cdx | tighten rootfs classifier executable probes so apt/dpkg and systemd indicators require resolved regular files, not directories or other existing paths
 - 2026-05-07 | @vmm-cdx | harden rootfs classifier path access with guest-root-aware symlink resolution and reject escaping symlink targets before reading or classifying imported rootfs content
@@ -771,7 +772,11 @@ Rootfs compatibility assembler behavior:
 - writes `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
 - installs v1.5 support scripts, profile scripts, and the `ubuntu-systemd`
   service graph under `cloud-init.target` / `multi-user.target`
-- writes SSH CA/principal, sudoers, and user `.env` seed files when provided
+- writes SSH CA/principal, sudoers, and user `.env` seed files when provided;
+  CA login includes `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` with
+  `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`
+- makes the vsock SSH bridge source `/etc/motlie/v1.5/backend.env`, so
+  `MOTLIE_SSH_VSOCK_PORT` is honored instead of hardcoded
 - creates required mount directories and records all installed paths in
   `RootfsCompatibilityAssemblyManifest`
 - records installable package/init gaps and runtime gaps such as `/dev/fuse` in
@@ -780,6 +785,9 @@ Rootfs compatibility assembler behavior:
 - uses the selected `RootfsProfileSpec` package data as the source of truth; the
   built-in `ubuntu-systemd` profile mirrors the current v1.5 validation package
   baseline and can be overridden by production builders
+- enforces YAML-safe mount tags and guest-path components: ASCII letters,
+  digits, `_`, `-`, and `.` only; mount guest paths must be absolute and cannot
+  be `/`
 - rejects symlink parents during rootfs writes so malformed OCI roots cannot
   redirect output outside the assembly root
 

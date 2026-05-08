@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-08 | @vmm-cdx | Address PR #270 assembler feedback: complete SSH CA trust config, honor backend.env SSH vsock port, fix clippy cmp-owned, and tighten mount YAML-safe validation |
 | 2026-05-07 | @vmm-cdx | Implement the first Phase 11 rootfs compatibility assembler slice: install v1.5 Motlie files into supported imported rootfs trees, emit assembly manifests, and keep package/runtime requirements explicit for later stages |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11 classifier presence checks so apt/dpkg and systemd probes require resolved regular files |
 | 2026-05-07 | @vmm-cdx | Harden Phase 11 rootfs classifier path handling against host symlink escape and tighten systemd detection so `/sbin/init` must resolve to a real systemd path |
@@ -631,12 +632,17 @@ Tasks:
   - [x] compatibility symlinks under `/usr/local/bin`
   - [x] VFS mount configuration schema
   - [x] SSH CA/principal seed schema
+  - [x] SSHD CA trust drop-in with `TrustedUserCAKeys` and
+        `AuthorizedPrincipalsFile`
   - [x] `ubuntu-systemd` service graph under `cloud-init.target`
   - [x] required mount-point directories
   - [x] machine-readable assembly manifest with installed paths and pending
         package/runtime requirements
   - [x] safe rootfs writes that reject symlink parents instead of following
         host-escaping paths
+  - [x] backend-env-driven SSH vsock bridge script so
+        `MOTLIE_SSH_VSOCK_PORT` is honored
+  - [x] strict YAML-safe validation for mount tags and guest paths
 - [ ] add the package strategy for installable profile requirements:
   - [ ] consume `RootfsCompatibilityAssemblyManifest.pending_requirements`
   - [ ] install the selected profile's package baseline, or fail policy before
