@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Add the first rootfs compatibility assembler design: mutate imported rootfs trees with v1.5 Motlie files, emit a machine-readable manifest, and record package/runtime requirements still pending for later builder/emitter stages |
 | 2026-05-07 | @vmm-cdx | Tighten rootfs classifier executable probes so package-manager and systemd indicators require resolved regular files, not merely existing paths |
 | 2026-05-07 | @vmm-cdx | Harden the rootfs classifier trust boundary: path reads/classification use guest-root-aware symlink resolution, escaping symlinks are rejected, and `/sbin/init` is accepted only when it resolves to systemd |
 | 2026-05-07 | @vmm-cdx | Define the rootfs classifier requirements and design: stable VMM/VFS/VNET invariants stay typed in Rust while admin/profile package, mount, and init requirements are data driven |
@@ -797,12 +798,12 @@ and profile-specific requirements once a second base image is implemented.
 
 `libs/vmm/src/image.rs` is the first Rust surface for this roadmap. It resolves
 registry manifest metadata, fetches selected platform manifests and layer blobs
-into a content-addressed cache, parses selected platform manifests, and unpacks
-digest-checked rootfs layer blobs into a deterministic assembly root. It
-establishes the typed metadata that later classifier, assembler, emitter,
-harness, and CI code must share. It now classifies the imported rootfs against a
-data-driven profile before compatibility-layer assembly. It does not yet emit VM
-boot artifacts.
+into a content-addressed cache, parses selected platform manifests, unpacks
+digest-checked rootfs layer blobs into a deterministic assembly root, classifies
+that rootfs, and applies the first mutation-only Motlie compatibility layer. It
+establishes the typed metadata that classifier, assembler, emitter, harness, and
+CI code must share. It does not yet run package-manager installation and it does
+not yet emit VM boot artifacts.
 
 - `OciPlatform` and `GuestArchitecture` record the selected OCI platform.
 - `OciDigest` records immutable image-index, platform-manifest, and emitted
@@ -855,6 +856,16 @@ boot artifacts.
   `/lib/systemd/systemd`. Package-manager and systemd indicator probes require
   resolved regular files; directories or other non-file path types are not
   accepted as present.
+- `RootfsCompatibilityAssembler` applies the first pre-boot Motlie compatibility
+  layer to a supported imported rootfs. It installs v1.5 guest payloads under
+  `/opt/motlie/v1.5/guest/bin`, exposes compatibility symlinks under
+  `/usr/local/bin`, writes `backend.env`, writes `mounts.yaml`, installs the
+  `ubuntu-systemd` service graph, creates required mount directories, and writes
+  SSH CA/principal/sudo/user-env seed files. The assembler emits
+  `RootfsCompatibilityAssemblyManifest` with installed paths and pending
+  requirements. Missing installable packages or missing systemd remain explicit
+  manifest evidence unless the caller selects the fail-fast pending-requirement
+  policy; this slice does not fake package installation.
 
 ### Rootfs Classifier Requirements And Design
 
@@ -908,6 +919,69 @@ The current `ubuntu-systemd` profile validates against
 must fail if a caller combines the Ubuntu profile name with a different source
 image or init profile. SHA-family OCI digests must be full-length digests, not
 short placeholders, because validation records are provenance artifacts.
+
+### Rootfs Compatibility Assembler Requirements And Design
+
+The compatibility assembler is the first mutating step after rootfs import and
+classification. Its job is to turn a supported foundation rootfs into a Motlie
+v1.5 rootfs contract before any CH or VZ backend emitter packages it.
+
+Functional requirements:
+
+- The assembler input is an imported rootfs path plus a typed
+  `RootfsCompatibilityLayerSpec`.
+- The assembler must classify the rootfs first and refuse `unsupported`
+  foundations. Mutation only begins after the read-only classifier reports a
+  supported foundation.
+- The assembler installs static Motlie contract files only: guest binaries,
+  support scripts, systemd units, compatibility symlinks, profile scripts,
+  backend-neutral config files, SSH seed files, sudoers seed files, and required
+  mount-point directories.
+- The assembler must not run apt, dpkg, systemctl, chroot, SSH, TTY, or any
+  backend-specific emitter operation. Package-manager execution belongs to a
+  later builder/package strategy. Backend artifact packaging belongs to CH/VZ
+  emitters.
+- Missing installable requirements are explicit data. The default policy records
+  them in `RootfsCompatibilityAssemblyManifest.pending_requirements`; a stricter
+  caller can fail on installable pending requirements.
+- The built-in `ubuntu-systemd` package baseline mirrors the current v1.5
+  validation image assumptions, including systemd/cloud-init, OpenSSH/sudo,
+  VFS/FUSE support, networking/debugging tools, `socat` for the vsock SSH loop,
+  and coding-agent CLI prerequisites such as `git` and `npm`. Production
+  builders can supply a different package set through `RootfsProfileSpec`.
+- Runtime requirements such as `/dev/fuse` stay visible as pending runtime
+  provisioning rather than being hidden by rootfs mutation.
+- All writes must stay inside the imported rootfs. Parent path symlinks are
+  rejected during writes so a hostile or malformed OCI rootfs cannot redirect
+  assembler output into the host filesystem.
+- The manifest must be machine-readable and sufficient for later emitters and
+  harness/CI to explain what was installed and what remains pending.
+
+The first API surface is:
+
+```rust
+let mut spec = RootfsCompatibilityLayerSpec::new(
+    rootfs_profile_spec,
+    RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
+);
+spec.mounts.push(RootfsMountSpec::new("alice-workspace", "/workspace"));
+spec.guest_binaries.push(
+    RootfsPayloadFile::new(host_guest_binary, MOTLIE_V15_GUEST_BIN_OPT, 0o755)
+        .with_link(MOTLIE_V15_GUEST_BIN_COMPAT),
+);
+
+let manifest = RootfsCompatibilityAssembler::new().assemble(rootfs, &spec)?;
+```
+
+The manifest is the handoff contract for the next slices:
+
+- Package strategy consumes `pending_requirements` and either installs the
+  package/profile baseline or rejects the image before emit.
+- CH/VZ emitters consume the mutated rootfs plus installed-path metadata and add
+  only backend artifact packaging, seed overlays, kernel/disk metadata, and
+  backend-specific launch inputs.
+- Harness validation records consume the source profile plus emitted artifact
+  digests and prove v1.5 parity against CH and VZ.
 
 The current helper
 `OciPlatform::default_for_v1_5_validation_backend(BackendKind)` is only a lab

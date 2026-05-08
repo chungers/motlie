@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-07 | @vmm-cdx | add the rootfs compatibility assembler API that installs the v1.5 Motlie pre-boot layer into supported imported rootfs trees and emits installed/pending manifest evidence
 - 2026-05-07 | @vmm-cdx | tighten rootfs classifier executable probes so apt/dpkg and systemd indicators require resolved regular files, not directories or other existing paths
 - 2026-05-07 | @vmm-cdx | harden rootfs classifier path access with guest-root-aware symlink resolution and reject escaping symlink targets before reading or classifying imported rootfs content
 - 2026-05-07 | @vmm-cdx | add the rootfs classifier API with data-driven `RootfsProfileSpec`, typed stable VMM/VFS/VNET findings, and `ready` / `compatible-with-adaptation` / `unsupported` status
@@ -75,6 +76,8 @@ High-level status:
   - [x] OCI/Docker manifest index resolution through Registry v2
   - [x] selected platform-manifest digest extraction
   - [x] content-addressed fetch/cache for selected platform manifests and rootfs layers
+  - [x] rootfs compatibility assembler for the first v1.5 pre-boot Motlie layer
+  - [x] machine-readable compatibility assembly manifest with pending package/runtime requirements
 
 Phase 1 convergence:
 
@@ -609,7 +612,8 @@ OCI/Docker manifest indexes to immutable digests, parses selected platform
 manifests, fetches selected platform manifests and layer blobs into a
 content-addressed cache, and can unpack digest-checked local rootfs layer blobs
 into an empty assembly root. It can also classify an imported rootfs against a
-data-driven profile before the Motlie compatibility layer mutates it. It does
+data-driven profile and apply the first pre-boot Motlie compatibility layer to
+a supported rootfs. It does not yet run package-manager installation and it does
 not yet emit CH/VZ artifacts.
 
 ```rust
@@ -617,7 +621,10 @@ use motlie_vmm::backend::BackendKind;
 use motlie_vmm::image::{
     EmittedArtifactDigest, ExternalOciSource, GuestImageProfile, GuestImageValidationRecord,
     OciContentCache, OciDigest, OciImageReference, OciPlatform, OciRegistryClient,
-    OciRootfsImporter, RootfsClassificationStatus, RootfsClassifier, RootfsProfileSpec,
+    OciRootfsImporter, RootfsClassificationStatus, RootfsClassifier,
+    RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec,
+    RootfsMountSpec, RootfsPayloadFile, RootfsProfileSpec, MOTLIE_V15_GUEST_BIN_COMPAT,
+    MOTLIE_V15_GUEST_BIN_OPT,
 };
 
 let source = ExternalOciSource::ubuntu_systemd(
@@ -658,6 +665,19 @@ let imported = OciRootfsImporter::new().import_layers(&cached.layers, assembly_r
 let classifier_spec = RootfsProfileSpec::for_profile(profile.clone());
 let classification = RootfsClassifier::new().classify(&imported.root, &classifier_spec)?;
 assert_ne!(classification.status, RootfsClassificationStatus::Unsupported);
+
+let mut assembly_spec = RootfsCompatibilityLayerSpec::new(
+    classifier_spec,
+    RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
+);
+assembly_spec.mounts.push(RootfsMountSpec::new("workspace", "/workspace"));
+let host_guest_binary = "/tmp/motlie-vfs-guest";
+assembly_spec.guest_binaries.push(
+    RootfsPayloadFile::new(host_guest_binary, MOTLIE_V15_GUEST_BIN_OPT, 0o755)
+        .with_link(MOTLIE_V15_GUEST_BIN_COMPAT),
+);
+let assembly = RootfsCompatibilityAssembler::new().assemble(&imported.root, &assembly_spec)?;
+assert_eq!(assembly.contract_version, "v1.5");
 ```
 
 The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
@@ -741,6 +761,27 @@ Rootfs classifier behavior:
   `unsupported`
 - is read-only; compatibility-layer assembly and backend artifact emission are
   separate later steps
+
+Rootfs compatibility assembler behavior:
+
+- takes a supported imported rootfs plus `RootfsCompatibilityLayerSpec`
+- refuses unsupported foundations before any mutation
+- installs guest payloads under `/opt/motlie/v1.5/guest/bin` and compatibility
+  symlinks under `/usr/local/bin`
+- writes `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
+- installs v1.5 support scripts, profile scripts, and the `ubuntu-systemd`
+  service graph under `cloud-init.target` / `multi-user.target`
+- writes SSH CA/principal, sudoers, and user `.env` seed files when provided
+- creates required mount directories and records all installed paths in
+  `RootfsCompatibilityAssemblyManifest`
+- records installable package/init gaps and runtime gaps such as `/dev/fuse` in
+  `pending_requirements`; it does not run apt/dpkg or pretend packages were
+  installed
+- uses the selected `RootfsProfileSpec` package data as the source of truth; the
+  built-in `ubuntu-systemd` profile mirrors the current v1.5 validation package
+  baseline and can be overridden by production builders
+- rejects symlink parents during rootfs writes so malformed OCI roots cannot
+  redirect output outside the assembly root
 
 Resolver validation:
 

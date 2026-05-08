@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-07 | @vmm-cdx | Implement the first Phase 11 rootfs compatibility assembler slice: install v1.5 Motlie files into supported imported rootfs trees, emit assembly manifests, and keep package/runtime requirements explicit for later stages |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11 classifier presence checks so apt/dpkg and systemd probes require resolved regular files |
 | 2026-05-07 | @vmm-cdx | Harden Phase 11 rootfs classifier path handling against host symlink escape and tighten systemd detection so `/sbin/init` must resolve to a real systemd path |
 | 2026-05-07 | @vmm-cdx | Implement the Phase 11 rootfs classifier API and mark the imported-rootfs classification gate complete for the first `ubuntu-systemd` profile |
@@ -99,6 +100,10 @@ Current common guest-image implementation status:
       and content-addressed layer cache input.
 - [x] Imported rootfs classification is implemented as the read-only gate before
       Motlie compatibility-layer assembly.
+- [x] The first rootfs compatibility assembler is implemented for supported
+      imported rootfs trees. It installs v1.5 Motlie payload/config/service/seed
+      files and emits a manifest while leaving package-manager execution to the
+      next builder stage.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
       than a Rust-owned OCI-derived rootfs assembly.
 
@@ -621,13 +626,23 @@ Tasks:
         regular files, not directories or other path types
   - [x] return machine-readable `ready`, `compatible-with-adaptation`, or
         `unsupported` status with typed findings
-- [ ] apply the pre-boot Motlie compatibility layer:
-  - [ ] Motlie guest binaries under `/opt/motlie/v1.5/guest/bin`
-  - [ ] compatibility symlinks under `/usr/local/bin`
-  - [ ] VFS mount configuration schema
-  - [ ] SSH CA/principal seed schema
-  - [ ] `ubuntu-systemd` service graph under `cloud-init.target`
-  - [ ] required mount-point directories
+- [x] apply the first pre-boot Motlie compatibility layer:
+  - [x] Motlie guest binaries under `/opt/motlie/v1.5/guest/bin`
+  - [x] compatibility symlinks under `/usr/local/bin`
+  - [x] VFS mount configuration schema
+  - [x] SSH CA/principal seed schema
+  - [x] `ubuntu-systemd` service graph under `cloud-init.target`
+  - [x] required mount-point directories
+  - [x] machine-readable assembly manifest with installed paths and pending
+        package/runtime requirements
+  - [x] safe rootfs writes that reject symlink parents instead of following
+        host-escaping paths
+- [ ] add the package strategy for installable profile requirements:
+  - [ ] consume `RootfsCompatibilityAssemblyManifest.pending_requirements`
+  - [ ] install the selected profile's package baseline, or fail policy before
+        backend emit
+  - [ ] preserve explicit evidence for requirements that remain runtime-owned,
+        such as `/dev/fuse`
 - [ ] emit backend artifacts from the same assembled rootfs:
   - [ ] CH kernel/rootfs/seed artifacts
   - [ ] VZ disk/boot artifacts
