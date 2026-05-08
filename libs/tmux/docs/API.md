@@ -896,6 +896,24 @@ because the selector parent is briefly a background process group after the
 attach child exits; without that guard, shells can leave dashboard callers in a
 stopped-job state after `Ctrl-b d`.
 
+Selector-style applications that redraw their own UI after detach can use
+explicit attach options:
+
+```rust
+use motlie_tmux::AttachOptions;
+
+let exit = target
+    .attach_current_pty_with_options(&AttachOptions {
+        suppress_transition_output: true,
+    })
+    .await?;
+```
+
+`suppress_transition_output` keeps inherited interactive stdio while the child
+is attached. After the child exits, the library best-effort clears the terminal
+line used by tmux/SSH detach status text. For SSH targets, it also adds `ssh -q`
+to suppress client-side connection diagnostics.
+
 `AttachExit::shell_status()` maps normal exits to their exit code and Unix
 signal exits to `128 + signal`, which is the value CLI callers should return.
 
