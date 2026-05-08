@@ -10145,6 +10145,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "voice-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hound",
+ "libc",
+ "motlie-model",
+ "motlie-model-moonshine",
+ "motlie-model-piper",
+ "motlie-model-qwen3-tts-cpp",
+ "motlie-model-sherpa-onnx",
+ "motlie-model-whisper-cpp",
+ "motlie-models",
+ "motlie-voice",
+ "tokio",
+]
+
+[[package]]
 name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

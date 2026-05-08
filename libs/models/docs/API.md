@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-25 | @codex-gpt55: Added the Qwen3.6 27B GGUF example to the documented example set, including its manual validation commands and current text-only image fail-closed behavior. | Example Program, Notes |
 | 2026-04-21 | @codex-tts: Removed the non-functional Qwen3-TTS ONNX curated backend from `libs/models` per issue `#210`, including the `model-qwen3-tts-0_6b` / `qwen3-tts-cuda` feature flags, the curated bundle wiring, and the historical export runbook. The supported TTS catalog now contains only Piper and `qwen3-tts.cpp`. | Overview, Notes |
 | 2026-04-20 | @codex-tts: Added a concrete 2x3 TTS-to-ASR validation report covering the two shipped TTS examples against all three shipped ASR examples, with per-run input/output/WER tables and pipeline-level summary findings. | Example Program, Notes |
 | 2026-04-20 | @codex-tts: Added shell-ready SSH streaming examples for the two shipped TTS binaries (`tts_piper`, `tts_qwen3_tts_cpp`) using Homebrew `sox` via `/opt/homebrew/bin/play` on a remote macOS host, with short/medium/long stdin inputs. | Example Program, Notes |
@@ -362,8 +363,14 @@ The runnable examples for this crate are:
 - `chat_multimodal_gemma4` Gemma multimodal slice
   - [README.md](../examples/chat_multimodal_gemma4/README.md)
   - [main.rs](../examples/chat_multimodal_gemma4/main.rs)
+- `chat_gguf_gwen3_gemma4` llama.cpp GGUF chat slice
+  - [README.md](../examples/chat_gguf_gwen3_gemma4/README.md)
+  - [main.rs](../examples/chat_gguf_gwen3_gemma4/main.rs)
+- `chat_multimodal_qwen3_6_27b` Qwen3.6 27B llama.cpp GGUF slice
+  - [README.md](../examples/chat_multimodal_qwen3_6_27b/README.md)
+  - [main.rs](../examples/chat_multimodal_qwen3_6_27b/main.rs)
 
-The examples are explicit about which curated bundles are compiled into the binary. `chat_mistral_qwen3` and `chat_multimodal_gemma4` remain single-bundle builds; `embeddings` is the embedding comparison example and is built with both embedding bundles compiled in.
+The examples are explicit about which curated bundles are compiled into the binary. `chat_mistral_qwen3`, `chat_multimodal_gemma4`, and `chat_multimodal_qwen3_6_27b` remain single-bundle builds; `chat_gguf_gwen3_gemma4` is the llama.cpp GGUF switching example; `embeddings` is the embedding comparison example and is built with both embedding bundles compiled in.
 
 The shipped speech examples now also share a simple shell-composition contract:
 
@@ -436,6 +443,24 @@ Or:
 cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --download-artifacts "Describe ownership in one paragraph"
 ```
 
+llama.cpp GGUF chat example (`chat_gguf_gwen3_gemma4`):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- "What is Rust's ownership model?"
+```
+
+Qwen3.6 27B GGUF example (`chat_multimodal_qwen3_6_27b`):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf --example chat_multimodal_qwen3_6_27b -- "Describe ownership in one paragraph"
+```
+
+Qwen3.6 CUDA build check:
+
+```sh
+cargo check -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf,llama-cpp-cuda --example chat_multimodal_qwen3_6_27b
+```
+
 ## Curator Implementation
 
 For a new curated embedding bundle, the intended implementation checklist is:
@@ -467,7 +492,8 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m` or `EmbeddingModels::Qwen3Embedding06B`; `ModelSelector` is the parser-friendly wrapper above that.
 - Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
-- The embedding caller path should be understandable by reading the `embeddings` example; the text-only chat caller path by reading `chat_mistral_qwen3`; and the multimodal chat caller path by reading `chat_multimodal_gemma4`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_embedding_06b`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
+- The embedding caller path should be understandable by reading the `embeddings` example; the text-only chat caller path by reading `chat_mistral_qwen3`; the llama.cpp GGUF text caller path by reading `chat_gguf_gwen3_gemma4`; and the multimodal chat caller path by reading `chat_multimodal_gemma4`. Qwen3.6 currently follows the GGUF text path in `chat_multimodal_qwen3_6_27b` and fails closed for image input until llama.cpp `mtmd`/mmproj execution is wired and validated.
+- `chat_multimodal_qwen3_6_27b` is build/unit validated, including CPU and CUDA feature checks. Live generation validation with real Qwen3.6 27B artifacts remains a hardware/artifact-gated follow-up because the model is intentionally much larger than the default curated check set.
 - The shipped speech examples are now intentionally composable through Unix pipes. That contract lives at the example layer rather than the model-layer traits: TTS stdout is WAV, ASR stdin is WAV, and transcript text remains stdout-oriented.
 - Current runtime-metrics support in the examples comes from the `libs/model` handle contract and the `mistral` backend implementation. It uses `sysinfo` for current RSS on macOS and Linux and keeps peak RSS as the maximum sample observed by Motlie during the handle lifetime.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.

@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use motlie_model::typed::{
-    AudioBuf, Mono, SpeechStream as TypedSpeechStream, SpeechSynthesizer, SynthesisRequest,
+    AudioBuf, BufferedSpeechChunkStream, BufferedSpeechSynthesizer, Mono, SpeechSynthesizer,
+    SynthesisRequest,
 };
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
@@ -13,19 +14,21 @@ use motlie_model::{
     StartOptions, UnsupportedChat, UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_espeak_ng::text_to_phonemes;
-use motlie_model_ort::build_session;
+use motlie_model_ort::{OrtExecutionTarget, build_session_with_target};
 use ndarray::{Array1, Array2};
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    resolve_onnx_artifacts, PiperArtifactPaths, PiperConfig, RuntimeMetricState,
+    PiperArtifactPaths, PiperConfig, RuntimeMetricState, configure_artifact_policy, lock_metrics,
+    observe_latency, observe_memory, resolve_onnx_artifacts,
 };
 
 const PIPER_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Onnx];
 const OUTPUT_CHUNK_DURATION_MS: u32 = 40;
 const PIPER_SAMPLE_RATE_HZ: u32 = 22_050;
+
+pub type PiperSpeechStream = BufferedSpeechChunkStream<i16, PIPER_SAMPLE_RATE_HZ, Mono>;
 
 #[derive(Clone, Debug)]
 pub struct PiperSpeechSpec {
@@ -42,7 +45,7 @@ impl PiperSpeechSpec {
             id: BundleId::new("piper_en_us_ljspeech_medium"),
             display_name: "Piper en_US ljspeech medium",
             model_filename: "en_US-ljspeech-medium.onnx",
-            capabilities: Capabilities::speech_stream_only(),
+            capabilities: Capabilities::speech_buffered_only(),
             quantization: QuantizationSupport::none(),
         }
     }
@@ -182,6 +185,25 @@ pub struct PiperHandle {
 impl PiperHandle {
     pub async fn shutdown(self) -> Result<(), ModelError> {
         <Self as BundleHandle>::shutdown(self).await
+    }
+
+    async fn synthesize_pcm(
+        &self,
+        request: SynthesisRequest,
+    ) -> Result<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>, ModelError> {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        let started_at = Instant::now();
+        let pcm = runtime.synthesize(&request)?;
+        let elapsed = started_at.elapsed();
+
+        {
+            let mut state = lock_metrics(&metrics, "piper-typed-synthesize");
+            observe_latency(&mut state.runtime, elapsed);
+        }
+
+        Ok(AudioBuf::new(pcm))
     }
 }
 
@@ -331,81 +353,31 @@ impl PiperRuntime {
     }
 }
 
-/// Piper streams expose already-synthesized PCM in monotonic chunks.
-///
-/// Piper is a non-autoregressive VITS-style model in this slice, so
-/// `open_stream()` performs the full synthesis up front and `next_chunk()`
-/// subsequently yields buffered PCM for sink adapters.
-pub struct PiperSpeechStream {
-    pcm: Vec<i16>,
-    offset: usize,
-    chunk_len_samples: usize,
-}
+// Piper is a non-autoregressive VITS-style model in this slice, so
+// `synthesize()` performs the full synthesis up front and the returned
+// buffered stream only chunks already-computed PCM for sink adapters.
+impl BufferedSpeechSynthesizer for PiperHandle {
+    type Request = SynthesisRequest;
+    type Output = AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>;
 
-impl PiperSpeechStream {
-    fn new(pcm: Vec<i16>) -> Self {
-        let frames_per_chunk =
-            ((PIPER_SAMPLE_RATE_HZ as u64 * OUTPUT_CHUNK_DURATION_MS as u64) / 1000) as usize;
-
-        Self {
-            pcm,
-            offset: 0,
-            chunk_len_samples: frames_per_chunk.max(1),
-        }
-    }
-}
-
-impl PiperSpeechStream {
-    async fn next_audio_chunk(
-        &mut self,
-    ) -> Result<Option<AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>>, ModelError> {
-        if self.offset >= self.pcm.len() {
-            return Ok(None);
-        }
-
-        let end = (self.offset + self.chunk_len_samples).min(self.pcm.len());
-        let chunk = AudioBuf::new(self.pcm[self.offset..end].to_vec());
-        self.offset = end;
-
-        Ok(Some(chunk))
-    }
-
-    async fn finish_stream(self) -> Result<(), ModelError> {
-        Ok(())
+    async fn synthesize_buffered(
+        &self,
+        request: Self::Request,
+    ) -> Result<Self::Output, ModelError> {
+        self.synthesize_pcm(request).await
     }
 }
 
 impl SpeechSynthesizer for PiperHandle {
     type Request = SynthesisRequest;
-    type Output = AudioBuf<i16, 22_050, Mono>;
+    type Output = AudioBuf<i16, PIPER_SAMPLE_RATE_HZ, Mono>;
     type Stream = PiperSpeechStream;
 
     async fn synthesize(&self, request: Self::Request) -> Result<Self::Stream, ModelError> {
-        let runtime = Arc::clone(&self.runtime);
-        let metrics = Arc::clone(&self.metrics);
-
-        let started_at = Instant::now();
-        let pcm = runtime.synthesize(&request)?;
-        let elapsed = started_at.elapsed();
-
-        {
-            let mut state = lock_metrics(&metrics, "piper-typed-synthesize");
-            observe_latency(&mut state.runtime, elapsed);
-        }
-
-        Ok(PiperSpeechStream::new(pcm))
-    }
-}
-
-impl TypedSpeechStream for PiperSpeechStream {
-    type Chunk = AudioBuf<i16, 22_050, Mono>;
-
-    async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>, ModelError> {
-        self.next_audio_chunk().await
-    }
-
-    async fn finish(self) -> Result<(), ModelError> {
-        self.finish_stream().await
+        Ok(PiperSpeechStream::new(
+            self.synthesize_pcm(request).await?,
+            OUTPUT_CHUNK_DURATION_MS,
+        ))
     }
 }
 
@@ -415,6 +387,13 @@ struct PiperSynthesisScales {
     length_scale: f32,
     noise_w: f32,
     speaker_id: Option<i64>,
+}
+
+fn piper_ort_target() -> OrtExecutionTarget {
+    match std::env::var("MOTLIE_PIPER_ALLOW_CUDA") {
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => OrtExecutionTarget::Auto,
+        _ => OrtExecutionTarget::CpuOnly,
+    }
 }
 
 fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelError> {
@@ -427,7 +406,15 @@ fn load_runtime(artifacts: &PiperArtifactPaths) -> Result<PiperRuntime, ModelErr
     }
 
     Ok(PiperRuntime {
-        session: Mutex::new(build_session("piper", &artifacts.model)?),
+        // @codex-tts 2026-04-27 -- Piper exits with glibc heap corruption on this host when
+        // the ONNX Runtime CUDA execution provider is enabled during teardown. Default to CPU
+        // for Piper as a stability workaround, but allow explicit opt-in probing with
+        // MOTLIE_PIPER_ALLOW_CUDA=1 on hosts that may not reproduce the crash. See issue #230.
+        session: Mutex::new(build_session_with_target(
+            "piper",
+            &artifacts.model,
+            piper_ort_target(),
+        )?),
         config,
     })
 }
@@ -550,11 +537,12 @@ fn ort_tensor_error(err: ort::Error) -> ModelError {
 mod tests {
     use super::*;
     use motlie_model::SpeechParams;
+    use motlie_model::typed::SpeechStream as _;
 
     #[tokio::test]
     async fn stream_emits_chunks_and_finishes_once() {
-        let pcm = vec![1_i16; 10_000];
-        let mut stream = PiperSpeechStream::new(pcm);
+        let pcm = AudioBuf::new(vec![1_i16; 10_000]);
+        let mut stream = PiperSpeechStream::new(pcm, OUTPUT_CHUNK_DURATION_MS);
 
         let mut total = 0usize;
         while let Some(chunk) = stream.next_chunk().await.expect("chunking should succeed") {
@@ -562,11 +550,13 @@ mod tests {
         }
 
         assert_eq!(total, 10_000);
-        assert!(stream
-            .next_chunk()
-            .await
-            .expect("stream should stay exhausted")
-            .is_none());
+        assert!(
+            stream
+                .next_chunk()
+                .await
+                .expect("stream should stay exhausted")
+                .is_none()
+        );
     }
 
     #[test]
