@@ -18,7 +18,6 @@ use crate::consts::{
     MODAL_TEXT_FIELD_HEIGHT, MOTLIE_PLACEHOLDER, STATUS_BAR_BG, STATUS_BAR_FG,
     STATUS_BAR_MNEMONIC_FG,
 };
-use crate::detail::{DetailMode, SessionDetailSource};
 use crate::model::{
     AppState, Button, Focus, HostFleet, LayoutMode, ModalBody, ModalState, ModalView,
     NewSessionFocus, SendKeysFocus, SessionKeyValueFocus, SessionKeyValueKind, SessionKeyValueRow,
@@ -377,7 +376,7 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         );
         format!("{start_row}-{end_row}/{total_rows}")
     };
-    let title = detail_title(app.detail.source.mode(), &position);
+    let title = detail_title(&position);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -511,14 +510,10 @@ fn saturating_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
 }
 
-pub(crate) fn detail_title(mode: DetailMode, position: &str) -> Line<'static> {
-    let mode = match mode {
-        DetailMode::Sample => "snapshot",
-        DetailMode::Monitor => "monitor",
-    };
+pub(crate) fn detail_title(position: &str) -> Line<'static> {
     Line::from(vec![
         TuiSpan::raw(" Detail "),
-        TuiSpan::styled(mode, Style::default().add_modifier(Modifier::BOLD)),
+        TuiSpan::styled("live", Style::default().add_modifier(Modifier::BOLD)),
         TuiSpan::raw(format!(" {position} ")),
     ])
 }
@@ -689,8 +684,6 @@ pub(crate) fn status_line_text(app: &AppState) -> String {
 pub(crate) fn status_line(app: &AppState) -> Line<'static> {
     let mut spans = vec![status_span(" tab ↑/↓ | ")];
     push_status_command(&mut spans, "help", 'h');
-    push_status_separator(&mut spans);
-    push_status_command(&mut spans, "monitor", 'm');
     push_status_separator(&mut spans);
     push_status_command(&mut spans, "prompt", 'p');
     push_status_separator(&mut spans);

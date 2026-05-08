@@ -13,7 +13,7 @@ use crate::consts::{
     DEFAULT_DETAIL_LINES, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
     PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
 };
-use crate::detail::{DetailMode, DetailSource, SessionDetailSource};
+use crate::detail::{fetch_older_lines, render_live_preview};
 use crate::model::{
     ActivityTracker, AppState, Button, Focus, HostEntry, HostFleet, HostId, LayoutMode, ModalState,
     NewSessionFocus, NewSessionHostChoice, NewSessionModalUi, PendingListShortcut, SelectedSession,
@@ -398,7 +398,6 @@ async fn apply_refreshed_rows(
     failures: Vec<String>,
     options: RefreshApplyOptions,
 ) -> Result<()> {
-    let closed_monitored = closed_monitored_session(app, &rows);
     let previous_key = options.previous().or_else(|| current_selection_key(app));
     let selection_key_before_refresh = previous_key.clone();
     app.session_list.set_rows_sorted(rows, fleet);
@@ -407,29 +406,15 @@ async fn apply_refreshed_rows(
         app.status = build_status(app, &failures);
     }
     let selected_key = current_selection_key(app);
-    let mut monitor_just_closed = false;
-    if let Some((host_id, id, name)) = closed_monitored {
-        if let Some(name) = stop_monitor_if_closed(app, &host_id, &id, name).await {
-            app.status = StatusBanner::info(format!("monitored session {name} closed"));
-            monitor_just_closed = true;
-        }
-    }
     // Only re-render the detail pane when something the session-refresh
     // path actually changed: the caller forced it (user-driven action),
-    // the highlighted row moved to a different (host, session), or the
-    // monitored session just closed and we need to repaint as Sample.
+    // or the highlighted row moved to a different (host, session).
     //
     // Quiet refreshes that find nothing changed in detail must NOT call
-    // `refresh_detail`. In `Monitor` mode the inner render unconditionally
-    // recaptures the pane (no `force` check), and doing that on every
-    // session-refresh tick blocks the next draw — so updated `list-sessions`
-    // activity in the row list lands a tick or more late. The main loop
-    // owns the monitor refresh cadence (its 750 ms `refresh_detail` call);
-    // session refresh does not need to drive it.
+    // `refresh_detail`. The main loop owns the live-preview cadence; session
+    // refresh does not need to drive it.
     let selection_changed = selection_key_before_refresh != selected_key;
-    if options.allow_detail_refresh()
-        && (options.force_detail() || selection_changed || monitor_just_closed)
-    {
+    if options.allow_detail_refresh() && (options.force_detail() || selection_changed) {
         refresh_detail(fleet, app, true).await?;
     }
     Ok(())
@@ -453,31 +438,6 @@ fn build_status(app: &AppState, failures: &[String]) -> StatusBanner {
     }
 }
 
-/// Detect whether the currently-monitored session has dropped out of the
-/// merged listing (closed, or its host became unreachable). Returns the
-/// `(host_id, session_id, name)` triple needed to deactivate the monitor.
-fn closed_monitored_session(
-    app: &AppState,
-    refreshed_rows: &[SessionRow],
-) -> Option<(HostId, String, String)> {
-    let monitored_id = app.detail.source.monitored_session_id()?.to_string();
-    let monitored_host = app.detail.source.monitored_host_id()?.clone();
-    if refreshed_rows
-        .iter()
-        .any(|row| row.host_id == monitored_host && row.session.id.as_str() == monitored_id)
-    {
-        return None;
-    }
-    let name = app
-        .session_list
-        .rows
-        .iter()
-        .find(|row| row.host_id == monitored_host && row.session.id.as_str() == monitored_id)
-        .map(|row| row.session.name.clone())
-        .unwrap_or_else(|| monitored_id.clone());
-    Some((monitored_host, monitored_id, name))
-}
-
 pub(crate) async fn refresh_detail(
     fleet: &HostFleet,
     app: &mut AppState,
@@ -496,54 +456,17 @@ pub(crate) async fn refresh_detail(
         return Ok(());
     };
 
-    match app.detail.source.mode() {
-        DetailMode::Sample => {
-            if force || app.detail.lines.is_empty() {
-                let text = app
-                    .detail
-                    .source
-                    .render(host, &selected)
-                    .await
-                    .unwrap_or_else(|err| format!("sample error: {err:#}"));
-                app.set_detail_text(text);
-            }
-        }
-        DetailMode::Monitor => {
-            let text = app
-                .detail
-                .source
-                .render(host, &selected)
-                .await
-                .unwrap_or_else(|err| format!("monitor error: {err:#}"));
-            app.detail.lines = text.lines().map(|line| line.to_string()).collect();
-            if app.detail.auto_tail {
-                app.detail.scroll = 0;
-            }
-        }
+    if force || app.detail.auto_tail || app.detail.lines.is_empty() {
+        let text = render_live_preview(host, &selected)
+            .await
+            .unwrap_or_else(|err| format!("preview error: {err:#}"));
+        app.set_detail_text(text);
     }
     Ok(())
 }
 
 fn fleet_host<'a>(fleet: &'a HostFleet, host_id: &HostId) -> Option<&'a HostHandle> {
     fleet.entry(host_id).map(|entry| &entry.handle)
-}
-
-pub(crate) async fn stop_monitor_if_closed(
-    app: &mut AppState,
-    host_id: &HostId,
-    session_id: &str,
-    name: String,
-) -> Option<String> {
-    if app.detail.source.monitored_session_id() == Some(session_id)
-        && app.detail.source.monitored_host_id() == Some(host_id)
-    {
-        stop_detail_source(app).await;
-        app.detail.source = DetailSource::sample();
-        app.detail.lines.clear();
-        Some(name)
-    } else {
-        None
-    }
 }
 
 pub(crate) enum KeyOutcome {
@@ -578,7 +501,6 @@ pub(crate) async fn handle_key(
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => app.layout.focus = Focus::List,
         (KeyCode::Char('h'), _) => app.modal = Some(ModalState::Help),
-        (KeyCode::Char('m'), _) => start_monitor(fleet, app).await?,
         (KeyCode::Char('g'), _) if app.layout.focus == Focus::List => {
             toggle_session_grouping(fleet, app).await?;
         }
@@ -642,7 +564,7 @@ pub(crate) async fn handle_key(
         }
         (KeyCode::Enter, _) if app.layout.focus == Focus::List => {
             if app.selected_session().is_some() {
-                reset_to_sample_detail(fleet, app).await?;
+                refresh_selected_detail(fleet, app).await?;
             } else {
                 app.status = StatusBanner::info("no session selected");
             }
@@ -712,7 +634,7 @@ pub(crate) async fn handle_key(
         (KeyCode::PageUp, _) => match app.layout.focus {
             Focus::List => {
                 if app.move_selection(-10) {
-                    reset_to_sample_detail(fleet, app).await?;
+                    refresh_selected_detail(fleet, app).await?;
                 }
             }
             Focus::Detail => {
@@ -723,7 +645,7 @@ pub(crate) async fn handle_key(
         (KeyCode::PageDown, _) => match app.layout.focus {
             Focus::List => {
                 if app.move_selection(10) {
-                    reset_to_sample_detail(fleet, app).await?;
+                    refresh_selected_detail(fleet, app).await?;
                 }
             }
             Focus::Detail => app.scroll_detail(-10),
@@ -732,7 +654,7 @@ pub(crate) async fn handle_key(
             Focus::List => {
                 if !app.session_list.rows.is_empty() {
                     app.session_list.selected = 0;
-                    reset_to_sample_detail(fleet, app).await?;
+                    refresh_selected_detail(fleet, app).await?;
                 }
             }
             Focus::Detail => app.detail_home(),
@@ -741,7 +663,7 @@ pub(crate) async fn handle_key(
             Focus::List => {
                 if !app.session_list.rows.is_empty() {
                     app.session_list.selected = app.session_list.rows.len().saturating_sub(1);
-                    reset_to_sample_detail(fleet, app).await?;
+                    refresh_selected_detail(fleet, app).await?;
                 }
             }
             Focus::Detail => app.detail_end(),
@@ -792,7 +714,7 @@ async fn handle_send_keys_immediate_shortcut(
 
 async fn move_list_selection(fleet: &HostFleet, app: &mut AppState, delta: isize) -> Result<()> {
     if app.move_selection(delta) {
-        reset_to_sample_detail(fleet, app).await?;
+        refresh_selected_detail(fleet, app).await?;
     }
     Ok(())
 }
@@ -815,7 +737,7 @@ async fn toggle_session_grouping(fleet: &HostFleet, app: &mut AppState) -> Resul
     app.session_list.resort(fleet);
     app.session_list.select_first();
     if previous != current_selection_key(app) {
-        reset_to_sample_detail(fleet, app).await?;
+        refresh_selected_detail(fleet, app).await?;
     }
     app.status = StatusBanner::info(match mode {
         SessionSortMode::Activity => "sort: activity",
@@ -859,9 +781,7 @@ fn new_session_modal_state(fleet: &HostFleet, app: &AppState) -> ModalState {
     }
 }
 
-async fn reset_to_sample_detail(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
-    stop_detail_source(app).await;
-    app.detail.source = DetailSource::sample();
+async fn refresh_selected_detail(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     refresh_detail(fleet, app, true).await
 }
 
@@ -1813,9 +1733,7 @@ async fn send_keys_sequence(
             } else {
                 format!("sent keys to {}", session.name())
             });
-            if app.detail.source.mode() == DetailMode::Sample {
-                refresh_detail(fleet, app, true).await?;
-            }
+            refresh_detail(fleet, app, true).await?;
         }
         None => {
             refresh_sessions(fleet, app, true).await?;
@@ -2211,38 +2129,6 @@ fn host_for_new_session<'a>(fleet: &'a HostFleet, app: &AppState) -> Option<&'a 
     fleet.first()
 }
 
-async fn start_monitor(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
-    let Some(selected) = app.selected_session() else {
-        app.status = StatusBanner::info("no session selected");
-        return Ok(());
-    };
-    let Some(host) = fleet_host(fleet, &selected.host_id) else {
-        app.status =
-            StatusBanner::error(format!("host {} no longer connected", selected.host_label));
-        return Ok(());
-    };
-
-    stop_detail_source(app).await;
-    let mut source = DetailSource::monitor();
-    match source.activate(host, &selected).await {
-        Ok(()) => {
-            app.detail.source = source;
-            app.status = StatusBanner::info(format!("monitoring {}", selected.name()));
-            app.detail.lines.clear();
-        }
-        Err(err) => {
-            app.detail.source = DetailSource::sample();
-            app.status = StatusBanner::error(format!("monitor failed: {err}"));
-            refresh_detail(fleet, app, true).await?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn stop_detail_source(app: &mut AppState) {
-    let _ = app.detail.source.deactivate().await;
-}
-
 async fn fetch_older_detail(fleet: &HostFleet, app: &mut AppState) -> Result<()> {
     let Some(selected) = app.selected_session() else {
         return Ok(());
@@ -2251,10 +2137,7 @@ async fn fetch_older_detail(fleet: &HostFleet, app: &mut AppState) -> Result<()>
         return Ok(());
     };
     let older_than_lines = app.detail.lines.len();
-    let text = app
-        .detail
-        .source
-        .fetch_older(host, &selected, older_than_lines, DEFAULT_DETAIL_LINES)
+    let text = fetch_older_lines(host, &selected, older_than_lines, DEFAULT_DETAIL_LINES)
         .await
         .unwrap_or_default();
     if !text.trim().is_empty() {
