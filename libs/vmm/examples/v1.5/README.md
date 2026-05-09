@@ -128,6 +128,38 @@ The common seed must provide:
 `backend.env.example` and `mounts.example.yaml` are schema examples for the
 first v1.5 image-builder slice.
 
+## Image Builder Contract
+
+The checked-in v1.5 image-builder contract starts at:
+
+```text
+libs/vmm/examples/v1.5/motlie-image.yaml
+```
+
+The standalone builder binary is:
+
+```text
+libs/vmm/bins/motlie-vmm-image.rs
+```
+
+Current CLI:
+
+```bash
+cargo run -p motlie-vmm --bin motlie-vmm-image -- \
+  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --out /tmp/motlie-vmm-image/ch
+
+cargo run -p motlie-vmm --bin motlie-vmm-image -- \
+  validate --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --artifact /tmp/motlie-vmm-image/ch
+```
+
+This first binary slice consumes the config and emits
+`motlie-vmm-image-manifest.json` with declared builder stages. Full issue #271
+closure still requires the binary to execute package installation, backend
+emission, and live v1.5 validation from that config.
+
 ## Service Graph
 
 The converged boot graph is:

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-09 | @vmm-cdx | Add the first issue #271 implementation slice: checked-in `motlie-image.yaml`, `motlie-vmm-image` build/validate binary, and machine-readable declared-stage manifest output |
 | 2026-05-09 | @vmm-cdx | Add GitHub issue #271 closure to v1.5 demo acceptance: implement a checked-in Dockerfile-like build spec and standalone `motlie-vmm-image` builder/validator CLI before accepting the demo |
 | 2026-05-09 | @vmm-cdx | Split Phase 11 rootfs compatibility assembly from per-guest seed overlay emission; record NoCloud seed output, uid/gid ownership enforcement, VFS mount readiness, dynamic backend.env sourcing, and fail-loud CH egress setup |
 | 2026-05-08 | @vmm-cdx | Address PR #270 assembler feedback: complete SSH CA trust config, honor backend.env SSH vsock port, fix clippy cmp-owned, and tighten mount YAML-safe validation |
@@ -110,10 +111,13 @@ Current common guest-image implementation status:
 - [x] The first per-guest seed overlay assembler is implemented. It emits
       NoCloud seed files, backend env, mount config, SSH principal material,
       sudo/user env seed files, and uid/gid ownership for user-owned seed files.
-- [ ] GitHub issue #271 remains open and is now a required v1.5 demo success
-      criterion: the demo is not accepted until a checked-in Dockerfile-like
-      build spec and standalone `motlie-vmm-image` builder/validator CLI drive
-      the staged image build and produce machine-readable stage manifests.
+- [x] GitHub issue #271 has an initial product surface:
+      `libs/vmm/examples/v1.5/motlie-image.yaml` plus
+      `libs/vmm/bins/motlie-vmm-image.rs`.
+- [ ] GitHub issue #271 remains open as a required v1.5 demo success criterion:
+      the demo is not accepted until `motlie-vmm-image` executes package,
+      backend-emitter, and validation stages, not only declared-stage manifest
+      generation.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
       than a Rust-owned OCI-derived rootfs assembly.
 
@@ -665,15 +669,20 @@ Tasks:
   - [x] uid/gid required for user creation and seed-file ownership
   - [x] strict YAML-safe validation for mount tags and guest paths
 - [ ] close GitHub issue #271 as part of the v1.5 demo:
-  - [ ] define and check in the Dockerfile-like builder spec
-        (`libs/vmm/examples/v1.5/Motliefile` or `motlie-image.yaml`)
-  - [ ] declare ordered source/import/classify/package/immutable-layer/policy/
+  - [x] define and check in the Dockerfile-like builder spec
+        (`libs/vmm/examples/v1.5/motlie-image.yaml`)
+  - [x] declare ordered source/import/classify/package/immutable-layer/policy/
         seed/backend-emitter/validation stages in that spec
-  - [ ] make package-manager stages explicit; apt first, with room for
+  - [x] make package-manager stages explicit; apt first, with room for
         apk/dnf/zypper/pacman profiles
-  - [ ] add standalone `motlie-vmm-image build --config ... --target ch|vz
+  - [x] add standalone `motlie-vmm-image build --config ... --target ch|vz
         --out ...`
-  - [ ] add standalone `motlie-vmm-image validate --config ... --artifact ...`
+  - [x] add standalone `motlie-vmm-image validate --config ... --artifact ...`
+  - [x] produce an initial machine-readable manifest for declared stages,
+        immutable files, seed files, source profile, target, and validation
+        requirements
+  - [ ] execute package, immutable-layer, policy, seed, backend-emitter, and
+        validation stages from the config instead of emitting declarations only
   - [ ] produce machine-readable manifests for source digests, package stage
         results, immutable installed files, seed artifacts, backend artifacts,
         pending/runtime requirements, and validation results

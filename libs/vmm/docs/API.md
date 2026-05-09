@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-09 | @vmm-cdx | add the initial `motlie-vmm-image` binary and checked-in `motlie-image.yaml` config surface for issue #271; build/validate now consume the config and emit/check a stage manifest
 - 2026-05-09 | @vmm-cdx | clarify that issue #271 owns the durable config-driven `motlie-vmm-image` product interface and that current rootfs/seed APIs are lower-level builder stages behind that v1.5 demo success criterion
 - 2026-05-09 | @vmm-cdx | split rootfs compatibility assembly from per-guest seed overlay emission and document cloud-init/user ownership, dynamic backend.env sourcing, VFS mount readiness waiting, and fail-loud CH egress setup
 - 2026-05-08 | @vmm-cdx | address PR #270 assembler feedback by documenting SSHD CA trust drop-in installation, backend.env-driven SSH vsock port handling, and strict mount YAML-safe value validation
@@ -821,17 +822,27 @@ Rootfs seed overlay assembler behavior:
 
 The durable v1.5 image-builder interface is not these Rust structs directly.
 GitHub issue #271 tracks the checked-in Dockerfile-like build spec plus
-standalone `motlie-vmm-image` CLI that will consume these stages:
+standalone `motlie-vmm-image` CLI that consumes these stages. The current
+locations are:
+
+```text
+libs/vmm/examples/v1.5/motlie-image.yaml
+libs/vmm/bins/motlie-vmm-image.rs
+```
+
+Current CLI shape:
 
 ```sh
-motlie-vmm-image build --config libs/vmm/examples/v1.5/Motliefile --target ch --out artifacts/v1.5/ch
-motlie-vmm-image build --config libs/vmm/examples/v1.5/Motliefile --target vz --out artifacts/v1.5/vz
-motlie-vmm-image validate --config libs/vmm/examples/v1.5/Motliefile --artifact artifacts/v1.5/ch
+motlie-vmm-image build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out artifacts/v1.5/ch
+motlie-vmm-image build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
+motlie-vmm-image validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch
 ```
 
 The v1.5 demo success criteria require closing #271 with that config/CLI
-surface, machine-readable stage manifests, and CH/VZ validation from the same
-immutable rootfs contract.
+surface, executed package/emitter stages, machine-readable stage manifests, and
+CH/VZ validation from the same immutable rootfs contract. The first binary slice
+emits and validates the declared stage manifest; package installation and
+backend artifact emission remain follow-on #271 work.
 
 Resolver validation:
 

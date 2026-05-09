@@ -26,6 +26,7 @@ host-runtime = [
     "dep:russh",
     "dep:serde",
     "dep:serde_json",
+    "dep:serde_yaml",
     "dep:sha2",
     "dep:shadow-terminal",
     "dep:tar",
@@ -118,3 +119,8 @@ path = "examples/v1.5/harness/main.rs"
 name = "motlie-vfs-guest-v1_5"
 path = "bins/v1.5/motlie-vfs-guest.rs"
 required-features = ["guest-vfs"]
+
+[[bin]]
+name = "motlie-vmm-image"
+path = "bins/motlie-vmm-image.rs"
+required-features = ["host-runtime"]
