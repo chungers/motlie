@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-09 | @vmm-cdx | Split Phase 11 rootfs compatibility assembly from per-guest seed overlay emission; record NoCloud seed output, uid/gid ownership enforcement, VFS mount readiness, dynamic backend.env sourcing, and fail-loud CH egress setup |
 | 2026-05-08 | @vmm-cdx | Address PR #270 assembler feedback: complete SSH CA trust config, honor backend.env SSH vsock port, fix clippy cmp-owned, and tighten mount YAML-safe validation |
 | 2026-05-07 | @vmm-cdx | Implement the first Phase 11 rootfs compatibility assembler slice: install v1.5 Motlie files into supported imported rootfs trees, emit assembly manifests, and keep package/runtime requirements explicit for later stages |
 | 2026-05-07 | @vmm-cdx | Tighten Phase 11 classifier presence checks so apt/dpkg and systemd probes require resolved regular files |
@@ -102,9 +103,12 @@ Current common guest-image implementation status:
 - [x] Imported rootfs classification is implemented as the read-only gate before
       Motlie compatibility-layer assembly.
 - [x] The first rootfs compatibility assembler is implemented for supported
-      imported rootfs trees. It installs v1.5 Motlie payload/config/service/seed
-      files and emits a manifest while leaving package-manager execution to the
-      next builder stage.
+      imported rootfs trees. It installs immutable v1.5 Motlie
+      payload/config/service files and emits a manifest while leaving
+      package-manager execution to the next builder stage.
+- [x] The first per-guest seed overlay assembler is implemented. It emits
+      NoCloud seed files, backend env, mount config, SSH principal material,
+      sudo/user env seed files, and uid/gid ownership for user-owned seed files.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
       than a Rust-owned OCI-derived rootfs assembly.
 
@@ -630,8 +634,8 @@ Tasks:
 - [x] apply the first pre-boot Motlie compatibility layer:
   - [x] Motlie guest binaries under `/opt/motlie/v1.5/guest/bin`
   - [x] compatibility symlinks under `/usr/local/bin`
-  - [x] VFS mount configuration schema
-  - [x] SSH CA/principal seed schema
+  - [x] immutable VFS/backend config directories without baking per-guest
+        `backend.env` or `mounts.yaml`
   - [x] SSHD CA trust drop-in with `TrustedUserCAKeys` and
         `AuthorizedPrincipalsFile`
   - [x] `ubuntu-systemd` service graph under `cloud-init.target`
@@ -642,6 +646,18 @@ Tasks:
         host-escaping paths
   - [x] backend-env-driven SSH vsock bridge script so
         `MOTLIE_SSH_VSOCK_PORT` is honored
+  - [x] backend env is re-sourced inside the SSH bridge retry loop
+  - [x] agent-state setup waits for `/agent-state` and home mounts in
+        `/proc/mounts` before bind-mounting user agent state
+  - [x] CH egress setup fails instead of reporting success when the egress
+        interface cannot be brought up
+- [x] emit the first per-guest seed overlay:
+  - [x] NoCloud `user-data` and `meta-data`
+  - [x] VFS mount configuration schema
+  - [x] backend env schema
+  - [x] SSH CA/principal seed schema
+  - [x] sudoers and user `.env` seed files
+  - [x] uid/gid required for user creation and seed-file ownership
   - [x] strict YAML-safe validation for mount tags and guest paths
 - [ ] add the package strategy for installable profile requirements:
   - [ ] consume `RootfsCompatibilityAssemblyManifest.pending_requirements`

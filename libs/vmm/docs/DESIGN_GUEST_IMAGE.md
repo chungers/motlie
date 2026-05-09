@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-09 | @vmm-cdx | Split immutable rootfs compatibility assembly from per-guest seed overlay emission; document NoCloud seed ownership, uid/gid ownership enforcement, VFS readiness waiting, dynamic backend.env sourcing, and fail-loud CH egress setup |
 | 2026-05-08 | @vmm-cdx | Address PR #270 feedback in the rootfs assembler contract: install SSHD CA trust directives, make the vsock SSH loop consume backend.env, and require strict mount YAML-safe tag/path values |
 | 2026-05-07 | @vmm-cdx | Add the first rootfs compatibility assembler design: mutate imported rootfs trees with v1.5 Motlie files, emit a machine-readable manifest, and record package/runtime requirements still pending for later builder/emitter stages |
 | 2026-05-07 | @vmm-cdx | Tighten rootfs classifier executable probes so package-manager and systemd indicators require resolved regular files, not merely existing paths |
@@ -393,6 +394,8 @@ The seed schema is common. Backend packaging may differ.
 Seed-owned files:
 
 ```text
+/var/lib/cloud/seed/nocloud/user-data
+/var/lib/cloud/seed/nocloud/meta-data
 /etc/motlie/v1.5/backend.env
 /etc/motlie-vfs/mounts.yaml
 /etc/ssh/ca/user_ca.pub
@@ -400,7 +403,13 @@ Seed-owned files:
 /home/<user>/.env
 ```
 
-Cloud-init owns:
+The rootfs builder must keep those files out of the immutable common rootfs.
+They are emitted per guest as NoCloud seed content or as an ephemeral/persistent
+overlay applied before boot. Cloud-init consumes `user-data` and `meta-data`.
+The Motlie guest services consume `backend.env`, `mounts.yaml`, SSH principal
+material, and user environment files from the same per-guest seed/overlay.
+
+Seed/overlay-owned dynamic semantics:
 
 - user creation
 - uid/gid
@@ -617,8 +626,8 @@ Pre-boot adaptation owns:
   `/agent-state`, and `/home/<user>` templates where the image policy requires
   them
 - installing baseline packages required by the selected validation profile
-- installing backend-neutral config schemas such as
-  `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
+- creating backend-neutral config directories and service defaults; concrete
+  `backend.env` and `mounts.yaml` contents are per-guest seed/overlay files
 - enabling the CH egress setup service only in CH-emitted artifacts when CH
   requires guest-side route/DNS programming
 
@@ -857,16 +866,22 @@ not yet emit VM boot artifacts.
   `/lib/systemd/systemd`. Package-manager and systemd indicator probes require
   resolved regular files; directories or other non-file path types are not
   accepted as present.
-- `RootfsCompatibilityAssembler` applies the first pre-boot Motlie compatibility
+- `RootfsCompatibilityAssembler` applies the immutable Motlie compatibility
   layer to a supported imported rootfs. It installs v1.5 guest payloads under
   `/opt/motlie/v1.5/guest/bin`, exposes compatibility symlinks under
-  `/usr/local/bin`, writes `backend.env`, writes `mounts.yaml`, installs the
-  `ubuntu-systemd` service graph, creates required mount directories, and writes
-  SSH CA/principal/sudo/user-env seed files. The assembler emits
+  `/usr/local/bin`, installs the `ubuntu-systemd` service graph, creates stable
+  directories, installs SSHD CA trust directives, and emits
   `RootfsCompatibilityAssemblyManifest` with installed paths and pending
-  requirements. Missing installable packages or missing systemd remain explicit
-  manifest evidence unless the caller selects the fail-fast pending-requirement
-  policy; this slice does not fake package installation.
+  requirements. It does not write per-guest `backend.env`, `mounts.yaml`, SSH
+  principals, sudo/user env files, or cloud-init seed files.
+- `RootfsSeedOverlayAssembler` emits the per-guest seed/overlay layer. It writes
+  NoCloud `user-data` / `meta-data`, `backend.env`, `mounts.yaml`, SSH CA and
+  principal material, sudoers, and user `.env` files. User seeds require uid/gid
+  so cloud-init can create the OS user and seed-owned files such as
+  `/home/<user>/.env` can be chowned before boot. Missing installable packages
+  or missing systemd remain explicit manifest evidence unless the caller selects
+  the fail-fast pending-requirement policy; this slice does not fake package
+  installation.
 
 ### Rootfs Classifier Requirements And Design
 
@@ -921,11 +936,12 @@ must fail if a caller combines the Ubuntu profile name with a different source
 image or init profile. SHA-family OCI digests must be full-length digests, not
 short placeholders, because validation records are provenance artifacts.
 
-### Rootfs Compatibility Assembler Requirements And Design
+### Rootfs Compatibility And Seed Overlay Requirements And Design
 
-The compatibility assembler is the first mutating step after rootfs import and
-classification. Its job is to turn a supported foundation rootfs into a Motlie
-v1.5 rootfs contract before any CH or VZ backend emitter packages it.
+The immutable compatibility assembler is the first mutating step after rootfs
+import and classification. Its job is to turn a supported foundation rootfs into
+a reusable Motlie v1.5 rootfs contract before any CH or VZ backend emitter
+packages it. Per-guest state is a separate seed/overlay emission step.
 
 Functional requirements:
 
@@ -934,10 +950,19 @@ Functional requirements:
 - The assembler must classify the rootfs first and refuse `unsupported`
   foundations. Mutation only begins after the read-only classifier reports a
   supported foundation.
-- The assembler installs static Motlie contract files only: guest binaries,
-  support scripts, systemd units, compatibility symlinks, profile scripts,
-  backend-neutral config files, SSH seed files, sudoers seed files, and required
-  mount-point directories.
+- The compatibility assembler installs immutable Motlie contract files only:
+  guest binaries, support scripts, systemd units, compatibility symlinks,
+  profile scripts, SSHD CA trust directives, backend-neutral directories, and
+  required mount-point directories.
+- The compatibility assembler must not write per-guest state into the common
+  rootfs: no `backend.env`, no `mounts.yaml`, no NoCloud seed, no SSH
+  principals, no sudoers, and no user `.env` files.
+- `RootfsSeedOverlayAssembler` owns the per-guest seed/overlay layer:
+  NoCloud `user-data` and `meta-data`, `backend.env`, `mounts.yaml`, SSH CA key,
+  auth principals, sudoers, and user `.env` files.
+- User seed entries require uid/gid. The seed overlay renders cloud-init user
+  creation and also applies the same uid/gid ownership to user-owned seed files,
+  preventing root-owned `0600` files from becoming unreadable after boot.
 - The assembler must not run apt, dpkg, systemctl, chroot, SSH, TTY, or any
   backend-specific emitter operation. Package-manager execution belongs to a
   later builder/package strategy. Backend artifact packaging belongs to CH/VZ
@@ -950,14 +975,21 @@ Functional requirements:
   VFS/FUSE support, networking/debugging tools, `socat` for the vsock SSH loop,
   and coding-agent CLI prerequisites such as `git` and `npm`. Production
   builders can supply a different package set through `RootfsProfileSpec`.
-- SSH CA auto-provisioning must be complete in the rootfs, not only partially
-  seeded. When a user CA key is supplied, the assembler writes both
-  `/etc/ssh/ca/user_ca.pub` and an OpenSSH drop-in at
-  `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` with `TrustedUserCAKeys` and
-  `AuthorizedPrincipalsFile` directives.
-- The vsock SSH loop consumes `/etc/motlie/v1.5/backend.env` at runtime so
-  `MOTLIE_SSH_VSOCK_PORT` in the manifest/env contract is the value used by the
-  guest bridge. The default remains port `2222`.
+- SSH CA auto-provisioning is split: the common rootfs installs the OpenSSH
+  drop-in at `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` and an empty
+  `/etc/ssh/ca/user_ca.pub` placeholder, while the seed overlay supplies the
+  per-guest CA key contents and `/etc/ssh/auth_principals/<user>`.
+- The vsock SSH loop re-sources `/etc/motlie/v1.5/backend.env` inside its retry
+  loop so seed/overlay refreshes are visible without relying on stale shell
+  variables. The default remains port `2222`.
+- `motlie-agent-state-setup` waits for `/agent-state` and the target home
+  directory to appear in `/proc/mounts` before bind-mounting agent state into
+  the guest home. The unit graph therefore does not depend on `Type=notify`,
+  but the script has an explicit readiness contract rather than only
+  `After=motlie-vfs-guest.service`.
+- CH egress setup must fail loudly if the selected egress interface cannot be
+  brought up. Skipping route/DNS configuration after a failed `ip link set up`
+  is not a successful boot contract.
 - Mount config rendering stays manual for this first slice, but it is not
   freeform: mount tags and mount guest-path components must be ASCII tokens
   using only letters, digits, `_`, `-`, or `.`. Guest mount paths must be
@@ -974,17 +1006,25 @@ Functional requirements:
 The first API surface is:
 
 ```rust
-let mut spec = RootfsCompatibilityLayerSpec::new(
-    rootfs_profile_spec,
-    RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
-);
-spec.mounts.push(RootfsMountSpec::new("alice-workspace", "/workspace"));
-spec.guest_binaries.push(
+let mut rootfs_spec = RootfsCompatibilityLayerSpec::new(rootfs_profile_spec);
+rootfs_spec.guest_binaries.push(
     RootfsPayloadFile::new(host_guest_binary, MOTLIE_V15_GUEST_BIN_OPT, 0o755)
         .with_link(MOTLIE_V15_GUEST_BIN_COMPAT),
 );
 
-let manifest = RootfsCompatibilityAssembler::new().assemble(rootfs, &spec)?;
+let rootfs_manifest = RootfsCompatibilityAssembler::new().assemble(rootfs, &rootfs_spec)?;
+
+let mut seed_spec = RootfsSeedOverlaySpec::new(
+    RootfsCloudInitSeed::new("alice", "motlie-alice"),
+    RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
+);
+seed_spec.mounts.push(RootfsMountSpec::new("alice-workspace", "/workspace"));
+let mut alice = RootfsUserSeed::new("alice", "alice");
+alice.uid = Some(1000);
+alice.gid = Some(1000);
+seed_spec.users.push(alice);
+
+let seed_manifest = RootfsSeedOverlayAssembler::new().assemble(seed_overlay_root, &seed_spec)?;
 ```
 
 The manifest is the handoff contract for the next slices:

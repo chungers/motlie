@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-09 | @vmm-cdx | split rootfs compatibility assembly from per-guest seed overlay emission and document cloud-init/user ownership, dynamic backend.env sourcing, VFS mount readiness waiting, and fail-loud CH egress setup
 - 2026-05-08 | @vmm-cdx | address PR #270 assembler feedback by documenting SSHD CA trust drop-in installation, backend.env-driven SSH vsock port handling, and strict mount YAML-safe value validation
 - 2026-05-07 | @vmm-cdx | add the rootfs compatibility assembler API that installs the v1.5 Motlie pre-boot layer into supported imported rootfs trees and emits installed/pending manifest evidence
 - 2026-05-07 | @vmm-cdx | tighten rootfs classifier executable probes so apt/dpkg and systemd indicators require resolved regular files, not directories or other existing paths
@@ -78,6 +79,7 @@ High-level status:
   - [x] selected platform-manifest digest extraction
   - [x] content-addressed fetch/cache for selected platform manifests and rootfs layers
   - [x] rootfs compatibility assembler for the first v1.5 pre-boot Motlie layer
+  - [x] per-guest seed overlay assembler for NoCloud, backend env, mounts, SSH, sudo, and user env state
   - [x] machine-readable compatibility assembly manifest with pending package/runtime requirements
 
 Phase 1 convergence:
@@ -614,8 +616,9 @@ manifests, fetches selected platform manifests and layer blobs into a
 content-addressed cache, and can unpack digest-checked local rootfs layer blobs
 into an empty assembly root. It can also classify an imported rootfs against a
 data-driven profile and apply the first pre-boot Motlie compatibility layer to
-a supported rootfs. It does not yet run package-manager installation and it does
-not yet emit CH/VZ artifacts.
+a supported rootfs, with per-guest seed/overlay emission split into a separate
+API. It does not yet run package-manager installation and it does not yet emit
+CH/VZ artifacts.
 
 ```rust
 use motlie_vmm::backend::BackendKind;
@@ -623,9 +626,10 @@ use motlie_vmm::image::{
     EmittedArtifactDigest, ExternalOciSource, GuestImageProfile, GuestImageValidationRecord,
     OciContentCache, OciDigest, OciImageReference, OciPlatform, OciRegistryClient,
     OciRootfsImporter, RootfsClassificationStatus, RootfsClassifier,
-    RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec,
-    RootfsMountSpec, RootfsPayloadFile, RootfsProfileSpec, MOTLIE_V15_GUEST_BIN_COMPAT,
-    MOTLIE_V15_GUEST_BIN_OPT,
+    RootfsCloudInitSeed, RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv,
+    RootfsCompatibilityLayerSpec, RootfsMountSpec, RootfsPayloadFile, RootfsProfileSpec,
+    RootfsSeedOverlayAssembler, RootfsSeedOverlaySpec, RootfsUserSeed,
+    MOTLIE_V15_GUEST_BIN_COMPAT, MOTLIE_V15_GUEST_BIN_OPT,
 };
 
 let source = ExternalOciSource::ubuntu_systemd(
@@ -667,11 +671,7 @@ let classifier_spec = RootfsProfileSpec::for_profile(profile.clone());
 let classification = RootfsClassifier::new().classify(&imported.root, &classifier_spec)?;
 assert_ne!(classification.status, RootfsClassificationStatus::Unsupported);
 
-let mut assembly_spec = RootfsCompatibilityLayerSpec::new(
-    classifier_spec,
-    RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
-);
-assembly_spec.mounts.push(RootfsMountSpec::new("workspace", "/workspace"));
+let mut assembly_spec = RootfsCompatibilityLayerSpec::new(classifier_spec);
 let host_guest_binary = "/tmp/motlie-vfs-guest";
 assembly_spec.guest_binaries.push(
     RootfsPayloadFile::new(host_guest_binary, MOTLIE_V15_GUEST_BIN_OPT, 0o755)
@@ -679,6 +679,18 @@ assembly_spec.guest_binaries.push(
 );
 let assembly = RootfsCompatibilityAssembler::new().assemble(&imported.root, &assembly_spec)?;
 assert_eq!(assembly.contract_version, "v1.5");
+
+let mut seed_spec = RootfsSeedOverlaySpec::new(
+    RootfsCloudInitSeed::new("alice", "motlie-alice"),
+    RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
+);
+seed_spec.mounts.push(RootfsMountSpec::new("workspace", "/workspace"));
+let mut alice = RootfsUserSeed::new("alice", "alice");
+alice.uid = Some(1000);
+alice.gid = Some(1000);
+seed_spec.users.push(alice);
+let seed_overlay = RootfsSeedOverlayAssembler::new().assemble("/tmp/alice-seed", &seed_spec)?;
+assert_eq!(seed_overlay.contract_version, "v1.5");
 ```
 
 The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
@@ -769,15 +781,18 @@ Rootfs compatibility assembler behavior:
 - refuses unsupported foundations before any mutation
 - installs guest payloads under `/opt/motlie/v1.5/guest/bin` and compatibility
   symlinks under `/usr/local/bin`
-- writes `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
 - installs v1.5 support scripts, profile scripts, and the `ubuntu-systemd`
   service graph under `cloud-init.target` / `multi-user.target`
-- writes SSH CA/principal, sudoers, and user `.env` seed files when provided;
-  CA login includes `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` with
-  `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`
-- makes the vsock SSH bridge source `/etc/motlie/v1.5/backend.env`, so
-  `MOTLIE_SSH_VSOCK_PORT` is honored instead of hardcoded
-- creates required mount directories and records all installed paths in
+- installs the OpenSSH CA trust drop-in
+  `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` plus an empty
+  `/etc/ssh/ca/user_ca.pub` placeholder; per-guest CA key and principal files
+  come from the seed overlay
+- installs `motlie-agent-state-setup` with an explicit `/proc/mounts` wait for
+  `/agent-state` and the user home before binding agent-state directories
+- makes the vsock SSH bridge re-source `/etc/motlie/v1.5/backend.env` inside
+  its retry loop, so seed/overlay refreshes can update `MOTLIE_SSH_VSOCK_PORT`
+- fails CH egress setup if the selected egress interface cannot be brought up
+- creates stable required mount directories and records installed paths in
   `RootfsCompatibilityAssemblyManifest`
 - records installable package/init gaps and runtime gaps such as `/dev/fuse` in
   `pending_requirements`; it does not run apt/dpkg or pretend packages were
@@ -785,6 +800,18 @@ Rootfs compatibility assembler behavior:
 - uses the selected `RootfsProfileSpec` package data as the source of truth; the
   built-in `ubuntu-systemd` profile mirrors the current v1.5 validation package
   baseline and can be overridden by production builders
+
+Rootfs seed overlay assembler behavior:
+
+- takes per-guest `RootfsSeedOverlaySpec`
+- writes NoCloud `user-data` and `meta-data` for cloud-init user creation,
+  hostname, uid/gid, and passwordless sudo where requested
+- writes `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
+- writes `/etc/ssh/ca/user_ca.pub`, `/etc/ssh/auth_principals/<user>`,
+  `/etc/sudoers.d/90-motlie-vmm`, and `/home/<user>/.env` seed files when
+  requested
+- requires each user seed to carry uid/gid and applies ownership to user home
+  directories and `0600` user env files before boot
 - enforces YAML-safe mount tags and guest-path components: ASCII letters,
   digits, `_`, `-`, and `.` only; mount guest paths must be absolute and cannot
   be `/`

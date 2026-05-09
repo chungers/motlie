@@ -27,6 +27,8 @@ pub const MOTLIE_V15_GUEST_BIN_COMPAT: &str = "/usr/local/bin/motlie-vfs-guest";
 pub const MOTLIE_V15_BACKEND_ENV_PATH: &str = "/etc/motlie/v1.5/backend.env";
 pub const MOTLIE_V15_MOUNTS_PATH: &str = "/etc/motlie-vfs/mounts.yaml";
 pub const MOTLIE_V15_SSHD_CA_CONFIG_PATH: &str = "/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf";
+pub const MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH: &str = "/var/lib/cloud/seed/nocloud/user-data";
+pub const MOTLIE_V15_CLOUD_INIT_META_DATA_PATH: &str = "/var/lib/cloud/seed/nocloud/meta-data";
 pub const MOTLIE_V15_VFS_HOST_CID: u32 = 2;
 pub const MOTLIE_V15_VFS_PORT: u16 = 5000;
 pub const MOTLIE_V15_SSH_VSOCK_PORT: u16 = 2222;
@@ -804,12 +806,14 @@ impl RootfsClassifier {
             });
         }
 
-        let mut findings = vec![RootfsRequirementFinding::new(
-            RootfsRequirementKind::RootDirectory,
-            RootfsRequirementStatus::Present,
-            "rootfs assembly root is a directory",
-        )
-        .with_path("/")];
+        let mut findings = vec![
+            RootfsRequirementFinding::new(
+                RootfsRequirementKind::RootDirectory,
+                RootfsRequirementStatus::Present,
+                "rootfs assembly root is a directory",
+            )
+            .with_path("/"),
+        ];
 
         let os_release = read_rootfs_os_release(root)?;
         findings.push(classify_os_release(&spec.os, os_release.as_ref()));
@@ -973,6 +977,27 @@ impl RootfsUserSeed {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootfsCloudInitSeed {
+    pub instance_id: String,
+    pub local_hostname: String,
+}
+
+impl RootfsCloudInitSeed {
+    pub fn new(instance_id: impl Into<String>, local_hostname: impl Into<String>) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+            local_hostname: local_hostname.into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), RootfsCompatibilityError> {
+        validate_env_token("cloud-init instance-id", &self.instance_id)?;
+        validate_env_token("cloud-init local-hostname", &self.local_hostname)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RootfsPendingRequirementPolicy {
@@ -983,27 +1008,16 @@ pub enum RootfsPendingRequirementPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootfsCompatibilityLayerSpec {
     pub profile_spec: RootfsProfileSpec,
-    pub backend_env: RootfsCompatibilityBackendEnv,
-    pub mounts: Vec<RootfsMountSpec>,
     pub guest_binaries: Vec<RootfsPayloadFile>,
-    pub users: Vec<RootfsUserSeed>,
-    pub ssh_user_ca_pubkey: Option<String>,
     pub enable_ch_egress_service: bool,
     pub pending_requirement_policy: RootfsPendingRequirementPolicy,
 }
 
 impl RootfsCompatibilityLayerSpec {
-    pub fn new(
-        profile_spec: RootfsProfileSpec,
-        backend_env: RootfsCompatibilityBackendEnv,
-    ) -> Self {
+    pub fn new(profile_spec: RootfsProfileSpec) -> Self {
         Self {
             profile_spec,
-            backend_env,
-            mounts: Vec::new(),
             guest_binaries: Vec::new(),
-            users: Vec::new(),
-            ssh_user_ca_pubkey: None,
             enable_ch_egress_service: false,
             pending_requirement_policy: RootfsPendingRequirementPolicy::Record,
         }
@@ -1013,13 +1027,8 @@ impl RootfsCompatibilityLayerSpec {
         self.profile_spec
             .validate()
             .map_err(RootfsCompatibilityError::Classification)?;
-        self.backend_env.validate()?;
         if self.guest_binaries.is_empty() {
             return Err(RootfsCompatibilityError::MissingGuestBinaryPayload);
-        }
-        for mount in &self.mounts {
-            validate_mount_tag(&mount.tag)?;
-            validate_mount_guest_path(&mount.guest_path)?;
         }
         for payload in &self.guest_binaries {
             map_install_path_error(
@@ -1029,6 +1038,40 @@ impl RootfsCompatibilityLayerSpec {
             for link_path in &payload.link_paths {
                 map_install_path_error(link_path, validate_rootfs_requirement_path(link_path))?;
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootfsSeedOverlaySpec {
+    pub cloud_init: RootfsCloudInitSeed,
+    pub backend_env: RootfsCompatibilityBackendEnv,
+    pub mounts: Vec<RootfsMountSpec>,
+    pub users: Vec<RootfsUserSeed>,
+    pub ssh_user_ca_pubkey: Option<String>,
+}
+
+impl RootfsSeedOverlaySpec {
+    pub fn new(
+        cloud_init: RootfsCloudInitSeed,
+        backend_env: RootfsCompatibilityBackendEnv,
+    ) -> Self {
+        Self {
+            cloud_init,
+            backend_env,
+            mounts: Vec::new(),
+            users: Vec::new(),
+            ssh_user_ca_pubkey: None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), RootfsCompatibilityError> {
+        self.cloud_init.validate()?;
+        self.backend_env.validate()?;
+        for mount in &self.mounts {
+            validate_mount_tag(&mount.tag)?;
+            validate_mount_guest_path(&mount.guest_path)?;
         }
         if let Some(pubkey) = &self.ssh_user_ca_pubkey {
             validate_config_value("ssh_user_ca_pubkey", pubkey)?;
@@ -1119,6 +1162,15 @@ pub struct RootfsCompatibilityAssemblyManifest {
     pub classification: RootfsClassification,
     pub installed: Vec<RootfsCompatibilityInstallRecord>,
     pub pending_requirements: Vec<RootfsCompatibilityPendingRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootfsSeedOverlayManifest {
+    pub root: PathBuf,
+    pub contract_version: String,
+    pub installed: Vec<RootfsCompatibilityInstallRecord>,
+    pub cloud_init_user_data_path: PathBuf,
+    pub cloud_init_meta_data_path: PathBuf,
     pub backend_env_path: PathBuf,
     pub mounts_path: PathBuf,
 }
@@ -1170,9 +1222,6 @@ impl RootfsCompatibilityAssembler {
         install_required_directories(root, spec, &mut installed)?;
         install_guest_payloads(root, spec, &mut installed)?;
         install_builtin_support_files(root, spec.enable_ch_egress_service, &mut installed)?;
-        install_backend_env(root, &spec.backend_env, &mut installed)?;
-        install_mounts_yaml(root, &spec.mounts, &mut installed)?;
-        install_ssh_and_user_seeds(root, spec, &mut installed)?;
 
         Ok(RootfsCompatibilityAssemblyManifest {
             root: root.to_path_buf(),
@@ -1181,6 +1230,38 @@ impl RootfsCompatibilityAssembler {
             classification,
             installed,
             pending_requirements,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RootfsSeedOverlayAssembler;
+
+impl RootfsSeedOverlayAssembler {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn assemble(
+        &self,
+        root: impl AsRef<Path>,
+        spec: &RootfsSeedOverlaySpec,
+    ) -> Result<RootfsSeedOverlayManifest, RootfsCompatibilityError> {
+        spec.validate()?;
+        let root = root.as_ref();
+        let mut installed = Vec::new();
+        install_seed_overlay_directories(root, spec, &mut installed)?;
+        install_cloud_init_seed(root, spec, &mut installed)?;
+        install_backend_env(root, &spec.backend_env, &mut installed)?;
+        install_mounts_yaml(root, &spec.mounts, &mut installed)?;
+        install_ssh_and_user_seeds(root, spec, &mut installed)?;
+
+        Ok(RootfsSeedOverlayManifest {
+            root: root.to_path_buf(),
+            contract_version: MOTLIE_V15_CONTRACT_VERSION.to_string(),
+            installed,
+            cloud_init_user_data_path: PathBuf::from(MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH),
+            cloud_init_meta_data_path: PathBuf::from(MOTLIE_V15_CLOUD_INIT_META_DATA_PATH),
             backend_env_path: PathBuf::from(MOTLIE_V15_BACKEND_ENV_PATH),
             mounts_path: PathBuf::from(MOTLIE_V15_MOUNTS_PATH),
         })
@@ -1869,7 +1950,9 @@ pub enum RootfsClassificationError {
 pub enum RootfsCompatibilityError {
     #[error(transparent)]
     Classification(#[from] RootfsClassificationError),
-    #[error("rootfs is unsupported for profile {profile_name}: {unsupported_findings} unsupported finding(s)")]
+    #[error(
+        "rootfs is unsupported for profile {profile_name}: {unsupported_findings} unsupported finding(s)"
+    )]
     UnsupportedRootfs {
         profile_name: String,
         unsupported_findings: usize,
@@ -1895,6 +1978,8 @@ pub enum RootfsCompatibilityError {
     },
     #[error("rootfs compatibility symlink creation is unsupported on this host platform")]
     UnsupportedHostSymlink,
+    #[error("rootfs compatibility ownership changes are unsupported on this host platform")]
+    UnsupportedHostOwnership,
     #[error("I/O error at {path:?}: {source}")]
     Io {
         path: Option<PathBuf>,
@@ -2055,6 +2140,23 @@ set -eu
 # /agent-state or /home paths because ownership is presented by the active VFS
 # layer for the guest uid/gid.
 
+is_mounted() {
+    mount_path="$1"
+    awk -v mount_path="$mount_path" '$2 == mount_path { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts
+}
+
+wait_for_mount() {
+    mount_path="$1"
+    for _attempt in $(seq 1 120); do
+        if is_mounted "$mount_path"; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "motlie-agent-state-setup: timed out waiting for $mount_path mount" >&2
+    return 1
+}
+
 setup_user() {
     user_name="$1"
     home_dir="/home/$user_name"
@@ -2064,6 +2166,8 @@ setup_user() {
     claude_code_dst="$config_dir/claude-code"
 
     [ -d "$home_dir" ] || return 0
+    wait_for_mount /agent-state
+    wait_for_mount "$home_dir"
 
     for mount_path in "$codex_dst" "$claude_dst" "$claude_code_dst"; do
         umount "$mount_path" >/dev/null 2>&1 || true
@@ -2095,13 +2199,13 @@ const MOTLIE_VMM_VSOCK_SSH_LOOP_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 
 BACKEND_ENV="${MOTLIE_BACKEND_ENV:-/etc/motlie/v1.5/backend.env}"
-if [ -f "$BACKEND_ENV" ]; then
-    . "$BACKEND_ENV"
-fi
-SSH_HOST_CID="${MOTLIE_SSH_HOST_CID:-${MOTLIE_VFS_HOST_CID:-2}}"
-SSH_VSOCK_PORT="${MOTLIE_SSH_VSOCK_PORT:-2222}"
 
 while true; do
+    if [ -f "$BACKEND_ENV" ]; then
+        . "$BACKEND_ENV"
+    fi
+    SSH_HOST_CID="${MOTLIE_SSH_HOST_CID:-${MOTLIE_VFS_HOST_CID:-2}}"
+    SSH_VSOCK_PORT="${MOTLIE_SSH_VSOCK_PORT:-2222}"
     /usr/bin/socat "VSOCK-CONNECT:${SSH_HOST_CID}:${SSH_VSOCK_PORT}" TCP:127.0.0.1:22 || true
     sleep 1
 done
@@ -2159,7 +2263,7 @@ done
 
 mkdir -p /run
 ln -sf "/sys/class/net/$EGRESS_IFACE" /run/motlie-vmm-egress.link
-ip link set "$EGRESS_IFACE" up || exit 0
+ip link set "$EGRESS_IFACE" up
 ip addr replace "$EGRESS_IPV4/24" dev "$EGRESS_IFACE"
 ip route replace "$EGRESS_NETWORK/24" dev "$EGRESS_IFACE" scope link src "$EGRESS_IPV4"
 ip route replace default via "$EGRESS_GATEWAY" dev "$EGRESS_IFACE" metric 100
@@ -2497,12 +2601,33 @@ fn install_required_directories(
     for path in &spec.profile_spec.profile.required_mount_points {
         dirs.insert(path.clone());
     }
+
+    for dir in dirs {
+        rootfs_ensure_dir(root, &dir, 0o755)?;
+        installed.push(RootfsCompatibilityInstallRecord::new(
+            RootfsCompatibilityInstallKind::Directory,
+            dir,
+            Some(0o755),
+        ));
+    }
+    Ok(())
+}
+
+fn install_seed_overlay_directories(
+    root: &Path,
+    spec: &RootfsSeedOverlaySpec,
+    installed: &mut Vec<RootfsCompatibilityInstallRecord>,
+) -> Result<(), RootfsCompatibilityError> {
+    let mut dirs = BTreeSet::from([
+        PathBuf::from("/etc/motlie/v1.5"),
+        PathBuf::from("/etc/motlie-vfs"),
+        PathBuf::from("/var/lib/cloud/seed/nocloud"),
+    ]);
     for mount in &spec.mounts {
         dirs.insert(mount.guest_path.clone());
     }
     if spec.ssh_user_ca_pubkey.is_some() {
         dirs.insert(PathBuf::from("/etc/ssh/ca"));
-        dirs.insert(PathBuf::from("/etc/ssh/sshd_config.d"));
     }
     if spec.users.iter().any(|user| user.ssh_principal.is_some()) {
         dirs.insert(PathBuf::from("/etc/ssh/auth_principals"));
@@ -2521,6 +2646,11 @@ fn install_required_directories(
             dir,
             Some(0o755),
         ));
+    }
+    for user in &spec.users {
+        if user.uid.is_some() || user.gid.is_some() {
+            rootfs_set_guest_owner(root, &user.home, user.uid, user.gid)?;
+        }
     }
     Ok(())
 }
@@ -2621,6 +2751,22 @@ fn install_builtin_support_files(
         RootfsCompatibilityInstallKind::ServiceUnit,
         installed,
     )?;
+    install_builtin_file(
+        root,
+        MOTLIE_V15_SSHD_CA_CONFIG_PATH,
+        MOTLIE_SSHD_CA_CONFIG,
+        0o644,
+        RootfsCompatibilityInstallKind::Config,
+        installed,
+    )?;
+    install_builtin_file(
+        root,
+        "/etc/ssh/ca/user_ca.pub",
+        "",
+        0o644,
+        RootfsCompatibilityInstallKind::Config,
+        installed,
+    )?;
     install_service_enablement(
         root,
         "/etc/systemd/system/cloud-init.target.wants/motlie-vfs-guest.service",
@@ -2697,6 +2843,38 @@ fn install_builtin_support_files(
     Ok(())
 }
 
+fn install_cloud_init_seed(
+    root: &Path,
+    spec: &RootfsSeedOverlaySpec,
+    installed: &mut Vec<RootfsCompatibilityInstallRecord>,
+) -> Result<(), RootfsCompatibilityError> {
+    rootfs_write_file(
+        root,
+        Path::new(MOTLIE_V15_CLOUD_INIT_META_DATA_PATH),
+        render_cloud_init_meta_data(&spec.cloud_init)?.as_bytes(),
+        0o644,
+    )?;
+    installed.push(RootfsCompatibilityInstallRecord::new(
+        RootfsCompatibilityInstallKind::Config,
+        MOTLIE_V15_CLOUD_INIT_META_DATA_PATH,
+        Some(0o644),
+    ));
+
+    rootfs_write_file(
+        root,
+        Path::new(MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH),
+        render_cloud_init_user_data(&spec.users)?.as_bytes(),
+        0o644,
+    )?;
+    installed.push(RootfsCompatibilityInstallRecord::new(
+        RootfsCompatibilityInstallKind::Config,
+        MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH,
+        Some(0o644),
+    ));
+
+    Ok(())
+}
+
 fn install_backend_env(
     root: &Path,
     backend_env: &RootfsCompatibilityBackendEnv,
@@ -2737,7 +2915,7 @@ fn install_mounts_yaml(
 
 fn install_ssh_and_user_seeds(
     root: &Path,
-    spec: &RootfsCompatibilityLayerSpec,
+    spec: &RootfsSeedOverlaySpec,
     installed: &mut Vec<RootfsCompatibilityInstallRecord>,
 ) -> Result<(), RootfsCompatibilityError> {
     if let Some(pubkey) = &spec.ssh_user_ca_pubkey {
@@ -2750,17 +2928,6 @@ fn install_ssh_and_user_seeds(
         installed.push(RootfsCompatibilityInstallRecord::new(
             RootfsCompatibilityInstallKind::SshSeed,
             "/etc/ssh/ca/user_ca.pub",
-            Some(0o644),
-        ));
-        rootfs_write_file(
-            root,
-            Path::new(MOTLIE_V15_SSHD_CA_CONFIG_PATH),
-            MOTLIE_SSHD_CA_CONFIG.as_bytes(),
-            0o644,
-        )?;
-        installed.push(RootfsCompatibilityInstallRecord::new(
-            RootfsCompatibilityInstallKind::SshSeed,
-            MOTLIE_V15_SSHD_CA_CONFIG_PATH,
             Some(0o644),
         ));
     }
@@ -2793,6 +2960,7 @@ fn install_ssh_and_user_seeds(
         if !user.env.is_empty() {
             let path = user.home.join(".env");
             rootfs_write_file(root, &path, render_user_env(user)?.as_bytes(), 0o600)?;
+            rootfs_set_guest_owner(root, &path, user.uid, user.gid)?;
             installed.push(RootfsCompatibilityInstallRecord::new(
                 RootfsCompatibilityInstallKind::Config,
                 path,
@@ -2872,6 +3040,58 @@ fn render_rootfs_mounts_yaml(
     Ok(out)
 }
 
+fn render_cloud_init_meta_data(
+    seed: &RootfsCloudInitSeed,
+) -> Result<String, RootfsCompatibilityError> {
+    seed.validate()?;
+    Ok(format!(
+        "instance-id: {}\nlocal-hostname: {}\n",
+        seed.instance_id, seed.local_hostname
+    ))
+}
+
+fn render_cloud_init_user_data(
+    users: &[RootfsUserSeed],
+) -> Result<String, RootfsCompatibilityError> {
+    let mut out = String::from("#cloud-config\n");
+    if users.is_empty() {
+        out.push_str("users: []\n");
+        return Ok(out);
+    }
+
+    out.push_str("users:\n");
+    for user in users {
+        validate_user_seed(user)?;
+        let Some(uid) = user.uid else {
+            return Err(RootfsCompatibilityError::InvalidConfigValue {
+                field: "user uid".to_string(),
+                value: user.user.clone(),
+                reason: "cloud-init user seed requires uid".to_string(),
+            });
+        };
+        let Some(gid) = user.gid else {
+            return Err(RootfsCompatibilityError::InvalidConfigValue {
+                field: "user gid".to_string(),
+                value: user.user.clone(),
+                reason: "cloud-init user seed requires gid".to_string(),
+            });
+        };
+        writeln!(&mut out, "  - name: {}", user.user).expect("writing to String cannot fail");
+        writeln!(&mut out, "    uid: {uid}").expect("writing to String cannot fail");
+        writeln!(&mut out, "    gid: {gid}").expect("writing to String cannot fail");
+        writeln!(&mut out, "    home: {}", user.home.display())
+            .expect("writing to String cannot fail");
+        writeln!(&mut out, "    shell: /bin/bash").expect("writing to String cannot fail");
+        if user.passwordless_sudo {
+            writeln!(&mut out, "    groups: [sudo]").expect("writing to String cannot fail");
+            writeln!(&mut out, "    sudo: ALL=(ALL) NOPASSWD:ALL")
+                .expect("writing to String cannot fail");
+        }
+        writeln!(&mut out, "    lock_passwd: true").expect("writing to String cannot fail");
+    }
+    Ok(out)
+}
+
 fn render_sudoers(users: &[RootfsUserSeed]) -> Result<String, RootfsCompatibilityError> {
     let mut out = String::new();
     for user in users.iter().filter(|user| user.passwordless_sudo) {
@@ -2899,6 +3119,14 @@ fn shell_quote(value: &str) -> String {
 fn validate_user_seed(user: &RootfsUserSeed) -> Result<(), RootfsCompatibilityError> {
     validate_user_name(&user.user)?;
     map_install_path_error(&user.home, validate_rootfs_requirement_path(&user.home))?;
+    if user.uid.is_none() || user.gid.is_none() {
+        return Err(RootfsCompatibilityError::InvalidConfigValue {
+            field: "user uid/gid".to_string(),
+            value: user.user.clone(),
+            reason: "per-guest user seed requires both uid and gid for cloud-init creation and file ownership"
+                .to_string(),
+        });
+    }
     if let Some(principal) = &user.ssh_principal {
         validate_config_value("ssh_principal", principal)?;
     }
@@ -3208,6 +3436,45 @@ fn rootfs_set_mode(path: &Path, mode: u32) -> Result<(), RootfsCompatibilityErro
 #[cfg(not(unix))]
 fn rootfs_set_mode(_path: &Path, _mode: u32) -> Result<(), RootfsCompatibilityError> {
     Ok(())
+}
+
+fn rootfs_set_guest_owner(
+    root: &Path,
+    guest_path: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<(), RootfsCompatibilityError> {
+    if uid.is_none() && gid.is_none() {
+        return Ok(());
+    }
+    let Some(host_path) = resolve_rootfs_path(root, guest_path)? else {
+        return Err(RootfsCompatibilityError::InvalidInstallPath {
+            path: guest_path.to_path_buf(),
+            reason: "path must exist before ownership can be set".to_string(),
+        });
+    };
+    rootfs_chown(&host_path, uid, gid)
+}
+
+#[cfg(unix)]
+fn rootfs_chown(
+    path: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<(), RootfsCompatibilityError> {
+    std::os::unix::fs::chown(path, uid, gid).map_err(|source| RootfsCompatibilityError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn rootfs_chown(
+    _path: &Path,
+    _uid: Option<u32>,
+    _gid: Option<u32>,
+) -> Result<(), RootfsCompatibilityError> {
+    Err(RootfsCompatibilityError::UnsupportedHostOwnership)
 }
 
 #[cfg(unix)]
@@ -4332,6 +4599,8 @@ mod tests {
     use super::*;
     use std::io::Write;
     #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     fn digest(byte: char) -> OciDigest {
@@ -4447,8 +4716,19 @@ mod tests {
         profile_spec: RootfsProfileSpec,
         binary: &Path,
     ) -> RootfsCompatibilityLayerSpec {
-        let mut spec = RootfsCompatibilityLayerSpec::new(
-            profile_spec,
+        let mut spec = RootfsCompatibilityLayerSpec::new(profile_spec);
+        spec.guest_binaries.push(RootfsPayloadFile::new(
+            binary,
+            MOTLIE_V15_GUEST_BIN_OPT,
+            0o755,
+        ));
+        spec.enable_ch_egress_service = true;
+        spec
+    }
+
+    fn rootfs_seed_overlay_spec(owner_root: &Path) -> RootfsSeedOverlaySpec {
+        let mut spec = RootfsSeedOverlaySpec::new(
+            RootfsCloudInitSeed::new("alice", "motlie-alice"),
             RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
         );
         spec.mounts = vec![
@@ -4456,17 +4736,17 @@ mod tests {
             RootfsMountSpec::new("alice-workspace", "/workspace"),
             RootfsMountSpec::new("alice-agent-state", "/agent-state"),
         ];
-        spec.guest_binaries.push(RootfsPayloadFile::new(
-            binary,
-            MOTLIE_V15_GUEST_BIN_OPT,
-            0o755,
-        ));
         spec.ssh_user_ca_pubkey = Some("ssh-ed25519 AAAATEST motlie-test-ca".to_string());
         let mut user = RootfsUserSeed::new("alice", "alice");
+        #[cfg(unix)]
+        {
+            let metadata = fs::metadata(owner_root).unwrap();
+            user.uid = Some(metadata.uid());
+            user.gid = Some(metadata.gid());
+        }
         user.env
             .push(("MOTLIE_GUEST".to_string(), "alice".to_string()));
         spec.users.push(user);
-        spec.enable_ch_egress_service = true;
         spec
     }
 
@@ -5175,13 +5455,14 @@ mod tests {
             fs::read_link(rootfs_path(&root, MOTLIE_V15_GUEST_BIN_COMPAT)).unwrap(),
             PathBuf::from(MOTLIE_V15_GUEST_BIN_OPT)
         );
-        let backend_env =
-            fs::read_to_string(rootfs_path(&root, MOTLIE_V15_BACKEND_ENV_PATH)).unwrap();
-        assert!(backend_env.contains("MOTLIE_BACKEND=ch\n"));
-        assert!(backend_env.contains("MOTLIE_NET_BACKEND=ch-vhost-user\n"));
-        let mounts_yaml = fs::read_to_string(rootfs_path(&root, MOTLIE_V15_MOUNTS_PATH)).unwrap();
-        assert!(mounts_yaml.contains("tag: alice-home"));
-        assert!(mounts_yaml.contains("guest_path: /home/alice"));
+        assert!(
+            !rootfs_path(&root, MOTLIE_V15_BACKEND_ENV_PATH).exists(),
+            "immutable rootfs assembly must not bake per-guest backend.env"
+        );
+        assert!(
+            !rootfs_path(&root, MOTLIE_V15_MOUNTS_PATH).exists(),
+            "immutable rootfs assembly must not bake per-guest mounts.yaml"
+        );
         assert!(rootfs_path(&root, "/etc/systemd/system/motlie-vfs-guest.service").exists());
         assert_eq!(
             fs::read_link(rootfs_path(
@@ -5219,13 +5500,17 @@ mod tests {
         assert!(sshd_ca_config.contains("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub"));
         assert!(sshd_ca_config.contains("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u"));
         assert_eq!(
-            fs::read_to_string(rootfs_path(&root, "/etc/ssh/auth_principals/alice")).unwrap(),
-            "alice\n"
+            fs::read_to_string(rootfs_path(&root, "/etc/ssh/ca/user_ca.pub")).unwrap(),
+            "",
+            "common rootfs should install only an empty CA-key placeholder"
         );
         assert!(
-            fs::read_to_string(rootfs_path(&root, "/etc/sudoers.d/90-motlie-vmm"))
-                .unwrap()
-                .contains("alice ALL=(ALL) NOPASSWD:ALL")
+            !rootfs_path(&root, "/etc/ssh/auth_principals/alice").exists(),
+            "immutable rootfs assembly must not bake per-user SSH principals"
+        );
+        assert!(
+            !rootfs_path(&root, "/etc/sudoers.d/90-motlie-vmm").exists(),
+            "immutable rootfs assembly must not bake per-user sudoers"
         );
         assert!(
             manifest.installed.iter().any(|record| {
@@ -5239,6 +5524,67 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rootfs_seed_overlay_emits_guest_specific_state_with_ownership() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let overlay = tempdir.path().join("seed-overlay");
+        fs::create_dir(&overlay).unwrap();
+        let spec = rootfs_seed_overlay_spec(&overlay);
+
+        let manifest = RootfsSeedOverlayAssembler::new()
+            .assemble(&overlay, &spec)
+            .unwrap();
+
+        assert_eq!(manifest.contract_version, MOTLIE_V15_CONTRACT_VERSION);
+        assert_eq!(
+            manifest.cloud_init_user_data_path,
+            PathBuf::from(MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH)
+        );
+        assert_eq!(
+            manifest.cloud_init_meta_data_path,
+            PathBuf::from(MOTLIE_V15_CLOUD_INIT_META_DATA_PATH)
+        );
+        let cloud_meta =
+            fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_CLOUD_INIT_META_DATA_PATH))
+                .unwrap();
+        assert!(cloud_meta.contains("instance-id: alice\n"));
+        assert!(cloud_meta.contains("local-hostname: motlie-alice\n"));
+        let cloud_user =
+            fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH))
+                .unwrap();
+        assert!(cloud_user.contains("  - name: alice\n"));
+        assert!(cloud_user.contains("    home: /home/alice\n"));
+        assert!(cloud_user.contains("    sudo: ALL=(ALL) NOPASSWD:ALL\n"));
+        let backend_env =
+            fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_BACKEND_ENV_PATH)).unwrap();
+        assert!(backend_env.contains("MOTLIE_BACKEND=ch\n"));
+        assert!(backend_env.contains("MOTLIE_NET_BACKEND=ch-vhost-user\n"));
+        let mounts_yaml =
+            fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_MOUNTS_PATH)).unwrap();
+        assert!(mounts_yaml.contains("tag: alice-home"));
+        assert!(mounts_yaml.contains("guest_path: /home/alice"));
+        assert_eq!(
+            fs::read_to_string(rootfs_path(&overlay, "/etc/ssh/auth_principals/alice")).unwrap(),
+            "alice\n"
+        );
+        assert!(
+            fs::read_to_string(rootfs_path(&overlay, "/etc/sudoers.d/90-motlie-vmm"))
+                .unwrap()
+                .contains("alice ALL=(ALL) NOPASSWD:ALL")
+        );
+        let env_path = rootfs_path(&overlay, "/home/alice/.env");
+        assert!(
+            fs::read_to_string(&env_path)
+                .unwrap()
+                .contains("MOTLIE_GUEST='alice'")
+        );
+        let env_metadata = fs::metadata(env_path).unwrap();
+        let expected_metadata = fs::metadata(&overlay).unwrap();
+        assert_eq!(env_metadata.uid(), expected_metadata.uid());
+        assert_eq!(env_metadata.gid(), expected_metadata.gid());
+    }
+
     #[test]
     fn rootfs_assembler_uses_backend_env_for_ssh_vsock_port() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -5246,16 +5592,12 @@ mod tests {
         fs::create_dir(&root).unwrap();
         write_ubuntu_systemd_foundation(&root, &installed_ubuntu_packages());
         let binary = fake_guest_binary(tempdir.path());
-        let mut spec = rootfs_assembly_spec(&binary);
-        spec.backend_env.motlie_ssh_vsock_port = 2444;
+        let rootfs_spec = rootfs_assembly_spec(&binary);
 
         RootfsCompatibilityAssembler::new()
-            .assemble(&root, &spec)
+            .assemble(&root, &rootfs_spec)
             .unwrap();
 
-        let backend_env =
-            fs::read_to_string(rootfs_path(&root, MOTLIE_V15_BACKEND_ENV_PATH)).unwrap();
-        assert!(backend_env.contains("MOTLIE_SSH_VSOCK_PORT=2444\n"));
         let loop_script = fs::read_to_string(rootfs_path(
             &root,
             "/opt/motlie/v1.5/guest/bin/motlie-vmm-vsock-ssh-loop",
@@ -5264,33 +5606,46 @@ mod tests {
         assert!(loop_script.contains("SSH_VSOCK_PORT=\"${MOTLIE_SSH_VSOCK_PORT:-2222}\""));
         assert!(loop_script.contains("VSOCK-CONNECT:${SSH_HOST_CID}:${SSH_VSOCK_PORT}"));
         assert!(
+            loop_script.contains(". \"$BACKEND_ENV\""),
+            "script must source backend.env inside the retry loop"
+        );
+        assert!(
             !loop_script.contains("VSOCK-CONNECT:2:2222"),
             "script must not hardcode the default SSH vsock port"
         );
+
+        let overlay = tempdir.path().join("seed-overlay");
+        fs::create_dir(&overlay).unwrap();
+        let mut seed_spec = rootfs_seed_overlay_spec(&overlay);
+        seed_spec.backend_env.motlie_ssh_vsock_port = 2444;
+        RootfsSeedOverlayAssembler::new()
+            .assemble(&overlay, &seed_spec)
+            .unwrap();
+        let backend_env =
+            fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_BACKEND_ENV_PATH)).unwrap();
+        assert!(backend_env.contains("MOTLIE_SSH_VSOCK_PORT=2444\n"));
     }
 
     #[test]
     fn rootfs_assembler_rejects_unsafe_mount_yaml_values() {
         let tempdir = tempfile::tempdir().unwrap();
-        let root = tempdir.path().join("rootfs");
-        fs::create_dir(&root).unwrap();
-        write_ubuntu_systemd_foundation(&root, &installed_ubuntu_packages());
-        let binary = fake_guest_binary(tempdir.path());
+        let overlay = tempdir.path().join("seed-overlay");
+        fs::create_dir(&overlay).unwrap();
 
-        let mut bad_tag = rootfs_assembly_spec(&binary);
+        let mut bad_tag = rootfs_seed_overlay_spec(&overlay);
         bad_tag.mounts[0].tag = "alice:home".to_string();
-        let error = RootfsCompatibilityAssembler::new()
-            .assemble(&root, &bad_tag)
+        let error = RootfsSeedOverlayAssembler::new()
+            .assemble(&overlay, &bad_tag)
             .unwrap_err();
         assert!(
             matches!(error, RootfsCompatibilityError::InvalidConfigValue { .. }),
             "expected strict mount tag validation, got {error:?}"
         );
 
-        let mut bad_path = rootfs_assembly_spec(&binary);
+        let mut bad_path = rootfs_seed_overlay_spec(&overlay);
         bad_path.mounts[0].guest_path = PathBuf::from("/home/alice workspace");
-        let error = RootfsCompatibilityAssembler::new()
-            .assemble(&root, &bad_path)
+        let error = RootfsSeedOverlayAssembler::new()
+            .assemble(&overlay, &bad_path)
             .unwrap_err();
         assert!(
             matches!(error, RootfsCompatibilityError::InvalidInstallPath { .. }),
@@ -5493,10 +5848,12 @@ mod tests {
             assert_eq!(source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
             assert_eq!(source.platform, platform);
             assert!(source.image_index_digest.as_ref().starts_with("sha256:"));
-            assert!(source
-                .platform_manifest_digest
-                .as_ref()
-                .starts_with("sha256:"));
+            assert!(
+                source
+                    .platform_manifest_digest
+                    .as_ref()
+                    .starts_with("sha256:")
+            );
             source.validate().unwrap();
         }
     }
@@ -5545,10 +5902,29 @@ mod tests {
             .assemble(&imported.root, &assembly_spec)
             .unwrap();
         assert_eq!(manifest.contract_version, MOTLIE_V15_CONTRACT_VERSION);
-        assert!(imported
-            .root
-            .join(MOTLIE_V15_BACKEND_ENV_PATH.trim_start_matches('/'))
-            .exists());
+        assert!(
+            !imported
+                .root
+                .join(MOTLIE_V15_BACKEND_ENV_PATH.trim_start_matches('/'))
+                .exists(),
+            "common rootfs assembly must not bake per-guest backend.env"
+        );
+        let overlay = tempdir.path().join("seed-overlay");
+        fs::create_dir(&overlay).unwrap();
+        let seed_spec = rootfs_seed_overlay_spec(&overlay);
+        let seed_manifest = RootfsSeedOverlayAssembler::new()
+            .assemble(&overlay, &seed_spec)
+            .unwrap();
+        assert_eq!(
+            seed_manifest.backend_env_path,
+            PathBuf::from(MOTLIE_V15_BACKEND_ENV_PATH)
+        );
+        assert!(
+            overlay
+                .join(MOTLIE_V15_BACKEND_ENV_PATH.trim_start_matches('/'))
+                .exists(),
+            "per-guest seed overlay must emit backend.env"
+        );
         assert!(
             manifest.pending_requirements.iter().any(|finding| {
                 matches!(
@@ -5570,14 +5946,18 @@ mod tests {
         assert_eq!(profile.name, UBUNTU_SYSTEMD_PROFILE);
         assert_eq!(profile.source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
         assert_eq!(profile.source.platform.to_string(), "linux/amd64");
-        assert!(profile
-            .required_packages
-            .iter()
-            .any(|pkg| pkg == "openssh-server"));
-        assert!(profile
-            .required_mount_points
-            .iter()
-            .any(|path| path == &PathBuf::from("/workspace")));
+        assert!(
+            profile
+                .required_packages
+                .iter()
+                .any(|pkg| pkg == "openssh-server")
+        );
+        assert!(
+            profile
+                .required_mount_points
+                .iter()
+                .any(|path| path == &PathBuf::from("/workspace"))
+        );
         profile.validate().unwrap();
     }
 
