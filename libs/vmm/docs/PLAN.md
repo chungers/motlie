@@ -4,8 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-09 | @vmm-cdx | Add the first issue #271 implementation slice: checked-in `motlie-image.yaml`, `motlie-vmm-image` build/validate binary, and machine-readable declared-stage manifest output |
-| 2026-05-09 | @vmm-cdx | Add GitHub issue #271 closure to v1.5 demo acceptance: implement a checked-in Dockerfile-like build spec and standalone `motlie-vmm-image` builder/validator CLI before accepting the demo |
+| 2026-05-09 | @vmm-cdx | Add the first issue #271 implementation slice: checked-in `motlie-image.yaml`, top-level `mbuild` build/validate binary, and machine-readable declared-stage manifest output |
+| 2026-05-09 | @vmm-cdx | Add GitHub issue #271 closure to v1.5 demo acceptance: implement a checked-in Dockerfile-like build spec and standalone top-level `mbuild` builder/validator CLI before accepting the demo |
 | 2026-05-09 | @vmm-cdx | Split Phase 11 rootfs compatibility assembly from per-guest seed overlay emission; record NoCloud seed output, uid/gid ownership enforcement, VFS mount readiness, dynamic backend.env sourcing, and fail-loud CH egress setup |
 | 2026-05-08 | @vmm-cdx | Address PR #270 assembler feedback: complete SSH CA trust config, honor backend.env SSH vsock port, fix clippy cmp-owned, and tighten mount YAML-safe validation |
 | 2026-05-07 | @vmm-cdx | Implement the first Phase 11 rootfs compatibility assembler slice: install v1.5 Motlie files into supported imported rootfs trees, emit assembly manifests, and keep package/runtime requirements explicit for later stages |
@@ -113,9 +113,9 @@ Current common guest-image implementation status:
       sudo/user env seed files, and uid/gid ownership for user-owned seed files.
 - [x] GitHub issue #271 has an initial product surface:
       `libs/vmm/examples/v1.5/motlie-image.yaml` plus
-      `libs/vmm/bins/motlie-vmm-image.rs`.
+      `bins/mbuild/src/main.rs`.
 - [ ] GitHub issue #271 remains open as a required v1.5 demo success criterion:
-      the demo is not accepted until `motlie-vmm-image` executes package,
+      the demo is not accepted until `mbuild` executes package,
       backend-emitter, and validation stages, not only declared-stage manifest
       generation.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
@@ -675,9 +675,9 @@ Tasks:
         seed/backend-emitter/validation stages in that spec
   - [x] make package-manager stages explicit; apt first, with room for
         apk/dnf/zypper/pacman profiles
-  - [x] add standalone `motlie-vmm-image build --config ... --target ch|vz
+  - [x] add standalone `mbuild build --config ... --target ch|vz
         --out ...`
-  - [x] add standalone `motlie-vmm-image validate --config ... --artifact ...`
+  - [x] add standalone `mbuild validate --config ... --artifact ...`
   - [x] produce an initial machine-readable manifest for declared stages,
         immutable files, seed files, source profile, target, and validation
         requirements
@@ -718,7 +718,7 @@ Acceptance:
 - profile-specific Ubuntu/systemd behavior is not confused with the
   backend-neutral Motlie guest contract
 - the v1.5 demo closes GitHub issue #271 by using the checked-in build spec and
-  `motlie-vmm-image` CLI, not ad hoc shell/harness-only wiring, for image build
+  `mbuild` CLI, not ad hoc shell/harness-only wiring, for image build
   and validation
 - the harness can report exactly which source digest, selected platform, and
   emitted backend artifacts were validated

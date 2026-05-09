@@ -119,8 +119,3 @@ path = "examples/v1.5/harness/main.rs"
 name = "motlie-vfs-guest-v1_5"
 path = "bins/v1.5/motlie-vfs-guest.rs"
 required-features = ["guest-vfs"]
-
-[[bin]]
-name = "motlie-vmm-image"
-path = "bins/motlie-vmm-image.rs"
-required-features = ["host-runtime"]

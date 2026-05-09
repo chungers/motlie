@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use motlie_vmm::image::MOTLIE_V15_CONTRACT_VERSION;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_MANIFEST_NAME: &str = "motlie-vmm-image-manifest.json";
+const DEFAULT_MANIFEST_NAME: &str = "mbuild-manifest.json";
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("motlie-vmm-image: {error}");
+        eprintln!("mbuild: {error}");
         std::process::exit(1);
     }
 }
@@ -151,8 +151,8 @@ fn print_usage() {
     println!(
         "\
 Usage:
-  motlie-vmm-image build --config PATH --target ch|vz --out DIR
-  motlie-vmm-image validate --config PATH --artifact DIR
+  mbuild build --config PATH --target ch|vz --out DIR
+  mbuild validate --config PATH --artifact DIR
 
 The current implementation consumes the v1.5 Dockerfile-like config and emits
 a machine-readable stage manifest. Package installation and CH/VZ artifact

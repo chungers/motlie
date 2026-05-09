@@ -4,8 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-09 | @vmm-cdx | Add the initial issue #271 product surface: `libs/vmm/examples/v1.5/motlie-image.yaml` and the standalone `motlie-vmm-image` builder/validator binary, currently emitting a stage manifest while package/emitter execution remains pending |
-| 2026-05-09 | @vmm-cdx | Record GitHub issue #271 as a v1.5 demo success criterion: a Dockerfile-like build spec plus standalone `motlie-vmm-image` CLI must drive the staged image builder before the demo is accepted |
+| 2026-05-09 | @vmm-cdx | Add the initial issue #271 product surface: `libs/vmm/examples/v1.5/motlie-image.yaml` and the standalone top-level `mbuild` builder/validator binary, currently emitting a stage manifest while package/emitter execution remains pending |
+| 2026-05-09 | @vmm-cdx | Record GitHub issue #271 as a v1.5 demo success criterion: a Dockerfile-like build spec plus standalone top-level `mbuild` CLI must drive the staged image builder before the demo is accepted |
 | 2026-05-09 | @vmm-cdx | Split immutable rootfs compatibility assembly from per-guest seed overlay emission; document NoCloud seed ownership, uid/gid ownership enforcement, VFS readiness waiting, dynamic backend.env sourcing, and fail-loud CH egress setup |
 | 2026-05-08 | @vmm-cdx | Address PR #270 feedback in the rootfs assembler contract: install SSHD CA trust directives, make the vsock SSH loop consume backend.env, and require strict mount YAML-safe tag/path values |
 | 2026-05-07 | @vmm-cdx | Add the first rootfs compatibility assembler design: mutate imported rootfs trees with v1.5 Motlie files, emit a machine-readable manifest, and record package/runtime requirements still pending for later builder/emitter stages |
@@ -1073,9 +1073,9 @@ Required product surface:
 The standalone binary is the durable operator/CI entrypoint:
 
 ```sh
-motlie-vmm-image build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out artifacts/v1.5/ch
-motlie-vmm-image build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
-motlie-vmm-image validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch
+mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out artifacts/v1.5/ch
+mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
+mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch
 ```
 
 `RootfsClassifier`, `RootfsCompatibilityAssembler`, and
@@ -1086,11 +1086,11 @@ builder, not reconstruct the lifecycle from example shell scripts.
 Current binary location:
 
 ```text
-libs/vmm/bins/motlie-vmm-image.rs
+bins/mbuild/src/main.rs
 ```
 
 The first binary slice consumes the config and writes
-`motlie-vmm-image-manifest.json` with declared source/import/classify/package/
+`mbuild-manifest.json` with declared source/import/classify/package/
 immutable-layer/policy/seed/backend-emitter/validation stages. Later #271 work
 must make those stages execute package installation, CH/VZ emission, and live
 validation instead of remaining declaration-only records.
@@ -1119,7 +1119,7 @@ v1.5 succeeds when:
     consume those payloads, and a final published multi-arch OCI guest image
     reference.
 11. GitHub issue #271 is closed by the v1.5 demo: a Dockerfile-like checked-in
-    builder spec and standalone `motlie-vmm-image` binary drive the image build,
+    builder spec and standalone top-level `mbuild` binary drive the image build,
     validation, and machine-readable stage manifests.
 
 ## v1.5 Functional Parity Acceptance
