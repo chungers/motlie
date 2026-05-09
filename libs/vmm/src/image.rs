@@ -5585,6 +5585,36 @@ mod tests {
         assert_eq!(env_metadata.gid(), expected_metadata.gid());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rootfs_assembler_builds_reusable_rootfs_without_guest_identity() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("rootfs");
+        fs::create_dir(&root).unwrap();
+        write_ubuntu_systemd_foundation(&root, &installed_ubuntu_packages());
+        let binary = fake_guest_binary(tempdir.path());
+        let spec = rootfs_assembly_spec(&binary);
+
+        RootfsCompatibilityAssembler::new()
+            .assemble(&root, &spec)
+            .unwrap();
+
+        for per_guest_path in [
+            MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH,
+            MOTLIE_V15_CLOUD_INIT_META_DATA_PATH,
+            MOTLIE_V15_BACKEND_ENV_PATH,
+            MOTLIE_V15_MOUNTS_PATH,
+            "/etc/ssh/auth_principals/alice",
+            "/etc/sudoers.d/90-motlie-vmm",
+            "/home/alice/.env",
+        ] {
+            assert!(
+                !rootfs_path(&root, per_guest_path).exists(),
+                "immutable rootfs assembly must not include per-guest path {per_guest_path}"
+            );
+        }
+    }
+
     #[test]
     fn rootfs_assembler_uses_backend_env_for_ssh_vsock_port() {
         let tempdir = tempfile::tempdir().unwrap();

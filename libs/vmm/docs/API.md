@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-09 | @vmm-cdx | clarify that issue #271 owns the durable config-driven `motlie-vmm-image` product interface and that current rootfs/seed APIs are lower-level builder stages behind that v1.5 demo success criterion
 - 2026-05-09 | @vmm-cdx | split rootfs compatibility assembly from per-guest seed overlay emission and document cloud-init/user ownership, dynamic backend.env sourcing, VFS mount readiness waiting, and fail-loud CH egress setup
 - 2026-05-08 | @vmm-cdx | address PR #270 assembler feedback by documenting SSHD CA trust drop-in installation, backend.env-driven SSH vsock port handling, and strict mount YAML-safe value validation
 - 2026-05-07 | @vmm-cdx | add the rootfs compatibility assembler API that installs the v1.5 Motlie pre-boot layer into supported imported rootfs trees and emits installed/pending manifest evidence
@@ -817,6 +818,20 @@ Rootfs seed overlay assembler behavior:
   be `/`
 - rejects symlink parents during rootfs writes so malformed OCI roots cannot
   redirect output outside the assembly root
+
+The durable v1.5 image-builder interface is not these Rust structs directly.
+GitHub issue #271 tracks the checked-in Dockerfile-like build spec plus
+standalone `motlie-vmm-image` CLI that will consume these stages:
+
+```sh
+motlie-vmm-image build --config libs/vmm/examples/v1.5/Motliefile --target ch --out artifacts/v1.5/ch
+motlie-vmm-image build --config libs/vmm/examples/v1.5/Motliefile --target vz --out artifacts/v1.5/vz
+motlie-vmm-image validate --config libs/vmm/examples/v1.5/Motliefile --artifact artifacts/v1.5/ch
+```
+
+The v1.5 demo success criteria require closing #271 with that config/CLI
+surface, machine-readable stage manifests, and CH/VZ validation from the same
+immutable rootfs contract.
 
 Resolver validation:
 
