@@ -1,8 +1,8 @@
-use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use clap::{Parser, Subcommand, ValueEnum};
 use motlie_vmm::image::MOTLIE_V15_CONTRACT_VERSION;
 use serde::{Deserialize, Serialize};
 
@@ -16,18 +16,14 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let command = parse_args(env::args().skip(1).collect())?;
-    match command {
-        Command::Build {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Build {
             config,
             target,
             out,
         } => build(&config, target, &out),
-        Command::Validate { config, artifact } => validate(&config, &artifact),
-        Command::Help => {
-            print_usage();
-            Ok(())
-        }
+        Commands::Validate { config, artifact } => validate(&config, &artifact),
     }
 }
 
@@ -76,88 +72,41 @@ fn load_config(path: &Path) -> Result<ImageBuildConfig, Box<dyn Error>> {
     Ok(config)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Command {
+#[derive(Debug, Parser)]
+#[command(
+    name = "mbuild",
+    about = "Motlie v1.5 image builder",
+    version,
+    after_help = "Current scope: consumes the v1.5 image config and emits or validates a declared-stage manifest. Package installation, rootfs assembly, and CH/VZ artifact emission remain explicit follow-on stages."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+enum Commands {
+    /// Consume the image config and emit a machine-readable stage manifest.
     Build {
+        /// Dockerfile-like v1.5 image build config.
+        #[arg(long)]
         config: PathBuf,
+        /// Backend artifact target to declare.
+        #[arg(long, value_enum)]
         target: ImageTarget,
+        /// Output directory for mbuild-manifest.json.
+        #[arg(long)]
         out: PathBuf,
     },
+    /// Validate an emitted mbuild manifest against the image config.
     Validate {
+        /// Dockerfile-like v1.5 image build config.
+        #[arg(long)]
         config: PathBuf,
+        /// Artifact directory containing mbuild-manifest.json.
+        #[arg(long)]
         artifact: PathBuf,
     },
-    Help,
-}
-
-fn parse_args(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    let Some(command) = args.first().map(String::as_str) else {
-        return Ok(Command::Help);
-    };
-    match command {
-        "build" => parse_build_args(&args[1..]),
-        "validate" => parse_validate_args(&args[1..]),
-        "-h" | "--help" | "help" => Ok(Command::Help),
-        other => Err(format!("unknown command {other:?}").into()),
-    }
-}
-
-fn parse_build_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
-    let mut config = None;
-    let mut target = None;
-    let mut out = None;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--config" => config = iter.next().map(PathBuf::from),
-            "--target" => {
-                target = Some(
-                    iter.next()
-                        .ok_or("--target requires an argument")?
-                        .parse::<ImageTarget>()?,
-                );
-            }
-            "--out" => out = iter.next().map(PathBuf::from),
-            "-h" | "--help" => return Ok(Command::Help),
-            other => return Err(format!("unexpected build argument {other:?}").into()),
-        }
-    }
-    Ok(Command::Build {
-        config: config.ok_or("build requires --config PATH")?,
-        target: target.ok_or("build requires --target ch|vz")?,
-        out: out.ok_or("build requires --out PATH")?,
-    })
-}
-
-fn parse_validate_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
-    let mut config = None;
-    let mut artifact = None;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--config" => config = iter.next().map(PathBuf::from),
-            "--artifact" => artifact = iter.next().map(PathBuf::from),
-            "-h" | "--help" => return Ok(Command::Help),
-            other => return Err(format!("unexpected validate argument {other:?}").into()),
-        }
-    }
-    Ok(Command::Validate {
-        config: config.ok_or("validate requires --config PATH")?,
-        artifact: artifact.ok_or("validate requires --artifact PATH")?,
-    })
-}
-
-fn print_usage() {
-    println!(
-        "\
-Usage:
-  mbuild build --config PATH --target ch|vz --out DIR
-  mbuild validate --config PATH --artifact DIR
-
-The current implementation consumes the v1.5 Dockerfile-like config and emits
-a machine-readable stage manifest. Package installation and CH/VZ artifact
-emission are explicit follow-on stages, not launch-time side effects."
-    );
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -325,7 +274,7 @@ impl ServiceSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 enum ImageTarget {
     Ch,
@@ -344,18 +293,6 @@ impl ImageTarget {
 impl std::fmt::Display for ImageTarget {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for ImageTarget {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "ch" => Ok(Self::Ch),
-            "vz" => Ok(Self::Vz),
-            other => Err(format!("unknown target {other:?}; expected ch or vz")),
-        }
     }
 }
 
@@ -472,20 +409,21 @@ mod tests {
 
     #[test]
     fn parses_build_command() {
-        let command = parse_args(vec![
-            "build".to_string(),
-            "--config".to_string(),
-            "motlie-image.yaml".to_string(),
-            "--target".to_string(),
-            "ch".to_string(),
-            "--out".to_string(),
-            "artifacts/ch".to_string(),
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "build",
+            "--config",
+            "motlie-image.yaml",
+            "--target",
+            "ch",
+            "--out",
+            "artifacts/ch",
         ])
         .unwrap();
 
         assert_eq!(
-            command,
-            Command::Build {
+            cli.command,
+            Commands::Build {
                 config: PathBuf::from("motlie-image.yaml"),
                 target: ImageTarget::Ch,
                 out: PathBuf::from("artifacts/ch")
@@ -495,21 +433,30 @@ mod tests {
 
     #[test]
     fn parses_validate_command() {
-        let command = parse_args(vec![
-            "validate".to_string(),
-            "--config".to_string(),
-            "motlie-image.yaml".to_string(),
-            "--artifact".to_string(),
-            "artifacts/ch".to_string(),
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "validate",
+            "--config",
+            "motlie-image.yaml",
+            "--artifact",
+            "artifacts/ch",
         ])
         .unwrap();
 
         assert_eq!(
-            command,
-            Command::Validate {
+            cli.command,
+            Commands::Validate {
                 config: PathBuf::from("motlie-image.yaml"),
                 artifact: PathBuf::from("artifacts/ch")
             }
         );
+    }
+
+    #[test]
+    fn help_mentions_current_scope() {
+        let error = Cli::try_parse_from(["mbuild", "--help"]).unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(error.to_string().contains("Current scope"));
     }
 }
