@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-09 | @vmm-cdx | expand `mbuild` into the issue #271 app-layer entrypoint: `build` delegates current CH/VZ adapters, `seed` regenerates per-guest seed overlays, and `validate --scenario` delegates live harness validation with a validation manifest
 - 2026-05-09 | @vmm-cdx | add the initial top-level `mbuild` binary and checked-in `motlie-image.yaml` config surface for issue #271; build/validate now consume the config and emit/check a stage manifest
 - 2026-05-09 | @vmm-cdx | clarify that issue #271 owns the durable config-driven top-level `mbuild` product interface and that current rootfs/seed APIs are lower-level builder stages behind that v1.5 demo success criterion
 - 2026-05-09 | @vmm-cdx | split rootfs compatibility assembly from per-guest seed overlay emission and document cloud-init/user ownership, dynamic backend.env sourcing, VFS mount readiness waiting, and fail-loud CH egress setup
@@ -835,14 +836,18 @@ Current CLI shape:
 ```sh
 mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out artifacts/v1.5/ch
 mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
-mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch
+mbuild seed --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --guest alice --uid 2001 --gid 2001 --out artifacts/v1.5/seed/alice
+mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch --require-executed --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
 The v1.5 demo success criteria require closing #271 with that config/CLI
 surface, executed package/emitter stages, machine-readable stage manifests, and
-CH/VZ validation from the same immutable rootfs contract. The first binary slice
-emits and validates the declared stage manifest; package installation and
-backend artifact emission remain follow-on #271 work.
+CH/VZ validation from the same immutable rootfs contract. `mbuild build`
+delegates the current CH/VZ shell adapters and records adapter logs plus
+artifact digests; `mbuild seed` produces per-guest seed files separately from
+the immutable image. With `--scenario`, `mbuild validate` delegates live
+conformance to `harness_v1_5` and writes `mbuild-validation-manifest.json` with
+the command, log path, scenario, target, and exit status.
 
 Resolver validation:
 

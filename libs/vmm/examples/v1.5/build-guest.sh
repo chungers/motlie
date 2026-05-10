@@ -10,7 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common-contract.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
+ARTIFACTS_DIR="${MOTLIE_V15_ARTIFACTS_DIR:-$SCRIPT_DIR/artifacts}"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-5-base-iter}"
 RUN_LOG="$ARTIFACTS_DIR/build-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/build-result.json"

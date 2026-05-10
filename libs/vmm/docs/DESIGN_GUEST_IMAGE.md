@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-09 | @vmm-cdx | Expand the issue #271 `mbuild` design status: app-layer CLI delegates current CH/VZ adapters, emits artifact digests, regenerates per-guest seed overlays, and delegates optional live harness validation with a validation manifest |
 | 2026-05-09 | @vmm-cdx | Add the initial issue #271 product surface: `libs/vmm/examples/v1.5/motlie-image.yaml` and the standalone top-level `mbuild` builder/validator binary, currently emitting a stage manifest while package/emitter execution remains pending |
 | 2026-05-09 | @vmm-cdx | Record GitHub issue #271 as a v1.5 demo success criterion: a Dockerfile-like build spec plus standalone top-level `mbuild` CLI must drive the staged image builder before the demo is accepted |
 | 2026-05-09 | @vmm-cdx | Split immutable rootfs compatibility assembly from per-guest seed overlay emission; document NoCloud seed ownership, uid/gid ownership enforcement, VFS readiness waiting, dynamic backend.env sourcing, and fail-loud CH egress setup |
@@ -1075,7 +1076,8 @@ The standalone binary is the durable operator/CI entrypoint:
 ```sh
 mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out artifacts/v1.5/ch
 mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
-mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch
+mbuild seed --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --guest alice --uid 2001 --gid 2001 --out artifacts/v1.5/seed/alice
+mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch --require-executed --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
 `RootfsClassifier`, `RootfsCompatibilityAssembler`, and
@@ -1089,11 +1091,14 @@ Current binary location:
 bins/mbuild/src/main.rs
 ```
 
-The first binary slice consumes the config and writes
-`mbuild-manifest.json` with declared source/import/classify/package/
-immutable-layer/policy/seed/backend-emitter/validation stages. Later #271 work
-must make those stages execute package installation, CH/VZ emission, and live
-validation instead of remaining declaration-only records.
+`mbuild build` consumes the config and writes `mbuild-manifest.json` with
+source/import/classify/package/immutable-layer/policy/backend-emitter evidence,
+delegating to the current v1.5 CH/VZ adapters while they remain transitional.
+`mbuild seed` writes `mbuild-seed-manifest.json` and regenerates per-guest
+NoCloud/backend/VFS/SSH/user seed files without rebuilding the immutable image.
+`mbuild validate --scenario` delegates live conformance to `harness_v1_5` and
+writes `mbuild-validation-manifest.json` with the harness command, log path,
+scenario, target, and exit status.
 
 ## Success Criteria
 

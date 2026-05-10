@@ -151,14 +151,25 @@ cargo run -p mbuild -- \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- \
+  seed --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --guest alice \
+  --uid 2001 \
+  --gid 2001 \
+  --out /tmp/mbuild/seed/alice
+
+cargo run -p mbuild -- \
   validate --config libs/vmm/examples/v1.5/motlie-image.yaml \
-  --artifact /tmp/mbuild/ch
+  --artifact /tmp/mbuild/ch \
+  --require-executed \
+  --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
-This first binary slice consumes the config and emits
-`mbuild-manifest.json` with declared builder stages. Full issue #271
-closure still requires the binary to execute package installation, backend
-emission, and live v1.5 validation from that config.
+`mbuild build` consumes the config and delegates artifact emission to the
+current CH/VZ adapters. `mbuild seed` regenerates per-guest seed files without
+rebuilding the immutable image. `mbuild validate` checks the emitted manifest,
+can require adapter execution evidence, and can delegate a live scenario to
+`harness_v1_5` while recording the harness log and exit status.
 
 ## Service Graph
 

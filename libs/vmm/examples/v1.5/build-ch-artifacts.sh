@@ -150,6 +150,7 @@ KERNEL_MODE="${MOTLIE_V15_CH_KERNEL_MODE:-download}"
 ROOTFS_MODE="${MOTLIE_V15_CH_ROOTFS_MODE:-build}"
 MMDEBSTRAP_MODE="${MMDEBSTRAP_MODE:-unshare}"
 INSTALL_AGENT_CLIS="${MOTLIE_V15_INSTALL_AGENT_CLIS:-1}"
+PACKAGE_INCLUDE="${MOTLIE_V15_PACKAGE_INCLUDE:-openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,git,tmux,vim,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,iputils-ping,cloud-init,locales,sudo,python3,npm,strace,socat,wget}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -217,7 +218,7 @@ CH_KERNEL_RELEASE="${CH_KERNEL_RELEASE:-ch-release-v6.16.9-20251112}"
 CH_KERNEL_URL="${CH_KERNEL_URL:-https://github.com/cloud-hypervisor/linux/releases/download/${CH_KERNEL_RELEASE}/${KERNEL_RELEASE_ASSET}}"
 DEBIAN_SUITE="${DEBIAN_SUITE:-bookworm}"
 DEBIAN_MIRROR="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"
-ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
+ARTIFACTS_DIR="${MOTLIE_V15_ARTIFACTS_DIR:-$SCRIPT_DIR/artifacts}"
 BASE_ARTIFACTS="$ARTIFACTS_DIR/base"
 BASE_ROOTFS="$BASE_ARTIFACTS/rootfs.squashfs"
 BASE_KERNEL="$BASE_ARTIFACTS/$KERNEL_IMAGE"
@@ -430,7 +431,7 @@ if [ "$ROOTFS_MODE" = "build" ]; then
     rm -f "$BASE_ROOTFS"
 
     ROOTFS_ARGS=(
-        --include=openssh-server,bash,bubblewrap,ca-certificates,coreutils,curl,dnsutils,git,tmux,vim,fuse3,libfuse3-3,systemd,systemd-sysv,dbus,iproute2,iputils-ping,cloud-init,locales,sudo,python3,npm,strace,socat,wget
+        --include="$PACKAGE_INCLUDE"
         --customize-hook='chroot "$1" systemctl enable ssh'
         --customize-hook='chroot "$1" systemctl enable systemd-networkd'
         --customize-hook='chroot "$1" systemctl disable systemd-networkd-wait-online.service'

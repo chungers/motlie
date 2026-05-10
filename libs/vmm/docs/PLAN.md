@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-09 | @vmm-cdx | Expand `mbuild` for issue #271: app-layer `anyhow` errors, adapter-backed `build`, standalone `seed`, `validate --require-executed`, optional `validate --scenario` harness delegation, artifact digests, and validation records |
 | 2026-05-09 | @vmm-cdx | Add the first issue #271 implementation slice: checked-in `motlie-image.yaml`, top-level `mbuild` build/validate binary, and machine-readable declared-stage manifest output |
 | 2026-05-09 | @vmm-cdx | Add GitHub issue #271 closure to v1.5 demo acceptance: implement a checked-in Dockerfile-like build spec and standalone top-level `mbuild` builder/validator CLI before accepting the demo |
 | 2026-05-09 | @vmm-cdx | Split Phase 11 rootfs compatibility assembly from per-guest seed overlay emission; record NoCloud seed output, uid/gid ownership enforcement, VFS mount readiness, dynamic backend.env sourcing, and fail-loud CH egress setup |
@@ -681,13 +682,19 @@ Tasks:
   - [x] produce an initial machine-readable manifest for declared stages,
         immutable files, seed files, source profile, target, and validation
         requirements
-  - [ ] execute package, immutable-layer, policy, seed, backend-emitter, and
-        validation stages from the config instead of emitting declarations only
-  - [ ] produce machine-readable manifests for source digests, package stage
-        results, immutable installed files, seed artifacts, backend artifacts,
-        pending/runtime requirements, and validation results
-  - [ ] ensure examples/v1.5 shell scripts are transitional adapters, not the
-        durable product contract
+  - [x] execute package, immutable-layer, policy, and backend-emitter stages
+        through `mbuild build` delegating to the current v1.5 CH/VZ adapters
+  - [x] regenerate per-guest seed artifacts through standalone `mbuild seed`
+        without rebuilding the immutable image
+  - [x] produce machine-readable manifests for package intent, immutable files,
+        seed files, backend adapter evidence, artifact digests, and
+        pending/runtime requirements
+  - [x] keep examples/v1.5 shell scripts as transitional adapters: `mbuild`
+        is now the durable product entrypoint and supplies artifact output
+        paths plus package intent to the adapters
+  - [x] wire live harness validation delegation into `mbuild validate
+        --scenario ...`; it records the harness command, log path, and exit
+        status in `mbuild-validation-manifest.json`
 - [ ] add the package strategy for installable profile requirements:
   - [ ] consume `RootfsCompatibilityAssemblyManifest.pending_requirements`
   - [ ] install the selected profile's package baseline, or fail policy before
