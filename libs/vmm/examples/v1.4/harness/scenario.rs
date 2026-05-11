@@ -1173,12 +1173,14 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Driver
             message: error.to_string(),
         },
         RuntimeError::Ssh(ssh) => classify_ssh_failure(stage, ssh),
-        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) | RuntimeError::VzEgress(_) => DriverFailure {
-            class: DriverFailureClass::Network,
-            stage,
-            code: "vnet_failed",
-            message: error.to_string(),
-        },
+        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) | RuntimeError::VzEgress(_) => {
+            DriverFailure {
+                class: DriverFailureClass::Network,
+                stage,
+                code: "vnet_failed",
+                message: error.to_string(),
+            }
+        }
         RuntimeError::UnsupportedHypervisor => DriverFailure {
             class: DriverFailureClass::Backend,
             stage,

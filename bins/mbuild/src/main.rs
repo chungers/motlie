@@ -7,12 +7,11 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
-    RootfsCloudInitSeed, RootfsCompatibilityBackendEnv, RootfsMountSpec,
+    v1_5, RootfsCloudInitSeed, RootfsCompatibilityBackendEnv, RootfsMountSpec,
     RootfsSeedOverlayAssembler, RootfsSeedOverlayManifest, RootfsSeedOverlaySpec, RootfsUserSeed,
-    v1_5,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -159,25 +158,14 @@ fn seed(options: SeedOptions) -> Result<()> {
     let hostname = options
         .hostname
         .unwrap_or_else(|| format!("motlie-{}", options.guest));
+    let seed_stage = config.seed.render(&options.guest)?;
     let mut spec = RootfsSeedOverlaySpec::new(
         RootfsCloudInitSeed::new(&options.guest, hostname),
         emitter.backend_env(),
     );
-    spec.mounts = vec![
-        RootfsMountSpec::new(
-            format!("{}-home", options.guest),
-            format!("/home/{}", options.guest),
-        ),
-        RootfsMountSpec::new(
-            format!("{}-workspace", options.guest),
-            PathBuf::from("/workspace"),
-        ),
-        RootfsMountSpec::new(
-            format!("{}-agent-state", options.guest),
-            PathBuf::from("/agent-state"),
-        ),
-    ];
-    let mut user = RootfsUserSeed::new(&options.guest, &options.guest);
+    spec.mounts = seed_stage.mounts;
+    let mut user = RootfsUserSeed::new(&options.guest, seed_stage.ssh_principal);
+    user.home = seed_stage.user_home;
     user.uid = options.uid;
     user.gid = options.gid;
     spec.users.push(user);
@@ -370,6 +358,7 @@ fn run_backend_adapter(
         started_at_unix_seconds,
         completed_at_unix_seconds,
         package_include: config.package_stage.install.clone(),
+        materialized_source: emitter.materialized_source.clone(),
     })
 }
 
@@ -524,7 +513,11 @@ fn unix_now() -> Result<u64> {
 }
 
 fn bool_env(value: bool) -> &'static str {
-    if value { "1" } else { "0" }
+    if value {
+        "1"
+    } else {
+        "0"
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -622,6 +615,7 @@ struct ImageBuildConfig {
     services: Vec<ServiceSpec>,
     immutable_files: Vec<String>,
     seed_files: Vec<String>,
+    seed: SeedStage,
     emitters: Vec<BackendEmitterSpec>,
     validation: Vec<String>,
 }
@@ -650,6 +644,7 @@ impl ImageBuildConfig {
         if self.seed_files.is_empty() {
             bail!("seed_files must not be empty");
         }
+        self.seed.validate()?;
         if self.emitters.is_empty() {
             bail!("emitters must not be empty");
         }
@@ -679,6 +674,7 @@ impl ImageBuildConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 struct SourceStage {
+    kind: SourceKind,
     image: String,
     profile: ProfileId,
     platform: String,
@@ -690,7 +686,35 @@ impl SourceStage {
         require_non_empty("source.image", &self.image)?;
         self.profile.validate("source.profile")?;
         require_non_empty("source.platform", &self.platform)?;
+        match self.kind {
+            SourceKind::ExternalOci => {
+                if self.digest_policy == DigestPolicy::AdapterVerified {
+                    bail!("source.digest_policy adapter-verified is only valid for transitional-adapter sources");
+                }
+            }
+            SourceKind::TransitionalAdapter => {
+                if self.digest_policy != DigestPolicy::AdapterVerified {
+                    bail!("source.digest_policy for transitional-adapter sources must be adapter-verified");
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum SourceKind {
+    ExternalOci,
+    TransitionalAdapter,
+}
+
+impl std::fmt::Display for SourceKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExternalOci => formatter.write_str("external-oci"),
+            Self::TransitionalAdapter => formatter.write_str("transitional-adapter"),
+        }
     }
 }
 
@@ -705,8 +729,8 @@ struct PackageStage {
 impl PackageStage {
     fn validate(&self) -> Result<()> {
         self.manager.validate("package_stage.manager")?;
-        if package_manager_strategy(self.manager.as_str()).is_none() {
-            bail!(
+        let strategy = package_manager_strategy(self.manager.as_str()).with_context(|| {
+            format!(
                 "package_stage.manager {:?} is not registered; registered managers: {}",
                 self.manager.as_str(),
                 PACKAGE_MANAGER_STRATEGIES
@@ -714,6 +738,12 @@ impl PackageStage {
                     .map(|strategy| strategy.id)
                     .collect::<Vec<_>>()
                     .join(", ")
+            )
+        })?;
+        if strategy.support != PackageManagerSupport::Implemented {
+            bail!(
+                "package_stage.manager {:?} is reserved but not implemented by current mbuild adapters",
+                self.manager.as_str()
             );
         }
         if self.install.is_empty() {
@@ -781,6 +811,77 @@ impl SshdPolicy {
 struct ServiceSpec {
     name: String,
     enable: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SeedStage {
+    user_home: String,
+    ssh_principal: String,
+    mounts: Vec<SeedMountTemplate>,
+}
+
+impl SeedStage {
+    fn validate(&self) -> Result<()> {
+        require_seed_template("seed.user_home", &self.user_home)?;
+        require_seed_template("seed.ssh_principal", &self.ssh_principal)?;
+        if self.mounts.is_empty() {
+            bail!("seed.mounts must not be empty");
+        }
+        for mount in &self.mounts {
+            mount.validate()?;
+        }
+        Ok(())
+    }
+
+    fn render(&self, guest: &str) -> Result<RenderedSeedStage> {
+        require_token("seed guest", guest)?;
+        let user_home = render_seed_template(&self.user_home, guest);
+        require_abs_path("seed.user_home", &user_home)?;
+        let ssh_principal = render_seed_template(&self.ssh_principal, guest);
+        require_token("seed.ssh_principal", &ssh_principal)?;
+        let mut mounts = Vec::with_capacity(self.mounts.len());
+        for mount in &self.mounts {
+            mounts.push(mount.render(guest)?);
+        }
+        Ok(RenderedSeedStage {
+            user_home: PathBuf::from(user_home),
+            ssh_principal,
+            mounts,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SeedMountTemplate {
+    tag: String,
+    guest_path: String,
+    #[serde(default)]
+    read_only: bool,
+}
+
+impl SeedMountTemplate {
+    fn validate(&self) -> Result<()> {
+        require_seed_template("seed.mounts.tag", &self.tag)?;
+        require_seed_template("seed.mounts.guest_path", &self.guest_path)?;
+        Ok(())
+    }
+
+    fn render(&self, guest: &str) -> Result<RootfsMountSpec> {
+        let tag = render_seed_template(&self.tag, guest);
+        require_token("seed.mounts.tag", &tag)?;
+        let guest_path = render_seed_template(&self.guest_path, guest);
+        require_abs_path("seed.mounts.guest_path", &guest_path)?;
+        let mut spec = RootfsMountSpec::new(tag, PathBuf::from(guest_path));
+        spec.read_only = self.read_only;
+        Ok(spec)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RenderedSeedStage {
+    user_home: PathBuf,
+    ssh_principal: String,
+    mounts: Vec<RootfsMountSpec>,
 }
 
 impl ServiceSpec {
@@ -853,6 +954,7 @@ impl ProfileId {
 enum DigestPolicy {
     Pinned,
     Floating,
+    AdapterVerified,
 }
 
 impl std::fmt::Display for DigestPolicy {
@@ -860,6 +962,7 @@ impl std::fmt::Display for DigestPolicy {
         match self {
             Self::Pinned => formatter.write_str("pinned"),
             Self::Floating => formatter.write_str("floating"),
+            Self::AdapterVerified => formatter.write_str("adapter-verified"),
         }
     }
 }
@@ -881,14 +984,36 @@ impl PackageManagerId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PackageManagerStrategy {
     id: &'static str,
+    support: PackageManagerSupport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageManagerSupport {
+    Implemented,
+    Reserved,
 }
 
 const PACKAGE_MANAGER_STRATEGIES: &[PackageManagerStrategy] = &[
-    PackageManagerStrategy { id: "apt" },
-    PackageManagerStrategy { id: "apk" },
-    PackageManagerStrategy { id: "dnf" },
-    PackageManagerStrategy { id: "zypper" },
-    PackageManagerStrategy { id: "pacman" },
+    PackageManagerStrategy {
+        id: "apt",
+        support: PackageManagerSupport::Implemented,
+    },
+    PackageManagerStrategy {
+        id: "apk",
+        support: PackageManagerSupport::Reserved,
+    },
+    PackageManagerStrategy {
+        id: "dnf",
+        support: PackageManagerSupport::Reserved,
+    },
+    PackageManagerStrategy {
+        id: "zypper",
+        support: PackageManagerSupport::Reserved,
+    },
+    PackageManagerStrategy {
+        id: "pacman",
+        support: PackageManagerSupport::Reserved,
+    },
 ];
 
 fn package_manager_strategy(id: &str) -> Option<&'static PackageManagerStrategy> {
@@ -900,6 +1025,7 @@ fn package_manager_strategy(id: &str) -> Option<&'static PackageManagerStrategy>
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct BackendEmitterSpec {
     id: BackendTargetId,
+    materialized_source: Option<AdapterMaterializedSource>,
     adapter: BackendAdapterSpec,
     seed: BackendSeedSpec,
     validation: BackendValidationSpec,
@@ -908,6 +1034,9 @@ struct BackendEmitterSpec {
 impl BackendEmitterSpec {
     fn validate(&self) -> Result<()> {
         require_token("emitters.id", self.id.as_str())?;
+        if let Some(source) = &self.materialized_source {
+            source.validate()?;
+        }
         self.adapter.validate()?;
         self.seed.validate()?;
         self.validation.validate()?;
@@ -919,6 +1048,27 @@ impl BackendEmitterSpec {
             &self.seed.motlie_backend,
             &self.seed.motlie_net_backend,
         )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdapterMaterializedSource {
+    image: String,
+    profile: String,
+    platform: String,
+    materializer: String,
+}
+
+impl AdapterMaterializedSource {
+    fn validate(&self) -> Result<()> {
+        require_non_empty("emitters.materialized_source.image", &self.image)?;
+        require_token("emitters.materialized_source.profile", &self.profile)?;
+        require_token("emitters.materialized_source.platform", &self.platform)?;
+        require_token(
+            "emitters.materialized_source.materializer",
+            &self.materializer,
+        )?;
+        Ok(())
     }
 }
 
@@ -1062,6 +1212,7 @@ impl ImageBuildManifest {
             target,
             output_dir: out.to_path_buf(),
             source: ManifestSource {
+                kind: config.source.kind.to_string(),
                 image: config.source.image.clone(),
                 profile: config.source.profile.as_str().to_string(),
                 platform: config.source.platform.clone(),
@@ -1089,6 +1240,7 @@ impl ImageBuildManifest {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ManifestSource {
+    kind: String,
     image: String,
     profile: String,
     platform: String,
@@ -1112,6 +1264,7 @@ struct AdapterRecord {
     started_at_unix_seconds: u64,
     completed_at_unix_seconds: u64,
     package_include: Vec<String>,
+    materialized_source: Option<AdapterMaterializedSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1304,6 +1457,38 @@ fn require_env_name(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_seed_template(field: &str, value: &str) -> Result<()> {
+    require_non_empty(field, value)?;
+    let mut rest = value;
+    loop {
+        let open = rest.find('{');
+        let close = rest.find('}');
+        match (open, close) {
+            (Some(open), Some(close)) if close < open => {
+                bail!("{field} contains an unopened template placeholder");
+            }
+            (Some(open), _) => {
+                let after_start = &rest[open + 1..];
+                let Some(end) = after_start.find('}') else {
+                    bail!("{field} contains an unclosed template placeholder");
+                };
+                let name = &after_start[..end];
+                if name != "guest" {
+                    bail!("{field} contains unsupported template placeholder {{{name}}}");
+                }
+                rest = &after_start[end + 1..];
+            }
+            (None, Some(_)) => bail!("{field} contains an unopened template placeholder"),
+            (None, None) => break,
+        }
+    }
+    Ok(())
+}
+
+fn render_seed_template(template: &str, guest: &str) -> String {
+    template.replace("{guest}", guest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1401,5 +1586,52 @@ mod tests {
 
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
         assert!(error.to_string().contains("mbuild consumes"));
+    }
+
+    #[test]
+    fn seed_stage_renders_configured_topology() {
+        let stage = SeedStage {
+            user_home: "/home/{guest}".to_string(),
+            ssh_principal: "{guest}".to_string(),
+            mounts: vec![
+                SeedMountTemplate {
+                    tag: "{guest}-home".to_string(),
+                    guest_path: "/home/{guest}".to_string(),
+                    read_only: false,
+                },
+                SeedMountTemplate {
+                    tag: "{guest}-readonly".to_string(),
+                    guest_path: "/readonly".to_string(),
+                    read_only: true,
+                },
+            ],
+        };
+
+        let rendered = stage.render("alice").unwrap();
+
+        assert_eq!(rendered.user_home, PathBuf::from("/home/alice"));
+        assert_eq!(rendered.ssh_principal, "alice");
+        assert_eq!(rendered.mounts[0].tag, "alice-home");
+        assert_eq!(rendered.mounts[0].guest_path, PathBuf::from("/home/alice"));
+        assert!(!rendered.mounts[0].read_only);
+        assert_eq!(rendered.mounts[1].tag, "alice-readonly");
+        assert_eq!(rendered.mounts[1].guest_path, PathBuf::from("/readonly"));
+        assert!(rendered.mounts[1].read_only);
+    }
+
+    #[test]
+    fn reserved_package_managers_are_not_executable() {
+        let stage = PackageStage {
+            manager: PackageManagerId("apk".to_string()),
+            update: true,
+            install: vec!["openssh".to_string()],
+            clean: true,
+        };
+
+        let error = stage.validate().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("reserved but not implemented by current mbuild adapters"));
     }
 }

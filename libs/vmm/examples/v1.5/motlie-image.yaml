@@ -1,9 +1,10 @@
 version: v1.5
 source:
-  image: docker.io/library/ubuntu:24.04
-  profile: ubuntu-systemd
-  platform: linux/amd64
-  digest_policy: pinned
+  kind: transitional-adapter
+  image: examples/v1.5/current-shell-adapters
+  profile: v1-5-shell-adapter
+  platform: host-native
+  digest_policy: adapter-verified
 package_stage:
   manager: apt
   update: true
@@ -67,8 +68,23 @@ seed_files:
   - /etc/ssh/ca/user_ca.pub
   - /etc/ssh/auth_principals/<user>
   - /home/<user>/.env
+seed:
+  user_home: /home/{guest}
+  ssh_principal: "{guest}"
+  mounts:
+    - tag: "{guest}-home"
+      guest_path: /home/{guest}
+    - tag: "{guest}-workspace"
+      guest_path: /workspace
+    - tag: "{guest}-agent-state"
+      guest_path: /agent-state
 emitters:
   - id: ch
+    materialized_source:
+      image: debian:bookworm
+      profile: debian-systemd
+      platform: host-native-linux
+      materializer: mmdebstrap
     adapter:
       program: bash
       args:
@@ -89,6 +105,11 @@ emitters:
       artifact_dir_env: MOTLIE_V15_CH_BASE_ARTIFACTS_DIR
       artifact_dir_suffix: base
   - id: vz
+    materialized_source:
+      image: local://libs/vmm/examples/v1.35/artifacts/source-base.vm
+      profile: vz-native-systemd
+      platform: host-native-macos
+      materializer: apple-virtualization-source-vm
     adapter:
       program: bash
       args:

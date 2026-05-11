@@ -5,12 +5,15 @@ Dockerfile-like image contract used by the v1.5 examples, drives the current
 backend image adapters, regenerates per-guest seed artifacts, and emits
 machine-readable manifests for CI and harness consumption.
 
-Status as of 2026-05-09 (`@vmm-cdx`): `mbuild build` is the durable entrypoint
+Status as of 2026-05-11 (`@vmm-cdx`): `mbuild build` is the durable entrypoint
 for the v1.5 image build. It consumes `motlie-image.yaml` and delegates
-backend-specific artifact emission to the current `examples/v1.5` adapters.
-`mbuild seed` regenerates per-guest seed overlays without rebuilding the
-immutable image. `mbuild validate` validates manifests and can require adapter
-execution evidence; live guest conformance still runs through the v1.5 harness.
+backend-specific artifact emission to the current `examples/v1.5` transitional
+adapters. The checked-in config is honest about that transition: the top-level
+source is `transitional-adapter`, and each backend records the concrete source
+its adapter materializes today. `mbuild seed` regenerates per-guest seed
+overlays without rebuilding the immutable image. `mbuild validate` validates
+manifests and can require adapter execution evidence; live guest conformance
+still runs through the v1.5 harness.
 
 ## Commands
 
@@ -97,25 +100,32 @@ When `validate --scenario` is used, validation also writes:
 The current config schema is intentionally explicit:
 
 - `version`: must match the Motlie v1.5 image contract version.
-- `source`: foundation OCI image, profile, platform, and digest policy.
+- `source`: source kind, image/profile/platform identity, and digest policy.
+  `external-oci` is the final imported-OCI path. The current checked-in v1.5
+  config uses `transitional-adapter` with `adapter-verified` digest policy so
+  manifests do not claim that the shell adapters materialized
+  `docker.io/library/ubuntu:24.04`.
 - `package_stage`: package manager intent for mutable package installation.
 - `immutable_payloads`: Motlie guest payloads copied into immutable paths.
 - `sshd_policy`: guest SSH policy files and optional forced-command policy.
 - `services`: systemd services expected to be enabled.
 - `immutable_files`: files expected to exist in the immutable image layer.
 - `seed_files`: per-guest seed or overlay files expected after emission.
+- `seed`: per-guest seed topology templates. The checked-in config renders the
+  validation user home, SSH principal, and VFS mount set from `{guest}` instead
+  of hardcoding `/home/<guest>`, `/workspace`, or `/agent-state` in CLI code.
 - `emitters`: registered backend targets. Each emitter declares its backend ID,
-  adapter command, adapter env-var contract, seed backend values, and harness
-  validation env-var contract. The adapter env includes package manager,
-  update/install/clean intent so shell emitters do not rediscover config shape.
-  The checked-in config registers `ch` and `vz`, but the CLI accepts any target
-  ID declared here.
+  optional `materialized_source`, adapter command, adapter env-var contract,
+  seed backend values, and harness validation env-var contract. The adapter env
+  includes package manager, update/install/clean intent so shell emitters do not
+  rediscover config shape. The checked-in config registers `ch` and `vz`, but
+  the CLI accepts any target ID declared here.
 - `validation`: post-boot behavior checks the produced image must satisfy.
 
-`package_stage.manager` is validated against a small strategy table (`apt`,
-`apk`, `dnf`, `zypper`, `pacman`) so configs can describe non-apt foundations
-without changing CLI parsing. Current v1.5 shell adapters still wire the Ubuntu
-`apt` path first.
+`package_stage.manager` currently supports only `apt` in executable adapters.
+The parser reserves `apk`, `dnf`, `zypper`, and `pacman`, but rejects them until
+a concrete package strategy exists. This keeps the config schema forward-shaped
+without pretending the current adapters implement non-apt roots.
 
 ## Manifest Contract
 
@@ -133,11 +143,12 @@ backend-emitter
 validation
 ```
 
-The build manifest records the config source, target backend, package intent,
-stage status, adapter log path, artifact digests, immutable files, seed files,
-and pending runtime requirements. The seed manifest records the generated
-NoCloud seed, backend env, VFS mount config, SSH CA/principal seed files, and
-artifact digests. The validation manifest records the delegated harness command,
+The build manifest records the config source kind, target backend, package
+intent, stage status, adapter log path, adapter materialized source, artifact
+digests, immutable files, seed files, and pending runtime requirements. The
+seed manifest records the generated NoCloud seed, backend env, VFS mount
+config, SSH CA/principal seed files, guest ownership metadata, and artifact
+digests. The validation manifest records the delegated harness command,
 scenario, target, log path, and exit status.
 
 The manifests are deliberately machine-readable so harnesses and CI can verify

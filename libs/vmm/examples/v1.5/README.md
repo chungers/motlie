@@ -166,10 +166,14 @@ cargo run -p mbuild -- \
 ```
 
 `mbuild build` consumes the config and delegates artifact emission to the
-current CH/VZ adapters. `mbuild seed` regenerates per-guest seed files without
-rebuilding the immutable image. `mbuild validate` checks the emitted manifest,
-can require adapter execution evidence, and can delegate a live scenario to
-`harness_v1_5` while recording the harness log and exit status.
+current CH/VZ transitional adapters. The checked-in config identifies the
+top-level source as `transitional-adapter` and records each backend's concrete
+`materialized_source`, rather than claiming the adapters already materialize an
+Ubuntu OCI source. `mbuild seed` regenerates per-guest seed files from the
+config-driven seed topology without rebuilding the immutable image. `mbuild
+validate` checks the emitted manifest, can require adapter execution evidence,
+and can delegate a live scenario to `harness_v1_5` while recording the harness
+log and exit status.
 
 ## Service Graph
 

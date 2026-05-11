@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-11 | @vmm-cdx | Tighten the `mbuild` contract after PR #270 review: current configs identify transitional shell adapters honestly, record per-emitter materialized sources, make seed topology config-driven, keep only apt executable for now, and move seed uid/gid handling to guest ownership metadata instead of host chown |
 | 2026-05-09 | @vmm-cdx | Expand the issue #271 `mbuild` design status: app-layer CLI delegates current CH/VZ adapters, emits artifact digests, regenerates per-guest seed overlays, and delegates optional live harness validation with a validation manifest |
 | 2026-05-09 | @vmm-cdx | Add the initial issue #271 product surface: `libs/vmm/examples/v1.5/motlie-image.yaml` and the standalone top-level `mbuild` builder/validator binary, currently emitting a stage manifest while package/emitter execution remains pending |
 | 2026-05-09 | @vmm-cdx | Record GitHub issue #271 as a v1.5 demo success criterion: a Dockerfile-like build spec plus standalone top-level `mbuild` CLI must drive the staged image builder before the demo is accepted |
@@ -880,11 +881,13 @@ not yet emit VM boot artifacts.
 - `RootfsSeedOverlayAssembler` emits the per-guest seed/overlay layer. It writes
   NoCloud `user-data` / `meta-data`, `backend.env`, `mounts.yaml`, SSH CA and
   principal material, sudoers, and user `.env` files. User seeds require uid/gid
-  so cloud-init can create the OS user and seed-owned files such as
-  `/home/<user>/.env` can be chowned before boot. Missing installable packages
-  or missing systemd remain explicit manifest evidence unless the caller selects
-  the fail-fast pending-requirement policy; this slice does not fake package
-  installation.
+  so cloud-init can create the OS user and the seed manifest can carry desired
+  guest ownership for user-owned files such as `/home/<user>/.env`. The seed
+  overlay writer does not call host `chown`; that would fail on macOS and
+  non-root hosts and would make the seed command backend-host-specific. Missing
+  installable packages or missing systemd remain explicit manifest evidence
+  unless the caller selects the fail-fast pending-requirement policy; this slice
+  does not fake package installation.
 
 ### Rootfs Classifier Requirements And Design
 
@@ -964,8 +967,10 @@ Functional requirements:
   NoCloud `user-data` and `meta-data`, `backend.env`, `mounts.yaml`, SSH CA key,
   auth principals, sudoers, and user `.env` files.
 - User seed entries require uid/gid. The seed overlay renders cloud-init user
-  creation and also applies the same uid/gid ownership to user-owned seed files,
-  preventing root-owned `0600` files from becoming unreadable after boot.
+  creation and records the same uid/gid as desired guest ownership metadata for
+  user-owned seed files. The portable seed command must not rely on host
+  `chown`; backend emitters or guest boot mechanisms must preserve or apply that
+  metadata when they package seed files into a boot artifact.
 - The assembler must not run apt, dpkg, systemctl, chroot, SSH, TTY, or any
   backend-specific emitter operation. Package-manager execution belongs to a
   later builder/package strategy. Backend artifact packaging belongs to CH/VZ
@@ -1040,12 +1045,10 @@ The manifest is the handoff contract for the next slices:
 - Harness validation records consume the source profile plus emitted artifact
   digests and prove v1.5 parity against CH and VZ.
 
-The current helper
-`OciPlatform::default_for_v1_5_validation_backend(BackendKind)` is only a lab
-default: CH validation currently targets native amd64 DGX hosts and VZ
-validation currently targets Apple Silicon arm64 hosts. The selected platform
-remains explicit in `ExternalOciSource` and must be supplied by callers when a
-different CH or VZ host architecture is used.
+CH validation currently targets native amd64 DGX hosts and VZ validation
+currently targets Apple Silicon arm64 hosts. Platform selection must remain an
+explicit image-builder input so a different CH or VZ host architecture cannot
+silently validate the wrong OCI platform variant.
 
 ### Dockerfile-Like Builder Contract For v1.5 Demo
 
@@ -1055,6 +1058,14 @@ checked-in config/CLI surface. It must not be read as making Rust structs the
 product interface. The v1.5 demo is accepted only after #271 is closed by the
 config-driven builder running the full staged image flow.
 
+The current checked-in `motlie-image.yaml` is deliberately transitional. Its
+top-level `source.kind` is `transitional-adapter`, not `external-oci`, because
+the CH adapter currently materializes Debian/bookworm through `mmdebstrap` and
+the VZ adapter currently customizes a local v1.35-native base VM. Each emitter
+records that concrete `materialized_source` so manifests do not claim
+`docker.io/library/ubuntu:24.04` provenance before the native OCI source/import/
+package/emitter path is wired through `mbuild`.
+
 Required product surface:
 
 - checked-in Dockerfile-like config:
@@ -1063,8 +1074,10 @@ Required product surface:
   immutable Motlie layer, image policy, seed overlay, backend emission, and
   validation
 - explicit immutable image files versus per-guest seed files
-- package-manager stages for apt first, with room for apk/dnf/zypper/pacman
-  profiles without changing the core lifecycle
+- package-manager stages for apt first; apk/dnf/zypper/pacman identifiers are
+  reserved but rejected until concrete package strategies are implemented
+- config-driven seed topology for user home, SSH principal, and mount
+  declarations so the CLI does not hardcode example paths
 - sshd image policy for CA trust, ForceCommand/on-login hooks, and reusable
   hardening; dynamic CA key and principals stay seed data
 - CH and VZ emitter targets from the same immutable rootfs contract
@@ -1091,9 +1104,12 @@ Current binary location:
 bins/mbuild/src/main.rs
 ```
 
-`mbuild build` consumes the config and writes `mbuild-manifest.json` with
-source/import/classify/package/immutable-layer/policy/backend-emitter evidence,
-delegating to the current v1.5 CH/VZ adapters while they remain transitional.
+`mbuild build` consumes the config and writes `mbuild-manifest.json` with source
+kind, package intent, source/import/classify/package/immutable-layer/policy/
+backend-emitter evidence, and adapter materialization evidence. It delegates to
+the current v1.5 CH/VZ adapters while they remain transitional. `source.kind`
+must switch from `transitional-adapter` to `external-oci` only when the builder
+derives CH and VZ artifacts from the assembled OCI rootfs path.
 `mbuild seed` writes `mbuild-seed-manifest.json` and regenerates per-guest
 NoCloud/backend/VFS/SSH/user seed files without rebuilding the immutable image.
 `mbuild validate --scenario` delegates live conformance to `harness_v1_5` and
@@ -1125,7 +1141,9 @@ v1.5 succeeds when:
     reference.
 11. GitHub issue #271 is closed by the v1.5 demo: a Dockerfile-like checked-in
     builder spec and standalone top-level `mbuild` binary drive the image build,
-    validation, and machine-readable stage manifests.
+    validation, and machine-readable stage manifests through the native OCI
+    source/import/package/emitter path rather than only transitional shell
+    adapters.
 
 ## v1.5 Functional Parity Acceptance
 

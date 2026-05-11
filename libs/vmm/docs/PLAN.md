@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-11 | @vmm-cdx | Update Phase 11 after PR #270 review: `mbuild` now records transitional adapter source truth, per-emitter materialized sources, config-driven seed topology, apt-only executable package support, and portable seed ownership metadata instead of host chown |
 | 2026-05-09 | @vmm-cdx | Expand `mbuild` for issue #271: app-layer `anyhow` errors, adapter-backed `build`, standalone `seed`, `validate --require-executed`, optional `validate --scenario` harness delegation, artifact digests, and validation records |
 | 2026-05-09 | @vmm-cdx | Add the first issue #271 implementation slice: checked-in `motlie-image.yaml`, top-level `mbuild` build/validate binary, and machine-readable declared-stage manifest output |
 | 2026-05-09 | @vmm-cdx | Add GitHub issue #271 closure to v1.5 demo acceptance: implement a checked-in Dockerfile-like build spec and standalone top-level `mbuild` builder/validator CLI before accepting the demo |
@@ -111,14 +112,15 @@ Current common guest-image implementation status:
       package-manager execution to the next builder stage.
 - [x] The first per-guest seed overlay assembler is implemented. It emits
       NoCloud seed files, backend env, mount config, SSH principal material,
-      sudo/user env seed files, and uid/gid ownership for user-owned seed files.
+      sudo/user env seed files, and uid/gid guest ownership metadata for
+      user-owned seed files without requiring host `chown`.
 - [x] GitHub issue #271 has an initial product surface:
       `libs/vmm/examples/v1.5/motlie-image.yaml` plus
       `bins/mbuild/src/main.rs`.
 - [ ] GitHub issue #271 remains open as a required v1.5 demo success criterion:
-      the demo is not accepted until `mbuild` executes package,
-      backend-emitter, and validation stages, not only declared-stage manifest
-      generation.
+      the demo is not accepted until `mbuild` drives the native OCI
+      source/import/package/emitter path and shared harness validation, not only
+      transitional shell-adapter manifests.
 - [ ] CH and VZ emitters still consume current v1.5 script artifacts rather
       than a Rust-owned OCI-derived rootfs assembly.
 
@@ -667,15 +669,24 @@ Tasks:
   - [x] backend env schema
   - [x] SSH CA/principal seed schema
   - [x] sudoers and user `.env` seed files
-  - [x] uid/gid required for user creation and seed-file ownership
+  - [x] uid/gid required for user creation and seed-file guest ownership
+        metadata; the portable seed writer does not require host `chown`
   - [x] strict YAML-safe validation for mount tags and guest paths
 - [ ] close GitHub issue #271 as part of the v1.5 demo:
   - [x] define and check in the Dockerfile-like builder spec
         (`libs/vmm/examples/v1.5/motlie-image.yaml`)
   - [x] declare ordered source/import/classify/package/immutable-layer/policy/
         seed/backend-emitter/validation stages in that spec
-  - [x] make package-manager stages explicit; apt first, with room for
-        apk/dnf/zypper/pacman profiles
+  - [x] make package-manager stages explicit; apt is implemented by the
+        current adapters and apk/dnf/zypper/pacman identifiers are reserved but
+        rejected until package strategies exist
+  - [x] record the current transitional source truth: top-level
+        `source.kind = transitional-adapter`, plus per-emitter
+        `materialized_source` for CH Debian/mmdebstrap and VZ local source-VM
+        customization
+  - [x] move seed topology into config templates for user home, SSH principal,
+        and mount declarations so `mbuild seed` does not hardcode the v1.5
+        example layout
   - [x] add standalone `mbuild build --config ... --target ch|vz
         --out ...`
   - [x] add standalone `mbuild validate --config ... --artifact ...`
@@ -699,9 +710,15 @@ Tasks:
   - [ ] consume `RootfsCompatibilityAssemblyManifest.pending_requirements`
   - [ ] install the selected profile's package baseline, or fail policy before
         backend emit
+  - [ ] implement non-apt strategies only when the selected profile names a
+        concrete package manager contract; reserved managers must keep failing
+        closed
   - [ ] preserve explicit evidence for requirements that remain runtime-owned,
         such as `/dev/fuse`
 - [ ] emit backend artifacts from the same assembled rootfs:
+  - [ ] switch `motlie-image.yaml` source from `transitional-adapter` to
+        `external-oci` only after CH/VZ emitters consume the assembled OCI
+        rootfs path
   - [ ] CH kernel/rootfs/seed artifacts
   - [ ] VZ disk/boot artifacts
   - [ ] backend artifact manifest with digests

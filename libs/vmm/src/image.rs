@@ -40,8 +40,8 @@ pub mod v1_5 {
 use v1_5::{
     MOTLIE_V15_BACKEND_ENV_PATH, MOTLIE_V15_CLOUD_INIT_META_DATA_PATH,
     MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH, MOTLIE_V15_CONTRACT_VERSION, MOTLIE_V15_GUEST_BIN_COMPAT,
-    MOTLIE_V15_GUEST_BIN_OPT, MOTLIE_V15_MOUNTS_PATH, MOTLIE_V15_SSH_VSOCK_PORT,
-    MOTLIE_V15_SSHD_CA_CONFIG_PATH, MOTLIE_V15_VFS_HOST_CID, MOTLIE_V15_VFS_PORT,
+    MOTLIE_V15_GUEST_BIN_OPT, MOTLIE_V15_MOUNTS_PATH, MOTLIE_V15_SSHD_CA_CONFIG_PATH,
+    MOTLIE_V15_SSH_VSOCK_PORT, MOTLIE_V15_VFS_HOST_CID, MOTLIE_V15_VFS_PORT,
 };
 
 /// Guest CPU architecture as named by OCI platform descriptors.
@@ -804,14 +804,12 @@ impl RootfsClassifier {
             });
         }
 
-        let mut findings = vec![
-            RootfsRequirementFinding::new(
-                RootfsRequirementKind::RootDirectory,
-                RootfsRequirementStatus::Present,
-                "rootfs assembly root is a directory",
-            )
-            .with_path("/"),
-        ];
+        let mut findings = vec![RootfsRequirementFinding::new(
+            RootfsRequirementKind::RootDirectory,
+            RootfsRequirementStatus::Present,
+            "rootfs assembly root is a directory",
+        )
+        .with_path("/")];
 
         let os_release = read_rootfs_os_release(root)?;
         findings.push(classify_os_release(&spec.os, os_release.as_ref()));
@@ -1110,6 +1108,10 @@ pub struct RootfsCompatibilityInstallRecord {
     pub mode: Option<u32>,
     pub source: Option<PathBuf>,
     pub target: Option<PathBuf>,
+    #[serde(default)]
+    pub guest_uid: Option<u32>,
+    #[serde(default)]
+    pub guest_gid: Option<u32>,
 }
 
 impl RootfsCompatibilityInstallRecord {
@@ -1124,6 +1126,8 @@ impl RootfsCompatibilityInstallRecord {
             mode,
             source: None,
             target: None,
+            guest_uid: None,
+            guest_gid: None,
         }
     }
 
@@ -1134,6 +1138,12 @@ impl RootfsCompatibilityInstallRecord {
 
     fn with_target(mut self, target: impl Into<PathBuf>) -> Self {
         self.target = Some(target.into());
+        self
+    }
+
+    fn with_guest_owner(mut self, uid: Option<u32>, gid: Option<u32>) -> Self {
+        self.guest_uid = uid;
+        self.guest_gid = gid;
         self
     }
 }
@@ -1228,7 +1238,12 @@ impl RootfsCompatibilityAssembler {
         let mut installed = Vec::new();
         install_required_directories(root, spec, &mut installed)?;
         install_guest_payloads(root, spec, &mut installed)?;
-        install_builtin_support_files(root, spec.enable_ch_egress_service, &mut installed)?;
+        install_builtin_support_files(
+            root,
+            &spec.profile_spec,
+            spec.enable_ch_egress_service,
+            &mut installed,
+        )?;
         tracing::info!(
             root = %root.display(),
             installed = installed.len(),
@@ -2717,16 +2732,15 @@ fn install_seed_overlay_directories(
 
     for dir in dirs {
         rootfs_ensure_dir(root, &dir, 0o755)?;
-        installed.push(RootfsCompatibilityInstallRecord::new(
+        let mut record = RootfsCompatibilityInstallRecord::new(
             RootfsCompatibilityInstallKind::Directory,
-            dir,
+            dir.clone(),
             Some(0o755),
-        ));
-    }
-    for user in &spec.users {
-        if user.uid.is_some() || user.gid.is_some() {
-            rootfs_set_guest_owner(root, &user.home, user.uid, user.gid)?;
+        );
+        if let Some(user) = spec.users.iter().find(|user| user.home == dir) {
+            record = record.with_guest_owner(user.uid, user.gid);
         }
+        installed.push(record);
     }
     Ok(())
 }
@@ -2772,6 +2786,7 @@ fn install_guest_payloads(
 
 fn install_builtin_support_files(
     root: &Path,
+    profile_spec: &RootfsProfileSpec,
     enable_ch_egress_service: bool,
     installed: &mut Vec<RootfsCompatibilityInstallRecord>,
 ) -> Result<(), RootfsCompatibilityError> {
@@ -2877,14 +2892,16 @@ fn install_builtin_support_files(
         RootfsCompatibilityInstallKind::ProfileScript,
         installed,
     )?;
-    install_builtin_file(
-        root,
-        "/etc/apt/apt.conf.d/99motlie-force-ipv4",
-        MOTLIE_APT_FORCE_IPV4,
-        0o644,
-        RootfsCompatibilityInstallKind::Config,
-        installed,
-    )?;
+    if profile_spec.package_manager == PackageManagerRequirement::AptDpkg {
+        install_builtin_file(
+            root,
+            "/etc/apt/apt.conf.d/99motlie-force-ipv4",
+            MOTLIE_APT_FORCE_IPV4,
+            0o644,
+            RootfsCompatibilityInstallKind::Config,
+            installed,
+        )?;
+    }
 
     if enable_ch_egress_service {
         install_builtin_file(
@@ -3036,12 +3053,14 @@ fn install_ssh_and_user_seeds(
         if !user.env.is_empty() {
             let path = user.home.join(".env");
             rootfs_write_file(root, &path, render_user_env(user)?.as_bytes(), 0o600)?;
-            rootfs_set_guest_owner(root, &path, user.uid, user.gid)?;
-            installed.push(RootfsCompatibilityInstallRecord::new(
-                RootfsCompatibilityInstallKind::Config,
-                path,
-                Some(0o600),
-            ));
+            installed.push(
+                RootfsCompatibilityInstallRecord::new(
+                    RootfsCompatibilityInstallKind::Config,
+                    path,
+                    Some(0o600),
+                )
+                .with_guest_owner(user.uid, user.gid),
+            );
         }
     }
     Ok(())
@@ -3199,7 +3218,7 @@ fn validate_user_seed(user: &RootfsUserSeed) -> Result<(), RootfsCompatibilityEr
         return Err(RootfsCompatibilityError::InvalidConfigValue {
             field: "user uid/gid".to_string(),
             value: user.user.clone(),
-            reason: "per-guest user seed requires both uid and gid for cloud-init creation and file ownership"
+            reason: "per-guest user seed requires both uid and gid for cloud-init creation and guest ownership metadata"
                 .to_string(),
         });
     }
@@ -3512,45 +3531,6 @@ fn rootfs_set_mode(path: &Path, mode: u32) -> Result<(), RootfsCompatibilityErro
 #[cfg(not(unix))]
 fn rootfs_set_mode(_path: &Path, _mode: u32) -> Result<(), RootfsCompatibilityError> {
     Ok(())
-}
-
-fn rootfs_set_guest_owner(
-    root: &Path,
-    guest_path: &Path,
-    uid: Option<u32>,
-    gid: Option<u32>,
-) -> Result<(), RootfsCompatibilityError> {
-    if uid.is_none() && gid.is_none() {
-        return Ok(());
-    }
-    let Some(host_path) = resolve_rootfs_path(root, guest_path)? else {
-        return Err(RootfsCompatibilityError::InvalidInstallPath {
-            path: guest_path.to_path_buf(),
-            reason: "path must exist before ownership can be set".to_string(),
-        });
-    };
-    rootfs_chown(&host_path, uid, gid)
-}
-
-#[cfg(unix)]
-fn rootfs_chown(
-    path: &Path,
-    uid: Option<u32>,
-    gid: Option<u32>,
-) -> Result<(), RootfsCompatibilityError> {
-    std::os::unix::fs::chown(path, uid, gid).map_err(|source| RootfsCompatibilityError::Io {
-        path: Some(path.to_path_buf()),
-        source,
-    })
-}
-
-#[cfg(not(unix))]
-fn rootfs_chown(
-    _path: &Path,
-    _uid: Option<u32>,
-    _gid: Option<u32>,
-) -> Result<(), RootfsCompatibilityError> {
-    Err(RootfsCompatibilityError::UnsupportedHostOwnership)
 }
 
 #[cfg(unix)]
@@ -4675,8 +4655,6 @@ mod tests {
     use super::*;
     use std::io::Write;
     #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
-    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     fn digest(byte: char) -> OciDigest {
@@ -4802,7 +4780,7 @@ mod tests {
         spec
     }
 
-    fn rootfs_seed_overlay_spec(owner_root: &Path) -> RootfsSeedOverlaySpec {
+    fn rootfs_seed_overlay_spec(_owner_root: &Path) -> RootfsSeedOverlaySpec {
         let mut spec = RootfsSeedOverlaySpec::new(
             RootfsCloudInitSeed::new("alice", "motlie-alice"),
             RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
@@ -4814,12 +4792,8 @@ mod tests {
         ];
         spec.ssh_user_ca_pubkey = Some("ssh-ed25519 AAAATEST motlie-test-ca".to_string());
         let mut user = RootfsUserSeed::new("alice", "alice");
-        #[cfg(unix)]
-        {
-            let metadata = fs::metadata(owner_root).unwrap();
-            user.uid = Some(metadata.uid());
-            user.gid = Some(metadata.gid());
-        }
+        user.uid = Some(2001);
+        user.gid = Some(2001);
         user.env
             .push(("MOTLIE_GUEST".to_string(), "alice".to_string()));
         spec.users.push(user);
@@ -5588,9 +5562,8 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn rootfs_seed_overlay_emits_guest_specific_state_with_ownership() {
+    fn rootfs_seed_overlay_emits_guest_specific_state_with_guest_ownership_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
         let overlay = tempdir.path().join("seed-overlay");
         fs::create_dir(&overlay).unwrap();
@@ -5638,15 +5611,23 @@ mod tests {
                 .contains("alice ALL=(ALL) NOPASSWD:ALL")
         );
         let env_path = rootfs_path(&overlay, "/home/alice/.env");
-        assert!(
-            fs::read_to_string(&env_path)
-                .unwrap()
-                .contains("MOTLIE_GUEST='alice'")
-        );
-        let env_metadata = fs::metadata(env_path).unwrap();
-        let expected_metadata = fs::metadata(&overlay).unwrap();
-        assert_eq!(env_metadata.uid(), expected_metadata.uid());
-        assert_eq!(env_metadata.gid(), expected_metadata.gid());
+        assert!(fs::read_to_string(&env_path)
+            .unwrap()
+            .contains("MOTLIE_GUEST='alice'"));
+        let env_record = manifest
+            .installed
+            .iter()
+            .find(|record| record.path == PathBuf::from("/home/alice/.env"))
+            .unwrap();
+        assert_eq!(env_record.guest_uid, Some(2001));
+        assert_eq!(env_record.guest_gid, Some(2001));
+        let home_record = manifest
+            .installed
+            .iter()
+            .find(|record| record.path == PathBuf::from("/home/alice"))
+            .unwrap();
+        assert_eq!(home_record.guest_uid, Some(2001));
+        assert_eq!(home_record.guest_gid, Some(2001));
     }
 
     #[cfg(unix)]
@@ -5942,12 +5923,10 @@ mod tests {
             assert_eq!(source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
             assert_eq!(source.platform, platform);
             assert!(source.image_index_digest.as_ref().starts_with("sha256:"));
-            assert!(
-                source
-                    .platform_manifest_digest
-                    .as_ref()
-                    .starts_with("sha256:")
-            );
+            assert!(source
+                .platform_manifest_digest
+                .as_ref()
+                .starts_with("sha256:"));
             source.validate().unwrap();
         }
     }
@@ -6040,18 +6019,14 @@ mod tests {
         assert_eq!(profile.name, UBUNTU_SYSTEMD_PROFILE);
         assert_eq!(profile.source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
         assert_eq!(profile.source.platform.to_string(), "linux/amd64");
-        assert!(
-            profile
-                .required_packages
-                .iter()
-                .any(|pkg| pkg == "openssh-server")
-        );
-        assert!(
-            profile
-                .required_mount_points
-                .iter()
-                .any(|path| path == &PathBuf::from("/workspace"))
-        );
+        assert!(profile
+            .required_packages
+            .iter()
+            .any(|pkg| pkg == "openssh-server"));
+        assert!(profile
+            .required_mount_points
+            .iter()
+            .any(|path| path == &PathBuf::from("/workspace")));
         profile.validate().unwrap();
     }
 
