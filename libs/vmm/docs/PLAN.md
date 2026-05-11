@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-11 | @vmm-cdx | Add the PR #270 build-file hardening tasks: strict YAML schema, APT-aware package spec validation, and manifest/config comparison during `mbuild validate` |
 | 2026-05-11 | @vmm-cdx | Update Phase 11 after PR #270 review: `mbuild` now records transitional adapter source truth, per-emitter materialized sources, config-driven seed topology, apt-only executable package support, and portable seed ownership metadata instead of host chown |
 | 2026-05-09 | @vmm-cdx | Expand `mbuild` for issue #271: app-layer `anyhow` errors, adapter-backed `build`, standalone `seed`, `validate --require-executed`, optional `validate --scenario` harness delegation, artifact digests, and validation records |
 | 2026-05-09 | @vmm-cdx | Add the first issue #271 implementation slice: checked-in `motlie-image.yaml`, top-level `mbuild` build/validate binary, and machine-readable declared-stage manifest output |
@@ -680,6 +681,10 @@ Tasks:
   - [x] make package-manager stages explicit; apt is implemented by the
         current adapters and apk/dnf/zypper/pacman identifiers are reserved but
         rejected until package strategies exist
+  - [x] validate APT package entries with package-manager-aware syntax instead
+        of the generic backend/profile token grammar
+  - [x] reject unknown YAML fields at every checked-in config level so typos
+        and unsupported directives cannot silently pass
   - [x] record the current transitional source truth: top-level
         `source.kind = transitional-adapter`, plus per-emitter
         `materialized_source` for CH Debian/mmdebstrap and VZ local source-VM
@@ -700,6 +705,9 @@ Tasks:
   - [x] produce machine-readable manifests for package intent, immutable files,
         seed files, backend adapter evidence, artifact digests, and
         pending/runtime requirements
+  - [x] make `mbuild validate` compare manifest source, package stage,
+        immutable files, seed files, validation list, and adapter materialized
+        source back against the current config
   - [x] keep examples/v1.5 shell scripts as transitional adapters: `mbuild`
         is now the durable product entrypoint and supplies artifact output
         paths plus package intent to the adapters

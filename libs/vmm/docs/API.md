@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-11 | @vmm-cdx | remove the stale platform-default helper API reference; platform selection is now explicit in the builder/harness contract
 - 2026-05-09 | @vmm-cdx | expand `mbuild` into the issue #271 app-layer entrypoint: `build` delegates current CH/VZ adapters, `seed` regenerates per-guest seed overlays, and `validate --scenario` delegates live harness validation with a validation manifest
 - 2026-05-09 | @vmm-cdx | add the initial top-level `mbuild` binary and checked-in `motlie-image.yaml` config surface for issue #271; build/validate now consume the config and emit/check a stage manifest
 - 2026-05-09 | @vmm-cdx | clarify that issue #271 owns the durable config-driven top-level `mbuild` product interface and that current rootfs/seed APIs are lower-level builder stages behind that v1.5 demo success criterion
@@ -696,11 +697,11 @@ let seed_overlay = RootfsSeedOverlayAssembler::new().assemble("/tmp/alice-seed",
 assert_eq!(seed_overlay.contract_version, "v1.5");
 ```
 
-The helper `OciPlatform::default_for_v1_5_validation_backend(...)` returns only
-the current validation-lab default: CH maps to `linux/amd64` for DGX validation
-and VZ maps to `linux/arm64` for Apple Silicon validation. It is not a backend
-invariant; callers should pass an explicit `OciPlatform` when the host or guest
-architecture differs.
+Platform selection is explicit. The v1.5 validation harness may choose lab
+defaults such as CH `linux/amd64` on DGX and VZ `linux/arm64` on Apple Silicon,
+but `OciPlatform` does not expose backend-derived defaults. Builders and tests
+must pass the selected platform so CH-on-arm64, VZ-on-amd64, and future backend
+matrices cannot silently validate the wrong OCI variant.
 
 Validation rules intentionally reject short fake `sha256` values and enforce
 the current `ubuntu-systemd` profile/source coherence:

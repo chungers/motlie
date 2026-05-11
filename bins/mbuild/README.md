@@ -100,6 +100,8 @@ When `validate --scenario` is used, validation also writes:
 The current config schema is intentionally explicit:
 
 - `version`: must match the Motlie v1.5 image contract version.
+- Unknown fields are rejected at every config level. Typos and unsupported
+  directives must fail schema loading instead of being ignored.
 - `source`: source kind, image/profile/platform identity, and digest policy.
   `external-oci` is the final imported-OCI path. The current checked-in v1.5
   config uses `transitional-adapter` with `adapter-verified` digest policy so
@@ -123,8 +125,10 @@ The current config schema is intentionally explicit:
 - `validation`: post-boot behavior checks the produced image must satisfy.
 
 `package_stage.manager` currently supports only `apt` in executable adapters.
-The parser reserves `apk`, `dnf`, `zypper`, and `pacman`, but rejects them until
-a concrete package strategy exists. This keeps the config schema forward-shaped
+APT package entries are validated with APT-aware syntax, including `+`, arch
+qualifiers such as `foo:amd64`, and pinned specs such as `foo=version`. The
+parser reserves `apk`, `dnf`, `zypper`, and `pacman`, but rejects them until a
+concrete package strategy exists. This keeps the config schema forward-shaped
 without pretending the current adapters implement non-apt roots.
 
 ## Manifest Contract
@@ -145,11 +149,13 @@ validation
 
 The build manifest records the config source kind, target backend, package
 intent, stage status, adapter log path, adapter materialized source, artifact
-digests, immutable files, seed files, and pending runtime requirements. The
-seed manifest records the generated NoCloud seed, backend env, VFS mount
-config, SSH CA/principal seed files, guest ownership metadata, and artifact
-digests. The validation manifest records the delegated harness command,
-scenario, target, log path, and exit status.
+digests, immutable files, seed files, and pending runtime requirements.
+`mbuild validate` compares those manifest fields back against the current
+config so stale manifests fail when the build file changes. The seed manifest
+records the generated NoCloud seed, backend env, VFS mount config, SSH
+CA/principal seed files, guest ownership metadata, and artifact digests. The
+validation manifest records the delegated harness command, scenario, target,
+log path, and exit status.
 
 The manifests are deliberately machine-readable so harnesses and CI can verify
 what stage was produced without rediscovering output paths or inferring backend

@@ -204,14 +204,7 @@ fn validate(options: ValidationOptions) -> Result<()> {
 
     let manifest_path = options.artifact.join(DEFAULT_MANIFEST_NAME);
     let manifest: ImageBuildManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-    if manifest.contract_version != config.version {
-        bail!(
-            "manifest contract version {} does not match config version {}",
-            manifest.contract_version,
-            config.version
-        );
-    }
-    let emitter = config.validate_for_target(&manifest.target)?;
+    let emitter = manifest.validate_against_config(&config)?;
     if manifest.stages.is_empty() {
         bail!("manifest does not contain stage records");
     }
@@ -606,6 +599,7 @@ enum Commands {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImageBuildConfig {
     version: String,
     source: SourceStage,
@@ -673,6 +667,7 @@ impl ImageBuildConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceStage {
     kind: SourceKind,
     image: String,
@@ -719,6 +714,7 @@ impl std::fmt::Display for SourceKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PackageStage {
     manager: PackageManagerId,
     update: bool,
@@ -750,13 +746,14 @@ impl PackageStage {
             bail!("package_stage.install must not be empty");
         }
         for package in &self.install {
-            require_token("package_stage.install", package)?;
+            (strategy.validate_package)("package_stage.install", package)?;
         }
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PayloadSpec {
     label: String,
     source: PathBuf,
@@ -784,6 +781,7 @@ impl PayloadSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SshdPolicy {
     trusted_user_ca_keys: String,
     authorized_principals_file: String,
@@ -808,12 +806,14 @@ impl SshdPolicy {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ServiceSpec {
     name: String,
     enable: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SeedStage {
     user_home: String,
     ssh_principal: String,
@@ -852,6 +852,7 @@ impl SeedStage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SeedMountTemplate {
     tag: String,
     guest_path: String,
@@ -981,10 +982,11 @@ impl PackageManagerId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 struct PackageManagerStrategy {
     id: &'static str,
     support: PackageManagerSupport,
+    validate_package: fn(&str, &str) -> Result<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -997,22 +999,27 @@ const PACKAGE_MANAGER_STRATEGIES: &[PackageManagerStrategy] = &[
     PackageManagerStrategy {
         id: "apt",
         support: PackageManagerSupport::Implemented,
+        validate_package: validate_apt_package_spec,
     },
     PackageManagerStrategy {
         id: "apk",
         support: PackageManagerSupport::Reserved,
+        validate_package: validate_reserved_package_spec,
     },
     PackageManagerStrategy {
         id: "dnf",
         support: PackageManagerSupport::Reserved,
+        validate_package: validate_reserved_package_spec,
     },
     PackageManagerStrategy {
         id: "zypper",
         support: PackageManagerSupport::Reserved,
+        validate_package: validate_reserved_package_spec,
     },
     PackageManagerStrategy {
         id: "pacman",
         support: PackageManagerSupport::Reserved,
+        validate_package: validate_reserved_package_spec,
     },
 ];
 
@@ -1022,7 +1029,90 @@ fn package_manager_strategy(id: &str) -> Option<&'static PackageManagerStrategy>
         .find(|strategy| strategy.id == id)
 }
 
+fn validate_reserved_package_spec(field: &str, value: &str) -> Result<()> {
+    require_non_empty(field, value)
+}
+
+fn validate_apt_package_spec(field: &str, value: &str) -> Result<()> {
+    require_non_empty(field, value)?;
+    if value
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b',' | b'/'))
+    {
+        bail!("{field} contains unsupported apt package spec {value:?}");
+    }
+
+    let mut equals = value.split('=');
+    let name_arch = equals.next().unwrap_or_default();
+    let version = equals.next();
+    if equals.next().is_some() {
+        bail!("{field} contains unsupported apt package spec {value:?}: multiple '=' separators");
+    }
+    if let Some(version) = version {
+        validate_apt_version(field, value, version)?;
+    }
+
+    let mut name_arch_parts = name_arch.split(':');
+    let name = name_arch_parts.next().unwrap_or_default();
+    let arch = name_arch_parts.next();
+    if name_arch_parts.next().is_some() {
+        bail!("{field} contains unsupported apt package spec {value:?}: multiple ':' separators before version");
+    }
+    validate_apt_package_name(field, value, name)?;
+    if let Some(arch) = arch {
+        validate_apt_arch(field, value, arch)?;
+    }
+    Ok(())
+}
+
+fn validate_apt_package_name(field: &str, full: &str, name: &str) -> Result<()> {
+    require_non_empty(field, name)?;
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        bail!("{field} contains unsupported apt package spec {full:?}: empty package name");
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        bail!("{field} contains unsupported apt package spec {full:?}: package name must start with lowercase ASCII or digit");
+    }
+    if !bytes.all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')
+    }) {
+        bail!("{field} contains unsupported apt package spec {full:?}: unsupported package name character");
+    }
+    Ok(())
+}
+
+fn validate_apt_arch(field: &str, full: &str, arch: &str) -> Result<()> {
+    require_non_empty(field, arch)?;
+    let mut bytes = arch.bytes();
+    let Some(first) = bytes.next() else {
+        bail!(
+            "{field} contains unsupported apt package spec {full:?}: empty architecture qualifier"
+        );
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        bail!("{field} contains unsupported apt package spec {full:?}: architecture must start with lowercase ASCII or digit");
+    }
+    if !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
+        bail!("{field} contains unsupported apt package spec {full:?}: unsupported architecture character");
+    }
+    Ok(())
+}
+
+fn validate_apt_version(field: &str, full: &str, version: &str) -> Result<()> {
+    require_non_empty(field, version)?;
+    if !version.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-' | b':' | b'~')
+    }) {
+        bail!(
+            "{field} contains unsupported apt package spec {full:?}: unsupported version character"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct BackendEmitterSpec {
     id: BackendTargetId,
     materialized_source: Option<AdapterMaterializedSource>,
@@ -1051,7 +1141,8 @@ impl BackendEmitterSpec {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct AdapterMaterializedSource {
     image: String,
     profile: String,
@@ -1073,6 +1164,7 @@ impl AdapterMaterializedSource {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct BackendAdapterSpec {
     program: String,
     #[serde(default)]
@@ -1091,6 +1183,7 @@ impl BackendAdapterSpec {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct BackendAdapterEnvSpec {
     artifact_dir: String,
     build_config: String,
@@ -1119,6 +1212,7 @@ impl BackendAdapterEnvSpec {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct BackendSeedSpec {
     motlie_backend: String,
     motlie_net_backend: String,
@@ -1133,6 +1227,7 @@ impl BackendSeedSpec {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct BackendValidationSpec {
     artifact_dir_env: Option<String>,
     artifact_dir_suffix: Option<PathBuf>,
@@ -1175,7 +1270,7 @@ impl BackendValidationSpec {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ImageBuildManifest {
     contract_version: String,
     config_path: PathBuf,
@@ -1211,19 +1306,8 @@ impl ImageBuildManifest {
             config_path: config_path.to_path_buf(),
             target,
             output_dir: out.to_path_buf(),
-            source: ManifestSource {
-                kind: config.source.kind.to_string(),
-                image: config.source.image.clone(),
-                profile: config.source.profile.as_str().to_string(),
-                platform: config.source.platform.clone(),
-                digest_policy: config.source.digest_policy.to_string(),
-            },
-            package_stage: ManifestPackageStage {
-                manager: config.package_stage.manager.as_str().to_string(),
-                update: config.package_stage.update,
-                install: config.package_stage.install.clone(),
-                clean: config.package_stage.clean,
-            },
+            source: ManifestSource::from_config(config),
+            package_stage: ManifestPackageStage::from_config(config),
             stages,
             immutable_files: config.immutable_files.clone(),
             seed_files: config.seed_files.clone(),
@@ -1236,9 +1320,43 @@ impl ImageBuildManifest {
             ],
         }
     }
+
+    fn validate_against_config<'a>(
+        &self,
+        config: &'a ImageBuildConfig,
+    ) -> Result<&'a BackendEmitterSpec> {
+        require_manifest_match("contract_version", &self.contract_version, &config.version)?;
+        let emitter = config.validate_for_target(&self.target)?;
+        require_manifest_match("source", &self.source, &ManifestSource::from_config(config))?;
+        require_manifest_match(
+            "package_stage",
+            &self.package_stage,
+            &ManifestPackageStage::from_config(config),
+        )?;
+        require_manifest_match(
+            "immutable_files",
+            &self.immutable_files,
+            &config.immutable_files,
+        )?;
+        require_manifest_match("seed_files", &self.seed_files, &config.seed_files)?;
+        require_manifest_match("validation", &self.validation, &config.validation)?;
+        if let Some(adapter) = &self.adapter {
+            require_manifest_match(
+                "adapter.materialized_source",
+                &adapter.materialized_source,
+                &emitter.materialized_source,
+            )?;
+            require_manifest_match(
+                "adapter.package_include",
+                &adapter.package_include,
+                &config.package_stage.install,
+            )?;
+        }
+        Ok(emitter)
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ManifestSource {
     kind: String,
     image: String,
@@ -1247,12 +1365,35 @@ struct ManifestSource {
     digest_policy: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl ManifestSource {
+    fn from_config(config: &ImageBuildConfig) -> Self {
+        Self {
+            kind: config.source.kind.to_string(),
+            image: config.source.image.clone(),
+            profile: config.source.profile.as_str().to_string(),
+            platform: config.source.platform.clone(),
+            digest_policy: config.source.digest_policy.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ManifestPackageStage {
     manager: String,
     update: bool,
     install: Vec<String>,
     clean: bool,
+}
+
+impl ManifestPackageStage {
+    fn from_config(config: &ImageBuildConfig) -> Self {
+        Self {
+            manager: config.package_stage.manager.as_str().to_string(),
+            update: config.package_stage.update,
+            install: config.package_stage.install.clone(),
+            clean: config.package_stage.clean,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1288,7 +1429,7 @@ struct HarnessValidationRecord {
     completed_at_unix_seconds: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StageRecord {
     name: String,
     status: String,
@@ -1416,6 +1557,16 @@ fn require_eq(field: &str, actual: &str, expected: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_manifest_match<T>(field: &str, actual: &T, expected: &T) -> Result<()>
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if actual != expected {
+        bail!("manifest {field} does not match config: manifest={actual:?}, config={expected:?}");
+    }
+    Ok(())
+}
+
 fn require_non_empty(field: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("{field} must not be empty");
@@ -1492,6 +1643,152 @@ fn render_seed_template(template: &str, guest: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image_config_fixture() -> ImageBuildConfig {
+        ImageBuildConfig {
+            version: v1_5::MOTLIE_V15_CONTRACT_VERSION.to_string(),
+            source: SourceStage {
+                kind: SourceKind::TransitionalAdapter,
+                image: "examples/v1.5/current-shell-adapters".to_string(),
+                profile: ProfileId("v1-5-shell-adapter".to_string()),
+                platform: "host-native".to_string(),
+                digest_policy: DigestPolicy::AdapterVerified,
+            },
+            package_stage: PackageStage {
+                manager: PackageManagerId("apt".to_string()),
+                update: true,
+                install: vec!["bash".to_string(), "g++".to_string()],
+                clean: true,
+            },
+            immutable_payloads: vec![PayloadSpec {
+                label: "motlie-vfs-guest".to_string(),
+                source: PathBuf::from("target/release/motlie-vfs-guest-v1_5"),
+                guest_path: v1_5::MOTLIE_V15_GUEST_BIN_OPT.to_string(),
+                mode: "0755".to_string(),
+                links: vec![v1_5::MOTLIE_V15_GUEST_BIN_COMPAT.to_string()],
+            }],
+            sshd_policy: SshdPolicy {
+                trusted_user_ca_keys: "/etc/ssh/ca/user_ca.pub".to_string(),
+                authorized_principals_file: "/etc/ssh/auth_principals/%u".to_string(),
+                force_command: None,
+            },
+            services: vec![ServiceSpec {
+                name: "motlie-vfs-guest.service".to_string(),
+                enable: "cloud-init.target".to_string(),
+            }],
+            immutable_files: vec![v1_5::MOTLIE_V15_GUEST_BIN_OPT.to_string()],
+            seed_files: vec![v1_5::MOTLIE_V15_BACKEND_ENV_PATH.to_string()],
+            seed: SeedStage {
+                user_home: "/home/{guest}".to_string(),
+                ssh_principal: "{guest}".to_string(),
+                mounts: vec![SeedMountTemplate {
+                    tag: "{guest}-workspace".to_string(),
+                    guest_path: "/workspace".to_string(),
+                    read_only: false,
+                }],
+            },
+            emitters: vec![BackendEmitterSpec {
+                id: BackendTargetId("ch".to_string()),
+                materialized_source: Some(AdapterMaterializedSource {
+                    image: "debian:bookworm".to_string(),
+                    profile: "debian-systemd".to_string(),
+                    platform: "host-native-linux".to_string(),
+                    materializer: "mmdebstrap".to_string(),
+                }),
+                adapter: BackendAdapterSpec {
+                    program: "bash".to_string(),
+                    args: vec!["libs/vmm/examples/v1.5/build-image.sh".to_string()],
+                    env: BackendAdapterEnvSpec {
+                        artifact_dir: "MOTLIE_V15_ARTIFACTS_DIR".to_string(),
+                        build_config: "MOTLIE_V15_BUILD_CONFIG".to_string(),
+                        package_manager: "MOTLIE_V15_PACKAGE_MANAGER".to_string(),
+                        package_update: "MOTLIE_V15_PACKAGE_UPDATE".to_string(),
+                        package_include: "MOTLIE_V15_PACKAGE_INCLUDE".to_string(),
+                        package_clean: "MOTLIE_V15_PACKAGE_CLEAN".to_string(),
+                    },
+                },
+                seed: BackendSeedSpec {
+                    motlie_backend: "ch".to_string(),
+                    motlie_net_backend: "ch-vhost-user".to_string(),
+                },
+                validation: BackendValidationSpec {
+                    artifact_dir_env: Some("MOTLIE_V15_CH_BASE_ARTIFACTS_DIR".to_string()),
+                    artifact_dir_suffix: Some(PathBuf::from("base")),
+                    base_vm_dir_env: None,
+                    base_vm_dir_suffix: None,
+                    base_vm_dir_required_files: Vec::new(),
+                },
+            }],
+            validation: vec!["vfs_memfs".to_string()],
+        }
+    }
+
+    fn image_config_yaml(extra_top_level: &str, extra_source: &str) -> String {
+        format!(
+            r#"version: v1.5
+source:
+  kind: transitional-adapter
+  image: examples/v1.5/current-shell-adapters
+  profile: v1-5-shell-adapter
+  platform: host-native
+  digest_policy: adapter-verified
+{extra_source}package_stage:
+  manager: apt
+  update: true
+  install:
+    - bash
+  clean: true
+immutable_payloads:
+  - label: motlie-vfs-guest
+    source: target/release/motlie-vfs-guest-v1_5
+    guest_path: /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
+    mode: "0755"
+    links:
+      - /usr/local/bin/motlie-vfs-guest
+sshd_policy:
+  trusted_user_ca_keys: /etc/ssh/ca/user_ca.pub
+  authorized_principals_file: /etc/ssh/auth_principals/%u
+  force_command: null
+services:
+  - name: motlie-vfs-guest.service
+    enable: cloud-init.target
+immutable_files:
+  - /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
+seed_files:
+  - /etc/motlie/v1.5/backend.env
+seed:
+  user_home: /home/{{guest}}
+  ssh_principal: "{{guest}}"
+  mounts:
+    - tag: "{{guest}}-workspace"
+      guest_path: /workspace
+emitters:
+  - id: ch
+    materialized_source:
+      image: debian:bookworm
+      profile: debian-systemd
+      platform: host-native-linux
+      materializer: mmdebstrap
+    adapter:
+      program: bash
+      args: []
+      env:
+        artifact_dir: MOTLIE_V15_ARTIFACTS_DIR
+        build_config: MOTLIE_V15_BUILD_CONFIG
+        package_manager: MOTLIE_V15_PACKAGE_MANAGER
+        package_update: MOTLIE_V15_PACKAGE_UPDATE
+        package_include: MOTLIE_V15_PACKAGE_INCLUDE
+        package_clean: MOTLIE_V15_PACKAGE_CLEAN
+    seed:
+      motlie_backend: ch
+      motlie_net_backend: ch-vhost-user
+    validation:
+      artifact_dir_env: MOTLIE_V15_CH_BASE_ARTIFACTS_DIR
+validation:
+  - vfs_memfs
+{extra_top_level}"#
+        )
+    }
 
     #[test]
     fn parses_build_command() {
@@ -1633,5 +1930,96 @@ mod tests {
         assert!(error
             .to_string()
             .contains("reserved but not implemented by current mbuild adapters"));
+    }
+
+    #[test]
+    fn apt_package_specs_allow_common_apt_syntax() {
+        let stage = PackageStage {
+            manager: PackageManagerId("apt".to_string()),
+            update: true,
+            install: vec![
+                "g++".to_string(),
+                "libstdc++6".to_string(),
+                "foo:amd64".to_string(),
+                "foo=version".to_string(),
+                "foo:amd64=1:2.0+really-1~deb12u1".to_string(),
+            ],
+            clean: true,
+        };
+
+        stage.validate().unwrap();
+    }
+
+    #[test]
+    fn config_rejects_unknown_top_level_fields() {
+        let error =
+            serde_yaml::from_str::<ImageBuildConfig>(&image_config_yaml("unexpected: true\n", ""))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn config_rejects_unknown_nested_fields() {
+        let error = serde_yaml::from_str::<ImageBuildConfig>(&image_config_yaml(
+            "",
+            "  unexpected_source: true\n",
+        ))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn manifest_validation_rejects_stale_package_config() {
+        let config = image_config_fixture();
+        let mut manifest = ImageBuildManifest::from_config(
+            Path::new("motlie-image.yaml"),
+            BackendTargetId("ch".to_string()),
+            Path::new("artifacts/ch"),
+            &config,
+            None,
+            Vec::new(),
+        );
+        manifest.package_stage.install = vec!["nano".to_string()];
+
+        let error = manifest.validate_against_config(&config).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("manifest package_stage does not match config"));
+    }
+
+    #[test]
+    fn manifest_validation_rejects_stale_adapter_materialized_source() {
+        let config = image_config_fixture();
+        let manifest = ImageBuildManifest::from_config(
+            Path::new("motlie-image.yaml"),
+            BackendTargetId("ch".to_string()),
+            Path::new("artifacts/ch"),
+            &config,
+            Some(AdapterRecord {
+                kind: "v1.5-shell-adapter".to_string(),
+                command: vec!["bash".to_string()],
+                log_path: PathBuf::from("mbuild-adapter.log"),
+                exit_status: 0,
+                started_at_unix_seconds: 1,
+                completed_at_unix_seconds: 2,
+                package_include: config.package_stage.install.clone(),
+                materialized_source: Some(AdapterMaterializedSource {
+                    image: "ubuntu:24.04".to_string(),
+                    profile: "ubuntu-systemd".to_string(),
+                    platform: "linux/amd64".to_string(),
+                    materializer: "oci-importer".to_string(),
+                }),
+            }),
+            Vec::new(),
+        );
+
+        let error = manifest.validate_against_config(&config).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("manifest adapter.materialized_source does not match config"));
     }
 }

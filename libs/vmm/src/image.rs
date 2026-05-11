@@ -5554,7 +5554,7 @@ mod tests {
             manifest.installed.iter().any(|record| {
                 record.kind == RootfsCompatibilityInstallKind::ServiceEnablement
                     && record.path
-                        == PathBuf::from(
+                        == Path::new(
                             "/etc/systemd/system/multi-user.target.wants/motlie-vmm-egress.service",
                         )
             }),
@@ -5617,14 +5617,14 @@ mod tests {
         let env_record = manifest
             .installed
             .iter()
-            .find(|record| record.path == PathBuf::from("/home/alice/.env"))
+            .find(|record| record.path == Path::new("/home/alice/.env"))
             .unwrap();
         assert_eq!(env_record.guest_uid, Some(2001));
         assert_eq!(env_record.guest_gid, Some(2001));
         let home_record = manifest
             .installed
             .iter()
-            .find(|record| record.path == PathBuf::from("/home/alice"))
+            .find(|record| record.path == Path::new("/home/alice"))
             .unwrap();
         assert_eq!(home_record.guest_uid, Some(2001));
         assert_eq!(home_record.guest_gid, Some(2001));

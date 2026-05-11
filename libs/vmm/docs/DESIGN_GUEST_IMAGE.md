@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-11 | @vmm-cdx | Strengthen the `mbuild` build-file contract: YAML config rejects unknown fields, APT package entries use package-manager-aware validation, and `mbuild validate` compares manifests back to the current config |
 | 2026-05-11 | @vmm-cdx | Tighten the `mbuild` contract after PR #270 review: current configs identify transitional shell adapters honestly, record per-emitter materialized sources, make seed topology config-driven, keep only apt executable for now, and move seed uid/gid handling to guest ownership metadata instead of host chown |
 | 2026-05-09 | @vmm-cdx | Expand the issue #271 `mbuild` design status: app-layer CLI delegates current CH/VZ adapters, emits artifact digests, regenerates per-guest seed overlays, and delegates optional live harness validation with a validation manifest |
 | 2026-05-09 | @vmm-cdx | Add the initial issue #271 product surface: `libs/vmm/examples/v1.5/motlie-image.yaml` and the standalone top-level `mbuild` builder/validator binary, currently emitting a stage manifest while package/emitter execution remains pending |
@@ -1070,12 +1071,15 @@ Required product surface:
 
 - checked-in Dockerfile-like config:
   `libs/vmm/examples/v1.5/motlie-image.yaml`
+- strict schema loading that rejects unknown fields so typos and unsupported
+  directives do not silently pass
 - ordered stages for source resolve, import, classify, package install,
   immutable Motlie layer, image policy, seed overlay, backend emission, and
   validation
 - explicit immutable image files versus per-guest seed files
-- package-manager stages for apt first; apk/dnf/zypper/pacman identifiers are
-  reserved but rejected until concrete package strategies are implemented
+- package-manager stages for apt first, with package-manager-aware package
+  spec validation; apk/dnf/zypper/pacman identifiers are reserved but rejected
+  until concrete package strategies are implemented
 - config-driven seed topology for user home, SSH principal, and mount
   declarations so the CLI does not hardcode example paths
 - sshd image policy for CA trust, ForceCommand/on-login hooks, and reusable
@@ -1106,10 +1110,14 @@ bins/mbuild/src/main.rs
 
 `mbuild build` consumes the config and writes `mbuild-manifest.json` with source
 kind, package intent, source/import/classify/package/immutable-layer/policy/
-backend-emitter evidence, and adapter materialization evidence. It delegates to
-the current v1.5 CH/VZ adapters while they remain transitional. `source.kind`
-must switch from `transitional-adapter` to `external-oci` only when the builder
-derives CH and VZ artifacts from the assembled OCI rootfs path.
+backend-emitter evidence, and adapter materialization evidence. `mbuild
+validate` compares the manifest source, package stage, immutable files, seed
+files, validation list, and executed adapter materialized source back to the
+current config. A manifest produced from an older build file is not valid
+evidence for the current build file. The build path delegates to the current
+v1.5 CH/VZ adapters while they remain transitional. `source.kind` must switch
+from `transitional-adapter` to `external-oci` only when the builder derives CH
+and VZ artifacts from the assembled OCI rootfs path.
 `mbuild seed` writes `mbuild-seed-manifest.json` and regenerates per-guest
 NoCloud/backend/VFS/SSH/user seed files without rebuilding the immutable image.
 `mbuild validate --scenario` delegates live conformance to `harness_v1_5` and
