@@ -104,8 +104,18 @@ The current config schema is intentionally explicit:
 - `services`: systemd services expected to be enabled.
 - `immutable_files`: files expected to exist in the immutable image layer.
 - `seed_files`: per-guest seed or overlay files expected after emission.
-- `emitters`: backend targets supported by the config, currently `ch` and `vz`.
+- `emitters`: registered backend targets. Each emitter declares its backend ID,
+  adapter command, adapter env-var contract, seed backend values, and harness
+  validation env-var contract. The adapter env includes package manager,
+  update/install/clean intent so shell emitters do not rediscover config shape.
+  The checked-in config registers `ch` and `vz`, but the CLI accepts any target
+  ID declared here.
 - `validation`: post-boot behavior checks the produced image must satisfy.
+
+`package_stage.manager` is validated against a small strategy table (`apt`,
+`apk`, `dnf`, `zypper`, `pacman`) so configs can describe non-apt foundations
+without changing CLI parsing. Current v1.5 shell adapters still wire the Ubuntu
+`apt` path first.
 
 ## Manifest Contract
 
@@ -133,6 +143,10 @@ scenario, target, log path, and exit status.
 The manifests are deliberately machine-readable so harnesses and CI can verify
 what stage was produced without rediscovering output paths or inferring backend
 intent from directory names.
+
+`mbuild` emits structured tracing logs. Use `RUST_LOG=debug` when debugging OCI
+fetch/import, rootfs classification, backend adapter delegation, or harness
+validation.
 
 ## Local Verification
 

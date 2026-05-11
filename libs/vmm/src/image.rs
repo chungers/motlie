@@ -19,19 +19,30 @@ use crate::backend::BackendKind;
 /// First supported external OCI import profile.
 pub const UBUNTU_SYSTEMD_PROFILE: &str = "ubuntu-systemd";
 pub const UBUNTU_SYSTEMD_SOURCE_REF: &str = "docker.io/library/ubuntu:24.04";
-pub const MOTLIE_V15_CONTRACT_VERSION: &str = "v1.5";
-pub const MOTLIE_V15_GUEST_MOUNTER_MARKER: &str = "MOTLIE_VMM_GUEST_MOUNTER_V1_5";
-pub const MOTLIE_V15_GUEST_BUILD_FEATURES: &str = "--no-default-features --features guest-vfs";
-pub const MOTLIE_V15_GUEST_BIN_OPT: &str = "/opt/motlie/v1.5/guest/bin/motlie-vfs-guest";
-pub const MOTLIE_V15_GUEST_BIN_COMPAT: &str = "/usr/local/bin/motlie-vfs-guest";
-pub const MOTLIE_V15_BACKEND_ENV_PATH: &str = "/etc/motlie/v1.5/backend.env";
-pub const MOTLIE_V15_MOUNTS_PATH: &str = "/etc/motlie-vfs/mounts.yaml";
-pub const MOTLIE_V15_SSHD_CA_CONFIG_PATH: &str = "/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf";
-pub const MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH: &str = "/var/lib/cloud/seed/nocloud/user-data";
-pub const MOTLIE_V15_CLOUD_INIT_META_DATA_PATH: &str = "/var/lib/cloud/seed/nocloud/meta-data";
-pub const MOTLIE_V15_VFS_HOST_CID: u32 = 2;
-pub const MOTLIE_V15_VFS_PORT: u16 = 5000;
-pub const MOTLIE_V15_SSH_VSOCK_PORT: u16 = 2222;
+
+/// Motlie v1.5 product image contract constants.
+pub mod v1_5 {
+    pub const MOTLIE_V15_CONTRACT_VERSION: &str = "v1.5";
+    pub const MOTLIE_V15_GUEST_MOUNTER_MARKER: &str = "MOTLIE_VMM_GUEST_MOUNTER_V1_5";
+    pub const MOTLIE_V15_GUEST_BUILD_FEATURES: &str = "--no-default-features --features guest-vfs";
+    pub const MOTLIE_V15_GUEST_BIN_OPT: &str = "/opt/motlie/v1.5/guest/bin/motlie-vfs-guest";
+    pub const MOTLIE_V15_GUEST_BIN_COMPAT: &str = "/usr/local/bin/motlie-vfs-guest";
+    pub const MOTLIE_V15_BACKEND_ENV_PATH: &str = "/etc/motlie/v1.5/backend.env";
+    pub const MOTLIE_V15_MOUNTS_PATH: &str = "/etc/motlie-vfs/mounts.yaml";
+    pub const MOTLIE_V15_SSHD_CA_CONFIG_PATH: &str = "/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf";
+    pub const MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH: &str = "/var/lib/cloud/seed/nocloud/user-data";
+    pub const MOTLIE_V15_CLOUD_INIT_META_DATA_PATH: &str = "/var/lib/cloud/seed/nocloud/meta-data";
+    pub const MOTLIE_V15_VFS_HOST_CID: u32 = 2;
+    pub const MOTLIE_V15_VFS_PORT: u16 = 5000;
+    pub const MOTLIE_V15_SSH_VSOCK_PORT: u16 = 2222;
+}
+
+use v1_5::{
+    MOTLIE_V15_BACKEND_ENV_PATH, MOTLIE_V15_CLOUD_INIT_META_DATA_PATH,
+    MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH, MOTLIE_V15_CONTRACT_VERSION, MOTLIE_V15_GUEST_BIN_COMPAT,
+    MOTLIE_V15_GUEST_BIN_OPT, MOTLIE_V15_MOUNTS_PATH, MOTLIE_V15_SSH_VSOCK_PORT,
+    MOTLIE_V15_SSHD_CA_CONFIG_PATH, MOTLIE_V15_VFS_HOST_CID, MOTLIE_V15_VFS_PORT,
+};
 
 /// Guest CPU architecture as named by OCI platform descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,20 +101,6 @@ impl OciPlatform {
 
     pub const fn linux_arm64() -> Self {
         GuestArchitecture::Arm64.oci_platform()
-    }
-
-    /// Current v1.5 lab defaults, not a backend invariant.
-    ///
-    /// CH validation runs on native amd64 DGX hosts today; VZ validation runs on
-    /// Apple Silicon arm64 hosts. Callers that know their target guest platform
-    /// should pass it explicitly instead of deriving it from backend kind.
-    pub const fn default_for_v1_5_validation_backend(backend_kind: BackendKind) -> Self {
-        match backend_kind {
-            BackendKind::Vz => Self::linux_arm64(),
-            BackendKind::ChShell | BackendKind::ChForkExec | BackendKind::ChVmmThread => {
-                Self::linux_amd64()
-            }
-        }
     }
 }
 
@@ -783,6 +780,7 @@ impl RootfsClassifier {
         Self
     }
 
+    #[tracing::instrument(skip(self, root, spec), fields(profile = %spec.profile.name))]
     pub fn classify(
         &self,
         root: impl AsRef<Path>,
@@ -841,6 +839,13 @@ impl RootfsClassifier {
         findings.extend(classify_vnet_requirements(root, &spec.vnet)?);
 
         let status = aggregate_classification_status(&findings);
+        tracing::info!(
+            root = %root.display(),
+            profile = %spec.profile.name,
+            status = ?status,
+            findings = findings.len(),
+            "classified rootfs compatibility"
+        );
         Ok(RootfsClassification {
             root: root.to_path_buf(),
             profile_name: spec.profile.name.clone(),
@@ -1183,6 +1188,7 @@ impl RootfsCompatibilityAssembler {
         Self
     }
 
+    #[tracing::instrument(skip(self, root, spec), fields(profile = %spec.profile_spec.profile.name))]
     pub fn assemble(
         &self,
         root: impl AsRef<Path>,
@@ -1190,6 +1196,7 @@ impl RootfsCompatibilityAssembler {
     ) -> Result<RootfsCompatibilityAssemblyManifest, RootfsCompatibilityError> {
         spec.validate()?;
         let root = root.as_ref();
+        tracing::info!(root = %root.display(), "assembling rootfs compatibility layer");
         let classification = RootfsClassifier::new().classify(root, &spec.profile_spec)?;
         if !classification.is_supported_foundation() {
             let unsupported_findings = classification
@@ -1222,6 +1229,12 @@ impl RootfsCompatibilityAssembler {
         install_required_directories(root, spec, &mut installed)?;
         install_guest_payloads(root, spec, &mut installed)?;
         install_builtin_support_files(root, spec.enable_ch_egress_service, &mut installed)?;
+        tracing::info!(
+            root = %root.display(),
+            installed = installed.len(),
+            pending_requirements = pending_requirements.len(),
+            "assembled rootfs compatibility layer"
+        );
 
         Ok(RootfsCompatibilityAssemblyManifest {
             root: root.to_path_buf(),
@@ -1242,6 +1255,7 @@ impl RootfsSeedOverlayAssembler {
         Self
     }
 
+    #[tracing::instrument(skip(self, root, spec), fields(instance_id = %spec.cloud_init.instance_id))]
     pub fn assemble(
         &self,
         root: impl AsRef<Path>,
@@ -1249,12 +1263,20 @@ impl RootfsSeedOverlayAssembler {
     ) -> Result<RootfsSeedOverlayManifest, RootfsCompatibilityError> {
         spec.validate()?;
         let root = root.as_ref();
+        tracing::info!(root = %root.display(), "assembling rootfs seed overlay");
         let mut installed = Vec::new();
         install_seed_overlay_directories(root, spec, &mut installed)?;
         install_cloud_init_seed(root, spec, &mut installed)?;
         install_backend_env(root, &spec.backend_env, &mut installed)?;
         install_mounts_yaml(root, &spec.mounts, &mut installed)?;
         install_ssh_and_user_seeds(root, spec, &mut installed)?;
+        tracing::info!(
+            root = %root.display(),
+            installed = installed.len(),
+            users = spec.users.len(),
+            mounts = spec.mounts.len(),
+            "assembled rootfs seed overlay"
+        );
 
         Ok(RootfsSeedOverlayManifest {
             root: root.to_path_buf(),
@@ -1367,6 +1389,7 @@ impl OciRootfsImporter {
         Self
     }
 
+    #[tracing::instrument(skip(self, layers, assembly_root), fields(layer_count = layers.len()))]
     pub fn import_layers(
         &self,
         layers: &[OciLayerInput],
@@ -1376,10 +1399,21 @@ impl OciRootfsImporter {
             return Err(OciRootfsImportError::NoRootfsLayers);
         }
         let assembly_root = assembly_root.as_ref();
+        tracing::info!(
+            root = %assembly_root.display(),
+            layer_count = layers.len(),
+            "importing OCI rootfs layers"
+        );
         ensure_empty_assembly_root(assembly_root)?;
 
         let mut applied_layers = Vec::with_capacity(layers.len());
         for layer in layers {
+            tracing::debug!(
+                digest = %layer.descriptor.digest,
+                media_type = %layer.descriptor.media_type,
+                path = %layer.path.display(),
+                "applying OCI rootfs layer"
+            );
             layer.descriptor.digest.validate()?;
             let compression = layer_compression(&layer.descriptor.media_type)?;
             verify_layer_blob(&layer.path, &layer.descriptor)?;
@@ -1390,6 +1424,11 @@ impl OciRootfsImporter {
                 size: layer.descriptor.size,
             });
         }
+        tracing::info!(
+            root = %assembly_root.display(),
+            applied_layers = applied_layers.len(),
+            "imported OCI rootfs layers"
+        );
 
         Ok(ImportedOciRootfs {
             root: assembly_root.to_path_buf(),
@@ -1420,20 +1459,24 @@ impl OciRegistryClient {
         Self { client }
     }
 
+    #[tracing::instrument(skip(self), fields(platform = %platform))]
     pub async fn resolve_ubuntu_systemd_source(
         &self,
         platform: OciPlatform,
     ) -> Result<ExternalOciSource, OciRegistryError> {
         let image_ref = OciImageReference::from_str(UBUNTU_SYSTEMD_SOURCE_REF)?;
+        tracing::info!(image_ref = %image_ref, platform = %platform, "resolving Ubuntu systemd OCI source");
         let resolved = self.resolve_manifest(&image_ref, platform).await?;
         Ok(resolved.into_external_source())
     }
 
+    #[tracing::instrument(skip(self, image_ref), fields(image_ref = %image_ref, platform = %platform))]
     pub async fn resolve_manifest(
         &self,
         image_ref: &OciImageReference,
         platform: OciPlatform,
     ) -> Result<ResolvedOciManifest, OciRegistryError> {
+        tracing::info!(image_ref = %image_ref, platform = %platform, "resolving OCI manifest");
         let manifest = self.fetch_manifest(image_ref).await?;
         let image_index_digest = digest_from_bytes(&manifest.body)?;
         if let Some(header_digest) = manifest.registry_digest {
@@ -1447,6 +1490,13 @@ impl OciRegistryClient {
         }
         let platform_manifest_digest =
             select_platform_manifest_digest(&manifest.body, platform, image_ref)?;
+        tracing::info!(
+            image_ref = %image_ref,
+            platform = %platform,
+            image_index_digest = %image_index_digest,
+            platform_manifest_digest = %platform_manifest_digest,
+            "resolved OCI platform manifest"
+        );
         Ok(ResolvedOciManifest {
             image_ref: image_ref.clone(),
             image_index_digest,
@@ -1455,11 +1505,18 @@ impl OciRegistryClient {
         })
     }
 
+    #[tracing::instrument(skip(self, resolved, cache), fields(image_ref = %resolved.image_ref, platform = %resolved.platform, cache = %cache.root().display()))]
     pub async fn fetch_resolved_platform_to_cache(
         &self,
         resolved: &ResolvedOciManifest,
         cache: &OciContentCache,
     ) -> Result<CachedOciPlatform, OciRegistryError> {
+        tracing::info!(
+            image_ref = %resolved.image_ref,
+            platform = %resolved.platform,
+            cache = %cache.root().display(),
+            "fetching resolved OCI platform to cache"
+        );
         let manifest_blob = self
             .fetch_manifest_digest_to_cache(
                 &resolved.image_ref,
@@ -1475,6 +1532,12 @@ impl OciRegistryClient {
         let manifest = OciPlatformManifest::from_json(&manifest_bytes)?;
         let mut layers = Vec::with_capacity(manifest.layers.len());
         for descriptor in &manifest.layers {
+            tracing::debug!(
+                image_ref = %resolved.image_ref,
+                digest = %descriptor.digest,
+                size = descriptor.size,
+                "fetching OCI layer to cache"
+            );
             let cached = self
                 .fetch_blob_to_cache(
                     &resolved.image_ref,
@@ -1485,6 +1548,12 @@ impl OciRegistryClient {
                 .await?;
             layers.push(OciLayerInput::new(descriptor.clone(), cached.path));
         }
+        tracing::info!(
+            image_ref = %resolved.image_ref,
+            platform = %resolved.platform,
+            layers = layers.len(),
+            "fetched OCI platform to cache"
+        );
         Ok(CachedOciPlatform {
             resolved: resolved.clone(),
             manifest_blob,
@@ -1493,6 +1562,7 @@ impl OciRegistryClient {
         })
     }
 
+    #[tracing::instrument(skip(self, cache), fields(platform = %platform, cache = %cache.root().display()))]
     pub async fn resolve_and_fetch_ubuntu_systemd_to_cache(
         &self,
         platform: OciPlatform,
@@ -1504,6 +1574,7 @@ impl OciRegistryClient {
             .await
     }
 
+    #[tracing::instrument(skip(self, image_ref, cache), fields(image_ref = %image_ref, digest = %digest, cache = %cache.root().display()))]
     async fn fetch_manifest_digest_to_cache(
         &self,
         image_ref: &OciImageReference,
@@ -1511,8 +1582,10 @@ impl OciRegistryClient {
         cache: &OciContentCache,
     ) -> Result<CachedOciBlob, OciRegistryError> {
         if let Some(blob) = cache.cached_blob(digest, None)? {
+            tracing::debug!(digest = %digest, path = %blob.path.display(), "using cached OCI manifest");
             return Ok(blob);
         }
+        tracing::info!(image_ref = %image_ref, digest = %digest, "fetching OCI manifest digest");
         let digest_ref = image_ref.with_digest(digest.clone());
         let manifest = self.fetch_manifest(&digest_ref).await?;
         let computed_digest = digest_from_bytes(&manifest.body)?;
@@ -1535,6 +1608,7 @@ impl OciRegistryClient {
         cache.store_blob(digest, &manifest.body)
     }
 
+    #[tracing::instrument(skip(self, image_ref, cache), fields(image_ref = %image_ref, digest = %digest, cache = %cache.root().display()))]
     async fn fetch_blob_to_cache(
         &self,
         image_ref: &OciImageReference,
@@ -1543,8 +1617,10 @@ impl OciRegistryClient {
         cache: &OciContentCache,
     ) -> Result<CachedOciBlob, OciRegistryError> {
         if let Some(blob) = cache.cached_blob(digest, expected_size)? {
+            tracing::debug!(digest = %digest, path = %blob.path.display(), "using cached OCI blob");
             return Ok(blob);
         }
+        tracing::info!(image_ref = %image_ref, digest = %digest, "fetching OCI blob");
         let mut response = self.fetch_blob_once(image_ref, digest, None).await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             let challenge = response
@@ -4798,18 +4874,6 @@ mod tests {
                 finding.kind == kind && finding.path.as_deref() == Some(Path::new(path))
             })
             .unwrap_or_else(|| panic!("missing {kind:?} finding for {path}"))
-    }
-
-    #[test]
-    fn platform_defaults_follow_backend_contract() {
-        assert_eq!(
-            OciPlatform::default_for_v1_5_validation_backend(BackendKind::ChShell),
-            OciPlatform::linux_amd64()
-        );
-        assert_eq!(
-            OciPlatform::default_for_v1_5_validation_backend(BackendKind::Vz),
-            OciPlatform::linux_arm64()
-        );
     }
 
     #[test]

@@ -1,18 +1,23 @@
+use std::collections::BTreeSet;
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
     RootfsCloudInitSeed, RootfsCompatibilityBackendEnv, RootfsMountSpec,
     RootfsSeedOverlayAssembler, RootfsSeedOverlayManifest, RootfsSeedOverlaySpec, RootfsUserSeed,
-    MOTLIE_V15_CONTRACT_VERSION,
+    v1_5,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::{error, info, instrument};
+use tracing_subscriber::EnvFilter;
 
 const DEFAULT_MANIFEST_NAME: &str = "mbuild-manifest.json";
 const DEFAULT_SEED_MANIFEST_NAME: &str = "mbuild-seed-manifest.json";
@@ -21,10 +26,19 @@ const ADAPTER_LOG_NAME: &str = "mbuild-adapter.log";
 const VALIDATION_LOG_NAME: &str = "mbuild-validation.log";
 
 fn main() {
+    init_tracing();
     if let Err(error) = run() {
-        eprintln!("mbuild: {error}");
+        error!(error = %error, "mbuild failed");
         std::process::exit(1);
     }
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
 }
 
 fn run() -> Result<()> {
@@ -85,23 +99,24 @@ fn run() -> Result<()> {
 #[derive(Debug)]
 struct BuildOptions {
     config_path: PathBuf,
-    target: ImageTarget,
+    target: BackendTargetId,
     out: PathBuf,
     repo_root: Option<PathBuf>,
     plan_only: bool,
     adapter_args: Vec<String>,
 }
 
+#[instrument(skip(options), fields(target = %options.target, config = %options.config_path.display()))]
 fn build(options: BuildOptions) -> Result<()> {
     let config = load_config(&options.config_path)?;
-    config.validate_for_target(options.target)?;
+    let emitter = config.validate_for_target(&options.target)?;
     fs::create_dir_all(&options.out)?;
 
-    let repo_root = options.repo_root.clone().unwrap_or_else(default_repo_root);
     let adapter = if options.plan_only {
         None
     } else {
-        Some(run_backend_adapter(&repo_root, &config, &options)?)
+        let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+        Some(run_backend_adapter(&repo_root, &config, emitter, &options)?)
     };
     let artifacts = if options.plan_only {
         Vec::new()
@@ -119,14 +134,14 @@ fn build(options: BuildOptions) -> Result<()> {
     );
     let manifest_path = options.out.join(DEFAULT_MANIFEST_NAME);
     fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
-    println!("{}", manifest_path.display());
+    info!(path = %manifest_path.display(), "wrote mbuild manifest");
     Ok(())
 }
 
 #[derive(Debug)]
 struct SeedOptions {
     config_path: PathBuf,
-    target: ImageTarget,
+    target: BackendTargetId,
     guest: String,
     uid: Option<u32>,
     gid: Option<u32>,
@@ -135,9 +150,10 @@ struct SeedOptions {
     ssh_ca_pubkey: Option<PathBuf>,
 }
 
+#[instrument(skip(options), fields(target = %options.target, guest = %options.guest, config = %options.config_path.display()))]
 fn seed(options: SeedOptions) -> Result<()> {
     let config = load_config(&options.config_path)?;
-    config.validate_for_target(options.target)?;
+    let emitter = config.validate_for_target(&options.target)?;
     fs::create_dir_all(&options.out)?;
 
     let hostname = options
@@ -145,7 +161,7 @@ fn seed(options: SeedOptions) -> Result<()> {
         .unwrap_or_else(|| format!("motlie-{}", options.guest));
     let mut spec = RootfsSeedOverlaySpec::new(
         RootfsCloudInitSeed::new(&options.guest, hostname),
-        backend_env_for_target(options.target),
+        emitter.backend_env(),
     );
     spec.mounts = vec![
         RootfsMountSpec::new(
@@ -172,14 +188,14 @@ fn seed(options: SeedOptions) -> Result<()> {
     let seed_manifest = RootfsSeedOverlayAssembler::new().assemble(&options.out, &spec)?;
     let manifest = ImageSeedManifest::from_seed_overlay(
         &options.config_path,
-        options.target,
+        options.target.clone(),
         &options.out,
         &config,
         &seed_manifest,
-    );
+    )?;
     let manifest_path = options.out.join(DEFAULT_SEED_MANIFEST_NAME);
     fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
-    println!("{}", manifest_path.display());
+    info!(path = %manifest_path.display(), "wrote mbuild seed manifest");
     Ok(())
 }
 
@@ -193,6 +209,7 @@ struct ValidationOptions {
     harness_bin: Option<PathBuf>,
 }
 
+#[instrument(skip(options), fields(config = %options.config_path.display(), artifact = %options.artifact.display()))]
 fn validate(options: ValidationOptions) -> Result<()> {
     let config = load_config(&options.config_path)?;
     config.validate()?;
@@ -206,12 +223,7 @@ fn validate(options: ValidationOptions) -> Result<()> {
             config.version
         );
     }
-    if !config.emitters.contains(&manifest.target) {
-        bail!(
-            "manifest target {} is not declared by config emitters",
-            manifest.target.as_str()
-        );
-    }
+    let emitter = config.validate_for_target(&manifest.target)?;
     if manifest.stages.is_empty() {
         bail!("manifest does not contain stage records");
     }
@@ -222,9 +234,15 @@ fn validate(options: ValidationOptions) -> Result<()> {
         bail!("executed manifest does not contain artifact digests");
     }
     if let Some(scenario) = &options.scenario {
-        let repo_root = options.repo_root.clone().unwrap_or_else(default_repo_root);
-        let validation =
-            run_harness_validation(&repo_root, &manifest, &options.artifact, scenario, &options)?;
+        let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+        let validation = run_harness_validation(
+            &repo_root,
+            &manifest,
+            emitter,
+            &options.artifact,
+            scenario,
+            &options,
+        )?;
         let ok = validation.exit_status == 0;
         let validation_path = options.artifact.join(DEFAULT_VALIDATION_MANIFEST_NAME);
         fs::write(&validation_path, serde_json::to_vec_pretty(&validation)?)?;
@@ -235,36 +253,65 @@ fn validate(options: ValidationOptions) -> Result<()> {
                 validation.log_path.display()
             );
         }
-        println!("validated {}", validation_path.display());
+        info!(path = %validation_path.display(), "validated mbuild harness scenario");
         return Ok(());
     }
-    println!("validated {}", manifest_path.display());
+    info!(path = %manifest_path.display(), "validated mbuild manifest");
     Ok(())
 }
 
+#[instrument(fields(path = %path.display()))]
 fn load_config(path: &Path) -> Result<ImageBuildConfig> {
     let config: ImageBuildConfig = serde_yaml::from_slice(&fs::read(path)?)?;
     config.validate()?;
     Ok(config)
 }
 
-fn default_repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("bins/mbuild must live two levels below the repository root")
-        .to_path_buf()
+fn resolve_repo_root(provided: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = provided {
+        return validate_repo_root(path);
+    }
+    if let Some(path) = env::var_os("MOTLIE_REPO_ROOT") {
+        return validate_repo_root(Path::new(&path));
+    }
+
+    let output = Command::new("cargo")
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let cargo_toml = String::from_utf8(output.stdout)
+                .context("cargo locate-project returned non-UTF-8 output")?;
+            let cargo_toml = PathBuf::from(cargo_toml.trim());
+            if let Some(repo_root) = cargo_toml.parent() {
+                return validate_repo_root(repo_root);
+            }
+        }
+    }
+
+    bail!("repo root is required; pass --repo-root or set MOTLIE_REPO_ROOT")
 }
 
+fn validate_repo_root(path: &Path) -> Result<PathBuf> {
+    if !path.is_dir() {
+        bail!("repo root is not a directory: {}", path.display());
+    }
+    if !path.join("Cargo.toml").is_file() {
+        bail!("repo root does not contain Cargo.toml: {}", path.display());
+    }
+    Ok(path.to_path_buf())
+}
+
+#[instrument(
+    skip(repo_root, config, emitter, options),
+    fields(target = %options.target, out = %options.out.display())
+)]
 fn run_backend_adapter(
     repo_root: &Path,
     config: &ImageBuildConfig,
+    emitter: &BackendEmitterSpec,
     options: &BuildOptions,
 ) -> Result<AdapterRecord> {
-    let script = repo_root.join("libs/vmm/examples/v1.5/build-image.sh");
-    if !script.is_file() {
-        bail!("v1.5 backend adapter not found: {}", script.display());
-    }
     let log_path = options.out.join(ADAPTER_LOG_NAME);
     let log = OpenOptions::new()
         .create(true)
@@ -273,21 +320,40 @@ fn run_backend_adapter(
         .open(&log_path)?;
     let stderr = log.try_clone()?;
     let package_include = config.package_stage.install.join(",");
-    let started_at_unix_seconds = unix_now();
-    let mut command = Command::new("bash");
+    let started_at_unix_seconds = unix_now()?;
+    let mut command = Command::new(&emitter.adapter.program);
     command
-        .arg(&script)
-        .arg("--backend")
-        .arg(options.target.as_str())
+        .args(&emitter.adapter.args)
         .args(&options.adapter_args)
         .current_dir(repo_root)
-        .env("MOTLIE_V15_ARTIFACTS_DIR", &options.out)
-        .env("MOTLIE_V15_BUILD_CONFIG", &options.config_path)
-        .env("MOTLIE_V15_PACKAGE_INCLUDE", &package_include)
+        .env(&emitter.adapter.env.artifact_dir, &options.out)
+        .env(&emitter.adapter.env.build_config, &options.config_path)
+        .env(
+            &emitter.adapter.env.package_manager,
+            config.package_stage.manager.as_str(),
+        )
+        .env(
+            &emitter.adapter.env.package_update,
+            bool_env(config.package_stage.update),
+        )
+        .env(&emitter.adapter.env.package_include, &package_include)
+        .env(
+            &emitter.adapter.env.package_clean,
+            bool_env(config.package_stage.clean),
+        )
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
+    let mut command_line = vec![emitter.adapter.program.clone()];
+    command_line.extend(emitter.adapter.args.clone());
+    command_line.extend(options.adapter_args.clone());
+    info!(
+        target = %options.target,
+        log = %log_path.display(),
+        command = ?command_line,
+        "running backend adapter"
+    );
     let status = command.status()?;
-    let completed_at_unix_seconds = unix_now();
+    let completed_at_unix_seconds = unix_now()?;
     let exit_status = status.code().unwrap_or(-1);
     if !status.success() {
         bail!(
@@ -295,14 +361,6 @@ fn run_backend_adapter(
             log_path.display()
         );
     }
-
-    let mut command_line = vec![
-        "bash".to_string(),
-        script.display().to_string(),
-        "--backend".to_string(),
-        options.target.as_str().to_string(),
-    ];
-    command_line.extend(options.adapter_args.clone());
 
     Ok(AdapterRecord {
         kind: "v1.5-shell-adapter".to_string(),
@@ -315,9 +373,14 @@ fn run_backend_adapter(
     })
 }
 
+#[instrument(
+    skip(repo_root, manifest, emitter, artifact, options),
+    fields(target = %manifest.target, scenario = %scenario.display())
+)]
 fn run_harness_validation(
     repo_root: &Path,
     manifest: &ImageBuildManifest,
+    emitter: &BackendEmitterSpec,
     artifact: &Path,
     scenario: &Path,
     options: &ValidationOptions,
@@ -329,7 +392,7 @@ fn run_harness_validation(
         .write(true)
         .open(&log_path)?;
     let stderr = log.try_clone()?;
-    let started_at_unix_seconds = unix_now();
+    let started_at_unix_seconds = unix_now()?;
 
     let mut command_line = Vec::new();
     let mut command = if let Some(harness_bin) = &options.harness_bin {
@@ -364,25 +427,20 @@ fn run_harness_validation(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
 
-    match manifest.target {
-        ImageTarget::Ch => {
-            command.env("MOTLIE_V15_CH_BASE_ARTIFACTS_DIR", artifact.join("base"));
-        }
-        ImageTarget::Vz => {
-            command.env("MOTLIE_VZ_ARTIFACTS_DIR", artifact);
-            let default_vm_dir = artifact.join("motlie-v1-5-base-iter.vm");
-            if default_vm_dir.join("disk.img").exists() && default_vm_dir.join("nvram.bin").exists()
-            {
-                command.env("MOTLIE_VZ_BASE_VM_DIR", default_vm_dir);
-            }
-        }
-    }
+    emitter.validation.apply_to_command(&mut command, artifact);
+    info!(
+        target = %manifest.target,
+        scenario = %scenario.display(),
+        log = %log_path.display(),
+        command = ?command_line,
+        "running harness validation"
+    );
 
     let status = command.status()?;
-    let completed_at_unix_seconds = unix_now();
+    let completed_at_unix_seconds = unix_now()?;
     Ok(HarnessValidationRecord {
         contract_version: manifest.contract_version.clone(),
-        target: manifest.target,
+        target: manifest.target.clone(),
         artifact_dir: artifact.to_path_buf(),
         scenario: scenario.to_path_buf(),
         command: command_line,
@@ -419,7 +477,16 @@ fn collect_artifacts_recursive(
                 continue;
             }
             let metadata = entry.metadata()?;
-            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+            let relative = path
+                .strip_prefix(base)
+                .with_context(|| {
+                    format!(
+                        "artifact {} is not under artifact root {}",
+                        path.display(),
+                        base.display()
+                    )
+                })?
+                .to_path_buf();
             artifacts.push(ManifestArtifact {
                 label: artifact_label(&relative),
                 path: relative,
@@ -449,18 +516,15 @@ fn sha256_file(path: &Path) -> Result<String, io::Error> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn backend_env_for_target(target: ImageTarget) -> RootfsCompatibilityBackendEnv {
-    match target {
-        ImageTarget::Ch => RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
-        ImageTarget::Vz => RootfsCompatibilityBackendEnv::for_backend("vz", "vz-userspace"),
-    }
+fn unix_now() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX_EPOCH")?
+        .as_secs())
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+fn bool_env(value: bool) -> &'static str {
+    if value { "1" } else { "0" }
 }
 
 #[derive(Debug, Parser)]
@@ -483,8 +547,8 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
         /// Backend artifact target to declare.
-        #[arg(long, value_enum)]
-        target: ImageTarget,
+        #[arg(long)]
+        target: BackendTargetId,
         /// Output directory for mbuild-manifest.json.
         #[arg(long)]
         out: PathBuf,
@@ -504,8 +568,8 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
         /// Backend seed target.
-        #[arg(long, value_enum)]
-        target: ImageTarget,
+        #[arg(long)]
+        target: BackendTargetId,
         /// Guest user/identity name.
         #[arg(long)]
         guest: String,
@@ -558,13 +622,13 @@ struct ImageBuildConfig {
     services: Vec<ServiceSpec>,
     immutable_files: Vec<String>,
     seed_files: Vec<String>,
-    emitters: Vec<ImageTarget>,
+    emitters: Vec<BackendEmitterSpec>,
     validation: Vec<String>,
 }
 
 impl ImageBuildConfig {
     fn validate(&self) -> Result<()> {
-        require_eq("version", &self.version, MOTLIE_V15_CONTRACT_VERSION)?;
+        require_eq("version", &self.version, v1_5::MOTLIE_V15_CONTRACT_VERSION)?;
         self.source.validate()?;
         self.package_stage.validate()?;
         if self.immutable_payloads.is_empty() {
@@ -589,42 +653,50 @@ impl ImageBuildConfig {
         if self.emitters.is_empty() {
             bail!("emitters must not be empty");
         }
+        let mut ids = BTreeSet::new();
+        for emitter in &self.emitters {
+            emitter.validate()?;
+            if !ids.insert(emitter.id.clone()) {
+                bail!("duplicate emitter id {}", emitter.id);
+            }
+        }
         if self.validation.is_empty() {
             bail!("validation must not be empty");
         }
         Ok(())
     }
 
-    fn validate_for_target(&self, target: ImageTarget) -> Result<()> {
+    fn validate_for_target(&self, target: &BackendTargetId) -> Result<&BackendEmitterSpec> {
         self.validate()?;
-        if !self.emitters.contains(&target) {
-            bail!("target {} is not declared in emitters", target.as_str());
-        }
-        Ok(())
+        self.emitter(target)
+            .with_context(|| format!("target {} is not declared in emitters", target.as_str()))
+    }
+
+    fn emitter(&self, target: &BackendTargetId) -> Option<&BackendEmitterSpec> {
+        self.emitters.iter().find(|emitter| &emitter.id == target)
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct SourceStage {
     image: String,
-    profile: String,
+    profile: ProfileId,
     platform: String,
-    digest_policy: String,
+    digest_policy: DigestPolicy,
 }
 
 impl SourceStage {
     fn validate(&self) -> Result<()> {
         require_non_empty("source.image", &self.image)?;
-        require_eq("source.profile", &self.profile, "ubuntu-systemd")?;
+        self.profile.validate("source.profile")?;
         require_non_empty("source.platform", &self.platform)?;
-        require_eq("source.digest_policy", &self.digest_policy, "pinned")?;
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct PackageStage {
-    manager: String,
+    manager: PackageManagerId,
     update: bool,
     install: Vec<String>,
     clean: bool,
@@ -632,15 +704,24 @@ struct PackageStage {
 
 impl PackageStage {
     fn validate(&self) -> Result<()> {
-        require_eq("package_stage.manager", &self.manager, "apt")?;
+        self.manager.validate("package_stage.manager")?;
+        if package_manager_strategy(self.manager.as_str()).is_none() {
+            bail!(
+                "package_stage.manager {:?} is not registered; registered managers: {}",
+                self.manager.as_str(),
+                PACKAGE_MANAGER_STRATEGIES
+                    .iter()
+                    .map(|strategy| strategy.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         if self.install.is_empty() {
             bail!("package_stage.install must not be empty");
         }
         for package in &self.install {
             require_token("package_stage.install", package)?;
         }
-        let _ = self.update;
-        let _ = self.clean;
         Ok(())
     }
 }
@@ -713,25 +794,234 @@ impl ServiceSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-enum ImageTarget {
-    Ch,
-    Vz,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(transparent)]
+struct BackendTargetId(String);
+
+impl BackendTargetId {
+    fn parse(value: String) -> std::result::Result<Self, String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err("backend target id must not be empty".to_string());
+        }
+        if !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(format!(
+                "backend target id contains unsupported token {value:?}"
+            ));
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-impl ImageTarget {
-    fn as_str(self) -> &'static str {
+impl FromStr for BackendTargetId {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value.to_string())
+    }
+}
+
+impl std::fmt::Display for BackendTargetId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+struct ProfileId(String);
+
+impl ProfileId {
+    fn validate(&self, field: &str) -> Result<()> {
+        require_token(field, &self.0)
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DigestPolicy {
+    Pinned,
+    Floating,
+}
+
+impl std::fmt::Display for DigestPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ch => "ch",
-            Self::Vz => "vz",
+            Self::Pinned => formatter.write_str("pinned"),
+            Self::Floating => formatter.write_str("floating"),
         }
     }
 }
 
-impl std::fmt::Display for ImageTarget {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+struct PackageManagerId(String);
+
+impl PackageManagerId {
+    fn validate(&self, field: &str) -> Result<()> {
+        require_token(field, &self.0)
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackageManagerStrategy {
+    id: &'static str,
+}
+
+const PACKAGE_MANAGER_STRATEGIES: &[PackageManagerStrategy] = &[
+    PackageManagerStrategy { id: "apt" },
+    PackageManagerStrategy { id: "apk" },
+    PackageManagerStrategy { id: "dnf" },
+    PackageManagerStrategy { id: "zypper" },
+    PackageManagerStrategy { id: "pacman" },
+];
+
+fn package_manager_strategy(id: &str) -> Option<&'static PackageManagerStrategy> {
+    PACKAGE_MANAGER_STRATEGIES
+        .iter()
+        .find(|strategy| strategy.id == id)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BackendEmitterSpec {
+    id: BackendTargetId,
+    adapter: BackendAdapterSpec,
+    seed: BackendSeedSpec,
+    validation: BackendValidationSpec,
+}
+
+impl BackendEmitterSpec {
+    fn validate(&self) -> Result<()> {
+        require_token("emitters.id", self.id.as_str())?;
+        self.adapter.validate()?;
+        self.seed.validate()?;
+        self.validation.validate()?;
+        Ok(())
+    }
+
+    fn backend_env(&self) -> RootfsCompatibilityBackendEnv {
+        RootfsCompatibilityBackendEnv::for_backend(
+            &self.seed.motlie_backend,
+            &self.seed.motlie_net_backend,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BackendAdapterSpec {
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    env: BackendAdapterEnvSpec,
+}
+
+impl BackendAdapterSpec {
+    fn validate(&self) -> Result<()> {
+        require_non_empty("emitters.adapter.program", &self.program)?;
+        for arg in &self.args {
+            require_non_empty("emitters.adapter.args", arg)?;
+        }
+        self.env.validate()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BackendAdapterEnvSpec {
+    artifact_dir: String,
+    build_config: String,
+    package_manager: String,
+    package_update: String,
+    package_include: String,
+    package_clean: String,
+}
+
+impl BackendAdapterEnvSpec {
+    fn validate(&self) -> Result<()> {
+        require_env_name("emitters.adapter.env.artifact_dir", &self.artifact_dir)?;
+        require_env_name("emitters.adapter.env.build_config", &self.build_config)?;
+        require_env_name(
+            "emitters.adapter.env.package_manager",
+            &self.package_manager,
+        )?;
+        require_env_name("emitters.adapter.env.package_update", &self.package_update)?;
+        require_env_name(
+            "emitters.adapter.env.package_include",
+            &self.package_include,
+        )?;
+        require_env_name("emitters.adapter.env.package_clean", &self.package_clean)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BackendSeedSpec {
+    motlie_backend: String,
+    motlie_net_backend: String,
+}
+
+impl BackendSeedSpec {
+    fn validate(&self) -> Result<()> {
+        require_token("emitters.seed.motlie_backend", &self.motlie_backend)?;
+        require_token("emitters.seed.motlie_net_backend", &self.motlie_net_backend)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct BackendValidationSpec {
+    artifact_dir_env: Option<String>,
+    artifact_dir_suffix: Option<PathBuf>,
+    base_vm_dir_env: Option<String>,
+    base_vm_dir_suffix: Option<PathBuf>,
+    #[serde(default)]
+    base_vm_dir_required_files: Vec<PathBuf>,
+}
+
+impl BackendValidationSpec {
+    fn validate(&self) -> Result<()> {
+        if let Some(env_name) = &self.artifact_dir_env {
+            require_env_name("emitters.validation.artifact_dir_env", env_name)?;
+        }
+        if let Some(env_name) = &self.base_vm_dir_env {
+            require_env_name("emitters.validation.base_vm_dir_env", env_name)?;
+        }
+        Ok(())
+    }
+
+    fn apply_to_command(&self, command: &mut Command, artifact: &Path) {
+        if let Some(env_name) = &self.artifact_dir_env {
+            let suffix = self.artifact_dir_suffix.as_deref().unwrap_or(Path::new(""));
+            command.env(env_name, artifact.join(suffix));
+        }
+        if let Some(env_name) = &self.base_vm_dir_env {
+            let suffix = self.base_vm_dir_suffix.as_deref().unwrap_or(Path::new(""));
+            let path = artifact.join(suffix);
+            let ready = if self.base_vm_dir_required_files.is_empty() {
+                path.exists()
+            } else {
+                self.base_vm_dir_required_files
+                    .iter()
+                    .all(|required| path.join(required).exists())
+            };
+            if ready {
+                command.env(env_name, path);
+            }
+        }
     }
 }
 
@@ -739,7 +1029,7 @@ impl std::fmt::Display for ImageTarget {
 struct ImageBuildManifest {
     contract_version: String,
     config_path: PathBuf,
-    target: ImageTarget,
+    target: BackendTargetId,
     output_dir: PathBuf,
     source: ManifestSource,
     package_stage: ManifestPackageStage,
@@ -755,7 +1045,7 @@ struct ImageBuildManifest {
 impl ImageBuildManifest {
     fn from_config(
         config_path: &Path,
-        target: ImageTarget,
+        target: BackendTargetId,
         out: &Path,
         config: &ImageBuildConfig,
         adapter: Option<AdapterRecord>,
@@ -773,12 +1063,12 @@ impl ImageBuildManifest {
             output_dir: out.to_path_buf(),
             source: ManifestSource {
                 image: config.source.image.clone(),
-                profile: config.source.profile.clone(),
+                profile: config.source.profile.as_str().to_string(),
                 platform: config.source.platform.clone(),
-                digest_policy: config.source.digest_policy.clone(),
+                digest_policy: config.source.digest_policy.to_string(),
             },
             package_stage: ManifestPackageStage {
-                manager: config.package_stage.manager.clone(),
+                manager: config.package_stage.manager.as_str().to_string(),
                 update: config.package_stage.update,
                 install: config.package_stage.install.clone(),
                 clean: config.package_stage.clean,
@@ -835,7 +1125,7 @@ struct ManifestArtifact {
 #[derive(Debug, Serialize, Deserialize)]
 struct HarnessValidationRecord {
     contract_version: String,
-    target: ImageTarget,
+    target: BackendTargetId,
     artifact_dir: PathBuf,
     scenario: PathBuf,
     command: Vec<String>,
@@ -877,7 +1167,7 @@ impl StageRecord {
 struct ImageSeedManifest {
     contract_version: String,
     config_path: PathBuf,
-    target: ImageTarget,
+    target: BackendTargetId,
     output_dir: PathBuf,
     seed_files: Vec<String>,
     rootfs_seed_overlay: RootfsSeedOverlayManifest,
@@ -887,20 +1177,20 @@ struct ImageSeedManifest {
 impl ImageSeedManifest {
     fn from_seed_overlay(
         config_path: &Path,
-        target: ImageTarget,
+        target: BackendTargetId,
         out: &Path,
         config: &ImageBuildConfig,
         rootfs_seed_overlay: &RootfsSeedOverlayManifest,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             contract_version: config.version.clone(),
             config_path: config_path.to_path_buf(),
             target,
             output_dir: out.to_path_buf(),
             seed_files: config.seed_files.clone(),
             rootfs_seed_overlay: rootfs_seed_overlay.clone(),
-            artifacts: collect_artifacts(out, DEFAULT_SEED_MANIFEST_NAME).unwrap_or_default(),
-        }
+            artifacts: collect_artifacts(out, DEFAULT_SEED_MANIFEST_NAME)?,
+        })
     }
 }
 
@@ -999,6 +1289,21 @@ fn require_token(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_env_name(field: &str, value: &str) -> Result<()> {
+    require_non_empty(field, value)?;
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        bail!("{field} must not be empty");
+    };
+    if !(first.is_ascii_uppercase() || first == b'_') {
+        bail!("{field} must start with an uppercase ASCII letter or underscore");
+    }
+    if !bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_') {
+        bail!("{field} must contain only uppercase ASCII letters, digits, or underscore");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,7 +1326,7 @@ mod tests {
             cli.command,
             Commands::Build {
                 config: PathBuf::from("motlie-image.yaml"),
-                target: ImageTarget::Ch,
+                target: "ch".parse().unwrap(),
                 out: PathBuf::from("artifacts/ch"),
                 repo_root: None,
                 plan_only: false,
@@ -1079,7 +1384,7 @@ mod tests {
             cli.command,
             Commands::Seed {
                 config: PathBuf::from("motlie-image.yaml"),
-                target: ImageTarget::Vz,
+                target: "vz".parse().unwrap(),
                 guest: "alice".to_string(),
                 uid: Some(2001),
                 gid: Some(2001),
