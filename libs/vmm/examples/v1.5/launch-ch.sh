@@ -151,7 +151,7 @@ case "$ADMIN_NET:$EGRESS_NET" in
 esac
 
 # Derive defaults from GUEST_NAME when not explicitly supplied.
-BASE_ARTIFACTS="$SCRIPT_DIR/artifacts/base"
+BASE_ARTIFACTS="${BASE_ARTIFACTS:-$SCRIPT_DIR/artifacts/base}"
 BASE_CONTRACT_JSON="$BASE_ARTIFACTS/guest-contract.json"
 [ -n "$API_SOCKET" ]      || API_SOCKET="/tmp/motlie-vmm-v15-${GUEST_NAME}-api.sock"
 [ -n "$VSOCK_SOCKET" ]    || VSOCK_SOCKET="/tmp/motlie-vmm-v15-${GUEST_NAME}.vsock"
