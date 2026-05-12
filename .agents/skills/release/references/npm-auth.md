@@ -2,6 +2,14 @@
 
 Use this reference when publishing Motlie packages to npm under `@motlie`.
 
+Parameterize examples by the release target:
+
+```text
+BIN=<installed command name>
+NPM_PACKAGE=<platform package name, e.g. @motlie/<bin>-linux-x64-gnu>
+PACKAGE_DIR=dist/npm/<package path>
+```
+
 Preferred path:
 
 - use npm trusted publishing from GitHub Actions
@@ -39,7 +47,7 @@ Minimal publish step with token fallback:
     registry-url: https://registry.npmjs.org
 
 - run: npm publish --access public
-  working-directory: dist/npm/@motlie/mmux-linux-x64-gnu
+  working-directory: ${PACKAGE_DIR}
   env:
     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
@@ -57,7 +65,7 @@ steps:
       node-version: 24
       registry-url: https://registry.npmjs.org
   - run: npm publish --access public
-    working-directory: dist/npm/@motlie/mmux-linux-x64-gnu
+    working-directory: ${PACKAGE_DIR}
 ```
 
 Do not print token values, commit `.npmrc` with credentials, or reuse personal all-access tokens.

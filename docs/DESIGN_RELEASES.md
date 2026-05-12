@@ -5,6 +5,7 @@
 - 2026-04-29, @gpt55-dgx: Initial release distribution design for Motlie native binaries, npm packages, direct installers, and macOS Homebrew distribution.
 - 2026-04-29, @gpt55-dgx: Updated Homebrew tap target to `motlie/homebrew-tap` and clarified installer script hosting plus archive/npm install modes.
 - 2026-04-29, @gpt55-dgx: Added macOS code-signing and installed-path execution requirements for npm, direct installer, and Homebrew flows.
+- 2026-05-12, @gpt55-dgx: Generalized the design around a user-specified binary target; `mmux` is now the first worked validation target only.
 
 ## Status
 
@@ -14,42 +15,83 @@ This is greenfield product packaging design. There is no backwards-compatibility
 
 ## Problem
 
-Motlie needs a repeatable way to distribute native binaries across macOS and Linux for multiple CPU architectures. The first concrete binary is `mmux`, but the distribution model must also support future Motlie binaries, including possible model-related binaries with CUDA-enabled builds.
+Motlie needs a repeatable way to distribute native binaries across macOS and Linux for multiple CPU architectures. The first worked validation target is `mmux`, but the distribution model is parameterized by binary and must support future Motlie binaries, including possible model-related binaries with CUDA-enabled builds.
 
-The distribution contract must make platform-specific assets precise without making the user experience feel platform-specific. Users should still run stable command names such as `mmux`.
+The distribution contract must make platform-specific assets precise without making the user experience feel platform-specific. Users should still run stable command names such as the requested `<bin>`.
 
 ## Goals
 
 - Publish native Motlie binaries for macOS and Linux on x64 and arm64.
 - Support direct GitHub Release archives, npm packages under the `@motlie` org, and a macOS Homebrew tap.
-- Keep `mmux` safe for host-wide SSH `ForceCommand` usage by executing the native Rust binary directly.
-- Avoid Node launcher scripts in the `mmux` runtime path.
+- Keep host/SSH-safe binaries such as `mmux` safe for host-wide SSH `ForceCommand` usage by executing the native Rust binary directly.
+- Avoid Node launcher scripts in native binary runtime paths.
 - Ensure macOS builds are signed or re-signed at final install location so Apple Silicon hosts can execute the binary reliably.
 - Make CUDA an explicit optional accelerator suffix only for binaries that ship CUDA-enabled builds.
 - Keep release metadata, artifact naming, package naming, and installer behavior driven by one shared release manifest.
 
 ## Non-Goals
 
-- Do not require CUDA for `mmux`.
+- Do not require CUDA for binaries that do not publish CUDA-enabled functionality. The worked `mmux` target is CPU/default only.
 - Do not put CUDA, GPU, Node, npm lifecycle scripts, or model runtime dependencies in the SSH login path.
 - Do not make Homebrew solve Linux packaging.
 - Do not require deb, rpm, or container images in the first release implementation.
-- Do not publish a JavaScript launcher as the `mmux` command.
+- Do not publish a JavaScript launcher as a native Motlie binary command.
+
+## Release Target Model
+
+The release framework is generic. Each release target must define the binary-specific fields before implementation or publication begins.
+
+```text
+BIN=<installed command name>
+CARGO_PACKAGE=<cargo package name>
+CARGO_BIN=<cargo binary name>
+VERSION=<release version>
+INSTALL_PATH=<default absolute install path, if any>
+FORMULA=<Homebrew formula name, if Homebrew is enabled>
+NPM_PREFIX=@motlie/<package-prefix>
+INSTALLER=install-<bin>.sh
+FORCE_COMMAND_SAFE=true|false
+```
+
+Worked `mmux` target:
+
+```text
+BIN=mmux
+CARGO_PACKAGE=motlie-mmux
+CARGO_BIN=mmux
+VERSION=0.1.0
+INSTALL_PATH=/usr/local/bin/mmux
+FORMULA=mmux
+NPM_PREFIX=@motlie/mmux
+INSTALLER=install-mmux.sh
+FORCE_COMMAND_SAFE=true
+```
 
 ## User Experience
 
-Users run the same command regardless of distribution channel:
+Users run the requested command regardless of distribution channel:
 
 ```sh
-mmux --help
-mmux --version
+<bin> --help
+<bin> --version
 ```
 
-Platform, architecture, libc, and accelerator names belong in archive and package names, not in the installed executable name.
+Platform, architecture, libc, and accelerator names belong in archive and package names, not in the installed executable name. `mmux` examples below are worked examples for the first validation target.
 
 ### npm
 
-The npm channel is best for developer and CI installs where package-manager pinning matters. Because `mmux` must not use a Node boot script, npm users install the native package for their platform.
+The npm channel is best for developer and CI installs where package-manager pinning matters. Because native Motlie binaries must not use a Node boot script, npm users install the native package for their binary/platform pair.
+
+Generic package shape:
+
+```text
+@motlie/<bin>-linux-x64-gnu
+@motlie/<bin>-linux-arm64-gnu
+@motlie/<bin>-darwin-arm64
+@motlie/<bin>-darwin-x64
+```
+
+Worked `mmux` examples:
 
 Linux x64 glibc:
 
@@ -103,7 +145,7 @@ macOS signing requirement:
 
 ### Direct Installer
 
-The direct installer is the preferred UX for host administrators, especially for SSH selector deployment. It can inspect the machine, select the correct GitHub Release archive, verify checksums, and install the native binary to a stable path.
+The direct installer is the preferred UX for host administrators, especially for host/SSH-safe binary deployment. It can inspect the machine, select the correct GitHub Release archive, verify checksums, and install the native binary to a stable path.
 
 Latest-style UX:
 
@@ -131,14 +173,14 @@ Tradeoffs:
 
 - The installer gives the best host-admin UX because users do not need to know package names or platform triples.
 - The installer can detect OS, architecture, libc, and accelerator capability before selecting an artifact.
-- The installer can install directly to `/usr/local/bin/mmux`.
+- The installer can install directly to a stable path such as `/usr/local/bin/<bin>`.
 - `curl | sh` has trust and audit concerns, so docs must include release-pinned and checksum-verified alternatives.
 - Installer logic needs portability tests and an upgrade/uninstall story.
 
 macOS signing requirement:
 
 - The installer must re-sign the final installed binary after copying it into the target prefix on macOS.
-- The installer must verify the final installed path with `codesign --verify` and execute `mmux --version` from that path.
+- The installer must verify the final installed path with `codesign --verify` and execute `<bin> --version` from that path.
 
 Installer scripts may support multiple source modes:
 
@@ -150,7 +192,7 @@ sh install-mmux.sh --prefix /usr/local
 
 Recommended defaults:
 
-- `mmux` should default to `--source archive` because host-wide SSH deployment should not depend on npm or Node.
+- Host/SSH-safe binaries should default to `--source archive` because host-wide deployment should not depend on npm or Node.
 - Developer and CI workflows may use `--source npm` when package-manager state is desired.
 - CUDA-capable model tools may detect CUDA and select either direct archives or npm packages, depending on `--source`.
 
@@ -158,7 +200,15 @@ Recommended defaults:
 
 Homebrew is the preferred macOS package-manager UX. It should consume the same Motlie source release, but it should not define a separate release system.
 
-User UX:
+Generic Homebrew UX:
+
+```sh
+brew tap motlie/tap
+brew install <formula>
+<bin> --help
+```
+
+Worked `mmux` UX:
 
 ```sh
 brew tap motlie/tap
@@ -172,7 +222,7 @@ or:
 brew install motlie/tap/mmux
 ```
 
-macOS SSH `ForceCommand` examples:
+macOS SSH `ForceCommand` examples for host/SSH-safe binaries should use the configured `INSTALL_PATH`. Worked `mmux` examples:
 
 ```sshconfig
 Match Group mmux-users
@@ -194,7 +244,7 @@ Tradeoffs:
 - Homebrew bottles provide prebuilt macOS binaries without requiring users to know Darwin asset names.
 - The tap is macOS-only for this design; Linux remains npm/archive/installer-driven until a separate Linux package-manager strategy is chosen.
 - Homebrew install prefixes differ between Apple Silicon and Intel, so SSH docs must call out both paths or recommend a stable admin-managed symlink.
-- Homebrew formula tests must execute `#{bin}/mmux` from the installed path so code-signing problems are caught before bottle publication.
+- Homebrew formula tests must execute `#{bin}/<bin>` from the installed path so code-signing problems are caught before bottle publication.
 
 ## Distribution Channels
 
@@ -207,14 +257,30 @@ Each Motlie release should publish:
 - Source tag, for example `v0.1.0`.
 - Native `.tar.gz` archives.
 - Checksums.
-- Installer scripts such as `install-mmux.sh`.
+- Installer scripts such as `install-<bin>.sh`; `install-mmux.sh` is the worked example.
 - Release notes.
 
 ### npm
 
 The npm registry hosts generated native packages under the `@motlie` org. Package templates and release scripts should live in the Motlie repo, but generated package directories do not need to be committed unless the PLAN chooses that workflow.
 
-Native package example:
+Native package example, parameterized by binary:
+
+```json
+{
+  "name": "@motlie/<bin>-linux-x64-gnu",
+  "version": "0.1.0",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": "glibc",
+  "files": ["bin/<bin>", "README.md", "LICENSE"],
+  "bin": {
+    "<bin>": "bin/<bin>"
+  }
+}
+```
+
+Worked `mmux` package example:
 
 ```json
 {
@@ -230,7 +296,7 @@ Native package example:
 }
 ```
 
-Do not publish a `@motlie/mmux` package that exposes `bin/mmux.js` as the command. If a convenience package is revisited later, it must not be the documented ForceCommand path.
+Do not publish a convenience package that exposes a JavaScript boot script as the native command. If a convenience package is revisited later, it must not be the documented ForceCommand path for host/SSH-safe binaries.
 
 ### Homebrew Tap
 
@@ -240,7 +306,7 @@ Homebrew requires an additional package repository:
 motlie/homebrew-tap
 ```
 
-The tap should contain:
+The tap should contain one formula per Homebrew-enabled binary. For the `mmux` worked example:
 
 ```text
 Formula/mmux.rb
@@ -298,14 +364,22 @@ Apple Silicon requires executable Mach-O binaries to have a valid code signature
 
 Release requirements:
 
-- Every Darwin release artifact must contain a signed `mmux` binary.
+- Every Darwin release artifact must contain a signed binary at `bin/<bin>`.
 - Ad-hoc signing with `codesign --force --sign -` is sufficient for the first release design.
 - The final installed path must be verified and executed, not just the build output path.
 - Direct installers must re-sign after copying into the install prefix.
 - Homebrew formulae should re-sign after `bin.install` and before tests.
 - npm Darwin packages should package a signed binary; any later copy into `/usr/local/bin` must re-sign the copied file.
 
-Expected verification commands:
+Expected verification commands, parameterized by binary:
+
+```sh
+codesign --force --sign - "target/release/${BIN}"
+codesign --verify --strict --verbose=2 "target/release/${BIN}"
+"target/release/${BIN}" --version
+```
+
+Worked `mmux` verification commands:
 
 ```sh
 codesign --force --sign - target/release/mmux
@@ -313,7 +387,16 @@ codesign --verify --strict --verbose=2 target/release/mmux
 target/release/mmux --version
 ```
 
-After direct installation:
+After direct installation, parameterized by binary:
+
+```sh
+install -m 755 "${BIN}" "${INSTALL_PATH}"
+codesign --force --sign - "${INSTALL_PATH}"
+codesign --verify --strict --verbose=2 "${INSTALL_PATH}"
+"${INSTALL_PATH}" --version
+```
+
+Worked `mmux` direct-install verification:
 
 ```sh
 install -m 755 mmux /usr/local/bin/mmux
@@ -322,7 +405,16 @@ codesign --verify --strict --verbose=2 /usr/local/bin/mmux
 /usr/local/bin/mmux --version
 ```
 
-For npm verification on macOS:
+For npm verification on macOS, parameterized by binary:
+
+```sh
+npm install -g "@motlie/<bin>-darwin-arm64"
+codesign -dvv "$(which <bin>)"
+codesign --verify --strict --verbose=2 "$(which <bin>)"
+<bin> --version
+```
+
+Worked `mmux` npm verification:
 
 ```sh
 npm install -g @motlie/mmux-darwin-arm64
@@ -331,7 +423,13 @@ codesign --verify --strict --verbose=2 "$(which mmux)"
 mmux --version
 ```
 
-For Homebrew verification, the bottle/formula test must execute:
+For Homebrew verification, the bottle/formula test must execute the installed formula binary:
+
+```sh
+$(brew --prefix)/bin/<bin> --version
+```
+
+Worked `mmux` Homebrew verification:
 
 ```sh
 $(brew --prefix)/bin/mmux --version
@@ -361,12 +459,23 @@ motlie-models-v0.1.0-linux-x64-gnu-cuda-12.4.tar.gz
 The executable inside the archive keeps the stable command name:
 
 ```text
-bin/mmux
+bin/<bin>
 ```
 
 ## npm Package Naming
 
-For `mmux`:
+Generic package names:
+
+```text
+@motlie/<bin>-darwin-arm64
+@motlie/<bin>-darwin-x64
+@motlie/<bin>-linux-x64-gnu
+@motlie/<bin>-linux-arm64-gnu
+@motlie/<bin>-linux-x64-musl
+@motlie/<bin>-linux-arm64-musl
+```
+
+Worked `mmux` package names:
 
 ```text
 @motlie/mmux-darwin-arm64
@@ -417,6 +526,8 @@ release/
       verify-checksum.sh
 ```
 
+The generic naming rule is `install-<bin>.sh`; the listed files are examples.
+
 The canonical hosted installer scripts should be uploaded to version-pinned GitHub Releases:
 
 ```text
@@ -466,7 +577,7 @@ The DESIGN should prefer trusted publishing or short-lived CI credentials where 
 
 A shared manifest should drive artifact, package, installer, and Homebrew metadata.
 
-Example:
+Example manifest entries. The `mmux` entry is the worked validation target; `motlie-models` illustrates a future non-ForceCommand target with a CUDA-capable variant.
 
 ```toml
 [release]
@@ -547,7 +658,7 @@ Initial recommendation:
 
 - Implement release automation in an internal `xtask` or `release/` tool first.
 - Add runtime library helpers only when multiple binaries need the same metadata/self-check behavior.
-- Keep CUDA/model dependencies out of non-CUDA tools such as `mmux`.
+- Keep CUDA/model dependencies out of non-CUDA binary targets such as the worked `mmux` target.
 
 ## Alternatives Considered
 
@@ -569,7 +680,7 @@ This aligns Homebrew directly with Motlie archive names, but a source formula pl
 
 ## Open Questions
 
-- Should the first implementation publish only `mmux`, then generalize?
+- Should the first implementation publish only the `mmux` worked target, then enable other binary targets after the workflow is proven?
 - Are Linux musl builds required in v0.1?
 - Should direct installer scripts be hosted on GitHub Releases only, GitHub Pages only, or both?
 - Should installer platform/CUDA detection be handwritten shell, generated from a manifest, or implemented in a helper binary?

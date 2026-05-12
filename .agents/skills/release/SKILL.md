@@ -5,15 +5,42 @@ description: Execute or plan Motlie binary releases across GitHub Releases, npm 
 
 # Motlie Release
 
-Use this skill for Motlie binary release work.
+Use this skill for Motlie binary release work. The release target is parameterized by the binary the human specifies. Do not assume `mmux` unless the human says `mmux` or the task is explicitly the first worked release validation.
 
 Before changing anything:
 
 - identify yourself as required by `AGENTS.md`
 - check `git status --short --branch`
-- confirm the target branch and release version
+- confirm the target branch, release version, and release target
 - do not publish npm packages, GitHub Releases, or Homebrew tap changes without explicit human approval
 - do not commit unrelated files
+
+Release target fields:
+
+```text
+BIN=<installed command name>
+CARGO_PACKAGE=<cargo package name>
+CARGO_BIN=<cargo binary name>
+VERSION=<release version>
+INSTALL_PATH=<default absolute install path, if any>
+FORMULA=<Homebrew formula name, if enabled>
+NPM_PREFIX=@motlie/<package-prefix>
+INSTALLER=install-<bin>.sh
+FORCE_COMMAND_SAFE=true|false
+```
+
+Worked example:
+
+```text
+BIN=mmux
+CARGO_PACKAGE=motlie-mmux
+CARGO_BIN=mmux
+INSTALL_PATH=/usr/local/bin/mmux
+FORMULA=mmux
+NPM_PREFIX=@motlie/mmux
+INSTALLER=install-mmux.sh
+FORCE_COMMAND_SAFE=true
+```
 
 Primary references:
 
@@ -43,8 +70,8 @@ Read references only when needed:
 
 Hard requirements:
 
-- `mmux` npm packages expose the native Rust binary directly; do not add a Node boot script.
-- `mmux` direct installer defaults to archive mode, not npm mode.
+- native npm packages expose the requested binary directly; do not add a Node boot script.
+- direct installers for host/SSH-safe binaries default to archive mode, not npm mode.
 - Darwin binaries must be signed and verified from their installed path.
 - npm auth is needed only at `npm publish` time unless trusted publishing is configured.
 - release artifacts, npm packages, installer scripts, and Homebrew formulae must all trace back to the same source tag.

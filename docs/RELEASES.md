@@ -4,6 +4,7 @@
 
 - 2026-05-12, @gpt55-dgx: Initial user playbook for staged Motlie binary releases, Linux cross-compilation, macOS signing, npm publication, and Homebrew tap updates.
 - 2026-05-12, @gpt55-dgx: Added step-by-step npm authentication guidance and linked the repo-local release skill.
+- 2026-05-12, @gpt55-dgx: Generalized the release playbook around a user-specified binary target; `mmux` is now only the worked example.
 
 ## Scope
 
@@ -26,6 +27,38 @@ The package destinations are:
 GitHub Releases: github.com/chungers/motlie/releases
 npm:             @motlie
 Homebrew tap:    github.com/motlie/homebrew-tap
+```
+
+## Release Target Parameters
+
+This playbook is generic. The release operator must identify the binary target before starting a release. `mmux` is the first worked example used to validate the workflow, not the only supported target.
+
+Required target fields:
+
+```text
+BIN=<installed command name>
+CARGO_PACKAGE=<cargo package name>
+CARGO_BIN=<cargo binary name>
+VERSION=<release version>
+INSTALL_PATH=<default absolute install path, if any>
+FORMULA=<Homebrew formula name, if Homebrew is enabled>
+NPM_PREFIX=@motlie/<package-prefix>
+INSTALLER=install-<bin>.sh
+FORCE_COMMAND_SAFE=true|false
+```
+
+Worked `mmux` target:
+
+```text
+BIN=mmux
+CARGO_PACKAGE=motlie-mmux
+CARGO_BIN=mmux
+VERSION=0.1.0
+INSTALL_PATH=/usr/local/bin/mmux
+FORMULA=mmux
+NPM_PREFIX=@motlie/mmux
+INSTALLER=install-mmux.sh
+FORCE_COMMAND_SAFE=true
 ```
 
 ## Release Model
@@ -107,10 +140,19 @@ The Linux workflow may use Rust cross-compilation tooling, Zig, or an osxcross-s
 - all outputs are built from the release tag;
 - target names match `docs/DESIGN_RELEASES.md`;
 - artifact names follow the canonical naming grammar;
-- the installed executable remains `mmux`;
+- the installed executable remains `${BIN}`;
 - Darwin binaries produced on Linux are not considered final until macOS signing verification passes.
 
-Example archive names:
+Generic archive names:
+
+```text
+motlie-${BIN}-v${VERSION}-linux-x64-gnu.tar.gz
+motlie-${BIN}-v${VERSION}-linux-arm64-gnu.tar.gz
+motlie-${BIN}-v${VERSION}-darwin-x64.tar.gz
+motlie-${BIN}-v${VERSION}-darwin-arm64.tar.gz
+```
+
+Worked `mmux` archive names:
 
 ```text
 motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz
@@ -122,7 +164,7 @@ motlie-mmux-v0.1.0-darwin-arm64.tar.gz
 Every archive should include:
 
 ```text
-bin/mmux
+bin/${BIN}
 README.md
 LICENSE
 ```
@@ -130,14 +172,14 @@ LICENSE
 Generate checksums for every staged archive:
 
 ```sh
-shasum -a 256 motlie-mmux-v0.1.0-*.tar.gz > SHA256SUMS
+shasum -a 256 "motlie-${BIN}-v${VERSION}"-*.tar.gz > SHA256SUMS
 ```
 
 Upload the unsigned or pre-signing staged artifacts to the prerelease with names that make the state clear if needed:
 
 ```text
-motlie-mmux-v0.1.0-darwin-arm64.tar.gz
-motlie-mmux-v0.1.0-darwin-x64.tar.gz
+motlie-${BIN}-v${VERSION}-darwin-arm64.tar.gz
+motlie-${BIN}-v${VERSION}-darwin-x64.tar.gz
 SHA256SUMS
 ```
 
@@ -156,18 +198,18 @@ This step exists because Apple Silicon validates Mach-O code signatures at execu
 Minimum signing for this release path is ad-hoc signing:
 
 ```sh
-codesign --force --sign - bin/mmux
-codesign --verify --strict --verbose=2 bin/mmux
-bin/mmux --version
+codesign --force --sign - "bin/${BIN}"
+codesign --verify --strict --verbose=2 "bin/${BIN}"
+"bin/${BIN}" --version
 ```
 
 Manual signing workflow:
 
 1. Download the staged Darwin archives from the GitHub prerelease.
 2. Extract each archive.
-3. Re-sign `bin/mmux`.
+3. Re-sign `bin/${BIN}`.
 4. Verify the signature.
-5. Execute `bin/mmux --version`.
+5. Execute `bin/${BIN} --version`.
 6. Repack the archive with the signed binary.
 7. Recompute checksums.
 8. Replace the staged Darwin archives and checksum file on the GitHub Release.
@@ -175,10 +217,10 @@ Manual signing workflow:
 Apple Silicon final-path verification:
 
 ```sh
-sudo install -m 755 bin/mmux /usr/local/bin/mmux
-sudo codesign --force --sign - /usr/local/bin/mmux
-codesign --verify --strict --verbose=2 /usr/local/bin/mmux
-/usr/local/bin/mmux --version
+sudo install -m 755 "bin/${BIN}" "${INSTALL_PATH}"
+sudo codesign --force --sign - "${INSTALL_PATH}"
+codesign --verify --strict --verbose=2 "${INSTALL_PATH}"
+"${INSTALL_PATH}" --version
 ```
 
 This final-path verification is required for:
@@ -196,24 +238,24 @@ After Linux builds and macOS signing pass, update the GitHub Release so only fin
 Final release assets should include:
 
 ```text
-motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz
-motlie-mmux-v0.1.0-linux-arm64-gnu.tar.gz
-motlie-mmux-v0.1.0-darwin-x64.tar.gz
-motlie-mmux-v0.1.0-darwin-arm64.tar.gz
+motlie-${BIN}-v${VERSION}-linux-x64-gnu.tar.gz
+motlie-${BIN}-v${VERSION}-linux-arm64-gnu.tar.gz
+motlie-${BIN}-v${VERSION}-darwin-x64.tar.gz
+motlie-${BIN}-v${VERSION}-darwin-arm64.tar.gz
 SHA256SUMS
-install-mmux.sh
+${INSTALLER}
 ```
 
-The installer script should default to archive mode for `mmux`:
+The installer script should default to archive mode for host/SSH-safe binaries:
 
 ```sh
-sh install-mmux.sh --source archive
+sh "${INSTALLER}" --source archive
 ```
 
 It may also support npm mode:
 
 ```sh
-sh install-mmux.sh --source npm
+sh "${INSTALLER}" --source npm
 ```
 
 When the artifacts are final and checksums match, change the release from prerelease to stable.
@@ -222,9 +264,18 @@ When the artifacts are final and checksums match, change the release from prerel
 
 npm packages are published after final GitHub Release artifacts exist and after macOS signing passes.
 
-Publish native packages only. Do not publish a Node boot script as the `mmux` runtime entrypoint.
+Publish native packages only. Do not publish a Node boot script as the binary runtime entrypoint.
 
-Expected packages:
+Generic package names:
+
+```text
+${NPM_PREFIX}-linux-x64-gnu
+${NPM_PREFIX}-linux-arm64-gnu
+${NPM_PREFIX}-darwin-x64
+${NPM_PREFIX}-darwin-arm64
+```
+
+Worked `mmux` package names:
 
 ```text
 @motlie/mmux-linux-x64-gnu
@@ -239,7 +290,7 @@ Package contents:
 package.json
 README.md
 LICENSE
-bin/mmux
+bin/${BIN}
 ```
 
 Each package should expose:
@@ -247,7 +298,7 @@ Each package should expose:
 ```json
 {
   "bin": {
-    "mmux": "bin/mmux"
+    "<bin>": "bin/<bin>"
   }
 }
 ```
@@ -257,7 +308,7 @@ Publication workflow:
 1. Generate package directories from the final signed/release artifacts.
 2. Run `npm pack --dry-run` for each package.
 3. Install each package locally or in CI.
-4. Execute `mmux --version` from the npm-installed path.
+4. Execute `${BIN} --version` from the npm-installed path.
 5. Select the npm auth path.
 6. Publish to the npm registry under `@motlie`.
 
@@ -309,7 +360,7 @@ Token-backed publish step:
     registry-url: https://registry.npmjs.org
 
 - run: npm publish --access public
-  working-directory: dist/npm/@motlie/mmux-linux-x64-gnu
+  working-directory: dist/npm/@motlie/<package-name>
   env:
     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
@@ -327,7 +378,7 @@ steps:
       node-version: 24
       registry-url: https://registry.npmjs.org
   - run: npm publish --access public
-    working-directory: dist/npm/@motlie/mmux-linux-x64-gnu
+    working-directory: dist/npm/@motlie/<package-name>
 ```
 
 GitHub Actions publish jobs should run only for releases or tags, not normal PRs.
@@ -354,7 +405,7 @@ User install UX:
 
 ```sh
 brew tap motlie/tap
-brew install mmux
+brew install "${FORMULA}"
 ```
 
 Homebrew publication is a separate PR to `motlie/homebrew-tap`.
@@ -362,7 +413,7 @@ Homebrew publication is a separate PR to `motlie/homebrew-tap`.
 The tap PR should update:
 
 ```text
-Formula/mmux.rb
+Formula/<formula>.rb
 ```
 
 Recommended formula source:
@@ -376,9 +427,9 @@ The formula should build from source and re-sign after install on macOS:
 
 ```ruby
 def install
-  system "cargo", "build", "--release", "--locked", "-p", "motlie-mmux"
-  bin.install "target/release/mmux"
-  system "codesign", "--force", "--sign", "-", bin/"mmux" if OS.mac?
+  system "cargo", "build", "--release", "--locked", "-p", "<cargo-package>"
+  bin.install "target/release/<bin>"
+  system "codesign", "--force", "--sign", "-", bin/"<bin>" if OS.mac?
 end
 ```
 
@@ -386,8 +437,16 @@ The formula test must execute the installed binary:
 
 ```ruby
 test do
-  assert_match "mmux", shell_output("#{bin}/mmux --version")
+  assert_match "<bin>", shell_output("#{bin}/<bin> --version")
 end
+```
+
+Worked `mmux` formula values:
+
+```text
+FORMULA=mmux
+CARGO_PACKAGE=motlie-mmux
+BIN=mmux
 ```
 
 Bottle workflow:
@@ -424,7 +483,7 @@ macOS signing workflow:
 - Trigger manually with `workflow_dispatch`, or through a protected environment.
 - Download staged Darwin artifacts.
 - Sign, verify, repack, and replace Darwin assets.
-- Verify `/usr/local/bin/mmux --version` from a final copied path.
+- Verify `${INSTALL_PATH} --version` from a final copied path.
 
 npm publication workflow:
 
@@ -443,6 +502,7 @@ Homebrew workflow:
 ## Manual Release Checklist
 
 - [ ] Release preparation PR merged to `main`.
+- [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, enabled channels, and targets.
 - [ ] `main` is clean and current.
 - [ ] Release tag pushed.
 - [ ] GitHub prerelease created.
