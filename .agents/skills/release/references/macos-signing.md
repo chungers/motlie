@@ -2,6 +2,13 @@
 
 Use this reference when validating Darwin artifacts or installer behavior.
 
+Parameterize examples by the release target:
+
+```text
+BIN=<installed command name>
+INSTALL_PATH=<final installed path, e.g. /usr/local/bin/<bin>>
+```
+
 Minimum first-release requirement:
 
 - ad-hoc sign with `codesign --force --sign -`
@@ -11,18 +18,18 @@ Minimum first-release requirement:
 Build-path verification:
 
 ```sh
-codesign --force --sign - target/release/mmux
-codesign --verify --strict --verbose=2 target/release/mmux
-target/release/mmux --version
+codesign --force --sign - "target/release/${BIN}"
+codesign --verify --strict --verbose=2 "target/release/${BIN}"
+"target/release/${BIN}" --version
 ```
 
 Final-path verification:
 
 ```sh
-sudo install -m 755 bin/mmux /usr/local/bin/mmux
-sudo codesign --force --sign - /usr/local/bin/mmux
-codesign --verify --strict --verbose=2 /usr/local/bin/mmux
-/usr/local/bin/mmux --version
+sudo install -m 755 "bin/${BIN}" "${INSTALL_PATH}"
+sudo codesign --force --sign - "${INSTALL_PATH}"
+codesign --verify --strict --verbose=2 "${INSTALL_PATH}"
+"${INSTALL_PATH}" --version
 ```
 
 Why this gate exists:

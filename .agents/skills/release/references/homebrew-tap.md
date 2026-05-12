@@ -2,6 +2,15 @@
 
 Use this reference when updating Motlie Homebrew distribution.
 
+Parameterize examples by the release target:
+
+```text
+BIN=<installed command name>
+CARGO_PACKAGE=<cargo package name>
+FORMULA=<formula name, often same as BIN>
+VERSION=<release version>
+```
+
 Tap repo:
 
 ```text
@@ -12,19 +21,19 @@ User UX:
 
 ```sh
 brew tap motlie/tap
-brew install mmux
+brew install "${FORMULA}"
 ```
 
 Formula path:
 
 ```text
-Formula/mmux.rb
+Formula/<formula>.rb
 ```
 
 Preferred formula source:
 
 ```ruby
-url "https://github.com/chungers/motlie/archive/refs/tags/v0.1.0.tar.gz"
+url "https://github.com/chungers/motlie/archive/refs/tags/v#{version}.tar.gz"
 sha256 "<source-tarball-sha256>"
 ```
 
@@ -32,9 +41,9 @@ Install shape:
 
 ```ruby
 def install
-  system "cargo", "build", "--release", "--locked", "-p", "motlie-mmux"
-  bin.install "target/release/mmux"
-  system "codesign", "--force", "--sign", "-", bin/"mmux" if OS.mac?
+  system "cargo", "build", "--release", "--locked", "-p", "<cargo-package>"
+  bin.install "target/release/<bin>"
+  system "codesign", "--force", "--sign", "-", bin/"<bin>" if OS.mac?
 end
 ```
 
@@ -42,8 +51,16 @@ Test shape:
 
 ```ruby
 test do
-  assert_match "mmux", shell_output("#{bin}/mmux --version")
+  assert_match "<bin>", shell_output("#{bin}/<bin> --version")
 end
+```
+
+Worked `mmux` example:
+
+```text
+BIN=mmux
+CARGO_PACKAGE=motlie-mmux
+FORMULA=mmux
 ```
 
 Homebrew release rule:

@@ -2,6 +2,7 @@
 
 Use this checklist when coordinating an end-to-end Motlie release.
 
+- [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, channels, and targets.
 - [ ] Release preparation PR merged to `main`.
 - [ ] `main` is clean and current.
 - [ ] Release tag pushed.
