@@ -3,6 +3,7 @@
 ## Changelog
 
 - 2026-05-12, @gpt55-dgx: Initial user playbook for staged Motlie binary releases, Linux cross-compilation, macOS signing, npm publication, and Homebrew tap updates.
+- 2026-05-12, @gpt55-dgx: Added step-by-step npm authentication guidance and linked the repo-local release skill.
 
 ## Scope
 
@@ -10,6 +11,7 @@ This playbook describes how to produce and publish Motlie native binary releases
 
 - `docs/DESIGN_RELEASES.md`
 - `docs/PLAN_RELEASES.md`
+- `.agents/skills/release/SKILL.md`
 - Issue #234: https://github.com/chungers/motlie/issues/234
 
 The source repository remains:
@@ -256,18 +258,76 @@ Publication workflow:
 2. Run `npm pack --dry-run` for each package.
 3. Install each package locally or in CI.
 4. Execute `mmux --version` from the npm-installed path.
-5. Publish to the npm registry under `@motlie`.
+5. Select the npm auth path.
+6. Publish to the npm registry under `@motlie`.
 
-Preferred authentication:
+### npm Authentication Steps
+
+npm credentials are needed only for the publish operation. They are not needed for build, packaging, GitHub Release upload, installer verification, or Homebrew work.
+
+No npm API key is needed for:
+
+1. Linux cross-compilation.
+2. macOS signing.
+3. Archive creation.
+4. Checksum generation.
+5. GitHub Release asset upload.
+6. npm package directory generation.
+7. `npm pack --dry-run`.
+8. Local package install verification from a generated `.tgz`.
+9. Homebrew formula PR or bottle build.
+
+Preferred auth path:
 
 - Use npm trusted publishing from GitHub Actions when available.
-- If bootstrap requires a token, use a granular npm token scoped to the `@motlie` packages and store it as a GitHub Actions secret.
-- Do not commit npm tokens.
+- Configure trusted publishing for the package and the exact GitHub Actions workflow.
+- Give the workflow `id-token: write`.
+- Do not create or store `NPM_TOKEN` when trusted publishing is working.
+
+Bootstrap fallback path:
+
+1. Create a granular npm token scoped to the `@motlie` org/packages.
+2. Store it as a GitHub Actions secret in `chungers/motlie`.
+3. Name the secret `NPM_TOKEN`.
+4. Use it only in the `npm publish` step.
+5. Pass it as `NODE_AUTH_TOKEN`.
+6. Do not write an authenticated `.npmrc` into the repository.
+7. Revoke the token after trusted publishing is configured and verified.
 
 Token name if needed:
 
 ```text
 NPM_TOKEN
+```
+
+Token-backed publish step:
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: 24
+    registry-url: https://registry.npmjs.org
+
+- run: npm publish --access public
+  working-directory: dist/npm/@motlie/mmux-linux-x64-gnu
+  env:
+    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+Trusted-publishing shape:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+
+steps:
+  - uses: actions/setup-node@v4
+    with:
+      node-version: 24
+      registry-url: https://registry.npmjs.org
+  - run: npm publish --access public
+    working-directory: dist/npm/@motlie/mmux-linux-x64-gnu
 ```
 
 GitHub Actions publish jobs should run only for releases or tags, not normal PRs.
