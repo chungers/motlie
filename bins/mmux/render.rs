@@ -1226,47 +1226,264 @@ fn visible_session_key_value_rows(area_height: u16, row_count: usize) -> usize {
 
 fn send_keys_text_field_height(input: &str, width: u16) -> u16 {
     let inner_width = width.saturating_sub(2).max(1) as usize;
-    let wrapped_rows = wrapped_line_count(input, inner_width);
+    let wrapped_rows = send_keys_wrapped_line_count(input, inner_width);
     max(
         SEND_KEYS_TEXT_FIELD_MIN_HEIGHT,
-        wrapped_rows.saturating_add(2),
+        saturating_u16(wrapped_rows).saturating_add(2),
     )
 }
 
-fn wrapped_line_count(input: &str, width: usize) -> u16 {
-    let width = max(1, width);
-    let rows = if input.is_empty() {
-        1
-    } else {
-        input
-            .split('\n')
-            .map(|line| max(1, line.chars().count().div_ceil(width)))
-            .sum()
-    };
-    min(rows, u16::MAX as usize) as u16
+struct SendKeysInputView {
+    text: String,
+    cursor_x: u16,
+    cursor_y: u16,
 }
 
-fn hard_wrapped_text(input: &str, width: usize) -> String {
+fn send_keys_input_view(input: &str, width: usize, visible_rows: usize) -> SendKeysInputView {
     let width = max(1, width);
-    if input.is_empty() {
-        return String::new();
+    let visible_rows = max(1, visible_rows);
+    let lines = send_keys_wrapped_lines(input, width);
+    let cursor_row = lines.len().saturating_sub(1);
+    let cursor_col = lines
+        .last()
+        .map(|line| min(char_width(line), width.saturating_sub(1)))
+        .unwrap_or(0);
+    let first_row = cursor_row.saturating_add(1).saturating_sub(visible_rows);
+    let visible = lines
+        .iter()
+        .skip(first_row)
+        .take(visible_rows)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    SendKeysInputView {
+        text: visible.join("\n"),
+        cursor_x: saturating_u16(cursor_col),
+        cursor_y: saturating_u16(cursor_row.saturating_sub(first_row)),
     }
-    let mut output = String::new();
-    for (line_index, line) in input.split('\n').enumerate() {
-        if line_index > 0 {
-            output.push('\n');
-        }
-        if line.is_empty() {
+}
+
+// `WrapState` above mirrors ratatui's detail-pane wrapping for row counts.
+// Keep Send Keys word-boundary behavior aligned with it, but pre-wrap here
+// because this modal must render a scrolled editable viewport and place the
+// terminal cursor on the visible tail row.
+fn send_keys_wrapped_line_count(input: &str, width: usize) -> usize {
+    let width = max(1, width);
+    let mut target = CountSendKeysLines::default();
+    for logical_line in input.split('\n') {
+        wrap_send_keys_logical_line(logical_line, width, &mut target);
+    }
+    target.count()
+}
+
+fn send_keys_wrapped_lines(input: &str, width: usize) -> Vec<String> {
+    let width = max(1, width);
+    let mut target = CollectSendKeysLines::default();
+    for logical_line in input.split('\n') {
+        wrap_send_keys_logical_line(logical_line, width, &mut target);
+    }
+    target.into_lines()
+}
+
+fn wrap_send_keys_logical_line(input: &str, width: usize, target: &mut impl SendKeysLineTarget) {
+    if input.is_empty() {
+        target.push_line();
+        return;
+    }
+
+    let mut pending_space = "";
+    let mut pending_space_width = 0usize;
+
+    for (run, is_whitespace) in text_runs(input) {
+        let run_width = char_width(run);
+        if is_whitespace {
+            pending_space = run;
+            pending_space_width = run_width;
             continue;
         }
-        for (index, ch) in line.chars().enumerate() {
-            if index > 0 && index % width == 0 {
-                output.push('\n');
-            }
-            output.push(ch);
+
+        if target.current_width() > 0
+            && target.current_width() + pending_space_width + run_width > width
+        {
+            target.push_line();
+            pending_space = "";
+            pending_space_width = 0;
+        } else if !pending_space.is_empty() {
+            append_hard_wrapped_send_keys_run(pending_space, width, target);
+            pending_space = "";
+            pending_space_width = 0;
+        }
+
+        append_hard_wrapped_send_keys_run(run, width, target);
+    }
+
+    if !pending_space.is_empty() {
+        append_hard_wrapped_send_keys_run(pending_space, width, target);
+    }
+
+    target.push_line();
+}
+
+fn append_hard_wrapped_send_keys_run(
+    run: &str,
+    width: usize,
+    target: &mut impl SendKeysLineTarget,
+) {
+    for ch in run.chars() {
+        let Some(ch_width) = ch.width() else {
+            // Keep non-rendering control characters in the submitted key
+            // sequence, but omit them from display and cursor accounting.
+            continue;
+        };
+        if target.current_width() > 0 && target.current_width().saturating_add(ch_width) > width {
+            target.push_line();
+        }
+        target.push_char(ch, ch_width);
+    }
+}
+
+trait SendKeysLineTarget {
+    fn current_width(&self) -> usize;
+    fn push_char(&mut self, ch: char, ch_width: usize);
+    fn push_line(&mut self);
+}
+
+#[derive(Default)]
+struct CountSendKeysLines {
+    rows: usize,
+    current_width: usize,
+}
+
+impl CountSendKeysLines {
+    fn count(self) -> usize {
+        max(1, self.rows)
+    }
+}
+
+impl SendKeysLineTarget for CountSendKeysLines {
+    fn current_width(&self) -> usize {
+        self.current_width
+    }
+
+    fn push_char(&mut self, _ch: char, ch_width: usize) {
+        self.current_width = self.current_width.saturating_add(ch_width);
+    }
+
+    fn push_line(&mut self) {
+        self.rows = self.rows.saturating_add(1);
+        self.current_width = 0;
+    }
+}
+
+#[derive(Default)]
+struct CollectSendKeysLines {
+    lines: Vec<String>,
+    current: String,
+    current_width: usize,
+}
+
+impl CollectSendKeysLines {
+    fn into_lines(self) -> Vec<String> {
+        if self.lines.is_empty() {
+            vec![String::new()]
+        } else {
+            self.lines
         }
     }
-    output
+}
+
+impl SendKeysLineTarget for CollectSendKeysLines {
+    fn current_width(&self) -> usize {
+        self.current_width
+    }
+
+    fn push_char(&mut self, ch: char, ch_width: usize) {
+        self.current.push(ch);
+        self.current_width = self.current_width.saturating_add(ch_width);
+    }
+
+    fn push_line(&mut self) {
+        self.lines.push(std::mem::take(&mut self.current));
+        self.current_width = 0;
+    }
+}
+
+fn text_runs(input: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut rest = input;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+
+        let mut chars = rest.char_indices();
+        let (_, first) = chars.next()?;
+        let is_whitespace = first.is_whitespace();
+        let mut end = first.len_utf8();
+        for (index, ch) in chars {
+            if ch.is_whitespace() != is_whitespace {
+                break;
+            }
+            end = index + ch.len_utf8();
+        }
+
+        let (run, remaining) = rest.split_at(end);
+        rest = remaining;
+        Some((run, is_whitespace))
+    })
+}
+
+#[cfg(test)]
+mod send_keys_wrap_tests {
+    use super::*;
+
+    fn strings(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    #[test]
+    fn send_keys_word_wrap_hard_wraps_unbroken_words() {
+        assert_eq!(
+            send_keys_wrapped_lines("abcdef", 3),
+            strings(&["abc", "def"])
+        );
+    }
+
+    #[test]
+    fn send_keys_word_wrap_preserves_spaces_that_fit_and_trailing_spaces() {
+        assert_eq!(send_keys_wrapped_lines("a  b", 4), strings(&["a  b"]));
+        assert_eq!(send_keys_wrapped_lines("abc  ", 4), strings(&["abc ", " "]));
+    }
+
+    #[test]
+    fn send_keys_word_wrap_handles_width_one() {
+        assert_eq!(
+            send_keys_wrapped_lines("ab cd", 1),
+            strings(&["a", "b", "c", "d"])
+        );
+    }
+
+    #[test]
+    fn send_keys_word_wrap_omits_control_chars_from_display() {
+        assert_eq!(send_keys_wrapped_lines("ab\u{7}cd", 10), strings(&["abcd"]));
+    }
+
+    #[test]
+    fn send_keys_word_wrap_count_matches_collected_lines() {
+        for (input, width) in [
+            ("", 1),
+            ("abcdef", 3),
+            ("a  b", 4),
+            ("abc  ", 4),
+            ("ab cd", 1),
+            ("alpha beta\ngamma delta", 7),
+            ("ab\u{7}cd", 10),
+        ] {
+            assert_eq!(
+                send_keys_wrapped_line_count(input, width),
+                send_keys_wrapped_lines(input, width).len()
+            );
+        }
+    }
 }
 
 fn key_value_prefix_column_width(area_width: u16) -> u16 {
@@ -1454,32 +1671,6 @@ fn set_inline_text_cursor(frame: &mut Frame<'_>, area: Rect, value: &str) {
     frame.set_cursor_position(Position::new(area.x + offset, area.y));
 }
 
-fn set_wrapped_text_cursor(frame: &mut Frame<'_>, input_inner: Rect, value: &str) {
-    if input_inner.width == 0 || input_inner.height == 0 {
-        return;
-    }
-    let (x_offset, y_offset) = wrapped_cursor_offset(value, input_inner.width as usize);
-    frame.set_cursor_position(Position::new(
-        input_inner.x + min(x_offset, input_inner.width.saturating_sub(1)),
-        input_inner.y + min(y_offset, input_inner.height.saturating_sub(1)),
-    ));
-}
-
-fn wrapped_cursor_offset(input: &str, width: usize) -> (u16, u16) {
-    let width = max(1, width);
-    let mut parts = input.split('\n').collect::<Vec<_>>();
-    let last = parts.pop().unwrap_or("");
-    let row = parts.iter().fold(0u16, |row, line| {
-        row.saturating_add(wrapped_line_count(line, width))
-    });
-    let len = last.chars().count();
-    let cursor_cell = len.saturating_sub(usize::from(len > 0 && len % width == 0));
-    (
-        (cursor_cell % width) as u16,
-        row.saturating_add((cursor_cell / width).min(u16::MAX as usize) as u16),
-    )
-}
-
 fn input_cell_text(value: &str, width: usize, focused: bool) -> String {
     let visible = if focused {
         focused_input_visible_text(value, width)
@@ -1631,12 +1822,17 @@ fn draw_labeled_multiline_text_field(
     );
     let input_inner = inset_rect(input_rect, 1, 1);
     if input_inner.width > 0 && input_inner.height > 0 {
-        frame.render_widget(
-            Paragraph::new(hard_wrapped_text(value, input_inner.width as usize)),
-            input_inner,
+        let view = send_keys_input_view(
+            value,
+            input_inner.width as usize,
+            input_inner.height as usize,
         );
+        frame.render_widget(Paragraph::new(view.text), input_inner);
         if focused {
-            set_wrapped_text_cursor(frame, input_inner, value);
+            frame.set_cursor_position(Position::new(
+                input_inner.x + min(view.cursor_x, input_inner.width.saturating_sub(1)),
+                input_inner.y + min(view.cursor_y, input_inner.height.saturating_sub(1)),
+            ));
         }
     }
 }

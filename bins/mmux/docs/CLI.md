@@ -339,7 +339,8 @@ Window-level tmux alert flags such as `!`, `#`, and `~` are not shown in v1.
 Pressing `p` or `@` opens the `Send Keys` modal for the highlighted session.
 The modal has a compact text field labeled `To: <session> on <host>`, accepts
 `motlie-tmux` key-sequence syntax such as `echo hi`, `1`, or `{C-c}`, wraps long
-input by growing the text field vertically while keeping its width fixed,
+input at word boundaries by growing the text field vertically while keeping its
+width fixed, scrolls the field when capped so the cursor stays visible,
 then sends the parsed input exactly through the highlighted session target.
 Include `{Enter}` or `{C-m}` explicitly when the target should receive Enter.
 Sending happens when `Ok` is focused and Enter is pressed, or when Enter is

@@ -171,8 +171,10 @@ Plain `tmux ls` followed by manual `tmux attach` is not enough because:
   routing as the Send Keys modal.
 - Pressing `p` or `@` opens a centered `Send Keys` modal for the highlighted
   session. The modal shows a label `To: <session> on <host>` above a compact
-  text field and has `Cancel` / `Ok` buttons. Long input wraps by growing the field
-  vertically while the input width stays fixed. `Tab` cycles the text field and
+  text field and has `Cancel` / `Ok` buttons. Long input wraps at word
+  boundaries by growing the field vertically while the input width stays fixed;
+  when terminal height caps the field, the rendered input scrolls to keep the
+  cursor row visible. `Tab` cycles the text field and
   buttons; Enter on focused `Ok`, or Enter from the text field after text has
   been entered, parses the field as a `KeySequence`, and sends that sequence
   exactly to the captured stable session target through `Target::send_keys`.
