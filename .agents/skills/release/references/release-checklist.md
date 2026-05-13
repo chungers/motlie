@@ -2,18 +2,23 @@
 
 Use this checklist when coordinating an end-to-end Motlie release.
 
-- [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, channels, and targets.
-- [ ] Release preparation PR merged to `main`.
-- [ ] `main` is clean and current.
-- [ ] Release tag pushed.
-- [ ] GitHub prerelease created.
-- [ ] Linux cross-compilation produced Linux and Darwin archives.
-- [ ] Checksums generated.
-- [ ] Staged artifacts uploaded to GitHub prerelease.
-- [ ] macOS signing workflow completed.
-- [ ] Darwin archives replaced with signed artifacts.
-- [ ] Final checksums uploaded.
-- [ ] Installer script uploaded.
+- [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, channels, targets, `MANIFEST`, and `RELEASE_BRANCH`.
+- [ ] Release coordination branch created from `main`.
+- [ ] `releases/<bin>/<version>.toml` committed with deterministic intent, explicit names, target matrix, and gates.
+- [ ] `releases/<bin>/<version>.md` committed as the release-note source.
+- [ ] Coordination PR opened against `main`.
+- [ ] Platform/channel sub-PRs opened against the release branch as needed.
+- [ ] Sub-PRs update manifest status with source commit, timestamp, actor, and evidence links.
+- [ ] Build outputs are not committed to git.
+- [ ] Manifest confirms native npm mode when required, for example `runner = "native-binary"` and `node_launcher = false`.
+- [ ] macOS signing evidence is recorded for Darwin targets that require it.
+- [ ] Coordination PR is up to date with `main`.
+- [ ] Coordination PR merged to `main`.
+- [ ] Final source tag pushed from `main`.
+- [ ] Final artifacts built from the final source tag.
+- [ ] Final Darwin artifacts signed and verified from the installed path.
+- [ ] Final checksums generated.
+- [ ] GitHub Release published with final archives, checksums, installer assets, and notes.
 - [ ] Direct installer verified from release-pinned URL.
 - [ ] npm packages generated from final artifacts.
 - [ ] `npm pack --dry-run` reviewed for each package.
@@ -21,8 +26,8 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] npm packages published to `@motlie`.
 - [ ] npm installs verified for Linux and macOS packages.
 - [ ] Homebrew tap PR opened against `motlie/homebrew-tap`.
-- [ ] Homebrew formula builds from source tag.
+- [ ] Homebrew formula builds from final source tag.
 - [ ] Homebrew formula re-signs installed binary on macOS.
 - [ ] Homebrew bottle tests pass from installed path.
 - [ ] Homebrew tap PR merged.
-- [ ] GitHub Release marked stable.
+- [ ] Post-release ledger PR updates `releases/<bin>/<version>.toml` to `state = "published"` with final URLs, checksums, npm links, Homebrew tap commit, and install evidence.

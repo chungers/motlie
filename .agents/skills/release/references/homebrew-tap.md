@@ -9,6 +9,7 @@ BIN=<installed command name>
 CARGO_PACKAGE=<cargo package name>
 FORMULA=<formula name, often same as BIN>
 VERSION=<release version>
+MANIFEST=releases/<bin>/<version>.toml
 ```
 
 Tap repo:
@@ -66,6 +67,8 @@ FORMULA=mmux
 Homebrew release rule:
 
 - update the tap by PR
-- build and test bottles on macOS runners
+- build from the final source tag after the release coordination PR is merged to `main`
+- build and test bottles on macOS runners or manually for the first release
 - execute the installed bottled binary
 - keep Homebrew bottle naming under Homebrew control; do not force npm/archive asset names onto bottles
+- update the Motlie post-release ledger PR with the tap PR URL and tap commit after publication

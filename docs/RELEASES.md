@@ -5,6 +5,8 @@
 - 2026-05-12, @gpt55-dgx: Initial user playbook for staged Motlie binary releases, Linux cross-compilation, macOS signing, npm publication, and Homebrew tap updates.
 - 2026-05-12, @gpt55-dgx: Added step-by-step npm authentication guidance and linked the repo-local release skill.
 - 2026-05-12, @gpt55-dgx: Generalized the release playbook around a user-specified binary target; `mmux` is now only the worked example.
+- 2026-05-12, @gpt55-dgx: Clarified that CI workflows are future automation; the current release execution path is the manual process in `docs/PLAN_RELEASES.md`.
+- 2026-05-12, @gpt55-dgx: Aligned the playbook to per-binary manifests under `releases/<bin>/<version>.toml` and a release coordination PR with sub-PR status updates.
 
 ## Scope
 
@@ -45,6 +47,8 @@ FORMULA=<Homebrew formula name, if Homebrew is enabled>
 NPM_PREFIX=@motlie/<package-prefix>
 INSTALLER=install-<bin>.sh
 FORCE_COMMAND_SAFE=true|false
+MANIFEST=releases/<bin>/<version>.toml
+RELEASE_BRANCH=release/<bin>-v<version>
 ```
 
 Worked `mmux` target:
@@ -59,74 +63,83 @@ FORMULA=mmux
 NPM_PREFIX=@motlie/mmux
 INSTALLER=install-mmux.sh
 FORCE_COMMAND_SAFE=true
+MANIFEST=releases/mmux/0.1.0.toml
+RELEASE_BRANCH=release/mmux-v0.1.0
 ```
 
 ## Release Model
 
-Use a staged release workflow instead of publishing directly from a local build.
+Use a release coordination PR instead of publishing directly from a local build. The coordination PR is a long-running branch from `main` that carries the version bump, per-release manifest, release notes, and status updates from platform-specific sub-PRs.
 
 The release should move through these gates:
 
-1. Release preparation PR in `chungers/motlie`.
-2. GitHub Release draft or prerelease for binary staging.
-3. Linux-based cross-compilation for Linux and macOS target artifacts.
-4. Separate macOS signing verification step.
-5. Final GitHub Release artifact publication.
-6. npm package publication.
-7. Homebrew tap PR and bottle publication.
-8. Post-publish install verification.
+1. Release coordination branch and PR in `chungers/motlie`.
+2. Per-release manifest under `releases/<bin>/<version>.toml`.
+3. Platform or channel sub-PRs targeting the release branch.
+4. Manifest status updates recording staging evidence.
+5. Coordination PR merge to `main`.
+6. Final source tag from `main`.
+7. Final build, signing, and archive publication from the final tag.
+8. npm package publication.
+9. Homebrew tap PR and bottle publication.
+10. Post-release ledger PR recording final URLs, checksums, and package links.
 
-This keeps binary production, signing, package-manager upload, and install verification distinct. If a later gate fails, earlier artifacts remain inspectable and reproducible.
+This keeps staging, final publication, and post-release audit metadata distinct. If a later gate fails, status remains inspectable in the manifest without moving the release tag.
 
-## Release Preparation PR
+## Release Coordination PR
 
-Open a release preparation PR against `main` before building binaries.
-
-The PR should include only release metadata and docs needed for the release:
-
-- Version updates.
-- Changelog or release notes.
-- Release manifest updates.
-- New target matrix entries.
-- npm package metadata template changes.
-- installer script changes.
-- Homebrew formula template changes if needed.
-
-Do not publish npm packages or Homebrew formula updates from this PR. Its purpose is to make the source tree and release manifest reviewable.
+Open a release coordination PR against `main` before building final binaries.
 
 Recommended branch name:
 
 ```text
-@gpt55-dgx/release-v0.1.0
+release/mmux-v0.1.0
 ```
 
-After review, merge the release preparation PR into `main`.
+The initial PR should include:
 
-## Tag and Stage Release
+- Version updates in `Cargo.toml`.
+- The release manifest, for example `releases/mmux/0.1.0.toml`.
+- Release notes, for example `releases/mmux/0.1.0.md`.
+- Source-side installer, npm, or Homebrew templates under `releases/<bin>/` if needed.
+- Release docs and release skill updates.
 
-Create the release tag from `main` after the release preparation PR merges.
+Platform-specific work should land as sub-PRs targeting the release branch:
+
+```text
+release/mmux-v0.1.0-linux-x64 -> release/mmux-v0.1.0
+release/mmux-v0.1.0-darwin-arm64 -> release/mmux-v0.1.0
+release/mmux-v0.1.0-npm -> release/mmux-v0.1.0
+```
+
+Each sub-PR should update `releases/<bin>/<version>.toml` with status, source commit, timestamp, actor, and evidence links. Do not commit built binaries to git.
+
+## Final Tag and GitHub Release
+
+Create the release tag from `main` after the release coordination PR merges and all required gates are complete or explicitly deferred.
 
 ```sh
 git switch main
 git pull --ff-only
+rg -n 'binary = "mmux"|version = "0.1.0"|tag = "v0.1.0"' releases/mmux/0.1.0.toml Cargo.toml
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Create a GitHub Release in draft or prerelease state first. The staged release is where build artifacts, checksums, and installer scripts are uploaded before package-manager publication.
+Important: a GitHub Release is tag-centric, not PR-centric. The final tag must point to the exact source commit used for final artifacts. Staging builds from the release branch are useful evidence, but final artifacts must be rebuilt or revalidated from the final tag if the commit changed.
 
-Recommended staged release state:
+Create the GitHub Release from the committed release notes:
 
-```text
-draft: false
-prerelease: true
+```sh
+gh release create v0.1.0 \
+  --repo chungers/motlie \
+  --title "v0.1.0" \
+  --notes-file releases/mmux/0.1.0.md
 ```
-
-Use prerelease instead of draft if downstream CI needs to download release assets for signing or package dry-runs.
 
 ## Cross-Compile on Linux
 
-The primary build workflow should run on Linux and produce all initial target artifacts:
+The final build should run from the source tag and produce target artifacts listed in the manifest:
 
 ```text
 linux-x64-gnu
@@ -135,15 +148,15 @@ darwin-x64
 darwin-arm64
 ```
 
-The Linux workflow may use Rust cross-compilation tooling, Zig, or an osxcross-style macOS SDK toolchain for Darwin targets. The exact toolchain is an implementation detail of `docs/PLAN_RELEASES.md`, but the release contract is:
+The Linux build may use Rust cross-compilation tooling, Zig, or an osxcross-style macOS SDK toolchain for Darwin targets. The exact toolchain is an implementation detail of `docs/PLAN_RELEASES.md`, but the release contract is:
 
 - all outputs are built from the release tag;
-- target names match `docs/DESIGN_RELEASES.md`;
-- artifact names follow the canonical naming grammar;
-- the installed executable remains `${BIN}`;
+- target names match `releases/<bin>/<version>.toml`;
+- artifact names use explicit manifest fields such as `archive_asset`;
+- archive binary paths use explicit manifest fields such as `archive_binary_path`;
 - Darwin binaries produced on Linux are not considered final until macOS signing verification passes.
 
-Generic archive names:
+Generic archive names are a convention only. If the manifest provides an explicit `archive_asset`, use the manifest value.
 
 ```text
 motlie-${BIN}-v${VERSION}-linux-x64-gnu.tar.gz
@@ -169,29 +182,17 @@ README.md
 LICENSE
 ```
 
-Generate checksums for every staged archive:
+Generate checksums for every final archive:
 
 ```sh
 shasum -a 256 "motlie-${BIN}-v${VERSION}"-*.tar.gz > SHA256SUMS
 ```
 
-Upload the unsigned or pre-signing staged artifacts to the prerelease with names that make the state clear if needed:
-
-```text
-motlie-${BIN}-v${VERSION}-darwin-arm64.tar.gz
-motlie-${BIN}-v${VERSION}-darwin-x64.tar.gz
-SHA256SUMS
-```
-
-If unsigned Darwin artifacts are uploaded before macOS signing, mark the GitHub Release notes clearly:
-
-```text
-Darwin artifacts are staged for signing verification and are not final until the macOS signing gate completes.
-```
+Do not upload unsigned Darwin artifacts as final release assets. If candidate artifacts must be shared before final signing, use PR evidence or clearly marked staging assets, and rebuild or revalidate from the final tag before publishing.
 
 ## macOS Signing Gate
 
-Run a separate manual or manually approved workflow on macOS after Linux cross-compilation completes.
+Run a separate manual or manually approved gate on macOS during staging and again for final release artifacts if the final tag differs from the staged source commit.
 
 This step exists because Apple Silicon validates Mach-O code signatures at execution time. A binary that works from one path can fail from another path after copying, so the final installed-path behavior must be verified.
 
@@ -203,16 +204,16 @@ codesign --verify --strict --verbose=2 "bin/${BIN}"
 "bin/${BIN}" --version
 ```
 
-Manual signing workflow:
+Manual signing workflow for final artifacts:
 
-1. Download the staged Darwin archives from the GitHub prerelease.
+1. Build or download Darwin artifacts produced from the final source tag.
 2. Extract each archive.
 3. Re-sign `bin/${BIN}`.
 4. Verify the signature.
 5. Execute `bin/${BIN} --version`.
 6. Repack the archive with the signed binary.
 7. Recompute checksums.
-8. Replace the staged Darwin archives and checksum file on the GitHub Release.
+8. Upload signed Darwin archives and checksum file to the GitHub Release.
 
 Apple Silicon final-path verification:
 
@@ -233,9 +234,9 @@ Developer ID signing and notarization are not required for the first release pat
 
 ## Finalize GitHub Release
 
-After Linux builds and macOS signing pass, update the GitHub Release so only final artifacts are presented as installable.
+After final Linux builds and final macOS signing pass from the final source tag, create or update the GitHub Release so only final artifacts are presented as installable.
 
-Final release assets should include:
+Final release assets should match the manifest's explicit `archive_asset` values. For `mmux`:
 
 ```text
 motlie-${BIN}-v${VERSION}-linux-x64-gnu.tar.gz
@@ -258,7 +259,7 @@ It may also support npm mode:
 sh "${INSTALLER}" --source npm
 ```
 
-When the artifacts are final and checksums match, change the release from prerelease to stable.
+When the artifacts are final and checksums match, publish the GitHub Release as the stable release for the tag.
 
 ## npm Publication
 
@@ -266,7 +267,7 @@ npm packages are published after final GitHub Release artifacts exist and after 
 
 Publish native packages only. Do not publish a Node boot script as the binary runtime entrypoint.
 
-Generic package names:
+Generic package names are a convention only. If the manifest provides explicit `npm_package` values, use the manifest values.
 
 ```text
 ${NPM_PREFIX}-linux-x64-gnu
@@ -391,7 +392,7 @@ on:
     types: [published]
 ```
 
-If publishing from a prerelease staging workflow, require a manual approval environment before running `npm publish`.
+If future automation publishes from a release workflow, require a manual approval environment before running `npm publish`.
 
 ## Homebrew Publication
 
@@ -460,9 +461,11 @@ Bottle workflow:
 
 The Homebrew tap may use the source tarball rather than the prebuilt GitHub Release archives. The bottle workflow is responsible for producing and publishing Homebrew-managed macOS bottles.
 
-## GitHub Actions Structure
+## Future GitHub Actions Structure
 
-Use multiple workflows or multiple jobs with explicit gates.
+The manual v0 release process does not create these workflows. Use this section only when the release process is ready to be automated after the manual process has been validated.
+
+Future automation should use multiple workflows or multiple jobs with explicit gates.
 
 Recommended structure:
 
@@ -474,14 +477,14 @@ Recommended structure:
 
 Release build workflow:
 
-- Trigger on tag or release prerelease.
+- Trigger on the final source tag or stable release publication.
 - Build Linux and Darwin target archives from Linux.
-- Upload staged artifacts/checksums to the GitHub Release.
+- Upload final artifacts/checksums to the GitHub Release.
 
 macOS signing workflow:
 
 - Trigger manually with `workflow_dispatch`, or through a protected environment.
-- Download staged Darwin artifacts.
+- Download final Darwin artifacts built from the source tag.
 - Sign, verify, repack, and replace Darwin assets.
 - Verify `${INSTALL_PATH} --version` from a final copied path.
 
@@ -501,16 +504,17 @@ Homebrew workflow:
 
 ## Manual Release Checklist
 
-- [ ] Release preparation PR merged to `main`.
 - [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, enabled channels, and targets.
-- [ ] `main` is clean and current.
-- [ ] Release tag pushed.
-- [ ] GitHub prerelease created.
-- [ ] Linux cross-compilation produced Linux and Darwin archives.
-- [ ] Checksums generated.
-- [ ] Staged artifacts uploaded to GitHub prerelease.
-- [ ] macOS signing workflow completed.
-- [ ] Darwin archives replaced with signed artifacts.
+- [ ] Release coordination branch created from `main`.
+- [ ] `releases/<bin>/<version>.toml` committed with release intent, explicit names, target matrix, and gates.
+- [ ] `releases/<bin>/<version>.md` committed as release-note source.
+- [ ] Coordination PR opened against `main`.
+- [ ] Platform/channel sub-PRs merged into the release branch.
+- [ ] Manifest status updated with staging evidence and source commits.
+- [ ] Coordination PR merged to `main`.
+- [ ] Final source tag pushed from `main`.
+- [ ] Final Linux and Darwin artifacts built from the source tag.
+- [ ] Final Darwin artifacts signed and verified on macOS.
 - [ ] Final checksums uploaded.
 - [ ] Installer script uploaded.
 - [ ] Direct installer verified from release-pinned URL.
@@ -523,13 +527,14 @@ Homebrew workflow:
 - [ ] Homebrew formula re-signs installed binary on macOS.
 - [ ] Homebrew bottle tests pass from installed path.
 - [ ] Homebrew tap PR merged.
-- [ ] GitHub Release marked stable.
+- [ ] GitHub Release published as stable.
+- [ ] Post-release ledger PR updates `releases/<bin>/<version>.toml` with final URLs, checksums, npm links, Homebrew tap commit, and install evidence.
 
 ## Rollback
 
 If GitHub Release artifact validation fails:
 
-- Keep the release as prerelease.
+- Leave the GitHub Release unpublished or replace invalid assets before announcing the release.
 - Replace failed artifacts.
 - Regenerate checksums.
 - Re-run signing and install verification.
@@ -550,7 +555,7 @@ If Homebrew publication fails:
 ## Open Decisions
 
 - Which Linux cross-compilation toolchain should become the blessed release path for Darwin targets.
-- Whether Darwin artifacts should be uploaded before signing as prerelease assets or kept only as workflow artifacts until signing completes.
+- Whether Darwin candidate artifacts should be shared as PR evidence, workflow artifacts, or clearly marked non-final staging assets before final signing.
 - Whether npm publication should run from the source repo workflow or a separate release environment.
 - Whether the Homebrew tap should be updated by a bot PR from `chungers/motlie` or manually after the source release is finalized.
 - Whether future public macOS downloads require Developer ID signing and notarization beyond ad-hoc signing.
