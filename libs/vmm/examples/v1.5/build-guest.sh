@@ -902,7 +902,17 @@ sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie
 sudo install -D -m 0644 /tmp/motlie-vmm-backend.env /etc/motlie/v1.5/backend.env
 sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_vz.cfg
 sudo mkdir -p /etc/motlie-vfs
-sudo mkdir -p /etc/ssh/ca /etc/ssh/auth_principals
+sudo mkdir -p /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
+# VZ native source images can carry a host UID on the root inode after local
+# disk materialization. OpenSSH StrictModes walks AuthorizedPrincipalsFile path
+# ancestors from /, so normalize this in the image instead of weakening sshd.
+sudo chown root:root /
+sudo chmod 0755 /
+cat >/tmp/90_motlie_vmm_ca.conf <<'SSHDCAEOF'
+TrustedUserCAKeys /etc/ssh/ca/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+SSHDCAEOF
+sudo install -D -m 0644 /tmp/90_motlie_vmm_ca.conf /etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf
 sudo install -D -m 0755 /tmp/motlie-vmm-vsock-ssh-loop /usr/local/bin/motlie-vmm-vsock-ssh-loop
 sudo install -D -m 0644 /tmp/motlie-vmm-vsock-ssh.service /etc/systemd/system/motlie-vmm-vsock-ssh.service
 if ! grep -q '^TrustedUserCAKeys /etc/ssh/ca/user_ca.pub$' /etc/ssh/sshd_config; then

@@ -1198,11 +1198,33 @@ fi
 if [[ ! -s /etc/profile.d/agent-state.sh ]]; then
   contract_missing+=("/etc/profile.d/agent-state.sh from the base image")
 fi
-if ! grep -q '^TrustedUserCAKeys /etc/ssh/ca/user_ca.pub$' /etc/ssh/sshd_config; then
-  contract_missing+=("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub baked into /etc/ssh/sshd_config")
+root_owner="\$(stat -c '%u:%g' / 2>/dev/null || true)"
+root_mode="\$(stat -c '%a' / 2>/dev/null || true)"
+if [[ "\$root_owner" != "0:0" || "\$root_mode" != "755" ]]; then
+  contract_missing+=(
+    "root filesystem inode must be root:root 0755 for OpenSSH StrictModes; got owner=\${root_owner:-unknown} mode=\${root_mode:-unknown}"
+  )
 fi
-if ! grep -q '^AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u$' /etc/ssh/sshd_config; then
-  contract_missing+=("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u baked into /etc/ssh/sshd_config")
+sshd_config_probe=/usr/sbin/sshd
+if [[ ! -x "\$sshd_config_probe" ]]; then
+  sshd_config_probe="\$(command -v sshd 2>/dev/null || true)"
+fi
+if [[ -z "\$sshd_config_probe" ]]; then
+  contract_missing+=("sshd executable for effective CA policy validation")
+else
+  sshd_probe_err=/tmp/motlie-sshd-config.err
+  effective_sshd_config="\$(printf '${CONTROL_PASSWORD}\n' | sudo -S "\$sshd_config_probe" -T -C user=${LOGIN_USER},host=${GUEST_HOSTNAME},addr=127.0.0.1 2>"\$sshd_probe_err" || true)"
+  if [[ -z "\$effective_sshd_config" ]]; then
+    sshd_probe_error="\$(cat "\$sshd_probe_err" 2>/dev/null || true)"
+    contract_missing+=("sshd effective CA policy probe produced no config: \${sshd_probe_error:-unknown sshd -T failure}")
+  else
+    if ! printf '%s\n' "\$effective_sshd_config" | grep -q '^trustedusercakeys /etc/ssh/ca/user_ca.pub$'; then
+      contract_missing+=("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub effective in sshd config")
+    fi
+    if ! printf '%s\n' "\$effective_sshd_config" | grep -q '^authorizedprincipalsfile /etc/ssh/auth_principals/%u$'; then
+      contract_missing+=("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u effective in sshd config")
+    fi
+  fi
 fi
 if [[ ! -s /usr/local/bin/codex || ! -x /usr/local/bin/codex ]]; then
   contract_missing+=("/usr/local/bin/codex executable from the base image")
@@ -1244,6 +1266,12 @@ printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vmm-prin
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0644 /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 motlie_guest_phase guest-runtime-files-installed
+# Dynamic CA/principal files are per-guest seed state. The sshd policy must be
+# baked into the image, but reload sshd here so first proxy auth observes the
+# freshly seeded CA material before the launcher declares interactive-ready.
+printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl reload ssh.service >/dev/null 2>&1 \
+  || printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh.service
+motlie_guest_phase sshd-reloaded
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
 motlie_guest_phase vfs-service-restarted
 mounts_ready=0
