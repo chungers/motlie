@@ -1226,47 +1226,152 @@ fn visible_session_key_value_rows(area_height: u16, row_count: usize) -> usize {
 
 fn send_keys_text_field_height(input: &str, width: u16) -> u16 {
     let inner_width = width.saturating_sub(2).max(1) as usize;
-    let wrapped_rows = wrapped_line_count(input, inner_width);
+    let wrapped_rows = send_keys_wrapped_lines(input, inner_width).len();
     max(
         SEND_KEYS_TEXT_FIELD_MIN_HEIGHT,
-        wrapped_rows.saturating_add(2),
+        saturating_u16(wrapped_rows).saturating_add(2),
     )
 }
 
-fn wrapped_line_count(input: &str, width: usize) -> u16 {
-    let width = max(1, width);
-    let rows = if input.is_empty() {
-        1
-    } else {
-        input
-            .split('\n')
-            .map(|line| max(1, line.chars().count().div_ceil(width)))
-            .sum()
-    };
-    min(rows, u16::MAX as usize) as u16
+struct SendKeysInputView {
+    text: String,
+    cursor_x: u16,
+    cursor_y: u16,
 }
 
-fn hard_wrapped_text(input: &str, width: usize) -> String {
+fn send_keys_input_view(input: &str, width: usize, visible_rows: usize) -> SendKeysInputView {
     let width = max(1, width);
-    if input.is_empty() {
-        return String::new();
+    let visible_rows = max(1, visible_rows);
+    let lines = send_keys_wrapped_lines(input, width);
+    let cursor_row = lines.len().saturating_sub(1);
+    let cursor_col = lines
+        .last()
+        .map(|line| min(char_width(line), width.saturating_sub(1)))
+        .unwrap_or(0);
+    let first_row = cursor_row.saturating_add(1).saturating_sub(visible_rows);
+    let visible = lines
+        .iter()
+        .skip(first_row)
+        .take(visible_rows)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    SendKeysInputView {
+        text: visible.join("\n"),
+        cursor_x: saturating_u16(cursor_col),
+        cursor_y: saturating_u16(cursor_row.saturating_sub(first_row)),
     }
-    let mut output = String::new();
-    for (line_index, line) in input.split('\n').enumerate() {
-        if line_index > 0 {
-            output.push('\n');
-        }
-        if line.is_empty() {
+}
+
+fn send_keys_wrapped_lines(input: &str, width: usize) -> Vec<String> {
+    let width = max(1, width);
+    let mut lines = Vec::new();
+    for logical_line in input.split('\n') {
+        append_word_wrapped_line(logical_line, width, &mut lines);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn append_word_wrapped_line(input: &str, width: usize, lines: &mut Vec<String>) {
+    if input.is_empty() {
+        lines.push(String::new());
+        return;
+    }
+
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut pending_space = String::new();
+    let mut pending_space_width = 0usize;
+
+    for (run, is_whitespace) in text_runs(input) {
+        let run_width = char_width(run);
+        if is_whitespace {
+            pending_space.push_str(run);
+            pending_space_width = pending_space_width.saturating_add(run_width);
             continue;
         }
-        for (index, ch) in line.chars().enumerate() {
-            if index > 0 && index % width == 0 {
-                output.push('\n');
-            }
-            output.push(ch);
+
+        if current_width > 0 && current_width + pending_space_width + run_width > width {
+            push_wrapped_line(lines, &mut current, &mut current_width);
+            pending_space.clear();
+            pending_space_width = 0;
+        } else if !pending_space.is_empty() {
+            append_hard_wrapped_run(
+                &pending_space,
+                width,
+                lines,
+                &mut current,
+                &mut current_width,
+            );
+            pending_space.clear();
+            pending_space_width = 0;
         }
+
+        append_hard_wrapped_run(run, width, lines, &mut current, &mut current_width);
     }
-    output
+
+    if !pending_space.is_empty() {
+        append_hard_wrapped_run(
+            &pending_space,
+            width,
+            lines,
+            &mut current,
+            &mut current_width,
+        );
+    }
+
+    lines.push(current);
+}
+
+fn append_hard_wrapped_run(
+    run: &str,
+    width: usize,
+    lines: &mut Vec<String>,
+    current: &mut String,
+    current_width: &mut usize,
+) {
+    for ch in run.chars() {
+        let Some(ch_width) = ch.width() else {
+            continue;
+        };
+        if *current_width > 0 && current_width.saturating_add(ch_width) > width {
+            push_wrapped_line(lines, current, current_width);
+        }
+        current.push(ch);
+        *current_width = current_width.saturating_add(ch_width);
+    }
+}
+
+fn push_wrapped_line(lines: &mut Vec<String>, current: &mut String, current_width: &mut usize) {
+    lines.push(std::mem::take(current));
+    *current_width = 0;
+}
+
+fn text_runs(input: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut rest = input;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+
+        let mut chars = rest.char_indices();
+        let (_, first) = chars.next()?;
+        let is_whitespace = first.is_whitespace();
+        let mut end = first.len_utf8();
+        for (index, ch) in chars {
+            if ch.is_whitespace() != is_whitespace {
+                break;
+            }
+            end = index + ch.len_utf8();
+        }
+
+        let (run, remaining) = rest.split_at(end);
+        rest = remaining;
+        Some((run, is_whitespace))
+    })
 }
 
 fn key_value_prefix_column_width(area_width: u16) -> u16 {
@@ -1454,32 +1559,6 @@ fn set_inline_text_cursor(frame: &mut Frame<'_>, area: Rect, value: &str) {
     frame.set_cursor_position(Position::new(area.x + offset, area.y));
 }
 
-fn set_wrapped_text_cursor(frame: &mut Frame<'_>, input_inner: Rect, value: &str) {
-    if input_inner.width == 0 || input_inner.height == 0 {
-        return;
-    }
-    let (x_offset, y_offset) = wrapped_cursor_offset(value, input_inner.width as usize);
-    frame.set_cursor_position(Position::new(
-        input_inner.x + min(x_offset, input_inner.width.saturating_sub(1)),
-        input_inner.y + min(y_offset, input_inner.height.saturating_sub(1)),
-    ));
-}
-
-fn wrapped_cursor_offset(input: &str, width: usize) -> (u16, u16) {
-    let width = max(1, width);
-    let mut parts = input.split('\n').collect::<Vec<_>>();
-    let last = parts.pop().unwrap_or("");
-    let row = parts.iter().fold(0u16, |row, line| {
-        row.saturating_add(wrapped_line_count(line, width))
-    });
-    let len = last.chars().count();
-    let cursor_cell = len.saturating_sub(usize::from(len > 0 && len % width == 0));
-    (
-        (cursor_cell % width) as u16,
-        row.saturating_add((cursor_cell / width).min(u16::MAX as usize) as u16),
-    )
-}
-
 fn input_cell_text(value: &str, width: usize, focused: bool) -> String {
     let visible = if focused {
         focused_input_visible_text(value, width)
@@ -1631,12 +1710,17 @@ fn draw_labeled_multiline_text_field(
     );
     let input_inner = inset_rect(input_rect, 1, 1);
     if input_inner.width > 0 && input_inner.height > 0 {
-        frame.render_widget(
-            Paragraph::new(hard_wrapped_text(value, input_inner.width as usize)),
-            input_inner,
+        let view = send_keys_input_view(
+            value,
+            input_inner.width as usize,
+            input_inner.height as usize,
         );
+        frame.render_widget(Paragraph::new(view.text), input_inner);
         if focused {
-            set_wrapped_text_cursor(frame, input_inner, value);
+            frame.set_cursor_position(Position::new(
+                input_inner.x + min(view.cursor_x, input_inner.width.saturating_sub(1)),
+                input_inner.y + min(view.cursor_y, input_inner.height.saturating_sub(1)),
+            ));
         }
     }
 }

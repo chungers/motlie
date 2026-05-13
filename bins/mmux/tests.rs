@@ -2006,6 +2006,51 @@ fn modal_content_separates_body_from_button_bar() {
             > modal_border_height(&short_lines, "Send Keys")
     );
 
+    let mut word_wrap_app = app_with_session();
+    word_wrap_app.modal = Some(test_send_keys_modal(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+        SendKeysFocus::Input,
+    ));
+    let word_wrap_lines = render_to_lines(&mut word_wrap_app, 100, 30);
+    assert!(
+        word_wrap_lines
+            .iter()
+            .any(|line| line.contains("lambda mu")),
+        "expected the Send Keys field to wrap on the space before lambda"
+    );
+    assert!(
+        !word_wrap_lines
+            .iter()
+            .any(|line| line.contains("kappa lambd")),
+        "Send Keys field should not hard-split a word when a word boundary is available"
+    );
+
+    let mut scrolled_app = app_with_session();
+    let middle = (0..30)
+        .map(|index| format!("middle{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    scrolled_app.modal = Some(test_send_keys_modal(
+        &format!("start {middle} tail-token"),
+        SendKeysFocus::Input,
+    ));
+    let (scrolled_lines, scrolled_cursor) = render_to_lines_and_cursor(&mut scrolled_app, 80, 16);
+    let cursor_line = &scrolled_lines[scrolled_cursor.y as usize];
+    assert!(
+        cursor_line.contains("tail-token"),
+        "capped Send Keys field should scroll to keep the cursor row visible"
+    );
+    assert_eq!(
+        scrolled_cursor.x,
+        (line_char_index(cursor_line, "tail-token") + "tail-token".len()) as u16
+    );
+    assert!(
+        !scrolled_lines
+            .iter()
+            .any(|line| line.contains("start middle0")),
+        "oldest wrapped input rows should scroll out when the modal height is capped"
+    );
+
     let tags = modal_content(&test_session_tags_modal(
         vec![SessionKeyValueRow {
             key: "owner".to_string(),
