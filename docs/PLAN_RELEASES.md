@@ -6,117 +6,151 @@
 - 2026-04-29, @gpt55-dgx: Updated Homebrew tap target to `motlie/homebrew-tap` and added installer script hosting/source-mode tasks.
 - 2026-04-29, @gpt55-dgx: Added macOS signing and installed-path verification tasks for npm, direct installer, and Homebrew release flows.
 - 2026-05-12, @gpt55-dgx: Generalized plan tasks around a selected binary target; `mmux` remains the first worked validation target.
+- 2026-05-12, @gpt55-dgx: Reworked the plan as a manual v0 release process with explicit release PR, manifest, tag, artifact, signing, npm, and Homebrew steps; CI job creation is deferred.
+- 2026-05-12, @gpt55-dgx: Aligned the plan to per-binary release manifests under `releases/<bin>/<version>.toml` and a long-running release coordination PR.
 
 ## Status
 
-Draft implementation plan for `docs/DESIGN_RELEASES.md` and issue #234.
+Manual v0 release plan for `docs/DESIGN_RELEASES.md`, `docs/RELEASES.md`, and issue #234. This plan intentionally does not create CI jobs yet. The release coordination PR is the work queue and ledger for humans or agents working on different hosts.
 
-## Phase 1: Release Metadata
+Worked manifest:
 
-- [ ] 1.1 Confirm the selected binary target fields: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, channels, targets, and whether it is host/SSH-safe. The first worked validation target is `mmux`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`.
-- [ ] 1.2 Confirm whether Linux musl targets are in v0.1 or deferred. Reference: `docs/DESIGN_RELEASES.md#open-questions`.
-- [ ] 1.3 Fix workspace and package metadata needed by release tooling: version, repository, license, authors, and package descriptions. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`.
-- [ ] 1.4 Decide whether the release manifest lives at `release/motlie-release.toml` or `motlie-release.toml`. Reference: `docs/DESIGN_RELEASES.md#release-manifest`.
+```text
+releases/mmux/0.1.0.toml
+```
 
-## Phase 2: Release Manifest and Validation
+Worked release branch:
 
-- [ ] 2.1 Add the shared release manifest with the selected binary target's archive, npm, installer, and Homebrew channel metadata. Reference: `docs/DESIGN_RELEASES.md#release-manifest`.
-- [ ] 2.2 Add a release validation command in `xtask` or `release/` that checks manifest shape, target names, and accelerator suffix rules. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`.
-- [ ] 2.3 Validate that CPU/default builds omit accelerator suffixes and CUDA builds include explicit suffixes. Reference: `docs/DESIGN_RELEASES.md#npm-package-naming`.
-- [ ] 2.4 Validate that host/SSH-safe targets such as `mmux` are marked `force_command_safe = true` and install as native binaries. Reference: `docs/DESIGN_RELEASES.md#user-experience`.
+```text
+release/mmux-v0.1.0
+```
 
-## Phase 3: Native Build Matrix
+## Phase 1: Release Target Intake
 
-- [ ] 3.1 Add CI jobs for the selected `BIN` on Linux x64 glibc. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`.
-- [ ] 3.2 Add CI jobs for the selected `BIN` on Linux arm64 glibc. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`.
-- [ ] 3.3 Add CI jobs for the selected `BIN` on macOS Apple Silicon. Reference: `docs/DESIGN_RELEASES.md#homebrew`.
-- [ ] 3.4 Add CI jobs for the selected `BIN` on macOS Intel. Reference: `docs/DESIGN_RELEASES.md#homebrew`.
-- [ ] 3.5 Run smoke tests on every build: `<bin> --help` and `<bin> --version`. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
+- [ ] 1.1 Confirm the selected binary target, version, and release branch with the user. For `mmux`: `BIN=mmux`, `VERSION=0.1.0`, `CARGO_PACKAGE=motlie-mmux`, `CARGO_BIN=mmux`, `INSTALL_PATH=/usr/local/bin/mmux`, and `release/mmux-v0.1.0`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 1.2 Confirm the release is manual v0 and that CI job creation is out of scope for the release coordination PR. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 1.3 Confirm channel scope: GitHub Release archives, direct installer, native npm packages, and Homebrew tap. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 1.4 Confirm whether this target has accelerator variants. CPU/default artifacts omit accelerator suffixes; CUDA artifacts use explicit suffixes such as `cuda-12-4`. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/SKILL.md`.
 
-## Phase 4: GitHub Release Archives
+## Phase 2: Open the Release Coordination PR
 
-- [ ] 4.1 Package each native build as `motlie-{bin}-v{version}-{os}-{arch}[-{libc}][-{accelerator}].tar.gz`. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`.
-- [ ] 4.2 Include `bin/<bin>`, README, and license in each archive. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`.
-- [ ] 4.3 Ad-hoc sign Darwin binaries before archive packaging. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
-- [ ] 4.4 Verify Darwin binaries with `codesign --verify --strict --verbose=2` and execute `<bin> --version` from the packaged path. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
-- [ ] 4.5 Generate checksums for all archives. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 4.6 Upload archives, checksums, and release notes to the `chungers/motlie` GitHub Release. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
+Branch from current `main` and open a long-running PR back to `main`.
 
-## Phase 5: npm Native Packages
+```sh
+git switch main
+git pull --ff-only
+git switch -c release/mmux-v0.1.0
+```
 
-- [ ] 5.1 Add npm package templates for native packages under `release/npm/`. Reference: `docs/DESIGN_RELEASES.md#npm`.
-- [ ] 5.2 Generate Darwin npm packages for the selected `BIN`, for example `@motlie/<bin>-darwin-arm64` and `@motlie/<bin>-darwin-x64`. Reference: `docs/DESIGN_RELEASES.md#npm-package-naming`.
-- [ ] 5.3 Generate Linux npm packages for the selected `BIN`, for example `@motlie/<bin>-linux-x64-gnu` and `@motlie/<bin>-linux-arm64-gnu`. Reference: `docs/DESIGN_RELEASES.md#npm-package-naming`.
-- [ ] 5.4 Ensure each npm package exposes `<bin> = bin/<bin>` directly, without a Node launcher. Reference: `docs/DESIGN_RELEASES.md#npm`.
-- [ ] 5.5 Ensure Darwin npm package binaries are signed before `npm pack`. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
-- [ ] 5.6 Run `npm pack --dry-run` and inspect package contents. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
-- [ ] 5.7 Install Darwin npm packages in CI and execute `<bin> --version` from the npm-installed path. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
-- [ ] 5.8 Publish native npm packages to the `@motlie` org after release artifacts pass verification. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
+- [ ] 2.1 Bump the workspace release version in `Cargo.toml` under `[workspace.package].version`. For `mmux`, `bins/mmux/Cargo.toml` inherits `version.workspace = true`; verify package name, bin name, and description there. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 2.2 Add `releases/<bin>/<version>.toml`. For `mmux`, add `releases/mmux/0.1.0.toml`. This file captures release intent, explicit non-derived names, target matrix, gates, and mutable status. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 2.3 Add `releases/<bin>/<version>.md` as the release-note source. For `mmux`, add `releases/mmux/0.1.0.md`. Reference: `docs/DESIGN_RELEASES.md#github-releases`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 2.4 Add source-side installer, npm, or Homebrew templates under `releases/<bin>/` only when needed by the release. The live Homebrew formula still belongs in `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`. Skill support: `.agents/skills/release/references/homebrew-tap.md`.
+- [ ] 2.5 Open the coordination PR: `release/<bin>-v<version> -> main`. The PR should explain that platform-specific work lands through sub-PRs targeting the release branch. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 
-## Phase 6: Direct Installer
+Release PR scope:
 
-- [ ] 6.1 Add installer script sources under `release/install/`, including `install-<bin>.sh` for the selected target and shared detection helpers. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`.
-- [ ] 6.2 Implement OS, architecture, and Linux libc detection. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 6.3 Implement archive selection from the release manifest. Reference: `docs/DESIGN_RELEASES.md#release-manifest`.
-- [ ] 6.4 Download archive and checksum from a release-pinned GitHub Release URL. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 6.5 Verify checksum before installing. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 6.6 Install the selected `BIN` to its configured `INSTALL_PATH` by default. Reference: `docs/DESIGN_RELEASES.md#user-experience`.
-- [ ] 6.7 Document the `curl -fsSL ... | sh` path and the safer audit-before-run path. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 6.8 Upload installer scripts to version-pinned GitHub Releases as canonical hosted artifacts. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`.
-- [ ] 6.9 Optionally publish GitHub Pages latest convenience entrypoints under `https://motlie.github.io/install/`. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`.
-- [ ] 6.10 Support installer `--source archive` and `--source npm` modes, with host/SSH-safe binaries defaulting to archive mode. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 6.11 Scope CUDA detection to binaries that publish CUDA-capable artifacts or packages. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`.
-- [ ] 6.12 On macOS, re-sign the final installed binary after copying into the prefix. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
-- [ ] 6.13 On macOS, verify and execute `${INSTALL_PATH} --version` from the final installed path. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
+- `Cargo.toml` version and release metadata.
+- `bins/<bin>/Cargo.toml` verification or package-specific metadata.
+- `releases/<bin>/<version>.toml`.
+- `releases/<bin>/<version>.md`.
+- Optional source-side templates under `releases/<bin>/install/`, `releases/<bin>/npm/`, and `releases/<bin>/homebrew/`.
+- Release docs and release skill updates.
 
-## Phase 7: Homebrew Tap
+The coordination PR must not publish npm packages, create a stable GitHub Release, or merge live Homebrew tap changes.
 
-- [ ] 7.1 Create or confirm the tap repository `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#homebrew-tap`.
-- [ ] 7.2 Add `Formula/<formula>.rb` that builds the selected binary from the Motlie source tag. Reference: `docs/DESIGN_RELEASES.md#homebrew-tap`.
-- [ ] 7.3 Add Homebrew test that runs `<bin> --help` or `<bin> --version`. Reference: `docs/DESIGN_RELEASES.md#homebrew-tap`.
-- [ ] 7.4 Configure tap CI for macOS Apple Silicon and Intel bottle builds. Reference: `docs/DESIGN_RELEASES.md#homebrew`.
-- [ ] 7.5 Upload bottles using the tap's bottle workflow and update the formula bottle block if required. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
-- [ ] 7.6 Verify `brew install motlie/tap/<formula>` on macOS. Reference: `docs/DESIGN_RELEASES.md#user-experience`.
-- [ ] 7.7 Re-sign `bin/"<bin>"` in the formula after `bin.install` on macOS. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
-- [ ] 7.8 Ensure formula and bottle tests execute `#{bin}/<bin> --version` from the installed path. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
+## Phase 3: Land Platform Sub-PRs Into the Release Branch
 
-## Phase 8: End-to-End Publishing Workflow
+Platform work should use short branches targeting the release branch, not `main`.
 
-- [ ] 8.1 Create and push the Motlie source tag. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
-- [ ] 8.2 Build and test all native binaries from the tag. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
-- [ ] 8.3 Sign and verify Darwin binaries before publishing. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
-- [ ] 8.4 Upload GitHub Release archives, checksums, and installer scripts to `chungers/motlie`. Reference: `docs/DESIGN_RELEASES.md#github-releases`.
-- [ ] 8.5 Publish generated native npm packages to the npm registry under `@motlie`. Reference: `docs/DESIGN_RELEASES.md#npm`.
-- [ ] 8.6 Update the Homebrew tap repository and publish bottles for macOS only. Reference: `docs/DESIGN_RELEASES.md#homebrew-tap`.
-- [ ] 8.7 Run post-publish installation verification for each channel from final installed paths. Reference: `docs/DESIGN_RELEASES.md#user-experience`.
+```text
+release/mmux-v0.1.0-linux-x64 -> release/mmux-v0.1.0
+release/mmux-v0.1.0-darwin-arm64 -> release/mmux-v0.1.0
+release/mmux-v0.1.0-npm -> release/mmux-v0.1.0
+```
 
-## Phase 9: Verification Matrix
+- [ ] 3.1 Each sub-PR builds or validates one scoped gate and updates `releases/<bin>/<version>.toml` with status, source commit, timestamp, actor, and evidence links. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 3.2 Status updates are staging evidence only. Final artifacts must still be rebuilt or revalidated from the final source tag if the final tag commit differs from the staging commit. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 3.3 Build outputs are not committed to git. Store only deterministic names, checksums, source commits, and validation evidence in the manifest. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 
-- [ ] 9.1 Verify Linux x64 glibc npm install: `npm install -g @motlie/<bin>-linux-x64-gnu`. Reference: `docs/DESIGN_RELEASES.md#npm`.
-- [ ] 9.2 Verify Linux arm64 glibc npm install: `npm install -g @motlie/<bin>-linux-arm64-gnu`. Reference: `docs/DESIGN_RELEASES.md#npm`.
-- [ ] 9.3 Verify macOS Apple Silicon npm install: `npm install -g @motlie/<bin>-darwin-arm64`. Reference: `docs/DESIGN_RELEASES.md#npm`.
-- [ ] 9.4 Verify macOS Intel npm install: `npm install -g @motlie/<bin>-darwin-x64`. Reference: `docs/DESIGN_RELEASES.md#npm`.
-- [ ] 9.5 Verify direct installer on Linux x64 and arm64. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 9.6 Verify direct installer on macOS Apple Silicon and Intel. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
-- [ ] 9.7 Verify Homebrew install on macOS Apple Silicon and Intel. Reference: `docs/DESIGN_RELEASES.md#homebrew`.
-- [ ] 9.8 For host/SSH-safe binaries, verify SSH `ForceCommand ${INSTALL_PATH}` on Linux after direct installer install. Reference: `docs/DESIGN_RELEASES.md#user-experience`.
-- [ ] 9.9 Verify macOS installed binaries with `codesign --verify --strict --verbose=2` and installed-path `<bin> --version`. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
+## Phase 4: Pull the Coordination Branch on macOS
 
-## Phase 10: Documentation
+A macOS operator can pick up the release PR or a platform sub-PR and perform signing validation.
 
-- [ ] 10.1 Add release installation docs for npm, installer, and Homebrew. Reference: `docs/DESIGN_RELEASES.md#user-experience`.
-- [ ] 10.2 Add release operator docs that distinguish where artifacts are hosted: `chungers/motlie`, npm `@motlie`, and `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
-- [ ] 10.3 Add SSH `ForceCommand` docs for Linux and macOS install paths. Reference: `docs/DESIGN_RELEASES.md#user-experience`.
-- [ ] 10.4 Add upgrade and uninstall docs for the direct installer. Reference: `docs/DESIGN_RELEASES.md#direct-installer`.
+```sh
+gh pr checkout <release-pr-number>
+git switch release/mmux-v0.1.0
+git pull --ff-only
+cargo build --release --locked -p motlie-mmux --bin mmux
+codesign --force --sign - target/release/mmux
+codesign --verify --strict --verbose=2 target/release/mmux
+target/release/mmux --version
+sudo install -m 755 target/release/mmux /usr/local/bin/mmux
+sudo codesign --force --sign - /usr/local/bin/mmux
+codesign --verify --strict --verbose=2 /usr/local/bin/mmux
+/usr/local/bin/mmux --version
+```
+
+- [ ] 4.1 Record staged macOS signing evidence in `releases/<bin>/<version>.toml`. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`. Skill support: `.agents/skills/release/references/macos-signing.md`.
+- [ ] 4.2 Open a sub-PR back to the release branch with the manifest status update. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/macos-signing.md`.
+
+## Phase 5: Complete the Coordination PR
+
+- [ ] 5.1 Confirm every required gate in `releases/<bin>/<version>.toml` is complete or explicitly deferred. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 5.2 Confirm all sub-PRs have merged into the release branch and the coordination PR is up to date with `main`. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 5.3 Merge the coordination PR to `main`. Prefer a merge strategy that makes it clear which exact source tree is being released. If the merge commit changes the source commit used for staging evidence, final artifacts must be rebuilt or revalidated from the final tag. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+
+## Phase 6: Tag and Publish From Main
+
+Create the final source tag only after the coordination PR is merged.
+
+```sh
+git switch main
+git pull --ff-only
+rg -n 'binary = "mmux"|version = "0.1.0"|tag = "v0.1.0"' releases/mmux/0.1.0.toml Cargo.toml
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+- [ ] 6.1 Build final artifacts from `v<VERSION>`, not from a dirty worktree. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 6.2 Use the manifest's explicit `archive_asset`, `archive_binary_path`, `npm_package`, `npm.bin_path`, and installer names. Do not derive names when the manifest provides them. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 6.3 Sign and verify final Darwin artifacts from the final tag. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`. Skill support: `.agents/skills/release/references/macos-signing.md`.
+- [ ] 6.4 Create the GitHub Release from `releases/<bin>/<version>.md` and upload final archives, checksums, and installer assets. Reference: `docs/DESIGN_RELEASES.md#github-releases`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+
+## Phase 7: Publish npm and Homebrew
+
+- [ ] 7.1 Generate native npm packages from final artifacts. For `mmux`, the manifest requires `runner = "native-binary"` and `node_launcher = false`; do not create `mmux.sh` or `mmux.js` as the npm runtime entrypoint. Reference: `docs/DESIGN_RELEASES.md#npm`. Skill support: `.agents/skills/release/references/npm-auth.md`.
+- [ ] 7.2 Run `npm pack --dry-run`, install generated packages on matching platforms, and execute `<bin> --version` from the npm-installed path. Reference: `docs/DESIGN_RELEASES.md#npm`. Skill support: `.agents/skills/release/references/npm-auth.md`.
+- [ ] 7.3 Publish npm packages only after choosing the auth path. Trusted publishing is preferred; a scoped `NPM_TOKEN` is only needed at `npm publish` time if trusted publishing is unavailable. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/npm-auth.md`.
+- [ ] 7.4 Open a separate PR in `motlie/homebrew-tap` for `Formula/<formula>.rb`; build from the final source tag and re-sign installed binaries on macOS. Reference: `docs/DESIGN_RELEASES.md#homebrew-tap`. Skill support: `.agents/skills/release/references/homebrew-tap.md`.
+
+## Phase 8: Post-Release Ledger PR
+
+Final GitHub Release URLs, uploaded asset URLs, npm links, Homebrew tap commits, and final checksums are not known before publication. Record them in a small post-release ledger PR after the release is complete.
+
+- [ ] 8.1 Update `releases/<bin>/<version>.toml` to `state = "published"`. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 8.2 Add final `published` metadata: tag, GitHub Release URL, release notes URL, asset URLs, checksums, npm package URLs, Homebrew tap PR/commit, and install verification evidence. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 8.3 Merge the ledger PR to `main`. Do not move the release tag to include ledger-only metadata. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+
+## Phase 9: Future Automation
+
+These tasks are intentionally deferred. They should not be part of the manual v0 release PR unless the user explicitly reopens automation scope.
+
+- [ ] 9.1 Add a manifest validation helper that checks schema, explicit names, status transitions, and accelerator suffix rules. Reference: `docs/DESIGN_RELEASES.md#core-motlie-work`.
+- [ ] 9.2 Add CI jobs for Linux builds and Darwin cross-build staging. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
+- [ ] 9.3 Add a manually approved macOS signing workflow. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
+- [ ] 9.4 Add npm trusted-publishing workflows after package names and release assets are proven manually. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
+- [ ] 9.5 Add Homebrew bottle automation in `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#homebrew-tap`.
 
 ## Commit Readiness
 
-A release-distribution implementation commit is ready only after:
+A release coordination PR is ready to merge only after:
 
-- `cargo fmt` passes for touched Rust code.
-- Rust release helper tests pass if helper code is added.
-- Shell installer syntax and behavior tests pass.
-- npm package dry-runs show only intended files.
-- macOS installed-path signing checks pass for npm, direct installer, and Homebrew paths.
-- Homebrew formula audit/test passes in the tap.
-- Docs match the implemented release behavior.
+- The target is represented in `releases/<bin>/<version>.toml`.
+- The manifest distinguishes immutable release intent from mutable status.
+- `Cargo.toml` contains the intended workspace version and non-placeholder release metadata.
+- `releases/<bin>/<version>.md` exists and matches the release target.
+- Any installer, npm, or Homebrew templates included in the PR match the manifest.
+- Docs and release skill match this coordination-PR workflow.
+- No CI workflow files are added unless separately approved.
+- No packages, stable GitHub Release assets, or Homebrew tap changes have been published from untrusted PR context.

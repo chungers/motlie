@@ -1,0 +1,181 @@
+schema_version = 1
+kind = "motlie.binary-release"
+state = "planned"
+
+[identity]
+binary = "mmux"
+version = "0.1.0"
+
+[coordination]
+source_repo = "chungers/motlie"
+base_branch = "main"
+release_branch = "release/mmux-v0.1.0"
+release_pr = ""
+post_release_ledger_pr = ""
+sub_prs_allowed = true
+
+[release]
+tag = "v0.1.0"
+notes_path = "releases/mmux/0.1.0.md"
+github_release = ""
+source_ref_policy = "final-artifacts-must-build-from-final-tag"
+
+[build]
+cargo_package = "motlie-mmux"
+cargo_bin = "mmux"
+profile = "release"
+locked = true
+
+[install]
+command = "mmux"
+default_path = "/usr/local/bin/mmux"
+force_command_safe = true
+
+[archive]
+enabled = true
+asset_prefix = "motlie-mmux"
+format = "tar.gz"
+binary_path = "bin/mmux"
+include = ["README.md", "LICENSE"]
+
+[installer]
+enabled = true
+script_asset = "install-mmux.sh"
+source_path = "releases/mmux/install/install-mmux.sh"
+default_source = "archive"
+
+[npm]
+enabled = true
+scope = "@motlie"
+package_prefix = "mmux"
+access = "public"
+runner = "native-binary"
+node_launcher = false
+bin_command = "mmux"
+bin_path = "bin/mmux"
+
+[homebrew]
+enabled = true
+tap = "motlie/homebrew-tap"
+formula = "mmux"
+source = "source-tag"
+
+[[target]]
+id = "linux-x64-gnu"
+os = "linux"
+arch = "x64"
+libc = "gnu"
+rust_target = "x86_64-unknown-linux-gnu"
+archive_asset = "motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz"
+npm_package = "@motlie/mmux-linux-x64-gnu"
+archive_binary_path = "bin/mmux"
+npm_bin_path = "bin/mmux"
+status = "planned"
+
+[[target]]
+id = "linux-arm64-gnu"
+os = "linux"
+arch = "arm64"
+libc = "gnu"
+rust_target = "aarch64-unknown-linux-gnu"
+archive_asset = "motlie-mmux-v0.1.0-linux-arm64-gnu.tar.gz"
+npm_package = "@motlie/mmux-linux-arm64-gnu"
+archive_binary_path = "bin/mmux"
+npm_bin_path = "bin/mmux"
+status = "planned"
+
+[[target]]
+id = "darwin-x64"
+os = "darwin"
+arch = "x64"
+rust_target = "x86_64-apple-darwin"
+archive_asset = "motlie-mmux-v0.1.0-darwin-x64.tar.gz"
+npm_package = "@motlie/mmux-darwin-x64"
+archive_binary_path = "bin/mmux"
+npm_bin_path = "bin/mmux"
+requires_macos_signing = true
+status = "planned"
+
+[[target]]
+id = "darwin-arm64"
+os = "darwin"
+arch = "arm64"
+rust_target = "aarch64-apple-darwin"
+archive_asset = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
+npm_package = "@motlie/mmux-darwin-arm64"
+archive_binary_path = "bin/mmux"
+npm_bin_path = "bin/mmux"
+requires_macos_signing = true
+status = "planned"
+
+[[gate]]
+id = "release-pr-opened"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "linux-builds-staged"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "darwin-builds-staged"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "darwin-codesign-staged"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "final-tag-created"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "github-release-published"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "npm-published"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "homebrew-tap-published"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "post-release-ledger-committed"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []

@@ -6,6 +6,7 @@
 - 2026-04-29, @gpt55-dgx: Updated Homebrew tap target to `motlie/homebrew-tap` and clarified installer script hosting plus archive/npm install modes.
 - 2026-04-29, @gpt55-dgx: Added macOS code-signing and installed-path execution requirements for npm, direct installer, and Homebrew flows.
 - 2026-05-12, @gpt55-dgx: Generalized the design around a user-specified binary target; `mmux` is now the first worked validation target only.
+- 2026-05-12, @gpt55-dgx: Replaced the shared manifest concept with per-binary release manifests under `releases/<bin>/<version>.toml` and a release coordination PR workflow.
 
 ## Status
 
@@ -27,7 +28,7 @@ The distribution contract must make platform-specific assets precise without mak
 - Avoid Node launcher scripts in native binary runtime paths.
 - Ensure macOS builds are signed or re-signed at final install location so Apple Silicon hosts can execute the binary reliably.
 - Make CUDA an explicit optional accelerator suffix only for binaries that ship CUDA-enabled builds.
-- Keep release metadata, artifact naming, package naming, and installer behavior driven by one shared release manifest.
+- Keep release metadata, artifact naming, package naming, and installer behavior driven by a per-binary release manifest.
 
 ## Non-Goals
 
@@ -51,6 +52,8 @@ FORMULA=<Homebrew formula name, if Homebrew is enabled>
 NPM_PREFIX=@motlie/<package-prefix>
 INSTALLER=install-<bin>.sh
 FORCE_COMMAND_SAFE=true|false
+MANIFEST=releases/<bin>/<version>.toml
+RELEASE_BRANCH=release/<bin>-v<version>
 ```
 
 Worked `mmux` target:
@@ -65,6 +68,8 @@ FORMULA=mmux
 NPM_PREFIX=@motlie/mmux
 INSTALLER=install-mmux.sh
 FORCE_COMMAND_SAFE=true
+MANIFEST=releases/mmux/0.1.0.toml
+RELEASE_BRANCH=release/mmux-v0.1.0
 ```
 
 ## User Experience
@@ -513,17 +518,22 @@ The release process uploads to multiple destinations. They are not all hosted in
 Installer script source should live in the Motlie source repository:
 
 ```text
-release/
-  install/
-    install-mmux.sh
-    install-motlie-models.sh
-    lib/
-      detect-os.sh
-      detect-arch.sh
-      detect-libc.sh
-      detect-cuda.sh
-      fetch-release-asset.sh
-      verify-checksum.sh
+releases/
+  mmux/
+    install/
+      install-mmux.sh
+  motlie-models/
+    install/
+      install-motlie-models.sh
+  _shared/
+    install/
+      lib/
+        detect-os.sh
+        detect-arch.sh
+        detect-libc.sh
+        detect-cuda.sh
+        fetch-release-asset.sh
+        verify-checksum.sh
 ```
 
 The generic naming rule is `install-<bin>.sh`; the listed files are examples.
@@ -558,16 +568,20 @@ or fall back to:
 
 ### Release Upload Sequence
 
-1. Create and push the Motlie source tag.
-2. Build and test native binaries from that tag.
-3. Sign and verify Darwin binaries.
-4. Upload canonical archives, checksums, and installer scripts to the `chungers/motlie` GitHub Release.
-5. Generate native npm packages from the same build outputs.
-6. Publish npm packages to the `@motlie` org.
-7. Update `motlie/homebrew-tap` with the new formula version and source tarball checksum.
-8. Run tap CI to build/test the formula on macOS Apple Silicon and Intel.
-9. Publish Homebrew bottles using the tap's bottle workflow and update the formula bottle block if required.
-10. Run install verification for npm, direct installer, and Homebrew from final installed paths.
+1. Create a release coordination branch from `main`, for example `release/mmux-v0.1.0`.
+2. Add the per-release manifest and release notes, for example `releases/mmux/0.1.0.toml` and `releases/mmux/0.1.0.md`.
+3. Open a coordination PR from the release branch to `main`.
+4. Land platform-specific sub-PRs into the release branch. Each sub-PR updates manifest status with staging evidence.
+5. Merge the coordination PR to `main` after all required gates are complete or explicitly deferred.
+6. Create the final source tag from `main`.
+7. Build, sign, and package final artifacts from the final source tag.
+8. Upload canonical archives, checksums, and installer scripts to the `chungers/motlie` GitHub Release.
+9. Generate and publish native npm packages from the same final build outputs.
+10. Update `motlie/homebrew-tap` with the new formula version and source tarball checksum.
+11. Run install verification for npm, direct installer, and Homebrew from final installed paths.
+12. Open a post-release ledger PR that updates the manifest with final published URLs, checksums, package links, and tap commit.
+
+Important GitHub constraint: a full GitHub Release is tag-centric, not PR-centric. The final release tag must point to the exact source commit used for final artifacts. Staging builds performed from the release branch are useful evidence, but if the final tag commit differs from the staging commit, final artifacts must be rebuilt or revalidated from the final tag.
 
 ### Publishing Credentials
 
@@ -575,71 +589,153 @@ The DESIGN should prefer trusted publishing or short-lived CI credentials where 
 
 ## Release Manifest
 
-A shared manifest should drive artifact, package, installer, and Homebrew metadata.
+Each released binary version has one manifest checked into:
 
-Example manifest entries. The `mmux` entry is the worked validation target; `motlie-models` illustrates a future non-ForceCommand target with a CUDA-capable variant.
+```text
+releases/<bin>/<version>.toml
+```
+
+The manifest is both deterministic input and a release ledger:
+
+- Intent sections are immutable release inputs. Build, package, installer, npm, and Homebrew steps read these sections.
+- Status sections are mutable staging evidence. Platform sub-PRs update them while targeting the release branch.
+- Published sections are final ledger metadata. A post-release PR records final URLs, checksums, package links, and tap commits after publication.
+
+The build system and release skill must not derive a name when the manifest provides an explicit value. This is necessary for cases such as `mmux`, where npm must install a native binary directly and must not use `mmux.sh`, `mmux.js`, or another runner.
+
+Gate status values are intentionally simple: `planned`, `staged`, `complete`, `deferred`, or `failed`. A completed gate records at least `completed_at`, `completed_by`, `source_commit`, and an `evidence` link or note. These fields allow different agents or humans to pick up release work on different hosts without relying on conversational context.
+
+Worked `mmux` manifest:
 
 ```toml
-[release]
-version_source = "workspace"
+schema_version = 1
+kind = "motlie.binary-release"
+state = "planned"
 
-[[binary]]
-name = "mmux"
+[identity]
+binary = "mmux"
+version = "0.1.0"
+
+[coordination]
+source_repo = "chungers/motlie"
+base_branch = "main"
+release_branch = "release/mmux-v0.1.0"
+release_pr = ""
+post_release_ledger_pr = ""
+sub_prs_allowed = true
+
+[release]
+tag = "v0.1.0"
+notes_path = "releases/mmux/0.1.0.md"
+github_release = ""
+source_ref_policy = "final-artifacts-must-build-from-final-tag"
+
+[build]
 cargo_package = "motlie-mmux"
 cargo_bin = "mmux"
+profile = "release"
+locked = true
+
+[install]
+command = "mmux"
+default_path = "/usr/local/bin/mmux"
 force_command_safe = true
-install_path = "/usr/local/bin/mmux"
 
-[binary.channels.archive]
+[archive]
 enabled = true
+asset_prefix = "motlie-mmux"
+format = "tar.gz"
+binary_path = "bin/mmux"
+include = ["README.md", "LICENSE"]
 
-[binary.channels.npm]
+[installer]
+enabled = true
+script_asset = "install-mmux.sh"
+source_path = "releases/mmux/install/install-mmux.sh"
+default_source = "archive"
+
+[npm]
 enabled = true
 scope = "@motlie"
+package_prefix = "mmux"
+access = "public"
+runner = "native-binary"
+node_launcher = false
+bin_command = "mmux"
+bin_path = "bin/mmux"
 
-[binary.channels.homebrew]
+[homebrew]
 enabled = true
 tap = "motlie/homebrew-tap"
 formula = "mmux"
-targets = ["darwin-arm64", "darwin-x64"]
+source = "source-tag"
 
-[[binary.target]]
+[[target]]
+id = "linux-x64-gnu"
 os = "linux"
 arch = "x64"
 libc = "gnu"
+rust_target = "x86_64-unknown-linux-gnu"
+archive_asset = "motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz"
+npm_package = "@motlie/mmux-linux-x64-gnu"
+archive_binary_path = "bin/mmux"
+npm_bin_path = "bin/mmux"
+status = "planned"
 
-[[binary.target]]
-os = "linux"
-arch = "arm64"
-libc = "gnu"
-
-[[binary.target]]
+[[target]]
+id = "darwin-arm64"
 os = "darwin"
 arch = "arm64"
+rust_target = "aarch64-apple-darwin"
+archive_asset = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
+npm_package = "@motlie/mmux-darwin-arm64"
+archive_binary_path = "bin/mmux"
+npm_bin_path = "bin/mmux"
+requires_macos_signing = true
+status = "planned"
 
-[[binary.target]]
-os = "darwin"
-arch = "x64"
-
-[[binary]]
-name = "motlie-models"
-cargo_package = "motlie-models"
-cargo_bin = "motlie-models"
-force_command_safe = false
-
-[[binary.target]]
-os = "linux"
-arch = "x64"
-libc = "gnu"
-
-[[binary.target]]
-os = "linux"
-arch = "x64"
-libc = "gnu"
-accelerator = "cuda-12.4"
+[[gate]]
+id = "darwin-codesign-staged"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
 ```
 
-The PLAN should decide whether this lives at `release/motlie-release.toml` or `motlie-release.toml`.
+For future CUDA-capable binaries, a target may add `accelerator = "cuda-12-4"`. CPU/default targets omit the accelerator field entirely.
+
+After publication, the same manifest is updated in a post-release ledger PR:
+
+```toml
+state = "published"
+
+[published]
+tag = "v0.1.0"
+github_release = "https://github.com/chungers/motlie/releases/tag/v0.1.0"
+release_notes = "https://github.com/chungers/motlie/releases/tag/v0.1.0"
+
+[[published.asset]]
+target = "darwin-arm64"
+name = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
+url = "https://github.com/chungers/motlie/releases/download/v0.1.0/motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
+sha256 = "<final-sha256>"
+signed = true
+
+[[published.npm]]
+target = "darwin-arm64"
+package = "@motlie/mmux-darwin-arm64"
+version = "0.1.0"
+url = "https://www.npmjs.com/package/@motlie/mmux-darwin-arm64"
+
+[published.homebrew]
+tap = "motlie/homebrew-tap"
+formula = "mmux"
+pr = "<tap-pr-url>"
+commit = "<tap-commit>"
+```
+
+Do not move the release tag just to include ledger-only metadata. The ledger PR is an audit update on `main`; the release tag remains the immutable source for final artifacts.
 
 ## Core Motlie Work
 

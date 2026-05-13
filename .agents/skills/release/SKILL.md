@@ -14,6 +14,8 @@ Before changing anything:
 - confirm the target branch, release version, and release target
 - do not publish npm packages, GitHub Releases, or Homebrew tap changes without explicit human approval
 - do not commit unrelated files
+- default to the manual v0 process in `docs/PLAN_RELEASES.md`; do not propose new CI jobs unless the human explicitly asks for automation
+- use `releases/<bin>/<version>.toml` as the release source of truth and status ledger
 
 Release target fields:
 
@@ -27,6 +29,8 @@ FORMULA=<Homebrew formula name, if enabled>
 NPM_PREFIX=@motlie/<package-prefix>
 INSTALLER=install-<bin>.sh
 FORCE_COMMAND_SAFE=true|false
+MANIFEST=releases/<bin>/<version>.toml
+RELEASE_BRANCH=release/<bin>-v<version>
 ```
 
 Worked example:
@@ -40,6 +44,8 @@ FORMULA=mmux
 NPM_PREFIX=@motlie/mmux
 INSTALLER=install-mmux.sh
 FORCE_COMMAND_SAFE=true
+MANIFEST=releases/mmux/0.1.0.toml
+RELEASE_BRANCH=release/mmux-v0.1.0
 ```
 
 Primary references:
@@ -49,17 +55,69 @@ Primary references:
 - plan: `docs/PLAN_RELEASES.md`
 - issue: `https://github.com/chungers/motlie/issues/234`
 
-Default release sequence:
+Manual v0 release sequence:
 
-1. Prepare a release PR against `main`.
-2. Tag from current `main`.
-3. Stage binaries on a GitHub prerelease.
-4. Cross-compile Linux and Darwin target archives from Linux.
-5. Run a separate macOS signing gate for Darwin artifacts.
-6. Finalize GitHub Release assets and checksums.
-7. Publish native npm packages under `@motlie`.
-8. Update `motlie/homebrew-tap` by PR and publish bottles.
-9. Verify installs from final installed paths.
+1. Create a release coordination branch from `main`, for example `release/mmux-v0.1.0`.
+2. Add or update `releases/<bin>/<version>.toml` and `releases/<bin>/<version>.md`.
+3. Open the coordination PR from the release branch to `main`.
+4. Land platform/channel sub-PRs into the release branch.
+5. Update manifest status with staging evidence, source commits, timestamps, actors, and links.
+6. Merge the coordination PR to `main` after all required gates are complete or explicitly deferred.
+7. Create the final source tag from `main`.
+8. Build, sign, package, and publish final artifacts from the final tag.
+9. Publish native npm packages and update `motlie/homebrew-tap`.
+10. Open a post-release ledger PR that marks the manifest `state = "published"` and records final URLs/checksums/package links.
+
+Release PR source files:
+
+- `Cargo.toml`: bump `[workspace.package].version` and fix release metadata.
+- `bins/<bin>/Cargo.toml`: verify package name, bin name, and description; most binaries should inherit the workspace version.
+- `releases/<bin>/<version>.toml`: deterministic release intent and mutable status ledger.
+- `releases/<bin>/<version>.md`: release notes used by `gh release create`.
+- `releases/<bin>/install/*`: direct installer sources, only when installer distribution is in scope.
+- `releases/<bin>/npm/*`: npm native package templates, only when npm distribution is in scope.
+- `releases/<bin>/homebrew/*`: source-side formula template or notes only; the live formula PR belongs in `motlie/homebrew-tap`.
+- `docs/*`: update when behavior or workflow changes.
+
+To stage macOS signing from another host:
+
+```sh
+gh pr checkout <release-pr-number>
+git switch release/<bin>-v<version>
+git pull --ff-only
+cargo build --release --locked -p <cargo-package> --bin <cargo-bin>
+codesign --force --sign - target/release/<bin>
+codesign --verify --strict --verbose=2 target/release/<bin>
+target/release/<bin> --version
+sudo install -m 755 target/release/<bin> <install-path>
+sudo codesign --force --sign - <install-path>
+codesign --verify --strict --verbose=2 <install-path>
+<install-path> --version
+```
+
+After the coordination PR merges to `main`:
+
+```sh
+git switch main
+git pull --ff-only
+rg -n 'binary = "<bin>"|version = "<version>"|tag = "v<version>"' releases/<bin>/<version>.toml Cargo.toml
+git tag v<VERSION>
+git push origin v<VERSION>
+gh release create v<VERSION> --repo chungers/motlie --title "v<VERSION>" --notes-file releases/<bin>/<version>.md
+```
+
+GitHub constraints:
+
+- A full GitHub Release is tag-centric, not PR-centric.
+- The final tag must point to the exact source commit used for final artifacts.
+- Staging evidence from a release branch does not replace final build/signing from the final tag if the commit changed.
+- Do not move the release tag to include post-release ledger metadata.
+
+Manifest status rules:
+
+- Gate state values are `planned`, `staged`, `complete`, `deferred`, or `failed`.
+- Completed gates should record `completed_at`, `completed_by`, `source_commit`, and `evidence`.
+- Status fields are evidence only; intent fields drive artifact names, package names, binary paths, and installer behavior.
 
 Read references only when needed:
 
@@ -71,10 +129,12 @@ Read references only when needed:
 Hard requirements:
 
 - native npm packages expose the requested binary directly; do not add a Node boot script.
+- if the manifest says `runner = "native-binary"` and `node_launcher = false`, do not create `<bin>.js` or `<bin>.sh` as the npm runtime entrypoint.
 - direct installers for host/SSH-safe binaries default to archive mode, not npm mode.
 - Darwin binaries must be signed and verified from their installed path.
 - npm auth is needed only at `npm publish` time unless trusted publishing is configured.
 - release artifacts, npm packages, installer scripts, and Homebrew formulae must all trace back to the same source tag.
+- final artifact, npm package, and binary path names must come from the manifest when explicit fields are present.
 
 Use this response shape for release status:
 
