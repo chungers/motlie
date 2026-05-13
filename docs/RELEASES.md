@@ -9,6 +9,7 @@
 - 2026-05-12, @gpt55-dgx: Aligned the playbook to per-binary manifests under `releases/<bin>/<version>.toml` and a release coordination PR with sub-PR status updates.
 - 2026-05-12, @gpt55-dgx: Added operator handoff workflow showing how the release skill prompts humans and updates manifest state at each release gate.
 - 2026-05-13, @gpt55-dgx: Tightened manifest status schema, target-specific gates, evidence requirements, merge strategy, disabled-channel handling, and v0 Darwin cross-build toolchain guidance.
+- 2026-05-13, @gpt55-dgx: Added manifest-tracked installer validation, detached-tag build guidance, GitHub Pages installer update rules, and release rollback semantics.
 
 ## Scope
 
@@ -125,6 +126,7 @@ For `staged`, `complete`, `deferred`, and `failed`, the gate or target status mu
 | Coordination merge | coordination PR | Prompt the human reviewer to confirm all required gates are `complete` or explicitly `deferred`, then merge to `main` with a merge commit. Warn that final artifacts must trace to the final tag. |
 | Final tag | `main` | Prompt for explicit approval to create and push `v<VERSION>`. Verify the manifest tag and workspace version before tagging. |
 | GitHub Release | final tag | Prompt for explicit approval to create the GitHub Release and upload final assets. Use manifest asset names and release notes. |
+| Installer validation | final GitHub Release assets | Prompt the operator to run the release-pinned installer on each target platform, execute `<bin> --version` from the installed path, and update the target-specific `installer-validated` gate. |
 | npm publish | final artifacts | Prompt for explicit approval and auth mode. Publish only after final artifacts exist and package dry-runs/install tests pass. |
 | Homebrew publish | `motlie/homebrew-tap` | Prompt for tap PR merge or bottle publication only after the final source tag exists and formula tests pass. |
 | Post-release ledger | short PR to `main` | Prompt to update `state = "published"` and record final URLs, checksums, npm links, Homebrew tap commit, and install evidence. Never move the release tag for ledger-only metadata. |
@@ -174,6 +176,13 @@ git push origin v0.1.0
 ```
 
 Important: a GitHub Release is tag-centric, not PR-centric. The final tag must point to the exact source commit used for final artifacts. Staging builds from the release branch are useful evidence, but final artifacts must be rebuilt or revalidated from the final tag if the commit changed.
+
+Build final artifacts from a detached checkout of the tag so the source tree cannot accidentally include release-branch or working-tree changes:
+
+```sh
+git switch --detach v0.1.0
+git status --short --branch
+```
 
 Create the GitHub Release from the committed release notes:
 
@@ -308,6 +317,23 @@ It may also support npm mode:
 ```sh
 sh "${INSTALLER}" --source npm
 ```
+
+After final assets are uploaded, validate the release-pinned installer URL on each supported target and update the corresponding `installer-validated` gate in `releases/<bin>/<version>.toml`:
+
+```sh
+curl -fsSLO https://github.com/chungers/motlie/releases/download/v0.1.0/install-mmux.sh
+sh install-mmux.sh --source archive --prefix /usr/local
+/usr/local/bin/mmux --version
+```
+
+GitHub Pages installer URLs are optional convenience entrypoints. If enabled for a release, update them only after the version-pinned GitHub Release installer exists:
+
+1. Open a PR to the configured Pages repository, for example `motlie/motlie.github.io`.
+2. Update `/install/<bin>.sh` to redirect to or fetch the current release-pinned GitHub Release installer.
+3. Verify the Pages URL downloads the intended release-pinned script and that checksums match.
+4. Record the Pages URL, Pages commit, and verification evidence in the post-release ledger PR.
+
+If no Pages repository is configured, skip this channel and do not advertise the Pages URL as a production install path.
 
 When the artifacts are final and checksums match, publish the GitHub Release as the stable release for the tag.
 
@@ -570,7 +596,7 @@ Homebrew workflow:
 - [ ] Final Darwin artifacts signed and verified on macOS.
 - [ ] Final checksums uploaded.
 - [ ] Installer script uploaded.
-- [ ] Direct installer verified from release-pinned URL.
+- [ ] Direct installer verified from release-pinned URL and `installer-validated` gates updated.
 - [ ] npm packages generated from final artifacts.
 - [ ] `npm pack --dry-run` reviewed for each package.
 - [ ] npm packages published to `@motlie`.
@@ -588,16 +614,18 @@ Homebrew workflow:
 If GitHub Release artifact validation fails:
 
 - Leave the GitHub Release unpublished or replace invalid assets before announcing the release.
-- Replace failed artifacts.
-- Regenerate checksums.
+- Replace failed assets with explicit operator action, for example delete/re-upload the asset or use `gh release upload --clobber` while the release is still unannounced.
+- Regenerate checksums and re-upload checksum assets with the same replacement discipline.
 - Re-run signing and install verification.
+- If an announced asset is broken, prefer a new patch release instead of silently replacing an asset users may already have cached.
 
 If npm publication fails before all packages are published:
 
 - Stop publication.
 - Do not publish a convenience/meta package.
 - Fix and publish the missing native packages at the same version if npm permits.
-- If a broken package version is already public, publish a new patch version.
+- If a broken package version is already public, prefer `npm deprecate <package>@<version> "<reason>"` and publish a new patch version.
+- Use `npm unpublish` only when npm policy allows it and the release owner explicitly approves; newly created packages have a 72-hour unpublish window only when policy criteria allow, unpublished package versions cannot be reused, and unpublish should not be the normal rollback plan. See npm's unpublish policy: https://docs.npmjs.com/policies/unpublish
 
 If Homebrew publication fails:
 

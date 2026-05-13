@@ -8,6 +8,7 @@
 - 2026-05-12, @gpt55-dgx: Generalized the design around a user-specified binary target; `mmux` is now the first worked validation target only.
 - 2026-05-12, @gpt55-dgx: Replaced the shared manifest concept with per-binary release manifests under `releases/<bin>/<version>.toml` and a release coordination PR workflow.
 - 2026-05-13, @gpt55-dgx: Added structured target status, target-specific and rollup gates, evidence schema, cargo-zigbuild default, and merge-commit coordination strategy.
+- 2026-05-13, @gpt55-dgx: Fixed npm global-bin command, defined optional GitHub Pages installer updates, and added installer validation as a manifest-tracked gate.
 
 ## Status
 
@@ -133,7 +134,7 @@ For SSH host integration through npm, pin the native binary to a stable path:
 
 ```sh
 npm install -g @motlie/mmux-linux-x64-gnu
-ln -sf "$(npm bin -g)/mmux" /usr/local/bin/mmux
+ln -sf "$(npm config get prefix)/bin/mmux" /usr/local/bin/mmux
 /usr/local/bin/mmux --version
 ```
 
@@ -557,6 +558,15 @@ https://motlie.github.io/install/motlie-models.sh
 
 Production and automation docs should prefer release-pinned GitHub Release URLs. Pages URLs are convenience shortcuts and should redirect to, or fetch from, the current release-pinned installer.
 
+The GitHub Pages update process is optional and must be explicit:
+
+1. Publish the version-pinned installer asset to the GitHub Release first.
+2. Open a separate PR to the configured Pages repository, for example `motlie/motlie.github.io`, updating `/install/<bin>.sh` to redirect to or fetch the release-pinned installer.
+3. Verify the Pages URL downloads the intended release-pinned installer and that the installer checksum matches the GitHub Release asset.
+4. Record the Pages URL, Pages repository commit, and verification evidence in the post-release ledger PR.
+
+If no Pages repository is configured for a binary release, do not advertise a Pages URL for production use.
+
 In npm mode, installer scripts can select platform-specific native packages instead of direct archives. For a CUDA-capable binary, npm-mode selection could choose:
 
 ```text
@@ -609,6 +619,8 @@ The build system and release skill must not derive a name when the manifest prov
 Gate status values are intentionally simple: `planned`, `staged`, `complete`, `deferred`, or `failed`. `staged`, `complete`, `deferred`, and `failed` gates record at least `completed_at`, `completed_by`, `source_commit`, and structured `evidence`. These fields allow different agents or humans to pick up release work on different hosts without relying on conversational context.
 
 Gate rows are keyed by `(id, target_id)`. Target-specific platform and package work uses the target id, for example `target_id = "linux-x64-gnu"`. Global or rollup gates use `target_id = ""`; rollup rows set `rollup = true`. A rollup gate is complete only when all enabled target/channel gates it summarizes are complete or explicitly deferred.
+
+Install verification is also manifest-tracked. A direct installer release should include `installer-validated` gates for each target that must run the release-pinned installer on a matching host. The rollup `installer-validated` gate is complete only after the target-specific installer checks complete or are explicitly deferred.
 
 Evidence entries use this minimal shape:
 
@@ -830,7 +842,7 @@ This aligns Homebrew directly with Motlie archive names, but a source formula pl
 
 - Should the first implementation publish only the `mmux` worked target, then enable other binary targets after the workflow is proven?
 - Are Linux musl builds required in v0.1?
-- Should direct installer scripts be hosted on GitHub Releases only, GitHub Pages only, or both?
+- Should the first release enable optional GitHub Pages convenience installer URLs, or ship only version-pinned GitHub Release installer URLs until the Pages repository workflow is proven?
 - Should installer platform/CUDA detection be handwritten shell, generated from a manifest, or implemented in a helper binary?
 - Should every Motlie binary support `--version --json` and `--self-check`?
 - Should macOS public-download releases add Developer ID signing and notarization after the ad-hoc-signing release path is working?

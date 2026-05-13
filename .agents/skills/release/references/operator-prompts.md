@@ -133,8 +133,22 @@ Action:
 - Verify `Cargo.toml`, manifest version, and manifest tag.
 - Verify `Cargo.lock` is committed and unchanged at the final tag.
 - Create and push the tag only after approval.
-- Build final artifacts from the tag.
+- Build final artifacts from a detached checkout of the tag, for example `git switch --detach v<VERSION>`.
 - Use manifest asset names for upload.
+
+## Installer Validation
+
+Prompt:
+
+```text
+@<identity> <datetime> -- Next gate is installer validation for target_id=<target-id>. This requires the matching target host. Install from the release-pinned installer URL, execute <bin> --version from the installed path, and update the target-specific installer-validated gate in <manifest>.
+```
+
+Action:
+
+- Use the release-pinned GitHub Release installer URL, not a moving Pages URL, for required validation.
+- Record installed path, command output, source release tag, installer URL, and checksum evidence.
+- If GitHub Pages convenience installer URLs are enabled, update the Pages repository only after the release-pinned installer exists and record Pages verification in the post-release ledger PR.
 
 ## npm Publish
 

@@ -10,6 +10,7 @@
 - 2026-05-12, @gpt55-dgx: Aligned the plan to per-binary release manifests under `releases/<bin>/<version>.toml` and a long-running release coordination PR.
 - 2026-05-12, @gpt55-dgx: Added skill-guided operator handoff requirements so different operators can pick up gates from manifest state.
 - 2026-05-13, @gpt55-dgx: Added target-specific gate tracking, cargo-zigbuild toolchain evidence, merge-commit strategy, and disabled-channel deferral requirements.
+- 2026-05-13, @gpt55-dgx: Added detached-tag build command and manifest-tracked installer validation gates.
 
 ## Status
 
@@ -125,12 +126,15 @@ git pull --ff-only
 rg -n 'binary = "mmux"|version = "0.1.0"|tag = "v0.1.0"' releases/mmux/0.1.0.toml Cargo.toml
 git tag v0.1.0
 git push origin v0.1.0
+git switch --detach v0.1.0
+git status --short --branch
 ```
 
 - [ ] 6.1 Build final artifacts from `v<VERSION>`, not from a dirty worktree. Confirm `Cargo.lock` is committed and unchanged. For Darwin-from-Linux, use the v0 default `cargo-zigbuild` and record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version` in evidence. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 - [ ] 6.2 Use the manifest's explicit `archive_asset`, `archive_binary_path`, `npm_package`, `npm.bin_path`, and installer names. Do not derive names when the manifest provides them. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 6.3 Sign and verify final Darwin artifacts from the final tag. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`. Skill support: `.agents/skills/release/references/macos-signing.md`.
 - [ ] 6.4 Create the GitHub Release from `releases/<bin>/<version>.md` and upload final archives, checksums, and installer assets. Reference: `docs/DESIGN_RELEASES.md#github-releases`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 6.5 Validate the release-pinned direct installer on each supported target and update the target-specific `installer-validated` gates. If GitHub Pages convenience installer URLs are enabled, update the Pages repository in a separate PR after the release-pinned installer exists. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 
 ## Phase 7: Publish npm and Homebrew
 
@@ -167,6 +171,7 @@ A release coordination PR is ready to merge only after:
 - `Cargo.lock` policy and toolchain evidence requirements are captured in the manifest.
 - `releases/<bin>/<version>.md` exists and matches the release target.
 - Any installer, npm, or Homebrew templates included in the PR match the manifest.
+- If direct installer distribution is enabled, target-specific `installer-validated` gates exist in the manifest.
 - Docs and release skill match this coordination-PR workflow.
 - No CI workflow files are added unless separately approved.
 - No packages, stable GitHub Release assets, or Homebrew tap changes have been published from untrusted PR context.
