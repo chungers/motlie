@@ -285,6 +285,62 @@ deferred_reason = ""
 evidence = []
 
 [[gate]]
+id = "installer-validated"
+target_id = ""
+channel = "installer"
+rollup = true
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "installer-validated"
+target_id = "linux-x64-gnu"
+channel = "installer"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "installer-validated"
+target_id = "linux-arm64-gnu"
+channel = "installer"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "installer-validated"
+target_id = "darwin-x64"
+channel = "installer"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "installer-validated"
+target_id = "darwin-arm64"
+channel = "installer"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
 id = "npm-published"
 target_id = ""
 channel = "npm"

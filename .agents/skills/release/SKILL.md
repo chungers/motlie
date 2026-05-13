@@ -66,8 +66,9 @@ Manual v0 release sequence:
 6. Merge the coordination PR to `main` after all required gates are complete or explicitly deferred.
 7. Create the final source tag from `main`.
 8. Build, sign, package, and publish final artifacts from the final tag.
-9. Publish native npm packages and update `motlie/homebrew-tap`.
-10. Open a post-release ledger PR that marks the manifest `state = "published"` and records final URLs/checksums/package links.
+9. Validate release-pinned installers and update `installer-validated` gates.
+10. Publish native npm packages and update `motlie/homebrew-tap`.
+11. Open a post-release ledger PR that marks the manifest `state = "published"` and records final URLs/checksums/package links.
 
 Release PR source files:
 
@@ -121,6 +122,7 @@ Manifest status rules:
 - Per-target status is a struct at `[target.status]`; do not use a bare status string.
 - Gate rows are keyed by `(id, target_id)`. Use `target_id = ""` only for global gates or explicit rollups. Rollup rows set `rollup = true` and summarize target-specific rows.
 - Rollup gates are complete only when all enabled target/channel gates they summarize are complete or explicitly deferred.
+- Installer validation gates use `id = "installer-validated"` and should be target-specific when the installer must run on matching host platforms.
 - Channel-disabled gates are marked `deferred` at coordination-PR-open time with `deferred_reason`.
 - Evidence entries use `{ kind, ref, sha256?, note? }`; include toolchain versions for build and signing gates.
 - Status fields are evidence only; intent fields drive artifact names, package names, binary paths, and installer behavior.

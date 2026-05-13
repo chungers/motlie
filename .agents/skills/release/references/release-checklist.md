@@ -12,7 +12,7 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Coordination PR opened against `main`.
 - [ ] Platform/channel sub-PRs opened against the release branch as needed.
 - [ ] Sub-PRs update manifest status with source commit, timestamp, actor, target id, channel, and evidence links.
-- [ ] Each gate handoff is reconstructable from manifest evidence and PR comments.
+- [ ] Each gate handoff is reconstructable from manifest evidence.
 - [ ] Evidence entries follow `{ kind, ref, sha256?, note? }`.
 - [ ] Build outputs are not committed to git.
 - [ ] `Cargo.lock` is committed and unchanged at the final tag.
@@ -27,7 +27,7 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Final Darwin artifacts signed and verified from the installed path.
 - [ ] Final checksums generated.
 - [ ] GitHub Release published with final archives, checksums, installer assets, and notes.
-- [ ] Direct installer verified from release-pinned URL.
+- [ ] Direct installer verified from release-pinned URL and `installer-validated` gates updated.
 - [ ] npm packages generated from final artifacts.
 - [ ] `npm pack --dry-run` reviewed for each package.
 - [ ] npm auth path selected: trusted publishing or temporary `NPM_TOKEN`.
