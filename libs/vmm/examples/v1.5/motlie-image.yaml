@@ -139,6 +139,7 @@ emitters:
         package_update: MOTLIE_V15_PACKAGE_UPDATE
         package_include: MOTLIE_V15_PACKAGE_INCLUDE
         package_clean: MOTLIE_V15_PACKAGE_CLEAN
+        rootfs_tarball: MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL
     seed:
       motlie_backend: vz
       motlie_net_backend: vz-userspace

@@ -131,11 +131,13 @@ hardening, document the technical reason before diverging.
 For the VZ #271 bridge, `build-guest.sh` accepts
 `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is copied through the build
 seed disk and applied while producing VZ artifacts; the emitted
-`build-result.json` and `guest-contract.json` record `rootfs_input`. This is
-the only allowed transitional handoff from the common rootfs assembler into the
-Apple VZ adapter. Harness launch, `ready`, first SSH, and scenario steps must
-consume the completed artifacts only; they must not run rootfs assembly,
-package installation, npm repair, or guest binary builds.
+`build-result.json` and `guest-contract.json` record `rootfs_input`.
+`mbuild build --target vz --rootfs-tarball <tar>` is the preferred entrypoint
+because the builder validates the tarball and passes it through the configured
+VZ adapter env. This is the only allowed transitional handoff from the common
+rootfs assembler into the Apple VZ adapter. Harness launch, `ready`, first SSH,
+and scenario steps must consume the completed artifacts only; they must not run
+rootfs assembly, package installation, npm repair, or guest binary builds.
 
 The first-contact path must fail fast when immutable base-image content is
 missing. Rebuild the image; do not add hidden runtime repair to `launch-vz.sh`

@@ -1087,10 +1087,11 @@ current `materialized_source` for the macOS source-VM adapter until VZ consumes
 the same assembled OCI rootfs path.
 
 The VZ side of this transition must be explicit. When an assembled rootfs
-tarball exists, `mbuild build --target vz` may set
-`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` for the VZ adapter so the build consumes
-the same logical rootfs contract as CH while still adapting it into Apple VZ's
-required disk/NVRAM boot shape. The emitted VZ artifacts must include
+tarball exists, `mbuild build --target vz --rootfs-tarball <tar>` passes that
+input through the configured VZ adapter environment as
+`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` so the build consumes the same logical
+rootfs contract as CH while still adapting it into Apple VZ's required
+disk/NVRAM boot shape. The emitted VZ artifacts must include
 `rootfs_input.kind`, the native boot substrate path, and the tarball path so
 validation evidence distinguishes "native-source VM only" from "assembled
 rootfs consumed by VZ emitter." Closing #271 requires the latter path plus live

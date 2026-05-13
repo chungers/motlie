@@ -65,6 +65,7 @@ fn run() -> Result<()> {
             repo_root,
             plan_only,
             adapter_arg,
+            rootfs_tarball,
         } => build(BuildOptions {
             config_path: config,
             target,
@@ -72,6 +73,7 @@ fn run() -> Result<()> {
             repo_root,
             plan_only,
             adapter_args: adapter_arg,
+            rootfs_tarball,
         }),
         Commands::Seed {
             config,
@@ -118,19 +120,37 @@ struct BuildOptions {
     repo_root: Option<PathBuf>,
     plan_only: bool,
     adapter_args: Vec<String>,
+    rootfs_tarball: Option<PathBuf>,
 }
 
 #[instrument(skip(options), fields(target = %options.target, config = %options.config_path.display()))]
 fn build(options: BuildOptions) -> Result<()> {
     let config = load_config(&options.config_path)?;
     let emitter = config.validate_for_target(&options.target)?;
+    let rootfs_tarball = if let Some(path) = &options.rootfs_tarball {
+        if emitter.adapter.env.rootfs_tarball.is_none() {
+            bail!(
+                "target {} does not declare an adapter rootfs_tarball env",
+                options.target
+            );
+        }
+        Some(rootfs_tarball_record(path)?)
+    } else {
+        None
+    };
     fs::create_dir_all(&options.out)?;
 
     let adapter = if options.plan_only {
         None
     } else {
         let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
-        Some(run_build_execution(&repo_root, &config, emitter, &options)?)
+        Some(run_build_execution(
+            &repo_root,
+            &config,
+            emitter,
+            &options,
+            rootfs_tarball.as_ref(),
+        )?)
     };
     let artifacts = if options.plan_only {
         Vec::new()
@@ -303,11 +323,12 @@ fn run_build_execution(
     config: &ImageBuildConfig,
     emitter: &BackendEmitterSpec,
     options: &BuildOptions,
+    rootfs_tarball: Option<&RootfsTarballRecord>,
 ) -> Result<AdapterRecord> {
     if config.source.kind == SourceKind::ExternalOci && options.target.as_str() == "ch" {
         return run_ch_external_oci_build(repo_root, config, emitter, options);
     }
-    run_backend_adapter(repo_root, config, emitter, options)
+    run_backend_adapter(repo_root, config, emitter, options, rootfs_tarball)
 }
 
 #[instrument(
@@ -419,6 +440,7 @@ fn run_ch_external_oci_build(
         package_include: config.package_stage.install.clone(),
         materialized_source: None,
         external_oci_source: Some(source),
+        rootfs_tarball: None,
     })
 }
 
@@ -431,6 +453,7 @@ fn run_backend_adapter(
     config: &ImageBuildConfig,
     emitter: &BackendEmitterSpec,
     options: &BuildOptions,
+    rootfs_tarball: Option<&RootfsTarballRecord>,
 ) -> Result<AdapterRecord> {
     let log_path = options.out.join(ADAPTER_LOG_NAME);
     let log = OpenOptions::new()
@@ -463,6 +486,11 @@ fn run_backend_adapter(
         )
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
+    if let (Some(rootfs_tarball), Some(env_name)) =
+        (rootfs_tarball, emitter.adapter.env.rootfs_tarball.as_ref())
+    {
+        command.env(env_name, &rootfs_tarball.canonical_path);
+    }
     let mut command_line = vec![emitter.adapter.program.clone()];
     command_line.extend(emitter.adapter.args.clone());
     command_line.extend(options.adapter_args.clone());
@@ -492,6 +520,7 @@ fn run_backend_adapter(
         package_include: config.package_stage.install.clone(),
         materialized_source: emitter.materialized_source.clone(),
         external_oci_source: None,
+        rootfs_tarball: rootfs_tarball.cloned(),
     })
 }
 
@@ -1217,6 +1246,34 @@ fn sha256_file(path: &Path) -> Result<String, io::Error> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn rootfs_tarball_record(path: &Path) -> Result<RootfsTarballRecord> {
+    let canonical_path = fs::canonicalize(path)
+        .with_context(|| format!("rootfs tarball cannot be canonicalized: {}", path.display()))?;
+    let metadata = fs::metadata(&canonical_path).with_context(|| {
+        format!(
+            "rootfs tarball metadata is not readable: {}",
+            canonical_path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        bail!(
+            "rootfs tarball is not a file: {}",
+            canonical_path.display()
+        );
+    }
+    let sha256 = sha256_file(&canonical_path).with_context(|| {
+        format!(
+            "failed to compute rootfs tarball sha256: {}",
+            canonical_path.display()
+        )
+    })?;
+    Ok(RootfsTarballRecord {
+        canonical_path,
+        size_bytes: metadata.len(),
+        sha256,
+    })
+}
+
 fn unix_now() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1266,6 +1323,9 @@ enum Commands {
         /// Extra argument forwarded to the backend adapter script.
         #[arg(long = "adapter-arg")]
         adapter_arg: Vec<String>,
+        /// Assembled rootfs tarball to hand to a backend emitter.
+        #[arg(long)]
+        rootfs_tarball: Option<PathBuf>,
     },
     /// Emit per-guest seed artifacts without rebuilding the immutable image.
     Seed {
@@ -1958,6 +2018,8 @@ struct BackendAdapterEnvSpec {
     package_update: String,
     package_include: String,
     package_clean: String,
+    #[serde(default)]
+    rootfs_tarball: Option<String>,
 }
 
 impl BackendAdapterEnvSpec {
@@ -1974,6 +2036,9 @@ impl BackendAdapterEnvSpec {
             &self.package_include,
         )?;
         require_env_name("emitters.adapter.env.package_clean", &self.package_clean)?;
+        if let Some(env_name) = &self.rootfs_tarball {
+            require_env_name("emitters.adapter.env.rootfs_tarball", env_name)?;
+        }
         Ok(())
     }
 }
@@ -2181,6 +2246,15 @@ struct AdapterRecord {
     materialized_source: Option<AdapterMaterializedSource>,
     #[serde(default)]
     external_oci_source: Option<ExternalOciSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rootfs_tarball: Option<RootfsTarballRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RootfsTarballRecord {
+    canonical_path: PathBuf,
+    size_bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2392,6 +2466,17 @@ fn stage_evidence(adapter: &AdapterRecord) -> Vec<String> {
             source.platform_manifest_digest
         ));
     }
+    if let Some(rootfs_tarball) = &adapter.rootfs_tarball {
+        evidence.push(format!(
+            "rootfs_tarball={}",
+            rootfs_tarball.canonical_path.display()
+        ));
+        evidence.push(format!(
+            "rootfs_tarball_size_bytes={}",
+            rootfs_tarball.size_bytes
+        ));
+        evidence.push(format!("rootfs_tarball_sha256={}", rootfs_tarball.sha256));
+    }
     evidence
 }
 
@@ -2553,6 +2638,7 @@ mod tests {
                         package_update: "MOTLIE_V15_PACKAGE_UPDATE".to_string(),
                         package_include: "MOTLIE_V15_PACKAGE_INCLUDE".to_string(),
                         package_clean: "MOTLIE_V15_PACKAGE_CLEAN".to_string(),
+                        rootfs_tarball: None,
                     },
                 },
                 seed: BackendSeedSpec {
@@ -2660,7 +2746,38 @@ validation:
                 out: PathBuf::from("artifacts/ch"),
                 repo_root: None,
                 plan_only: false,
-                adapter_arg: Vec::new()
+                adapter_arg: Vec::new(),
+                rootfs_tarball: None
+            }
+        );
+    }
+
+    #[test]
+    fn parses_build_rootfs_tarball() {
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "build",
+            "--config",
+            "motlie-image.yaml",
+            "--target",
+            "vz",
+            "--out",
+            "artifacts/vz",
+            "--rootfs-tarball",
+            "artifacts/rootfs.tar",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.command,
+            Commands::Build {
+                config: PathBuf::from("motlie-image.yaml"),
+                target: "vz".parse().unwrap(),
+                out: PathBuf::from("artifacts/vz"),
+                repo_root: None,
+                plan_only: false,
+                adapter_arg: Vec::new(),
+                rootfs_tarball: Some(PathBuf::from("artifacts/rootfs.tar"))
             }
         );
     }
@@ -2863,6 +2980,7 @@ validation:
                     materializer: "oci-importer".to_string(),
                 }),
                 external_oci_source: None,
+                rootfs_tarball: None,
             }),
             Vec::new(),
         );
