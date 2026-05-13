@@ -18,8 +18,9 @@ use motlie_model::{
 };
 
 use crate::common::{
-    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
-    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
+    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
+    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
+    TextMetricState,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -304,9 +305,9 @@ impl StubTextRuntime {
                 _ => None,
             })
             .unwrap_or_default();
-        Ok(ChatResponse {
-            content: format!("llama-cpp stub response to: {prompt}"),
-        })
+        Ok(ChatResponse::text(format!(
+            "llama-cpp stub response to: {prompt}"
+        )))
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
@@ -362,6 +363,10 @@ unsafe impl Sync for LlamaCppRuntime {}
 
 impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        if request.requires_tool_use() {
+            return Err(ModelError::UnsupportedCapability(CapabilityKind::ToolUse));
+        }
+
         let prompt = format_chat_prompt(self.arch, &request)?;
         self.generate_text(&prompt, &request.params).await
     }
@@ -527,9 +532,7 @@ impl LlamaCppRuntime {
                 );
             }
 
-            Ok(ChatResponse {
-                content: generated_text,
-            })
+            Ok(ChatResponse::text(generated_text))
         })
         .await
         .map_err(|e| ModelError::BackendExecution {
@@ -576,6 +579,7 @@ fn format_qwen3_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String,
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
+            ChatRole::Tool => "tool",
         };
         prompt.push_str(&format!("<|im_start|>{role}\n"));
         prompt.push_str(&collect_text(msg)?);
@@ -592,6 +596,7 @@ fn format_gemma4_prompt(messages: &[motlie_model::ChatMessage]) -> Result<String
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "model",
+            ChatRole::Tool => "tool",
         };
         prompt.push_str(&format!("<start_of_turn>{role}\n"));
         prompt.push_str(&collect_text(msg)?);

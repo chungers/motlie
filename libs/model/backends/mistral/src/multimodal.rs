@@ -13,10 +13,11 @@ use motlie_model::{
 };
 
 use crate::common::{
-    RuntimeMetricState, TextMetricState, apply_generation_params, configure_artifact_policy,
-    lock_metrics, map_chat_role, map_quantization_bits, observe_latency, observe_memory,
-    observe_text_usage, paged_attn_context_size, resolve_local_checkpoint, should_force_cpu,
-    snapshot_text_metrics,
+    apply_generation_params, apply_tools, configure_artifact_policy, lock_metrics, map_chat_role,
+    map_quantization_bits, mistral_response_to_chat_response, motlie_tool_call_to_mistral,
+    observe_latency, observe_memory, observe_text_usage, paged_attn_context_size,
+    resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics, RuntimeMetricState,
+    TextMetricState,
 };
 
 const MISTRAL_MULTIMODAL_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -43,7 +44,7 @@ impl MistralMultimodalSpec {
             display_name: "Gemma 4 E2B-it",
             model_id: "google/gemma-4-E2B-it",
             arch: MistralMultimodalArch::Gemma4,
-            capabilities: Capabilities::multimodal_chat_and_vision(),
+            capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
@@ -187,6 +188,31 @@ enum MultimodalRuntime {
     Stub(StubMultimodalRuntime),
 }
 
+#[cfg(test)]
+struct StubMultimodalRuntime;
+
+#[cfg(test)]
+impl StubMultimodalRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        let last_text = request
+            .messages
+            .last()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        Ok(ChatResponse::text(format!(
+            "multimodal stub response to: {last_text}"
+        )))
+    }
+}
+
 impl MultimodalRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         match self {
@@ -217,16 +243,18 @@ impl MistralMultimodalRuntime {
         let elapsed = started_at.elapsed();
 
         let usage = response.usage.clone();
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|choice| choice.message.content)
-            .ok_or_else(|| ModelError::BackendExecution {
-                backend: "mistralrs",
-                operation: "send_chat_request",
-                message: "response contained no text content".into(),
-            })?;
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| ModelError::BackendExecution {
+                    backend: "mistralrs",
+                    operation: "send_chat_request",
+                    message: "response contained no choices".into(),
+                })?;
+        let response =
+            mistral_response_to_chat_response(choice.message, choice.finish_reason, &usage)?;
 
         {
             let mut metrics = lock_metrics(&self.metrics, "mistral-multimodal-chat");
@@ -234,7 +262,7 @@ impl MistralMultimodalRuntime {
             observe_text_usage(&mut metrics.text, &usage);
         }
 
-        Ok(ChatResponse { content })
+        Ok(response)
     }
 }
 
@@ -242,12 +270,46 @@ fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelErro
     let mut builder = RequestBuilder::new();
     for msg in &request.messages {
         let (text, images) = collect_multimodal_parts(msg)?;
-        if images.is_empty() {
-            builder = builder.add_message(map_chat_role(msg.role), text);
-        } else {
-            builder = builder.add_image_message(map_chat_role(msg.role), text, images);
-        }
+        builder = match msg.role {
+            motlie_model::ChatRole::Tool => {
+                if !images.is_empty() {
+                    return Err(ModelError::InvalidConfiguration(
+                        "tool result messages cannot carry image content".into(),
+                    ));
+                }
+                let tool_call_id = msg.tool_call_id.as_ref().ok_or_else(|| {
+                    ModelError::InvalidConfiguration(
+                        "tool messages require `tool_call_id` metadata".into(),
+                    )
+                })?;
+                builder.add_tool_message(text, tool_call_id)
+            }
+            motlie_model::ChatRole::Assistant if !msg.tool_calls.is_empty() => {
+                if !images.is_empty() {
+                    return Err(ModelError::InvalidConfiguration(
+                        "assistant tool-call replay messages cannot carry image content".into(),
+                    ));
+                }
+                let tool_calls = msg
+                    .tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| motlie_tool_call_to_mistral(index, call))
+                    .collect();
+                builder.add_message_with_tool_call(map_chat_role(msg.role), text, tool_calls)
+            }
+            motlie_model::ChatRole::System | motlie_model::ChatRole::User
+                if !msg.tool_calls.is_empty() =>
+            {
+                return Err(ModelError::InvalidConfiguration(
+                    "only assistant messages may carry tool calls".into(),
+                ));
+            }
+            _ if images.is_empty() => builder.add_message(map_chat_role(msg.role), text),
+            _ => builder.add_image_message(map_chat_role(msg.role), text, images),
+        };
     }
+    let builder = apply_tools(builder, request)?;
     Ok(apply_generation_params(builder, &request.params))
 }
 
@@ -446,29 +508,6 @@ mod tests {
     use super::*;
     use motlie_model::{BackendAdapter, BackendKind, ChatMessage, ChatRole, ContentPart};
 
-    struct StubMultimodalRuntime;
-
-    impl StubMultimodalRuntime {
-        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-            let last_text = request
-                .messages
-                .last()
-                .map(|m| {
-                    m.content
-                        .iter()
-                        .filter_map(|part| match part {
-                            ContentPart::Text(text) => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<String>()
-                })
-                .unwrap_or_default();
-            Ok(ChatResponse {
-                content: format!("multimodal stub response to: {last_text}"),
-            })
-        }
-    }
-
     #[test]
     fn gemma4_spec_has_expected_identity() {
         let spec = MistralMultimodalSpec::gemma4_e2b();
@@ -479,6 +518,7 @@ mod tests {
         assert_eq!(spec.arch, MistralMultimodalArch::Gemma4);
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Vision));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
         assert!(!spec.capabilities.supports(CapabilityKind::Completion));
     }
 
@@ -493,7 +533,7 @@ mod tests {
         assert_eq!(adapter.backend_kind(), BackendKind::MistralRs);
         assert_eq!(
             adapter.capabilities(),
-            &Capabilities::multimodal_chat_and_vision()
+            &Capabilities::multimodal_chat_vision_and_tool_use()
         );
         assert_eq!(
             adapter.quantization().recommended(),
@@ -507,7 +547,7 @@ mod tests {
             descriptor: LoadedBundleDescriptor {
                 id: BundleId::new("gemma4_e2b"),
                 display_name: "Gemma 4 E2B-it".into(),
-                capabilities: Capabilities::multimodal_chat_and_vision(),
+                capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
                 quantization: QuantizationSupport::with_recommended(
                     [QuantizationBits::Four, QuantizationBits::Eight],
                     QuantizationBits::Four,
@@ -521,6 +561,7 @@ mod tests {
 
         assert!(handle.supports(CapabilityKind::Chat));
         assert!(handle.supports(CapabilityKind::Vision));
+        assert!(handle.supports(CapabilityKind::ToolUse));
         assert!(!handle.supports(CapabilityKind::Completion));
         assert!(matches!(
             handle.completion(),

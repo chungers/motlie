@@ -186,11 +186,9 @@ mod tests {
         #[cfg(feature = "model-qwen3-tts-cpp")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Speech)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Speech)
+                .any(|bundle| bundle.id == bundle_id));
         }
     }
 
