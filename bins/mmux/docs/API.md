@@ -359,8 +359,9 @@ captures `(host_id, session_id)` plus the current display name, prepopulates the
 
 `p` opens `SendKeys` for the highlighted session from any pane focus. The modal
 keeps focus explicit (`Input`, `Ok`, `Cancel`), renders a compact text field
-with `To: <session> on <host>`, wraps long input by growing the field height
-against a fixed input width, sends from either focused `Ok` or non-empty
+with `To: <session> on <host>`, wraps long input at word boundaries by growing
+the field height against a fixed input width, scrolls capped input to keep the
+cursor visible, sends from either focused `Ok` or non-empty
 `Input` Enter, parses the submitted text with `KeySequence::parse`, resolves
 the captured stable session id with `HostHandle::session_by_id()`, and
 dispatches the parsed sequence exactly through `Target::send_keys`.
