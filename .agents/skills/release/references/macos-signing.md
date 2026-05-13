@@ -9,6 +9,7 @@ BIN=<installed command name>
 INSTALL_PATH=<final installed path, e.g. /usr/local/bin/<bin>>
 MANIFEST=releases/<bin>/<version>.toml
 RELEASE_BRANCH=release/<bin>-v<version>
+RUST_TARGET=<target.rust_target from manifest>
 ```
 
 Minimum first-release requirement:
@@ -23,16 +24,16 @@ Build-path verification:
 gh pr checkout <release-pr-number>
 git switch "${RELEASE_BRANCH}"
 git pull --ff-only
-cargo build --release --locked -p "<cargo-package>" --bin "${BIN}"
-codesign --force --sign - "target/release/${BIN}"
-codesign --verify --strict --verbose=2 "target/release/${BIN}"
-"target/release/${BIN}" --version
+cargo build --release --locked --target "${RUST_TARGET}" -p "<cargo-package>" --bin "${BIN}"
+codesign --force --sign - "target/${RUST_TARGET}/release/${BIN}"
+codesign --verify --strict --verbose=2 "target/${RUST_TARGET}/release/${BIN}"
+"target/${RUST_TARGET}/release/${BIN}" --version
 ```
 
 Final-path verification:
 
 ```sh
-sudo install -m 755 "bin/${BIN}" "${INSTALL_PATH}"
+sudo install -m 755 "target/${RUST_TARGET}/release/${BIN}" "${INSTALL_PATH}"
 sudo codesign --force --sign - "${INSTALL_PATH}"
 codesign --verify --strict --verbose=2 "${INSTALL_PATH}"
 "${INSTALL_PATH}" --version
@@ -50,5 +51,6 @@ Release rule:
 - Darwin staging evidence should be recorded in `MANIFEST` through a sub-PR to the release branch.
 - Darwin artifacts are not final until the macOS signing gate signs, verifies, repacks, and executes artifacts built from the final source tag.
 - If the final tag commit differs from the staged signing commit, rebuild or revalidate before publishing.
+- Record `rustc -Vv`, `cargo -V`, `codesign -dv`, target triple, and signing identity in the gate evidence.
 
 Developer ID signing and notarization are later hardening steps, not the minimum first-release gate.

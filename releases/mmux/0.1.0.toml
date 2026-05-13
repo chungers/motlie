@@ -13,6 +13,7 @@ release_branch = "release/mmux-v0.1.0"
 release_pr = ""
 post_release_ledger_pr = ""
 sub_prs_allowed = true
+merge_strategy = "merge-commit"
 
 [release]
 tag = "v0.1.0"
@@ -25,6 +26,22 @@ cargo_package = "motlie-mmux"
 cargo_bin = "mmux"
 profile = "release"
 locked = true
+cargo_lock_policy = "must-be-committed-and-unchanged-at-final-tag"
+
+[toolchain]
+rust_policy = "record-rustc-and-cargo-version-in-evidence"
+darwin_cross = "cargo-zigbuild"
+darwin_cross_policy = "v0-default-for-darwin-from-linux"
+required_evidence = [
+  "rustc -Vv",
+  "cargo -V",
+  "cargo zigbuild -V",
+  "zig version",
+]
+
+[signing]
+identity = "adhoc"
+macos_verify_installed_path = true
 
 [install]
 command = "mmux"
@@ -70,7 +87,13 @@ archive_asset = "motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz"
 npm_package = "@motlie/mmux-linux-x64-gnu"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
-status = "planned"
+
+[target.status]
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
 
 [[target]]
 id = "linux-arm64-gnu"
@@ -82,7 +105,13 @@ archive_asset = "motlie-mmux-v0.1.0-linux-arm64-gnu.tar.gz"
 npm_package = "@motlie/mmux-linux-arm64-gnu"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
-status = "planned"
+
+[target.status]
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
 
 [[target]]
 id = "darwin-x64"
@@ -94,7 +123,13 @@ npm_package = "@motlie/mmux-darwin-x64"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 requires_macos_signing = true
-status = "planned"
+
+[target.status]
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
 
 [[target]]
 id = "darwin-arm64"
@@ -106,76 +141,257 @@ npm_package = "@motlie/mmux-darwin-arm64"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 requires_macos_signing = true
-status = "planned"
 
-[[gate]]
-id = "release-pr-opened"
+[target.status]
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+evidence = []
+
+[[gate]]
+id = "release-pr-opened"
+target_id = ""
+channel = "coordination"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
 id = "linux-builds-staged"
+target_id = ""
+channel = "archive"
+rollup = true
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "linux-builds-staged"
+target_id = "linux-x64-gnu"
+channel = "archive"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "linux-builds-staged"
+target_id = "linux-arm64-gnu"
+channel = "archive"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
 id = "darwin-builds-staged"
+target_id = ""
+channel = "archive"
+rollup = true
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "darwin-builds-staged"
+target_id = "darwin-x64"
+channel = "archive"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "darwin-builds-staged"
+target_id = "darwin-arm64"
+channel = "archive"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
 id = "darwin-codesign-staged"
+target_id = ""
+channel = "archive"
+rollup = true
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "darwin-codesign-staged"
+target_id = "darwin-x64"
+channel = "archive"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "darwin-codesign-staged"
+target_id = "darwin-arm64"
+channel = "archive"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
 id = "final-tag-created"
+target_id = ""
+channel = "source"
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
 id = "github-release-published"
+target_id = ""
+channel = "archive"
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
 id = "npm-published"
+target_id = ""
+channel = "npm"
+rollup = true
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
-id = "homebrew-tap-published"
+id = "npm-published"
+target_id = "linux-x64-gnu"
+channel = "npm"
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "npm-published"
+target_id = "linux-arm64-gnu"
+channel = "npm"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "npm-published"
+target_id = "darwin-x64"
+channel = "npm"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "npm-published"
+target_id = "darwin-arm64"
+channel = "npm"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "homebrew-formula-published"
+target_id = ""
+channel = "homebrew"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "homebrew-bottle-published"
+target_id = ""
+channel = "homebrew"
+rollup = true
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "homebrew-bottle-published"
+target_id = "darwin-x64"
+channel = "homebrew"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "homebrew-bottle-published"
+target_id = "darwin-arm64"
+channel = "homebrew"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
 evidence = []
 
 [[gate]]
 id = "post-release-ledger-committed"
+target_id = ""
+channel = "coordination"
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+deferred_reason = ""
 evidence = []

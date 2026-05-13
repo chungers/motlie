@@ -7,6 +7,7 @@
 - 2026-04-29, @gpt55-dgx: Added macOS code-signing and installed-path execution requirements for npm, direct installer, and Homebrew flows.
 - 2026-05-12, @gpt55-dgx: Generalized the design around a user-specified binary target; `mmux` is now the first worked validation target only.
 - 2026-05-12, @gpt55-dgx: Replaced the shared manifest concept with per-binary release manifests under `releases/<bin>/<version>.toml` and a release coordination PR workflow.
+- 2026-05-13, @gpt55-dgx: Added structured target status, target-specific and rollup gates, evidence schema, cargo-zigbuild default, and merge-commit coordination strategy.
 
 ## Status
 
@@ -71,6 +72,8 @@ FORCE_COMMAND_SAFE=true
 MANIFEST=releases/mmux/0.1.0.toml
 RELEASE_BRANCH=release/mmux-v0.1.0
 ```
+
+When `FORCE_COMMAND_SAFE=true`, the direct installer must default to archive mode and the login path must execute the native binary directly. When `FORCE_COMMAND_SAFE=false`, npm-mode install can be considered for non-login use cases, but package runtime paths still must execute native binaries directly unless a future design explicitly changes that contract.
 
 ## User Experience
 
@@ -572,7 +575,7 @@ or fall back to:
 2. Add the per-release manifest and release notes, for example `releases/mmux/0.1.0.toml` and `releases/mmux/0.1.0.md`.
 3. Open a coordination PR from the release branch to `main`.
 4. Land platform-specific sub-PRs into the release branch. Each sub-PR updates manifest status with staging evidence.
-5. Merge the coordination PR to `main` after all required gates are complete or explicitly deferred.
+5. Merge the coordination PR to `main` with a merge commit after all required gates are complete or explicitly deferred.
 6. Create the final source tag from `main`.
 7. Build, sign, and package final artifacts from the final source tag.
 8. Upload canonical archives, checksums, and installer scripts to the `chungers/motlie` GitHub Release.
@@ -603,7 +606,17 @@ The manifest is both deterministic input and a release ledger:
 
 The build system and release skill must not derive a name when the manifest provides an explicit value. This is necessary for cases such as `mmux`, where npm must install a native binary directly and must not use `mmux.sh`, `mmux.js`, or another runner.
 
-Gate status values are intentionally simple: `planned`, `staged`, `complete`, `deferred`, or `failed`. A completed gate records at least `completed_at`, `completed_by`, `source_commit`, and an `evidence` link or note. These fields allow different agents or humans to pick up release work on different hosts without relying on conversational context.
+Gate status values are intentionally simple: `planned`, `staged`, `complete`, `deferred`, or `failed`. `staged`, `complete`, `deferred`, and `failed` gates record at least `completed_at`, `completed_by`, `source_commit`, and structured `evidence`. These fields allow different agents or humans to pick up release work on different hosts without relying on conversational context.
+
+Gate rows are keyed by `(id, target_id)`. Target-specific platform and package work uses the target id, for example `target_id = "linux-x64-gnu"`. Global or rollup gates use `target_id = ""`; rollup rows set `rollup = true`. A rollup gate is complete only when all enabled target/channel gates it summarizes are complete or explicitly deferred.
+
+Evidence entries use this minimal shape:
+
+```toml
+{ kind = "command-log", ref = "PR #123 comment", sha256 = "", note = "rustc -Vv recorded" }
+```
+
+Disabled-channel gates are marked `deferred` at coordination-PR-open time with `deferred_reason = "channel disabled"`.
 
 Worked `mmux` manifest:
 
@@ -623,6 +636,7 @@ release_branch = "release/mmux-v0.1.0"
 release_pr = ""
 post_release_ledger_pr = ""
 sub_prs_allowed = true
+merge_strategy = "merge-commit"
 
 [release]
 tag = "v0.1.0"
@@ -635,6 +649,17 @@ cargo_package = "motlie-mmux"
 cargo_bin = "mmux"
 profile = "release"
 locked = true
+cargo_lock_policy = "must-be-committed-and-unchanged-at-final-tag"
+
+[toolchain]
+rust_policy = "record-rustc-and-cargo-version-in-evidence"
+darwin_cross = "cargo-zigbuild"
+darwin_cross_policy = "v0-default-for-darwin-from-linux"
+required_evidence = ["rustc -Vv", "cargo -V", "cargo zigbuild -V", "zig version"]
+
+[signing]
+identity = "adhoc"
+macos_verify_installed_path = true
 
 [install]
 command = "mmux"
@@ -680,7 +705,13 @@ archive_asset = "motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz"
 npm_package = "@motlie/mmux-linux-x64-gnu"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
-status = "planned"
+
+[target.status]
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
 
 [[target]]
 id = "darwin-arm64"
@@ -692,14 +723,35 @@ npm_package = "@motlie/mmux-darwin-arm64"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 requires_macos_signing = true
-status = "planned"
 
-[[gate]]
-id = "darwin-codesign-staged"
+[target.status]
 state = "planned"
 completed_at = ""
 completed_by = ""
 source_commit = ""
+evidence = []
+
+[[gate]]
+id = "darwin-codesign-staged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "darwin-codesign-staged"
+target_id = "darwin-arm64"
+channel = "archive"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
 evidence = []
 ```
 

@@ -8,6 +8,7 @@
 - 2026-05-12, @gpt55-dgx: Clarified that CI workflows are future automation; the current release execution path is the manual process in `docs/PLAN_RELEASES.md`.
 - 2026-05-12, @gpt55-dgx: Aligned the playbook to per-binary manifests under `releases/<bin>/<version>.toml` and a release coordination PR with sub-PR status updates.
 - 2026-05-12, @gpt55-dgx: Added operator handoff workflow showing how the release skill prompts humans and updates manifest state at each release gate.
+- 2026-05-13, @gpt55-dgx: Tightened manifest status schema, target-specific gates, evidence requirements, merge strategy, disabled-channel handling, and v0 Darwin cross-build toolchain guidance.
 
 ## Scope
 
@@ -68,6 +69,8 @@ MANIFEST=releases/mmux/0.1.0.toml
 RELEASE_BRANCH=release/mmux-v0.1.0
 ```
 
+For `FORCE_COMMAND_SAFE=true`, the direct installer must default to archive mode and the runtime path must execute the native binary directly. For `FORCE_COMMAND_SAFE=false`, npm-mode install may be acceptable for non-login use cases, but native binaries and explicit runtime paths are still required.
+
 ## Release Model
 
 Use a release coordination PR instead of publishing directly from a local build. The coordination PR is a long-running branch from `main` that carries the version bump, per-release manifest, release notes, and status updates from platform-specific sub-PRs.
@@ -101,15 +104,25 @@ At the start of every release turn, the skill should:
 
 Operator prompts should be concrete. The prompt should tell the human what host/platform is needed, what branch to pull, what command group will run, and what manifest gate will be updated.
 
+Gate rows are keyed by `(id, target_id)`. Use `target_id = ""` only for global gates or explicit rollups. A rollup row sets `rollup = true` and is complete only when every enabled target-specific row for that gate is `complete` or explicitly `deferred`. Platform/channel work should update target-specific rows first so concurrent operators do not collide on one coarse gate. Gate evidence entries use this shape:
+
+```toml
+evidence = [
+  { kind = "command-log", ref = "PR #123 comment", sha256 = "", note = "rustc -Vv and cargo -V output recorded" },
+]
+```
+
+For `staged`, `complete`, `deferred`, and `failed`, the gate or target status must record `completed_at`, `completed_by`, `source_commit`, and `evidence`. Disabled-channel gates are marked `deferred` when the coordination PR opens, with `deferred_reason = "channel disabled"`.
+
 | Release gate | Operator surface | Skill prompt and action |
 | --- | --- | --- |
 | Intake | `main` | Confirm `BIN`, `VERSION`, `MANIFEST`, `RELEASE_BRANCH`, enabled channels, and platform targets. If missing, prompt for the missing field before editing files. |
 | Coordination PR | `release/<bin>-v<version> -> main` | Prompt to create the release branch, add `releases/<bin>/<version>.toml`, add release notes, and open the coordination PR. Update the `release-pr-opened` gate with PR URL and source commit. |
-| Linux staging | sub-PR to release branch | Prompt the Linux operator to pull the release branch, build the scoped target, package or validate artifact names from the manifest, and update the corresponding Linux gate with commit, checksum, and evidence. |
-| macOS staging | sub-PR to release branch | Prompt the macOS operator to pull the release branch, run build-path and installed-path `codesign` checks, and update the Darwin signing gate with timestamp, actor, source commit, and evidence. |
-| npm staging | sub-PR to release branch | Prompt the operator to generate native package candidates using manifest `npm_package`, `bin_path`, and `node_launcher = false`; run `npm pack --dry-run`; update manifest status only. |
+| Linux staging | sub-PR to release branch | Prompt the Linux operator to pull the release branch, build the scoped `target_id`, package or validate artifact names from the manifest, and update the corresponding target status plus `(id, target_id)` gate with commit, checksum, toolchain, and evidence. |
+| macOS staging | sub-PR to release branch | Prompt the macOS operator to pull the release branch, build with manifest `rust_target`, run build-path and installed-path `codesign` checks, and update the Darwin signing gate with timestamp, actor, source commit, signing identity, and evidence. |
+| npm staging | sub-PR to release branch | Prompt the operator to generate one native package candidate per `target_id` using manifest `npm_package`, `bin_path`, and `node_launcher = false`; run `npm pack --dry-run`; update target-specific npm gate status only. |
 | Homebrew staging | tap PR or source-side template PR | Prompt the operator to prepare the tap PR shape and record tap PR evidence. Do not merge live tap changes until final source tag exists. |
-| Coordination merge | coordination PR | Prompt the human reviewer to confirm all required gates are `complete` or explicitly `deferred`, then merge to `main`. Warn that final artifacts must trace to the final tag. |
+| Coordination merge | coordination PR | Prompt the human reviewer to confirm all required gates are `complete` or explicitly `deferred`, then merge to `main` with a merge commit. Warn that final artifacts must trace to the final tag. |
 | Final tag | `main` | Prompt for explicit approval to create and push `v<VERSION>`. Verify the manifest tag and workspace version before tagging. |
 | GitHub Release | final tag | Prompt for explicit approval to create the GitHub Release and upload final assets. Use manifest asset names and release notes. |
 | npm publish | final artifacts | Prompt for explicit approval and auth mode. Publish only after final artifacts exist and package dry-runs/install tests pass. |
@@ -146,6 +159,8 @@ release/mmux-v0.1.0-npm -> release/mmux-v0.1.0
 
 Each sub-PR should update `releases/<bin>/<version>.toml` with status, source commit, timestamp, actor, and evidence links. Do not commit built binaries to git.
 
+Use merge commits for the coordination PR. Do not squash or rebase the release branch, because preserving the sub-PR merge history makes manifest evidence and platform handoffs easier to audit.
+
 ## Final Tag and GitHub Release
 
 Create the release tag from `main` after the release coordination PR merges and all required gates are complete or explicitly deferred.
@@ -180,13 +195,16 @@ darwin-x64
 darwin-arm64
 ```
 
-The Linux build may use Rust cross-compilation tooling, Zig, or an osxcross-style macOS SDK toolchain for Darwin targets. The exact toolchain is an implementation detail of `docs/PLAN_RELEASES.md`, but the release contract is:
+The Linux build uses Rust target builds for Linux artifacts and uses `cargo-zigbuild` as the default v0 Darwin cross-build path. A release may document an approved exception in manifest evidence, but the normal release contract is:
 
 - all outputs are built from the release tag;
+- `Cargo.lock` is committed and unchanged at the final tag;
 - target names match `releases/<bin>/<version>.toml`;
 - artifact names use explicit manifest fields such as `archive_asset`;
 - archive binary paths use explicit manifest fields such as `archive_binary_path`;
 - Darwin binaries produced on Linux are not considered final until macOS signing verification passes.
+
+Build evidence must record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version`. If `rust-toolchain.toml` is not present for the release tag, the exact Rust toolchain identity in evidence is mandatory.
 
 Generic archive names are a convention only. If the manifest provides an explicit `archive_asset`, use the manifest value.
 
@@ -366,6 +384,7 @@ Preferred auth path:
 - Use npm trusted publishing from GitHub Actions when available.
 - Configure trusted publishing for the package and the exact GitHub Actions workflow.
 - Give the workflow `id-token: write`.
+- Keep npm provenance enabled; trusted publishing can attach registry provenance without a long-lived npm token.
 - Do not create or store `NPM_TOKEN` when trusted publishing is working.
 
 Bootstrap fallback path:
@@ -538,12 +557,14 @@ Homebrew workflow:
 
 - [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, enabled channels, and targets.
 - [ ] Release coordination branch created from `main`.
-- [ ] `releases/<bin>/<version>.toml` committed with release intent, explicit names, target matrix, and gates.
+- [ ] `releases/<bin>/<version>.toml` committed with release intent, explicit names, target matrix, structured target status, and `(id, target_id)` gates.
 - [ ] `releases/<bin>/<version>.md` committed as release-note source.
+- [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.
 - [ ] Coordination PR opened against `main`.
 - [ ] Platform/channel sub-PRs merged into the release branch.
-- [ ] Manifest status updated with staging evidence and source commits.
-- [ ] Coordination PR merged to `main`.
+- [ ] Manifest status updated with target id, channel, staging evidence, toolchain evidence, and source commits.
+- [ ] `Cargo.lock` committed and unchanged at the final source tag.
+- [ ] Coordination PR merged to `main` with a merge commit.
 - [ ] Final source tag pushed from `main`.
 - [ ] Final Linux and Darwin artifacts built from the source tag.
 - [ ] Final Darwin artifacts signed and verified on macOS.
@@ -586,7 +607,6 @@ If Homebrew publication fails:
 
 ## Open Decisions
 
-- Which Linux cross-compilation toolchain should become the blessed release path for Darwin targets.
 - Whether Darwin candidate artifacts should be shared as PR evidence, workflow artifacts, or clearly marked non-final staging assets before final signing.
 - Whether npm publication should run from the source repo workflow or a separate release environment.
 - Whether the Homebrew tap should be updated by a bot PR from `chungers/motlie` or manually after the source release is finalized.
