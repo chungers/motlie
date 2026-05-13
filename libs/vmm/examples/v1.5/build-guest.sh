@@ -17,6 +17,11 @@ RESULT_JSON="$ARTIFACTS_DIR/build-result.json"
 CONTRACT_JSON="$ARTIFACTS_DIR/guest-contract.json"
 IDENTITY_PROBE_JSON="$ARTIFACTS_DIR/identity-probe.json"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
+ROOTFS_TARBALL_OVERRIDE="${MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL:-${MOTLIE_V15_VZ_ROOTFS_TARBALL:-}}"
+ROOTFS_TARBALL_SOURCE=""
+ROOTFS_TARBALL_SEED_NAME="motlie-assembled-rootfs.tar"
+ROOTFS_TARBALL_GUEST_PATH="/tmp/motlie-assembled-rootfs.tar"
+ROOTFS_INPUT_KIND="transitional-native-source-vm"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-300}"
 GUEST_SRC_DIR="/home/admin/motlie-src"
 BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
@@ -68,6 +73,43 @@ require_cmd ssh
 require_cmd hdiutil
 require_cmd cargo
 
+if [[ -n "$ROOTFS_TARBALL_OVERRIDE" ]]; then
+  if [[ ! -f "$ROOTFS_TARBALL_OVERRIDE" ]]; then
+    cat >&2 <<EOF
+assembled rootfs tarball does not exist: $ROOTFS_TARBALL_OVERRIDE
+
+Set MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL to a tarball emitted by the common
+rootfs assembly stage, or leave it unset to use the current VZ native-source VM
+adapter path.
+EOF
+    exit 1
+  fi
+  python3 - "$ROOTFS_TARBALL_OVERRIDE" <<'PY'
+import sys
+import tarfile
+
+path = sys.argv[1]
+try:
+    with tarfile.open(path, "r:*") as archive:
+        for member in archive:
+            name = member.name
+            normalized = name
+            while normalized.startswith("./"):
+                normalized = normalized[2:]
+            if (
+                name.startswith("/")
+                or normalized == ".."
+                or normalized.startswith("../")
+                or "/../" in normalized
+            ):
+                raise SystemExit(f"unsafe rootfs tar entry escapes guest root: {name}")
+except tarfile.TarError as error:
+    raise SystemExit(f"rootfs tarball is not readable by Python tarfile: {error}") from error
+PY
+  ROOTFS_TARBALL_SOURCE="$ROOTFS_TARBALL_OVERRIDE"
+  ROOTFS_INPUT_KIND="assembled-rootfs-tar-overlay"
+fi
+
 if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin" ]]; then
   SOURCE_DISK_PATH="$NATIVE_SOURCE_VM_DIR/disk.img"
   SOURCE_NVRAM_PATH="$NATIVE_SOURCE_VM_DIR/nvram.bin"
@@ -106,6 +148,10 @@ echo "=== Vz v1.5 base guest build ==="
 echo "Base VM:      $BASE_VM_NAME"
 echo "Source disk:  $SOURCE_DISK_PATH"
 echo "Native cache: $NATIVE_SOURCE_VM_DIR"
+echo "Rootfs input: $ROOTFS_INPUT_KIND"
+if [[ -n "$ROOTFS_TARBALL_SOURCE" ]]; then
+  echo "Rootfs tar:   $ROOTFS_TARBALL_SOURCE"
+fi
 
 rm -rf "$WORK_VM_DIR"
 mkdir -p "$WORK_VM_DIR"
@@ -345,6 +391,9 @@ cp "$AGENT_STATE_SETUP_FILE" "$SEED_DIR/motlie-agent-state-setup"
 cp "$AGENT_STATE_UNIT_FILE" "$SEED_DIR/motlie-agent-state.service"
 cp "$SSH_BRIDGE_LOOP_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh-loop"
 cp "$SSH_BRIDGE_UNIT_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh.service"
+if [[ -n "$ROOTFS_TARBALL_SOURCE" ]]; then
+  cp "$ROOTFS_TARBALL_SOURCE" "$SEED_DIR/$ROOTFS_TARBALL_SEED_NAME"
+fi
 cat >"$SEED_DIR/meta-data" <<EOF
 instance-id: ${BASE_VM_NAME}
 local-hostname: motlie-v1-5-build
@@ -776,7 +825,26 @@ sudo cp "\$SEED_MOUNT/motlie-agent-state-setup" /tmp/motlie-agent-state-setup
 sudo cp "\$SEED_MOUNT/motlie-agent-state.service" /tmp/motlie-agent-state.service
 sudo cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh-loop" /tmp/motlie-vmm-vsock-ssh-loop
 sudo cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh.service" /tmp/motlie-vmm-vsock-ssh.service
+if [[ -f "\$SEED_MOUNT/$ROOTFS_TARBALL_SEED_NAME" ]]; then
+  sudo cp "\$SEED_MOUNT/$ROOTFS_TARBALL_SEED_NAME" "$ROOTFS_TARBALL_GUEST_PATH"
+fi
 sudo umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
+if [[ -f "$ROOTFS_TARBALL_GUEST_PATH" ]]; then
+  echo "[v1.5 build] applying assembled rootfs payload before guest contract build"
+  # VZ currently boots through an EFI disk plus NVRAM. Until the durable VZ
+  # emitter can synthesize that boot container directly from OCI, preserve
+  # firmware/boot/runtime pseudo-filesystems and apply only the rootfs payload
+  # during image assembly. Launch and first SSH must never perform this work.
+  sudo tar --numeric-owner --preserve-permissions \
+    --exclude='dev' --exclude='./dev' --exclude='dev/*' --exclude='./dev/*' \
+    --exclude='proc' --exclude='./proc' --exclude='proc/*' --exclude='./proc/*' \
+    --exclude='sys' --exclude='./sys' --exclude='sys/*' --exclude='./sys/*' \
+    --exclude='run' --exclude='./run' --exclude='run/*' --exclude='./run/*' \
+    --exclude='tmp' --exclude='./tmp' --exclude='tmp/*' --exclude='./tmp/*' \
+    --exclude='boot' --exclude='./boot' --exclude='boot/*' --exclude='./boot/*' \
+    --exclude='efi' --exclude='./efi' --exclude='efi/*' --exclude='./efi/*' \
+    -xpf "$ROOTFS_TARBALL_GUEST_PATH" -C /
+fi
 echo "[v1.5 build] unpacking source tarball"
 rm -rf '$GUEST_SRC_DIR'
 mkdir -p '$GUEST_SRC_DIR'
@@ -1102,13 +1170,37 @@ PY
 EOF
 guest_fetch /tmp/motlie-identity-probe.json "$IDENTITY_PROBE_JSON"
 
-python3 - "$RESULT_JSON" "$CONTRACT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PROBE_JSON" <<'PY'
+python3 - "$RESULT_JSON" "$CONTRACT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PROBE_JSON" "$ROOTFS_INPUT_KIND" "$NATIVE_SOURCE_VM_DIR" "$ROOTFS_TARBALL_SOURCE" <<'PY'
 import json
 import sys
 
-path, contract_path, vm_name, ip_addr, boot_seconds, guest_binary, identity_probe_json = sys.argv[1:]
+(
+    path,
+    contract_path,
+    vm_name,
+    ip_addr,
+    boot_seconds,
+    guest_binary,
+    identity_probe_json,
+    rootfs_input_kind,
+    native_source_vm_dir,
+    rootfs_tarball_source,
+) = sys.argv[1:]
 with open(identity_probe_json, "r", encoding="utf-8") as fh:
     identity_payload = json.load(fh)
+
+rootfs_input = {
+    "kind": rootfs_input_kind,
+    "native_source_vm_dir": native_source_vm_dir,
+    "apple_vz_constraints": {
+        "requires_bootable_efi_disk": True,
+        "requires_nvram": True,
+        "assembled_rootfs_tarball_applied_during_image_build": bool(rootfs_tarball_source),
+        "preserves_boot_artifacts_from_native_source_vm": True,
+    },
+}
+if rootfs_tarball_source:
+    rootfs_input["assembled_rootfs_tarball"] = rootfs_tarball_source
 
 guest_contract = {
     "motlie_vfs_guest_path": guest_binary,
@@ -1119,6 +1211,7 @@ guest_contract = {
         "bob": {"uid": 1001, "gid": 1001, "password": "testpass"},
     },
     "agent_state": "/agent-state",
+    "rootfs_input": rootfs_input,
 }
 
 payload = {
@@ -1128,12 +1221,14 @@ payload = {
     "boot_to_ip_seconds": float(boot_seconds),
     "guest_contract": guest_contract,
     "identity_probe": identity_payload,
+    "rootfs_input": rootfs_input,
 }
 
 contract_payload = {
     "contract_version": "v1.5",
     "packaging_backend": "vz-native",
     "guest_contract": guest_contract,
+    "rootfs_input": rootfs_input,
 }
 
 for output_path, output_payload in (

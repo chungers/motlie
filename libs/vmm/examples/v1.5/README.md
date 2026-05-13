@@ -187,6 +187,24 @@ pty-agent-validation.json
 pty-login.json
 ```
 
+VZ has an explicit issue #271 handoff for the common rootfs contract:
+
+```bash
+MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL=/path/to/assembled-rootfs.tar \
+cargo run -p mbuild -- \
+  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target vz \
+  --out /tmp/mbuild/vz
+```
+
+The tarball is consumed during image build only. The current VZ adapter still
+preserves a native Apple VZ EFI/NVRAM boot container, applies the assembled
+rootfs payload into that container, and records `rootfs_input` in
+`build-result.json` and `guest-contract.json`. Guest launch and first SSH must
+not apply this tarball, install packages, or build binaries. If the environment
+variable is unset, the artifact records `transitional-native-source-vm` so the
+remaining #271 gap is visible.
+
 ## Service Graph
 
 The converged boot graph is:

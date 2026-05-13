@@ -128,6 +128,15 @@ The v1.5 builders bake smoke-image hardening during image assembly:
 This is image content, not first-contact repair. If a backend cannot use this
 hardening, document the technical reason before diverging.
 
+For the VZ #271 bridge, `build-guest.sh` accepts
+`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is copied through the build
+seed disk and applied while producing VZ artifacts; the emitted
+`build-result.json` and `guest-contract.json` record `rootfs_input`. This is
+the only allowed transitional handoff from the common rootfs assembler into the
+Apple VZ adapter. Harness launch, `ready`, first SSH, and scenario steps must
+consume the completed artifacts only; they must not run rootfs assembly,
+package installation, npm repair, or guest binary builds.
+
 The first-contact path must fail fast when immutable base-image content is
 missing. Rebuild the image; do not add hidden runtime repair to `launch-vz.sh`
 or `launch-ch.sh`.

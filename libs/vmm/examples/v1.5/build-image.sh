@@ -20,6 +20,10 @@ Examples:
   ./build-image.sh --backend vz
   ./build-image.sh --backend ch
   ./build-image.sh --backend ch --kernel skip
+
+VZ rootfs handoff:
+  MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL=/path/to/assembled-rootfs.tar \
+    ./build-image.sh --backend vz
 EOF
 }
 

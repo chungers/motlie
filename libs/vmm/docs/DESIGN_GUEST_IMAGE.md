@@ -5,6 +5,7 @@
 | Date | Who | Summary |
 |------|-----|---------|
 | 2026-05-14 | @vmm-cdx | Complete the Linux/CH native OCI builder path for issue #271: `mbuild build --target ch` now imports pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH harness matrix |
+| 2026-05-12 | @codex-vz | Add the VZ contributor handoff for issue #271: the VZ emitter can consume an assembled rootfs tarball during image build, records that rootfs input in emitted artifacts, and still documents the remaining Apple VZ EFI/NVRAM boot-container constraint |
 | 2026-05-11 | @vmm-cdx | Strengthen the `mbuild` build-file contract: YAML config rejects unknown fields, APT package entries use package-manager-aware validation, and `mbuild validate` compares manifests back to the current config |
 | 2026-05-11 | @vmm-cdx | Tighten the `mbuild` contract after PR #270 review: current configs identify transitional shell adapters honestly, record per-emitter materialized sources, make seed topology config-driven, keep only apt executable for now, and move seed uid/gid handling to guest ownership metadata instead of host chown |
 | 2026-05-09 | @vmm-cdx | Expand the issue #271 `mbuild` design status: app-layer CLI delegates current CH/VZ adapters, emits artifact digests, regenerates per-guest seed overlays, and delegates optional live harness validation with a validation manifest |
@@ -697,6 +698,17 @@ Implications for VZ:
 - A file-handle storage path may be possible through
   `VZDiskBlockDeviceStorageDeviceAttachment`, but that is a different backend
   contract and should be designed explicitly before becoming the default.
+- The current `examples/v1.5/build-guest.sh` VZ adapter has an explicit
+  contributor bridge for #271: `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` copies a
+  common builder-emitted rootfs tarball through the VZ seed disk, applies it
+  during image build, and records `rootfs_input` in `build-result.json` and
+  `guest-contract.json`. This is image-build work only; launch and first SSH
+  must not apply rootfs payloads, install packages, or build binaries.
+- That bridge does not remove the Apple VZ boot-container problem. Until the
+  durable VZ emitter can synthesize a bootable VZ disk from the OCI rootfs
+  contract, the adapter still preserves EFI, NVRAM, and boot partition content
+  from a native source VM and overlays the assembled rootfs payload into that
+  container.
 
 Implications for CH:
 
@@ -1073,6 +1085,16 @@ platform-manifest digests. The Linux/CH emitter consumes that native
 source/import/package/compatibility path. The VZ emitter still records its
 current `materialized_source` for the macOS source-VM adapter until VZ consumes
 the same assembled OCI rootfs path.
+
+The VZ side of this transition must be explicit. When an assembled rootfs
+tarball exists, `mbuild build --target vz` may set
+`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` for the VZ adapter so the build consumes
+the same logical rootfs contract as CH while still adapting it into Apple VZ's
+required disk/NVRAM boot shape. The emitted VZ artifacts must include
+`rootfs_input.kind`, the native boot substrate path, and the tarball path so
+validation evidence distinguishes "native-source VM only" from "assembled
+rootfs consumed by VZ emitter." Closing #271 requires the latter path plus live
+VZ harness validation from fresh `mbuild` artifacts.
 
 Required product surface:
 
