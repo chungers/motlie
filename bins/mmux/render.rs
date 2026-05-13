@@ -1226,7 +1226,7 @@ fn visible_session_key_value_rows(area_height: u16, row_count: usize) -> usize {
 
 fn send_keys_text_field_height(input: &str, width: u16) -> u16 {
     let inner_width = width.saturating_sub(2).max(1) as usize;
-    let wrapped_rows = send_keys_wrapped_lines(input, inner_width).len();
+    let wrapped_rows = send_keys_wrapped_line_count(input, inner_width);
     max(
         SEND_KEYS_TEXT_FIELD_MIN_HEIGHT,
         saturating_u16(wrapped_rows).saturating_add(2),
@@ -1263,91 +1263,149 @@ fn send_keys_input_view(input: &str, width: usize, visible_rows: usize) -> SendK
     }
 }
 
-fn send_keys_wrapped_lines(input: &str, width: usize) -> Vec<String> {
+// `WrapState` above mirrors ratatui's detail-pane wrapping for row counts.
+// Keep Send Keys word-boundary behavior aligned with it, but pre-wrap here
+// because this modal must render a scrolled editable viewport and place the
+// terminal cursor on the visible tail row.
+fn send_keys_wrapped_line_count(input: &str, width: usize) -> usize {
     let width = max(1, width);
-    let mut lines = Vec::new();
+    let mut target = CountSendKeysLines::default();
     for logical_line in input.split('\n') {
-        append_word_wrapped_line(logical_line, width, &mut lines);
+        wrap_send_keys_logical_line(logical_line, width, &mut target);
     }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+    target.count()
 }
 
-fn append_word_wrapped_line(input: &str, width: usize, lines: &mut Vec<String>) {
+fn send_keys_wrapped_lines(input: &str, width: usize) -> Vec<String> {
+    let width = max(1, width);
+    let mut target = CollectSendKeysLines::default();
+    for logical_line in input.split('\n') {
+        wrap_send_keys_logical_line(logical_line, width, &mut target);
+    }
+    target.into_lines()
+}
+
+fn wrap_send_keys_logical_line(input: &str, width: usize, target: &mut impl SendKeysLineTarget) {
     if input.is_empty() {
-        lines.push(String::new());
+        target.push_line();
         return;
     }
 
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    let mut pending_space = String::new();
+    let mut pending_space = "";
     let mut pending_space_width = 0usize;
 
     for (run, is_whitespace) in text_runs(input) {
         let run_width = char_width(run);
         if is_whitespace {
-            pending_space.push_str(run);
-            pending_space_width = pending_space_width.saturating_add(run_width);
+            pending_space = run;
+            pending_space_width = run_width;
             continue;
         }
 
-        if current_width > 0 && current_width + pending_space_width + run_width > width {
-            push_wrapped_line(lines, &mut current, &mut current_width);
-            pending_space.clear();
+        if target.current_width() > 0
+            && target.current_width() + pending_space_width + run_width > width
+        {
+            target.push_line();
+            pending_space = "";
             pending_space_width = 0;
         } else if !pending_space.is_empty() {
-            append_hard_wrapped_run(
-                &pending_space,
-                width,
-                lines,
-                &mut current,
-                &mut current_width,
-            );
-            pending_space.clear();
+            append_hard_wrapped_send_keys_run(pending_space, width, target);
+            pending_space = "";
             pending_space_width = 0;
         }
 
-        append_hard_wrapped_run(run, width, lines, &mut current, &mut current_width);
+        append_hard_wrapped_send_keys_run(run, width, target);
     }
 
     if !pending_space.is_empty() {
-        append_hard_wrapped_run(
-            &pending_space,
-            width,
-            lines,
-            &mut current,
-            &mut current_width,
-        );
+        append_hard_wrapped_send_keys_run(pending_space, width, target);
     }
 
-    lines.push(current);
+    target.push_line();
 }
 
-fn append_hard_wrapped_run(
+fn append_hard_wrapped_send_keys_run(
     run: &str,
     width: usize,
-    lines: &mut Vec<String>,
-    current: &mut String,
-    current_width: &mut usize,
+    target: &mut impl SendKeysLineTarget,
 ) {
     for ch in run.chars() {
         let Some(ch_width) = ch.width() else {
+            // Keep non-rendering control characters in the submitted key
+            // sequence, but omit them from display and cursor accounting.
             continue;
         };
-        if *current_width > 0 && current_width.saturating_add(ch_width) > width {
-            push_wrapped_line(lines, current, current_width);
+        if target.current_width() > 0 && target.current_width().saturating_add(ch_width) > width {
+            target.push_line();
         }
-        current.push(ch);
-        *current_width = current_width.saturating_add(ch_width);
+        target.push_char(ch, ch_width);
     }
 }
 
-fn push_wrapped_line(lines: &mut Vec<String>, current: &mut String, current_width: &mut usize) {
-    lines.push(std::mem::take(current));
-    *current_width = 0;
+trait SendKeysLineTarget {
+    fn current_width(&self) -> usize;
+    fn push_char(&mut self, ch: char, ch_width: usize);
+    fn push_line(&mut self);
+}
+
+#[derive(Default)]
+struct CountSendKeysLines {
+    rows: usize,
+    current_width: usize,
+}
+
+impl CountSendKeysLines {
+    fn count(self) -> usize {
+        max(1, self.rows)
+    }
+}
+
+impl SendKeysLineTarget for CountSendKeysLines {
+    fn current_width(&self) -> usize {
+        self.current_width
+    }
+
+    fn push_char(&mut self, _ch: char, ch_width: usize) {
+        self.current_width = self.current_width.saturating_add(ch_width);
+    }
+
+    fn push_line(&mut self) {
+        self.rows = self.rows.saturating_add(1);
+        self.current_width = 0;
+    }
+}
+
+#[derive(Default)]
+struct CollectSendKeysLines {
+    lines: Vec<String>,
+    current: String,
+    current_width: usize,
+}
+
+impl CollectSendKeysLines {
+    fn into_lines(self) -> Vec<String> {
+        if self.lines.is_empty() {
+            vec![String::new()]
+        } else {
+            self.lines
+        }
+    }
+}
+
+impl SendKeysLineTarget for CollectSendKeysLines {
+    fn current_width(&self) -> usize {
+        self.current_width
+    }
+
+    fn push_char(&mut self, ch: char, ch_width: usize) {
+        self.current.push(ch);
+        self.current_width = self.current_width.saturating_add(ch_width);
+    }
+
+    fn push_line(&mut self) {
+        self.lines.push(std::mem::take(&mut self.current));
+        self.current_width = 0;
+    }
 }
 
 fn text_runs(input: &str) -> impl Iterator<Item = (&str, bool)> {
@@ -1372,6 +1430,60 @@ fn text_runs(input: &str) -> impl Iterator<Item = (&str, bool)> {
         rest = remaining;
         Some((run, is_whitespace))
     })
+}
+
+#[cfg(test)]
+mod send_keys_wrap_tests {
+    use super::*;
+
+    fn strings(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    #[test]
+    fn send_keys_word_wrap_hard_wraps_unbroken_words() {
+        assert_eq!(
+            send_keys_wrapped_lines("abcdef", 3),
+            strings(&["abc", "def"])
+        );
+    }
+
+    #[test]
+    fn send_keys_word_wrap_preserves_spaces_that_fit_and_trailing_spaces() {
+        assert_eq!(send_keys_wrapped_lines("a  b", 4), strings(&["a  b"]));
+        assert_eq!(send_keys_wrapped_lines("abc  ", 4), strings(&["abc ", " "]));
+    }
+
+    #[test]
+    fn send_keys_word_wrap_handles_width_one() {
+        assert_eq!(
+            send_keys_wrapped_lines("ab cd", 1),
+            strings(&["a", "b", "c", "d"])
+        );
+    }
+
+    #[test]
+    fn send_keys_word_wrap_omits_control_chars_from_display() {
+        assert_eq!(send_keys_wrapped_lines("ab\u{7}cd", 10), strings(&["abcd"]));
+    }
+
+    #[test]
+    fn send_keys_word_wrap_count_matches_collected_lines() {
+        for (input, width) in [
+            ("", 1),
+            ("abcdef", 3),
+            ("a  b", 4),
+            ("abc  ", 4),
+            ("ab cd", 1),
+            ("alpha beta\ngamma delta", 7),
+            ("ab\u{7}cd", 10),
+        ] {
+            assert_eq!(
+                send_keys_wrapped_line_count(input, width),
+                send_keys_wrapped_lines(input, width).len()
+            );
+        }
+    }
 }
 
 fn key_value_prefix_column_width(area_width: u16) -> u16 {
