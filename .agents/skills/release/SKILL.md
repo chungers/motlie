@@ -127,6 +127,8 @@ Manifest status rules:
 - Evidence entries use `{ kind, ref, sha256?, note? }`; include toolchain versions for build and signing gates.
 - Status fields are evidence only; intent fields drive artifact names, package names, binary paths, and installer behavior.
 - The v0 Darwin-from-Linux toolchain is `cargo-zigbuild`; record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version` in evidence.
+- Linux targets default to static musl when feasible. For `linux-*-musl`, record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
+- Generate `linux-*-gnu` targets only when the manifest enables gnu fallback/CUDA targets. For those targets, record `ldd --version`, `objdump -T <binary> | grep GLIBC_ | sort -u`, `glibc_build_host_version`, and `glibc_min_version`.
 - Use merge commits for the coordination PR; do not squash or rebase the release branch because the merge history preserves sub-PR evidence.
 
 Operator prompt workflow:

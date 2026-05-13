@@ -10,6 +10,7 @@
 - 2026-05-12, @gpt55-dgx: Added operator handoff workflow showing how the release skill prompts humans and updates manifest state at each release gate.
 - 2026-05-13, @gpt55-dgx: Tightened manifest status schema, target-specific gates, evidence requirements, merge strategy, disabled-channel handling, and v0 Darwin cross-build toolchain guidance.
 - 2026-05-13, @gpt55-dgx: Added manifest-tracked installer validation, detached-tag build guidance, GitHub Pages installer update rules, and release rollback semantics.
+- 2026-05-13, @gpt55-dgx: Made static musl the default Linux artifact policy when feasible, with glibc-floor evidence only for gnu fallback/CUDA targets.
 
 ## Scope
 
@@ -198,28 +199,34 @@ gh release create v0.1.0 \
 The final build should run from the source tag and produce target artifacts listed in the manifest:
 
 ```text
-linux-x64-gnu
-linux-arm64-gnu
+linux-x64-musl
+linux-arm64-musl
 darwin-x64
 darwin-arm64
 ```
 
-The Linux build uses Rust target builds for Linux artifacts and uses `cargo-zigbuild` as the default v0 Darwin cross-build path. A release may document an approved exception in manifest evidence, but the normal release contract is:
+The Linux build uses static musl targets by default when feasible and uses `cargo-zigbuild` as the default v0 Darwin cross-build path. A release may document an approved exception in manifest evidence, but the normal release contract is:
 
 - all outputs are built from the release tag;
 - `Cargo.lock` is committed and unchanged at the final tag;
 - target names match `releases/<bin>/<version>.toml`;
 - artifact names use explicit manifest fields such as `archive_asset`;
 - archive binary paths use explicit manifest fields such as `archive_binary_path`;
+- `linux-*-musl` targets record static-link evidence;
+- `linux-*-gnu` fallback targets record both build-host glibc and binary GLIBC symbol floor;
 - Darwin binaries produced on Linux are not considered final until macOS signing verification passes.
 
-Build evidence must record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version`. If `rust-toolchain.toml` is not present for the release tag, the exact Rust toolchain identity in evidence is mandatory.
+Build evidence must record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version`. For `linux-*-musl` targets, evidence must also record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` to show the binary has no shared runtime dependencies. If `rust-toolchain.toml` is not present for the release tag, the exact Rust toolchain identity in evidence is mandatory.
+
+If a release enables `linux-*-gnu` targets because static musl is not feasible or because a glibc-linked runtime such as CUDA is required, evidence must also record `ldd --version` for the build host and `objdump -T <binary> | grep GLIBC_ | sort -u` for the actual binary GLIBC requirement. Populate `glibc_build_host_version` from `ldd --version` and `glibc_min_version` from the highest GLIBC symbol required by the built binary.
+
+For `mmux` v0.1, leave `gnu_enabled = false` and make `musl_enabled = true`.
 
 Generic archive names are a convention only. If the manifest provides an explicit `archive_asset`, use the manifest value.
 
 ```text
-motlie-${BIN}-v${VERSION}-linux-x64-gnu.tar.gz
-motlie-${BIN}-v${VERSION}-linux-arm64-gnu.tar.gz
+motlie-${BIN}-v${VERSION}-linux-x64-musl.tar.gz
+motlie-${BIN}-v${VERSION}-linux-arm64-musl.tar.gz
 motlie-${BIN}-v${VERSION}-darwin-x64.tar.gz
 motlie-${BIN}-v${VERSION}-darwin-arm64.tar.gz
 ```
@@ -227,8 +234,8 @@ motlie-${BIN}-v${VERSION}-darwin-arm64.tar.gz
 Worked `mmux` archive names:
 
 ```text
-motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz
-motlie-mmux-v0.1.0-linux-arm64-gnu.tar.gz
+motlie-mmux-v0.1.0-linux-x64-musl.tar.gz
+motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz
 motlie-mmux-v0.1.0-darwin-x64.tar.gz
 motlie-mmux-v0.1.0-darwin-arm64.tar.gz
 ```
@@ -298,8 +305,8 @@ After final Linux builds and final macOS signing pass from the final source tag,
 Final release assets should match the manifest's explicit `archive_asset` values. For `mmux`:
 
 ```text
-motlie-${BIN}-v${VERSION}-linux-x64-gnu.tar.gz
-motlie-${BIN}-v${VERSION}-linux-arm64-gnu.tar.gz
+motlie-${BIN}-v${VERSION}-linux-x64-musl.tar.gz
+motlie-${BIN}-v${VERSION}-linux-arm64-musl.tar.gz
 motlie-${BIN}-v${VERSION}-darwin-x64.tar.gz
 motlie-${BIN}-v${VERSION}-darwin-arm64.tar.gz
 SHA256SUMS
@@ -346,8 +353,8 @@ Publish native packages only. Do not publish a Node boot script as the binary ru
 Generic package names are a convention only. If the manifest provides explicit `npm_package` values, use the manifest values.
 
 ```text
-${NPM_PREFIX}-linux-x64-gnu
-${NPM_PREFIX}-linux-arm64-gnu
+${NPM_PREFIX}-linux-x64-musl
+${NPM_PREFIX}-linux-arm64-musl
 ${NPM_PREFIX}-darwin-x64
 ${NPM_PREFIX}-darwin-arm64
 ```
@@ -355,8 +362,8 @@ ${NPM_PREFIX}-darwin-arm64
 Worked `mmux` package names:
 
 ```text
-@motlie/mmux-linux-x64-gnu
-@motlie/mmux-linux-arm64-gnu
+@motlie/mmux-linux-x64-musl
+@motlie/mmux-linux-arm64-musl
 @motlie/mmux-darwin-x64
 @motlie/mmux-darwin-arm64
 ```
@@ -589,6 +596,8 @@ Homebrew workflow:
 - [ ] Coordination PR opened against `main`.
 - [ ] Platform/channel sub-PRs merged into the release branch.
 - [ ] Manifest status updated with target id, channel, staging evidence, toolchain evidence, and source commits.
+- [ ] `linux-*-musl` target evidence records `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
+- [ ] Any enabled `linux-*-gnu` fallback target evidence records `glibc_build_host_version`, `glibc_min_version`, `ldd --version`, and `objdump -T` GLIBC symbols.
 - [ ] `Cargo.lock` committed and unchanged at the final source tag.
 - [ ] Coordination PR merged to `main` with a merge commit.
 - [ ] Final source tag pushed from `main`.

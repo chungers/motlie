@@ -9,6 +9,7 @@
 - 2026-05-12, @gpt55-dgx: Replaced the shared manifest concept with per-binary release manifests under `releases/<bin>/<version>.toml` and a release coordination PR workflow.
 - 2026-05-13, @gpt55-dgx: Added structured target status, target-specific and rollup gates, evidence schema, cargo-zigbuild default, and merge-commit coordination strategy.
 - 2026-05-13, @gpt55-dgx: Fixed npm global-bin command, defined optional GitHub Pages installer updates, and added installer validation as a manifest-tracked gate.
+- 2026-05-13, @gpt55-dgx: Made static musl the default Linux target policy when feasible; glibc floors are required only for gnu fallback/CUDA targets.
 
 ## Status
 
@@ -94,25 +95,25 @@ The npm channel is best for developer and CI installs where package-manager pinn
 Generic package shape:
 
 ```text
-@motlie/<bin>-linux-x64-gnu
-@motlie/<bin>-linux-arm64-gnu
+@motlie/<bin>-linux-x64-musl
+@motlie/<bin>-linux-arm64-musl
 @motlie/<bin>-darwin-arm64
 @motlie/<bin>-darwin-x64
 ```
 
 Worked `mmux` examples:
 
-Linux x64 glibc:
+Linux x64 static musl:
 
 ```sh
-npm install -g @motlie/mmux-linux-x64-gnu
+npm install -g @motlie/mmux-linux-x64-musl
 mmux --help
 ```
 
-Linux arm64 glibc:
+Linux arm64 static musl:
 
 ```sh
-npm install -g @motlie/mmux-linux-arm64-gnu
+npm install -g @motlie/mmux-linux-arm64-musl
 mmux --help
 ```
 
@@ -133,7 +134,7 @@ mmux --help
 For SSH host integration through npm, pin the native binary to a stable path:
 
 ```sh
-npm install -g @motlie/mmux-linux-x64-gnu
+npm install -g @motlie/mmux-linux-x64-musl
 ln -sf "$(npm config get prefix)/bin/mmux" /usr/local/bin/mmux
 /usr/local/bin/mmux --version
 ```
@@ -277,11 +278,11 @@ Native package example, parameterized by binary:
 
 ```json
 {
-  "name": "@motlie/<bin>-linux-x64-gnu",
+  "name": "@motlie/<bin>-linux-x64-musl",
   "version": "0.1.0",
   "os": ["linux"],
   "cpu": ["x64"],
-  "libc": "glibc",
+  "libc": "musl",
   "files": ["bin/<bin>", "README.md", "LICENSE"],
   "bin": {
     "<bin>": "bin/<bin>"
@@ -293,11 +294,11 @@ Worked `mmux` package example:
 
 ```json
 {
-  "name": "@motlie/mmux-linux-x64-gnu",
+  "name": "@motlie/mmux-linux-x64-musl",
   "version": "0.1.0",
   "os": ["linux"],
   "cpu": ["x64"],
-  "libc": "glibc",
+  "libc": "musl",
   "files": ["bin/mmux", "README.md", "LICENSE"],
   "bin": {
     "mmux": "bin/mmux"
@@ -459,8 +460,8 @@ Examples:
 ```text
 motlie-mmux-v0.1.0-darwin-arm64.tar.gz
 motlie-mmux-v0.1.0-darwin-x64.tar.gz
-motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz
-motlie-mmux-v0.1.0-linux-arm64-gnu.tar.gz
+motlie-mmux-v0.1.0-linux-x64-musl.tar.gz
+motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz
 motlie-models-v0.1.0-linux-x64-gnu.tar.gz
 motlie-models-v0.1.0-linux-x64-gnu-cuda-12.4.tar.gz
 ```
@@ -471,6 +472,25 @@ The executable inside the archive keeps the stable command name:
 bin/<bin>
 ```
 
+## Linux libc Policy
+
+Linux targets default to static musl when the binary and its native dependencies support it. For `mmux` v0.1, the required Linux targets are `linux-x64-musl` and `linux-arm64-musl`.
+
+Every `linux-*-musl` target must record static-link evidence:
+
+- `file <binary>` showing the produced executable type;
+- `ldd <binary>` showing the binary is not dynamically linked, or equivalent output and exit status;
+- `readelf -d <binary>` showing no shared runtime dependencies.
+
+Static musl is the preferred default because it avoids distro-specific glibc floors, works in Alpine/musl environments, and simplifies host-wide SSH integration by reducing runtime dependency auditing.
+
+GNU/glibc targets are fallback or additional targets only when static musl is not feasible, or when the binary depends on glibc-linked runtimes such as CUDA. Every `linux-*-gnu` target must then record:
+
+- `glibc_build_host_version`: the build host glibc reported by `ldd --version`;
+- `glibc_min_version`: the actual binary GLIBC symbol floor reported by `objdump -T <binary> | grep GLIBC_ | sort -u`.
+
+These gnu values are intentionally separate. The build host glibc version explains the build environment, while the binary GLIBC symbol floor is the compatibility requirement users actually hit at runtime. If gnu artifacts are enabled, build them in a pinned, known-old glibc environment or explicitly document the runtime floor.
+
 ## npm Package Naming
 
 Generic package names:
@@ -478,10 +498,15 @@ Generic package names:
 ```text
 @motlie/<bin>-darwin-arm64
 @motlie/<bin>-darwin-x64
-@motlie/<bin>-linux-x64-gnu
-@motlie/<bin>-linux-arm64-gnu
 @motlie/<bin>-linux-x64-musl
 @motlie/<bin>-linux-arm64-musl
+```
+
+GNU/glibc package names are generated only when the binary manifest explicitly enables gnu targets:
+
+```text
+@motlie/<bin>-linux-x64-gnu
+@motlie/<bin>-linux-arm64-gnu
 ```
 
 Worked `mmux` package names:
@@ -489,8 +514,6 @@ Worked `mmux` package names:
 ```text
 @motlie/mmux-darwin-arm64
 @motlie/mmux-darwin-x64
-@motlie/mmux-linux-x64-gnu
-@motlie/mmux-linux-arm64-gnu
 @motlie/mmux-linux-x64-musl
 @motlie/mmux-linux-arm64-musl
 ```
@@ -573,11 +596,13 @@ In npm mode, installer scripts can select platform-specific native packages inst
 @motlie/models-linux-x64-gnu-cuda-12-4
 ```
 
-or fall back to:
+or, when CUDA is not required and static musl is feasible, fall back to:
 
 ```text
-@motlie/models-linux-x64-gnu
+@motlie/models-linux-x64-musl
 ```
+
+A non-CUDA gnu fallback is allowed only when static musl is not feasible and the manifest enables the gnu target with glibc-floor evidence.
 
 ### Release Upload Sequence
 
@@ -618,7 +643,7 @@ The build system and release skill must not derive a name when the manifest prov
 
 Gate status values are intentionally simple: `planned`, `staged`, `complete`, `deferred`, or `failed`. `staged`, `complete`, `deferred`, and `failed` gates record at least `completed_at`, `completed_by`, `source_commit`, and structured `evidence`. These fields allow different agents or humans to pick up release work on different hosts without relying on conversational context.
 
-Gate rows are keyed by `(id, target_id)`. Target-specific platform and package work uses the target id, for example `target_id = "linux-x64-gnu"`. Global or rollup gates use `target_id = ""`; rollup rows set `rollup = true`. A rollup gate is complete only when all enabled target/channel gates it summarizes are complete or explicitly deferred.
+Gate rows are keyed by `(id, target_id)`. Target-specific platform and package work uses the target id, for example `target_id = "linux-x64-musl"`. Global or rollup gates use `target_id = ""`; rollup rows set `rollup = true`. A rollup gate is complete only when all enabled target/channel gates it summarizes are complete or explicitly deferred.
 
 Install verification is also manifest-tracked. A direct installer release should include `installer-validated` gates for each target that must run the release-pinned installer on a matching host. The rollup `installer-validated` gate is complete only after the target-specific installer checks complete or are explicitly deferred.
 
@@ -667,7 +692,25 @@ cargo_lock_policy = "must-be-committed-and-unchanged-at-final-tag"
 rust_policy = "record-rustc-and-cargo-version-in-evidence"
 darwin_cross = "cargo-zigbuild"
 darwin_cross_policy = "v0-default-for-darwin-from-linux"
-required_evidence = ["rustc -Vv", "cargo -V", "cargo zigbuild -V", "zig version"]
+linux_default_libc = "musl"
+linux_static_policy = "default-static-musl-when-feasible"
+linux_gnu_policy = "fallback-for-glibc-or-cuda-runtime"
+linux_gnu_glibc_floor_policy = "record-host-and-binary-glibc-floor-for-gnu-targets"
+required_evidence = [
+  "rustc -Vv",
+  "cargo -V",
+  "cargo zigbuild -V",
+  "zig version",
+]
+linux_musl_required_evidence = [
+  "file <binary>",
+  "ldd <binary>",
+  "readelf -d <binary>",
+]
+linux_gnu_required_evidence = [
+  "objdump -T <binary> | grep GLIBC_ | sort -u",
+  "ldd --version",
+]
 
 [signing]
 identity = "adhoc"
@@ -680,6 +723,9 @@ force_command_safe = true
 
 [archive]
 enabled = true
+linux_default_libc = "musl"
+musl_enabled = true
+gnu_enabled = false
 asset_prefix = "motlie-mmux"
 format = "tar.gz"
 binary_path = "bin/mmux"
@@ -693,6 +739,9 @@ default_source = "archive"
 
 [npm]
 enabled = true
+linux_default_libc = "musl"
+musl_enabled = true
+gnu_enabled = false
 scope = "@motlie"
 package_prefix = "mmux"
 access = "public"
@@ -708,13 +757,14 @@ formula = "mmux"
 source = "source-tag"
 
 [[target]]
-id = "linux-x64-gnu"
+id = "linux-x64-musl"
 os = "linux"
 arch = "x64"
-libc = "gnu"
-rust_target = "x86_64-unknown-linux-gnu"
-archive_asset = "motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz"
-npm_package = "@motlie/mmux-linux-x64-gnu"
+libc = "musl"
+linkage = "static"
+rust_target = "x86_64-unknown-linux-musl"
+archive_asset = "motlie-mmux-v0.1.0-linux-x64-musl.tar.gz"
+npm_package = "@motlie/mmux-linux-x64-musl"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 
@@ -841,7 +891,7 @@ This aligns Homebrew directly with Motlie archive names, but a source formula pl
 ## Open Questions
 
 - Should the first implementation publish only the `mmux` worked target, then enable other binary targets after the workflow is proven?
-- Are Linux musl builds required in v0.1?
+- Which binaries cannot use static musl and need additional `linux-*-gnu` archive/npm targets with glibc-floor evidence?
 - Should the first release enable optional GitHub Pages convenience installer URLs, or ship only version-pinned GitHub Release installer URLs until the Pages repository workflow is proven?
 - Should installer platform/CUDA detection be handwritten shell, generated from a manifest, or implemented in a helper binary?
 - Should every Motlie binary support `--version --json` and `--self-check`?

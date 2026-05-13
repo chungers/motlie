@@ -32,11 +32,24 @@ cargo_lock_policy = "must-be-committed-and-unchanged-at-final-tag"
 rust_policy = "record-rustc-and-cargo-version-in-evidence"
 darwin_cross = "cargo-zigbuild"
 darwin_cross_policy = "v0-default-for-darwin-from-linux"
+linux_default_libc = "musl"
+linux_static_policy = "default-static-musl-when-feasible"
+linux_gnu_policy = "fallback-for-glibc-or-cuda-runtime"
+linux_gnu_glibc_floor_policy = "record-host-and-binary-glibc-floor-for-gnu-targets"
 required_evidence = [
   "rustc -Vv",
   "cargo -V",
   "cargo zigbuild -V",
   "zig version",
+]
+linux_musl_required_evidence = [
+  "file <binary>",
+  "ldd <binary>",
+  "readelf -d <binary>",
+]
+linux_gnu_required_evidence = [
+  "objdump -T <binary> | grep GLIBC_ | sort -u",
+  "ldd --version",
 ]
 
 [signing]
@@ -50,6 +63,9 @@ force_command_safe = true
 
 [archive]
 enabled = true
+linux_default_libc = "musl"
+musl_enabled = true
+gnu_enabled = false
 asset_prefix = "motlie-mmux"
 format = "tar.gz"
 binary_path = "bin/mmux"
@@ -63,6 +79,9 @@ default_source = "archive"
 
 [npm]
 enabled = true
+linux_default_libc = "musl"
+musl_enabled = true
+gnu_enabled = false
 scope = "@motlie"
 package_prefix = "mmux"
 access = "public"
@@ -78,13 +97,14 @@ formula = "mmux"
 source = "source-tag"
 
 [[target]]
-id = "linux-x64-gnu"
+id = "linux-x64-musl"
 os = "linux"
 arch = "x64"
-libc = "gnu"
-rust_target = "x86_64-unknown-linux-gnu"
-archive_asset = "motlie-mmux-v0.1.0-linux-x64-gnu.tar.gz"
-npm_package = "@motlie/mmux-linux-x64-gnu"
+libc = "musl"
+linkage = "static"
+rust_target = "x86_64-unknown-linux-musl"
+archive_asset = "motlie-mmux-v0.1.0-linux-x64-musl.tar.gz"
+npm_package = "@motlie/mmux-linux-x64-musl"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 
@@ -96,13 +116,14 @@ source_commit = ""
 evidence = []
 
 [[target]]
-id = "linux-arm64-gnu"
+id = "linux-arm64-musl"
 os = "linux"
 arch = "arm64"
-libc = "gnu"
-rust_target = "aarch64-unknown-linux-gnu"
-archive_asset = "motlie-mmux-v0.1.0-linux-arm64-gnu.tar.gz"
-npm_package = "@motlie/mmux-linux-arm64-gnu"
+libc = "musl"
+linkage = "static"
+rust_target = "aarch64-unknown-linux-musl"
+archive_asset = "motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz"
+npm_package = "@motlie/mmux-linux-arm64-musl"
 archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 
@@ -174,7 +195,7 @@ evidence = []
 
 [[gate]]
 id = "linux-builds-staged"
-target_id = "linux-x64-gnu"
+target_id = "linux-x64-musl"
 channel = "archive"
 state = "planned"
 completed_at = ""
@@ -185,7 +206,7 @@ evidence = []
 
 [[gate]]
 id = "linux-builds-staged"
-target_id = "linux-arm64-gnu"
+target_id = "linux-arm64-musl"
 channel = "archive"
 state = "planned"
 completed_at = ""
@@ -298,7 +319,7 @@ evidence = []
 
 [[gate]]
 id = "installer-validated"
-target_id = "linux-x64-gnu"
+target_id = "linux-x64-musl"
 channel = "installer"
 state = "planned"
 completed_at = ""
@@ -309,7 +330,7 @@ evidence = []
 
 [[gate]]
 id = "installer-validated"
-target_id = "linux-arm64-gnu"
+target_id = "linux-arm64-musl"
 channel = "installer"
 state = "planned"
 completed_at = ""
@@ -354,7 +375,7 @@ evidence = []
 
 [[gate]]
 id = "npm-published"
-target_id = "linux-x64-gnu"
+target_id = "linux-x64-musl"
 channel = "npm"
 state = "planned"
 completed_at = ""
@@ -365,7 +386,7 @@ evidence = []
 
 [[gate]]
 id = "npm-published"
-target_id = "linux-arm64-gnu"
+target_id = "linux-arm64-musl"
 channel = "npm"
 state = "planned"
 completed_at = ""
