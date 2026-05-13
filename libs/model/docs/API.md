@@ -19,6 +19,8 @@
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshots and unit-safe wrappers. Runtime/request aggregates now live on `BundleHandle::metric_snapshot()` instead of individual responses. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-09 | @codex-researcher: Documented the current cross-platform runtime-metrics implementation. `mistral` backends and examples use `sysinfo` for current RSS on macOS and Linux, with Motlie maintaining the observed peak in-handle rather than relying on an OS-native historical peak counter. | Handle-Level Metrics, Notes |
 | 2026-04-09 | @codex-researcher: Added the second embedding slice to the quantization examples. `QuantizationSupport::without_recommended([Q8])` is now concretely exercised by the Qwen3-Embedding-0.6B bundle, while EmbeddingGemma remains unquantized. | Core Types |
+| 2026-05-11 | @codex-tool-calling: Added the typed tool-calling chat vocabulary: `ToolSpec`, `ToolInputSchema`, `ToolArguments`, `ToolChoice`, `ToolCall`, `ToolRegistry`, `ChatRole::Tool`, tool-aware `ChatRequest`/`ChatResponse` fields, and descriptive `CapabilityKind::ToolUse`. Backend adapters still gate tool-bearing requests until concrete model paths are wired and tested. | Overview, Core Types, Request Envelopes |
+| 2026-05-13 | @codex-tool-calling: Added typed Rust tool binding helpers, `Capabilities` helpers for chat/completion/tool-use combinations, and the safetensors `mistral.rs` adapter path for Qwen3/Gemma 4 tool calls. GGUF tool-bearing requests remain gated by the llama.cpp adapter. | Overview, Core Types, Request Envelopes |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -34,7 +36,7 @@ The first concrete `libs/model` API now includes:
 - `ArtifactPolicy`
 - `ModelError`
 - `EmbeddingDistance`, `EmbeddingNormalization`, `EmbeddingSpec`, and `Embedding`
-- request/response envelopes for chat, completion, and embeddings
+- request/response envelopes for chat, tool-aware chat, completion, and embeddings
 - the `ModelBundle`, `BundleHandle`, `ChatModel`, `CompletionModel`, and `EmbeddingModel` traits
 - lightweight eval types in `model::eval`
 
@@ -44,7 +46,7 @@ Important scope note:
 
 - this API covers the embedding vertical slice, the first text-only chat slice (Qwen3-4B), and the first multimodal chat slice (Gemma 4 E2B-it)
 - `QuantizationBits` has been added to `StartOptions` for ISQ quantization of local chat models
-- remaining planned additive extensions are tracked in `DESIGN.md` / `PLAN.md`, including `ChatRole::Tool` and richer `ChatResponse` metadata
+- the core tool-calling chat vocabulary is present; safetensors Qwen3/Gemma 4 advertise `CapabilityKind::ToolUse` after `mistral.rs` adapter tests, while GGUF variants remain gated until llama.cpp chat-template validation lands
 
 For the current vertical slice, this contract is intended to support an end-to-end flow of:
 
@@ -88,9 +90,18 @@ Primary capability request/response types:
 - `ChatRole`
 - `ContentPart`
 - `ChatMessage`
+- `ToolName`
+- `ToolInputSchema`
+- `ToolSpec`
+- `ToolArguments`
+- `ToolChoice`
+- `ToolCall`
+- `ToolRegistry`
 - `GenerationParams`
 - `ChatRequest`
 - `ChatResponse`
+- `ChatFinishReason`
+- `GenerationUsage`
 - `CompletionRequest`
 - `CompletionResponse`
 - `EmbeddingRequest`
@@ -98,8 +109,9 @@ Primary capability request/response types:
 
 Known near-term additive follow-ups for chat-capable bundles:
 
-- `ChatRole::Tool`
-- richer `ChatResponse` metadata
+- backend adapters that map the common tool vocabulary into `llama.cpp`; the safetensors `mistral.rs` path is implemented for Qwen3/Gemma 4
+- curated descriptor gating for `CapabilityKind::ToolUse`
+- optional examples that demonstrate caller-owned tool execution loops
 
 Primary traits:
 
@@ -208,6 +220,11 @@ runtime behavior.
 
 `Capabilities::new(...)` canonicalizes descriptors by `CapabilityKind`: the first descriptor for a kind wins, later duplicates are dropped, and `supports(...)` always reflects exactly the descriptor set stored in the struct.
 
+Common helpers include `Capabilities::chat_and_completion()`,
+`Capabilities::chat_completion_and_tool_use()`,
+`Capabilities::multimodal_chat_and_vision()`, and
+`Capabilities::multimodal_chat_vision_and_tool_use()`.
+
 ### Request Envelopes
 
 ```rust
@@ -230,6 +247,7 @@ let chat = ChatRequest {
         max_tokens: Some(256),
         ..Default::default()
     },
+    ..Default::default()
 };
 
 let completion = CompletionRequest {
@@ -240,6 +258,56 @@ let completion = CompletionRequest {
 let embeddings = EmbeddingRequest {
     inputs: vec!["motlie model bundle".into(), "deterministic package bundle".into()],
 };
+```
+
+Tool-aware chat uses typed Rust argument structs and generated JSON Schema.
+Tool inputs are object-shaped; bind named argument structs rather than scalar
+or tuple payloads.
+
+```rust
+use motlie_model::{ChatRequest, ToolChoice, ToolError, ToolRegistry};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, JsonSchema)]
+struct AddArgs {
+    left: i64,
+    right: i64,
+}
+
+#[derive(Serialize)]
+struct AddOutput {
+    value: i64,
+}
+
+async fn add(args: AddArgs) -> Result<AddOutput, ToolError> {
+    Ok(AddOutput {
+        value: args.left + args.right,
+    })
+}
+
+let mut registry = ToolRegistry::new();
+registry.insert_fn("add", "Add two signed integers.", add)?;
+
+let chat = ChatRequest {
+    tools: registry.specs(),
+    tool_choice: Some(ToolChoice::Auto),
+    ..Default::default()
+};
+```
+
+An inline closure uses the same typed binding path:
+
+```rust
+registry.insert_fn(
+    "multiply",
+    "Multiply two signed integers.",
+    |args: AddArgs| async move {
+        Ok(AddOutput {
+            value: args.left * args.right,
+        })
+    },
+)?;
 ```
 
 ### Trait Shapes

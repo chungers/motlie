@@ -5191,6 +5191,9 @@ name = "motlie-model"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
@@ -5232,6 +5235,7 @@ dependencies = [
  "image",
  "mistralrs",
  "motlie-model",
+ "serde_json",
  "sysinfo",
  "tokio",
  "tracing",
@@ -5330,6 +5334,8 @@ dependencies = [
  "motlie-model-sherpa-onnx",
  "motlie-model-whisper-cpp",
  "motlie-voice",
+ "schemars 1.2.1",
+ "serde",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",

@@ -13,10 +13,11 @@ use motlie_model::{
 };
 
 use crate::common::{
-    RuntimeMetricState, TextMetricState, apply_generation_params, configure_artifact_policy,
-    lock_metrics, map_chat_role, map_quantization_bits, observe_latency, observe_memory,
-    observe_text_usage, paged_attn_context_size, resolve_local_checkpoint, should_force_cpu,
-    snapshot_text_metrics,
+    apply_generation_params, apply_tools, configure_artifact_policy, lock_metrics, map_chat_role,
+    map_quantization_bits, mistral_response_to_chat_response, motlie_tool_call_to_mistral,
+    observe_latency, observe_memory, observe_text_usage, paged_attn_context_size,
+    resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics, RuntimeMetricState,
+    TextMetricState,
 };
 
 const MISTRAL_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -53,7 +54,7 @@ impl MistralTextSpec {
             display_name: "Qwen3 4B",
             model_id: "Qwen/Qwen3-4B",
             arch: MistralTextArch::Qwen3,
-            capabilities: Capabilities::chat_and_completion(),
+            capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Four,
@@ -200,6 +201,31 @@ enum TextRuntime {
     Stub(StubTextRuntime),
 }
 
+#[cfg(test)]
+struct StubTextRuntime;
+
+#[cfg(test)]
+impl StubTextRuntime {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        let prompt = request
+            .messages
+            .last()
+            .and_then(|m| m.content.first())
+            .and_then(|part| match part {
+                motlie_model::ContentPart::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Ok(ChatResponse::text(format!("stub response to: {prompt}")))
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        Ok(CompletionResponse {
+            content: format!("stub completion of: {}", request.prompt),
+        })
+    }
+}
+
 impl TextRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         match self {
@@ -238,16 +264,18 @@ impl MistralTextRuntime {
         let elapsed = started_at.elapsed();
 
         let usage = response.usage.clone();
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|choice| choice.message.content)
-            .ok_or_else(|| ModelError::BackendExecution {
-                backend: "mistralrs",
-                operation: "send_chat_request",
-                message: "response contained no text content".into(),
-            })?;
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| ModelError::BackendExecution {
+                    backend: "mistralrs",
+                    operation: "send_chat_request",
+                    message: "response contained no choices".into(),
+                })?;
+        let response =
+            mistral_response_to_chat_response(choice.message, choice.finish_reason, &usage)?;
 
         {
             let mut metrics = lock_metrics(&self.metrics, "mistral-text-chat");
@@ -255,7 +283,7 @@ impl MistralTextRuntime {
             observe_text_usage(&mut metrics.text, &usage);
         }
 
-        Ok(ChatResponse { content })
+        Ok(response)
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
@@ -265,6 +293,7 @@ impl MistralTextRuntime {
                 request.prompt,
             )],
             params: request.params,
+            ..Default::default()
         };
         let chat_response = self.chat(chat_request).await?;
         Ok(CompletionResponse {
@@ -276,8 +305,34 @@ impl MistralTextRuntime {
 fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelError> {
     let mut builder = RequestBuilder::new();
     for msg in &request.messages {
-        builder = builder.add_message(map_chat_role(msg.role), collect_text_only_message(msg)?);
+        let text = collect_text_only_message(msg)?;
+        builder = match msg.role {
+            ChatRole::Tool => {
+                let tool_call_id = msg.tool_call_id.as_ref().ok_or_else(|| {
+                    ModelError::InvalidConfiguration(
+                        "tool messages require `tool_call_id` metadata".into(),
+                    )
+                })?;
+                builder.add_tool_message(text, tool_call_id)
+            }
+            ChatRole::Assistant if !msg.tool_calls.is_empty() => {
+                let tool_calls = msg
+                    .tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| motlie_tool_call_to_mistral(index, call))
+                    .collect();
+                builder.add_message_with_tool_call(map_chat_role(msg.role), text, tool_calls)
+            }
+            ChatRole::System | ChatRole::User if !msg.tool_calls.is_empty() => {
+                return Err(ModelError::InvalidConfiguration(
+                    "only assistant messages may carry tool calls".into(),
+                ));
+            }
+            _ => builder.add_message(map_chat_role(msg.role), text),
+        };
     }
+    let builder = apply_tools(builder, request)?;
     Ok(apply_generation_params(builder, &request.params))
 }
 
@@ -475,34 +530,6 @@ mod tests {
         ArtifactPolicy, BackendAdapter, BackendKind, QuantizationBits, StartOptions,
     };
 
-    struct StubTextRuntime;
-
-    impl StubTextRuntime {
-        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-            let prompt = request
-                .messages
-                .last()
-                .and_then(|m| m.content.first())
-                .and_then(|part| match part {
-                    motlie_model::ContentPart::Text(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            Ok(ChatResponse {
-                content: format!("stub response to: {prompt}"),
-            })
-        }
-
-        async fn complete(
-            &self,
-            request: CompletionRequest,
-        ) -> Result<CompletionResponse, ModelError> {
-            Ok(CompletionResponse {
-                content: format!("stub completion of: {}", request.prompt),
-            })
-        }
-    }
-
     #[test]
     fn qwen3_spec_has_expected_identity() {
         let spec = MistralTextSpec::qwen3_4b();
@@ -513,6 +540,7 @@ mod tests {
         assert_eq!(spec.arch, MistralTextArch::Qwen3);
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
         assert!(!spec.capabilities.supports(CapabilityKind::Embeddings));
     }
 
@@ -525,7 +553,10 @@ mod tests {
             &[CheckpointFormat::Safetensors]
         );
         assert_eq!(adapter.backend_kind(), BackendKind::MistralRs);
-        assert_eq!(adapter.capabilities(), &Capabilities::chat_and_completion());
+        assert_eq!(
+            adapter.capabilities(),
+            &Capabilities::chat_completion_and_tool_use()
+        );
         assert_eq!(
             adapter.quantization().recommended(),
             Some(QuantizationBits::Four)
@@ -538,7 +569,7 @@ mod tests {
             descriptor: LoadedBundleDescriptor {
                 id: BundleId::new("qwen3_4b"),
                 display_name: "Qwen3 4B".into(),
-                capabilities: Capabilities::chat_and_completion(),
+                capabilities: Capabilities::chat_completion_and_tool_use(),
                 quantization: QuantizationSupport::with_recommended(
                     [QuantizationBits::Four, QuantizationBits::Eight],
                     QuantizationBits::Four,
@@ -552,6 +583,7 @@ mod tests {
 
         assert!(handle.supports(CapabilityKind::Chat));
         assert!(handle.supports(CapabilityKind::Completion));
+        assert!(handle.supports(CapabilityKind::ToolUse));
         assert!(!handle.supports(CapabilityKind::Embeddings));
         assert!(matches!(
             handle.embeddings(),

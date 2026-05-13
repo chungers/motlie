@@ -184,7 +184,7 @@ pub fn should_force_cpu() -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();

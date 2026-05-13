@@ -100,8 +100,8 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::CapabilityDescriptor;
     use motlie_model::eval::EvalTrack;
+    use motlie_model::CapabilityDescriptor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -114,16 +114,12 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Chat)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Completion)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Chat));
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Completion));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[

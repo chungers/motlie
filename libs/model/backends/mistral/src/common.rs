@@ -2,15 +2,18 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use mistralrs::core::StopTokens;
-use mistralrs::core::Usage;
-use mistralrs::{IsqBits, RequestBuilder, SamplingParams};
-use motlie_model::{
-    ArtifactPolicy, ArtifactSource, Bytes, ChatRole, CheckpointFormat, EmbeddingMetrics,
-    GenerationParams, Milliseconds, ModelError, ModelMetricSnapshot, QuantizationBits,
-    ResolvedCheckpoint, RuntimeMetrics, StartOptions, TextGenerationMetrics, Tokens,
-    TokensPerSecond,
+use mistralrs::core::{StopTokens, Usage};
+use mistralrs::{
+    CalledFunction, Function, IsqBits, RequestBuilder, ResponseMessage, SamplingParams, Tool,
+    ToolCallResponse, ToolCallType, ToolChoice as MistralToolChoice, ToolType,
 };
+use motlie_model::{
+    ArtifactPolicy, ArtifactSource, Bytes, ChatFinishReason, ChatResponse, ChatRole,
+    CheckpointFormat, EmbeddingMetrics, GenerationParams, GenerationUsage, Milliseconds,
+    ModelError, ModelMetricSnapshot, QuantizationBits, ResolvedCheckpoint, RuntimeMetrics,
+    StartOptions, TextGenerationMetrics, Tokens, TokensPerSecond,
+};
+use serde_json::Value;
 
 pub(crate) struct ConfiguredBuilder {
     pub(crate) model_target: String,
@@ -97,6 +100,7 @@ pub(crate) fn map_chat_role(role: ChatRole) -> mistralrs::TextMessageRole {
         ChatRole::System => mistralrs::TextMessageRole::System,
         ChatRole::User => mistralrs::TextMessageRole::User,
         ChatRole::Assistant => mistralrs::TextMessageRole::Assistant,
+        ChatRole::Tool => mistralrs::TextMessageRole::Tool,
     }
 }
 
@@ -119,6 +123,157 @@ pub(crate) fn apply_generation_params(
         sampling.stop_toks = Some(StopTokens::Seqs(params.stop_sequences.clone()));
     }
     builder.set_sampling(sampling)
+}
+
+pub(crate) fn apply_tools(
+    builder: RequestBuilder,
+    request: &motlie_model::ChatRequest,
+) -> Result<RequestBuilder, ModelError> {
+    if request.tools.is_empty() {
+        return match &request.tool_choice {
+            None | Some(motlie_model::ToolChoice::None) => Ok(builder),
+            Some(_) => Err(ModelError::InvalidConfiguration(
+                "`tool_choice` requires at least one tool".into(),
+            )),
+        };
+    }
+
+    let tools = request
+        .tools
+        .iter()
+        .map(motlie_tool_spec_to_mistral)
+        .collect::<Result<Vec<_>, _>>()?;
+    let tool_choice = motlie_tool_choice_to_mistral(request.tool_choice.as_ref(), &request.tools)?;
+
+    Ok(builder.set_tools(tools).set_tool_choice(tool_choice))
+}
+
+pub(crate) fn motlie_tool_spec_to_mistral(
+    spec: &motlie_model::ToolSpec,
+) -> Result<Tool, ModelError> {
+    let parameters = spec
+        .input_schema
+        .to_json_value()
+        .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
+    let parameters = serde_json::from_value::<std::collections::HashMap<String, Value>>(parameters)
+        .map_err(|err| {
+            ModelError::InvalidConfiguration(format!(
+                "failed to convert tool schema for `{}` to mistral.rs parameters: {err}",
+                spec.name
+            ))
+        })?;
+
+    Ok(Tool {
+        tp: ToolType::Function,
+        function: Function {
+            description: Some(spec.description.clone()),
+            name: spec.name.as_str().to_string(),
+            parameters: Some(parameters),
+        },
+    })
+}
+
+pub(crate) fn motlie_tool_call_to_mistral(
+    index: usize,
+    call: &motlie_model::ToolCall,
+) -> ToolCallResponse {
+    ToolCallResponse {
+        index,
+        id: call.id.clone(),
+        tp: ToolCallType::Function,
+        function: CalledFunction {
+            name: call.name.as_str().to_string(),
+            arguments: call.arguments.raw_json_str().to_string(),
+        },
+    }
+}
+
+pub(crate) fn mistral_response_to_chat_response(
+    message: ResponseMessage,
+    finish_reason: String,
+    usage: &Usage,
+) -> Result<ChatResponse, ModelError> {
+    let raw_message = serde_json::to_string(&message).ok();
+    let tool_calls = message
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(mistral_tool_call_to_motlie)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let content = message.content.unwrap_or_default();
+    if content.is_empty() && tool_calls.is_empty() {
+        return Err(ModelError::BackendExecution {
+            backend: "mistralrs",
+            operation: "send_chat_request",
+            message: "response contained neither text content nor tool calls".into(),
+        });
+    }
+
+    let finish_reason = if !tool_calls.is_empty() {
+        Some(ChatFinishReason::ToolCalls)
+    } else {
+        map_finish_reason(&finish_reason)
+    };
+
+    Ok(ChatResponse {
+        content,
+        tool_calls,
+        finish_reason,
+        reasoning: message.reasoning_content,
+        usage: Some(GenerationUsage {
+            prompt_tokens: Some(usage.prompt_tokens as u32),
+            completion_tokens: Some(usage.completion_tokens as u32),
+            total_tokens: Some(usage.total_tokens as u32),
+        }),
+        raw_message,
+    })
+}
+
+fn motlie_tool_choice_to_mistral(
+    choice: Option<&motlie_model::ToolChoice>,
+    specs: &[motlie_model::ToolSpec],
+) -> Result<MistralToolChoice, ModelError> {
+    match choice {
+        None | Some(motlie_model::ToolChoice::Auto) => Ok(MistralToolChoice::Auto),
+        Some(motlie_model::ToolChoice::None) => Ok(MistralToolChoice::None),
+        Some(motlie_model::ToolChoice::Required) => Err(ModelError::InvalidConfiguration(
+            "mistral.rs backend does not expose required tool-choice enforcement".into(),
+        )),
+        Some(motlie_model::ToolChoice::Named(name)) => {
+            let spec = specs
+                .iter()
+                .find(|spec| spec.name.as_str() == name.as_str())
+                .ok_or_else(|| {
+                    ModelError::InvalidConfiguration(format!(
+                        "named tool choice `{name}` does not match a request tool"
+                    ))
+                })?;
+            Ok(MistralToolChoice::Tool(motlie_tool_spec_to_mistral(spec)?))
+        }
+    }
+}
+
+fn mistral_tool_call_to_motlie(
+    call: ToolCallResponse,
+) -> Result<motlie_model::ToolCall, ModelError> {
+    motlie_model::ToolCall::from_json_args(call.id, call.function.name, call.function.arguments)
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "mistralrs",
+            operation: "parse_tool_call",
+            message: err.to_string(),
+        })
+}
+
+fn map_finish_reason(reason: &str) -> Option<ChatFinishReason> {
+    match reason {
+        "" => None,
+        "stop" => Some(ChatFinishReason::Stop),
+        "length" => Some(ChatFinishReason::Length),
+        "tool_calls" => Some(ChatFinishReason::ToolCalls),
+        "content_filter" => Some(ChatFinishReason::ContentFilter),
+        other => Some(ChatFinishReason::Other(other.to_string())),
+    }
 }
 
 pub(crate) fn lock_metrics<'a, T>(mutex: &'a Mutex<T>, context: &'static str) -> MutexGuard<'a, T> {
@@ -290,7 +445,7 @@ fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64
 }
 
 fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();
@@ -312,6 +467,91 @@ fn max_opt_u64(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
 mod tests {
     use super::*;
     use mistralrs::core::Usage;
+
+    fn usage() -> Usage {
+        Usage {
+            completion_tokens: 7,
+            prompt_tokens: 11,
+            total_tokens: 18,
+            avg_tok_per_sec: 0.0,
+            avg_prompt_tok_per_sec: 0.0,
+            avg_compl_tok_per_sec: 0.0,
+            total_time_sec: 0.0,
+            total_prompt_time_sec: 0.0,
+            total_completion_time_sec: 0.0,
+        }
+    }
+
+    #[test]
+    fn tool_spec_maps_to_mistral_tool_schema() {
+        let spec = motlie_model::ToolSpec::from_json_schema(
+            "get_weather",
+            "Get weather.",
+            r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#,
+        )
+        .expect("schema should be valid");
+
+        let tool = motlie_tool_spec_to_mistral(&spec).expect("tool should map");
+
+        assert_eq!(tool.function.name, "get_weather");
+        assert_eq!(tool.function.description.as_deref(), Some("Get weather."));
+        assert_eq!(
+            tool.function
+                .parameters
+                .as_ref()
+                .and_then(|params| params.get("type"))
+                .and_then(Value::as_str),
+            Some("object")
+        );
+    }
+
+    #[test]
+    fn tool_call_round_trips_between_contract_and_mistral_shape() {
+        let call = motlie_model::ToolCall::from_json_args(
+            "call-1",
+            "get_weather",
+            r#"{"city":"Seattle"}"#,
+        )
+        .expect("tool call should be valid");
+
+        let mistral_call = motlie_tool_call_to_mistral(0, &call);
+        let mapped = mistral_tool_call_to_motlie(mistral_call).expect("call should map back");
+
+        assert_eq!(mapped.id, "call-1");
+        assert_eq!(mapped.name.as_str(), "get_weather");
+        assert_eq!(mapped.arguments.raw_json_str(), r#"{"city":"Seattle"}"#);
+    }
+
+    #[test]
+    fn response_with_tool_calls_maps_to_chat_response() {
+        let message = ResponseMessage {
+            content: None,
+            role: "assistant".to_string(),
+            tool_calls: Some(vec![ToolCallResponse {
+                index: 0,
+                id: "call-1".to_string(),
+                tp: ToolCallType::Function,
+                function: CalledFunction {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Seattle"}"#.to_string(),
+                },
+            }]),
+            reasoning_content: Some("thinking".to_string()),
+        };
+
+        let response =
+            mistral_response_to_chat_response(message, "tool_calls".to_string(), &usage())
+                .expect("response should map");
+
+        assert_eq!(response.finish_reason, Some(ChatFinishReason::ToolCalls));
+        assert_eq!(response.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            response.usage.as_ref().and_then(|usage| usage.total_tokens),
+            Some(18)
+        );
+        assert!(response.raw_message.is_some());
+    }
 
     #[test]
     fn text_metrics_aggregate_tokens_per_second_across_requests() {

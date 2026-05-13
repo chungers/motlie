@@ -56,6 +56,8 @@ thiserror.workspace = true
 anyhow.workspace = true
 hound = "3.5"
 libc = "0.2"
+schemars.workspace = true
+serde.workspace = true
 sysinfo = "0.36.1"
 tokio.workspace = true
 
@@ -72,6 +74,10 @@ required-features = ["model-google-gemma-300m", "model-qwen3-embedding-06b"]
 name = "chat_mistral_qwen3"
 path = "examples/chat_mistral_qwen3/main.rs"
 required-features = ["model-qwen3-4b"]
+
+[[example]]
+name = "chat_tool_binding"
+path = "examples/chat_tool_binding/main.rs"
 
 [[example]]
 name = "chat_multimodal_gemma4"

@@ -140,26 +140,18 @@ mod tests {
             variant.quantization.recommended(),
             Some(motlie_model::QuantizationBits::Five)
         );
-        assert!(
-            variant
-                .quantization
-                .supports(motlie_model::QuantizationBits::Four)
-        );
-        assert!(
-            variant
-                .quantization
-                .supports(motlie_model::QuantizationBits::Five)
-        );
-        assert!(
-            variant
-                .quantization
-                .supports(motlie_model::QuantizationBits::Eight)
-        );
-        assert!(
-            !variant
-                .quantization
-                .supports(motlie_model::QuantizationBits::FloatEight)
-        );
+        assert!(variant
+            .quantization
+            .supports(motlie_model::QuantizationBits::Four));
+        assert!(variant
+            .quantization
+            .supports(motlie_model::QuantizationBits::Five));
+        assert!(variant
+            .quantization
+            .supports(motlie_model::QuantizationBits::Eight));
+        assert!(!variant
+            .quantization
+            .supports(motlie_model::QuantizationBits::FloatEight));
     }
 
     #[test]
