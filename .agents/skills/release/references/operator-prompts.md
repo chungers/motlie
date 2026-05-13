@@ -14,6 +14,7 @@ Every prompt should include:
 - current branch and git cleanliness
 - current manifest `state`
 - next incomplete gate
+- `target_id` when the gate is target-specific
 - host/platform required
 - exact branch or PR to pull
 - command group to run or files to update
@@ -31,6 +32,7 @@ Prompt:
 Action:
 
 - Fill missing release target fields.
+- If a channel is disabled, mark that channel's gates `deferred` at coordination-PR-open time with `deferred_reason = "channel disabled"`.
 - Do not create tags, releases, registry packages, or tap changes.
 
 ## Coordination PR
@@ -46,19 +48,20 @@ Action:
 - Update or create `releases/<bin>/<version>.toml`.
 - Update or create `releases/<bin>/<version>.md`.
 - Record PR URL and source commit in the manifest gate after the PR exists.
+- Use `merge_strategy = "merge-commit"` in the manifest so sub-PR evidence remains visible after the coordination PR merges.
 
 ## Linux Staging
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is <linux-gate>. This requires a Linux host. Pull <release-branch>, build <cargo-package>/<cargo-bin>, verify artifact names from the manifest, and update manifest evidence through a sub-PR to <release-branch>.
+@<identity> <datetime> -- Next gate is <linux-gate> for target_id=<target-id>. This requires a Linux host. Pull <release-branch>, build <cargo-package>/<cargo-bin> for <rust-target>, verify artifact names from the manifest, record toolchain evidence, and update manifest evidence through a sub-PR to <release-branch>.
 ```
 
 Action:
 
 - Use explicit manifest names such as `archive_asset` and `archive_binary_path`.
-- Record source commit, checksums if generated, command notes, and evidence.
+- Record source commit, checksums if generated, command notes, `rustc -Vv`, `cargo -V`, and target status evidence.
 - Do not commit build outputs.
 
 ## macOS Signing
@@ -66,13 +69,13 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is <darwin-gate>. This requires macOS. Pull <release-branch>, run build-path and installed-path codesign checks, then update manifest evidence through a sub-PR to <release-branch>.
+@<identity> <datetime> -- Next gate is <darwin-gate> for target_id=<target-id>. This requires macOS. Pull <release-branch>, build with --target <rust-target>, run build-path and installed-path codesign checks, then update manifest evidence through a sub-PR to <release-branch>.
 ```
 
 Action:
 
 - Use `.agents/skills/release/references/macos-signing.md`.
-- Record `completed_at`, `completed_by`, `source_commit`, and evidence.
+- Record `completed_at`, `completed_by`, `source_commit`, `rust_target`, signing identity, and evidence.
 - If the final tag commit later differs, repeat or revalidate signing from the final tag.
 
 ## npm Staging
@@ -80,7 +83,7 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is npm staging. I will generate native npm package candidates using manifest package names and bin paths, run npm pack dry-runs, and update manifest evidence. I will not publish to npm without explicit approval.
+@<identity> <datetime> -- Next gate is npm staging for target_id=<target-id>. I will generate the native npm package candidate using the manifest package name and bin path, run npm pack dry-run, and update manifest evidence. I will not publish to npm without explicit approval.
 ```
 
 Action:
@@ -115,6 +118,7 @@ Action:
 
 - Do not merge without human approval.
 - Call out any `planned` or `failed` gates.
+- Use a merge commit. Do not squash or rebase the release coordination branch.
 
 ## Final Tag and GitHub Release
 
@@ -127,6 +131,7 @@ Prompt:
 Action:
 
 - Verify `Cargo.toml`, manifest version, and manifest tag.
+- Verify `Cargo.lock` is committed and unchanged at the final tag.
 - Create and push the tag only after approval.
 - Build final artifacts from the tag.
 - Use manifest asset names for upload.

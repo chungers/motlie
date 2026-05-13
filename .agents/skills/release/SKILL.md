@@ -39,6 +39,7 @@ Worked example:
 BIN=mmux
 CARGO_PACKAGE=motlie-mmux
 CARGO_BIN=mmux
+VERSION=0.1.0
 INSTALL_PATH=/usr/local/bin/mmux
 FORMULA=mmux
 NPM_PREFIX=@motlie/mmux
@@ -85,11 +86,11 @@ To stage macOS signing from another host:
 gh pr checkout <release-pr-number>
 git switch release/<bin>-v<version>
 git pull --ff-only
-cargo build --release --locked -p <cargo-package> --bin <cargo-bin>
-codesign --force --sign - target/release/<bin>
-codesign --verify --strict --verbose=2 target/release/<bin>
-target/release/<bin> --version
-sudo install -m 755 target/release/<bin> <install-path>
+cargo build --release --locked --target <rust-target> -p <cargo-package> --bin <cargo-bin>
+codesign --force --sign - target/<rust-target>/release/<bin>
+codesign --verify --strict --verbose=2 target/<rust-target>/release/<bin>
+target/<rust-target>/release/<bin> --version
+sudo install -m 755 target/<rust-target>/release/<bin> <install-path>
 sudo codesign --force --sign - <install-path>
 codesign --verify --strict --verbose=2 <install-path>
 <install-path> --version
@@ -116,8 +117,15 @@ GitHub constraints:
 Manifest status rules:
 
 - Gate state values are `planned`, `staged`, `complete`, `deferred`, or `failed`.
-- Completed gates should record `completed_at`, `completed_by`, `source_commit`, and `evidence`.
+- `staged`, `complete`, `deferred`, and `failed` gates must record `completed_at`, `completed_by`, `source_commit`, and `evidence`.
+- Per-target status is a struct at `[target.status]`; do not use a bare status string.
+- Gate rows are keyed by `(id, target_id)`. Use `target_id = ""` only for global gates or explicit rollups. Rollup rows set `rollup = true` and summarize target-specific rows.
+- Rollup gates are complete only when all enabled target/channel gates they summarize are complete or explicitly deferred.
+- Channel-disabled gates are marked `deferred` at coordination-PR-open time with `deferred_reason`.
+- Evidence entries use `{ kind, ref, sha256?, note? }`; include toolchain versions for build and signing gates.
 - Status fields are evidence only; intent fields drive artifact names, package names, binary paths, and installer behavior.
+- The v0 Darwin-from-Linux toolchain is `cargo-zigbuild`; record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version` in evidence.
+- Use merge commits for the coordination PR; do not squash or rebase the release branch because the merge history preserves sub-PR evidence.
 
 Operator prompt workflow:
 
@@ -141,6 +149,7 @@ Hard requirements:
 - native npm packages expose the requested binary directly; do not add a Node boot script.
 - if the manifest says `runner = "native-binary"` and `node_launcher = false`, do not create `<bin>.js` or `<bin>.sh` as the npm runtime entrypoint.
 - direct installers for host/SSH-safe binaries default to archive mode, not npm mode.
+- if `force_command_safe = false`, archive mode is not mandatory for host login safety, but native binaries and explicit runtime paths are still required.
 - Darwin binaries must be signed and verified from their installed path.
 - npm auth is needed only at `npm publish` time unless trusted publishing is configured.
 - release artifacts, npm packages, installer scripts, and Homebrew formulae must all trace back to the same source tag.

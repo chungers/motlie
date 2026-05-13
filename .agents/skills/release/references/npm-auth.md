@@ -18,6 +18,7 @@ Preferred path:
 - use npm trusted publishing from GitHub Actions
 - configure package publishing in npm for the release workflow
 - require `permissions.id-token: write`
+- keep npm provenance enabled; trusted publishing can attach registry provenance to the published package without a long-lived token
 - do not store a long-lived npm token
 
 Fallback bootstrap path:
@@ -72,4 +73,4 @@ steps:
     working-directory: ${PACKAGE_DIR}
 ```
 
-Do not print token values, commit `.npmrc` with credentials, or reuse personal all-access tokens.
+For each `npm-published` gate, record the package name, version, registry URL, provenance mode, and install-test evidence in the manifest. Do not print token values, commit `.npmrc` with credentials, or reuse personal all-access tokens.

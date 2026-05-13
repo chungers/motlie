@@ -6,17 +6,22 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Release skill inspected `MANIFEST` and identified the next incomplete gate before taking action.
 - [ ] Human prompt included current state, next gate, required platform, branch or PR to pull, files to update, and approval needed.
 - [ ] Release coordination branch created from `main`.
-- [ ] `releases/<bin>/<version>.toml` committed with deterministic intent, explicit names, target matrix, and gates.
+- [ ] `releases/<bin>/<version>.toml` committed with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
 - [ ] `releases/<bin>/<version>.md` committed as the release-note source.
+- [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.
 - [ ] Coordination PR opened against `main`.
 - [ ] Platform/channel sub-PRs opened against the release branch as needed.
-- [ ] Sub-PRs update manifest status with source commit, timestamp, actor, and evidence links.
+- [ ] Sub-PRs update manifest status with source commit, timestamp, actor, target id, channel, and evidence links.
 - [ ] Each gate handoff is reconstructable from manifest evidence and PR comments.
+- [ ] Evidence entries follow `{ kind, ref, sha256?, note? }`.
 - [ ] Build outputs are not committed to git.
+- [ ] `Cargo.lock` is committed and unchanged at the final tag.
+- [ ] Build evidence records `rustc -Vv`, `cargo -V`, and any cross-build toolchain versions.
+- [ ] Darwin-from-Linux evidence uses the v0 default `cargo-zigbuild` or records an approved exception.
 - [ ] Manifest confirms native npm mode when required, for example `runner = "native-binary"` and `node_launcher = false`.
 - [ ] macOS signing evidence is recorded for Darwin targets that require it.
 - [ ] Coordination PR is up to date with `main`.
-- [ ] Coordination PR merged to `main`.
+- [ ] Coordination PR merged to `main` with a merge commit, not squash or rebase.
 - [ ] Final source tag pushed from `main`.
 - [ ] Final artifacts built from the final source tag.
 - [ ] Final Darwin artifacts signed and verified from the installed path.
