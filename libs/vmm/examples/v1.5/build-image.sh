@@ -31,6 +31,9 @@ die() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND="${MOTLIE_V15_BUILD_BACKEND:-auto}"
 ARGS=()
+# macOS still ships old Bash in common environments; keep an explicit count so
+# the no-arg path never expands an empty array under `set -u`.
+ARG_COUNT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,6 +52,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             ARGS+=("$1")
+            ARG_COUNT=$(( ARG_COUNT + 1 ))
             shift
             ;;
     esac
@@ -64,10 +68,16 @@ fi
 
 case "$BACKEND" in
     vz|apple-vz|apple_virtualization)
-        exec /bin/zsh "$SCRIPT_DIR/build-guest.sh" "${ARGS[@]}"
+        if [[ "$ARG_COUNT" -gt 0 ]]; then
+            exec /bin/zsh "$SCRIPT_DIR/build-guest.sh" "${ARGS[@]}"
+        fi
+        exec /bin/zsh "$SCRIPT_DIR/build-guest.sh"
         ;;
     ch|cloud-hypervisor|cloud_hypervisor)
-        exec /usr/bin/env bash "$SCRIPT_DIR/build-ch-artifacts.sh" "${ARGS[@]}"
+        if [[ "$ARG_COUNT" -gt 0 ]]; then
+            exec /usr/bin/env bash "$SCRIPT_DIR/build-ch-artifacts.sh" "${ARGS[@]}"
+        fi
+        exec /usr/bin/env bash "$SCRIPT_DIR/build-ch-artifacts.sh"
         ;;
     *)
         die "unsupported backend '$BACKEND' (expected auto, vz, or ch)"
