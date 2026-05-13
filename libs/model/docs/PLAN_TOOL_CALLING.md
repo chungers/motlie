@@ -12,6 +12,7 @@
 |------|-----|---------|
 | 2026-05-11 | @codex-tool-calling | Initial staged plan for the unified tool-calling API contract, backend adapters, curated capability gating, and validation work. |
 | 2026-05-13 | @codex-tool-calling | Implemented the core typed Rust tool binding contract, added examples, wired the `mistral.rs` text/multimodal request and response adapter, and enabled `ToolUse` on the safetensors Qwen3/Gemma 4 curated descriptors. |
+| 2026-05-13 | @codex-tool-calling | Wired the llama.cpp GGUF tool-aware path through OpenAI-compatible message/tool JSON, chat-template rendering, grammar sampling, response parsing, and the GGUF live example switch. GGUF `ToolUse` descriptors remain gated pending artifact smoke validation. |
 
 Derived from [DESIGN_TOOL_CALLING.md](./DESIGN_TOOL_CALLING.md). This plan covers the work needed to make Gemma 4, Qwen3, and Qwen3.6 tool calling available through the existing `ChatModel` surface.
 
@@ -181,24 +182,28 @@ Files:
 
 Tasks:
 
-- [ ] Convert Motlie `ChatMessage` values to OpenAI-compatible JSON messages.
-- [ ] Convert Motlie `ToolSpec` values to OpenAI-compatible JSON tools.
-- [ ] Load the model chat template through `LlamaModel::chat_template(None)`.
-- [ ] Use `OpenAIChatTemplateParams` for tool-aware requests.
-- [ ] Feed returned grammar metadata into generation when present.
-- [ ] Parse generated output with `ChatTemplateResult::parse_response_oaicompat`.
-- [ ] Map parsed tool calls into `ChatResponse.tool_calls`.
-- [ ] Preserve the current image rejection behavior for text-only GGUF handles.
-- [ ] Decide whether to move all no-tool chat requests to the model template path or keep the current hand formatter for the first PR.
+- [x] Convert Motlie `ChatMessage` values to OpenAI-compatible JSON messages.
+- [x] Convert Motlie `ToolSpec` values to OpenAI-compatible JSON tools.
+- [x] Load the model chat template through `LlamaModel::chat_template(None)`.
+- [x] Use `OpenAIChatTemplateParams` for tool-aware requests.
+- [x] Feed returned grammar metadata into generation when present.
+- [x] Parse generated output with `ChatTemplateResult::parse_response_oaicompat`.
+- [x] Map parsed tool calls into `ChatResponse.tool_calls`.
+- [x] Preserve the current image rejection behavior for text-only GGUF handles.
+- [x] Keep current hand formatter for no-tool chat in this PR; route only tool-bearing chat through llama.cpp chat templates.
+
+Known limitation:
+
+- `ToolChoice::Named` returns `ModelError::InvalidConfiguration` on llama.cpp because upstream's OpenAI-compatible tool-choice parser accepts `auto`, `none`, and `required`.
 
 Validation:
 
-- [ ] Unit-test OpenAI-compatible message JSON for system/user/assistant/tool turns.
-- [ ] Unit-test OpenAI-compatible tool JSON.
-- [ ] Unit-test Qwen3 tool-call parse fixtures.
-- [ ] Unit-test Gemma 4 tool-call parse fixtures.
+- [x] Unit-test OpenAI-compatible message JSON for system/user/assistant/tool turns.
+- [x] Unit-test OpenAI-compatible tool JSON.
+- [x] Unit-test OpenAI-compatible parsed response tool-call mapping.
+- [ ] Add model-family generated-output fixtures if live smoke reveals parser differences.
 - [ ] Validate that GGUF artifact templates exist before advertising `ToolUse`.
-- [ ] Run `cargo test -p motlie-model-llama-cpp`.
+- [x] Run `cargo test -p motlie-model-llama-cpp`.
 
 ## Phase 4: Curated Bundle Capability Gating
 
@@ -239,10 +244,11 @@ Tasks:
 - [x] Show both existing function binding and closure binding.
 - [x] Show the local loop scaffold: send tool specs, handle simulated tool calls, execute local functions, and produce tool-result messages.
 - [x] Add a Qwen3 safetensors live backend example path that requests a final answer after tool-result messages.
+- [x] Add a GGUF llama.cpp live backend example path that requests a final answer after tool-result messages.
 - [ ] Add the same live backend tool loop to Gemma 4 safetensors once a suitable multimodal/text prompt path is selected.
-- [ ] Keep example execution optional because curated LLM weights may not be present in CI.
-- [ ] Add fixture-level tests that do not require downloading model weights.
-- [ ] Add manual smoke instructions for local model owners.
+- [x] Keep example execution optional because curated LLM weights may not be present in CI.
+- [x] Add fixture-level tests that do not require downloading model weights.
+- [x] Add manual smoke instructions for local model owners.
 
 ## Phase 6: Final Documentation and Issue Closure
 

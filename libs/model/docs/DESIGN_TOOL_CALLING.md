@@ -12,6 +12,7 @@
 |------|--------|----------|
 | 2026-05-11 | @codex-tool-calling: Initial design for a unified tool-calling chat contract that supports the curated Gemma 4 and Qwen3/Qwen3.6 LLMs with backend-local adaptation. | All |
 | 2026-05-13 | @codex-tool-calling: Refined the API around typed Rust tool binding, documented existing function and closure binding, implemented the `mistral.rs` adapter path, and enabled `ToolUse` for safetensors Qwen3/Gemma 4 descriptors. | Proposed Core API, Backend Adaptation, Validation Strategy |
+| 2026-05-13 | @codex-tool-calling: Implemented the llama.cpp GGUF tool-aware adapter path using OpenAI-compatible chat templates and documented the remaining GGUF descriptor gate. | Backend Adaptation, Validation Strategy |
 
 This document extends the `libs/model` chat contract with a common tool-calling API. It is intentionally focused on the Motlie contract layer, but it includes backend and curated-bundle implications because the design only works if the common shape can map cleanly to the current `mistral.rs` and `llama.cpp` paths.
 
@@ -469,14 +470,14 @@ Backend-specific limitations:
 
 ### `llama.cpp`
 
-Current Motlie wrappers format prompts by hand:
+The GGUF adapter now keeps current hand-formatted prompts for ordinary no-tool chat and routes tool-bearing chat through llama.cpp's OpenAI-compatible chat-template path.
 
 - `format_qwen3_prompt`
 - `format_gemma4_prompt`
 
-That path cannot support tool definitions, tool results, or model-template-specific tool rendering.
+The hand-formatting path cannot support tool definitions, tool results, or model-template-specific tool rendering, so it is bypassed when `ChatRequest::requires_tool_use()` is true.
 
-Required adaptation:
+Implemented adaptation:
 
 - Convert Motlie messages to OpenAI-compatible JSON messages.
 - Convert Motlie `ToolSpec` values to OpenAI-compatible JSON tools.
@@ -485,6 +486,11 @@ Required adaptation:
 - Use the returned grammar, when present, during generation.
 - Use `ChatTemplateResult::parse_response_oaicompat(...)` to parse tool calls from generated text.
 - Keep rejecting image parts on current text-only GGUF handles until mmproj support lands.
+
+Backend-specific limitations:
+
+- `ToolChoice::Named` returns `ModelError::InvalidConfiguration` because upstream's OpenAI-compatible parser accepts only `auto`, `none`, and `required`.
+- GGUF descriptors should not advertise `ToolUse` until local artifact smoke tests confirm that each selected GGUF preserves a usable tool-aware chat template.
 
 ## Model-Family Notes
 
