@@ -8,6 +8,7 @@
 - 2026-05-12, @gpt55-dgx: Generalized plan tasks around a selected binary target; `mmux` remains the first worked validation target.
 - 2026-05-12, @gpt55-dgx: Reworked the plan as a manual v0 release process with explicit release PR, manifest, tag, artifact, signing, npm, and Homebrew steps; CI job creation is deferred.
 - 2026-05-12, @gpt55-dgx: Aligned the plan to per-binary release manifests under `releases/<bin>/<version>.toml` and a long-running release coordination PR.
+- 2026-05-12, @gpt55-dgx: Added skill-guided operator handoff requirements so different operators can pick up gates from manifest state.
 
 ## Status
 
@@ -24,6 +25,19 @@ Worked release branch:
 ```text
 release/mmux-v0.1.0
 ```
+
+## Skill-Guided Operator Handoffs
+
+Each phase below may be performed by a different operator on a different platform. Before acting, the release skill must read `releases/<bin>/<version>.toml`, identify the next incomplete gate, and prompt the human with:
+
+- current manifest state;
+- next gate and required host/platform;
+- branch or PR to pull;
+- command group or files to update;
+- manifest fields to update;
+- whether explicit approval is required.
+
+Prompt templates live in `.agents/skills/release/references/operator-prompts.md`. The operator must update manifest gate state through the coordination PR or a sub-PR so the next operator can resume from repo state rather than chat context.
 
 ## Phase 1: Release Target Intake
 

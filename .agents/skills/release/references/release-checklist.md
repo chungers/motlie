@@ -3,12 +3,15 @@
 Use this checklist when coordinating an end-to-end Motlie release.
 
 - [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, channels, targets, `MANIFEST`, and `RELEASE_BRANCH`.
+- [ ] Release skill inspected `MANIFEST` and identified the next incomplete gate before taking action.
+- [ ] Human prompt included current state, next gate, required platform, branch or PR to pull, files to update, and approval needed.
 - [ ] Release coordination branch created from `main`.
 - [ ] `releases/<bin>/<version>.toml` committed with deterministic intent, explicit names, target matrix, and gates.
 - [ ] `releases/<bin>/<version>.md` committed as the release-note source.
 - [ ] Coordination PR opened against `main`.
 - [ ] Platform/channel sub-PRs opened against the release branch as needed.
 - [ ] Sub-PRs update manifest status with source commit, timestamp, actor, and evidence links.
+- [ ] Each gate handoff is reconstructable from manifest evidence and PR comments.
 - [ ] Build outputs are not committed to git.
 - [ ] Manifest confirms native npm mode when required, for example `runner = "native-binary"` and `node_launcher = false`.
 - [ ] macOS signing evidence is recorded for Darwin targets that require it.
