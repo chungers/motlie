@@ -39,6 +39,7 @@ quantization levels.
 9. Latency reporting for startup and each request path
 10. Process/memory snapshots before startup, after startup, and after each request
 11. Handle-level model metrics after startup and each request
+12. Optional `--tool-demo` path for caller-owned tool calling through llama.cpp chat templates
 
 ## Step 1: Download GGUF Artifacts
 
@@ -89,6 +90,18 @@ Full precision (F16, no quantization):
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
   --example chat_gguf_gwen3_gemma4 -- --precision=f16 "What is Rust's ownership model?"
 ```
+
+Tool-calling loop (Qwen3 GGUF):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
+  --example chat_gguf_gwen3_gemma4 -- --tool-demo "What is Rust's ownership model?"
+```
+
+The tool demo registers a local `get_weather` Rust function, sends its generated
+schema through the llama.cpp OpenAI-compatible chat-template path, executes the
+model-requested tool call through `ToolRegistry`, appends the tool-result
+message, and asks the model for a final answer.
 
 ## Preconditions
 

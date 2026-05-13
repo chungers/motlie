@@ -21,6 +21,7 @@
 | 2026-04-09 | @codex-researcher: Added the second embedding slice to the quantization examples. `QuantizationSupport::without_recommended([Q8])` is now concretely exercised by the Qwen3-Embedding-0.6B bundle, while EmbeddingGemma remains unquantized. | Core Types |
 | 2026-05-11 | @codex-tool-calling: Added the typed tool-calling chat vocabulary: `ToolSpec`, `ToolInputSchema`, `ToolArguments`, `ToolChoice`, `ToolCall`, `ToolRegistry`, `ChatRole::Tool`, tool-aware `ChatRequest`/`ChatResponse` fields, and descriptive `CapabilityKind::ToolUse`. Backend adapters still gate tool-bearing requests until concrete model paths are wired and tested. | Overview, Core Types, Request Envelopes |
 | 2026-05-13 | @codex-tool-calling: Added typed Rust tool binding helpers, `Capabilities` helpers for chat/completion/tool-use combinations, and the safetensors `mistral.rs` adapter path for Qwen3/Gemma 4 tool calls. GGUF tool-bearing requests remain gated by the llama.cpp adapter. | Overview, Core Types, Request Envelopes |
+| 2026-05-13 | @codex-tool-calling: Added the llama.cpp GGUF adapter path for tool-bearing chat through OpenAI-compatible chat templates. GGUF descriptor advertising remains gated pending local artifact smoke validation. | Overview |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -46,7 +47,7 @@ Important scope note:
 
 - this API covers the embedding vertical slice, the first text-only chat slice (Qwen3-4B), and the first multimodal chat slice (Gemma 4 E2B-it)
 - `QuantizationBits` has been added to `StartOptions` for ISQ quantization of local chat models
-- the core tool-calling chat vocabulary is present; safetensors Qwen3/Gemma 4 advertise `CapabilityKind::ToolUse` after `mistral.rs` adapter tests, while GGUF variants remain gated until llama.cpp chat-template validation lands
+- the core tool-calling chat vocabulary is present; safetensors Qwen3/Gemma 4 advertise `CapabilityKind::ToolUse` after `mistral.rs` adapter tests, while GGUF variants have adapter support but remain descriptor-gated until local chat-template smoke validation lands
 
 For the current vertical slice, this contract is intended to support an end-to-end flow of:
 
@@ -109,7 +110,7 @@ Primary capability request/response types:
 
 Known near-term additive follow-ups for chat-capable bundles:
 
-- backend adapters that map the common tool vocabulary into `llama.cpp`; the safetensors `mistral.rs` path is implemented for Qwen3/Gemma 4
+- live smoke validation for GGUF chat-template preservation before adding `CapabilityKind::ToolUse` to GGUF descriptors
 - curated descriptor gating for `CapabilityKind::ToolUse`
 - optional examples that demonstrate caller-owned tool execution loops
 

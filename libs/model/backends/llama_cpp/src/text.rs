@@ -8,14 +8,18 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{ChatTemplateResult, GrammarTriggerType};
+use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
-    CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
-    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions, UnsupportedEmbeddings,
+    CapabilityKind, ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatRole,
+    CheckpointFormat, CompletionModel, CompletionRequest, CompletionResponse, GenerationParams,
+    GenerationUsage, LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity,
+    ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
+use serde_json::{json, Value};
 
 use crate::common::{
     configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
@@ -364,7 +368,8 @@ unsafe impl Sync for LlamaCppRuntime {}
 impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         if request.requires_tool_use() {
-            return Err(ModelError::UnsupportedCapability(CapabilityKind::ToolUse));
+            let rendered = render_openai_compatible_chat(&self.model, self.arch, &request)?;
+            return self.generate_rendered_chat(rendered, &request.params).await;
         }
 
         let prompt = format_chat_prompt(self.arch, &request)?;
@@ -385,13 +390,55 @@ impl LlamaCppRuntime {
         prompt: &str,
         params: &GenerationParams,
     ) -> Result<ChatResponse, ModelError> {
+        let generated = self
+            .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new(), None)
+            .await?;
+        Ok(ChatResponse::text(generated.text))
+    }
+
+    async fn generate_rendered_chat(
+        &self,
+        rendered: RenderedChatPrompt,
+        params: &GenerationParams,
+    ) -> Result<ChatResponse, ModelError> {
+        let RenderedChatPrompt {
+            prompt,
+            template,
+            additional_stops,
+        } = rendered;
+        let generated = self
+            .generate_text_inner(
+                prompt,
+                params.clone(),
+                additional_stops,
+                Some(template.clone()),
+            )
+            .await?;
+        let raw_message = template
+            .parse_response_oaicompat(&generated.text, false)
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "llama-cpp",
+                operation: "parse_response_oaicompat",
+                message: err.to_string(),
+            })?;
+
+        openai_response_json_to_chat_response(raw_message, generated.usage)
+    }
+
+    async fn generate_text_inner(
+        &self,
+        prompt: String,
+        params: GenerationParams,
+        additional_stops: Vec<String>,
+        template: Option<ChatTemplateResult>,
+    ) -> Result<GeneratedText, ModelError> {
         let backend = Arc::clone(&self.backend);
         let model = Arc::clone(&self.model);
-        let prompt = prompt.to_owned();
         let max_tokens: u32 = params.max_tokens.unwrap_or(512);
         let temperature: f32 = params.temperature.unwrap_or(0.7_f32);
         let top_p: Option<f32> = params.top_p;
-        let stop_sequences = params.stop_sequences.clone();
+        let mut stop_sequences = params.stop_sequences;
+        stop_sequences.extend(additional_stops);
         let context_length = self.context_length;
         let metrics = Arc::clone(&self.metrics);
 
@@ -450,18 +497,7 @@ impl LlamaCppRuntime {
             // Use process-id-derived seed so temperature produces varied output
             // across requests while remaining reproducible within a process lifetime.
             let seed = std::process::id();
-            let mut sampler = if let Some(top_p) = top_p {
-                LlamaSampler::chain_simple([
-                    LlamaSampler::top_p(top_p, 1),
-                    LlamaSampler::temp(temperature),
-                    LlamaSampler::dist(seed),
-                ])
-            } else {
-                LlamaSampler::chain_simple([
-                    LlamaSampler::temp(temperature),
-                    LlamaSampler::dist(seed),
-                ])
-            };
+            let mut sampler = build_sampler(&model, template.as_ref(), top_p, temperature, seed)?;
 
             let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
@@ -532,7 +568,14 @@ impl LlamaCppRuntime {
                 );
             }
 
-            Ok(ChatResponse::text(generated_text))
+            Ok(GeneratedText {
+                text: generated_text,
+                usage: GenerationUsage {
+                    prompt_tokens: Some(prompt_token_count),
+                    completion_tokens: Some(generated_token_count),
+                    total_tokens: Some(prompt_token_count.saturating_add(generated_token_count)),
+                },
+            })
         })
         .await
         .map_err(|e| ModelError::BackendExecution {
@@ -541,6 +584,382 @@ impl LlamaCppRuntime {
             message: e.to_string(),
         })?
     }
+}
+
+struct RenderedChatPrompt {
+    prompt: String,
+    template: ChatTemplateResult,
+    additional_stops: Vec<String>,
+}
+
+struct GeneratedText {
+    text: String,
+    usage: GenerationUsage,
+}
+
+fn render_openai_compatible_chat(
+    model: &LlamaModel,
+    arch: LlamaCppTextArch,
+    request: &ChatRequest,
+) -> Result<RenderedChatPrompt, ModelError> {
+    let template = model
+        .chat_template(None)
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "llama-cpp",
+            operation: "chat_template",
+            message: err.to_string(),
+        })?;
+    let messages_json = openai_messages_json(&request.messages)?;
+    let tools_json = if request.tools.is_empty() {
+        None
+    } else {
+        Some(openai_tools_json(&request.tools)?)
+    };
+    let tool_choice = openai_tool_choice(request.tool_choice.as_ref(), &request.tools)?;
+    let parse_tool_calls =
+        tools_json.is_some() && !matches!(request.tool_choice, Some(ToolChoice::None));
+    let reasoning_format = if matches!(arch, LlamaCppTextArch::Qwen35) {
+        Some("auto")
+    } else {
+        None
+    };
+
+    let params = OpenAIChatTemplateParams {
+        messages_json: &messages_json,
+        tools_json: tools_json.as_deref(),
+        tool_choice: tool_choice.as_deref(),
+        json_schema: None,
+        grammar: None,
+        reasoning_format,
+        chat_template_kwargs: Some("{}"),
+        add_generation_prompt: true,
+        use_jinja: true,
+        parallel_tool_calls: false,
+        enable_thinking: matches!(arch, LlamaCppTextArch::Qwen35),
+        add_bos: false,
+        add_eos: false,
+        parse_tool_calls,
+    };
+    let result = model
+        .apply_chat_template_oaicompat(&template, &params)
+        .map_err(|err| ModelError::BackendExecution {
+            backend: "llama-cpp",
+            operation: "apply_chat_template_oaicompat",
+            message: err.to_string(),
+        })?;
+
+    Ok(RenderedChatPrompt {
+        prompt: result.prompt.clone(),
+        additional_stops: result.additional_stops.clone(),
+        template: result,
+    })
+}
+
+fn openai_messages_json(messages: &[motlie_model::ChatMessage]) -> Result<String, ModelError> {
+    let mut values = Vec::with_capacity(messages.len());
+
+    for message in messages {
+        let content = collect_text(message)?;
+        let mut value = serde_json::Map::new();
+        value.insert(
+            "role".into(),
+            Value::String(openai_role(message.role).into()),
+        );
+        value.insert("content".into(), Value::String(content));
+
+        match message.role {
+            ChatRole::Assistant => {
+                if !message.tool_calls.is_empty() {
+                    value.insert(
+                        "tool_calls".into(),
+                        Value::Array(
+                            message
+                                .tool_calls
+                                .iter()
+                                .map(openai_tool_call_value)
+                                .collect(),
+                        ),
+                    );
+                }
+            }
+            ChatRole::Tool => {
+                let tool_call_id = message.tool_call_id.as_ref().ok_or_else(|| {
+                    ModelError::InvalidConfiguration(
+                        "tool messages require `tool_call_id` metadata".into(),
+                    )
+                })?;
+                value.insert("tool_call_id".into(), Value::String(tool_call_id.clone()));
+                if let Some(name) = &message.name {
+                    value.insert("name".into(), Value::String(name.as_str().to_string()));
+                }
+            }
+            ChatRole::System | ChatRole::User if !message.tool_calls.is_empty() => {
+                return Err(ModelError::InvalidConfiguration(
+                    "only assistant messages may carry tool calls".into(),
+                ));
+            }
+            ChatRole::System | ChatRole::User => {}
+        }
+
+        if let Some(reasoning) = &message.reasoning {
+            value.insert("reasoning_content".into(), Value::String(reasoning.clone()));
+        }
+
+        values.push(Value::Object(value));
+    }
+
+    serde_json::to_string(&values).map_err(|err| ModelError::InvalidConfiguration(err.to_string()))
+}
+
+fn openai_tools_json(tools: &[ToolSpec]) -> Result<String, ModelError> {
+    let mut values = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let parameters = tool
+            .input_schema
+            .to_json_value()
+            .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
+        values.push(json!({
+            "type": "function",
+            "function": {
+                "name": tool.name.as_str(),
+                "description": tool.description.as_str(),
+                "parameters": parameters,
+            }
+        }));
+    }
+
+    serde_json::to_string(&values).map_err(|err| ModelError::InvalidConfiguration(err.to_string()))
+}
+
+fn openai_tool_choice(
+    choice: Option<&ToolChoice>,
+    tools: &[ToolSpec],
+) -> Result<Option<String>, ModelError> {
+    if tools.is_empty() {
+        return match choice {
+            None | Some(ToolChoice::None) => Ok(None),
+            Some(_) => Err(ModelError::InvalidConfiguration(
+                "`tool_choice` requires at least one tool".into(),
+            )),
+        };
+    }
+
+    match choice {
+        None | Some(ToolChoice::Auto) => Ok(Some("auto".into())),
+        Some(ToolChoice::None) => Ok(Some("none".into())),
+        Some(ToolChoice::Required) => Ok(Some("required".into())),
+        Some(ToolChoice::Named(name)) => Err(ModelError::InvalidConfiguration(format!(
+            "llama.cpp OpenAI-compatible tool templates do not expose named tool-choice enforcement (`{name}`)"
+        ))),
+    }
+}
+
+fn openai_role(role: ChatRole) -> &'static str {
+    match role {
+        ChatRole::Assistant => "assistant",
+        ChatRole::System => "system",
+        ChatRole::Tool => "tool",
+        ChatRole::User => "user",
+    }
+}
+
+fn openai_tool_call_value(call: &motlie_model::ToolCall) -> Value {
+    json!({
+        "id": call.id.as_str(),
+        "type": "function",
+        "function": {
+            "name": call.name.as_str(),
+            "arguments": call.arguments.raw_json_str(),
+        }
+    })
+}
+
+fn build_sampler(
+    model: &LlamaModel,
+    template: Option<&ChatTemplateResult>,
+    top_p: Option<f32>,
+    temperature: f32,
+    seed: u32,
+) -> Result<LlamaSampler, ModelError> {
+    let mut samplers = Vec::new();
+
+    if let Some(template) = template {
+        if let Some(grammar) = template.grammar.as_deref() {
+            samplers.push(grammar_sampler(model, template, grammar)?);
+        }
+    }
+
+    if let Some(top_p) = top_p {
+        samplers.push(LlamaSampler::top_p(top_p, 1));
+    }
+    samplers.push(LlamaSampler::temp(temperature));
+    samplers.push(LlamaSampler::dist(seed));
+
+    Ok(LlamaSampler::chain_simple(samplers))
+}
+
+fn grammar_sampler(
+    model: &LlamaModel,
+    template: &ChatTemplateResult,
+    grammar: &str,
+) -> Result<LlamaSampler, ModelError> {
+    if template.grammar_lazy {
+        let mut trigger_words = Vec::new();
+        let mut trigger_patterns = Vec::new();
+        let mut trigger_tokens = Vec::new();
+        for trigger in &template.grammar_triggers {
+            match trigger.trigger_type {
+                GrammarTriggerType::Token => {
+                    if let Some(token) = trigger.token {
+                        trigger_tokens.push(token);
+                    }
+                }
+                GrammarTriggerType::Word => trigger_words.push(trigger.value.as_str()),
+                GrammarTriggerType::Pattern | GrammarTriggerType::PatternFull => {
+                    trigger_patterns.push(trigger.value.clone());
+                }
+            }
+        }
+
+        if trigger_patterns.is_empty() {
+            return LlamaSampler::grammar_lazy(
+                model,
+                grammar,
+                "root",
+                trigger_words,
+                &trigger_tokens,
+            )
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "llama-cpp",
+                operation: "grammar_lazy",
+                message: err.to_string(),
+            });
+        }
+
+        if trigger_words.is_empty() {
+            return LlamaSampler::grammar_lazy_patterns(
+                model,
+                grammar,
+                "root",
+                &trigger_patterns,
+                &trigger_tokens,
+            )
+            .map_err(|err| ModelError::BackendExecution {
+                backend: "llama-cpp",
+                operation: "grammar_lazy_patterns",
+                message: err.to_string(),
+            });
+        }
+    }
+
+    LlamaSampler::grammar(model, grammar, "root").map_err(|err| ModelError::BackendExecution {
+        backend: "llama-cpp",
+        operation: "grammar",
+        message: err.to_string(),
+    })
+}
+
+fn openai_response_json_to_chat_response(
+    raw_message: String,
+    usage: GenerationUsage,
+) -> Result<ChatResponse, ModelError> {
+    let value: Value =
+        serde_json::from_str(&raw_message).map_err(|err| ModelError::BackendExecution {
+            backend: "llama-cpp",
+            operation: "parse_openai_response_json",
+            message: err.to_string(),
+        })?;
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let reasoning = value
+        .get("reasoning_content")
+        .or_else(|| value.get("reasoning"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let tool_calls = value
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .enumerate()
+                .map(openai_response_tool_call)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let finish_reason = if tool_calls.is_empty() {
+        Some(ChatFinishReason::Stop)
+    } else {
+        Some(ChatFinishReason::ToolCalls)
+    };
+
+    Ok(ChatResponse {
+        content,
+        tool_calls,
+        finish_reason,
+        reasoning,
+        usage: Some(usage),
+        raw_message: Some(raw_message),
+    })
+}
+
+fn openai_response_tool_call(
+    (index, call): (usize, &Value),
+) -> Result<motlie_model::ToolCall, ModelError> {
+    let function = call.get("function").unwrap_or(call);
+    let name = function
+        .get("name")
+        .or_else(|| call.get("name"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ModelError::BackendExecution {
+            backend: "llama-cpp",
+            operation: "parse_tool_call",
+            message: "tool call is missing function name".into(),
+        })?;
+    let arguments = function
+        .get("arguments")
+        .or_else(|| call.get("arguments"))
+        .ok_or_else(|| ModelError::BackendExecution {
+            backend: "llama-cpp",
+            operation: "parse_tool_call",
+            message: format!("tool call `{name}` is missing arguments"),
+        })?;
+    let arguments = match arguments {
+        Value::String(raw) => raw.clone(),
+        Value::Object(_) => {
+            serde_json::to_string(arguments).map_err(|err| ModelError::BackendExecution {
+                backend: "llama-cpp",
+                operation: "parse_tool_call",
+                message: err.to_string(),
+            })?
+        }
+        other => {
+            return Err(ModelError::BackendExecution {
+                backend: "llama-cpp",
+                operation: "parse_tool_call",
+                message: format!(
+                    "tool call `{name}` arguments must be a JSON object or string, got {other}"
+                ),
+            });
+        }
+    };
+    let id = call
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("call-{index}"));
+
+    motlie_model::ToolCall::from_json_args(id, name, arguments).map_err(|err| {
+        ModelError::BackendExecution {
+            backend: "llama-cpp",
+            operation: "parse_tool_call",
+            message: err.to_string(),
+        }
+    })
 }
 
 /// Format a chat request into the model's expected prompt template.
@@ -956,6 +1375,112 @@ mod tests {
         assert!(prompt.contains("<start_of_turn>system\nBe concise.<end_of_turn>"));
         assert!(prompt.contains("<start_of_turn>user\nHello<end_of_turn>"));
         assert!(prompt.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn openai_messages_json_represents_tool_transcript() {
+        let call = motlie_model::ToolCall::from_json_args(
+            "call-1",
+            "get_weather",
+            r#"{"city":"Seattle"}"#,
+        )
+        .expect("tool args should be valid");
+        let messages = vec![
+            ChatMessage::assistant_tool_calls(vec![call]),
+            ChatMessage::tool_result("call-1", "get_weather", r#"{"temperature":72}"#),
+        ];
+
+        let raw = openai_messages_json(&messages).expect("messages should map");
+        let value: Value = serde_json::from_str(&raw).expect("messages should be json");
+
+        assert_eq!(value[0]["role"], "assistant");
+        assert_eq!(value[0]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(
+            value[0]["tool_calls"][0]["function"]["arguments"],
+            r#"{"city":"Seattle"}"#
+        );
+        assert_eq!(value[1]["role"], "tool");
+        assert_eq!(value[1]["tool_call_id"], "call-1");
+        assert_eq!(value[1]["name"], "get_weather");
+    }
+
+    #[test]
+    fn openai_tools_json_represents_function_schema() {
+        let tool = motlie_model::ToolSpec::from_json_schema(
+            "get_weather",
+            "Get weather.",
+            r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#,
+        )
+        .expect("schema should be valid");
+
+        let raw = openai_tools_json(&[tool]).expect("tool should map");
+        let value: Value = serde_json::from_str(&raw).expect("tools should be json");
+
+        assert_eq!(value[0]["type"], "function");
+        assert_eq!(value[0]["function"]["name"], "get_weather");
+        assert_eq!(value[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn openai_tool_choice_maps_supported_llama_cpp_choices() {
+        let tool = motlie_model::ToolSpec::from_json_schema(
+            "get_weather",
+            "Get weather.",
+            r#"{"type":"object","properties":{"city":{"type":"string"}}}"#,
+        )
+        .expect("schema should be valid");
+
+        assert_eq!(
+            openai_tool_choice(Some(&ToolChoice::Required), &[tool.clone()])
+                .expect("required should map"),
+            Some("required".to_string())
+        );
+        assert!(matches!(
+            openai_tool_choice(Some(&ToolChoice::Named("get_weather".into())), &[tool]),
+            Err(ModelError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn openai_response_json_maps_tool_calls() {
+        let raw = json!({
+            "role": "assistant",
+            "content": null,
+            "reasoning_content": "thinking",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": {"city": "Seattle"}
+                }
+            }]
+        })
+        .to_string();
+
+        let response = openai_response_json_to_chat_response(
+            raw,
+            GenerationUsage {
+                prompt_tokens: Some(3),
+                completion_tokens: Some(4),
+                total_tokens: Some(7),
+            },
+        )
+        .expect("response should map");
+
+        assert_eq!(response.finish_reason, Some(ChatFinishReason::ToolCalls));
+        assert_eq!(response.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name.as_str(), "get_weather");
+        assert_eq!(
+            response.tool_calls[0].arguments.raw_json_str(),
+            r#"{"city":"Seattle"}"#
+        );
+        assert_eq!(
+            response.usage.as_ref().and_then(|usage| usage.total_tokens),
+            Some(7)
+        );
+        assert!(response.raw_message.is_some());
     }
 
     #[tokio::test]
