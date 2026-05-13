@@ -119,12 +119,22 @@ Manifest status rules:
 - Completed gates should record `completed_at`, `completed_by`, `source_commit`, and `evidence`.
 - Status fields are evidence only; intent fields drive artifact names, package names, binary paths, and installer behavior.
 
+Operator prompt workflow:
+
+1. Read `MANIFEST` before proposing the next action.
+2. Identify the first incomplete gate, its required platform, and whether the current host can perform it.
+3. If another host/operator is needed, prompt with the exact branch/PR to pull and the manifest fields to update.
+4. If the action creates tags, GitHub Releases, npm publications, or Homebrew tap changes, ask for explicit approval.
+5. After a gate is performed, update manifest status through a PR or sub-PR with `completed_at`, `completed_by`, `source_commit`, and `evidence`.
+6. For handoffs, reply with current state, next gate, required host/platform, command group, files to update, and approval needed.
+
 Read references only when needed:
 
 - npm publishing or token handling: `references/npm-auth.md`
 - macOS `codesign` or Darwin artifact validation: `references/macos-signing.md`
 - Homebrew formula/tap/bottle work: `references/homebrew-tap.md`
 - end-to-end checklist: `references/release-checklist.md`
+- operator handoff prompts or next-step prompting: `references/operator-prompts.md`
 
 Hard requirements:
 

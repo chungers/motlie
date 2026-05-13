@@ -7,6 +7,7 @@
 - 2026-05-12, @gpt55-dgx: Generalized the release playbook around a user-specified binary target; `mmux` is now only the worked example.
 - 2026-05-12, @gpt55-dgx: Clarified that CI workflows are future automation; the current release execution path is the manual process in `docs/PLAN_RELEASES.md`.
 - 2026-05-12, @gpt55-dgx: Aligned the playbook to per-binary manifests under `releases/<bin>/<version>.toml` and a release coordination PR with sub-PR status updates.
+- 2026-05-12, @gpt55-dgx: Added operator handoff workflow showing how the release skill prompts humans and updates manifest state at each release gate.
 
 ## Scope
 
@@ -85,6 +86,37 @@ The release should move through these gates:
 10. Post-release ledger PR recording final URLs, checksums, and package links.
 
 This keeps staging, final publication, and post-release audit metadata distinct. If a later gate fails, status remains inspectable in the manifest without moving the release tag.
+
+## Operator Handoff and Skill Prompts
+
+Release work can be performed by different humans or agents on different hosts. The release manifest is the handoff document. The release skill is responsible for reading the manifest, identifying the next gate, prompting the human for the action appropriate to that gate, and recording evidence through a PR update.
+
+At the start of every release turn, the skill should:
+
+1. Identify itself and check `git status --short --branch`.
+2. Read `releases/<bin>/<version>.toml`.
+3. Summarize the current release state, incomplete gates, and the branch or PR the operator should work on.
+4. Ask for explicit approval before publishing, tagging, modifying package registries, or changing Homebrew tap state.
+5. Update only manifest status/evidence for staging work; final published URLs and checksums belong in the post-release ledger PR.
+
+Operator prompts should be concrete. The prompt should tell the human what host/platform is needed, what branch to pull, what command group will run, and what manifest gate will be updated.
+
+| Release gate | Operator surface | Skill prompt and action |
+| --- | --- | --- |
+| Intake | `main` | Confirm `BIN`, `VERSION`, `MANIFEST`, `RELEASE_BRANCH`, enabled channels, and platform targets. If missing, prompt for the missing field before editing files. |
+| Coordination PR | `release/<bin>-v<version> -> main` | Prompt to create the release branch, add `releases/<bin>/<version>.toml`, add release notes, and open the coordination PR. Update the `release-pr-opened` gate with PR URL and source commit. |
+| Linux staging | sub-PR to release branch | Prompt the Linux operator to pull the release branch, build the scoped target, package or validate artifact names from the manifest, and update the corresponding Linux gate with commit, checksum, and evidence. |
+| macOS staging | sub-PR to release branch | Prompt the macOS operator to pull the release branch, run build-path and installed-path `codesign` checks, and update the Darwin signing gate with timestamp, actor, source commit, and evidence. |
+| npm staging | sub-PR to release branch | Prompt the operator to generate native package candidates using manifest `npm_package`, `bin_path`, and `node_launcher = false`; run `npm pack --dry-run`; update manifest status only. |
+| Homebrew staging | tap PR or source-side template PR | Prompt the operator to prepare the tap PR shape and record tap PR evidence. Do not merge live tap changes until final source tag exists. |
+| Coordination merge | coordination PR | Prompt the human reviewer to confirm all required gates are `complete` or explicitly `deferred`, then merge to `main`. Warn that final artifacts must trace to the final tag. |
+| Final tag | `main` | Prompt for explicit approval to create and push `v<VERSION>`. Verify the manifest tag and workspace version before tagging. |
+| GitHub Release | final tag | Prompt for explicit approval to create the GitHub Release and upload final assets. Use manifest asset names and release notes. |
+| npm publish | final artifacts | Prompt for explicit approval and auth mode. Publish only after final artifacts exist and package dry-runs/install tests pass. |
+| Homebrew publish | `motlie/homebrew-tap` | Prompt for tap PR merge or bottle publication only after the final source tag exists and formula tests pass. |
+| Post-release ledger | short PR to `main` | Prompt to update `state = "published"` and record final URLs, checksums, npm links, Homebrew tap commit, and install evidence. Never move the release tag for ledger-only metadata. |
+
+The skill reference `.agents/skills/release/references/operator-prompts.md` contains the step-specific prompt templates. Operators should prefer those prompts over reconstructing the process from memory.
 
 ## Release Coordination PR
 
