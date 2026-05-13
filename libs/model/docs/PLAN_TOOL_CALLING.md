@@ -13,6 +13,7 @@
 | 2026-05-11 | @codex-tool-calling | Initial staged plan for the unified tool-calling API contract, backend adapters, curated capability gating, and validation work. |
 | 2026-05-13 | @codex-tool-calling | Implemented the core typed Rust tool binding contract, added examples, wired the `mistral.rs` text/multimodal request and response adapter, and enabled `ToolUse` on the safetensors Qwen3/Gemma 4 curated descriptors. |
 | 2026-05-13 | @codex-tool-calling | Wired the llama.cpp GGUF tool-aware path through OpenAI-compatible message/tool JSON, chat-template rendering, grammar sampling, response parsing, and the GGUF live example switch. GGUF `ToolUse` descriptors remain gated pending artifact smoke validation. |
+| 2026-05-13 | @codex-tool-calling | Attempted the Qwen3 GGUF tool-demo smoke against the default local artifact cache. It failed before model load because `Qwen/Qwen3-4B-GGUF` is not cached locally; GGUF descriptors remain intentionally unadvertised for `ToolUse`. |
 
 Derived from [DESIGN_TOOL_CALLING.md](./DESIGN_TOOL_CALLING.md). This plan covers the work needed to make Gemma 4, Qwen3, and Qwen3.6 tool calling available through the existing `ChatModel` surface.
 
@@ -202,7 +203,7 @@ Validation:
 - [x] Unit-test OpenAI-compatible tool JSON.
 - [x] Unit-test OpenAI-compatible parsed response tool-call mapping.
 - [ ] Add model-family generated-output fixtures if live smoke reveals parser differences.
-- [ ] Validate that GGUF artifact templates exist before advertising `ToolUse`.
+- [ ] Validate that GGUF artifact templates exist before advertising `ToolUse`; blocked locally until `Qwen/Qwen3-4B-GGUF`, `bartowski/gemma-4-E2B-it-GGUF`, and `Qwen/Qwen3.6-27B-GGUF` artifacts are present in the curated HF cache.
 - [x] Run `cargo test -p motlie-model-llama-cpp`.
 
 ## Phase 4: Curated Bundle Capability Gating
@@ -249,6 +250,21 @@ Tasks:
 - [x] Keep example execution optional because curated LLM weights may not be present in CI.
 - [x] Add fixture-level tests that do not require downloading model weights.
 - [x] Add manual smoke instructions for local model owners.
+
+Manual smoke commands for the remaining GGUF descriptor gate:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
+  --bin motlie-models-download -- qwen3_4b_gguf
+
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
+  --example chat_gguf_gwen3_gemma4 -- --tool-demo "What is Rust?"
+```
+
+Local status on 2026-05-13: the smoke command was attempted without
+`--download-artifacts` and failed before model load with
+`artifact policy LocalOnly requires cached GGUF artifacts for Qwen/Qwen3-4B-GGUF`;
+this is an artifact availability blocker, not a code-path failure.
 
 ## Phase 6: Final Documentation and Issue Closure
 

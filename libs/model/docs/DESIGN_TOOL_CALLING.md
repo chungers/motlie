@@ -491,6 +491,7 @@ Backend-specific limitations:
 
 - `ToolChoice::Named` returns `ModelError::InvalidConfiguration` because upstream's OpenAI-compatible parser accepts only `auto`, `none`, and `required`.
 - GGUF descriptors should not advertise `ToolUse` until local artifact smoke tests confirm that each selected GGUF preserves a usable tool-aware chat template.
+- Local status on 2026-05-13: the Qwen3 GGUF `--tool-demo` smoke was attempted against the default curated cache and failed before model load because `Qwen/Qwen3-4B-GGUF` artifacts were not cached. This keeps the remaining GGUF gate at artifact validation rather than API/adapter design.
 
 ## Model-Family Notes
 

@@ -95,6 +95,9 @@ Tool-calling loop (Qwen3 GGUF):
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
+  --bin motlie-models-download -- qwen3_4b_gguf
+
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
   --example chat_gguf_gwen3_gemma4 -- --tool-demo "What is Rust's ownership model?"
 ```
 
@@ -108,6 +111,10 @@ message, and asks the model for a final answer.
 - Pre-downloaded GGUF artifacts in the curated artifact root, or `--download-artifacts`
 - Sufficient memory for the chosen precision and model size
 - The `model-qwen3-4b-gguf` feature (minimum); add `model-gemma4-e2b-gguf` for model switching
+
+Current descriptor gate:
+
+- The llama.cpp adapter path supports tool-bearing requests, but GGUF curated descriptors should advertise `ToolUse` only after this tool demo passes against the selected local artifacts. A local attempt on 2026-05-13 failed before model load because the default curated HF cache did not contain `Qwen/Qwen3-4B-GGUF`.
 
 ## Source
 
