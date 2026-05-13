@@ -11,6 +11,7 @@
 - 2026-05-12, @gpt55-dgx: Added skill-guided operator handoff requirements so different operators can pick up gates from manifest state.
 - 2026-05-13, @gpt55-dgx: Added target-specific gate tracking, cargo-zigbuild toolchain evidence, merge-commit strategy, and disabled-channel deferral requirements.
 - 2026-05-13, @gpt55-dgx: Added detached-tag build command and manifest-tracked installer validation gates.
+- 2026-05-13, @gpt55-dgx: Made static musl the default Linux artifact policy when feasible, with glibc-floor evidence only for gnu fallback/CUDA targets.
 
 ## Status
 
@@ -130,7 +131,7 @@ git switch --detach v0.1.0
 git status --short --branch
 ```
 
-- [ ] 6.1 Build final artifacts from `v<VERSION>`, not from a dirty worktree. Confirm `Cargo.lock` is committed and unchanged. For Darwin-from-Linux, use the v0 default `cargo-zigbuild` and record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version` in evidence. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 6.1 Build final artifacts from `v<VERSION>`, not from a dirty worktree. Confirm `Cargo.lock` is committed and unchanged. For Darwin-from-Linux, use the v0 default `cargo-zigbuild` and record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version` in evidence. For `linux-*-musl`, build static binaries and record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` evidence. For any enabled `linux-*-gnu` fallback, record both `ldd --version` plus `objdump -T <binary> | grep GLIBC_ | sort -u`; update `glibc_build_host_version` and `glibc_min_version` in the target block. Reference: `docs/DESIGN_RELEASES.md#linux-libc-policy`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 - [ ] 6.2 Use the manifest's explicit `archive_asset`, `archive_binary_path`, `npm_package`, `npm.bin_path`, and installer names. Do not derive names when the manifest provides them. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 6.3 Sign and verify final Darwin artifacts from the final tag. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`. Skill support: `.agents/skills/release/references/macos-signing.md`.
 - [ ] 6.4 Create the GitHub Release from `releases/<bin>/<version>.md` and upload final archives, checksums, and installer assets. Reference: `docs/DESIGN_RELEASES.md#github-releases`. Skill support: `.agents/skills/release/references/release-checklist.md`.
@@ -169,6 +170,8 @@ A release coordination PR is ready to merge only after:
 - The manifest distinguishes immutable release intent from mutable, structured target/gate status.
 - `Cargo.toml` contains the intended workspace version and non-placeholder release metadata.
 - `Cargo.lock` policy and toolchain evidence requirements are captured in the manifest.
+- `linux-*-musl` targets have static-link evidence commands captured in `[toolchain].linux_musl_required_evidence`.
+- Any enabled `linux-*-gnu` fallback targets have `glibc_build_host_version` and `glibc_min_version` fields, with required evidence commands captured in `[toolchain].linux_gnu_required_evidence`.
 - `releases/<bin>/<version>.md` exists and matches the release target.
 - Any installer, npm, or Homebrew templates included in the PR match the manifest.
 - If direct installer distribution is enabled, target-specific `installer-validated` gates exist in the manifest.

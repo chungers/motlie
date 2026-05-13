@@ -55,13 +55,15 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is <linux-gate> for target_id=<target-id>. This requires a Linux host. Pull <release-branch>, build <cargo-package>/<cargo-bin> for <rust-target>, verify artifact names from the manifest, record toolchain evidence, and update manifest evidence through a sub-PR to <release-branch>.
+@<identity> <datetime> -- Next gate is <linux-gate> for target_id=<target-id>. This requires a Linux host. Pull <release-branch>, build <cargo-package>/<cargo-bin> for <rust-target>, verify artifact names, record toolchain and Linux linkage evidence, and update manifest evidence through a sub-PR to <release-branch>.
 ```
 
 Action:
 
 - Use explicit manifest names such as `archive_asset` and `archive_binary_path`.
 - Record source commit, checksums if generated, command notes, `rustc -Vv`, `cargo -V`, and target status evidence.
+- For `linux-*-musl`, record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
+- Generate `linux-*-gnu` targets only when the manifest enables gnu fallback/CUDA targets; for those targets, record `ldd --version`, `objdump -T <binary> | grep GLIBC_ | sort -u`, `glibc_build_host_version`, and `glibc_min_version`.
 - Do not commit build outputs.
 
 ## macOS Signing

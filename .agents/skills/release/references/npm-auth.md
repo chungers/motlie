@@ -6,7 +6,7 @@ Parameterize examples by the release target:
 
 ```text
 BIN=<installed command name>
-NPM_PACKAGE=<platform package name, e.g. @motlie/<bin>-linux-x64-gnu>
+NPM_PACKAGE=<platform package name, e.g. @motlie/<bin>-linux-x64-musl>
 PACKAGE_DIR=dist/npm/<package path>
 MANIFEST=releases/<bin>/<version>.toml
 ```

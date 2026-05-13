@@ -17,6 +17,8 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Build outputs are not committed to git.
 - [ ] `Cargo.lock` is committed and unchanged at the final tag.
 - [ ] Build evidence records `rustc -Vv`, `cargo -V`, and any cross-build toolchain versions.
+- [ ] `linux-*-musl` targets record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
+- [ ] Any enabled `linux-*-gnu` fallback targets record `glibc_build_host_version`, `glibc_min_version`, `ldd --version`, and `objdump -T` GLIBC symbol evidence.
 - [ ] Darwin-from-Linux evidence uses the v0 default `cargo-zigbuild` or records an approved exception.
 - [ ] Manifest confirms native npm mode when required, for example `runner = "native-binary"` and `node_launcher = false`.
 - [ ] macOS signing evidence is recorded for Darwin targets that require it.
