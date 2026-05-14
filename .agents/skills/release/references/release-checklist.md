@@ -1,0 +1,50 @@
+# Release Checklist
+
+Use this checklist when coordinating an end-to-end Motlie release.
+
+- [ ] Release event captured: `RELEASE_NAME`, `RELEASE_BRANCH`, `RELEASE_TAG`, `WORKSPACE_MANIFEST`, channels, and binaries.
+- [ ] Every binary target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, targets, and `BINARY_MANIFEST`.
+- [ ] Release skill inspected `WORKSPACE_MANIFEST` and referenced per-binary manifests, then identified the next incomplete gate before taking action.
+- [ ] Human prompt included current state, next gate, required platform, branch or PR to pull, files to update, and approval needed.
+- [ ] Release branch created from `main` and pushed as `release/<YYYY-MM-codename>`.
+- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, binary list, and workspace gates.
+- [ ] `releases/notes.md` committed as the GitHub Release note source.
+- [ ] `releases/<bin>-<version>.toml` committed for each binary with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
+- [ ] `releases/<bin>-<version>.md` committed as each per-binary release-note source.
+- [ ] Release notes list every binary, version, target family, distribution channel, install command, user-visible change, compatibility note, and known issue.
+- [ ] Release owner has approved the final notes before `gh release create`.
+- [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.
+- [ ] No PR is opened to merge the release branch to `main`.
+- [ ] Platform/channel sub-PRs opened against the release branch as needed.
+- [ ] Sub-PRs update manifest status with source commit, timestamp, actor, target id, channel, and evidence links.
+- [ ] Each gate handoff is reconstructable from manifest evidence.
+- [ ] Evidence entries follow `{ kind, ref, sha256?, note? }`.
+- [ ] Build outputs are not committed to git.
+- [ ] `Cargo.lock` is committed and unchanged at the final tag.
+- [ ] Universal build evidence records `rustc -Vv` and `cargo -V`.
+- [ ] Darwin cross-build evidence records `cargo zigbuild -V` and `zig version`.
+- [ ] `linux-*-musl` targets use the manifest `linux_musl_toolchain`, or document why `cargo-zigbuild` is needed for C dependencies.
+- [ ] `linux-*-musl` targets record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
+- [ ] Any enabled `linux-*-gnu` fallback targets record `glibc_build_host_version`, `glibc_min_version`, `ldd --version`, and `objdump -T` GLIBC symbol evidence.
+- [ ] Darwin-from-Linux evidence uses the v0 default `cargo-zigbuild` or records an approved exception.
+- [ ] Manifest confirms native npm mode when required, for example `runner = "native-binary"` and `node_launcher = false`.
+- [ ] macOS signing evidence is recorded for Darwin targets that require it.
+- [ ] Reusable fixes from the release branch are cherry-picked to `main` PRs when needed.
+- [ ] Release branch is not merged to `main`.
+- [ ] Final source tag pushed from the release branch.
+- [ ] Final artifacts built from the final source tag.
+- [ ] Final Darwin artifacts signed and verified from the installed path.
+- [ ] Final checksums generated.
+- [ ] GitHub Release published with final archives, checksums, installer assets, and notes.
+- [ ] Direct installer verified from release-pinned URL and `installer-validated` gates updated.
+- [ ] npm packages generated from final artifacts.
+- [ ] `npm pack --dry-run` reviewed for each package.
+- [ ] npm auth path selected: trusted publishing or temporary `NPM_TOKEN`.
+- [ ] npm packages published to `@motlie`.
+- [ ] npm installs verified for Linux and macOS packages.
+- [ ] Homebrew tap PR opened against `motlie/homebrew-tap`.
+- [ ] Homebrew formula builds from final source tag.
+- [ ] Homebrew formula re-signs installed binary on macOS.
+- [ ] Homebrew bottle tests pass from installed path.
+- [ ] Homebrew tap PR merged.
+- [ ] Final release-branch ledger commit updates `releases/manifest.toml` and per-binary manifests to `state = "published"` with final URLs, checksums, npm links, Homebrew tap commit, and install evidence.
