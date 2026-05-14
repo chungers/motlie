@@ -1,23 +1,34 @@
 ---
 name: release
-description: Execute or plan Motlie binary releases across GitHub Releases, npm @motlie native packages, direct installers, and the motlie/homebrew-tap Homebrew tap. Use when asked to release, stage, publish, package, codesign, create release PRs, update release docs, or verify release artifacts.
+description: Execute or plan Motlie binary releases across GitHub Releases, npm @motlie native packages, direct installers, and the motlie/homebrew-tap Homebrew tap. Use when asked to release, stage, publish, package, codesign, create release branches, update release docs, or verify release artifacts.
 ---
 
 # Motlie Release
 
-Use this skill for Motlie binary release work. The release target is parameterized by the binary the human specifies. Do not assume `mmux` unless the human says `mmux` or the task is explicitly the first worked release validation.
+Use this skill for Motlie release work. The release event is identified by a calver-codename branch and may include one or more binaries. Do not assume `mmux` unless the human says `mmux` or the task is explicitly the first worked release validation.
 
 Before changing anything:
 
 - identify yourself as required by `AGENTS.md`
 - check `git status --short --branch`
-- confirm the target branch, release version, and release target
+- confirm the release branch, release tag, and binaries in scope
 - do not publish npm packages, GitHub Releases, or Homebrew tap changes without explicit human approval
 - do not commit unrelated files
 - default to the manual v0 process in `docs/PLAN_RELEASES.md`; do not propose new CI jobs unless the human explicitly asks for automation
-- use `releases/<bin>/<version>.toml` as the release source of truth and status ledger
+- use branch-local `releases/manifest.toml` as the workspace release source of truth; read every referenced per-binary manifest before acting
+- never merge a release branch to `main`; cherry-pick source, doc, skill, or tooling fixes back to `main` through separate PRs when needed
 
-Release target fields:
+Release event fields:
+
+```text
+RELEASE_NAME=<YYYY-MM-adjective-codename>
+RELEASE_BRANCH=release/<release-name>
+RELEASE_TAG=<release-name>
+WORKSPACE_MANIFEST=releases/manifest.toml
+WORKSPACE_NOTES=releases/notes.md
+```
+
+Per-binary fields:
 
 ```text
 BIN=<installed command name>
@@ -29,13 +40,18 @@ FORMULA=<Homebrew formula name, if enabled>
 NPM_PREFIX=@motlie/<package-prefix>
 INSTALLER=install-<bin>.sh
 FORCE_COMMAND_SAFE=true|false
-MANIFEST=releases/<bin>/<version>.toml
-RELEASE_BRANCH=release/<bin>-v<version>
+BINARY_MANIFEST=releases/<bin>-<version>.toml
+BINARY_NOTES=releases/<bin>-<version>.md
 ```
 
 Worked example:
 
 ```text
+RELEASE_NAME=2026-05-amber-aardvark
+RELEASE_BRANCH=release/2026-05-amber-aardvark
+RELEASE_TAG=2026-05-amber-aardvark
+WORKSPACE_MANIFEST=releases/manifest.toml
+WORKSPACE_NOTES=releases/notes.md
 BIN=mmux
 CARGO_PACKAGE=motlie-mmux
 CARGO_BIN=mmux
@@ -45,8 +61,8 @@ FORMULA=mmux
 NPM_PREFIX=@motlie/mmux
 INSTALLER=install-mmux.sh
 FORCE_COMMAND_SAFE=true
-MANIFEST=releases/mmux/0.1.0.toml
-RELEASE_BRANCH=release/mmux-v0.1.0
+BINARY_MANIFEST=releases/mmux-0.1.0.toml
+BINARY_NOTES=releases/mmux-0.1.0.md
 ```
 
 Primary references:
@@ -58,34 +74,36 @@ Primary references:
 
 Manual v0 release sequence:
 
-1. Create a release coordination branch from `main`, for example `release/mmux-v0.1.0`.
-2. Add or update `releases/<bin>/<version>.toml` and `releases/<bin>/<version>.md`.
-3. Open the coordination PR from the release branch to `main`.
+1. Create a release branch from `main`, for example `release/2026-05-amber-aardvark`.
+2. Add or update branch-local `releases/manifest.toml`, `releases/notes.md`, and one per-binary manifest and notes file per released binary.
+3. Push the release branch. Do not open a PR that merges it to `main`.
 4. Land platform/channel sub-PRs into the release branch.
 5. Update manifest status with staging evidence, source commits, timestamps, actors, and links.
-6. Merge the coordination PR to `main` after all required gates are complete or explicitly deferred.
-7. Create the final source tag from `main`.
+6. Cherry-pick reusable source, doc, skill, or tooling fixes to `main` through separate PRs when needed.
+7. Create the final source tag from the release branch after all required gates are complete or explicitly deferred.
 8. Build, sign, package, and publish final artifacts from the final tag.
 9. Validate release-pinned installers and update `installer-validated` gates.
 10. Publish native npm packages and update `motlie/homebrew-tap`.
-11. Open a post-release ledger PR that marks the manifest `state = "published"` and records final URLs/checksums/package links.
+11. Push a final release-branch ledger commit that marks manifests `state = "published"` and records final URLs/checksums/package links.
 
-Release PR source files:
+Release branch source files:
 
 - `Cargo.toml`: bump `[workspace.package].version` and fix release metadata.
 - `bins/<bin>/Cargo.toml`: verify package name, bin name, and description; most binaries should inherit the workspace version.
-- `releases/<bin>/<version>.toml`: deterministic release intent and mutable status ledger.
-- `releases/<bin>/<version>.md`: release notes used by `gh release create`.
-- `releases/<bin>/install/*`: direct installer sources, only when installer distribution is in scope.
-- `releases/<bin>/npm/*`: npm native package templates, only when npm distribution is in scope.
-- `releases/<bin>/homebrew/*`: source-side formula template or notes only; the live formula PR belongs in `motlie/homebrew-tap`.
-- `docs/*`: update when behavior or workflow changes.
+- `releases/manifest.toml`: workspace release intent and mutable workspace ledger.
+- `releases/notes.md`: GitHub Release notes source.
+- `releases/<bin>-<version>.toml`: deterministic per-binary release intent and mutable binary ledger.
+- `releases/<bin>-<version>.md`: per-binary notes included from workspace notes.
+- `releases/install/*`: direct installer sources, only when installer distribution is in scope.
+- `releases/npm/*`: npm native package templates, only when npm distribution is in scope.
+- `releases/homebrew/*`: source-side formula template or notes only; the live formula PR belongs in `motlie/homebrew-tap`.
+- `docs/*` and `.agents/skills/release/*`: update on `main` by cherry-picking through a normal PR when behavior or workflow changes.
 
 To stage macOS signing from another host:
 
 ```sh
 gh pr checkout <release-pr-number>
-git switch release/<bin>-v<version>
+git switch release/<release-name>
 git pull --ff-only
 cargo build --release --locked --target <rust-target> -p <cargo-package> --bin <cargo-bin>
 codesign --force --sign - target/<rust-target>/release/<bin>
@@ -97,15 +115,16 @@ codesign --verify --strict --verbose=2 <install-path>
 <install-path> --version
 ```
 
-After the coordination PR merges to `main`:
+After release-branch gates are complete:
 
 ```sh
-git switch main
+git switch release/<release-name>
 git pull --ff-only
-rg -n 'binary = "<bin>"|version = "<version>"|tag = "v<version>"' releases/<bin>/<version>.toml Cargo.toml
-git tag v<VERSION>
-git push origin v<VERSION>
-gh release create v<VERSION> --repo chungers/motlie --title "v<VERSION>" --notes-file releases/<bin>/<version>.md
+rg -n 'name = "<release-name>"|tag = "<release-name>"|binary = "<bin>"|version = "<version>"' releases Cargo.toml
+git tag <release-name>
+git push origin <release-name>
+gh release create <release-name> --repo chungers/motlie --title "<release-name>" --notes-file releases/notes.md
+gh release edit <release-name> --repo chungers/motlie --latest
 ```
 
 GitHub constraints:
@@ -114,6 +133,7 @@ GitHub constraints:
 - The final tag must point to the exact source commit used for final artifacts.
 - Staging evidence from a release branch does not replace final build/signing from the final tag if the commit changed.
 - Do not move the release tag to include post-release ledger metadata.
+- Release branches never merge to `main`; cherry-pick fixes back instead.
 
 Manifest status rules:
 
@@ -123,22 +143,22 @@ Manifest status rules:
 - Gate rows are keyed by `(id, target_id)`. Use `target_id = ""` only for global gates or explicit rollups. Rollup rows set `rollup = true` and summarize target-specific rows.
 - Rollup gates are complete only when all enabled target/channel gates they summarize are complete or explicitly deferred.
 - Installer validation gates use `id = "installer-validated"` and should be target-specific when the installer must run on matching host platforms.
-- Channel-disabled gates are marked `deferred` at coordination-PR-open time with `deferred_reason`.
+- Channel-disabled gates are marked `deferred` when the release branch opens with `deferred_reason`.
 - Evidence entries use `{ kind, ref, sha256?, note? }`; include toolchain versions for build and signing gates.
 - Status fields are evidence only; intent fields drive artifact names, package names, binary paths, and installer behavior.
 - Record universal build evidence `rustc -Vv` and `cargo -V`.
 - The v0 Darwin-from-Linux toolchain is `cargo-zigbuild`; record `cargo zigbuild -V` and `zig version` for Darwin cross-build evidence.
 - Linux targets default to static musl when feasible. For pure-Rust `linux-*-musl`, use `rustup + cargo build --target`; use `cargo-zigbuild` only when C dependencies need a musl-aware linker. Record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
 - Generate `linux-*-gnu` targets only when the manifest enables gnu fallback/CUDA targets. For those targets, record `ldd --version`, `objdump -T <binary> | grep GLIBC_ | sort -u`, `glibc_build_host_version`, and `glibc_min_version`.
-- Use merge commits for the coordination PR; do not squash or rebase the release branch because the merge history preserves sub-PR evidence.
+- Use merge commits for sub-PRs into the release branch when possible; do not merge the release branch to `main`.
 
 Operator prompt workflow:
 
-1. Read `MANIFEST` before proposing the next action.
-2. Identify the first incomplete gate, its required platform, and whether the current host can perform it.
+1. Read `WORKSPACE_MANIFEST`, then every referenced `BINARY_MANIFEST`, before proposing the next action.
+2. Identify the first incomplete workspace gate or `(binary, gate, target_id)`, its required platform, and whether the current host can perform it.
 3. If another host/operator is needed, prompt with the exact branch/PR to pull and the manifest fields to update.
 4. If the action creates tags, GitHub Releases, npm publications, or Homebrew tap changes, ask for explicit approval.
-5. After a gate is performed, update manifest status through a PR or sub-PR with `completed_at`, `completed_by`, `source_commit`, and `evidence`.
+5. After a gate is performed, update manifest status on the release branch or through a sub-PR with `completed_at`, `completed_by`, `source_commit`, and `evidence`.
 6. For handoffs, reply with current state, next gate, required host/platform, command group, files to update, and approval needed.
 
 Read references only when needed:

@@ -8,10 +8,10 @@ Parameterize examples by the release target:
 BIN=<installed command name>
 NPM_PACKAGE=<platform package name, e.g. @motlie/<bin>-linux-x64-musl>
 PACKAGE_DIR=dist/npm/<package path>
-MANIFEST=releases/<bin>/<version>.toml
+BINARY_MANIFEST=releases/<bin>-<version>.toml
 ```
 
-Read package names and binary paths from `MANIFEST` when explicit fields are present. For native packages, `runner = "native-binary"` and `node_launcher = false` means the npm package must expose the binary directly and must not create `<bin>.js` or `<bin>.sh` as the runtime entrypoint.
+Read package names and binary paths from `BINARY_MANIFEST` when explicit fields are present. For native packages, `runner = "native-binary"` and `node_launcher = false` means the npm package must expose the binary directly and must not create `<bin>.js` or `<bin>.sh` as the runtime entrypoint.
 
 Preferred path:
 
@@ -37,7 +37,7 @@ Token is not needed for:
 - running `npm pack --dry-run`
 - local package install verification from a `.tgz`
 - Homebrew formula or bottle work
-- release coordination PR status updates
+- release-branch status updates
 
 Token is needed only for:
 

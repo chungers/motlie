@@ -5,15 +5,16 @@ Use this reference when a release task may be handled by different operators on 
 First inspect:
 
 ```text
-MANIFEST=releases/<bin>/<version>.toml
-RELEASE_BRANCH=release/<bin>-v<version>
+WORKSPACE_MANIFEST=releases/manifest.toml
+RELEASE_BRANCH=release/<YYYY-MM-adjective-codename>
+BINARY_MANIFEST=releases/<bin>-<version>.toml
 ```
 
 Every prompt should include:
 
 - current branch and git cleanliness
-- current manifest `state`
-- next incomplete gate
+- current workspace and binary manifest `state`
+- next incomplete workspace gate or `(binary, gate, target_id)`
 - `target_id` when the gate is target-specific
 - host/platform required
 - exact branch or PR to pull
@@ -26,36 +27,36 @@ Every prompt should include:
 Prompt:
 
 ```text
-@<identity> <datetime> -- I found MANIFEST=<path> with state=<state>. Please confirm BIN=<bin>, VERSION=<version>, RELEASE_BRANCH=<branch>, enabled channels=<channels>, and targets=<targets>. I will only edit release metadata and docs until these are confirmed.
+@<identity> <datetime> -- I found WORKSPACE_MANIFEST=<path> with state=<state>. Please confirm RELEASE_NAME=<release-name>, RELEASE_BRANCH=<branch>, RELEASE_TAG=<tag>, binaries=<binaries>, enabled channels=<channels>, and targets=<targets>. I will only edit release metadata and docs until these are confirmed.
 ```
 
 Action:
 
-- Fill missing release target fields.
-- If a channel is disabled, mark that channel's gates `deferred` at coordination-PR-open time with `deferred_reason = "channel disabled"`.
+- Fill missing release-event and per-binary target fields.
+- If a channel is disabled, mark that channel's gates `deferred` when the release branch opens with `deferred_reason = "channel disabled"`.
 - Do not create tags, releases, registry packages, or tap changes.
 
-## Coordination PR
+## Release Branch
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is release-pr-opened. I will create/update <release-branch>, add <manifest>, add release notes, and open a coordination PR to main. This does not publish artifacts.
+@<identity> <datetime> -- Next gate is release-branch-created. I will create/update <release-branch>, add releases/manifest.toml, add per-binary manifests and notes, and push the release branch. This does not publish artifacts and will not merge to main.
 ```
 
 Action:
 
-- Update or create `releases/<bin>/<version>.toml`.
-- Update or create `releases/<bin>/<version>.md`.
-- Record PR URL and source commit in the manifest gate after the PR exists.
-- Use `merge_strategy = "merge-commit"` in the manifest so sub-PR evidence remains visible after the coordination PR merges.
+- Update or create `releases/manifest.toml` and `releases/notes.md`.
+- Update or create one `releases/<bin>-<version>.toml` and `releases/<bin>-<version>.md` for every binary in scope.
+- Record branch URL and source commit in the workspace manifest gate after the branch exists.
+- Record `main_merge_policy = "never-merge-release-branch"` and `main_fix_policy = "cherry-pick-source-fixes-only"` in the workspace manifest.
 
 ## Linux Staging
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is <linux-gate> for target_id=<target-id>. This requires a Linux host. Pull <release-branch>, build <cargo-package>/<cargo-bin> for <rust-target>, verify artifact names, record toolchain and Linux linkage evidence, and update manifest evidence through a sub-PR to <release-branch>.
+@<identity> <datetime> -- Next gate is <linux-gate> for binary=<bin>, target_id=<target-id>. This requires a Linux host. Pull <release-branch>, build <cargo-package>/<cargo-bin> for <rust-target>, verify artifact names, record toolchain and Linux linkage evidence, and update the per-binary manifest evidence through a sub-PR to <release-branch>.
 ```
 
 Action:
@@ -71,7 +72,7 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is <darwin-gate> for target_id=<target-id>. This requires macOS. Pull <release-branch>, build with --target <rust-target>, run build-path and installed-path codesign checks, then update manifest evidence through a sub-PR to <release-branch>.
+@<identity> <datetime> -- Next gate is <darwin-gate> for binary=<bin>, target_id=<target-id>. This requires macOS. Pull <release-branch>, build with --target <rust-target>, run build-path and installed-path codesign checks, then update the per-binary manifest evidence through a sub-PR to <release-branch>.
 ```
 
 Action:
@@ -85,7 +86,7 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is npm staging for target_id=<target-id>. I will generate the native npm package candidate using the manifest package name and bin path, run npm pack dry-run, and update manifest evidence. I will not publish to npm without explicit approval.
+@<identity> <datetime> -- Next gate is npm staging for binary=<bin>, target_id=<target-id>. I will generate the native npm package candidate using the manifest package name and bin path, run npm pack dry-run, and update manifest evidence. I will not publish to npm without explicit approval.
 ```
 
 Action:
@@ -108,56 +109,57 @@ Action:
 - Keep live formula changes in `motlie/homebrew-tap`.
 - Record tap PR URL or formula evidence in the manifest.
 
-## Coordination Merge
+## Release Branch Finalization
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- All required gates appear complete or deferred. Please confirm whether to merge the coordination PR to main. After merge, final artifacts must be built from the final tag, not merely from staging evidence.
+@<identity> <datetime> -- All required gates appear complete or deferred. Please confirm release-branch finalization. I will identify any source, doc, skill, or tooling fixes that need cherry-picks to main. I will not merge the release branch to main.
 ```
 
 Action:
 
-- Do not merge without human approval.
+- Do not tag or publish without human approval.
 - Call out any `planned` or `failed` gates.
-- Use a merge commit. Do not squash or rebase the release coordination branch.
+- Cherry-pick reusable fixes to normal `main` PRs when needed. Never merge the release branch to `main`.
 
 ## Final Tag and GitHub Release
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- Ready for final tag v<version> from main. This is a tag-centric GitHub Release step. Please approve tag creation and GitHub Release publication from <manifest>.
+@<identity> <datetime> -- Ready for final tag <release-name> from <release-branch>. This is a tag-centric GitHub Release step. Please approve tag creation and GitHub Release publication from <workspace-manifest>.
 ```
 
 Action:
 
-- Verify `Cargo.toml`, manifest version, and manifest tag.
+- Verify `Cargo.toml`, workspace manifest tag, and per-binary versions.
 - Verify `Cargo.lock` is committed and unchanged at the final tag.
 - Create and push the tag only after approval.
-- Build final artifacts from a detached checkout of the tag, for example `git switch --detach v<VERSION>`.
+- Build final artifacts from a detached checkout of the tag, for example `git switch --detach <release-name>`.
 - Use manifest asset names for upload.
+- Because tags are calver-codenames, explicitly mark the intended stable release with `gh release edit <release-name> --latest` when publishing.
 
 ## Installer Validation
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is installer validation for target_id=<target-id>. This requires the matching target host. Install from the release-pinned installer URL, execute <bin> --version from the installed path, and update the target-specific installer-validated gate in <manifest>.
+@<identity> <datetime> -- Next gate is installer validation for binary=<bin>, target_id=<target-id>. This requires the matching target host. Install from the release-pinned installer URL, execute <bin> --version from the installed path, and update the target-specific installer-validated gate in the per-binary manifest.
 ```
 
 Action:
 
 - Use the release-pinned GitHub Release installer URL, not a moving Pages URL, for required validation.
 - Record installed path, command output, source release tag, installer URL, and checksum evidence.
-- If GitHub Pages convenience installer URLs are enabled, update the Pages repository only after the release-pinned installer exists and record Pages verification in the post-release ledger PR.
+- If GitHub Pages convenience installer URLs are enabled, update the Pages repository only after the release-pinned installer exists and record Pages verification in the retained release-branch ledger.
 
 ## npm Publish
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- Ready to publish npm packages from final artifacts. Please approve npm auth mode: trusted publishing or temporary NPM_TOKEN. I will publish only packages listed in <manifest>.
+@<identity> <datetime> -- Ready to publish npm packages from final artifacts. Please approve npm auth mode: trusted publishing or temporary NPM_TOKEN. I will publish only packages listed in the per-binary manifests.
 ```
 
 Action:
@@ -165,15 +167,15 @@ Action:
 - Use `.agents/skills/release/references/npm-auth.md`.
 - Publish only after final artifacts and package install checks pass.
 
-## Post-Release Ledger
+## Final Ledger
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- Release publication is complete. I will open a ledger PR updating <manifest> to state=published with final URLs, checksums, npm links, Homebrew tap commit, and install evidence. I will not move the release tag.
+@<identity> <datetime> -- Release publication is complete. I will update the retained release branch manifests to state=published with final URLs, checksums, npm links, Homebrew tap commit, and install evidence. I will not move the release tag or merge the release branch to main.
 ```
 
 Action:
 
-- Update only release ledger metadata.
+- Update only release ledger metadata on the retained release branch.
 - Do not move tags or republish unless a separate fix is approved.

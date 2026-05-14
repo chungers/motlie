@@ -2,14 +2,17 @@
 
 Use this checklist when coordinating an end-to-end Motlie release.
 
-- [ ] Release target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, channels, targets, `MANIFEST`, and `RELEASE_BRANCH`.
-- [ ] Release skill inspected `MANIFEST` and identified the next incomplete gate before taking action.
+- [ ] Release event captured: `RELEASE_NAME`, `RELEASE_BRANCH`, `RELEASE_TAG`, `WORKSPACE_MANIFEST`, channels, and binaries.
+- [ ] Every binary target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, targets, and `BINARY_MANIFEST`.
+- [ ] Release skill inspected `WORKSPACE_MANIFEST` and referenced per-binary manifests, then identified the next incomplete gate before taking action.
 - [ ] Human prompt included current state, next gate, required platform, branch or PR to pull, files to update, and approval needed.
-- [ ] Release coordination branch created from `main`.
-- [ ] `releases/<bin>/<version>.toml` committed with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
-- [ ] `releases/<bin>/<version>.md` committed as the release-note source.
+- [ ] Release branch created from `main` and pushed as `release/<YYYY-MM-adjective-codename>`.
+- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, binary list, and workspace gates.
+- [ ] `releases/notes.md` committed as the GitHub Release note source.
+- [ ] `releases/<bin>-<version>.toml` committed for each binary with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
+- [ ] `releases/<bin>-<version>.md` committed as each per-binary release-note source.
 - [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.
-- [ ] Coordination PR opened against `main`.
+- [ ] No PR is opened to merge the release branch to `main`.
 - [ ] Platform/channel sub-PRs opened against the release branch as needed.
 - [ ] Sub-PRs update manifest status with source commit, timestamp, actor, target id, channel, and evidence links.
 - [ ] Each gate handoff is reconstructable from manifest evidence.
@@ -24,9 +27,9 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Darwin-from-Linux evidence uses the v0 default `cargo-zigbuild` or records an approved exception.
 - [ ] Manifest confirms native npm mode when required, for example `runner = "native-binary"` and `node_launcher = false`.
 - [ ] macOS signing evidence is recorded for Darwin targets that require it.
-- [ ] Coordination PR is up to date with `main`.
-- [ ] Coordination PR merged to `main` with a merge commit, not squash or rebase.
-- [ ] Final source tag pushed from `main`.
+- [ ] Reusable fixes from the release branch are cherry-picked to `main` PRs when needed.
+- [ ] Release branch is not merged to `main`.
+- [ ] Final source tag pushed from the release branch.
 - [ ] Final artifacts built from the final source tag.
 - [ ] Final Darwin artifacts signed and verified from the installed path.
 - [ ] Final checksums generated.
@@ -42,4 +45,4 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Homebrew formula re-signs installed binary on macOS.
 - [ ] Homebrew bottle tests pass from installed path.
 - [ ] Homebrew tap PR merged.
-- [ ] Post-release ledger PR updates `releases/<bin>/<version>.toml` to `state = "published"` with final URLs, checksums, npm links, Homebrew tap commit, and install evidence.
+- [ ] Final release-branch ledger commit updates `releases/manifest.toml` and per-binary manifests to `state = "published"` with final URLs, checksums, npm links, Homebrew tap commit, and install evidence.
