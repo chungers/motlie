@@ -13,6 +13,36 @@ BINARY_MANIFEST=releases/<bin>-<version>.toml
 
 Read package names and binary paths from `BINARY_MANIFEST` when explicit fields are present. For native packages, `runner = "native-binary"` and `node_launcher = false` means the npm package must expose the binary directly and must not create `<bin>.js` or `<bin>.sh` as the runtime entrypoint.
 
+Native package directory shape:
+
+```text
+package.json
+README.md
+LICENSE
+bin/<bin>
+```
+
+Minimal package contract:
+
+```json
+{
+  "name": "<npm_package from target>",
+  "version": "<binary version>",
+  "bin": {
+    "<bin_command>": "bin/<bin>"
+  },
+  "files": ["bin", "README.md", "LICENSE"]
+}
+```
+
+Package staging:
+
+1. Copy the final signed/release binary to the manifest `npm_bin_path`.
+2. Generate `package.json` from manifest values; do not derive package names when `npm_package` is explicit.
+3. Run `npm pack --dry-run`.
+4. Run `npm pack`, install the generated `.tgz` on a matching host, and execute `<bin> --version`.
+5. Record dry-run output, `.tgz` checksum, install-test output, package name, version, and source tag in the target-specific `npm-published` gate before publishing.
+
 Preferred path:
 
 - use npm trusted publishing from GitHub Actions
