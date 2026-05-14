@@ -34,11 +34,16 @@ darwin_cross = "cargo-zigbuild"
 darwin_cross_policy = "v0-default-for-darwin-from-linux"
 linux_default_libc = "musl"
 linux_static_policy = "default-static-musl-when-feasible"
+linux_musl_toolchain = "rustup + cargo build --target"
+linux_musl_toolchain_policy = "default-for-pure-rust-static-musl"
+linux_musl_zigbuild_policy = "use-cargo-zigbuild-when-c-deps-need-musl-aware-linker"
 linux_gnu_policy = "fallback-for-glibc-or-cuda-runtime"
 linux_gnu_glibc_floor_policy = "record-host-and-binary-glibc-floor-for-gnu-targets"
-required_evidence = [
+required_evidence_universal = [
   "rustc -Vv",
   "cargo -V",
+]
+darwin_cross_required_evidence = [
   "cargo zigbuild -V",
   "zig version",
 ]

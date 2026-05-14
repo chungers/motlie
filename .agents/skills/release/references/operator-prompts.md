@@ -62,7 +62,7 @@ Action:
 
 - Use explicit manifest names such as `archive_asset` and `archive_binary_path`.
 - Record source commit, checksums if generated, command notes, `rustc -Vv`, `cargo -V`, and target status evidence.
-- For `linux-*-musl`, record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
+- For pure-Rust `linux-*-musl`, use the manifest default `rustup + cargo build --target`; use `cargo-zigbuild` only when C dependencies need a musl-aware linker. Record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
 - Generate `linux-*-gnu` targets only when the manifest enables gnu fallback/CUDA targets; for those targets, record `ldd --version`, `objdump -T <binary> | grep GLIBC_ | sort -u`, `glibc_build_host_version`, and `glibc_min_version`.
 - Do not commit build outputs.
 

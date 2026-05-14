@@ -10,6 +10,7 @@
 - 2026-05-13, @gpt55-dgx: Added structured target status, target-specific and rollup gates, evidence schema, cargo-zigbuild default, and merge-commit coordination strategy.
 - 2026-05-13, @gpt55-dgx: Fixed npm global-bin command, defined optional GitHub Pages installer updates, and added installer validation as a manifest-tracked gate.
 - 2026-05-13, @gpt55-dgx: Made static musl the default Linux target policy when feasible; glibc floors are required only for gnu fallback/CUDA targets.
+- 2026-05-14, @gpt55-dgx: Split universal/Darwin/Linux evidence lists, pinned the default Linux musl toolchain, and documented the musl allocator trade-off.
 
 ## Status
 
@@ -484,6 +485,8 @@ Every `linux-*-musl` target must record static-link evidence:
 
 Static musl is the preferred default because it avoids distro-specific glibc floors, works in Alpine/musl environments, and simplifies host-wide SSH integration by reducing runtime dependency auditing.
 
+Musl's allocator can be slower than glibc's allocator in allocation-heavy workloads. This is not expected to matter for TUI tools such as `mmux`; high-throughput binaries should benchmark the release artifact and may opt into a Rust allocator such as `mimalloc` or `jemalloc` if allocation behavior is material.
+
 GNU/glibc targets are fallback or additional targets only when static musl is not feasible, or when the binary depends on glibc-linked runtimes such as CUDA. Every `linux-*-gnu` target must then record:
 
 - `glibc_build_host_version`: the build host glibc reported by `ldd --version`;
@@ -694,11 +697,16 @@ darwin_cross = "cargo-zigbuild"
 darwin_cross_policy = "v0-default-for-darwin-from-linux"
 linux_default_libc = "musl"
 linux_static_policy = "default-static-musl-when-feasible"
+linux_musl_toolchain = "rustup + cargo build --target"
+linux_musl_toolchain_policy = "default-for-pure-rust-static-musl"
+linux_musl_zigbuild_policy = "use-cargo-zigbuild-when-c-deps-need-musl-aware-linker"
 linux_gnu_policy = "fallback-for-glibc-or-cuda-runtime"
 linux_gnu_glibc_floor_policy = "record-host-and-binary-glibc-floor-for-gnu-targets"
-required_evidence = [
+required_evidence_universal = [
   "rustc -Vv",
   "cargo -V",
+]
+darwin_cross_required_evidence = [
   "cargo zigbuild -V",
   "zig version",
 ]
