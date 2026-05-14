@@ -91,7 +91,7 @@ Release branch source files:
 - `Cargo.toml`: bump `[workspace.package].version` and fix release metadata.
 - `bins/<bin>/Cargo.toml`: verify package name, bin name, and description; most binaries should inherit the workspace version.
 - `releases/manifest.toml`: workspace release intent and mutable workspace ledger.
-- `releases/notes.md`: GitHub Release notes source.
+- `releases/notes.md`: human-approved GitHub Release notes source.
 - `releases/<bin>-<version>.toml`: deterministic per-binary release intent and mutable binary ledger.
 - `releases/<bin>-<version>.md`: per-binary notes included from workspace notes.
 - `releases/install/*`: direct installer sources copied from canonical templates such as `bins/<bin>/install-template.sh`, only when installer distribution is in scope.
@@ -160,6 +160,14 @@ Package build rules:
 - Homebrew release work happens in `motlie/homebrew-tap`; formulae build from the final source tag and run the installed binary from Homebrew's install path.
 - Package publication updates target-specific `npm-published`, `homebrew-formula-published`, or `homebrew-bottle-published` gates with package URL, version, checksum/provenance when available, source tag, actor, and command evidence.
 
+Release note rules:
+
+- Draft `releases/notes.md` and every `releases/<bin>-<version>.md` when the release branch opens.
+- Use manifests as the source for binary names, versions, targets, package names, install commands, and asset names.
+- Ask the release owner for the user-visible summary, notable changes, breaking changes, known issues, and audience-specific install guidance.
+- Do not publish notes with placeholders, stale target/package names, or claims inferred only from commit subjects.
+- Before `gh release create`, confirm human approval and record final notes evidence in the workspace `github-release-published` gate.
+
 Operator prompt workflow:
 
 1. Read `WORKSPACE_MANIFEST`, then every referenced `BINARY_MANIFEST`, before proposing the next action.
@@ -174,6 +182,7 @@ Read references only when needed:
 - npm publishing or token handling: `references/npm-auth.md`
 - macOS `codesign` or Darwin artifact validation: `references/macos-signing.md`
 - Homebrew formula/tap/bottle work: `references/homebrew-tap.md`
+- release note drafting or validation: `references/release-notes.md`
 - end-to-end checklist: `references/release-checklist.md`
 - operator handoff prompts or next-step prompting: `references/operator-prompts.md`
 

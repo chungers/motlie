@@ -48,9 +48,25 @@ Action:
 
 - Update or create `releases/manifest.toml` and `releases/notes.md`.
 - Update or create one `releases/<bin>-<version>.toml` and `releases/<bin>-<version>.md` for every binary in scope.
+- Draft release notes from manifests and release owner input. Ask for missing user-visible summary, notable changes, breaking changes, known issues, and install guidance.
 - Copy installer scripts from canonical templates such as `bins/<bin>/install-template.sh` into branch-local `releases/install/install-<bin>.sh` when installer distribution is in scope.
 - Record branch URL and source commit in the workspace manifest gate after the branch exists.
 - Record `main_merge_policy = "never-merge-release-branch"` and `main_fix_policy = "cherry-pick-source-fixes-only"` in the workspace manifest.
+
+## Release Notes
+
+Prompt:
+
+```text
+@<identity> <datetime> -- I will draft or validate release notes for <release-name>. Please provide or approve the user-visible summary, notable changes, breaking changes, known issues, and install guidance for binaries=<binaries>. I will derive names, versions, targets, packages, and asset names from the manifests.
+```
+
+Action:
+
+- Use `.agents/skills/release/references/release-notes.md`.
+- Create or update `releases/notes.md` and every `releases/<bin>-<version>.md`.
+- Check notes against manifests for binary names, versions, targets, package names, install commands, asset names, checksums when final, and known issues.
+- Do not publish the GitHub Release if notes still contain placeholders or unapproved claims.
 
 ## Linux Staging
 
@@ -136,6 +152,7 @@ Prompt:
 Action:
 
 - Verify `Cargo.toml`, workspace manifest tag, and per-binary versions.
+- Verify `releases/notes.md` is human-approved and references every per-binary note.
 - Verify `Cargo.lock` is committed and unchanged at the final tag.
 - Create and push the tag only after approval.
 - Build final artifacts from a detached checkout of the tag, for example `git switch --detach <release-name>`.
