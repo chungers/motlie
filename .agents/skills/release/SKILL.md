@@ -21,7 +21,7 @@ Before changing anything:
 Release event fields:
 
 ```text
-RELEASE_NAME=<YYYY-MM-adjective-codename>
+RELEASE_NAME=<YYYY-MM-codename>
 RELEASE_BRANCH=release/<release-name>
 RELEASE_TAG=<release-name>
 WORKSPACE_MANIFEST=releases/manifest.toml
@@ -94,7 +94,7 @@ Release branch source files:
 - `releases/notes.md`: GitHub Release notes source.
 - `releases/<bin>-<version>.toml`: deterministic per-binary release intent and mutable binary ledger.
 - `releases/<bin>-<version>.md`: per-binary notes included from workspace notes.
-- `releases/install/*`: direct installer sources, only when installer distribution is in scope.
+- `releases/install/*`: direct installer sources copied from canonical templates such as `bins/<bin>/install-template.sh`, only when installer distribution is in scope.
 - `releases/npm/*`: npm native package templates, only when npm distribution is in scope.
 - `releases/homebrew/*`: source-side formula template or notes only; the live formula PR belongs in `motlie/homebrew-tap`.
 - `docs/*` and `.agents/skills/release/*`: update on `main` by cherry-picking through a normal PR when behavior or workflow changes.
@@ -134,6 +134,7 @@ GitHub constraints:
 - Staging evidence from a release branch does not replace final build/signing from the final tag if the commit changed.
 - Do not move the release tag to include post-release ledger metadata.
 - Release branches never merge to `main`; cherry-pick fixes back instead.
+- Concurrent release branches are allowed. Pull relevant fixes from `main` into another release branch with a normal merge from `main`.
 
 Manifest status rules:
 

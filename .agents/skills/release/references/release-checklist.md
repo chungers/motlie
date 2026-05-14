@@ -6,7 +6,7 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Every binary target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, targets, and `BINARY_MANIFEST`.
 - [ ] Release skill inspected `WORKSPACE_MANIFEST` and referenced per-binary manifests, then identified the next incomplete gate before taking action.
 - [ ] Human prompt included current state, next gate, required platform, branch or PR to pull, files to update, and approval needed.
-- [ ] Release branch created from `main` and pushed as `release/<YYYY-MM-adjective-codename>`.
+- [ ] Release branch created from `main` and pushed as `release/<YYYY-MM-codename>`.
 - [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, binary list, and workspace gates.
 - [ ] `releases/notes.md` committed as the GitHub Release note source.
 - [ ] `releases/<bin>-<version>.toml` committed for each binary with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.

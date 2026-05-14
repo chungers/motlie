@@ -8,7 +8,7 @@ Parameterize examples by the release target:
 BIN=<installed command name>
 INSTALL_PATH=<final installed path, e.g. /usr/local/bin/<bin>>
 BINARY_MANIFEST=releases/<bin>-<version>.toml
-RELEASE_BRANCH=release/<YYYY-MM-adjective-codename>
+RELEASE_BRANCH=release/<YYYY-MM-codename>
 RUST_TARGET=<target.rust_target from manifest>
 ```
 
