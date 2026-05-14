@@ -3,14 +3,14 @@
 Use this checklist when coordinating an end-to-end Motlie release.
 
 - [ ] Release event captured: `RELEASE_NAME`, `RELEASE_BRANCH`, `RELEASE_TAG`, `WORKSPACE_MANIFEST`, channels, and binaries.
-- [ ] Every binary target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, targets, and `BINARY_MANIFEST`.
-- [ ] Release skill inspected `WORKSPACE_MANIFEST` and referenced per-binary manifests, then identified the next incomplete gate before taking action.
+- [ ] Every binary target captured in one stable `releases/<bin>.toml` with `[identity].binary`, `[identity].version`, `[build].cargo_package`, `[build].cargo_bin`, targets, and `[release].notes_path`.
+- [ ] Release skill inspected `WORKSPACE_MANIFEST`, scanned `releases/*.toml` for per-binary manifests, then identified the next incomplete gate before taking action.
 - [ ] Human prompt included current state, next gate, required platform, branch or PR to pull, files to update, and approval needed.
 - [ ] Release branch created from `main` and pushed as `release/<YYYY-MM-codename>`.
-- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, binary list, and workspace gates.
+- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, discovery policy, global defaults, workspace gates, and final binary completion ledger.
 - [ ] `releases/notes.md` committed as the GitHub Release note source.
-- [ ] `releases/<bin>-<version>.toml` committed for each binary with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
-- [ ] `releases/<bin>-<version>.md` committed as each per-binary release-note source.
+- [ ] `releases/<bin>.toml` committed for each binary with deterministic intent, version, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
+- [ ] Each binary manifest's `[release].notes_path`, for example `releases/<bin>.md`, committed as its per-binary release-note source.
 - [ ] Release notes list every binary, version, target family, distribution channel, install command, user-visible change, compatibility note, and known issue.
 - [ ] Release owner has approved the final notes before `gh release create`.
 - [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.

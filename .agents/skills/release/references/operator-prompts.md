@@ -7,7 +7,7 @@ First inspect:
 ```text
 WORKSPACE_MANIFEST=releases/manifest.toml
 RELEASE_BRANCH=release/<YYYY-MM-codename>
-BINARY_MANIFEST=releases/<bin>-<version>.toml
+BINARY_MANIFESTS=releases/*.toml excluding releases/manifest.toml, requiring kind = "motlie.binary-release"
 ```
 
 Every prompt should include:
@@ -41,14 +41,14 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is release-branch-created. I will create/update <release-branch>, add releases/manifest.toml, add per-binary manifests and notes, and push the release branch. This does not publish artifacts and will not merge to main.
+@<identity> <datetime> -- Next gate is release-branch-created. I will create/update <release-branch>, add releases/manifest.toml, add stable releases/<bin>.toml manifests and their referenced notes, and push the release branch. This does not publish artifacts and will not merge to main.
 ```
 
 Action:
 
 - Update or create `releases/manifest.toml` and `releases/notes.md`.
-- Update or create one `releases/<bin>-<version>.toml` and `releases/<bin>-<version>.md` for every binary in scope.
-- Draft release notes from manifests and release owner input. Ask for missing user-visible summary, notable changes, breaking changes, known issues, and install guidance.
+- Update or create one `releases/<bin>.toml` for every binary in scope, with `[identity].version` and `[release].notes_path`.
+- Draft per-binary release notes from discovered manifests and release owner input, then aggregate `releases/notes.md`. Ask for missing user-visible summary, notable changes, breaking changes, known issues, and install guidance.
 - Copy installer scripts from canonical templates such as `bins/<bin>/install-template.sh` into branch-local `releases/install/install-<bin>.sh` when installer distribution is in scope.
 - Record branch URL and source commit in the workspace manifest gate after the branch exists.
 - Record `main_merge_policy = "never-merge-release-branch"` and `main_fix_policy = "cherry-pick-source-fixes-only"` in the workspace manifest.
@@ -58,13 +58,13 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- I will draft or validate release notes for <release-name>. Please provide or approve the user-visible summary, notable changes, breaking changes, known issues, and install guidance for binaries=<binaries>. I will derive names, versions, targets, packages, and asset names from the manifests.
+@<identity> <datetime> -- I will draft or validate release notes for <release-name>. Please provide or approve the user-visible summary, notable changes, breaking changes, known issues, and install guidance for binaries=<binaries>. I will derive names, versions, targets, packages, asset names, and per-binary note paths from discovered manifests.
 ```
 
 Action:
 
 - Use `.agents/skills/release/references/release-notes.md`.
-- Create or update `releases/notes.md` and every `releases/<bin>-<version>.md`.
+- Create or update every binary manifest's `[release].notes_path`, then aggregate `releases/notes.md`.
 - Check notes against manifests for binary names, versions, targets, package names, install commands, asset names, checksums when final, and known issues.
 - Do not publish the GitHub Release if notes still contain placeholders or unapproved claims.
 

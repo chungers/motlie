@@ -7,7 +7,7 @@
 - 2026-04-29, @gpt55-dgx: Added macOS signing and installed-path verification tasks for npm, direct installer, and Homebrew release flows.
 - 2026-05-12, @gpt55-dgx: Generalized plan tasks around a selected binary target; `mmux` remains the first worked validation target.
 - 2026-05-12, @gpt55-dgx: Reworked the plan as a manual v0 release process with explicit release PR, manifest, tag, artifact, signing, npm, and Homebrew steps; CI job creation is deferred.
-- 2026-05-12, @gpt55-dgx: Aligned the plan to per-binary release manifests under `releases/<bin>/<version>.toml` and a long-running release coordination PR.
+- 2026-05-12, @gpt55-dgx: Aligned the plan to per-binary release manifests and a long-running release coordination PR.
 - 2026-05-12, @gpt55-dgx: Added skill-guided operator handoff requirements so different operators can pick up gates from manifest state.
 - 2026-05-13, @gpt55-dgx: Added target-specific gate tracking, cargo-zigbuild toolchain evidence, merge-commit strategy, and disabled-channel deferral requirements.
 - 2026-05-13, @gpt55-dgx: Added detached-tag build command and manifest-tracked installer validation gates.
@@ -16,6 +16,7 @@
 - 2026-05-14, @gpt55-dgx: Reworked the plan around branch-local calver-codename release branches that never merge to `main`; fixes are cherry-picked back separately.
 - 2026-05-14, @gpt55-dgx: Clarified installer template copy flow and made the macOS signing example fully parameterized.
 - 2026-05-14, @gpt55-dgx: Added explicit release-note draft, review, and finalization tasks.
+- 2026-05-14, @gpt55-dgx: Changed the plan to discover stable `releases/<bin>.toml` binary manifests by scanning `releases/`, with versions stored in schema and aggregate GitHub notes built from per-binary notes.
 
 ## Status
 
@@ -34,13 +35,13 @@ Worked branch-local manifests:
 ```text
 releases/manifest.toml
 releases/notes.md
-releases/mmux-0.1.0.toml
-releases/mmux-0.1.0.md
+releases/mmux.toml
+releases/mmux.md
 ```
 
 ## Skill-Guided Operator Handoffs
 
-Each phase below may be performed by a different operator on a different platform. Before acting, the release skill must read `releases/manifest.toml`, then each referenced per-binary manifest, identify the next incomplete workspace or binary gate, and prompt the human with:
+Each phase below may be performed by a different operator on a different platform. Before acting, the release skill must read `releases/manifest.toml`, scan `releases/*.toml` for per-binary manifests with `kind = "motlie.binary-release"`, identify the next incomplete workspace or binary gate, and prompt the human with:
 
 - current release and manifest state;
 - next workspace gate or `(binary, gate, target_id)`;
@@ -55,7 +56,7 @@ Prompt templates live in `.agents/skills/release/references/operator-prompts.md`
 ## Phase 1: Release Event and Binary Intake
 
 - [ ] 1.1 Confirm the release event name, release branch, and tag with the user. For the worked release: `RELEASE_NAME=2026-05-amber-aardvark`, `RELEASE_BRANCH=release/2026-05-amber-aardvark`, and `RELEASE_TAG=2026-05-amber-aardvark`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 1.2 Confirm every binary included in the release event. For `mmux`: `BIN=mmux`, `VERSION=0.1.0`, `CARGO_PACKAGE=motlie-mmux`, `CARGO_BIN=mmux`, and `INSTALL_PATH=/usr/local/bin/mmux`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 1.2 Confirm every binary included in the release event and create or update one stable manifest per binary. For `mmux`: `BINARY_MANIFEST=releases/mmux.toml`, `[identity].binary=mmux`, `[identity].version=0.1.0`, `[build].cargo_package=motlie-mmux`, `[build].cargo_bin=mmux`, and `[install].default_path=/usr/local/bin/mmux`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 1.3 Confirm the release is manual v0 and that CI job creation is out of scope for the release branch. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 1.4 Confirm channel scope: GitHub Release archives, direct installer, native npm packages, and Homebrew tap. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 1.5 Confirm whether any binary has accelerator variants. CPU/default artifacts omit accelerator suffixes; CUDA artifacts use explicit suffixes such as `cuda-12-4`. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/SKILL.md`.
@@ -72,9 +73,9 @@ git push -u origin release/2026-05-amber-aardvark
 ```
 
 - [ ] 2.1 Bump release-branch versions in `Cargo.toml` or per-binary manifests as needed. If a binary inherits `version.workspace = true`, the release branch can carry the workspace version used for this release. Fix placeholder workspace metadata such as `authors = ["Your Name <your.email@example.com>"]` before the first real release. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 2.2 Add branch-local `releases/manifest.toml` and `releases/notes.md`. The workspace manifest lists all binaries in this release event and owns release-event identity, branch, tag, GitHub Release URL, and workspace gates. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 2.3 Add one per-binary manifest and notes file for each binary, for example `releases/mmux-0.1.0.toml` and `releases/mmux-0.1.0.md`. Per-binary manifests capture explicit non-derived names, target matrix, structured per-target status, `(id, target_id)` gates, and mutable status. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 2.4 Draft `releases/notes.md` and every `releases/<bin>-<version>.md`. The workspace notes must list all binaries, versions, distribution channels, install commands, user-visible changes, verification/checksum guidance, and known issues. Per-binary notes must cover binary-specific changes and compatibility notes. Reference: `docs/DESIGN_RELEASES.md#release-notes`. Skill support: `.agents/skills/release/references/release-notes.md`.
+- [ ] 2.2 Add branch-local `releases/manifest.toml` and `releases/notes.md`. The workspace manifest owns release-event identity, branch, tag, GitHub Release URL, global defaults, workspace gates, discovery policy, and final per-binary completion summaries. It does not enumerate the build fan-out. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 2.3 Add one stable per-binary manifest and notes file for each binary, for example `releases/mmux.toml` and `releases/mmux.md`. Per-binary manifests capture version, explicit non-derived names, target matrix, structured per-target status, `(id, target_id)` gates, and mutable status. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 2.4 Draft every per-binary note referenced by `[release].notes_path`, then aggregate `releases/notes.md`. The workspace notes must list all binaries, versions, distribution channels, install commands, user-visible changes, verification/checksum guidance, and known issues. Per-binary notes must cover binary-specific changes and compatibility notes. Reference: `docs/DESIGN_RELEASES.md#release-notes`. Skill support: `.agents/skills/release/references/release-notes.md`.
 - [ ] 2.5 Add source-side installer, npm, or Homebrew templates under branch-local `releases/install/`, `releases/npm/`, or `releases/homebrew/` only when needed by the release. Installer scripts should be copied from canonical templates on `main`, normally `bins/<bin>/install-template.sh`, into `releases/install/install-<bin>.sh`; release-specific values may be patched in the branch-local copy. The live Homebrew formula still belongs in `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`. Skill support: `.agents/skills/release/references/homebrew-tap.md`.
 - [ ] 2.6 Mark disabled-channel gates `deferred` when the release branch opens. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 
@@ -83,7 +84,7 @@ Release branch scope:
 - `Cargo.toml` version and release metadata for the release branch.
 - `bins/<bin>/Cargo.toml` verification or package-specific metadata for each binary.
 - `releases/manifest.toml` and `releases/notes.md`.
-- `releases/<bin>-<version>.toml` and `releases/<bin>-<version>.md` for every binary in scope.
+- `releases/<bin>.toml` and `releases/<bin>.md` for every binary in scope.
 - Optional source-side templates under branch-local `releases/install/`, `releases/npm/`, and `releases/homebrew/`.
 
 Reusable docs, release skill changes, tooling improvements, and real source fixes should land on `main` through normal PRs, usually by cherry-picking from the release branch if they were discovered there. The release branch must not publish npm packages, create a stable GitHub Release, or merge live Homebrew tap changes until the relevant gates are approved.
@@ -169,7 +170,7 @@ Final GitHub Release URLs, uploaded asset URLs, npm links, Homebrew tap commits,
 
 These tasks are intentionally deferred. They should not be part of the manual v0 release branch unless the user explicitly reopens automation scope.
 
-- [ ] 9.1 Add a manifest validation helper that checks schema, explicit names, status transitions, and accelerator suffix rules. Reference: `docs/DESIGN_RELEASES.md#core-motlie-work`.
+- [ ] 9.1 Add a manifest validation helper that scans `releases/*.toml`, filters `kind = "motlie.binary-release"`, enforces `releases/<identity.binary>.toml`, rejects duplicate binaries, validates `[identity].version` and `[release].notes_path`, checks explicit names, checks status transitions, and checks accelerator suffix rules. Reference: `docs/DESIGN_RELEASES.md#core-motlie-work`.
 - [ ] 9.2 Add CI jobs for Linux builds and Darwin cross-build staging. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
 - [ ] 9.3 Add a manually approved macOS signing workflow. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`.
 - [ ] 9.4 Add npm trusted-publishing workflows after package names and release assets are proven manually. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`.
@@ -180,7 +181,7 @@ These tasks are intentionally deferred. They should not be part of the manual v0
 A release branch is ready for final tagging only after:
 
 - The release event is represented in `releases/manifest.toml`.
-- Every binary in scope is represented in `releases/<bin>-<version>.toml`.
+- Every binary in scope is represented in one stable `releases/<bin>.toml` file with `[identity].version`.
 - The workspace and per-binary manifests distinguish immutable release intent from mutable, structured target/gate status.
 - `Cargo.toml` contains the intended workspace version and non-placeholder release metadata.
 - `Cargo.lock` policy and toolchain evidence requirements are captured in the relevant per-binary manifests.
@@ -188,8 +189,8 @@ A release branch is ready for final tagging only after:
 - Darwin cross-build evidence commands are captured in `[toolchain].darwin_cross_required_evidence`.
 - `linux-*-musl` targets have `linux_musl_toolchain` and static-link evidence commands captured in `[toolchain].linux_musl_required_evidence`.
 - Any enabled `linux-*-gnu` fallback targets have `glibc_build_host_version` and `glibc_min_version` fields, with required evidence commands captured in `[toolchain].linux_gnu_required_evidence`.
-- `releases/notes.md` exists and references all per-binary notes.
-- `releases/<bin>-<version>.md` exists and matches each release target.
+- `releases/notes.md` exists and aggregates all per-binary notes.
+- Each binary manifest's `[release].notes_path`, for example `releases/<bin>.md`, exists and matches that release target.
 - Release notes have been checked for placeholders, final tag, final install commands, target matrix, known issues, and human approval.
 - Any installer, npm, or Homebrew templates included in the branch match the manifest.
 - If direct installer distribution is enabled, target-specific `installer-validated` gates exist in the manifest.
