@@ -14,6 +14,7 @@
 - 2026-05-13, @gpt55-dgx: Made static musl the default Linux artifact policy when feasible, with glibc-floor evidence only for gnu fallback/CUDA targets.
 - 2026-05-14, @gpt55-dgx: Split release evidence by universal, Darwin cross, Linux musl, and Linux gnu categories and pinned the default musl build toolchain.
 - 2026-05-14, @gpt55-dgx: Reworked the plan around branch-local calver-codename release branches that never merge to `main`; fixes are cherry-picked back separately.
+- 2026-05-14, @gpt55-dgx: Clarified installer template copy flow and made the macOS signing example fully parameterized.
 
 ## Status
 
@@ -72,7 +73,7 @@ git push -u origin release/2026-05-amber-aardvark
 - [ ] 2.1 Bump release-branch versions in `Cargo.toml` or per-binary manifests as needed. If a binary inherits `version.workspace = true`, the release branch can carry the workspace version used for this release. Fix placeholder workspace metadata such as `authors = ["Your Name <your.email@example.com>"]` before the first real release. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 2.2 Add branch-local `releases/manifest.toml` and `releases/notes.md`. The workspace manifest lists all binaries in this release event and owns release-event identity, branch, tag, GitHub Release URL, and workspace gates. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 2.3 Add one per-binary manifest and notes file for each binary, for example `releases/mmux-0.1.0.toml` and `releases/mmux-0.1.0.md`. Per-binary manifests capture explicit non-derived names, target matrix, structured per-target status, `(id, target_id)` gates, and mutable status. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 2.4 Add source-side installer, npm, or Homebrew templates under branch-local `releases/install/`, `releases/npm/`, or `releases/homebrew/` only when needed by the release. The live Homebrew formula still belongs in `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`. Skill support: `.agents/skills/release/references/homebrew-tap.md`.
+- [ ] 2.4 Add source-side installer, npm, or Homebrew templates under branch-local `releases/install/`, `releases/npm/`, or `releases/homebrew/` only when needed by the release. Installer scripts should be copied from canonical templates on `main`, normally `bins/<bin>/install-template.sh`, into `releases/install/install-<bin>.sh`; release-specific values may be patched in the branch-local copy. The live Homebrew formula still belongs in `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`. Skill support: `.agents/skills/release/references/homebrew-tap.md`.
 - [ ] 2.5 Mark disabled-channel gates `deferred` when the release branch opens. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 
 Release branch scope:
@@ -107,14 +108,14 @@ A macOS operator can pick up the release branch or a platform sub-PR and perform
 gh pr checkout <sub-pr-number>
 git switch release/2026-05-amber-aardvark
 git pull --ff-only
-cargo build --release --locked --target aarch64-apple-darwin -p motlie-mmux --bin mmux
-codesign --force --sign - target/aarch64-apple-darwin/release/mmux
-codesign --verify --strict --verbose=2 target/aarch64-apple-darwin/release/mmux
-target/aarch64-apple-darwin/release/mmux --version
-sudo install -m 755 target/aarch64-apple-darwin/release/mmux /usr/local/bin/mmux
-sudo codesign --force --sign - /usr/local/bin/mmux
-codesign --verify --strict --verbose=2 /usr/local/bin/mmux
-/usr/local/bin/mmux --version
+cargo build --release --locked --target <rust-target> -p <cargo-package> --bin <cargo-bin>
+codesign --force --sign - target/<rust-target>/release/<bin>
+codesign --verify --strict --verbose=2 target/<rust-target>/release/<bin>
+target/<rust-target>/release/<bin> --version
+sudo install -m 755 target/<rust-target>/release/<bin> <install-path>
+sudo codesign --force --sign - <install-path>
+codesign --verify --strict --verbose=2 <install-path>
+<install-path> --version
 ```
 
 - [ ] 4.1 Record staged macOS signing evidence in the relevant per-binary manifest, including `rust_target`, signing identity, `rustc -Vv`, `cargo -V`, and codesign evidence. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`. Skill support: `.agents/skills/release/references/macos-signing.md`.

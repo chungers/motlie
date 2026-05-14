@@ -6,7 +6,7 @@ First inspect:
 
 ```text
 WORKSPACE_MANIFEST=releases/manifest.toml
-RELEASE_BRANCH=release/<YYYY-MM-adjective-codename>
+RELEASE_BRANCH=release/<YYYY-MM-codename>
 BINARY_MANIFEST=releases/<bin>-<version>.toml
 ```
 
@@ -48,6 +48,7 @@ Action:
 
 - Update or create `releases/manifest.toml` and `releases/notes.md`.
 - Update or create one `releases/<bin>-<version>.toml` and `releases/<bin>-<version>.md` for every binary in scope.
+- Copy installer scripts from canonical templates such as `bins/<bin>/install-template.sh` into branch-local `releases/install/install-<bin>.sh` when installer distribution is in scope.
 - Record branch URL and source commit in the workspace manifest gate after the branch exists.
 - Record `main_merge_policy = "never-merge-release-branch"` and `main_fix_policy = "cherry-pick-source-fixes-only"` in the workspace manifest.
 

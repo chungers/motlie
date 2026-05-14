@@ -13,6 +13,7 @@
 - 2026-05-13, @gpt55-dgx: Made static musl the default Linux artifact policy when feasible, with glibc-floor evidence only for gnu fallback/CUDA targets.
 - 2026-05-14, @gpt55-dgx: Split evidence requirements by target category and clarified the default Linux musl build toolchain.
 - 2026-05-14, @gpt55-dgx: Reworked the playbook for branch-local calver-codename release branches that support multiple binaries and never merge to `main`.
+- 2026-05-14, @gpt55-dgx: Clarified codename placeholders, concurrent release branches, and installer template origin.
 
 ## Scope
 
@@ -44,7 +45,7 @@ This playbook is generic. The release operator must identify the release event a
 Required release-event fields:
 
 ```text
-RELEASE_NAME=<YYYY-MM-adjective-codename>
+RELEASE_NAME=<YYYY-MM-codename>
 RELEASE_BRANCH=release/<release-name>
 RELEASE_TAG=<release-name>
 WORKSPACE_MANIFEST=releases/manifest.toml
@@ -92,7 +93,7 @@ For `FORCE_COMMAND_SAFE=true`, the direct installer must default to archive mode
 
 ## Release Model
 
-Use a release branch instead of publishing directly from a local build. The release branch starts from `main`, is named `release/<YYYY-MM-adjective-codename>`, and carries branch-local release manifests, release notes, and status updates from platform-specific sub-PRs.
+Use a release branch instead of publishing directly from a local build. The release branch starts from `main`, is named `release/<YYYY-MM-codename>`, and carries branch-local release manifests, release notes, and status updates from platform-specific sub-PRs.
 
 The release should move through these gates:
 
@@ -108,6 +109,8 @@ The release should move through these gates:
 10. Final release-branch ledger commit and uploaded manifest assets recording final URLs, checksums, and package links.
 
 This keeps staging, final publication, and post-release audit metadata distinct. If a later gate fails, status remains inspectable in the retained release branch without moving the release tag. Release branches never merge to `main`.
+
+Multiple release events may run concurrently. A fix cherry-picked from one release branch to `main` can be pulled into another release branch through a normal merge from `main` when it applies there.
 
 ## Operator Handoff and Skill Prompts
 
@@ -167,7 +170,7 @@ The initial branch should include:
 - The workspace manifest, `releases/manifest.toml`.
 - Workspace release notes, `releases/notes.md`.
 - Per-binary manifests and notes, for example `releases/mmux-0.1.0.toml` and `releases/mmux-0.1.0.md`.
-- Source-side installer, npm, or Homebrew templates under branch-local `releases/` if needed.
+- Source-side installer, npm, or Homebrew templates under branch-local `releases/` if needed. Installer scripts should be copied from canonical templates on `main`, normally `bins/<bin>/install-template.sh`, into `releases/install/install-<bin>.sh`.
 
 Platform-specific work should land as sub-PRs targeting the release branch:
 

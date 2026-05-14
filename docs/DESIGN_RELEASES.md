@@ -12,6 +12,7 @@
 - 2026-05-13, @gpt55-dgx: Made static musl the default Linux target policy when feasible; glibc floors are required only for gnu fallback/CUDA targets.
 - 2026-05-14, @gpt55-dgx: Split universal/Darwin/Linux evidence lists, pinned the default Linux musl toolchain, and documented the musl allocator trade-off.
 - 2026-05-14, @gpt55-dgx: Changed releases to branch-local calver-codename events that support multiple binaries and never merge release branches back to `main`.
+- 2026-05-14, @gpt55-dgx: Clarified codename terminology, concurrent release branch handling, and installer template lifecycle.
 
 ## Status
 
@@ -48,24 +49,26 @@ The distribution contract must make platform-specific assets precise without mak
 The release framework is generic and release-event centered. A release event is named with a calver-codename:
 
 ```text
-<YYYY-MM>-<adjective>-<codename>
+<YYYY-MM>-<codename>
 ```
 
-The month is locked when the release branch is opened. If the release slips, the name remains unchanged. The release branch and Git tag both use this release-event name:
+The month is locked when the release branch is opened. If the release slips, the name remains unchanged. The codename is freeform and may contain hyphens; `amber-aardvark` is only a worked example, not a rule that every codename must be adjective-animal. The release branch and Git tag both use this release-event name:
 
 ```text
-release/<YYYY-MM>-<adjective>-<codename>
-<YYYY-MM>-<adjective>-<codename>
+release/<YYYY-MM>-<codename>
+<YYYY-MM>-<codename>
 ```
 
 Release branches are retained release ledgers and never merge back to `main`. Source or process fixes discovered on a release branch must be cherry-picked into a normal `main` PR when they are relevant outside the release branch. The branch-local `releases/` directory can therefore contain release manifests, notes, installers, and ledger updates without polluting `main`.
 
 Codename uniqueness is enforced by remote branch and tag names. A main-branch codename registry is intentionally not required for v0 because it would reintroduce release-event state into `main`. If later automation needs a registry, it should be generated from remote refs or kept outside the source tree rather than becoming a required release artifact on `main`.
 
+Release events may run concurrently as independent release branches. Each branch is self-contained; fixes cherry-picked to `main` from one release branch can flow into another concurrent release branch through a normal merge from `main` when relevant.
+
 Each release event can contain one or more binary targets. Each binary target must define the binary-specific fields before implementation or publication begins.
 
 ```text
-RELEASE_NAME=<YYYY-MM-adjective-codename>
+RELEASE_NAME=<YYYY-MM-codename>
 RELEASE_BRANCH=release/<release-name>
 RELEASE_TAG=<release-name>
 WORKSPACE_MANIFEST=releases/manifest.toml
@@ -573,28 +576,28 @@ The release process uploads to multiple destinations. They are not all hosted in
 
 ### Installer Script Hosting
 
-Installer script source should live in the Motlie source repository:
+Canonical installer templates should live on `main` in the Motlie source repository. Per-binary templates use `bins/<bin>/install-template.sh`; shared helpers can live under `releases/install-templates/_shared/` without storing release-event ledger state on `main`:
 
 ```text
-releases/
+bins/
   mmux/
-    install/
-      install-mmux.sh
+    install-template.sh
   motlie-models/
-    install/
-      install-motlie-models.sh
-  _shared/
-    install/
-      lib/
-        detect-os.sh
-        detect-arch.sh
-        detect-libc.sh
-        detect-cuda.sh
-        fetch-release-asset.sh
-        verify-checksum.sh
+    install-template.sh
+releases/
+  install-templates/
+    _shared/
+      detect-os.sh
+      detect-arch.sh
+      detect-libc.sh
+      detect-cuda.sh
+      fetch-release-asset.sh
+      verify-checksum.sh
 ```
 
-The generic naming rule is `install-<bin>.sh`; the listed files are examples.
+Each release branch copies the canonical template into branch-local `releases/install/install-<bin>.sh` during Phase 2.4 and may patch release-specific values such as tag, asset names, and checksums into that copy. Installer behavior fixes discovered on a release branch should usually be cherry-picked back to the canonical template on `main`.
+
+The release asset naming rule is `install-<bin>.sh`; the listed files are examples.
 
 The canonical hosted installer scripts should be uploaded to version-pinned GitHub Releases:
 

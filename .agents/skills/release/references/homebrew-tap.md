@@ -10,7 +10,7 @@ CARGO_PACKAGE=<cargo package name>
 FORMULA=<formula name, often same as BIN>
 VERSION=<release version>
 BINARY_MANIFEST=releases/<bin>-<version>.toml
-RELEASE_TAG=<YYYY-MM-adjective-codename>
+RELEASE_TAG=<YYYY-MM-codename>
 ```
 
 Tap repo:
