@@ -93,7 +93,8 @@ Action:
 
 - Use manifest `npm_package`, `bin_path`, `runner`, and `node_launcher`.
 - If `node_launcher = false`, do not create `<bin>.js` or `<bin>.sh` as the runtime entrypoint.
-- Record dry-run evidence.
+- Generate native package directories from final artifacts or staging artifacts as appropriate for the gate, run `npm pack --dry-run`, and install-test the generated `.tgz` before publish.
+- Record dry-run output, package checksum, install-test output, package name, version, source tag, and provenance/auth mode when available.
 
 ## Homebrew Staging
 

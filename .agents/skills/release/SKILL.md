@@ -152,6 +152,13 @@ Manifest status rules:
 - Generate `linux-*-gnu` targets only when the manifest enables gnu fallback/CUDA targets. For those targets, record `ldd --version`, `objdump -T <binary> | grep GLIBC_ | sort -u`, `glibc_build_host_version`, and `glibc_min_version`.
 - Use merge commits for sub-PRs into the release branch when possible; do not merge the release branch to `main`.
 
+Package build rules:
+
+- Build archives and npm package directories from final artifacts produced from `RELEASE_TAG`; staging package directories are evidence only.
+- Native npm package directories are generated from per-target `npm_package`, `npm_bin_path`, `bin_command`, and `node_launcher = false`; run `npm pack --dry-run`, install the generated `.tgz`, and execute the installed binary before publishing.
+- Homebrew release work happens in `motlie/homebrew-tap`; formulae build from the final source tag and run the installed binary from Homebrew's install path.
+- Package publication updates target-specific `npm-published`, `homebrew-formula-published`, or `homebrew-bottle-published` gates with package URL, version, checksum/provenance when available, source tag, actor, and command evidence.
+
 Operator prompt workflow:
 
 1. Read `WORKSPACE_MANIFEST`, then every referenced `BINARY_MANIFEST`, before proposing the next action.
