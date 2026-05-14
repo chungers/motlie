@@ -131,7 +131,12 @@ hardening, document the technical reason before diverging.
 For the VZ #271 bridge, `build-guest.sh` accepts
 `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is copied through the build
 seed disk and applied while producing VZ artifacts; the emitted
-`build-result.json` and `guest-contract.json` record `rootfs_input`.
+`build-result.json` and `guest-contract.json` record `rootfs_input` with the
+canonical tarball path, byte size, and sha256 digest. The VZ adapter pre-scans
+the tarball before copying and verifies the seeded guest copy before root
+extraction. After extraction it normalizes OpenSSH StrictModes path ancestors
+(`/`, `/etc`, and `/etc/ssh/*`) to `root:root 0755`; launch-time provisioning
+must fail fast if this image contract is broken rather than weakening sshd.
 `mbuild build --target vz --rootfs-tarball <tar>` is the preferred entrypoint
 because the builder validates the tarball and passes it through the configured
 VZ adapter env. This is the only allowed transitional handoff from the common

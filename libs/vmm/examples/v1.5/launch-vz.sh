@@ -1105,8 +1105,17 @@ if [[ -z "\$existing_gid" ]]; then
   fi
   printf '${CONTROL_PASSWORD}\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
 elif [[ "\$existing_gid" != "$GID_NUM" ]]; then
-  echo "guest group $LOGIN_USER has gid \$existing_gid but expected $GID_NUM" >&2
-  exit 1
+  # VZ convergence bridge:
+  # Transitional VZ images can still contain demo users baked by the native
+  # source VM path (for example alice=1000). The unified harness is the source
+  # of truth for runtime UID/GID allocation, so migrate that same login user in
+  # place instead of rejecting VZ before first SSH provisioning can complete.
+  gid_owner="\$(getent group $GID_NUM | cut -d: -f1 || true)"
+  if [[ -n "\$gid_owner" && "\$gid_owner" != '$LOGIN_USER' ]]; then
+    echo "gid $GID_NUM already belongs to \$gid_owner; cannot provision $LOGIN_USER" >&2
+    exit 1
+  fi
+  printf '${CONTROL_PASSWORD}\n' | sudo -S groupmod -g $GID_NUM '$LOGIN_USER'
 fi
 
 existing_uid="\$(id -u '$LOGIN_USER' 2>/dev/null || true)"
@@ -1117,9 +1126,22 @@ if [[ -z "\$existing_uid" ]]; then
     exit 1
   fi
   printf '${CONTROL_PASSWORD}\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
-elif [[ "\$existing_uid" != "$UID_NUM" ]]; then
-  echo "guest user $LOGIN_USER has uid \$existing_uid but expected $UID_NUM" >&2
-  exit 1
+else
+  existing_primary_gid="\$(id -g '$LOGIN_USER' 2>/dev/null || true)"
+  if [[ "\$existing_uid" != "$UID_NUM" || "\$existing_primary_gid" != "$GID_NUM" ]]; then
+    uid_owner="\$(getent passwd $UID_NUM | cut -d: -f1 || true)"
+    if [[ -n "\$uid_owner" && "\$uid_owner" != '$LOGIN_USER' ]]; then
+      echo "uid $UID_NUM already belongs to \$uid_owner; cannot provision $LOGIN_USER" >&2
+      exit 1
+    fi
+    while read -r victim_pid; do
+      [[ -n "\$victim_pid" ]] || continue
+      printf '${CONTROL_PASSWORD}\n' | sudo -S kill -KILL "\$victim_pid" >/dev/null 2>&1 || true
+    done < <(pgrep -u '$LOGIN_USER' || true)
+    sleep 1
+    printf '${CONTROL_PASSWORD}\n' | sudo -S usermod -u $UID_NUM -g $GID_NUM '$LOGIN_USER'
+    printf '${CONTROL_PASSWORD}\n' | sudo -S chown -R $UID_NUM:$GID_NUM /home/$LOGIN_USER >/dev/null 2>&1 || true
+  fi
 fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
 printf '${CONTROL_PASSWORD}\n' | sudo -S usermod -aG sudo '$LOGIN_USER' || true
@@ -1198,13 +1220,15 @@ fi
 if [[ ! -s /etc/profile.d/agent-state.sh ]]; then
   contract_missing+=("/etc/profile.d/agent-state.sh from the base image")
 fi
-root_owner="\$(stat -c '%u:%g' / 2>/dev/null || true)"
-root_mode="\$(stat -c '%a' / 2>/dev/null || true)"
-if [[ "\$root_owner" != "0:0" || "\$root_mode" != "755" ]]; then
-  contract_missing+=(
-    "root filesystem inode must be root:root 0755 for OpenSSH StrictModes; got owner=\${root_owner:-unknown} mode=\${root_mode:-unknown}"
-  )
-fi
+for strict_path in / /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals; do
+  strict_owner="\$(stat -c '%u:%g' "\$strict_path" 2>/dev/null || true)"
+  strict_mode="\$(stat -c '%a' "\$strict_path" 2>/dev/null || true)"
+  if [[ "\$strict_owner" != "0:0" || "\$strict_mode" != "755" ]]; then
+    contract_missing+=(
+      "\$strict_path must be root:root 0755 for OpenSSH StrictModes; got owner=\${strict_owner:-unknown} mode=\${strict_mode:-unknown}"
+    )
+  fi
+done
 sshd_config_probe=/usr/sbin/sshd
 if [[ ! -x "\$sshd_config_probe" ]]; then
   sshd_config_probe="\$(command -v sshd 2>/dev/null || true)"
@@ -1266,12 +1290,10 @@ printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vmm-prin
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0644 /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 motlie_guest_phase guest-runtime-files-installed
-# Dynamic CA/principal files are per-guest seed state. The sshd policy must be
-# baked into the image, but reload sshd here so first proxy auth observes the
-# freshly seeded CA material before the launcher declares interactive-ready.
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl reload ssh.service >/dev/null 2>&1 \
-  || printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart ssh.service
-motlie_guest_phase sshd-reloaded
+# VZ parity with v1.45: do not reload/restart sshd in the first-contact path.
+# The sshd policy is immutable image content, and OpenSSH reads the CA and
+# AuthorizedPrincipals files during auth. Restarting sshd here introduces a
+# control-port race before the Rust SSH bridge can register the guest.
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
 motlie_guest_phase vfs-service-restarted
 mounts_ready=0

@@ -19,6 +19,8 @@ IDENTITY_PROBE_JSON="$ARTIFACTS_DIR/identity-probe.json"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
 ROOTFS_TARBALL_OVERRIDE="${MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL:-${MOTLIE_V15_VZ_ROOTFS_TARBALL:-}}"
 ROOTFS_TARBALL_SOURCE=""
+ROOTFS_TARBALL_SIZE_BYTES=""
+ROOTFS_TARBALL_SHA256=""
 ROOTFS_TARBALL_SEED_NAME="motlie-assembled-rootfs.tar"
 ROOTFS_TARBALL_GUEST_PATH="/tmp/motlie-assembled-rootfs.tar"
 ROOTFS_INPUT_KIND="transitional-native-source-vm"
@@ -84,29 +86,62 @@ adapter path.
 EOF
     exit 1
   fi
-  python3 - "$ROOTFS_TARBALL_OVERRIDE" <<'PY'
+  ROOTFS_TARBALL_METADATA="$(python3 - "$ROOTFS_TARBALL_OVERRIDE" <<'PY'
+import hashlib
+import os
 import sys
 import tarfile
 
 path = sys.argv[1]
+
+def normalize_name(name: str) -> str:
+    normalized = name
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+def assert_safe_member_name(name: str) -> None:
+    normalized = normalize_name(name)
+    if (
+        name.startswith("/")
+        or normalized == ".."
+        or normalized.startswith("../")
+        or "/../" in normalized
+    ):
+        raise SystemExit(f"unsafe rootfs tar entry escapes guest root: {name}")
+
+def assert_safe_linkname(name: str, linkname: str) -> None:
+    if not linkname:
+        raise SystemExit(f"unsafe empty rootfs tar link target: {name}")
+    normalized = normalize_name(linkname)
+    if normalized == ".." or normalized.startswith("../") or "/../" in normalized:
+        raise SystemExit(f"unsafe rootfs tar link target escapes guest root: {name} -> {linkname}")
+
 try:
     with tarfile.open(path, "r:*") as archive:
         for member in archive:
-            name = member.name
-            normalized = name
-            while normalized.startswith("./"):
-                normalized = normalized[2:]
-            if (
-                name.startswith("/")
-                or normalized == ".."
-                or normalized.startswith("../")
-                or "/../" in normalized
-            ):
-                raise SystemExit(f"unsafe rootfs tar entry escapes guest root: {name}")
+            assert_safe_member_name(member.name)
+            if not (member.isdir() or member.isfile() or member.issym() or member.islnk()):
+                raise SystemExit(f"unsafe rootfs tar member type for root extraction: {member.name}")
+            if member.issym() or member.islnk():
+                assert_safe_linkname(member.name, member.linkname)
 except tarfile.TarError as error:
     raise SystemExit(f"rootfs tarball is not readable by Python tarfile: {error}") from error
+
+sha256 = hashlib.sha256()
+with open(path, "rb") as fh:
+    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        sha256.update(chunk)
+
+print(os.path.realpath(path))
+print(os.path.getsize(path))
+print(sha256.hexdigest())
 PY
-  ROOTFS_TARBALL_SOURCE="$ROOTFS_TARBALL_OVERRIDE"
+)"
+  rootfs_tarball_metadata=("${(@f)ROOTFS_TARBALL_METADATA}")
+  ROOTFS_TARBALL_SOURCE="${rootfs_tarball_metadata[1]}"
+  ROOTFS_TARBALL_SIZE_BYTES="${rootfs_tarball_metadata[2]}"
+  ROOTFS_TARBALL_SHA256="${rootfs_tarball_metadata[3]}"
   ROOTFS_INPUT_KIND="assembled-rootfs-tar-overlay"
 fi
 
@@ -151,6 +186,8 @@ echo "Native cache: $NATIVE_SOURCE_VM_DIR"
 echo "Rootfs input: $ROOTFS_INPUT_KIND"
 if [[ -n "$ROOTFS_TARBALL_SOURCE" ]]; then
   echo "Rootfs tar:   $ROOTFS_TARBALL_SOURCE"
+  echo "Rootfs size:  $ROOTFS_TARBALL_SIZE_BYTES"
+  echo "Rootfs sha:   $ROOTFS_TARBALL_SHA256"
 fi
 
 rm -rf "$WORK_VM_DIR"
@@ -831,6 +868,32 @@ fi
 sudo umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
 if [[ -f "$ROOTFS_TARBALL_GUEST_PATH" ]]; then
   echo "[v1.5 build] applying assembled rootfs payload before guest contract build"
+  expected_rootfs_size='$ROOTFS_TARBALL_SIZE_BYTES'
+  expected_rootfs_sha256='$ROOTFS_TARBALL_SHA256'
+  if [[ -n "\$expected_rootfs_size" ]]; then
+    actual_rootfs_size="\$(stat -c '%s' "$ROOTFS_TARBALL_GUEST_PATH")"
+    if [[ "\$actual_rootfs_size" != "\$expected_rootfs_size" ]]; then
+      echo "assembled rootfs tarball size mismatch: expected \$expected_rootfs_size got \$actual_rootfs_size" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "\$expected_rootfs_sha256" ]]; then
+    actual_rootfs_sha256="\$(python3 - "$ROOTFS_TARBALL_GUEST_PATH" <<'PY'
+import hashlib
+import sys
+
+sha256 = hashlib.sha256()
+with open(sys.argv[1], "rb") as fh:
+    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        sha256.update(chunk)
+print(sha256.hexdigest())
+PY
+)"
+    if [[ "\$actual_rootfs_sha256" != "\$expected_rootfs_sha256" ]]; then
+      echo "assembled rootfs tarball sha256 mismatch: expected \$expected_rootfs_sha256 got \$actual_rootfs_sha256" >&2
+      exit 1
+    fi
+  fi
   # VZ currently boots through an EFI disk plus NVRAM. Until the durable VZ
   # emitter can synthesize that boot container directly from OCI, preserve
   # firmware/boot/runtime pseudo-filesystems and apply only the rootfs payload
@@ -844,6 +907,12 @@ if [[ -f "$ROOTFS_TARBALL_GUEST_PATH" ]]; then
     --exclude='boot' --exclude='./boot' --exclude='boot/*' --exclude='./boot/*' \
     --exclude='efi' --exclude='./efi' --exclude='efi/*' --exclude='./efi/*' \
     -xpf "$ROOTFS_TARBALL_GUEST_PATH" -C /
+  # VZ tarball-overlay bridge:
+  # The common rootfs payload is assembled outside the native Apple VZ disk. Do
+  # not let host-side tar ownership leak into OpenSSH StrictModes path
+  # ancestors; CA auth for first-contact SSH depends on these dirs being
+  # root-owned and not group/world-writable.
+  sudo install -d -m 0755 -o root -g root /etc
 fi
 echo "[v1.5 build] unpacking source tarball"
 rm -rf '$GUEST_SRC_DIR'
@@ -902,12 +971,12 @@ sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie
 sudo install -D -m 0644 /tmp/motlie-vmm-backend.env /etc/motlie/v1.5/backend.env
 sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_vz.cfg
 sudo mkdir -p /etc/motlie-vfs
-sudo mkdir -p /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
-# VZ native source images can carry a host UID on the root inode after local
-# disk materialization. OpenSSH StrictModes walks AuthorizedPrincipalsFile path
-# ancestors from /, so normalize this in the image instead of weakening sshd.
-sudo chown root:root /
-sudo chmod 0755 /
+sudo install -d -m 0755 -o root -g root /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
+# VZ native source images and transitional rootfs overlays can carry host UIDs
+# on StrictModes path ancestors. Normalize this in the image instead of
+# weakening sshd; launch/first SSH must only consume this contract.
+sudo chown root:root / /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
+sudo chmod 0755 / /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
 cat >/tmp/90_motlie_vmm_ca.conf <<'SSHDCAEOF'
 TrustedUserCAKeys /etc/ssh/ca/user_ca.pub
 AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
@@ -1180,7 +1249,7 @@ PY
 EOF
 guest_fetch /tmp/motlie-identity-probe.json "$IDENTITY_PROBE_JSON"
 
-python3 - "$RESULT_JSON" "$CONTRACT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PROBE_JSON" "$ROOTFS_INPUT_KIND" "$NATIVE_SOURCE_VM_DIR" "$ROOTFS_TARBALL_SOURCE" <<'PY'
+python3 - "$RESULT_JSON" "$CONTRACT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PROBE_JSON" "$ROOTFS_INPUT_KIND" "$NATIVE_SOURCE_VM_DIR" "$ROOTFS_TARBALL_SOURCE" "$ROOTFS_TARBALL_SIZE_BYTES" "$ROOTFS_TARBALL_SHA256" <<'PY'
 import json
 import sys
 
@@ -1195,6 +1264,8 @@ import sys
     rootfs_input_kind,
     native_source_vm_dir,
     rootfs_tarball_source,
+    rootfs_tarball_size_bytes,
+    rootfs_tarball_sha256,
 ) = sys.argv[1:]
 with open(identity_probe_json, "r", encoding="utf-8") as fh:
     identity_payload = json.load(fh)
@@ -1211,6 +1282,8 @@ rootfs_input = {
 }
 if rootfs_tarball_source:
     rootfs_input["assembled_rootfs_tarball"] = rootfs_tarball_source
+    rootfs_input["assembled_rootfs_tarball_size_bytes"] = int(rootfs_tarball_size_bytes)
+    rootfs_input["assembled_rootfs_tarball_sha256"] = rootfs_tarball_sha256
 
 guest_contract = {
     "motlie_vfs_guest_path": guest_binary,

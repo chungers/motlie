@@ -1092,10 +1092,14 @@ input through the configured VZ adapter environment as
 `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` so the build consumes the same logical
 rootfs contract as CH while still adapting it into Apple VZ's required
 disk/NVRAM boot shape. The emitted VZ artifacts must include
-`rootfs_input.kind`, the native boot substrate path, and the tarball path so
-validation evidence distinguishes "native-source VM only" from "assembled
-rootfs consumed by VZ emitter." Closing #271 requires the latter path plus live
-VZ harness validation from fresh `mbuild` artifacts.
+`rootfs_input.kind`, the native boot substrate path, and the canonical tarball
+path, byte size, and sha256 digest so validation evidence distinguishes
+"native-source VM only" from "assembled rootfs consumed by VZ emitter." Closing
+#271 requires the latter path plus live VZ harness validation from fresh
+`mbuild` artifacts. The VZ bridge must also normalize OpenSSH StrictModes path
+ancestors after overlay extraction so CA auth remains a launch-time consumption
+of image state, not a reason to weaken sshd or rerun build work during guest
+startup.
 
 Required product surface:
 

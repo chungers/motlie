@@ -1256,10 +1256,7 @@ fn rootfs_tarball_record(path: &Path) -> Result<RootfsTarballRecord> {
         )
     })?;
     if !metadata.is_file() {
-        bail!(
-            "rootfs tarball is not a file: {}",
-            canonical_path.display()
-        );
+        bail!("rootfs tarball is not a file: {}", canonical_path.display());
     }
     let sha256 = sha256_file(&canonical_path).with_context(|| {
         format!(

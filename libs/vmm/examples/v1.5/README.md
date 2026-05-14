@@ -197,14 +197,21 @@ cargo run -p mbuild -- \
   --rootfs-tarball /path/to/assembled-rootfs.tar
 ```
 
-`mbuild` validates the tarball path and passes it to the VZ adapter as
-`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is consumed during image
-build only. The current VZ adapter still preserves a native Apple VZ EFI/NVRAM
-boot container, applies the assembled rootfs payload into that container, and
-records `rootfs_input` in `build-result.json` and `guest-contract.json`. Guest
-launch and first SSH must not apply this tarball, install packages, or build
-binaries. If `--rootfs-tarball` is unset, the artifact records
-`transitional-native-source-vm` so the remaining #271 gap is visible.
+`mbuild` canonicalizes and digests the tarball, then passes it to the VZ
+adapter as `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is consumed
+during image build only. The current VZ adapter still preserves a native Apple
+VZ EFI/NVRAM boot container, applies the assembled rootfs payload into that
+container, and records `rootfs_input` with canonical path, size, and sha256 in
+`build-result.json` and `guest-contract.json`. Guest launch and first SSH must
+not apply this tarball, install packages, or build binaries. If
+`--rootfs-tarball` is unset, the artifact records `transitional-native-source-vm`
+so the remaining #271 gap is visible.
+
+The VZ adapter also normalizes OpenSSH StrictModes path ancestors after the
+tarball overlay. `/`, `/etc`, `/etc/ssh`, `/etc/ssh/ca`, and
+`/etc/ssh/auth_principals` must be `root:root 0755` in the built image; launch
+checks this contract and fails before declaring `interactive-ready` if it is
+broken.
 
 ## Service Graph
 
