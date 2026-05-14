@@ -11,6 +11,7 @@
 - 2026-05-13, @gpt55-dgx: Tightened manifest status schema, target-specific gates, evidence requirements, merge strategy, disabled-channel handling, and v0 Darwin cross-build toolchain guidance.
 - 2026-05-13, @gpt55-dgx: Added manifest-tracked installer validation, detached-tag build guidance, GitHub Pages installer update rules, and release rollback semantics.
 - 2026-05-13, @gpt55-dgx: Made static musl the default Linux artifact policy when feasible, with glibc-floor evidence only for gnu fallback/CUDA targets.
+- 2026-05-14, @gpt55-dgx: Split evidence requirements by target category and clarified the default Linux musl build toolchain.
 
 ## Scope
 
@@ -216,7 +217,9 @@ The Linux build uses static musl targets by default when feasible and uses `carg
 - `linux-*-gnu` fallback targets record both build-host glibc and binary GLIBC symbol floor;
 - Darwin binaries produced on Linux are not considered final until macOS signing verification passes.
 
-Build evidence must record `rustc -Vv`, `cargo -V`, `cargo zigbuild -V`, and `zig version`. For `linux-*-musl` targets, evidence must also record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` to show the binary has no shared runtime dependencies. If `rust-toolchain.toml` is not present for the release tag, the exact Rust toolchain identity in evidence is mandatory.
+Universal build evidence must record `rustc -Vv` and `cargo -V`. For Darwin cross builds, also record `cargo zigbuild -V` and `zig version`.
+
+For pure-Rust `linux-*-musl` targets, the v0 default toolchain is `rustup + cargo build --target`. Use `cargo-zigbuild` for musl only when C dependencies need a musl-aware linker. Musl evidence must record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` to show the binary has no shared runtime dependencies. If `rust-toolchain.toml` is not present for the release tag, the exact Rust toolchain identity in evidence is mandatory.
 
 If a release enables `linux-*-gnu` targets because static musl is not feasible or because a glibc-linked runtime such as CUDA is required, evidence must also record `ldd --version` for the build host and `objdump -T <binary> | grep GLIBC_ | sort -u` for the actual binary GLIBC requirement. Populate `glibc_build_host_version` from `ldd --version` and `glibc_min_version` from the highest GLIBC symbol required by the built binary.
 

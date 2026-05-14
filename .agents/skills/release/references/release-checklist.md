@@ -16,7 +16,9 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Evidence entries follow `{ kind, ref, sha256?, note? }`.
 - [ ] Build outputs are not committed to git.
 - [ ] `Cargo.lock` is committed and unchanged at the final tag.
-- [ ] Build evidence records `rustc -Vv`, `cargo -V`, and any cross-build toolchain versions.
+- [ ] Universal build evidence records `rustc -Vv` and `cargo -V`.
+- [ ] Darwin cross-build evidence records `cargo zigbuild -V` and `zig version`.
+- [ ] `linux-*-musl` targets use the manifest `linux_musl_toolchain`, or document why `cargo-zigbuild` is needed for C dependencies.
 - [ ] `linux-*-musl` targets record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` static-link evidence.
 - [ ] Any enabled `linux-*-gnu` fallback targets record `glibc_build_host_version`, `glibc_min_version`, `ldd --version`, and `objdump -T` GLIBC symbol evidence.
 - [ ] Darwin-from-Linux evidence uses the v0 default `cargo-zigbuild` or records an approved exception.
