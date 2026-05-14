@@ -15,7 +15,7 @@ Before changing anything:
 - do not publish npm packages, GitHub Releases, or Homebrew tap changes without explicit human approval
 - do not commit unrelated files
 - default to the manual v0 process in `docs/PLAN_RELEASES.md`; do not propose new CI jobs unless the human explicitly asks for automation
-- use branch-local `releases/manifest.toml` as the workspace release source of truth; read every referenced per-binary manifest before acting
+- use branch-local `releases/manifest.toml` as the workspace release ledger; scan `releases/*.toml` for stable per-binary manifests before acting
 - never merge a release branch to `main`; cherry-pick source, doc, skill, or tooling fixes back to `main` through separate PRs when needed
 
 Release event fields:
@@ -28,20 +28,20 @@ WORKSPACE_MANIFEST=releases/manifest.toml
 WORKSPACE_NOTES=releases/notes.md
 ```
 
-Per-binary fields:
+Per-binary manifests are discovered by scanning `releases/*.toml`, excluding `releases/manifest.toml`, and parsing files with `kind = "motlie.binary-release"`. Version belongs in `[identity].version`, not the filename.
+
+Per-binary manifest fields:
 
 ```text
-BIN=<installed command name>
-CARGO_PACKAGE=<cargo package name>
-CARGO_BIN=<cargo binary name>
-VERSION=<release version>
-INSTALL_PATH=<default absolute install path, if any>
-FORMULA=<Homebrew formula name, if enabled>
-NPM_PREFIX=@motlie/<package-prefix>
-INSTALLER=install-<bin>.sh
-FORCE_COMMAND_SAFE=true|false
-BINARY_MANIFEST=releases/<bin>-<version>.toml
-BINARY_NOTES=releases/<bin>-<version>.md
+BINARY_MANIFEST=releases/<bin>.toml
+BINARY_NOTES=releases/<bin>.md
+[identity].binary=<installed command name>
+[identity].version=<release version>
+[build].cargo_package=<cargo package name>
+[build].cargo_bin=<cargo binary name>
+[install].default_path=<default absolute install path, if any>
+[install].force_command_safe=true|false
+[release].notes_path=releases/<bin>.md
 ```
 
 Worked example:
@@ -52,17 +52,17 @@ RELEASE_BRANCH=release/2026-05-amber-aardvark
 RELEASE_TAG=2026-05-amber-aardvark
 WORKSPACE_MANIFEST=releases/manifest.toml
 WORKSPACE_NOTES=releases/notes.md
-BIN=mmux
-CARGO_PACKAGE=motlie-mmux
-CARGO_BIN=mmux
-VERSION=0.1.0
-INSTALL_PATH=/usr/local/bin/mmux
-FORMULA=mmux
-NPM_PREFIX=@motlie/mmux
-INSTALLER=install-mmux.sh
-FORCE_COMMAND_SAFE=true
-BINARY_MANIFEST=releases/mmux-0.1.0.toml
-BINARY_NOTES=releases/mmux-0.1.0.md
+BINARY_MANIFEST=releases/mmux.toml
+BINARY_NOTES=releases/mmux.md
+[identity].binary=mmux
+[identity].version=0.1.0
+[build].cargo_package=motlie-mmux
+[build].cargo_bin=mmux
+[install].default_path=/usr/local/bin/mmux
+[install].force_command_safe=true
+[homebrew].formula=mmux
+[npm].package_prefix=@motlie/mmux
+[installer].script=install-mmux.sh
 ```
 
 Primary references:
@@ -75,7 +75,7 @@ Primary references:
 Manual v0 release sequence:
 
 1. Create a release branch from `main`, for example `release/2026-05-amber-aardvark`.
-2. Add or update branch-local `releases/manifest.toml`, `releases/notes.md`, and one per-binary manifest and notes file per released binary.
+2. Add or update branch-local `releases/manifest.toml`, `releases/notes.md`, and one stable `releases/<bin>.toml` plus referenced notes file per released binary.
 3. Push the release branch. Do not open a PR that merges it to `main`.
 4. Land platform/channel sub-PRs into the release branch.
 5. Update manifest status with staging evidence, source commits, timestamps, actors, and links.
@@ -90,10 +90,10 @@ Release branch source files:
 
 - `Cargo.toml`: bump `[workspace.package].version` and fix release metadata.
 - `bins/<bin>/Cargo.toml`: verify package name, bin name, and description; most binaries should inherit the workspace version.
-- `releases/manifest.toml`: workspace release intent and mutable workspace ledger.
+- `releases/manifest.toml`: workspace release identity, global defaults, discovery policy, workspace gates, and final completion ledger.
 - `releases/notes.md`: human-approved GitHub Release notes source.
-- `releases/<bin>-<version>.toml`: deterministic per-binary release intent and mutable binary ledger.
-- `releases/<bin>-<version>.md`: per-binary notes included from workspace notes.
+- `releases/<bin>.toml`: deterministic per-binary release intent, version, and mutable binary ledger.
+- `releases/<bin>.md`: per-binary notes referenced by the binary manifest and aggregated into workspace notes.
 - `releases/install/*`: direct installer sources copied from canonical templates such as `bins/<bin>/install-template.sh`, only when installer distribution is in scope.
 - `releases/npm/*`: npm native package templates, only when npm distribution is in scope.
 - `releases/homebrew/*`: source-side formula template or notes only; the live formula PR belongs in `motlie/homebrew-tap`.
@@ -162,15 +162,15 @@ Package build rules:
 
 Release note rules:
 
-- Draft `releases/notes.md` and every `releases/<bin>-<version>.md` when the release branch opens.
-- Use manifests as the source for binary names, versions, targets, package names, install commands, and asset names.
+- Draft every binary manifest's `[release].notes_path`, then aggregate `releases/notes.md` when the release branch opens.
+- Use discovered per-binary manifests as the source for binary names, versions, targets, package names, install commands, and asset names.
 - Ask the release owner for the user-visible summary, notable changes, breaking changes, known issues, and audience-specific install guidance.
 - Do not publish notes with placeholders, stale target/package names, or claims inferred only from commit subjects.
 - Before `gh release create`, confirm human approval and record final notes evidence in the workspace `github-release-published` gate.
 
 Operator prompt workflow:
 
-1. Read `WORKSPACE_MANIFEST`, then every referenced `BINARY_MANIFEST`, before proposing the next action.
+1. Read `WORKSPACE_MANIFEST`, then scan `releases/*.toml` for `kind = "motlie.binary-release"` manifests before proposing the next action.
 2. Identify the first incomplete workspace gate or `(binary, gate, target_id)`, its required platform, and whether the current host can perform it.
 3. If another host/operator is needed, prompt with the exact branch/PR to pull and the manifest fields to update.
 4. If the action creates tags, GitHub Releases, npm publications, or Homebrew tap changes, ask for explicit approval.

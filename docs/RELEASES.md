@@ -6,7 +6,7 @@
 - 2026-05-12, @gpt55-dgx: Added step-by-step npm authentication guidance and linked the repo-local release skill.
 - 2026-05-12, @gpt55-dgx: Generalized the release playbook around a user-specified binary target; `mmux` is now only the worked example.
 - 2026-05-12, @gpt55-dgx: Clarified that CI workflows are future automation; the current release execution path is the manual process in `docs/PLAN_RELEASES.md`.
-- 2026-05-12, @gpt55-dgx: Aligned the playbook to per-binary manifests under `releases/<bin>/<version>.toml` and a release coordination PR with sub-PR status updates.
+- 2026-05-12, @gpt55-dgx: Aligned the playbook to branch-local per-binary manifests and a release coordination PR with sub-PR status updates.
 - 2026-05-12, @gpt55-dgx: Added operator handoff workflow showing how the release skill prompts humans and updates manifest state at each release gate.
 - 2026-05-13, @gpt55-dgx: Tightened manifest status schema, target-specific gates, evidence requirements, merge strategy, disabled-channel handling, and v0 Darwin cross-build toolchain guidance.
 - 2026-05-13, @gpt55-dgx: Added manifest-tracked installer validation, detached-tag build guidance, GitHub Pages installer update rules, and release rollback semantics.
@@ -15,6 +15,7 @@
 - 2026-05-14, @gpt55-dgx: Reworked the playbook for branch-local calver-codename release branches that support multiple binaries and never merge to `main`.
 - 2026-05-14, @gpt55-dgx: Clarified codename placeholders, concurrent release branches, and installer template origin.
 - 2026-05-14, @gpt55-dgx: Added release-note drafting and approval workflow for workspace and per-binary notes.
+- 2026-05-14, @gpt55-dgx: Changed per-binary release manifests and notes to stable `releases/<bin>.toml` and `releases/<bin>.md` files discovered by scanning `releases/`.
 
 ## Scope
 
@@ -53,20 +54,20 @@ WORKSPACE_MANIFEST=releases/manifest.toml
 WORKSPACE_NOTES=releases/notes.md
 ```
 
-Required per-binary fields:
+Per-binary manifests are discovered by scanning `releases/*.toml`, excluding `releases/manifest.toml`, and parsing files with `kind = "motlie.binary-release"`. Do not place the release version in the filename; the version belongs in `[identity].version`.
+
+Required fields inside each per-binary manifest:
 
 ```text
-BIN=<installed command name>
-CARGO_PACKAGE=<cargo package name>
-CARGO_BIN=<cargo binary name>
-VERSION=<release version>
-INSTALL_PATH=<default absolute install path, if any>
-FORMULA=<Homebrew formula name, if Homebrew is enabled>
-NPM_PREFIX=@motlie/<package-prefix>
-INSTALLER=install-<bin>.sh
-FORCE_COMMAND_SAFE=true|false
-BINARY_MANIFEST=releases/<bin>-<version>.toml
-BINARY_NOTES=releases/<bin>-<version>.md
+BINARY_MANIFEST=releases/<bin>.toml
+BINARY_NOTES=releases/<bin>.md
+[identity].binary=<installed command name>
+[identity].version=<release version>
+[build].cargo_package=<cargo package name>
+[build].cargo_bin=<cargo binary name>
+[install].default_path=<default absolute install path, if any>
+[install].force_command_safe=true|false
+[release].notes_path=releases/<bin>.md
 ```
 
 Worked `mmux` target:
@@ -77,17 +78,17 @@ RELEASE_BRANCH=release/2026-05-amber-aardvark
 RELEASE_TAG=2026-05-amber-aardvark
 WORKSPACE_MANIFEST=releases/manifest.toml
 WORKSPACE_NOTES=releases/notes.md
-BIN=mmux
-CARGO_PACKAGE=motlie-mmux
-CARGO_BIN=mmux
-VERSION=0.1.0
-INSTALL_PATH=/usr/local/bin/mmux
-FORMULA=mmux
-NPM_PREFIX=@motlie/mmux
-INSTALLER=install-mmux.sh
-FORCE_COMMAND_SAFE=true
-BINARY_MANIFEST=releases/mmux-0.1.0.toml
-BINARY_NOTES=releases/mmux-0.1.0.md
+BINARY_MANIFEST=releases/mmux.toml
+BINARY_NOTES=releases/mmux.md
+[identity].binary=mmux
+[identity].version=0.1.0
+[build].cargo_package=motlie-mmux
+[build].cargo_bin=mmux
+[install].default_path=/usr/local/bin/mmux
+[install].force_command_safe=true
+[homebrew].formula=mmux
+[npm].package_prefix=@motlie/mmux
+[installer].script=install-mmux.sh
 ```
 
 For `FORCE_COMMAND_SAFE=true`, the direct installer must default to archive mode and the runtime path must execute the native binary directly. For `FORCE_COMMAND_SAFE=false`, npm-mode install may be acceptable for non-login use cases, but native binaries and explicit runtime paths are still required.
@@ -99,7 +100,7 @@ Use a release branch instead of publishing directly from a local build. The rele
 The release should move through these gates:
 
 1. Release branch in `chungers/motlie`.
-2. Workspace manifest under `releases/manifest.toml` and per-binary manifests under `releases/<bin>-<version>.toml`.
+2. Workspace ledger under `releases/manifest.toml`, plus per-binary manifests discovered from stable `releases/<bin>.toml` files.
 3. Platform or channel sub-PRs targeting the release branch.
 4. Manifest status updates recording staging evidence.
 5. Cherry-pick reusable source, doc, skill, or tooling fixes back to `main` through separate PRs when needed.
@@ -120,7 +121,7 @@ Release work can be performed by different humans or agents on different hosts. 
 At the start of every release turn, the skill should:
 
 1. Identify itself and check `git status --short --branch`.
-2. Read `releases/manifest.toml`, then each referenced `releases/<bin>-<version>.toml`.
+2. Read `releases/manifest.toml`, then scan `releases/*.toml` for per-binary manifests, excluding `releases/manifest.toml` and requiring `kind = "motlie.binary-release"`.
 3. Summarize the current release state, incomplete gates, and the branch or PR the operator should work on.
 4. Ask for explicit approval before publishing, tagging, modifying package registries, or changing Homebrew tap state.
 5. Update only manifest status/evidence for staging work; final published URLs and checksums belong in the final release-branch ledger commit.
@@ -140,7 +141,7 @@ For `staged`, `complete`, `deferred`, and `failed`, the gate or target status mu
 | Release gate | Operator surface | Skill prompt and action |
 | --- | --- | --- |
 | Intake | `main` | Confirm `RELEASE_NAME`, `RELEASE_BRANCH`, `RELEASE_TAG`, all binaries and versions, enabled channels, and platform targets. If missing, prompt for the missing field before editing files. |
-| Release branch | `release/<release-name>` | Prompt to create the release branch, add `releases/manifest.toml`, add per-binary manifests and notes, and push the branch. Update the `release-branch-created` gate with branch URL and source commit. |
+| Release branch | `release/<release-name>` | Prompt to create the release branch, add `releases/manifest.toml`, add stable `releases/<bin>.toml` manifests and their referenced notes, and push the branch. Update the `release-branch-created` gate with branch URL and source commit. |
 | Linux staging | sub-PR to release branch | Prompt the Linux operator to pull the release branch, build the scoped `target_id`, package or validate artifact names from the manifest, and update the corresponding target status plus `(id, target_id)` gate with commit, checksum, toolchain, and evidence. |
 | macOS staging | sub-PR to release branch | Prompt the macOS operator to pull the release branch, build with manifest `rust_target`, run build-path and installed-path `codesign` checks, and update the Darwin signing gate with timestamp, actor, source commit, signing identity, and evidence. |
 | npm staging | sub-PR to release branch | Prompt the operator to generate one native package candidate per `target_id` using manifest `npm_package`, `bin_path`, and `node_launcher = false`; run `npm pack --dry-run`; update target-specific npm gate status only. |
@@ -170,14 +171,14 @@ The initial branch should include:
 - Version updates in `Cargo.toml`.
 - The workspace manifest, `releases/manifest.toml`.
 - Workspace release notes, `releases/notes.md`.
-- Per-binary manifests and notes, for example `releases/mmux-0.1.0.toml` and `releases/mmux-0.1.0.md`.
+- Per-binary manifests and notes, for example `releases/mmux.toml` and `releases/mmux.md`.
 - Source-side installer, npm, or Homebrew templates under branch-local `releases/` if needed. Installer scripts should be copied from canonical templates on `main`, normally `bins/<bin>/install-template.sh`, into `releases/install/install-<bin>.sh`.
 
 Release notes should be drafted at branch creation:
 
-- `releases/notes.md` is the GitHub Release body and must list all binaries, binary versions, distribution channels, target platforms, install commands, user-visible changes, verification/checksum guidance, and known issues.
-- `releases/<bin>-<version>.md` contains binary-specific changes, CLI/API changes, target matrix, package names, install examples, compatibility notes, and known issues.
-- The release skill may draft from manifests and `git log`, but a human must provide or approve the user-visible summary. Do not publish notes with placeholders or claims not backed by the manifests or release owner input.
+- `releases/notes.md` is the aggregate GitHub Release body and must list all binaries, binary versions, distribution channels, target platforms, install commands, user-visible changes, verification/checksum guidance, and known issues.
+- Each binary manifest's `[release].notes_path`, for example `releases/mmux.md`, contains binary-specific changes, CLI/API changes, target matrix, package names, install examples, compatibility notes, and known issues.
+- The release skill may draft from manifests and `git log`, but a human must provide or approve the user-visible summary. It should aggregate `releases/notes.md` from every discovered per-binary note plus release-event summary text. Do not publish notes with placeholders or claims not backed by the manifests or release owner input.
 
 Platform-specific work should land as sub-PRs targeting the release branch:
 
@@ -242,7 +243,7 @@ The Linux build uses static musl targets by default when feasible and uses `carg
 
 - all outputs are built from the release tag;
 - `Cargo.lock` is committed and unchanged at the final tag;
-- target names match `releases/<bin>-<version>.toml`;
+- target names match the discovered `releases/<bin>.toml` binary manifests;
 - artifact names use explicit manifest fields such as `archive_asset`;
 - archive binary paths use explicit manifest fields such as `archive_binary_path`;
 - `linux-*-musl` targets record static-link evidence;
@@ -564,9 +565,10 @@ end
 Worked `mmux` formula values:
 
 ```text
-FORMULA=mmux
-CARGO_PACKAGE=motlie-mmux
-BIN=mmux
+manifest = "releases/mmux.toml"
+[homebrew].formula = "mmux"
+[build].cargo_package = "motlie-mmux"
+[identity].binary = "mmux"
 ```
 
 Bottle workflow:
@@ -625,9 +627,9 @@ Homebrew workflow:
 
 - [ ] Release event captured: `RELEASE_NAME`, `RELEASE_BRANCH`, `RELEASE_TAG`, enabled channels, binaries, and targets.
 - [ ] Release branch created from `main`.
-- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, binary list, and workspace gates.
-- [ ] `releases/<bin>-<version>.toml` committed with release intent, explicit names, target matrix, structured target status, and `(id, target_id)` gates for every binary in scope.
-- [ ] `releases/notes.md` and `releases/<bin>-<version>.md` committed as release-note sources.
+- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, discovery policy, global defaults, workspace gates, and final binary completion ledger.
+- [ ] One stable `releases/<bin>.toml` committed per binary with release intent, version, explicit names, target matrix, structured target status, and `(id, target_id)` gates.
+- [ ] `releases/notes.md` and each binary manifest's `[release].notes_path`, for example `releases/<bin>.md`, committed as release-note sources.
 - [ ] Release notes list every binary, version, target family, distribution channel, install command, user-visible change, compatibility note, and known issue.
 - [ ] Release owner has approved the final notes before `gh release create`.
 - [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.

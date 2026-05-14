@@ -6,10 +6,10 @@ Parameterize examples by the release target:
 
 ```text
 BIN=<installed command name>
-CARGO_PACKAGE=<cargo package name>
+BINARY_MANIFEST=releases/<bin>.toml
+CARGO_PACKAGE=<[build].cargo_package from manifest>
 FORMULA=<formula name, often same as BIN>
-VERSION=<release version>
-BINARY_MANIFEST=releases/<bin>-<version>.toml
+VERSION=<[identity].version from manifest>
 RELEASE_TAG=<YYYY-MM-codename>
 ```
 
@@ -60,9 +60,11 @@ end
 Worked `mmux` example:
 
 ```text
-BIN=mmux
-CARGO_PACKAGE=motlie-mmux
-FORMULA=mmux
+BINARY_MANIFEST=releases/mmux.toml
+[identity].binary=mmux
+[identity].version=0.1.0
+[build].cargo_package=motlie-mmux
+[homebrew].formula=mmux
 ```
 
 Homebrew release rule:
