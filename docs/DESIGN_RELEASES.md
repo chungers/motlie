@@ -11,6 +11,7 @@
 - 2026-05-13, @gpt55-dgx: Fixed npm global-bin command, defined optional GitHub Pages installer updates, and added installer validation as a manifest-tracked gate.
 - 2026-05-13, @gpt55-dgx: Made static musl the default Linux target policy when feasible; glibc floors are required only for gnu fallback/CUDA targets.
 - 2026-05-14, @gpt55-dgx: Split universal/Darwin/Linux evidence lists, pinned the default Linux musl toolchain, and documented the musl allocator trade-off.
+- 2026-05-14, @gpt55-dgx: Changed releases to branch-local calver-codename events that support multiple binaries and never merge release branches back to `main`.
 
 ## Status
 
@@ -32,7 +33,7 @@ The distribution contract must make platform-specific assets precise without mak
 - Avoid Node launcher scripts in native binary runtime paths.
 - Ensure macOS builds are signed or re-signed at final install location so Apple Silicon hosts can execute the binary reliably.
 - Make CUDA an explicit optional accelerator suffix only for binaries that ship CUDA-enabled builds.
-- Keep release metadata, artifact naming, package naming, and installer behavior driven by a per-binary release manifest.
+- Keep release metadata, artifact naming, package naming, and installer behavior driven by branch-local workspace and per-binary release manifests.
 
 ## Non-Goals
 
@@ -44,9 +45,31 @@ The distribution contract must make platform-specific assets precise without mak
 
 ## Release Target Model
 
-The release framework is generic. Each release target must define the binary-specific fields before implementation or publication begins.
+The release framework is generic and release-event centered. A release event is named with a calver-codename:
 
 ```text
+<YYYY-MM>-<adjective>-<codename>
+```
+
+The month is locked when the release branch is opened. If the release slips, the name remains unchanged. The release branch and Git tag both use this release-event name:
+
+```text
+release/<YYYY-MM>-<adjective>-<codename>
+<YYYY-MM>-<adjective>-<codename>
+```
+
+Release branches are retained release ledgers and never merge back to `main`. Source or process fixes discovered on a release branch must be cherry-picked into a normal `main` PR when they are relevant outside the release branch. The branch-local `releases/` directory can therefore contain release manifests, notes, installers, and ledger updates without polluting `main`.
+
+Codename uniqueness is enforced by remote branch and tag names. A main-branch codename registry is intentionally not required for v0 because it would reintroduce release-event state into `main`. If later automation needs a registry, it should be generated from remote refs or kept outside the source tree rather than becoming a required release artifact on `main`.
+
+Each release event can contain one or more binary targets. Each binary target must define the binary-specific fields before implementation or publication begins.
+
+```text
+RELEASE_NAME=<YYYY-MM-adjective-codename>
+RELEASE_BRANCH=release/<release-name>
+RELEASE_TAG=<release-name>
+WORKSPACE_MANIFEST=releases/manifest.toml
+WORKSPACE_NOTES=releases/notes.md
 BIN=<installed command name>
 CARGO_PACKAGE=<cargo package name>
 CARGO_BIN=<cargo binary name>
@@ -56,13 +79,18 @@ FORMULA=<Homebrew formula name, if Homebrew is enabled>
 NPM_PREFIX=@motlie/<package-prefix>
 INSTALLER=install-<bin>.sh
 FORCE_COMMAND_SAFE=true|false
-MANIFEST=releases/<bin>/<version>.toml
-RELEASE_BRANCH=release/<bin>-v<version>
+BINARY_MANIFEST=releases/<bin>-<version>.toml
+BINARY_NOTES=releases/<bin>-<version>.md
 ```
 
 Worked `mmux` target:
 
 ```text
+RELEASE_NAME=2026-05-amber-aardvark
+RELEASE_BRANCH=release/2026-05-amber-aardvark
+RELEASE_TAG=2026-05-amber-aardvark
+WORKSPACE_MANIFEST=releases/manifest.toml
+WORKSPACE_NOTES=releases/notes.md
 BIN=mmux
 CARGO_PACKAGE=motlie-mmux
 CARGO_BIN=mmux
@@ -72,8 +100,8 @@ FORMULA=mmux
 NPM_PREFIX=@motlie/mmux
 INSTALLER=install-mmux.sh
 FORCE_COMMAND_SAFE=true
-MANIFEST=releases/mmux/0.1.0.toml
-RELEASE_BRANCH=release/mmux-v0.1.0
+BINARY_MANIFEST=releases/mmux-0.1.0.toml
+BINARY_NOTES=releases/mmux-0.1.0.md
 ```
 
 When `FORCE_COMMAND_SAFE=true`, the direct installer must default to archive mode and the login path must execute the native binary directly. When `FORCE_COMMAND_SAFE=false`, npm-mode install can be considered for non-login use cases, but package runtime paths still must execute native binaries directly unless a future design explicitly changes that contract.
@@ -168,14 +196,14 @@ mmux --help
 Release-pinned UX:
 
 ```sh
-curl -fsSL https://github.com/chungers/motlie/releases/download/v0.1.0/install-mmux.sh | sh
+curl -fsSL https://github.com/chungers/motlie/releases/download/2026-05-amber-aardvark/install-mmux.sh | sh
 /usr/local/bin/mmux --version
 ```
 
 Safer audit-before-run UX:
 
 ```sh
-curl -fsSLO https://github.com/chungers/motlie/releases/download/v0.1.0/install-mmux.sh
+curl -fsSLO https://github.com/chungers/motlie/releases/download/2026-05-amber-aardvark/install-mmux.sh
 shasum -a 256 install-mmux.sh
 sh install-mmux.sh
 ```
@@ -265,7 +293,7 @@ The `chungers/motlie` repository is the canonical source release and artifact ho
 
 Each Motlie release should publish:
 
-- Source tag, for example `v0.1.0`.
+- Source tag, for example `2026-05-amber-aardvark`.
 - Native `.tar.gz` archives.
 - Checksums.
 - Installer scripts such as `install-<bin>.sh`; `install-mmux.sh` is the worked example.
@@ -329,7 +357,7 @@ The formula should build from the Motlie source tag:
 class Mmux < Formula
   desc "TUI tmux session selector"
   homepage "https://github.com/chungers/motlie"
-  url "https://github.com/chungers/motlie/archive/refs/tags/v0.1.0.tar.gz"
+  url "https://github.com/chungers/motlie/archive/refs/tags/2026-05-amber-aardvark.tar.gz"
   sha256 "<source-tarball-sha256>"
   license "<repo-license>"
 
@@ -571,8 +599,8 @@ The generic naming rule is `install-<bin>.sh`; the listed files are examples.
 The canonical hosted installer scripts should be uploaded to version-pinned GitHub Releases:
 
 ```text
-https://github.com/chungers/motlie/releases/download/v0.1.0/install-mmux.sh
-https://github.com/chungers/motlie/releases/download/v0.1.0/install-motlie-models.sh
+https://github.com/chungers/motlie/releases/download/2026-05-amber-aardvark/install-mmux.sh
+https://github.com/chungers/motlie/releases/download/2026-05-amber-aardvark/install-motlie-models.sh
 ```
 
 GitHub Pages may provide latest convenience entrypoints:
@@ -589,7 +617,7 @@ The GitHub Pages update process is optional and must be explicit:
 1. Publish the version-pinned installer asset to the GitHub Release first.
 2. Open a separate PR to the configured Pages repository, for example `motlie/motlie.github.io`, updating `/install/<bin>.sh` to redirect to or fetch the release-pinned installer.
 3. Verify the Pages URL downloads the intended release-pinned installer and that the installer checksum matches the GitHub Release asset.
-4. Record the Pages URL, Pages repository commit, and verification evidence in the post-release ledger PR.
+4. Record the Pages URL, Pages repository commit, and verification evidence in the retained release-branch ledger.
 
 If no Pages repository is configured for a binary release, do not advertise a Pages URL for production use.
 
@@ -609,20 +637,22 @@ A non-CUDA gnu fallback is allowed only when static musl is not feasible and the
 
 ### Release Upload Sequence
 
-1. Create a release coordination branch from `main`, for example `release/mmux-v0.1.0`.
-2. Add the per-release manifest and release notes, for example `releases/mmux/0.1.0.toml` and `releases/mmux/0.1.0.md`.
-3. Open a coordination PR from the release branch to `main`.
-4. Land platform-specific sub-PRs into the release branch. Each sub-PR updates manifest status with staging evidence.
-5. Merge the coordination PR to `main` with a merge commit after all required gates are complete or explicitly deferred.
-6. Create the final source tag from `main`.
-7. Build, sign, and package final artifacts from the final source tag.
-8. Upload canonical archives, checksums, and installer scripts to the `chungers/motlie` GitHub Release.
+1. Create a release branch from `main`, for example `release/2026-05-amber-aardvark`.
+2. Add branch-local release files under `releases/`: `manifest.toml`, `notes.md`, and one per-binary manifest and notes file for every binary in scope.
+3. Push the release branch. The release branch is the coordination surface and release ledger; it is not a PR that will merge to `main`.
+4. Land platform-specific sub-PRs into the release branch. Each sub-PR updates branch-local manifest status with staging evidence.
+5. Cherry-pick source or process fixes back to `main` through normal PRs when those fixes matter outside the release branch. Do not merge the full release branch to `main`.
+6. After all required gates are complete or explicitly deferred, create the final release tag from the final release-branch commit.
+7. Build, sign, and package final artifacts from that final tag.
+8. Upload canonical archives, checksums, installer scripts, workspace manifest, per-binary manifests, and release notes to the `chungers/motlie` GitHub Release.
 9. Generate and publish native npm packages from the same final build outputs.
 10. Update `motlie/homebrew-tap` with the new formula version and source tarball checksum.
 11. Run install verification for npm, direct installer, and Homebrew from final installed paths.
-12. Open a post-release ledger PR that updates the manifest with final published URLs, checksums, package links, and tap commit.
+12. Commit final ledger status back to the retained release branch or upload a final ledger manifest as a GitHub Release asset. Do not move the release tag to include ledger-only metadata.
 
-Important GitHub constraint: a full GitHub Release is tag-centric, not PR-centric. The final release tag must point to the exact source commit used for final artifacts. Staging builds performed from the release branch are useful evidence, but if the final tag commit differs from the staging commit, final artifacts must be rebuilt or revalidated from the final tag.
+Important GitHub constraint: a full GitHub Release is tag-centric, not PR-centric. The final release tag must point to the exact release-branch source commit used for final artifacts. Staging builds performed earlier on the release branch are useful evidence, but if the final tag commit differs from the staging commit, final artifacts must be rebuilt or revalidated from the final tag.
+
+Because release tags are calver-codenames rather than semver, GitHub's automatic latest-release heuristic may not match operator intent. The release workflow should explicitly set the stable release with `gh release edit <release-name> --latest` when publishing.
 
 ### Publishing Credentials
 
@@ -630,35 +660,92 @@ The DESIGN should prefer trusted publishing or short-lived CI credentials where 
 
 ## Release Manifest
 
-Each released binary version has one manifest checked into:
+Release manifests are branch-local. A release branch contains a common `releases/` directory, but that directory is not merged to `main`:
 
 ```text
-releases/<bin>/<version>.toml
+releases/
+  manifest.toml
+  notes.md
+  mmux-0.1.0.toml
+  mmux-0.1.0.md
+  motlie-models-0.5.2.toml
+  motlie-models-0.5.2.md
+  install/
+    install-mmux.sh
+    install-motlie-models.sh
 ```
 
-The manifest is both deterministic input and a release ledger:
+`releases/manifest.toml` is the workspace release manifest. It owns release-event identity, branch, tag, GitHub Release URL, and workspace-scoped gates. Per-binary manifests own binary-specific build, target, channel, signing, installer, npm, and Homebrew state. Single-binary releases are the degenerate case: one `[[binaries]]` entry.
+
+The manifest set is both deterministic input and release ledger:
 
 - Intent sections are immutable release inputs. Build, package, installer, npm, and Homebrew steps read these sections.
 - Status sections are mutable staging evidence. Platform sub-PRs update them while targeting the release branch.
-- Published sections are final ledger metadata. A post-release PR records final URLs, checksums, package links, and tap commits after publication.
+- Published sections are final ledger metadata recorded on the retained release branch and uploaded as GitHub Release assets.
 
-The build system and release skill must not derive a name when the manifest provides an explicit value. This is necessary for cases such as `mmux`, where npm must install a native binary directly and must not use `mmux.sh`, `mmux.js`, or another runner.
+The build system and release skill must not derive a name when a manifest provides an explicit value. This is necessary for cases such as `mmux`, where npm must install a native binary directly and must not use `mmux.sh`, `mmux.js`, or another runner.
 
-Gate status values are intentionally simple: `planned`, `staged`, `complete`, `deferred`, or `failed`. `staged`, `complete`, `deferred`, and `failed` gates record at least `completed_at`, `completed_by`, `source_commit`, and structured `evidence`. These fields allow different agents or humans to pick up release work on different hosts without relying on conversational context.
-
-Gate rows are keyed by `(id, target_id)`. Target-specific platform and package work uses the target id, for example `target_id = "linux-x64-musl"`. Global or rollup gates use `target_id = ""`; rollup rows set `rollup = true`. A rollup gate is complete only when all enabled target/channel gates it summarizes are complete or explicitly deferred.
-
-Install verification is also manifest-tracked. A direct installer release should include `installer-validated` gates for each target that must run the release-pinned installer on a matching host. The rollup `installer-validated` gate is complete only after the target-specific installer checks complete or are explicitly deferred.
-
-Evidence entries use this minimal shape:
+Workspace manifest example:
 
 ```toml
-{ kind = "command-log", ref = "PR #123 comment", sha256 = "", note = "rustc -Vv recorded" }
+schema_version = 1
+kind = "motlie.release"
+state = "planned"
+
+[identity]
+name = "2026-05-amber-aardvark"
+release_month = "2026-05"
+codename = "amber-aardvark"
+
+[coordination]
+source_repo = "chungers/motlie"
+base_branch = "main"
+release_branch = "release/2026-05-amber-aardvark"
+sub_prs_allowed = true
+main_merge_policy = "never-merge-release-branch"
+main_fix_policy = "cherry-pick-source-fixes-only"
+
+[release]
+tag = "2026-05-amber-aardvark"
+notes_path = "releases/notes.md"
+github_release = ""
+source_ref_policy = "final-artifacts-must-build-from-final-tag"
+
+[[binaries]]
+name = "mmux"
+version = "0.1.0"
+manifest = "releases/mmux-0.1.0.toml"
+notes = "releases/mmux-0.1.0.md"
+
+[[gate]]
+id = "release-branch-created"
+scope = "workspace"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "final-tag-created"
+scope = "workspace"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
+
+[[gate]]
+id = "github-release-published"
+scope = "workspace"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+evidence = []
 ```
 
-Disabled-channel gates are marked `deferred` at coordination-PR-open time with `deferred_reason = "channel disabled"`.
-
-Worked `mmux` manifest:
+Per-binary manifest example:
 
 ```toml
 schema_version = 1
@@ -668,21 +755,7 @@ state = "planned"
 [identity]
 binary = "mmux"
 version = "0.1.0"
-
-[coordination]
-source_repo = "chungers/motlie"
-base_branch = "main"
-release_branch = "release/mmux-v0.1.0"
-release_pr = ""
-post_release_ledger_pr = ""
-sub_prs_allowed = true
-merge_strategy = "merge-commit"
-
-[release]
-tag = "v0.1.0"
-notes_path = "releases/mmux/0.1.0.md"
-github_release = ""
-source_ref_policy = "final-artifacts-must-build-from-final-tag"
+release_name = "2026-05-amber-aardvark"
 
 [build]
 cargo_package = "motlie-mmux"
@@ -702,23 +775,10 @@ linux_musl_toolchain_policy = "default-for-pure-rust-static-musl"
 linux_musl_zigbuild_policy = "use-cargo-zigbuild-when-c-deps-need-musl-aware-linker"
 linux_gnu_policy = "fallback-for-glibc-or-cuda-runtime"
 linux_gnu_glibc_floor_policy = "record-host-and-binary-glibc-floor-for-gnu-targets"
-required_evidence_universal = [
-  "rustc -Vv",
-  "cargo -V",
-]
-darwin_cross_required_evidence = [
-  "cargo zigbuild -V",
-  "zig version",
-]
-linux_musl_required_evidence = [
-  "file <binary>",
-  "ldd <binary>",
-  "readelf -d <binary>",
-]
-linux_gnu_required_evidence = [
-  "objdump -T <binary> | grep GLIBC_ | sort -u",
-  "ldd --version",
-]
+required_evidence_universal = ["rustc -Vv", "cargo -V"]
+darwin_cross_required_evidence = ["cargo zigbuild -V", "zig version"]
+linux_musl_required_evidence = ["file <binary>", "ldd <binary>", "readelf -d <binary>"]
+linux_gnu_required_evidence = ["objdump -T <binary> | grep GLIBC_ | sort -u", "ldd --version"]
 
 [signing]
 identity = "adhoc"
@@ -742,7 +802,7 @@ include = ["README.md", "LICENSE"]
 [installer]
 enabled = true
 script_asset = "install-mmux.sh"
-source_path = "releases/mmux/install/install-mmux.sh"
+source_path = "releases/install/install-mmux.sh"
 default_source = "archive"
 
 [npm]
@@ -783,39 +843,9 @@ completed_by = ""
 source_commit = ""
 evidence = []
 
-[[target]]
-id = "darwin-arm64"
-os = "darwin"
-arch = "arm64"
-rust_target = "aarch64-apple-darwin"
-archive_asset = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
-npm_package = "@motlie/mmux-darwin-arm64"
-archive_binary_path = "bin/mmux"
-npm_bin_path = "bin/mmux"
-requires_macos_signing = true
-
-[target.status]
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-evidence = []
-
 [[gate]]
-id = "darwin-codesign-staged"
-target_id = ""
-channel = "archive"
-rollup = true
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
-evidence = []
-
-[[gate]]
-id = "darwin-codesign-staged"
-target_id = "darwin-arm64"
+id = "linux-builds-staged"
+target_id = "linux-x64-musl"
 channel = "archive"
 state = "planned"
 completed_at = ""
@@ -825,39 +855,41 @@ deferred_reason = ""
 evidence = []
 ```
 
+Gate status values are intentionally simple: `planned`, `staged`, `complete`, `deferred`, or `failed`. `staged`, `complete`, `deferred`, and `failed` gates record at least `completed_at`, `completed_by`, `source_commit`, and structured `evidence`. These fields allow different agents or humans to pick up release work on different hosts without relying on conversational context.
+
+Binary-manifest gate rows are keyed by `(id, target_id)`. Target-specific platform and package work uses the target id, for example `target_id = "linux-x64-musl"`. Global or rollup gates use `target_id = ""`; rollup rows set `rollup = true`. A rollup gate is complete only when all enabled target/channel gates it summarizes are complete or explicitly deferred.
+
+Evidence entries use this minimal shape:
+
+```toml
+{ kind = "command-log", ref = "PR #123 comment", sha256 = "", note = "rustc -Vv recorded" }
+```
+
+Install verification is also manifest-tracked. A direct installer release should include `installer-validated` gates for each target that must run the release-pinned installer on a matching host. The rollup `installer-validated` gate is complete only after the target-specific installer checks complete or are explicitly deferred.
+
+Disabled-channel gates are marked `deferred` at release-branch-open time with `deferred_reason = "channel disabled"`.
+
 For future CUDA-capable binaries, a target may add `accelerator = "cuda-12-4"`. CPU/default targets omit the accelerator field entirely.
 
-After publication, the same manifest is updated in a post-release ledger PR:
+After publication, workspace and per-binary manifests are updated on the retained release branch:
 
 ```toml
 state = "published"
 
 [published]
-tag = "v0.1.0"
-github_release = "https://github.com/chungers/motlie/releases/tag/v0.1.0"
-release_notes = "https://github.com/chungers/motlie/releases/tag/v0.1.0"
+tag = "2026-05-amber-aardvark"
+github_release = "https://github.com/chungers/motlie/releases/tag/2026-05-amber-aardvark"
+release_notes = "https://github.com/chungers/motlie/releases/tag/2026-05-amber-aardvark"
 
 [[published.asset]]
 target = "darwin-arm64"
 name = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
-url = "https://github.com/chungers/motlie/releases/download/v0.1.0/motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
+url = "https://github.com/chungers/motlie/releases/download/2026-05-amber-aardvark/motlie-mmux-v0.1.0-darwin-arm64.tar.gz"
 sha256 = "<final-sha256>"
 signed = true
-
-[[published.npm]]
-target = "darwin-arm64"
-package = "@motlie/mmux-darwin-arm64"
-version = "0.1.0"
-url = "https://www.npmjs.com/package/@motlie/mmux-darwin-arm64"
-
-[published.homebrew]
-tap = "motlie/homebrew-tap"
-formula = "mmux"
-pr = "<tap-pr-url>"
-commit = "<tap-commit>"
 ```
 
-Do not move the release tag just to include ledger-only metadata. The ledger PR is an audit update on `main`; the release tag remains the immutable source for final artifacts.
+Do not move the release tag just to include ledger-only metadata. Ledger finalization happens on the retained release branch and in uploaded manifest assets; `main` remains free of per-release ledger files.
 
 ## Core Motlie Work
 

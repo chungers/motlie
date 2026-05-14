@@ -7,8 +7,8 @@ Parameterize examples by the release target:
 ```text
 BIN=<installed command name>
 INSTALL_PATH=<final installed path, e.g. /usr/local/bin/<bin>>
-MANIFEST=releases/<bin>/<version>.toml
-RELEASE_BRANCH=release/<bin>-v<version>
+BINARY_MANIFEST=releases/<bin>-<version>.toml
+RELEASE_BRANCH=release/<YYYY-MM-adjective-codename>
 RUST_TARGET=<target.rust_target from manifest>
 ```
 
@@ -48,7 +48,7 @@ Why this gate exists:
 Release rule:
 
 - Linux may cross-compile Darwin artifacts.
-- Darwin staging evidence should be recorded in `MANIFEST` through a sub-PR to the release branch.
+- Darwin staging evidence should be recorded in `BINARY_MANIFEST` through a sub-PR to the release branch.
 - Darwin artifacts are not final until the macOS signing gate signs, verifies, repacks, and executes artifacts built from the final source tag.
 - If the final tag commit differs from the staged signing commit, rebuild or revalidate before publishing.
 - Record `rustc -Vv`, `cargo -V`, `codesign -dv`, target triple, and signing identity in the gate evidence.
