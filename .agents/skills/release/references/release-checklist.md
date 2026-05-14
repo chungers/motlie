@@ -11,6 +11,8 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] `releases/notes.md` committed as the GitHub Release note source.
 - [ ] `releases/<bin>-<version>.toml` committed for each binary with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
 - [ ] `releases/<bin>-<version>.md` committed as each per-binary release-note source.
+- [ ] Release notes list every binary, version, target family, distribution channel, install command, user-visible change, compatibility note, and known issue.
+- [ ] Release owner has approved the final notes before `gh release create`.
 - [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.
 - [ ] No PR is opened to merge the release branch to `main`.
 - [ ] Platform/channel sub-PRs opened against the release branch as needed.

@@ -13,6 +13,7 @@
 - 2026-05-14, @gpt55-dgx: Split universal/Darwin/Linux evidence lists, pinned the default Linux musl toolchain, and documented the musl allocator trade-off.
 - 2026-05-14, @gpt55-dgx: Changed releases to branch-local calver-codename events that support multiple binaries and never merge release branches back to `main`.
 - 2026-05-14, @gpt55-dgx: Clarified codename terminology, concurrent release branch handling, and installer template lifecycle.
+- 2026-05-14, @gpt55-dgx: Added release notes workflow for workspace and per-binary notes, including operator prompts and publication gates.
 
 ## Status
 
@@ -301,6 +302,22 @@ Each Motlie release should publish:
 - Checksums.
 - Installer scripts such as `install-<bin>.sh`; `install-mmux.sh` is the worked example.
 - Release notes.
+
+### Release Notes
+
+Release notes are branch-local artifacts produced with the release manifests:
+
+```text
+releases/
+  notes.md
+  <bin>-<version>.md
+```
+
+`releases/notes.md` is the GitHub Release body and describes the release event as a whole. It must list every binary in the release, each binary version, supported distribution channels, target platforms, high-level changes, install commands, verification/checksum guidance, and known issues. Per-binary notes such as `releases/mmux-0.1.0.md` carry binary-specific changes, CLI/API changes, install examples, target matrix, and compatibility notes.
+
+Release notes are drafted when the release branch opens and finalized before the GitHub Release is created. The release skill should help the operator draft notes from `releases/manifest.toml`, per-binary manifests, and a human-provided summary of user-visible changes. The skill may use `git log` as supporting evidence, but it must not invent release claims from commit subjects alone. A human must approve the release notes before the `gh release create --notes-file releases/notes.md` step.
+
+The final release branch ledger should record the GitHub Release notes URL and, if release notes are uploaded as assets, the checksum or URL for the final note files. Do not move the release tag to revise notes-only ledger metadata.
 
 ### npm
 

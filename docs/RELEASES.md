@@ -14,6 +14,7 @@
 - 2026-05-14, @gpt55-dgx: Split evidence requirements by target category and clarified the default Linux musl build toolchain.
 - 2026-05-14, @gpt55-dgx: Reworked the playbook for branch-local calver-codename release branches that support multiple binaries and never merge to `main`.
 - 2026-05-14, @gpt55-dgx: Clarified codename placeholders, concurrent release branches, and installer template origin.
+- 2026-05-14, @gpt55-dgx: Added release-note drafting and approval workflow for workspace and per-binary notes.
 
 ## Scope
 
@@ -172,6 +173,12 @@ The initial branch should include:
 - Per-binary manifests and notes, for example `releases/mmux-0.1.0.toml` and `releases/mmux-0.1.0.md`.
 - Source-side installer, npm, or Homebrew templates under branch-local `releases/` if needed. Installer scripts should be copied from canonical templates on `main`, normally `bins/<bin>/install-template.sh`, into `releases/install/install-<bin>.sh`.
 
+Release notes should be drafted at branch creation:
+
+- `releases/notes.md` is the GitHub Release body and must list all binaries, binary versions, distribution channels, target platforms, install commands, user-visible changes, verification/checksum guidance, and known issues.
+- `releases/<bin>-<version>.md` contains binary-specific changes, CLI/API changes, target matrix, package names, install examples, compatibility notes, and known issues.
+- The release skill may draft from manifests and `git log`, but a human must provide or approve the user-visible summary. Do not publish notes with placeholders or claims not backed by the manifests or release owner input.
+
 Platform-specific work should land as sub-PRs targeting the release branch:
 
 ```text
@@ -205,7 +212,7 @@ git switch --detach 2026-05-amber-aardvark
 git status --short --branch
 ```
 
-Create the GitHub Release from the committed release notes:
+Create the GitHub Release from the committed, human-approved release notes:
 
 ```sh
 gh release create 2026-05-amber-aardvark \
@@ -621,6 +628,8 @@ Homebrew workflow:
 - [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, binary list, and workspace gates.
 - [ ] `releases/<bin>-<version>.toml` committed with release intent, explicit names, target matrix, structured target status, and `(id, target_id)` gates for every binary in scope.
 - [ ] `releases/notes.md` and `releases/<bin>-<version>.md` committed as release-note sources.
+- [ ] Release notes list every binary, version, target family, distribution channel, install command, user-visible change, compatibility note, and known issue.
+- [ ] Release owner has approved the final notes before `gh release create`.
 - [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.
 - [ ] No PR is opened to merge the release branch to `main`.
 - [ ] Platform/channel sub-PRs merged into the release branch.
