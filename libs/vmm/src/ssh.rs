@@ -56,12 +56,30 @@ macro_rules! debug_trace {
 
 fn ssh_exec_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MOTLIE_VMM_SSH_EXEC_TRACE").is_some())
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("MOTLIE_VMM_SSH_EXEC_TRACE").is_some()
+            || std::env::var_os("MOTLIE_SSH_EXEC_TRACE").is_some()
+    })
 }
 
 macro_rules! ssh_exec_trace {
     ($($arg:tt)*) => {
         if crate::ssh::ssh_exec_trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+fn ssh_bridge_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("MOTLIE_VMM_SSH_BRIDGE_TRACE").is_some() || ssh_exec_trace_enabled()
+    })
+}
+
+macro_rules! ssh_bridge_trace {
+    ($($arg:tt)*) => {
+        if crate::ssh::ssh_bridge_trace_enabled() {
             eprintln!($($arg)*);
         }
     };
@@ -395,6 +413,7 @@ fn update_guest_handle(
     guest_name: &str,
     handle: Arc<tokio::sync::Mutex<russh::client::Handle<GuestClientHandler>>>,
 ) -> Result<(), SshProxyError> {
+    ssh_bridge_trace!("ssh-bridge[{guest_name}]: updating guest registry");
     let mut registry = registry
         .lock()
         .map_err(|_| SshProxyError::StatePoisoned("guest registry"))?;
@@ -404,6 +423,7 @@ fn update_guest_handle(
             ssh_handle: Some(handle),
         },
     );
+    ssh_bridge_trace!("ssh-bridge[{guest_name}]: registry ready");
     Ok(())
 }
 
@@ -499,6 +519,10 @@ async fn accept_guest_ssh_once(
         guest_name,
         uds_path.display()
     );
+    ssh_bridge_trace!(
+        "ssh-bridge[{guest_name}]: waiting for guest connection on {}",
+        uds_path.display()
+    );
 
     let (stream, _) = listener
         .accept()
@@ -509,18 +533,26 @@ async fn accept_guest_ssh_once(
         })?;
 
     tracing::info!("Guest '{}' vsock SSH bridge connected", guest_name);
+    ssh_bridge_trace!("ssh-bridge[{guest_name}]: guest connection accepted");
 
     let eph = ca.sign_ephemeral(&ssh_access.principal)?;
     let config = Arc::new(russh::client::Config::default());
 
+    ssh_bridge_trace!("ssh-bridge[{guest_name}]: starting SSH handshake");
     let mut handle = russh::client::connect_stream(config, stream, GuestClientHandler)
         .await
         .map_err(|e| SshProxyError::GuestConnection {
             guest: guest_name.into(),
             reason: format!("SSH handshake failed: {e}"),
         })?;
+    ssh_bridge_trace!("ssh-bridge[{guest_name}]: SSH handshake completed");
 
     // Authenticate with CA-signed ephemeral certificate.
+    ssh_bridge_trace!(
+        "ssh-bridge[{guest_name}]: authenticating login_user={} principal={}",
+        ssh_access.login_user,
+        ssh_access.principal
+    );
     let result = handle
         .authenticate_openssh_cert(&ssh_access.login_user, Arc::new(eph.key), eph.cert)
         .await
@@ -528,6 +560,10 @@ async fn accept_guest_ssh_once(
             guest: guest_name.into(),
             reason: e.to_string(),
         })?;
+    ssh_bridge_trace!(
+        "ssh-bridge[{guest_name}]: authentication completed success={}",
+        result.success()
+    );
 
     if !result.success() {
         return Err(SshProxyError::GuestConnection {
@@ -551,23 +587,27 @@ pub async fn run_guest_ssh_bridge(
     registry: GuestRegistry,
 ) {
     loop {
+        ssh_bridge_trace!("ssh-bridge[{guest_name}]: accept loop waiting");
         match accept_guest_ssh_once(&listener, &uds_path, &ca, &guest_name, &ssh_access).await {
             Ok(handle) => {
                 let handle = Arc::new(tokio::sync::Mutex::new(handle));
                 match update_guest_handle(&registry, &guest_name, handle) {
                     Ok(()) => {
                         tracing::info!("SSH bridge ready for guest '{guest_name}'");
+                        ssh_bridge_trace!("ssh-bridge[{guest_name}]: ready");
                     }
                     Err(e) => {
                         tracing::warn!(
                             "SSH bridge registry update failed for guest '{guest_name}': {e}"
                         );
+                        ssh_bridge_trace!("ssh-bridge[{guest_name}]: registry update failed: {e}");
                         sleep(Duration::from_millis(250)).await;
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!("SSH bridge failed for guest '{guest_name}': {e}");
+                ssh_bridge_trace!("ssh-bridge[{guest_name}]: failed: {e}");
                 sleep(Duration::from_millis(250)).await;
             }
         }
@@ -920,11 +960,14 @@ pub async fn wait_for_guest_bridge_ready(
     timeout: Duration,
 ) -> Result<(), SshProxyError> {
     let deadline = Instant::now() + timeout;
+    ssh_bridge_trace!("ssh-bridge[{guest_name}]: wait_ready timeout={timeout:?}");
     loop {
         if current_guest_handle(registry, guest_name)?.is_some() {
+            ssh_bridge_trace!("ssh-bridge[{guest_name}]: wait_ready observed handle");
             return Ok(());
         }
         if Instant::now() >= deadline {
+            ssh_bridge_trace!("ssh-bridge[{guest_name}]: wait_ready timed out");
             return Err(SshProxyError::GuestConnection {
                 guest: guest_name.into(),
                 reason: "SSH bridge not ready".into(),

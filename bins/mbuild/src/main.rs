@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,8 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
-    v1_5, RootfsCloudInitSeed, RootfsCompatibilityBackendEnv, RootfsMountSpec,
+    v1_5, ExternalOciSource, GuestImageProfile, OciContentCache, OciDigest, OciImageReference,
+    OciPlatform, OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed,
+    RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec,
+    RootfsMountSpec, RootfsPayloadFile, RootfsPendingRequirementPolicy, RootfsProfileSpec,
     RootfsSeedOverlayAssembler, RootfsSeedOverlayManifest, RootfsSeedOverlaySpec, RootfsUserSeed,
+    UBUNTU_SYSTEMD_PROFILE,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,7 +29,15 @@ const DEFAULT_MANIFEST_NAME: &str = "mbuild-manifest.json";
 const DEFAULT_SEED_MANIFEST_NAME: &str = "mbuild-seed-manifest.json";
 const DEFAULT_VALIDATION_MANIFEST_NAME: &str = "mbuild-validation-manifest.json";
 const ADAPTER_LOG_NAME: &str = "mbuild-adapter.log";
+const CH_EMITTER_LOG_NAME: &str = "mbuild-ch-emitter.log";
+const CH_PACKAGE_STAGE_LOG_NAME: &str = "mbuild-package-stage.log";
+const CH_PACKAGE_STAGE_SCRIPT_NAME: &str = "mbuild-apt-stage.sh";
+const CH_BUILD_RESULT_NAME: &str = "ch-build-result.json";
+const CH_GUEST_CONTRACT_NAME: &str = "guest-contract.json";
+const CH_ROOTFS_NAME: &str = "rootfs.squashfs";
 const VALIDATION_LOG_NAME: &str = "mbuild-validation.log";
+const OCI_CACHE_DIR_ENV: &str = "MOTLIE_MBUILD_OCI_CACHE_DIR";
+const CH_KERNEL_RELEASE_DEFAULT: &str = "ch-release-v6.16.9-20251112";
 
 fn main() {
     init_tracing();
@@ -115,7 +130,7 @@ fn build(options: BuildOptions) -> Result<()> {
         None
     } else {
         let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
-        Some(run_backend_adapter(&repo_root, &config, emitter, &options)?)
+        Some(run_build_execution(&repo_root, &config, emitter, &options)?)
     };
     let artifacts = if options.plan_only {
         Vec::new()
@@ -283,6 +298,130 @@ fn validate_repo_root(path: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+fn run_build_execution(
+    repo_root: &Path,
+    config: &ImageBuildConfig,
+    emitter: &BackendEmitterSpec,
+    options: &BuildOptions,
+) -> Result<AdapterRecord> {
+    if config.source.kind == SourceKind::ExternalOci && options.target.as_str() == "ch" {
+        return run_ch_external_oci_build(repo_root, config, emitter, options);
+    }
+    run_backend_adapter(repo_root, config, emitter, options)
+}
+
+#[instrument(
+    skip(repo_root, config, _emitter, options),
+    fields(target = %options.target, out = %options.out.display())
+)]
+fn run_ch_external_oci_build(
+    repo_root: &Path,
+    config: &ImageBuildConfig,
+    _emitter: &BackendEmitterSpec,
+    options: &BuildOptions,
+) -> Result<AdapterRecord> {
+    let started_at_unix_seconds = unix_now()?;
+    let log_path = options.out.join(CH_EMITTER_LOG_NAME);
+    fs::write(&log_path, b"")?;
+    append_log(&log_path, "=== mbuild CH external-OCI builder ===\n")?;
+
+    let platform = parse_source_platform(&config.source.platform)?;
+    let source = resolve_external_source(config, platform)?;
+    append_log(
+        &log_path,
+        &format!(
+            "source={} platform={} index={} manifest={}\n",
+            source.image_ref,
+            source.platform,
+            source.image_index_digest,
+            source.platform_manifest_digest
+        ),
+    )?;
+
+    let host = ChHostTarget::detect()?;
+    if platform != host.platform {
+        bail!(
+            "CH external-OCI build currently requires host-native platform {}; config resolved {}",
+            host.platform,
+            platform
+        );
+    }
+
+    let work_root = create_work_root("mbuild-ch-rootfs")?;
+    let rootfs_dir = work_root.join("rootfs");
+    let cache_dir = oci_cache_dir(repo_root)?;
+    let base_dir = options.out.join("base");
+    fs::create_dir_all(&base_dir)?;
+
+    let imported = import_external_oci_rootfs(&source, &cache_dir, &rootfs_dir)?;
+    fs::write(
+        options.out.join("mbuild-oci-import.json"),
+        serde_json::to_vec_pretty(&imported)?,
+    )?;
+
+    let guest_binaries = build_guest_binaries(repo_root, &host, &log_path)?;
+    run_apt_package_stage(&rootfs_dir, config, &options.out)?;
+
+    let assembly_manifest =
+        assemble_immutable_rootfs(&rootfs_dir, config, &source, &guest_binaries)?;
+    fs::write(
+        options.out.join("mbuild-rootfs-assembly.json"),
+        serde_json::to_vec_pretty(&assembly_manifest)?,
+    )?;
+
+    install_ch_boot_adaptations(repo_root, &rootfs_dir, &source, &host, &guest_binaries.vfs)?;
+    write_ch_guest_contract(
+        &rootfs_dir.join("opt/motlie/v1.5/guest/guest-contract.json"),
+        &source,
+        &host,
+        Path::new(host.kernel_image),
+        &guest_binaries.vfs,
+    )?;
+    let rootfs_path = base_dir.join(CH_ROOTFS_NAME);
+    emit_squashfs(
+        &rootfs_dir,
+        &rootfs_path,
+        &options.out.join(CH_EMITTER_LOG_NAME),
+    )?;
+    let kernel_path = emit_ch_kernel(&base_dir, &host, &log_path)?;
+    let contract_path = base_dir.join(CH_GUEST_CONTRACT_NAME);
+    write_ch_guest_contract(
+        &contract_path,
+        &source,
+        &host,
+        &kernel_path,
+        &guest_binaries.vfs,
+    )?;
+    write_ch_build_result(
+        &options.out,
+        &contract_path,
+        &kernel_path,
+        &rootfs_path,
+        &guest_binaries.vfs,
+    )?;
+
+    let completed_at_unix_seconds = unix_now()?;
+    append_log(&log_path, "=== CH external-OCI build complete ===\n")?;
+    let _ = fs::remove_dir_all(&work_root);
+
+    Ok(AdapterRecord {
+        kind: "external-oci-ch-emitter".to_string(),
+        command: vec![
+            "mbuild".to_string(),
+            "build".to_string(),
+            "--target".to_string(),
+            options.target.to_string(),
+        ],
+        log_path,
+        exit_status: 0,
+        started_at_unix_seconds,
+        completed_at_unix_seconds,
+        package_include: config.package_stage.install.clone(),
+        materialized_source: None,
+        external_oci_source: Some(source),
+    })
+}
+
 #[instrument(
     skip(repo_root, config, emitter, options),
     fields(target = %options.target, out = %options.out.display())
@@ -352,7 +491,587 @@ fn run_backend_adapter(
         completed_at_unix_seconds,
         package_include: config.package_stage.install.clone(),
         materialized_source: emitter.materialized_source.clone(),
+        external_oci_source: None,
     })
+}
+
+#[derive(Debug, Clone)]
+struct ChHostTarget {
+    platform: OciPlatform,
+    rust_target: &'static str,
+    deb_arch: &'static str,
+    kernel_image: &'static str,
+    kernel_asset: &'static str,
+}
+
+impl ChHostTarget {
+    fn detect() -> Result<Self> {
+        match env::consts::ARCH {
+            "x86_64" => Ok(Self {
+                platform: OciPlatform::linux_amd64(),
+                rust_target: "x86_64-unknown-linux-gnu",
+                deb_arch: "amd64",
+                kernel_image: "vmlinux.bin",
+                kernel_asset: "vmlinux",
+            }),
+            "aarch64" => Ok(Self {
+                platform: OciPlatform::linux_arm64(),
+                rust_target: "aarch64-unknown-linux-gnu",
+                deb_arch: "arm64",
+                kernel_image: "Image",
+                kernel_asset: "Image-arm64",
+            }),
+            other => bail!("unsupported CH host architecture for v1.5 build: {other}"),
+        }
+    }
+}
+
+fn parse_source_platform(value: &str) -> Result<OciPlatform> {
+    match value {
+        "linux/amd64" | "amd64" => Ok(OciPlatform::linux_amd64()),
+        "linux/arm64" | "arm64" => Ok(OciPlatform::linux_arm64()),
+        "host-native" | "host-native-linux" => Ok(ChHostTarget::detect()?.platform),
+        other => bail!(
+            "unsupported source.platform {other:?}; expected linux/amd64, linux/arm64, or host-native-linux"
+        ),
+    }
+}
+
+fn resolve_external_source(
+    config: &ImageBuildConfig,
+    platform: OciPlatform,
+) -> Result<ExternalOciSource> {
+    if config.source.profile.as_str() != UBUNTU_SYSTEMD_PROFILE {
+        bail!(
+            "external-oci source.profile {:?} is not implemented; expected {}",
+            config.source.profile.as_str(),
+            UBUNTU_SYSTEMD_PROFILE
+        );
+    }
+    let image_ref = OciImageReference::from_str(&config.source.image)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create OCI registry runtime")?;
+    let resolved = runtime.block_on(async {
+        OciRegistryClient::new()
+            .resolve_manifest(&image_ref, platform)
+            .await
+    })?;
+
+    if let Some(expected) = &config.source.image_index_digest {
+        if expected != &resolved.image_index_digest {
+            bail!(
+                "resolved source.image_index_digest {} does not match pinned {}",
+                resolved.image_index_digest,
+                expected
+            );
+        }
+    }
+    if let Some(expected) = &config.source.platform_manifest_digest {
+        if expected != &resolved.platform_manifest_digest {
+            bail!(
+                "resolved source.platform_manifest_digest {} does not match pinned {}",
+                resolved.platform_manifest_digest,
+                expected
+            );
+        }
+    }
+
+    Ok(resolved.into_external_source())
+}
+
+fn import_external_oci_rootfs(
+    source: &ExternalOciSource,
+    cache_dir: &Path,
+    rootfs_dir: &Path,
+) -> Result<motlie_vmm::image::ImportedOciRootfs> {
+    let image_ref = OciImageReference::from_str(&source.image_ref)?;
+    let resolved = motlie_vmm::image::ResolvedOciManifest {
+        image_ref,
+        image_index_digest: source.image_index_digest.clone(),
+        platform: source.platform,
+        platform_manifest_digest: source.platform_manifest_digest.clone(),
+    };
+    let cache = OciContentCache::new(cache_dir);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create OCI fetch runtime")?;
+    let cached = runtime.block_on(async {
+        OciRegistryClient::new()
+            .fetch_resolved_platform_to_cache(&resolved, &cache)
+            .await
+    })?;
+    Ok(OciRootfsImporter::new().import_layers(&cached.layers, rootfs_dir)?)
+}
+
+fn oci_cache_dir(repo_root: &Path) -> Result<PathBuf> {
+    if let Some(path) = env::var_os(OCI_CACHE_DIR_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(repo_root.join("target/mbuild-cache/oci"))
+}
+
+fn create_work_root(prefix: &str) -> Result<PathBuf> {
+    let path = env::temp_dir().join(format!("{prefix}-{}-{}", process::id(), unix_now()?));
+    fs::create_dir_all(&path)
+        .with_context(|| format!("create work directory {}", path.display()))?;
+    Ok(path)
+}
+
+fn subordinate_id_range(path: &str) -> Result<(u32, u32)> {
+    let user =
+        env::var("USER").context("USER is required for rootless package-stage subid lookup")?;
+    let contents = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+    for line in contents.lines() {
+        let mut fields = line.split(':');
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if name != user {
+            continue;
+        }
+        let start = fields
+            .next()
+            .context("subid entry missing start")?
+            .parse::<u32>()
+            .with_context(|| format!("parse {path} start for {user}"))?;
+        let count = fields
+            .next()
+            .context("subid entry missing count")?
+            .parse::<u32>()
+            .with_context(|| format!("parse {path} count for {user}"))?;
+        if count < 1024 {
+            bail!("{path} entry for {user} is too small for package-stage uid/gid mapping");
+        }
+        return Ok((start, count));
+    }
+    bail!("{path} has no entry for {user}; rootless package stage requires subordinate ids")
+}
+
+#[derive(Debug, Clone)]
+struct GuestBinaries {
+    vfs: PathBuf,
+    ssh_bridge: PathBuf,
+}
+
+fn build_guest_binaries(
+    repo_root: &Path,
+    host: &ChHostTarget,
+    log_path: &Path,
+) -> Result<GuestBinaries> {
+    let target_dir = repo_root
+        .join("target")
+        .join(host.rust_target)
+        .join("release");
+    let vfs = target_dir.join("motlie-vfs-guest-v1_5");
+    let ssh_bridge = target_dir.join("motlie-vsock-ssh-bridge-v1_5");
+    let mut command = Command::new("cargo");
+    command
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(repo_root.join("libs/vmm/Cargo.toml"))
+        .arg("--release")
+        .arg("--target")
+        .arg(host.rust_target)
+        .arg("--no-default-features")
+        .arg("--features")
+        .arg("guest-vfs")
+        .arg("--bin")
+        .arg("motlie-vfs-guest-v1_5")
+        .arg("--bin")
+        .arg("motlie-vsock-ssh-bridge-v1_5")
+        .current_dir(repo_root);
+    run_logged_command(&mut command, log_path, "build v1.5 guest binaries")?;
+    if !vfs.is_file() {
+        bail!("guest binary was not produced at {}", vfs.display());
+    }
+    if !ssh_bridge.is_file() {
+        bail!(
+            "SSH bridge binary was not produced at {}",
+            ssh_bridge.display()
+        );
+    }
+    let marker = Command::new(&vfs)
+        .arg("--contract")
+        .output()
+        .with_context(|| format!("run guest binary contract check {}", vfs.display()))?;
+    let marker_stdout =
+        String::from_utf8(marker.stdout).context("guest binary contract marker is not UTF-8")?;
+    if marker_stdout.trim() != v1_5::MOTLIE_V15_GUEST_MOUNTER_MARKER {
+        bail!(
+            "guest binary contract marker mismatch: expected {}, got {:?}",
+            v1_5::MOTLIE_V15_GUEST_MOUNTER_MARKER,
+            marker_stdout.trim()
+        );
+    }
+    Ok(GuestBinaries { vfs, ssh_bridge })
+}
+
+fn run_apt_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -> Result<()> {
+    if config.package_stage.manager.as_str() != "apt" {
+        bail!(
+            "CH external-OCI package stage only implements apt, got {}",
+            config.package_stage.manager.as_str()
+        );
+    }
+    let script_path = out.join(CH_PACKAGE_STAGE_SCRIPT_NAME);
+    let log_path = out.join(CH_PACKAGE_STAGE_LOG_NAME);
+    fs::write(&script_path, apt_stage_script())?;
+    set_mode(&script_path, 0o755)?;
+    let (subuid_start, subuid_count) = subordinate_id_range("/etc/subuid")?;
+    let (subgid_start, subgid_count) = subordinate_id_range("/etc/subgid")?;
+    let uid_count = subuid_count.min(65_535);
+    let gid_count = subgid_count.min(65_535);
+
+    let mut command = Command::new("unshare");
+    command
+        .arg("--user")
+        .arg("--map-root-user")
+        .arg(format!("--map-users=1:{subuid_start}:{uid_count}"))
+        .arg(format!("--map-groups=1:{subgid_start}:{gid_count}"))
+        .arg("--setgroups")
+        .arg("allow")
+        .arg("--mount")
+        .arg("--pid")
+        .arg("--fork")
+        .arg("--mount-proc")
+        .arg("bash")
+        .arg(&script_path)
+        .arg(rootfs_dir)
+        .arg(bool_env(config.package_stage.update))
+        .arg(bool_env(config.package_stage.clean));
+    for package in &config.package_stage.install {
+        command.arg(package);
+    }
+    command.arg("--");
+    for package in &config.package_stage.npm_global {
+        command.arg(&package.package);
+    }
+    command.arg("--");
+    for package in &config.package_stage.npm_global {
+        for binary in &package.binaries {
+            command.arg(binary);
+        }
+    }
+    run_logged_command(&mut command, &log_path, "apt/npm package stage")
+}
+
+fn apt_stage_script() -> &'static str {
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+rootfs="$(readlink -f "$1")"
+update="$2"
+clean="$3"
+shift 3
+
+apt_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    apt_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    npm_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_binaries=("$@")
+
+mkdir -p "$rootfs/proc" "$rootfs/sys" "$rootfs/dev" "$rootfs/etc" "$rootfs/tmp"
+mount --bind /proc "$rootfs/proc"
+mount --rbind /sys "$rootfs/sys"
+mount --rbind /dev "$rootfs/dev"
+cleanup() {
+    umount -l "$rootfs/dev" >/dev/null 2>&1 || true
+    umount -l "$rootfs/sys" >/dev/null 2>&1 || true
+    umount -l "$rootfs/proc" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+if [[ -f /etc/resolv.conf ]]; then
+    cp /etc/resolv.conf "$rootfs/etc/resolv.conf"
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+if [[ "$update" == "1" ]]; then
+    chroot "$rootfs" env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Sandbox::User=root update
+fi
+if [[ ${#apt_packages[@]} -gt 0 ]]; then
+    chroot "$rootfs" env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Sandbox::User=root install -y --no-install-recommends "${apt_packages[@]}"
+fi
+
+mkdir -p "$rootfs/opt/motlie/npm"
+if [[ ${#npm_packages[@]} -gt 0 ]]; then
+    chroot "$rootfs" env npm_config_update_notifier=false npm install -g --prefix /opt/motlie/npm "${npm_packages[@]}"
+    mkdir -p "$rootfs/usr/local/bin"
+    for binary in "${npm_binaries[@]}"; do
+        chroot "$rootfs" ln -sf "/opt/motlie/npm/bin/$binary" "/usr/local/bin/$binary"
+    done
+fi
+
+printf 'en_US.UTF-8 UTF-8\n' > "$rootfs/etc/locale.gen"
+chroot "$rootfs" locale-gen en_US.UTF-8
+chroot "$rootfs" update-locale LANG=en_US.UTF-8
+chroot "$rootfs" ssh-keygen -A
+sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' "$rootfs/etc/ssh/sshd_config" || true
+systemctl --root="$rootfs" enable ssh >/dev/null
+systemctl --root="$rootfs" enable systemd-networkd >/dev/null
+systemctl --root="$rootfs" disable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+systemctl --root="$rootfs" disable apt-daily.service apt-daily.timer apt-daily-upgrade.service apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
+systemctl --root="$rootfs" mask apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
+grep -qxF user_allow_other "$rootfs/etc/fuse.conf" 2>/dev/null || printf '%s\n' user_allow_other >> "$rootfs/etc/fuse.conf"
+if [[ "$clean" == "1" ]]; then
+    chroot "$rootfs" apt-get clean
+    rm -rf "$rootfs/var/lib/apt/lists"/* "$rootfs/var/cache/apt/archives"/* "$rootfs/root/.npm"
+    mkdir -p "$rootfs/var/cache/apt/archives/partial"
+fi
+truncate -s 0 "$rootfs/etc/machine-id"
+"#
+}
+
+fn assemble_immutable_rootfs(
+    rootfs_dir: &Path,
+    config: &ImageBuildConfig,
+    source: &ExternalOciSource,
+    guest_binaries: &GuestBinaries,
+) -> Result<motlie_vmm::image::RootfsCompatibilityAssemblyManifest> {
+    let mut profile = GuestImageProfile::ubuntu_systemd(source.clone());
+    profile.required_packages = config.package_stage.install.clone();
+    let profile_spec = RootfsProfileSpec::for_profile(profile);
+    let mut spec = RootfsCompatibilityLayerSpec::new(profile_spec);
+    spec.pending_requirement_policy = RootfsPendingRequirementPolicy::FailInstallable;
+    spec.enable_ch_egress_service = true;
+    for payload in &config.immutable_payloads {
+        let mode = parse_octal_mode(&payload.mode)?;
+        let source = if payload.guest_path == v1_5::MOTLIE_V15_GUEST_BIN_OPT {
+            guest_binaries.vfs.clone()
+        } else if payload.guest_path == "/opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge" {
+            guest_binaries.ssh_bridge.clone()
+        } else {
+            payload.source.clone()
+        };
+        let mut file = RootfsPayloadFile::new(source, PathBuf::from(&payload.guest_path), mode);
+        for link in &payload.links {
+            file = file.with_link(PathBuf::from(link));
+        }
+        spec.guest_binaries.push(file);
+    }
+    Ok(RootfsCompatibilityAssembler::new().assemble(rootfs_dir, &spec)?)
+}
+
+fn parse_octal_mode(value: &str) -> Result<u32> {
+    u32::from_str_radix(value.trim_start_matches('0'), 8)
+        .with_context(|| format!("invalid octal mode {value:?}"))
+}
+
+fn install_ch_boot_adaptations(
+    repo_root: &Path,
+    rootfs_dir: &Path,
+    source: &ExternalOciSource,
+    host: &ChHostTarget,
+    guest_binary: &Path,
+) -> Result<()> {
+    let example_dir = repo_root.join("libs/vmm/examples/v1.5");
+    copy_into_rootfs(
+        &example_dir.join("overlay-init"),
+        rootfs_dir,
+        "/sbin/overlay-init",
+        0o755,
+    )?;
+    copy_into_rootfs(
+        &example_dir.join("99_motlie_ch.cfg"),
+        rootfs_dir,
+        "/etc/cloud/cloud.cfg.d/99_motlie_ch.cfg",
+        0o644,
+    )?;
+    write_rootfs_file(
+        rootfs_dir,
+        "/etc/fstab",
+        b"proc        /proc    proc    defaults        0      0\nsysfs       /sys     sysfs   defaults        0      0\ndevtmpfs    /dev     devtmpfs defaults       0      0\n",
+        0o644,
+    )?;
+    write_rootfs_file(
+        rootfs_dir,
+        "/etc/motd",
+        ch_motd(source, host).as_bytes(),
+        0o644,
+    )?;
+    let _ = guest_binary;
+    Ok(())
+}
+
+fn ch_motd(source: &ExternalOciSource, host: &ChHostTarget) -> String {
+    format!(
+        "motlie v1.5 CH guest\nsource={}\nplatform={}\narch={}\n",
+        source.image_ref, source.platform, host.deb_arch
+    )
+}
+
+fn emit_squashfs(rootfs_dir: &Path, rootfs_path: &Path, log_path: &Path) -> Result<()> {
+    if let Some(parent) = rootfs_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let script = "set -euo pipefail\nrm -f \"$2\"\ntar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C \"$1\" -cf - . | tar2sqfs -f \"$2\"\n";
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg("mbuild-squashfs")
+        .arg(rootfs_dir)
+        .arg(rootfs_path);
+    run_logged_command(&mut command, log_path, "emit CH squashfs")
+}
+
+fn emit_ch_kernel(base_dir: &Path, host: &ChHostTarget, log_path: &Path) -> Result<PathBuf> {
+    let kernel_path = base_dir.join(host.kernel_image);
+    if kernel_path.is_file() {
+        return Ok(kernel_path);
+    }
+    let release =
+        env::var("CH_KERNEL_RELEASE").unwrap_or_else(|_| CH_KERNEL_RELEASE_DEFAULT.to_string());
+    let url = env::var("CH_KERNEL_URL").unwrap_or_else(|_| {
+        format!(
+            "https://github.com/cloud-hypervisor/linux/releases/download/{release}/{}",
+            host.kernel_asset
+        )
+    });
+    let mut command = Command::new("wget");
+    command
+        .arg("-q")
+        .arg("--show-progress")
+        .arg("-O")
+        .arg(&kernel_path)
+        .arg(url);
+    run_logged_command(&mut command, log_path, "download CH kernel")?;
+    Ok(kernel_path)
+}
+
+fn write_ch_guest_contract(
+    path: &Path,
+    source: &ExternalOciSource,
+    host: &ChHostTarget,
+    kernel_path: &Path,
+    guest_binary: &Path,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let value = serde_json::json!({
+        "contract_version": v1_5::MOTLIE_V15_CONTRACT_VERSION,
+        "packaging_backend": "ch-squashfs",
+        "guest_arch": host.deb_arch,
+        "kernel_image": kernel_path.file_name().and_then(|name| name.to_str()).unwrap_or(host.kernel_image),
+        "source": {
+            "kind": "external-oci",
+            "image": source.image_ref.clone(),
+            "platform": source.platform.to_string(),
+            "image_index_digest": source.image_index_digest.to_string(),
+            "platform_manifest_digest": source.platform_manifest_digest.to_string(),
+        },
+        "guest_contract": {
+            "motlie_vfs_guest_path": v1_5::MOTLIE_V15_GUEST_BIN_OPT,
+            "motlie_vfs_guest_compat_path": v1_5::MOTLIE_V15_GUEST_BIN_COMPAT,
+            "motlie_vfs_guest_marker": v1_5::MOTLIE_V15_GUEST_MOUNTER_MARKER,
+            "motlie_vfs_guest_build_features": v1_5::MOTLIE_V15_GUEST_BUILD_FEATURES,
+            "guest_binary": guest_binary.display().to_string(),
+            "backend_env": v1_5::MOTLIE_V15_BACKEND_ENV_PATH,
+            "mounts": v1_5::MOTLIE_V15_MOUNTS_PATH,
+            "agent_state": "/agent-state"
+        },
+        "launch_contract": {
+            "builds_allowed": false,
+            "forbidden_first_contact_tools": ["apt", "apt-get", "cargo", "npm", "rustup"]
+        }
+    });
+    fs::write(path, serde_json::to_vec_pretty(&value)?)?;
+    Ok(())
+}
+
+fn write_ch_build_result(
+    out: &Path,
+    contract_path: &Path,
+    kernel_path: &Path,
+    rootfs_path: &Path,
+    guest_binary: &Path,
+) -> Result<()> {
+    let value = serde_json::json!({
+        "ok": true,
+        "backend": "ch",
+        "contract": contract_path.display().to_string(),
+        "kernel": kernel_path.display().to_string(),
+        "rootfs": rootfs_path.display().to_string(),
+        "guest_binary": guest_binary.display().to_string(),
+    });
+    fs::write(
+        out.join(CH_BUILD_RESULT_NAME),
+        serde_json::to_vec_pretty(&value)?,
+    )?;
+    Ok(())
+}
+
+fn copy_into_rootfs(source: &Path, rootfs_dir: &Path, guest_path: &str, mode: u32) -> Result<()> {
+    let bytes = fs::read(source)
+        .with_context(|| format!("read CH adaptation source {}", source.display()))?;
+    write_rootfs_file(rootfs_dir, guest_path, &bytes, mode)
+}
+
+fn write_rootfs_file(rootfs_dir: &Path, guest_path: &str, bytes: &[u8], mode: u32) -> Result<()> {
+    let relative = guest_path
+        .strip_prefix('/')
+        .with_context(|| format!("guest path must be absolute: {guest_path}"))?;
+    let path = rootfs_dir.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, bytes)?;
+    set_mode(&path, mode)
+}
+
+fn set_mode(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
+}
+
+fn append_log(path: &Path, text: &str) -> Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    use std::io::Write as _;
+    file.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+fn run_logged_command(command: &mut Command, log_path: &Path, label: &str) -> Result<()> {
+    append_log(
+        log_path,
+        &format!("\n--- {label} ---\ncommand={command:?}\n"),
+    )?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    let stderr = log.try_clone()?;
+    let status = command
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .status()
+        .with_context(|| format!("run {label}"))?;
+    if !status.success() {
+        bail!(
+            "{label} failed with status {}; see {}",
+            status.code().unwrap_or(-1),
+            log_path.display()
+        );
+    }
+    Ok(())
 }
 
 #[instrument(
@@ -674,6 +1393,10 @@ struct SourceStage {
     profile: ProfileId,
     platform: String,
     digest_policy: DigestPolicy,
+    #[serde(default)]
+    image_index_digest: Option<OciDigest>,
+    #[serde(default)]
+    platform_manifest_digest: Option<OciDigest>,
 }
 
 impl SourceStage {
@@ -686,10 +1409,19 @@ impl SourceStage {
                 if self.digest_policy == DigestPolicy::AdapterVerified {
                     bail!("source.digest_policy adapter-verified is only valid for transitional-adapter sources");
                 }
+                if self.digest_policy == DigestPolicy::Pinned
+                    && (self.image_index_digest.is_none()
+                        || self.platform_manifest_digest.is_none())
+                {
+                    bail!("source.digest_policy pinned requires source.image_index_digest and source.platform_manifest_digest");
+                }
             }
             SourceKind::TransitionalAdapter => {
                 if self.digest_policy != DigestPolicy::AdapterVerified {
                     bail!("source.digest_policy for transitional-adapter sources must be adapter-verified");
+                }
+                if self.image_index_digest.is_some() || self.platform_manifest_digest.is_some() {
+                    bail!("transitional-adapter sources must not declare OCI digest pins");
                 }
             }
         }
@@ -719,6 +1451,8 @@ struct PackageStage {
     manager: PackageManagerId,
     update: bool,
     install: Vec<String>,
+    #[serde(default)]
+    npm_global: Vec<NpmGlobalPackage>,
     clean: bool,
 }
 
@@ -747,6 +1481,39 @@ impl PackageStage {
         }
         for package in &self.install {
             (strategy.validate_package)("package_stage.install", package)?;
+        }
+        for package in &self.npm_global {
+            package.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NpmGlobalPackage {
+    package: String,
+    binaries: Vec<String>,
+}
+
+impl NpmGlobalPackage {
+    fn validate(&self) -> Result<()> {
+        require_non_empty("package_stage.npm_global.package", &self.package)?;
+        if self
+            .package
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b',' | b';'))
+        {
+            bail!(
+                "package_stage.npm_global.package contains unsupported npm package spec {:?}",
+                self.package
+            );
+        }
+        if self.binaries.is_empty() {
+            bail!("package_stage.npm_global.binaries must not be empty");
+        }
+        for binary in &self.binaries {
+            require_token("package_stage.npm_global.binaries", binary)?;
         }
         Ok(())
     }
@@ -1363,6 +2130,8 @@ struct ManifestSource {
     profile: String,
     platform: String,
     digest_policy: String,
+    image_index_digest: Option<OciDigest>,
+    platform_manifest_digest: Option<OciDigest>,
 }
 
 impl ManifestSource {
@@ -1373,6 +2142,8 @@ impl ManifestSource {
             profile: config.source.profile.as_str().to_string(),
             platform: config.source.platform.clone(),
             digest_policy: config.source.digest_policy.to_string(),
+            image_index_digest: config.source.image_index_digest.clone(),
+            platform_manifest_digest: config.source.platform_manifest_digest.clone(),
         }
     }
 }
@@ -1382,6 +2153,7 @@ struct ManifestPackageStage {
     manager: String,
     update: bool,
     install: Vec<String>,
+    npm_global: Vec<NpmGlobalPackage>,
     clean: bool,
 }
 
@@ -1391,6 +2163,7 @@ impl ManifestPackageStage {
             manager: config.package_stage.manager.as_str().to_string(),
             update: config.package_stage.update,
             install: config.package_stage.install.clone(),
+            npm_global: config.package_stage.npm_global.clone(),
             clean: config.package_stage.clean,
         }
     }
@@ -1406,6 +2179,8 @@ struct AdapterRecord {
     completed_at_unix_seconds: u64,
     package_include: Vec<String>,
     materialized_source: Option<AdapterMaterializedSource>,
+    #[serde(default)]
+    external_oci_source: Option<ExternalOciSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1453,6 +2228,15 @@ impl StageRecord {
             status: "delegated".to_string(),
             summary: summary.to_string(),
             evidence: vec![format!("adapter_log={}", adapter.log_path.display())],
+        }
+    }
+
+    fn executed(name: &str, summary: &str, adapter: &AdapterRecord) -> Self {
+        Self {
+            name: name.to_string(),
+            status: "executed".to_string(),
+            summary: summary.to_string(),
+            evidence: stage_evidence(adapter),
         }
     }
 }
@@ -1503,6 +2287,53 @@ fn declared_stages() -> Vec<StageRecord> {
 }
 
 fn executed_stages(adapter: &AdapterRecord) -> Vec<StageRecord> {
+    if adapter.kind == "external-oci-ch-emitter" {
+        return vec![
+            StageRecord::executed(
+                "source",
+                "external OCI source resolved and digest-checked",
+                adapter,
+            ),
+            StageRecord::executed(
+                "import",
+                "selected OCI platform layers fetched and imported",
+                adapter,
+            ),
+            StageRecord::executed(
+                "classify",
+                "imported rootfs classified against the selected profile",
+                adapter,
+            ),
+            StageRecord::executed(
+                "package",
+                "explicit apt/npm package stage executed before backend emit",
+                adapter,
+            ),
+            StageRecord::executed(
+                "immutable-layer",
+                "VMM guest payload and reusable service layer installed",
+                adapter,
+            ),
+            StageRecord::executed(
+                "policy",
+                "sshd, service, and image policy applied before boot",
+                adapter,
+            ),
+            StageRecord::declared(
+                "seed",
+                "per-guest seed is regenerated separately with `mbuild seed`",
+            ),
+            StageRecord::executed(
+                "backend-emitter",
+                "CH boot artifacts emitted from assembled rootfs",
+                adapter,
+            ),
+            StageRecord::declared(
+                "validation",
+                "post-boot harness validation is required after artifact build",
+            ),
+        ];
+    }
     vec![
         StageRecord::delegated(
             "source",
@@ -1548,6 +2379,20 @@ fn executed_stages(adapter: &AdapterRecord) -> Vec<StageRecord> {
             "post-boot harness validation is required after artifact build",
         ),
     ]
+}
+
+fn stage_evidence(adapter: &AdapterRecord) -> Vec<String> {
+    let mut evidence = vec![format!("log={}", adapter.log_path.display())];
+    if let Some(source) = &adapter.external_oci_source {
+        evidence.push(format!("image={}", source.image_ref));
+        evidence.push(format!("platform={}", source.platform));
+        evidence.push(format!("image_index_digest={}", source.image_index_digest));
+        evidence.push(format!(
+            "platform_manifest_digest={}",
+            source.platform_manifest_digest
+        ));
+    }
+    evidence
 }
 
 fn require_eq(field: &str, actual: &str, expected: &str) -> Result<()> {
@@ -1653,11 +2498,14 @@ mod tests {
                 profile: ProfileId("v1-5-shell-adapter".to_string()),
                 platform: "host-native".to_string(),
                 digest_policy: DigestPolicy::AdapterVerified,
+                image_index_digest: None,
+                platform_manifest_digest: None,
             },
             package_stage: PackageStage {
                 manager: PackageManagerId("apt".to_string()),
                 update: true,
                 install: vec!["bash".to_string(), "g++".to_string()],
+                npm_global: Vec::new(),
                 clean: true,
             },
             immutable_payloads: vec![PayloadSpec {
@@ -1922,6 +2770,7 @@ validation:
             manager: PackageManagerId("apk".to_string()),
             update: true,
             install: vec!["openssh".to_string()],
+            npm_global: Vec::new(),
             clean: true,
         };
 
@@ -1944,6 +2793,7 @@ validation:
                 "foo=version".to_string(),
                 "foo:amd64=1:2.0+really-1~deb12u1".to_string(),
             ],
+            npm_global: Vec::new(),
             clean: true,
         };
 
@@ -2012,6 +2862,7 @@ validation:
                     platform: "linux/amd64".to_string(),
                     materializer: "oci-importer".to_string(),
                 }),
+                external_oci_source: None,
             }),
             Vec::new(),
         );

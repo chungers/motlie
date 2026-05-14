@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-14 | @vmm-cdx | Complete the Linux/CH native OCI builder path for issue #271: `mbuild build --target ch` now imports pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH harness matrix |
 | 2026-05-11 | @vmm-cdx | Strengthen the `mbuild` build-file contract: YAML config rejects unknown fields, APT package entries use package-manager-aware validation, and `mbuild validate` compares manifests back to the current config |
 | 2026-05-11 | @vmm-cdx | Tighten the `mbuild` contract after PR #270 review: current configs identify transitional shell adapters honestly, record per-emitter materialized sources, make seed topology config-driven, keep only apt executable for now, and move seed uid/gid handling to guest ownership metadata instead of host chown |
 | 2026-05-09 | @vmm-cdx | Expand the issue #271 `mbuild` design status: app-layer CLI delegates current CH/VZ adapters, emits artifact digests, regenerates per-guest seed overlays, and delegates optional live harness validation with a validation manifest |
@@ -877,18 +878,22 @@ not yet emit VM boot artifacts.
   `/usr/local/bin`, installs the `ubuntu-systemd` service graph, creates stable
   directories, installs SSHD CA trust directives, and emits
   `RootfsCompatibilityAssemblyManifest` with installed paths and pending
-  requirements. It does not write per-guest `backend.env`, `mounts.yaml`, SSH
-  principals, sudo/user env files, or cloud-init seed files.
+  requirements. The native support file set includes the Rust guest
+  vsock-to-SSH bridge and tmux auto-start profile used by PTY/TUI validation.
+  It does not write per-guest `backend.env`, `mounts.yaml`, SSH principals,
+  sudo/user env files, or cloud-init seed files.
 - `RootfsSeedOverlayAssembler` emits the per-guest seed/overlay layer. It writes
   NoCloud `user-data` / `meta-data`, `backend.env`, `mounts.yaml`, SSH CA and
   principal material, sudoers, and user `.env` files. User seeds require uid/gid
   so cloud-init can create the OS user and the seed manifest can carry desired
   guest ownership for user-owned files such as `/home/<user>/.env`. The seed
   overlay writer does not call host `chown`; that would fail on macOS and
-  non-root hosts and would make the seed command backend-host-specific. Missing
-  installable packages or missing systemd remain explicit manifest evidence
-  unless the caller selects the fail-fast pending-requirement policy; this slice
-  does not fake package installation.
+  non-root hosts and would make the seed command backend-host-specific.
+  Cloud-init preserves OCI-provided apt sources and uses scalar passwordless
+  sudo rules so Ubuntu guests keep valid release suites and `sudo -n` works.
+  Missing installable packages or missing systemd remain explicit manifest
+  evidence unless the caller runs a concrete package strategy; the supported apt
+  strategy is implemented for the v1.5 CH path.
 
 ### Rootfs Classifier Requirements And Design
 
@@ -1038,18 +1043,21 @@ let seed_manifest = RootfsSeedOverlayAssembler::new().assemble(seed_overlay_root
 
 The manifest is the handoff contract for the next slices:
 
-- Package strategy consumes `pending_requirements` and either installs the
-  package/profile baseline or rejects the image before emit.
+- Package strategy consumes the selected profile/package stage and either
+  installs the package/profile baseline or rejects the image before emit. The
+  first implemented strategy is apt plus configured npm globals for the Ubuntu
+  profile.
 - CH/VZ emitters consume the mutated rootfs plus installed-path metadata and add
   only backend artifact packaging, seed overlays, kernel/disk metadata, and
   backend-specific launch inputs.
 - Harness validation records consume the source profile plus emitted artifact
   digests and prove v1.5 parity against CH and VZ.
 
-CH validation currently targets native amd64 DGX hosts and VZ validation
-currently targets Apple Silicon arm64 hosts. Platform selection must remain an
-explicit image-builder input so a different CH or VZ host architecture cannot
-silently validate the wrong OCI platform variant.
+The Linux/CH issue #271 validation on 2026-05-14 used the checked-in
+`linux/arm64` Ubuntu OCI platform. VZ validation currently targets Apple
+Silicon arm64 hosts. Platform selection must remain an explicit image-builder
+input so a different CH or VZ host architecture cannot silently validate the
+wrong OCI platform variant.
 
 ### Dockerfile-Like Builder Contract For v1.5 Demo
 
@@ -1059,13 +1067,12 @@ checked-in config/CLI surface. It must not be read as making Rust structs the
 product interface. The v1.5 demo is accepted only after #271 is closed by the
 config-driven builder running the full staged image flow.
 
-The current checked-in `motlie-image.yaml` is deliberately transitional. Its
-top-level `source.kind` is `transitional-adapter`, not `external-oci`, because
-the CH adapter currently materializes Debian/bookworm through `mmdebstrap` and
-the VZ adapter currently customizes a local v1.35-native base VM. Each emitter
-records that concrete `materialized_source` so manifests do not claim
-`docker.io/library/ubuntu:24.04` provenance before the native OCI source/import/
-package/emitter path is wired through `mbuild`.
+The current checked-in `motlie-image.yaml` uses `source.kind = external-oci`
+with pinned `docker.io/library/ubuntu:24.04` image-index and selected
+platform-manifest digests. The Linux/CH emitter consumes that native
+source/import/package/compatibility path. The VZ emitter still records its
+current `materialized_source` for the macOS source-VM adapter until VZ consumes
+the same assembled OCI rootfs path.
 
 Required product surface:
 
@@ -1110,19 +1117,24 @@ bins/mbuild/src/main.rs
 
 `mbuild build` consumes the config and writes `mbuild-manifest.json` with source
 kind, package intent, source/import/classify/package/immutable-layer/policy/
-backend-emitter evidence, and adapter materialization evidence. `mbuild
+backend-emitter evidence, and emitted artifact digests. `mbuild
 validate` compares the manifest source, package stage, immutable files, seed
 files, validation list, and executed adapter materialized source back to the
 current config. A manifest produced from an older build file is not valid
-evidence for the current build file. The build path delegates to the current
-v1.5 CH/VZ adapters while they remain transitional. `source.kind` must switch
-from `transitional-adapter` to `external-oci` only when the builder derives CH
-and VZ artifacts from the assembled OCI rootfs path.
+evidence for the current build file. The CH build path is native external OCI.
+The VZ build path remains adapter-backed until it derives VZ artifacts from the
+assembled OCI rootfs path.
 `mbuild seed` writes `mbuild-seed-manifest.json` and regenerates per-guest
 NoCloud/backend/VFS/SSH/user seed files without rebuilding the immutable image.
 `mbuild validate --scenario` delegates live conformance to `harness_v1_5` and
 writes `mbuild-validation-manifest.json` with the harness command, log path,
 scenario, target, and exit status.
+
+Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`): artifact
+`/tmp/mbuild-pr270-oci-ch-7` was built with `mbuild build --target ch`,
+validated with `mbuild validate --require-executed`, and passed
+`multiguest-validate`, `auto-provision-ssh`, `agent-bootstrap`,
+`pty-agent-validation`, and `pty-login`.
 
 ## Success Criteria
 

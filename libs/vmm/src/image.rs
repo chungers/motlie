@@ -2202,9 +2202,11 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/motlie-vmm-vsock-ssh-loop
+ExecStart=/usr/local/bin/motlie-vsock-ssh-bridge
 Restart=always
 RestartSec=1
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
@@ -2362,6 +2364,42 @@ cat > /etc/resolv.conf <<EOF
 nameserver $EGRESS_DNS
 options edns0
 EOF
+"#;
+const MOTLIE_TMUX_AUTO_PROFILE: &str = r#"# Auto-start tmux only for real interactive Bash SSH logins.
+[ -n "${BASH_VERSION:-}" ] || return 0
+case $- in
+    *i*) ;;
+    *) return 0 ;;
+esac
+[ -n "${SSH_CONNECTION:-}" ] || return 0
+[ -z "${TMUX:-}" ] || return 0
+[ -t 0 ] && [ -t 1 ] || return 0
+command -v tmux >/dev/null 2>&1 || return 0
+case "${TERM:-}" in
+    ""|dumb|unknown) return 0 ;;
+esac
+command -v infocmp >/dev/null 2>&1 || return 0
+infocmp "$TERM" >/dev/null 2>&1 || return 0
+
+if tmux has-session -t "$USER" 2>/dev/null; then
+    echo "Attaching to existing tmux session..."
+    sleep 1
+    tmux attach-session -t "$USER" || echo "tmux attach failed; continuing without tmux"
+    return 0
+fi
+
+printf "Start tmux session? [Y/n] (auto-yes in 3s) "
+if IFS= read -r -n 1 -t 3 answer; then
+    echo
+else
+    answer=Y
+    echo
+fi
+
+case "$answer" in
+    n|N) ;;
+    *) tmux new-session -s "$USER" || echo "tmux start failed; continuing without tmux" ;;
+esac
 "#;
 const MOTLIE_AGENT_STATE_PROFILE: &str = r#"agent_state_root=/agent-state
 codex_root="$agent_state_root/codex"
@@ -2878,6 +2916,14 @@ fn install_builtin_support_files(
     )?;
     install_builtin_file(
         root,
+        "/etc/profile.d/tmux-auto.sh",
+        MOTLIE_TMUX_AUTO_PROFILE,
+        0o644,
+        RootfsCompatibilityInstallKind::ProfileScript,
+        installed,
+    )?;
+    install_builtin_file(
+        root,
         "/etc/profile.d/agent-state.sh",
         MOTLIE_AGENT_STATE_PROFILE,
         0o644,
@@ -3149,6 +3195,8 @@ fn render_cloud_init_user_data(
     users: &[RootfsUserSeed],
 ) -> Result<String, RootfsCompatibilityError> {
     let mut out = String::from("#cloud-config\n");
+    out.push_str("apt:\n");
+    out.push_str("  preserve_sources_list: true\n");
     if users.is_empty() {
         out.push_str("users: []\n");
         return Ok(out);
@@ -5533,6 +5581,11 @@ mod tests {
                 .unwrap()
                 .contains("CODEX_HOME")
         );
+        assert!(
+            fs::read_to_string(rootfs_path(&root, "/etc/profile.d/tmux-auto.sh"))
+                .unwrap()
+                .contains("Start tmux session?")
+        );
         let sshd_ca_config =
             fs::read_to_string(rootfs_path(&root, MOTLIE_V15_SSHD_CA_CONFIG_PATH)).unwrap();
         assert!(sshd_ca_config.contains("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub"));
@@ -5590,6 +5643,7 @@ mod tests {
         let cloud_user =
             fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH))
                 .unwrap();
+        assert!(cloud_user.contains("  preserve_sources_list: true\n"));
         assert!(cloud_user.contains("  - name: alice\n"));
         assert!(cloud_user.contains("    home: /home/alice\n"));
         assert!(cloud_user.contains("    sudo: ALL=(ALL) NOPASSWD:ALL\n"));

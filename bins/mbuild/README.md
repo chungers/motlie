@@ -5,19 +5,19 @@ Dockerfile-like image contract used by the v1.5 examples, drives the current
 backend image adapters, regenerates per-guest seed artifacts, and emits
 machine-readable manifests for CI and harness consumption.
 
-Status as of 2026-05-11 (`@vmm-cdx`): `mbuild build` is the durable entrypoint
-for the v1.5 image build. It consumes `motlie-image.yaml` and delegates
-backend-specific artifact emission to the current `examples/v1.5` transitional
-adapters. The checked-in config is honest about that transition: the top-level
-source is `transitional-adapter`, and each backend records the concrete source
-its adapter materializes today. `mbuild seed` regenerates per-guest seed
-overlays without rebuilding the immutable image. `mbuild validate` validates
-manifests and can require adapter execution evidence; live guest conformance
-still runs through the v1.5 harness.
+Status as of 2026-05-14 (`@vmm-cdx`): `mbuild build --target ch` is the
+durable Linux/CH image-builder entrypoint for the v1.5 demo. It resolves the
+pinned Ubuntu OCI source, imports rootfs layers, runs the apt/npm package stage,
+applies the native v1.5 Motlie compatibility layer, and emits CH artifacts plus
+machine-readable manifests. `mbuild seed` regenerates per-guest seed overlays
+without rebuilding the immutable image. `mbuild validate` validates manifests,
+can require execution evidence, and can delegate live guest conformance to the
+v1.5 harness. The VZ target still records its current macOS adapter source until
+the VZ emitter consumes the same assembled OCI rootfs path.
 
 ## Commands
 
-Build CH artifacts through the current CH adapter:
+Build CH artifacts through the native external-OCI CH path:
 
 ```bash
 cargo run -p mbuild -- build \
@@ -95,6 +95,30 @@ When `validate --scenario` is used, validation also writes:
 <artifact>/mbuild-validation.log
 ```
 
+Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`) used:
+
+```bash
+cargo run -p mbuild -- build \
+  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --out /tmp/mbuild-pr270-oci-ch-7
+
+cargo run -p mbuild -- validate \
+  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --artifact /tmp/mbuild-pr270-oci-ch-7 \
+  --require-executed
+```
+
+Then the same artifact passed these CH scenarios:
+
+```text
+libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+libs/vmm/examples/v1.5/scenarios/auto-provision-ssh.json
+libs/vmm/examples/v1.5/scenarios/agent-bootstrap.json
+libs/vmm/examples/v1.5/scenarios/pty-agent-validation.json
+libs/vmm/examples/v1.5/scenarios/pty-login.json
+```
+
 ## Image Config Contract
 
 The current config schema is intentionally explicit:
@@ -103,10 +127,8 @@ The current config schema is intentionally explicit:
 - Unknown fields are rejected at every config level. Typos and unsupported
   directives must fail schema loading instead of being ignored.
 - `source`: source kind, image/profile/platform identity, and digest policy.
-  `external-oci` is the final imported-OCI path. The current checked-in v1.5
-  config uses `transitional-adapter` with `adapter-verified` digest policy so
-  manifests do not claim that the shell adapters materialized
-  `docker.io/library/ubuntu:24.04`.
+  The checked-in v1.5 config uses `external-oci` pinned to
+  `docker.io/library/ubuntu:24.04` for the native CH path.
 - `package_stage`: package manager intent for mutable package installation.
 - `immutable_payloads`: Motlie guest payloads copied into immutable paths.
 - `sshd_policy`: guest SSH policy files and optional forced-command policy.

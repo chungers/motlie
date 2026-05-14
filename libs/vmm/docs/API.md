@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-14 | @vmm-cdx | complete the Linux/CH issue #271 path: `mbuild build --target ch` consumes pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH scenario matrix
 - 2026-05-11 | @vmm-cdx | remove the stale platform-default helper API reference; platform selection is now explicit in the builder/harness contract
 - 2026-05-09 | @vmm-cdx | expand `mbuild` into the issue #271 app-layer entrypoint: `build` delegates current CH/VZ adapters, `seed` regenerates per-guest seed overlays, and `validate --scenario` delegates live harness validation with a validation manifest
 - 2026-05-09 | @vmm-cdx | add the initial top-level `mbuild` binary and checked-in `motlie-image.yaml` config surface for issue #271; build/validate now consume the config and emit/check a stage manifest
@@ -793,14 +794,18 @@ Rootfs compatibility assembler behavior:
   come from the seed overlay
 - installs `motlie-agent-state-setup` with an explicit `/proc/mounts` wait for
   `/agent-state` and the user home before binding agent-state directories
-- makes the vsock SSH bridge re-source `/etc/motlie/v1.5/backend.env` inside
-  its retry loop, so seed/overlay refreshes can update `MOTLIE_SSH_VSOCK_PORT`
+- installs the Rust guest vsock-to-SSH bridge and makes it reload
+  `/etc/motlie/v1.5/backend.env` inside its retry loop, so seed/overlay
+  refreshes can update `MOTLIE_SSH_VSOCK_PORT` without relying on distro
+  `socat` VSOCK support
+- installs the tmux auto-start profile used by PTY login and Codex TUI
+  validation
 - fails CH egress setup if the selected egress interface cannot be brought up
 - creates stable required mount directories and records installed paths in
   `RootfsCompatibilityAssemblyManifest`
 - records installable package/init gaps and runtime gaps such as `/dev/fuse` in
-  `pending_requirements`; it does not run apt/dpkg or pretend packages were
-  installed
+  `pending_requirements`; the `mbuild` app layer runs the supported apt/npm
+  package stage before backend emit
 - uses the selected `RootfsProfileSpec` package data as the source of truth; the
   built-in `ubuntu-systemd` profile mirrors the current v1.5 validation package
   baseline and can be overridden by production builders
@@ -810,6 +815,8 @@ Rootfs seed overlay assembler behavior:
 - takes per-guest `RootfsSeedOverlaySpec`
 - writes NoCloud `user-data` and `meta-data` for cloud-init user creation,
   hostname, uid/gid, and passwordless sudo where requested
+- preserves OCI-provided apt sources in cloud-init user-data so Ubuntu guests
+  keep valid release suites after first boot
 - writes `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
 - writes `/etc/ssh/ca/user_ca.pub`, `/etc/ssh/auth_principals/<user>`,
   `/etc/sudoers.d/90-motlie-vmm`, and `/home/<user>/.env` seed files when
@@ -843,12 +850,20 @@ mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact art
 
 The v1.5 demo success criteria require closing #271 with that config/CLI
 surface, executed package/emitter stages, machine-readable stage manifests, and
-CH/VZ validation from the same immutable rootfs contract. `mbuild build`
-delegates the current CH/VZ shell adapters and records adapter logs plus
-artifact digests; `mbuild seed` produces per-guest seed files separately from
-the immutable image. With `--scenario`, `mbuild validate` delegates live
+CH/VZ validation from the same immutable rootfs contract. `mbuild build
+--target ch` now uses the native external-OCI path and records source,
+package, compatibility-layer, backend artifact, and digest evidence. The VZ
+target remains adapter-backed until macOS emission consumes the same assembled
+OCI rootfs contract. `mbuild seed` produces per-guest seed files separately
+from the immutable image. With `--scenario`, `mbuild validate` delegates live
 conformance to `harness_v1_5` and writes `mbuild-validation-manifest.json` with
 the command, log path, scenario, target, and exit status.
+
+Linux/CH evidence from 2026-05-14 (`@vmm-cdx`): artifact
+`/tmp/mbuild-pr270-oci-ch-7` was built with `mbuild build --target ch`,
+validated with `mbuild validate --require-executed`, and passed the v1.5 CH
+scenarios `multiguest-validate`, `auto-provision-ssh`, `agent-bootstrap`,
+`pty-agent-validation`, and `pty-login`.
 
 Resolver validation:
 

@@ -51,6 +51,8 @@ pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError> {
 
 pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
     let mut out = String::from("#cloud-config\n");
+    writeln!(&mut out, "apt:").expect("writing to String cannot fail");
+    writeln!(&mut out, "  preserve_sources_list: true").expect("writing to String cannot fail");
     writeln!(&mut out, "users:").expect("writing to String cannot fail");
     writeln!(&mut out, "  - name: {}", guest.user.name).expect("writing to String cannot fail");
     writeln!(&mut out, "    uid: {}", guest.user.uid).expect("writing to String cannot fail");
@@ -564,7 +566,9 @@ mod tests {
     fn cloud_init_uses_reviewed_guest_shape() {
         let guest = sample_guest();
         let rendered = render_cloud_init(&guest).unwrap();
+        assert!(rendered.contains("preserve_sources_list: true"));
         assert!(rendered.contains("name: alice"));
+        assert!(rendered.contains("sudo: ALL=(ALL) NOPASSWD:ALL"));
         assert!(rendered.contains("packages:"));
         assert!(rendered.contains("  - vim"));
         assert!(rendered.contains("  - gh"));

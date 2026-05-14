@@ -67,6 +67,11 @@ GUEST_NAME=""
 ADMIN_NET="tap"
 EGRESS_NET="tap"
 OVERLAY_SIZE="${OVERLAY_SIZE:-2G}"
+CH_MEMORY_SIZE="${CH_MEMORY_SIZE:-1024M}"
+# The CH overlay-init path has already mounted the writable overlay and
+# devtmpfs before systemd starts. Skip redundant early boot units that can
+# stall against a minimal OCI-derived rootfs and a no-modules CH kernel.
+CH_KERNEL_EXTRA_ARGS="${CH_KERNEL_EXTRA_ARGS:-systemd.unit=multi-user.target systemd.mask=systemd-remount-fs.service systemd.mask=systemd-udev-trigger.service systemd.mask=systemd-networkd-wait-online.service}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-/tmp/motlie-vmm-v15-runtime}"
 CLOUD_INIT_DIR="${CLOUD_INIT_DIR:-}"
 SERIAL_BACKEND="${CH_SERIAL_BACKEND:-tty}"
@@ -326,6 +331,9 @@ CMDLINE="console=ttyS0 root=/dev/vda rootfstype=squashfs ro init=/sbin/overlay-i
 if [ -n "$CLOUD_INIT_DIR" ]; then
     CMDLINE="$CMDLINE ds=nocloud;s=file:///var/lib/cloud/seed/nocloud/"
 fi
+if [ -n "$CH_KERNEL_EXTRA_ARGS" ]; then
+    CMDLINE="$CMDLINE $CH_KERNEL_EXTRA_ARGS"
+fi
 if [ "$ADMIN_NET" = "tap" ]; then
     if [ "$EGRESS_NET" = "vhost-user" ]; then
         CMDLINE="$CMDLINE ip=${GUEST_IP}:::255.255.255.0::eth0:off"
@@ -334,9 +342,9 @@ if [ "$ADMIN_NET" = "tap" ]; then
     fi
 fi
 
-MEMORY_ARG="size=512M"
+MEMORY_ARG="size=$CH_MEMORY_SIZE"
 if [ "$EGRESS_NET" = "vhost-user" ]; then
-    MEMORY_ARG="size=512M,shared=on"
+    MEMORY_ARG="size=$CH_MEMORY_SIZE,shared=on"
 fi
 
 CH_ARGS=(

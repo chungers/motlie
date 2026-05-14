@@ -125,7 +125,12 @@ impl HarnessBackend {
                 ssh_bridge_timeout: Duration::from_secs(90),
                 exec_ready_timeout: Duration::from_secs(90),
             },
-            Self::Ch => ReadinessPolicy::default(),
+            Self::Ch => ReadinessPolicy {
+                api_socket_timeout: Duration::from_secs(10),
+                guestfs_timeout: Duration::from_secs(90),
+                ssh_bridge_timeout: Duration::from_secs(120),
+                exec_ready_timeout: Duration::from_secs(90),
+            },
         }
     }
 

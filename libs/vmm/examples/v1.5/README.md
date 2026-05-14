@@ -165,15 +165,27 @@ cargo run -p mbuild -- \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
-`mbuild build` consumes the config and delegates artifact emission to the
-current CH/VZ transitional adapters. The checked-in config identifies the
-top-level source as `transitional-adapter` and records each backend's concrete
-`materialized_source`, rather than claiming the adapters already materialize an
-Ubuntu OCI source. `mbuild seed` regenerates per-guest seed files from the
-config-driven seed topology without rebuilding the immutable image. `mbuild
-validate` checks the emitted manifest, can require adapter execution evidence,
-and can delegate a live scenario to `harness_v1_5` while recording the harness
-log and exit status.
+`mbuild build --target ch` now consumes the checked-in `external-oci` source,
+resolves and fetches the pinned Ubuntu OCI arm64 platform, imports the rootfs,
+runs the apt/npm package stage, applies the native Motlie v1.5 compatibility
+layer, and emits CH artifacts. The VZ target still records its current macOS
+adapter source until the VZ emitter consumes the same assembled OCI rootfs path.
+`mbuild seed` regenerates per-guest seed files from the config-driven seed
+topology without rebuilding the immutable image. `mbuild validate` checks the
+emitted manifest, can require execution evidence, and can delegate a live
+scenario to `harness_v1_5` while recording the harness log and exit status.
+
+Linux/CH evidence from 2026-05-14 (`@vmm-cdx`): the rebuilt artifact at
+`/tmp/mbuild-pr270-oci-ch-7` passed manifest validation and all v1.5 CH
+scenarios:
+
+```text
+multiguest-validate.json
+auto-provision-ssh.json
+agent-bootstrap.json
+pty-agent-validation.json
+pty-login.json
+```
 
 ## Service Graph
 
@@ -197,6 +209,7 @@ This is now part of the OCI-derived `ubuntu-systemd` compatibility profile:
 builders and backend emitters must bake the target wiring before guest boot
 instead of repairing units through first-contact SSH or launcher mutation.
 
-First-contact SSH must wait only for interactive readiness. Full egress, CLI,
-package-manager, and VFS/VNET certification belongs in explicit harness
-validation, not in the first SSH path.
+First-contact SSH must wait only for interactive readiness. Harness scenario
+`ready` may also wait for VFS transport readiness when the next scenario step
+uses mounted paths. Full egress, CLI, package-manager, and VFS/VNET semantic
+certification belongs in explicit harness validation, not in the first SSH path.

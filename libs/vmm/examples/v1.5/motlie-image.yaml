@@ -1,10 +1,12 @@
 version: v1.5
 source:
-  kind: transitional-adapter
-  image: examples/v1.5/current-shell-adapters
-  profile: v1-5-shell-adapter
-  platform: host-native
-  digest_policy: adapter-verified
+  kind: external-oci
+  image: docker.io/library/ubuntu:24.04
+  profile: ubuntu-systemd
+  platform: linux/arm64
+  digest_policy: pinned
+  image_index_digest: sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+  platform_manifest_digest: sha256:7607b6f97024ef850f1bd6e91a89273beb5973d04432c5b87f15f813d64b9c05
 package_stage:
   manager: apt
   update: true
@@ -34,6 +36,13 @@ package_stage:
     - tmux
     - vim
     - wget
+  npm_global:
+    - package: "@openai/codex"
+      binaries:
+        - codex
+    - package: "@anthropic-ai/claude-code"
+      binaries:
+        - claude
   clean: true
 immutable_payloads:
   - label: motlie-vfs-guest
@@ -42,6 +51,12 @@ immutable_payloads:
     mode: "0755"
     links:
       - /usr/local/bin/motlie-vfs-guest
+  - label: motlie-vsock-ssh-bridge
+    source: target/release/motlie-vsock-ssh-bridge-v1_5
+    guest_path: /opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge
+    mode: "0755"
+    links:
+      - /usr/local/bin/motlie-vsock-ssh-bridge
 sshd_policy:
   trusted_user_ca_keys: /etc/ssh/ca/user_ca.pub
   authorized_principals_file: /etc/ssh/auth_principals/%u
@@ -56,6 +71,8 @@ services:
 immutable_files:
   - /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
   - /usr/local/bin/motlie-vfs-guest
+  - /opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge
+  - /usr/local/bin/motlie-vsock-ssh-bridge
   - /etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf
   - /etc/systemd/system/motlie-vfs-guest.service
   - /etc/systemd/system/motlie-agent-state.service
@@ -80,11 +97,6 @@ seed:
       guest_path: /agent-state
 emitters:
   - id: ch
-    materialized_source:
-      image: debian:bookworm
-      profile: debian-systemd
-      platform: host-native-linux
-      materializer: mmdebstrap
     adapter:
       program: bash
       args:
