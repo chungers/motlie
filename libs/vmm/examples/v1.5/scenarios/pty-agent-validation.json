@@ -70,7 +70,7 @@
     {
       "action": "pty_expect_screen",
       "session": "alice-shell",
-      "contains": "Press enter to continue",
+      "contains": "Press Enter to continue",
       "timeout_ms": 60000
     },
     {
