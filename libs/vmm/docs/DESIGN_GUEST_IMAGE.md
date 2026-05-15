@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-15 | @vmm-cdx | Merge the VZ rootfs handoff bridge and tighten issue #271 closure: the CH native OCI builder now emits `assembled-rootfs.tar` plus digest evidence for VZ consumption, and VZ image build no longer intentionally bakes demo users |
 | 2026-05-14 | @vmm-cdx | Complete the Linux/CH native OCI builder path for issue #271: `mbuild build --target ch` now imports pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH harness matrix |
 | 2026-05-12 | @codex-vz | Add the VZ contributor handoff for issue #271: the VZ emitter can consume an assembled rootfs tarball during image build, records that rootfs input in emitted artifacts, and still documents the remaining Apple VZ EFI/NVRAM boot-container constraint |
 | 2026-05-11 | @vmm-cdx | Strengthen the `mbuild` build-file contract: YAML config rejects unknown fields, APT package entries use package-manager-aware validation, and `mbuild validate` compares manifests back to the current config |
@@ -1086,20 +1087,22 @@ source/import/package/compatibility path. The VZ emitter still records its
 current `materialized_source` for the macOS source-VM adapter until VZ consumes
 the same assembled OCI rootfs path.
 
-The VZ side of this transition must be explicit. When an assembled rootfs
-tarball exists, `mbuild build --target vz --rootfs-tarball <tar>` passes that
-input through the configured VZ adapter environment as
-`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` so the build consumes the same logical
-rootfs contract as CH while still adapting it into Apple VZ's required
-disk/NVRAM boot shape. The emitted VZ artifacts must include
-`rootfs_input.kind`, the native boot substrate path, and the canonical tarball
-path, byte size, and sha256 digest so validation evidence distinguishes
+The VZ side of this transition must be explicit. The Linux/CH native OCI build
+emits a common `assembled-rootfs.tar` before CH-specific boot adaptations are
+applied. That tarball is the cross-backend immutable rootfs handoff. When
+`mbuild build --target vz --rootfs-tarball <tar>` is run on macOS, the builder
+passes the tarball through the configured VZ adapter environment as
+`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` so VZ consumes the same logical rootfs
+contract as CH while still adapting it into Apple VZ's required disk/NVRAM boot
+shape. The emitted CH and VZ artifacts must include the canonical tarball path,
+byte size, and sha256 digest so validation evidence distinguishes
 "native-source VM only" from "assembled rootfs consumed by VZ emitter." Closing
-#271 requires the latter path plus live VZ harness validation from fresh
-`mbuild` artifacts. The VZ bridge must also normalize OpenSSH StrictModes path
-ancestors after overlay extraction so CA auth remains a launch-time consumption
-of image state, not a reason to weaken sshd or rerun build work during guest
-startup.
+#271 requires VZ live harness validation from the `mbuild`-emitted tarball. The
+VZ bridge must also normalize OpenSSH StrictModes path ancestors after overlay
+extraction so CA auth remains a launch-time consumption of image state, not a
+reason to weaken sshd or rerun build work during guest startup. Guest demo
+identities are per-guest provisioning state; reusable VZ images must not bake
+`alice`, `bob`, or any later harness guest.
 
 Required product surface:
 

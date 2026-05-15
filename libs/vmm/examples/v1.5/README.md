@@ -168,8 +168,10 @@ cargo run -p mbuild -- \
 `mbuild build --target ch` now consumes the checked-in `external-oci` source,
 resolves and fetches the pinned Ubuntu OCI arm64 platform, imports the rootfs,
 runs the apt/npm package stage, applies the native Motlie v1.5 compatibility
-layer, and emits CH artifacts. The VZ target still records its current macOS
-adapter source until the VZ emitter consumes the same assembled OCI rootfs path.
+layer, emits the common `assembled-rootfs.tar` handoff, and then emits CH
+artifacts. The VZ target still records its current macOS adapter source until
+the VZ emitter consumes that `mbuild`-emitted rootfs tarball and produces fresh
+VZ validation evidence.
 `mbuild seed` regenerates per-guest seed files from the config-driven seed
 topology without rebuilding the immutable image. `mbuild validate` checks the
 emitted manifest, can require execution evidence, and can delegate a live
@@ -192,20 +194,29 @@ VZ has an explicit issue #271 handoff for the common rootfs contract:
 ```bash
 cargo run -p mbuild -- \
   build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch
+
+cargo run -p mbuild -- \
+  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
-  --rootfs-tarball /path/to/assembled-rootfs.tar
+  --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
 ```
 
-`mbuild` canonicalizes and digests the tarball, then passes it to the VZ
+The CH build writes `/tmp/mbuild/ch/assembled-rootfs.tar` plus
+`/tmp/mbuild/ch/mbuild-common-rootfs.json` before CH-specific boot adaptations.
+`mbuild` canonicalizes and digests that tarball, then passes it to the VZ
 adapter as `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is consumed
-during image build only. The current VZ adapter still preserves a native Apple
-VZ EFI/NVRAM boot container, applies the assembled rootfs payload into that
-container, and records `rootfs_input` with canonical path, size, and sha256 in
-`build-result.json` and `guest-contract.json`. Guest launch and first SSH must
-not apply this tarball, install packages, or build binaries. If
+during VZ image build only. The current VZ adapter still preserves a native
+Apple VZ EFI/NVRAM boot container, applies the assembled rootfs payload into
+that container, and records `rootfs_input` with canonical path, size, and
+sha256 in `build-result.json` and `guest-contract.json`. Guest launch and first
+SSH must not apply this tarball, install packages, or build binaries. If
 `--rootfs-tarball` is unset, the artifact records `transitional-native-source-vm`
-so the remaining #271 gap is visible.
+so the remaining #271 gap is visible. Reusable VZ images do not intentionally
+bake demo guest users; `alice`, `bob`, and future harness guests are
+per-guest provisioning state.
 
 The VZ adapter also normalizes OpenSSH StrictModes path ancestors after the
 tarball overlay. `/`, `/etc`, `/etc/ssh`, `/etc/ssh/ca`, and

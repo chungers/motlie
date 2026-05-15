@@ -1060,53 +1060,12 @@ remap_conflicting_identity() {
     fi
 }
 
-ensure_guest_identity() {
-    user_name="$1"
-    target_uid="$2"
-    target_gid="$3"
-    password="$4"
-
-    existing_gid="$(getent group "$user_name" | cut -d: -f3 || true)"
-    if [ -z "$existing_gid" ]; then
-        gid_owner="$(getent group "$target_gid" | cut -d: -f1 || true)"
-        if [ -n "$gid_owner" ] && [ "$gid_owner" != "$user_name" ]; then
-            echo "gid $target_gid already belongs to $gid_owner" >&2
-            exit 1
-        fi
-        groupadd -g "$target_gid" "$user_name"
-    elif [ "$existing_gid" != "$target_gid" ]; then
-        echo "group $user_name has gid $existing_gid but expected $target_gid" >&2
-        exit 1
-    fi
-
-    existing_uid="$(id -u "$user_name" 2>/dev/null || true)"
-    if [ -z "$existing_uid" ]; then
-        uid_owner="$(getent passwd "$target_uid" | cut -d: -f1 || true)"
-        if [ -n "$uid_owner" ] && [ "$uid_owner" != "$user_name" ]; then
-            echo "uid $target_uid already belongs to $uid_owner" >&2
-            exit 1
-        fi
-        useradd -m -u "$target_uid" -g "$target_gid" -s /bin/bash "$user_name"
-    elif [ "$existing_uid" != "$target_uid" ]; then
-        echo "user $user_name has uid $existing_uid but expected $target_uid" >&2
-        exit 1
-    fi
-
-    usermod -aG sudo "$user_name" || true
-    echo "$user_name:$password" | chpasswd
-}
-
 remap_conflicting_identity admin 1000 1000 2000 2000
 remap_conflicting_identity ubuntu 1001 1001 2001 2001
-ensure_guest_identity alice 1000 1000 testpass
-ensure_guest_identity bob 1001 1001 testpass
-
-cat <<'SUDOERSEOF' > /etc/sudoers.d/90-motlie-demo
-alice ALL=(ALL) NOPASSWD:ALL
-bob ALL=(ALL) NOPASSWD:ALL
-SUDOERSEOF
-chown root:root /etc/sudoers.d/90-motlie-demo
-chmod 0440 /etc/sudoers.d/90-motlie-demo
+# The reusable VZ image must not bake demo guest identities. The launcher is
+# responsible for creating alice/bob or any later harness guest from per-guest
+# seed/provisioning inputs.
+rm -f /etc/sudoers.d/90-motlie-demo
 
 cat <<'TMUXEOF' > /etc/profile.d/tmux-auto.sh
 # Auto-start tmux only for real interactive Bash SSH logins.
@@ -1192,6 +1151,7 @@ install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-sta
 install -D -m 0644 /tmp/motlie-agent-state.service /etc/systemd/system/motlie-agent-state.service
 install -D -m 0755 /tmp/motlie-vmm-vsock-ssh-loop /usr/local/bin/motlie-vmm-vsock-ssh-loop
 install -D -m 0644 /tmp/motlie-vmm-vsock-ssh.service /etc/systemd/system/motlie-vmm-vsock-ssh.service
+rm -f /etc/sudoers.d/90-motlie-build
 systemctl unmask motlie-vfs-guest.service || true
 systemctl unmask motlie-agent-state.service || true
 systemctl unmask motlie-vmm-vsock-ssh.service || true
@@ -1199,6 +1159,15 @@ systemctl daemon-reload
 systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true
 systemctl enable motlie-agent-state.service >/dev/null 2>&1 || true
 systemctl enable motlie-vmm-vsock-ssh.service >/dev/null 2>&1 || true
+EOF
+
+echo "--- removing temporary build bootstrap identity ---"
+guest_bash_as admin admin <<'EOF'
+sudo loginctl terminate-user motlie-build >/dev/null 2>&1 || true
+sudo pkill -KILL -u motlie-build >/dev/null 2>&1 || true
+sudo rm -f /etc/sudoers.d/90-motlie-build
+sudo userdel -r motlie-build >/dev/null 2>&1 || true
+sudo groupdel motlie-build >/dev/null 2>&1 || true
 EOF
 
 echo "--- cleaning cloud-init state for reusable base image ---"
@@ -1236,11 +1205,13 @@ payload = {
         "admin": passwd_entry("admin"),
         "alice": passwd_entry("alice"),
         "bob": passwd_entry("bob"),
+        "motlie-build": passwd_entry("motlie-build"),
     },
     "group": {
         "admin": group_entry("admin"),
         "alice": group_entry("alice"),
         "bob": group_entry("bob"),
+        "motlie-build": group_entry("motlie-build"),
     },
 }
 with open("/tmp/motlie-identity-probe.json", "w", encoding="utf-8") as fh:
@@ -1289,10 +1260,7 @@ guest_contract = {
     "motlie_vfs_guest_path": guest_binary,
     "motlie_vfs_guest_marker": "MOTLIE_VMM_GUEST_MOUNTER_V1_5",
     "motlie_vfs_guest_build_features": "--no-default-features --features guest-vfs",
-    "users": {
-        "alice": {"uid": 1000, "gid": 1000, "password": "testpass"},
-        "bob": {"uid": 1001, "gid": 1001, "password": "testpass"},
-    },
+    "guest_identity": "per-guest seed/provisioning only; no demo users are baked into the reusable image",
     "agent_state": "/agent-state",
     "rootfs_input": rootfs_input,
 }

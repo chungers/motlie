@@ -35,6 +35,8 @@ const CH_PACKAGE_STAGE_SCRIPT_NAME: &str = "mbuild-apt-stage.sh";
 const CH_BUILD_RESULT_NAME: &str = "ch-build-result.json";
 const CH_GUEST_CONTRACT_NAME: &str = "guest-contract.json";
 const CH_ROOTFS_NAME: &str = "rootfs.squashfs";
+const COMMON_ROOTFS_TARBALL_NAME: &str = "assembled-rootfs.tar";
+const COMMON_ROOTFS_RECORD_NAME: &str = "mbuild-common-rootfs.json";
 const VALIDATION_LOG_NAME: &str = "mbuild-validation.log";
 const OCI_CACHE_DIR_ENV: &str = "MOTLIE_MBUILD_OCI_CACHE_DIR";
 const CH_KERNEL_RELEASE_DEFAULT: &str = "ch-release-v6.16.9-20251112";
@@ -389,6 +391,12 @@ fn run_ch_external_oci_build(
         options.out.join("mbuild-rootfs-assembly.json"),
         serde_json::to_vec_pretty(&assembly_manifest)?,
     )?;
+    let common_rootfs_tarball = emit_rootfs_tarball(
+        &rootfs_dir,
+        &options.out.join(COMMON_ROOTFS_TARBALL_NAME),
+        &log_path,
+    )?;
+    write_common_rootfs_record(&options.out, &source, &common_rootfs_tarball)?;
 
     install_ch_boot_adaptations(repo_root, &rootfs_dir, &source, &host, &guest_binaries.vfs)?;
     write_ch_guest_contract(
@@ -440,7 +448,7 @@ fn run_ch_external_oci_build(
         package_include: config.package_stage.install.clone(),
         materialized_source: None,
         external_oci_source: Some(source),
-        rootfs_tarball: None,
+        rootfs_tarball: Some(common_rootfs_tarball),
     })
 }
 
@@ -954,6 +962,26 @@ fn emit_squashfs(rootfs_dir: &Path, rootfs_path: &Path, log_path: &Path) -> Resu
     run_logged_command(&mut command, log_path, "emit CH squashfs")
 }
 
+fn emit_rootfs_tarball(
+    rootfs_dir: &Path,
+    tarball_path: &Path,
+    log_path: &Path,
+) -> Result<RootfsTarballRecord> {
+    if let Some(parent) = tarball_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let script = "set -euo pipefail\nrm -f \"$2\"\ntar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C \"$1\" -cf \"$2\" .\n";
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg("mbuild-rootfs-tarball")
+        .arg(rootfs_dir)
+        .arg(tarball_path);
+    run_logged_command(&mut command, log_path, "emit common rootfs tarball")?;
+    rootfs_tarball_record(tarball_path)
+}
+
 fn emit_ch_kernel(base_dir: &Path, host: &ChHostTarget, log_path: &Path) -> Result<PathBuf> {
     let kernel_path = base_dir.join(host.kernel_image);
     if kernel_path.is_file() {
@@ -1036,6 +1064,35 @@ fn write_ch_build_result(
     });
     fs::write(
         out.join(CH_BUILD_RESULT_NAME),
+        serde_json::to_vec_pretty(&value)?,
+    )?;
+    Ok(())
+}
+
+fn write_common_rootfs_record(
+    out: &Path,
+    source: &ExternalOciSource,
+    tarball: &RootfsTarballRecord,
+) -> Result<()> {
+    let value = serde_json::json!({
+        "kind": "common-assembled-rootfs-tarball",
+        "path": tarball.canonical_path.display().to_string(),
+        "size_bytes": tarball.size_bytes,
+        "sha256": tarball.sha256,
+        "source": {
+            "kind": "external-oci",
+            "image": source.image_ref.clone(),
+            "platform": source.platform.to_string(),
+            "image_index_digest": source.image_index_digest.to_string(),
+            "platform_manifest_digest": source.platform_manifest_digest.to_string(),
+        },
+        "consumers": {
+            "ch": "CH emitter applies backend boot adaptations after this common rootfs snapshot",
+            "vz": "VZ emitter consumes this tarball with --rootfs-tarball during image build"
+        }
+    });
+    fs::write(
+        out.join(COMMON_ROOTFS_RECORD_NAME),
         serde_json::to_vec_pretty(&value)?,
     )?;
     Ok(())

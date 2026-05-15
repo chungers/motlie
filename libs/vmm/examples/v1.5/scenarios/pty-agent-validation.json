@@ -70,7 +70,7 @@
     {
       "action": "pty_expect_screen",
       "session": "alice-shell",
-      "contains": "Press Enter to continue",
+      "contains": "or connect an API key",
       "timeout_ms": 60000
     },
     {

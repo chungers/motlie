@@ -5,15 +5,17 @@ Dockerfile-like image contract used by the v1.5 examples, drives the current
 backend image adapters, regenerates per-guest seed artifacts, and emits
 machine-readable manifests for CI and harness consumption.
 
-Status as of 2026-05-14 (`@vmm-cdx`): `mbuild build --target ch` is the
+Status as of 2026-05-15 (`@vmm-cdx`): `mbuild build --target ch` is the
 durable Linux/CH image-builder entrypoint for the v1.5 demo. It resolves the
 pinned Ubuntu OCI source, imports rootfs layers, runs the apt/npm package stage,
-applies the native v1.5 Motlie compatibility layer, and emits CH artifacts plus
-machine-readable manifests. `mbuild seed` regenerates per-guest seed overlays
-without rebuilding the immutable image. `mbuild validate` validates manifests,
-can require execution evidence, and can delegate live guest conformance to the
-v1.5 harness. The VZ target still records its current macOS adapter source until
-the VZ emitter consumes the same assembled OCI rootfs path.
+applies the native v1.5 Motlie compatibility layer, emits the common
+`assembled-rootfs.tar` handoff before CH-specific boot adaptations, and emits CH
+artifacts plus machine-readable manifests. `mbuild seed` regenerates per-guest
+seed overlays without rebuilding the immutable image. `mbuild validate`
+validates manifests, can require execution evidence, and can delegate live guest
+conformance to the v1.5 harness. The VZ target consumes the CH-emitted tarball
+with `--rootfs-tarball` while the durable Apple VZ boot-container emitter is
+still transitional.
 
 ## Commands
 
@@ -31,8 +33,14 @@ Build VZ artifacts through the current VZ adapter:
 ```bash
 cargo run -p mbuild -- build \
   --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch
+
+cargo run -p mbuild -- build \
+  --config libs/vmm/examples/v1.5/motlie-image.yaml \
   --target vz \
-  --out /tmp/mbuild/vz
+  --out /tmp/mbuild/vz \
+  --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
 ```
 
 Plan without running backend adapters:
@@ -80,6 +88,14 @@ The build command writes:
 
 ```text
 <out>/mbuild-manifest.json
+```
+
+For the native CH external-OCI path, the build also writes the cross-backend
+rootfs handoff before applying CH boot adaptations:
+
+```text
+<out>/assembled-rootfs.tar
+<out>/mbuild-common-rootfs.json
 ```
 
 The seed command writes:
