@@ -2,14 +2,15 @@
 
 Use this reference when updating Motlie Homebrew distribution.
 
-Parameterize examples by the release target:
+Parameterize examples by the current per-binary manifest, not by workspace-level binary fields:
 
 ```text
-BIN=<installed command name>
-CARGO_PACKAGE=<cargo package name>
-FORMULA=<formula name, often same as BIN>
-VERSION=<release version>
-BINARY_MANIFEST=releases/<bin>-<version>.toml
+BINARY_MANIFEST=releases/<bin>.toml
+[identity].binary=<installed command name>
+[identity].version=<release version>
+[build].cargo_package=<cargo package name>
+[build].cargo_bin=<cargo binary name>
+[homebrew].formula=<formula name, often same as [identity].binary>
 RELEASE_TAG=<YYYY-MM-codename>
 ```
 
@@ -23,7 +24,7 @@ User UX:
 
 ```sh
 brew tap motlie/tap
-brew install "${FORMULA}"
+brew install "<[homebrew].formula>"
 ```
 
 Formula path:
@@ -43,9 +44,9 @@ Install shape:
 
 ```ruby
 def install
-  system "cargo", "build", "--release", "--locked", "-p", "<cargo-package>"
-  bin.install "target/release/<bin>"
-  system "codesign", "--force", "--sign", "-", bin/"<bin>" if OS.mac?
+  system "cargo", "build", "--release", "--locked", "-p", "<[build].cargo_package>", "--bin", "<[build].cargo_bin>"
+  bin.install "target/release/<[identity].binary>"
+  system "codesign", "--force", "--sign", "-", bin/"<[identity].binary>" if OS.mac?
 end
 ```
 
@@ -53,16 +54,18 @@ Test shape:
 
 ```ruby
 test do
-  assert_match "<bin>", shell_output("#{bin}/<bin> --version")
+  assert_match "<[identity].binary>", shell_output("#{bin}/<[identity].binary> --version")
 end
 ```
 
 Worked `mmux` example:
 
 ```text
-BIN=mmux
-CARGO_PACKAGE=motlie-mmux
-FORMULA=mmux
+BINARY_MANIFEST=releases/mmux.toml
+[identity].binary=mmux
+[identity].version=0.1.0
+[build].cargo_package=motlie-mmux
+[homebrew].formula=mmux
 ```
 
 Homebrew release rule:

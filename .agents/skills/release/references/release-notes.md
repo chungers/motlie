@@ -7,8 +7,8 @@ Inputs:
 ```text
 WORKSPACE_MANIFEST=releases/manifest.toml
 WORKSPACE_NOTES=releases/notes.md
-BINARY_MANIFEST=releases/<bin>-<version>.toml
-BINARY_NOTES=releases/<bin>-<version>.md
+BINARY_MANIFEST=releases/<bin>.toml
+BINARY_NOTES=<binary manifest [release].notes_path, usually releases/<bin>.md>
 ```
 
 Ask the release owner for:
@@ -19,6 +19,8 @@ Ask the release owner for:
 - known issues and workarounds
 - install guidance for each enabled channel
 - audience-specific warnings such as CUDA, glibc fallback, SSH ForceCommand safety, or macOS signing
+
+Draft each binary manifest's `[release].notes_path` first, then aggregate `releases/notes.md` from those files, release-event summary text, final manifest state, and relevant sub-issue/sub-PR evidence.
 
 Draft `releases/notes.md` with:
 
@@ -43,7 +45,7 @@ Draft `releases/notes.md` with:
 ## Assets
 ```
 
-Draft each `releases/<bin>-<version>.md` with:
+Draft each `releases/<bin>.md` with:
 
 ```markdown
 # <bin> <version>
@@ -63,9 +65,10 @@ Draft each `releases/<bin>-<version>.md` with:
 
 Validation rules:
 
-- Derive binary names, versions, targets, package names, asset names, and install commands from manifests.
+- Derive binary names, versions, targets, package names, asset names, note paths, and install commands from discovered per-binary manifests.
 - Use `git log` only as supporting evidence; do not invent user-facing claims from commit subjects.
 - Notes must not contain placeholders before `gh release create`.
-- Workspace notes must reference every per-binary note.
+- Workspace notes must reference or summarize every per-binary note discovered from `[release].notes_path`.
 - Final notes should mention checksum verification and the release-pinned installer URL when installer distribution is enabled.
+- Final notes should be regenerated after required sub-PRs merge so target/package/checksum/install details match the manifest ledger.
 - Record human approval and the notes path in the `github-release-published` gate evidence.
