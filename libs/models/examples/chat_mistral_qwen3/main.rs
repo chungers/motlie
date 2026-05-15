@@ -1,10 +1,11 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
-    ContentPart, QuantizationBits, StartOptions, ToolChoice, ToolError, ToolRegistry,
+    ContentPart, GenerationParams, QuantizationBits, StartOptions, ToolChoice, ToolError,
+    ToolRegistry,
 };
 use motlie_models::{
-    chat::ChatModels, default_artifact_root, quantization_label_isq, ModelSelector,
+    ModelSelector, chat::ChatModels, default_artifact_root, quantization_label_isq,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,7 @@ async fn main() -> Result<()> {
     let mut precision = None;
     let mut download_artifacts = false;
     let mut tool_demo = false;
+    let mut tool_demo_only = false;
     let mut input_parts = Vec::new();
 
     for arg in std::env::args().skip(1) {
@@ -59,6 +61,9 @@ async fn main() -> Result<()> {
             download_artifacts = true;
         } else if arg == "--tool-demo" {
             tool_demo = true;
+        } else if arg == "--tool-demo-only" {
+            tool_demo = true;
+            tool_demo_only = true;
         } else if let Some(selector) = arg.strip_prefix("--chat=") {
             chat_selector = Some(selector.to_owned());
         } else if let Some(p) = arg.strip_prefix("--precision=") {
@@ -72,7 +77,7 @@ async fn main() -> Result<()> {
     if input.trim().is_empty() {
         bail!(
             "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- \
-             [--download-artifacts] [--tool-demo] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
+             [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
         );
     }
 
@@ -173,6 +178,24 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let chat = handle.chat().context("qwen3 bundle should expose chat")?;
+
+    if tool_demo_only {
+        run_tool_demo(chat).await?;
+        support::print_process_snapshot(
+            "process-after-tool-demo",
+            &support::current_process_snapshot(),
+        );
+        support::print_model_metrics("model-metrics-after-tool-demo", handle.metric_snapshot());
+        handle
+            .shutdown()
+            .await
+            .context("bundle shutdown should succeed")?;
+        support::print_process_snapshot(
+            "process-after-shutdown",
+            &support::current_process_snapshot(),
+        );
+        return Ok(());
+    }
 
     // Single-turn request.
     println!("\n--- single-turn ---");
@@ -303,6 +326,7 @@ async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
     let response = chat
         .generate(ChatRequest {
             messages: messages.clone(),
+            params: tool_demo_generation_params(),
             tools: tools.clone(),
             tool_choice: Some(ToolChoice::Auto),
             ..Default::default()
@@ -346,6 +370,7 @@ async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
     let final_response = chat
         .generate(ChatRequest {
             messages,
+            params: tool_demo_generation_params(),
             tools,
             tool_choice: Some(ToolChoice::None),
             ..Default::default()
@@ -361,4 +386,12 @@ async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn tool_demo_generation_params() -> GenerationParams {
+    GenerationParams {
+        max_tokens: Some(128),
+        temperature: Some(0.2),
+        ..Default::default()
+    }
 }

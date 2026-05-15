@@ -7,8 +7,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
-use llama_cpp_2::model::{ChatTemplateResult, GrammarTriggerType};
+use llama_cpp_2::model::{AddBos, ChatTemplateResult, LlamaModel};
 use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use motlie_model::{
@@ -19,12 +18,11 @@ use motlie_model::{
     ModelMetricSnapshot, QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions,
     ToolChoice, ToolSpec, UnsupportedEmbeddings,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, observe_latency, observe_memory,
-    observe_text_generation, resolve_gpu_layers, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    RuntimeMetricState, TextMetricState, configure_artifact_policy, lock_metrics, observe_latency,
+    observe_memory, observe_text_generation, resolve_gpu_layers, snapshot_text_metrics,
 };
 
 const LLAMA_CPP_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Gguf];
@@ -77,7 +75,7 @@ impl LlamaCppTextSpec {
             display_name: "Qwen3 4B (GGUF)",
             model_prefix: "Qwen3-4B",
             arch: LlamaCppTextArch::Qwen3,
-            capabilities: Capabilities::chat_and_completion(),
+            capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support(),
             default_context_length: 4096,
         }
@@ -89,7 +87,7 @@ impl LlamaCppTextSpec {
             display_name: "Gemma 4 E2B-it (GGUF)",
             model_prefix: "gemma-4-E2B-it",
             arch: LlamaCppTextArch::Gemma4,
-            capabilities: Capabilities::chat_and_completion(),
+            capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support(),
             default_context_length: 4096,
         }
@@ -391,7 +389,7 @@ impl LlamaCppRuntime {
         params: &GenerationParams,
     ) -> Result<ChatResponse, ModelError> {
         let generated = self
-            .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new(), None)
+            .generate_text_inner(prompt.to_owned(), params.clone(), Vec::new())
             .await?;
         Ok(ChatResponse::text(generated.text))
     }
@@ -407,12 +405,7 @@ impl LlamaCppRuntime {
             additional_stops,
         } = rendered;
         let generated = self
-            .generate_text_inner(
-                prompt,
-                params.clone(),
-                additional_stops,
-                Some(template.clone()),
-            )
+            .generate_text_inner(prompt, params.clone(), additional_stops)
             .await?;
         let raw_message = template
             .parse_response_oaicompat(&generated.text, false)
@@ -430,7 +423,6 @@ impl LlamaCppRuntime {
         prompt: String,
         params: GenerationParams,
         additional_stops: Vec<String>,
-        template: Option<ChatTemplateResult>,
     ) -> Result<GeneratedText, ModelError> {
         let backend = Arc::clone(&self.backend);
         let model = Arc::clone(&self.model);
@@ -497,7 +489,7 @@ impl LlamaCppRuntime {
             // Use process-id-derived seed so temperature produces varied output
             // across requests while remaining reproducible within a process lifetime.
             let seed = std::process::id();
-            let mut sampler = build_sampler(&model, template.as_ref(), top_p, temperature, seed)?;
+            let mut sampler = build_sampler(top_p, temperature, seed)?;
 
             let mut generated_token_count: u32 = 0;
             let mut generated_text = String::new();
@@ -775,20 +767,16 @@ fn openai_tool_call_value(call: &motlie_model::ToolCall) -> Value {
 }
 
 fn build_sampler(
-    model: &LlamaModel,
-    template: Option<&ChatTemplateResult>,
     top_p: Option<f32>,
     temperature: f32,
     seed: u32,
 ) -> Result<LlamaSampler, ModelError> {
     let mut samplers = Vec::new();
 
-    if let Some(template) = template {
-        if let Some(grammar) = template.grammar.as_deref() {
-            samplers.push(grammar_sampler(model, template, grammar)?);
-        }
-    }
-
+    // Tool templates from llama.cpp may include grammar constraints, but the
+    // current curated Qwen3 GGUF tool grammar trips an upstream sampler assert.
+    // Keep tool support prompt/parser based until the native grammar path is
+    // validated for every curated GGUF template.
     if let Some(top_p) = top_p {
         samplers.push(LlamaSampler::top_p(top_p, 1));
     }
@@ -796,67 +784,6 @@ fn build_sampler(
     samplers.push(LlamaSampler::dist(seed));
 
     Ok(LlamaSampler::chain_simple(samplers))
-}
-
-fn grammar_sampler(
-    model: &LlamaModel,
-    template: &ChatTemplateResult,
-    grammar: &str,
-) -> Result<LlamaSampler, ModelError> {
-    if template.grammar_lazy {
-        let mut trigger_words = Vec::new();
-        let mut trigger_patterns = Vec::new();
-        let mut trigger_tokens = Vec::new();
-        for trigger in &template.grammar_triggers {
-            match trigger.trigger_type {
-                GrammarTriggerType::Token => {
-                    if let Some(token) = trigger.token {
-                        trigger_tokens.push(token);
-                    }
-                }
-                GrammarTriggerType::Word => trigger_words.push(trigger.value.as_str()),
-                GrammarTriggerType::Pattern | GrammarTriggerType::PatternFull => {
-                    trigger_patterns.push(trigger.value.clone());
-                }
-            }
-        }
-
-        if trigger_patterns.is_empty() {
-            return LlamaSampler::grammar_lazy(
-                model,
-                grammar,
-                "root",
-                trigger_words,
-                &trigger_tokens,
-            )
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "llama-cpp",
-                operation: "grammar_lazy",
-                message: err.to_string(),
-            });
-        }
-
-        if trigger_words.is_empty() {
-            return LlamaSampler::grammar_lazy_patterns(
-                model,
-                grammar,
-                "root",
-                &trigger_patterns,
-                &trigger_tokens,
-            )
-            .map_err(|err| ModelError::BackendExecution {
-                backend: "llama-cpp",
-                operation: "grammar_lazy_patterns",
-                message: err.to_string(),
-            });
-        }
-    }
-
-    LlamaSampler::grammar(model, grammar, "root").map_err(|err| ModelError::BackendExecution {
-        backend: "llama-cpp",
-        operation: "grammar",
-        message: err.to_string(),
-    })
 }
 
 fn openai_response_json_to_chat_response(
@@ -1283,6 +1210,7 @@ mod tests {
         assert_eq!(spec.arch, LlamaCppTextArch::Qwen3);
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
         assert!(!spec.capabilities.supports(CapabilityKind::Embeddings));
     }
 
@@ -1295,6 +1223,7 @@ mod tests {
         assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
     }
 
     #[test]
@@ -1323,7 +1252,10 @@ mod tests {
 
         assert_eq!(adapter.supported_formats(), &[CheckpointFormat::Gguf]);
         assert_eq!(adapter.backend_kind(), BackendKind::LlamaCpp);
-        assert_eq!(adapter.capabilities(), &Capabilities::chat_and_completion());
+        assert_eq!(
+            adapter.capabilities(),
+            &Capabilities::chat_completion_and_tool_use()
+        );
         assert_eq!(
             adapter.quantization().recommended(),
             Some(QuantizationBits::Four)
@@ -1489,7 +1421,7 @@ mod tests {
             descriptor: LoadedBundleDescriptor {
                 id: BundleId::new("qwen3_4b_gguf"),
                 display_name: "Qwen3 4B (GGUF)".into(),
-                capabilities: Capabilities::chat_and_completion(),
+                capabilities: Capabilities::chat_completion_and_tool_use(),
                 quantization: QuantizationSupport::with_recommended(
                     [QuantizationBits::Four, QuantizationBits::Eight],
                     QuantizationBits::Four,
@@ -1503,6 +1435,7 @@ mod tests {
 
         assert!(handle.supports(CapabilityKind::Chat));
         assert!(handle.supports(CapabilityKind::Completion));
+        assert!(handle.supports(CapabilityKind::ToolUse));
         assert!(!handle.supports(CapabilityKind::Embeddings));
         assert!(matches!(
             handle.embeddings(),
