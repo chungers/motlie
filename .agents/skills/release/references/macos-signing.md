@@ -2,14 +2,16 @@
 
 Use this reference when validating Darwin artifacts or installer behavior.
 
-Parameterize examples by the release target:
+Parameterize examples by the current per-binary manifest, not by workspace-level binary fields:
 
 ```text
-BIN=<installed command name>
-INSTALL_PATH=<final installed path, e.g. /usr/local/bin/<bin>>
 BINARY_MANIFEST=releases/<bin>.toml
 RELEASE_BRANCH=release/<YYYY-MM-codename>
-RUST_TARGET=<target.rust_target from manifest>
+[identity].binary=<installed command name>
+[build].cargo_package=<cargo package name>
+[build].cargo_bin=<cargo binary name>
+[install].default_path=<final installed path, e.g. /usr/local/bin/<bin>>
+[[target]].rust_target=<Darwin target.rust_target from manifest>
 ```
 
 Minimum first-release requirement:
@@ -24,19 +26,19 @@ Build-path verification:
 gh pr checkout <release-pr-number>
 git switch "${RELEASE_BRANCH}"
 git pull --ff-only
-cargo build --release --locked --target "${RUST_TARGET}" -p "<cargo-package>" --bin "${BIN}"
-codesign --force --sign - "target/${RUST_TARGET}/release/${BIN}"
-codesign --verify --strict --verbose=2 "target/${RUST_TARGET}/release/${BIN}"
-"target/${RUST_TARGET}/release/${BIN}" --version
+cargo build --release --locked --target "<[[target]].rust_target>" -p "<[build].cargo_package>" --bin "<[build].cargo_bin>"
+codesign --force --sign - "target/<[[target]].rust_target>/release/<[identity].binary>"
+codesign --verify --strict --verbose=2 "target/<[[target]].rust_target>/release/<[identity].binary>"
+"target/<[[target]].rust_target>/release/<[identity].binary>" --version
 ```
 
 Final-path verification:
 
 ```sh
-sudo install -m 755 "target/${RUST_TARGET}/release/${BIN}" "${INSTALL_PATH}"
-sudo codesign --force --sign - "${INSTALL_PATH}"
-codesign --verify --strict --verbose=2 "${INSTALL_PATH}"
-"${INSTALL_PATH}" --version
+sudo install -m 755 "target/<[[target]].rust_target>/release/<[identity].binary>" "<[install].default_path>"
+sudo codesign --force --sign - "<[install].default_path>"
+codesign --verify --strict --verbose=2 "<[install].default_path>"
+"<[install].default_path>" --version
 ```
 
 Why this gate exists:

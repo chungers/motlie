@@ -2,14 +2,15 @@
 
 Use this reference when updating Motlie Homebrew distribution.
 
-Parameterize examples by the release target:
+Parameterize examples by the current per-binary manifest, not by workspace-level binary fields:
 
 ```text
-BIN=<installed command name>
 BINARY_MANIFEST=releases/<bin>.toml
-CARGO_PACKAGE=<[build].cargo_package from manifest>
-FORMULA=<formula name, often same as BIN>
-VERSION=<[identity].version from manifest>
+[identity].binary=<installed command name>
+[identity].version=<release version>
+[build].cargo_package=<cargo package name>
+[build].cargo_bin=<cargo binary name>
+[homebrew].formula=<formula name, often same as [identity].binary>
 RELEASE_TAG=<YYYY-MM-codename>
 ```
 
@@ -23,7 +24,7 @@ User UX:
 
 ```sh
 brew tap motlie/tap
-brew install "${FORMULA}"
+brew install "<[homebrew].formula>"
 ```
 
 Formula path:
@@ -43,9 +44,9 @@ Install shape:
 
 ```ruby
 def install
-  system "cargo", "build", "--release", "--locked", "-p", "<cargo-package>"
-  bin.install "target/release/<bin>"
-  system "codesign", "--force", "--sign", "-", bin/"<bin>" if OS.mac?
+  system "cargo", "build", "--release", "--locked", "-p", "<[build].cargo_package>", "--bin", "<[build].cargo_bin>"
+  bin.install "target/release/<[identity].binary>"
+  system "codesign", "--force", "--sign", "-", bin/"<[identity].binary>" if OS.mac?
 end
 ```
 
@@ -53,7 +54,7 @@ Test shape:
 
 ```ruby
 test do
-  assert_match "<bin>", shell_output("#{bin}/<bin> --version")
+  assert_match "<[identity].binary>", shell_output("#{bin}/<[identity].binary> --version")
 end
 ```
 
