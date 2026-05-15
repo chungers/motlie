@@ -117,12 +117,12 @@ pub struct ToolSpec {
 
 impl ToolSpec {
     pub fn from_args<T: schemars::JsonSchema>(
-        name: impl Into<ToolName>,
+        name: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Self, ToolSchemaError>;
 
     pub fn from_json_schema(
-        name: impl Into<ToolName>,
+        name: impl Into<String>,
         description: impl Into<String>,
         raw_json_schema: impl AsRef<str>,
     ) -> Result<Self, ToolSchemaError>;
@@ -133,6 +133,7 @@ Rules:
 
 - callers binding Rust functions should normally use `ToolSpec::from_args::<T>()`
 - imported schemas should use the explicit `from_json_schema(...)` escape hatch
+- `ToolName::new(...)` validates the OpenAI-compatible name shape once in the shared contract: non-empty, at most 64 characters, and ASCII letters, digits, `_`, or `-`
 - `ToolInputSchema` validates that the schema document is JSON and describes an object-shaped argument payload before it reaches a backend
 - adapters serialize `ToolSpec` to the model/backend-specific JSON shape
 - the contract does not execute functions through `ToolSpec`; execution is caller-owned through `ToolRegistry`
@@ -154,7 +155,7 @@ Rules:
 - `Auto` lets the model decide.
 - `None` suppresses tool calls even if tools are present.
 - `Required` requires at least one tool call if the backend/template can enforce it.
-- `Named` requires a specific tool if the backend/template can enforce it.
+- `Named` requires a specific tool if the backend/template can enforce it; callers can use `ToolChoice::named(...)` to validate the name while constructing the choice.
 - Unsupported enforcement should return `ModelError::InvalidConfiguration`, not silently downgrade.
 
 ### Tool Call
@@ -162,7 +163,7 @@ Rules:
 ```rust
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolCall {
-    pub id: String,
+    pub id: ToolCallId,
     pub name: ToolName,
     pub arguments: ToolArguments,
 }
@@ -183,7 +184,7 @@ impl ToolArguments {
 
 Rules:
 
-- `id` is a stable per-response correlation value. If a backend/model omits one, the adapter generates a deterministic local ID for that response.
+- `id` is a stable per-response correlation value represented as `ToolCallId`, not a bare string. Empty ids are rejected at construction.
 - `name` should match a registered `ToolSpec.name`; unknown tools still surface so the caller can reject them explicitly.
 - `ToolArguments` preserves the exact model/backend argument JSON while making typed parsing the normal Rust path.
 - `ToolArguments` rejects non-object JSON payloads; Rust tool arguments should be named structs.
@@ -326,7 +327,7 @@ pub struct ChatMessage {
     pub role: ChatRole,
     pub content: Vec<ContentPart>,
     pub name: Option<ToolName>,
-    pub tool_call_id: Option<String>,
+    pub tool_call_id: Option<ToolCallId>,
     pub tool_calls: Vec<ToolCall>,
     pub reasoning: Option<String>,
 }
@@ -336,8 +337,9 @@ Rules:
 
 - Existing constructors keep working and default the new fields to empty/`None`.
 - `Assistant` messages may include `tool_calls` when callers replay prior assistant tool-call turns.
-- `Tool` messages must provide `tool_call_id`; `name` should be set when known.
+- `Tool` messages must provide `tool_call_id`; `name` should be set when known. `ChatMessage::tool_result(...)` validates both fields, and `tool_result_parts(...)` accepts already validated newtypes.
 - `System` and `User` messages must not carry `tool_calls`.
+- Field-public hand-built messages should pass `validate_tool_metadata()` before backend serialization.
 - `reasoning` is optional transcript metadata for model families that expose thinking content. It must not be fed to backends that cannot represent it unless the adapter explicitly supports it.
 
 ### Chat Request
@@ -366,7 +368,6 @@ pub struct ChatResponse {
     pub finish_reason: Option<ChatFinishReason>,
     pub reasoning: Option<String>,
     pub usage: Option<GenerationUsage>,
-    pub raw_message: Option<String>,
 }
 
 pub enum ChatFinishReason {
@@ -391,7 +392,7 @@ Rules:
 - `tool_calls` is structured output. Callers should not parse `content` for tool calls.
 - `reasoning` carries thinking/reasoning text when the backend can split it from the final assistant content.
 - `usage` mirrors request-local token accounting. Existing handle-level aggregate metrics stay in `BundleHandle::metric_snapshot()`.
-- `raw_message` is for diagnostics and backend validation. It should not be required for normal callers.
+- Backend-specific raw message blobs are intentionally not part of `ChatResponse`; adapters should use logs/tests for diagnostics and keep the public response portable.
 
 ## Capability Model
 
@@ -554,8 +555,6 @@ The API changes are additive at the field/enum level but require source updates 
 No vendored dependency changes are required or expected.
 
 ## Open Questions
-
-- Should `ToolName` enforce a stricter backend-compatible character set at construction time?
 - Should Motlie expose a `parallel_tool_calls` request option in v1, or leave it backend-defaulted until a caller needs policy control?
 - Should `reasoning` be one field on `ChatMessage`/`ChatResponse`, or should it become a `ContentPart::Reasoning` variant later?
 - Should `ToolUse` also imply `ContentKind::StructuredJson` output on `Chat`, or remain a separate descriptive capability only?

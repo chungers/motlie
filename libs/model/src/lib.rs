@@ -20,7 +20,7 @@ pub mod transcription;
 pub mod typed;
 pub mod units;
 
-pub use chat::{ChatMessage, ChatRole, ContentPart};
+pub use chat::{ChatMessage, ChatMessageError, ChatRole, ContentPart};
 pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
 pub use eval::EvalTrack;
 pub use generation::{
@@ -30,8 +30,9 @@ pub use generation::{
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
 pub use speech::SpeechParams;
 pub use tool::{
-    Tool, ToolArgumentError, ToolArguments, ToolCall, ToolChoice, ToolError, ToolInputSchema,
-    ToolName, ToolRegistry, ToolSchemaError, ToolSpec,
+    Tool, ToolArgumentError, ToolArguments, ToolCall, ToolCallError, ToolCallId, ToolCallIdError,
+    ToolChoice, ToolError, ToolInputSchema, ToolName, ToolNameError, ToolRegistry, ToolSchemaError,
+    ToolSpec,
 };
 pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
 pub use typed::{
