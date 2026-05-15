@@ -57,7 +57,7 @@ Tasks:
 - [x] Add `ToolName`, `ToolInputSchema`, `ToolSpec`, `ToolChoice`, `ToolArguments`, and `ToolCall`.
 - [x] Extend `ChatMessage` with:
   - `name: Option<ToolName>`
-  - `tool_call_id: Option<String>`
+  - `tool_call_id: Option<ToolCallId>`
   - `tool_calls: Vec<ToolCall>`
   - `reasoning: Option<String>`
 - [x] Preserve existing constructors:
@@ -83,7 +83,6 @@ Tasks:
   - `finish_reason: Option<ChatFinishReason>`
   - `reasoning: Option<String>`
   - `usage: Option<GenerationUsage>`
-  - `raw_message: Option<String>`
 - [x] Add `ChatFinishReason`.
 - [x] Add `GenerationUsage`.
 - [x] Preserve text response readability for existing text-only callers through constructors/defaults.

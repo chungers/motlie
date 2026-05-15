@@ -269,6 +269,8 @@ impl MistralMultimodalRuntime {
 fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelError> {
     let mut builder = RequestBuilder::new();
     for msg in &request.messages {
+        msg.validate_tool_metadata()
+            .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
         let (text, images) = collect_multimodal_parts(msg)?;
         builder = match msg.role {
             motlie_model::ChatRole::Tool => {
@@ -282,7 +284,7 @@ fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelErro
                         "tool messages require `tool_call_id` metadata".into(),
                     )
                 })?;
-                builder.add_tool_message(text, tool_call_id)
+                builder.add_tool_message(text, tool_call_id.as_str())
             }
             motlie_model::ChatRole::Assistant if !msg.tool_calls.is_empty() => {
                 if !images.is_empty() {

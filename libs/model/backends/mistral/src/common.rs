@@ -179,7 +179,7 @@ pub(crate) fn motlie_tool_call_to_mistral(
 ) -> ToolCallResponse {
     ToolCallResponse {
         index,
-        id: call.id.clone(),
+        id: call.id.as_str().to_string(),
         tp: ToolCallType::Function,
         function: CalledFunction {
             name: call.name.as_str().to_string(),
@@ -193,7 +193,6 @@ pub(crate) fn mistral_response_to_chat_response(
     finish_reason: String,
     usage: &Usage,
 ) -> Result<ChatResponse, ModelError> {
-    let raw_message = serde_json::to_string(&message).ok();
     let tool_calls = message
         .tool_calls
         .unwrap_or_default()
@@ -222,11 +221,10 @@ pub(crate) fn mistral_response_to_chat_response(
         finish_reason,
         reasoning: message.reasoning_content,
         usage: Some(GenerationUsage {
-            prompt_tokens: Some(usage.prompt_tokens as u32),
-            completion_tokens: Some(usage.completion_tokens as u32),
-            total_tokens: Some(usage.total_tokens as u32),
+            prompt_tokens: Some(usage_count_to_u32(usage.prompt_tokens)),
+            completion_tokens: Some(usage_count_to_u32(usage.completion_tokens)),
+            total_tokens: Some(usage_count_to_u32(usage.total_tokens)),
         }),
-        raw_message,
     })
 }
 
@@ -274,6 +272,10 @@ fn map_finish_reason(reason: &str) -> Option<ChatFinishReason> {
         "content_filter" => Some(ChatFinishReason::ContentFilter),
         other => Some(ChatFinishReason::Other(other.to_string())),
     }
+}
+
+fn usage_count_to_u32(count: usize) -> u32 {
+    count.min(u32::MAX as usize) as u32
 }
 
 pub(crate) fn lock_metrics<'a, T>(mutex: &'a Mutex<T>, context: &'static str) -> MutexGuard<'a, T> {
@@ -517,7 +519,7 @@ mod tests {
         let mistral_call = motlie_tool_call_to_mistral(0, &call);
         let mapped = mistral_tool_call_to_motlie(mistral_call).expect("call should map back");
 
-        assert_eq!(mapped.id, "call-1");
+        assert_eq!(mapped.id.as_str(), "call-1");
         assert_eq!(mapped.name.as_str(), "get_weather");
         assert_eq!(mapped.arguments.raw_json_str(), r#"{"city":"Seattle"}"#);
     }
@@ -550,7 +552,6 @@ mod tests {
             response.usage.as_ref().and_then(|usage| usage.total_tokens),
             Some(18)
         );
-        assert!(response.raw_message.is_some());
     }
 
     #[test]

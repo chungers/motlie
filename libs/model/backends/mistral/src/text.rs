@@ -305,6 +305,8 @@ impl MistralTextRuntime {
 fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelError> {
     let mut builder = RequestBuilder::new();
     for msg in &request.messages {
+        msg.validate_tool_metadata()
+            .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
         let text = collect_text_only_message(msg)?;
         builder = match msg.role {
             ChatRole::Tool => {
@@ -313,7 +315,7 @@ fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelErro
                         "tool messages require `tool_call_id` metadata".into(),
                     )
                 })?;
-                builder.add_tool_message(text, tool_call_id)
+                builder.add_tool_message(text, tool_call_id.as_str())
             }
             ChatRole::Assistant if !msg.tool_calls.is_empty() => {
                 let tool_calls = msg

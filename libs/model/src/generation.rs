@@ -42,6 +42,10 @@ impl ChatRequest {
 pub enum ChatFinishReason {
     ContentFilter,
     Length,
+    /// Backend-specific finish reason not yet represented by this enum.
+    ///
+    /// Callers must treat this as diagnostic data and should not match on the
+    /// contained string for portable behavior.
     Other(String),
     Stop,
     ToolCalls,
@@ -63,7 +67,6 @@ pub struct ChatResponse {
     pub finish_reason: Option<ChatFinishReason>,
     pub reasoning: Option<String>,
     pub usage: Option<GenerationUsage>,
-    pub raw_message: Option<String>,
 }
 
 impl ChatResponse {
@@ -134,7 +137,6 @@ mod tests {
         assert_eq!(response.finish_reason, None);
         assert_eq!(response.reasoning, None);
         assert_eq!(response.usage, None);
-        assert_eq!(response.raw_message, None);
     }
 }
 

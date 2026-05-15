@@ -1,4 +1,6 @@
-use crate::tool::{ToolCall, ToolName};
+use thiserror::Error;
+
+use crate::tool::{ToolCall, ToolCallId, ToolCallIdError, ToolName, ToolNameError};
 use crate::ContentKind;
 
 /// Role labels used in chat-style requests.
@@ -43,12 +45,17 @@ impl ContentPart {
 }
 
 /// Single message in a chat request.
+///
+/// Prefer the role-specific constructors on this type. Fields remain public so
+/// backend adapters and tests can build exact transcripts, but callers should
+/// run `validate_tool_metadata` before sending hand-built messages that carry
+/// tool calls or tool results.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: Vec<ContentPart>,
     pub name: Option<ToolName>,
-    pub tool_call_id: Option<String>,
+    pub tool_call_id: Option<ToolCallId>,
     pub tool_calls: Vec<ToolCall>,
     pub reasoning: Option<String>,
 }
@@ -116,27 +123,52 @@ impl ChatMessage {
 
     pub fn tool_result(
         tool_call_id: impl Into<String>,
-        name: impl Into<ToolName>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Result<Self, ChatMessageError> {
+        Ok(Self::tool_result_parts(
+            ToolCallId::new(tool_call_id)?,
+            ToolName::new(name)?,
+            content,
+        ))
+    }
+
+    pub fn tool_result_parts(
+        tool_call_id: ToolCallId,
+        name: ToolName,
         content: impl Into<String>,
     ) -> Self {
         Self {
             role: ChatRole::Tool,
             content: vec![ContentPart::Text(content.into())],
-            name: Some(name.into()),
-            tool_call_id: Some(tool_call_id.into()),
+            name: Some(name),
+            tool_call_id: Some(tool_call_id),
             tool_calls: Vec::new(),
             reasoning: None,
         }
     }
 
-    pub fn with_name(mut self, name: impl Into<ToolName>) -> Self {
-        self.name = Some(name.into());
+    pub fn with_name(mut self, name: ToolName) -> Self {
+        self.name = Some(name);
         self
     }
 
-    pub fn with_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
-        self.tool_call_id = Some(tool_call_id.into());
+    pub fn try_with_name(mut self, name: impl Into<String>) -> Result<Self, ChatMessageError> {
+        self.name = Some(ToolName::new(name)?);
+        Ok(self)
+    }
+
+    pub fn with_tool_call_id(mut self, tool_call_id: ToolCallId) -> Self {
+        self.tool_call_id = Some(tool_call_id);
         self
+    }
+
+    pub fn try_with_tool_call_id(
+        mut self,
+        tool_call_id: impl Into<String>,
+    ) -> Result<Self, ChatMessageError> {
+        self.tool_call_id = Some(ToolCallId::new(tool_call_id)?);
+        Ok(self)
     }
 
     pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
@@ -147,6 +179,41 @@ impl ChatMessage {
     pub fn requires_tool_use(&self) -> bool {
         self.role == ChatRole::Tool || self.tool_call_id.is_some() || !self.tool_calls.is_empty()
     }
+
+    pub fn validate_tool_metadata(&self) -> Result<(), ChatMessageError> {
+        if self.role != ChatRole::Assistant && !self.tool_calls.is_empty() {
+            return Err(ChatMessageError::InvalidToolMetadata(
+                "only assistant messages may carry tool calls",
+            ));
+        }
+        if self.role != ChatRole::Tool && self.tool_call_id.is_some() {
+            return Err(ChatMessageError::InvalidToolMetadata(
+                "only tool messages may carry a tool call id",
+            ));
+        }
+        if self.role == ChatRole::Tool && self.tool_call_id.is_none() {
+            return Err(ChatMessageError::InvalidToolMetadata(
+                "tool messages require a tool call id",
+            ));
+        }
+        if self.role == ChatRole::Tool && !self.tool_calls.is_empty() {
+            return Err(ChatMessageError::InvalidToolMetadata(
+                "tool result messages cannot carry new tool calls",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ChatMessageError {
+    #[error(transparent)]
+    InvalidToolCallId(#[from] ToolCallIdError),
+    #[error(transparent)]
+    InvalidToolName(#[from] ToolNameError),
+    #[error("{0}")]
+    InvalidToolMetadata(&'static str),
 }
 
 #[cfg(test)]
@@ -202,7 +269,8 @@ mod tests {
 
     #[test]
     fn tool_result_message_carries_correlation_fields() {
-        let message = ChatMessage::tool_result("call-1", "get_weather", "{\"temp\":72}");
+        let message = ChatMessage::tool_result("call-1", "get_weather", "{\"temp\":72}")
+            .expect("tool metadata should validate");
 
         assert_eq!(message.role, ChatRole::Tool);
         assert_eq!(
@@ -215,5 +283,39 @@ mod tests {
             message.content,
             vec![ContentPart::Text("{\"temp\":72}".into())]
         );
+        assert!(message.validate_tool_metadata().is_ok());
+    }
+
+    #[test]
+    fn validate_tool_metadata_rejects_invalid_role_combinations() {
+        let mut user_message = ChatMessage::text(ChatRole::User, "hello")
+            .try_with_tool_call_id("call-1")
+            .expect("id should validate");
+        assert!(matches!(
+            user_message.validate_tool_metadata(),
+            Err(ChatMessageError::InvalidToolMetadata(
+                "only tool messages may carry a tool call id"
+            ))
+        ));
+
+        user_message.tool_call_id = None;
+        user_message.tool_calls.push(
+            ToolCall::from_json_args("call-1", "get_weather", r#"{"city":"Seattle"}"#)
+                .expect("call should validate"),
+        );
+        assert!(matches!(
+            user_message.validate_tool_metadata(),
+            Err(ChatMessageError::InvalidToolMetadata(
+                "only assistant messages may carry tool calls"
+            ))
+        ));
+
+        let tool_message = ChatMessage::text(ChatRole::Tool, "{}");
+        assert!(matches!(
+            tool_message.validate_tool_metadata(),
+            Err(ChatMessageError::InvalidToolMetadata(
+                "tool messages require a tool call id"
+            ))
+        ));
     }
 }

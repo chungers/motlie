@@ -92,6 +92,7 @@ Primary capability request/response types:
 - `ContentPart`
 - `ChatMessage`
 - `ToolName`
+- `ToolCallId`
 - `ToolInputSchema`
 - `ToolSpec`
 - `ToolArguments`
@@ -263,7 +264,8 @@ let embeddings = EmbeddingRequest {
 
 Tool-aware chat uses typed Rust argument structs and generated JSON Schema.
 Tool inputs are object-shaped; bind named argument structs rather than scalar
-or tuple payloads.
+or tuple payloads. Tool names are validated once through `ToolName`, and model
+tool-call correlation ids are carried as `ToolCallId` rather than plain strings.
 
 ```rust
 use motlie_model::{ChatRequest, ToolChoice, ToolError, ToolRegistry};
