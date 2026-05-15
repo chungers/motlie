@@ -7,7 +7,8 @@ First inspect:
 ```text
 WORKSPACE_MANIFEST=releases/manifest.toml
 RELEASE_BRANCH=release/<YYYY-MM-codename>
-BINARY_MANIFEST=releases/<bin>-<version>.toml
+MASTER_ISSUE=<GitHub issue URL, when created>
+BINARY_MANIFESTS=releases/*.toml excluding releases/manifest.toml, requiring kind = "motlie.binary-release"
 ```
 
 Every prompt should include:
@@ -18,9 +19,25 @@ Every prompt should include:
 - `target_id` when the gate is target-specific
 - host/platform required
 - exact branch or PR to pull
+- master issue and sub-issue links when they exist
 - command group to run or files to update
 - manifest fields that will be updated
 - whether explicit approval is required
+
+## Codename Suggestion
+
+Prompt:
+
+```text
+@<identity> <datetime> -- I will start release intake for binaries=<binaries>. I will suggest 3-5 <YYYY-MM-codename> names, check remote branch/tag conflicts, and wait for your selected release name before creating a branch or issues.
+```
+
+Action:
+
+- Use the current month unless the human provides a release month.
+- Suggest 3-5 codenames without assuming every codename must be adjective-animal.
+- Check remote branches and tags for conflicts before presenting the final candidate set.
+- Do not create a branch, issue, tag, registry package, or tap change until the human confirms the release name and binary list.
 
 ## Intake
 
@@ -41,30 +58,61 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- Next gate is release-branch-created. I will create/update <release-branch>, add releases/manifest.toml, add per-binary manifests and notes, and push the release branch. This does not publish artifacts and will not merge to main.
+@<identity> <datetime> -- Next gate is release-branch-created. I will create/update <release-branch>, add releases/manifest.toml, add stable releases/<bin>.toml manifests and their referenced notes, and push the release branch. This does not publish artifacts and will not merge to main.
 ```
 
 Action:
 
 - Update or create `releases/manifest.toml` and `releases/notes.md`.
-- Update or create one `releases/<bin>-<version>.toml` and `releases/<bin>-<version>.md` for every binary in scope.
-- Draft release notes from manifests and release owner input. Ask for missing user-visible summary, notable changes, breaking changes, known issues, and install guidance.
+- Update or create one `releases/<bin>.toml` for every binary in scope, with `[identity].version` and `[release].notes_path`.
+- Draft per-binary release notes from discovered manifests and release owner input, then aggregate `releases/notes.md`. Ask for missing user-visible summary, notable changes, breaking changes, known issues, and install guidance.
 - Copy installer scripts from canonical templates such as `bins/<bin>/install-template.sh` into branch-local `releases/install/install-<bin>.sh` when installer distribution is in scope.
 - Record branch URL and source commit in the workspace manifest gate after the branch exists.
 - Record `main_merge_policy = "never-merge-release-branch"` and `main_fix_policy = "cherry-pick-source-fixes-only"` in the workspace manifest.
+
+## Master Tracking Issue
+
+Prompt:
+
+```text
+@<identity> <datetime> -- Release branch <release-branch> is pushed. I will create the master tracking issue for <release-name>, link manifests and binaries=<binaries>, record the issue URL in releases/manifest.toml, and push the ledger update. The issue coordinates the release, but manifests remain authoritative.
+```
+
+Action:
+
+- Create the master issue after release branch and initial manifests exist.
+- Include release name, release branch, tag, binaries, manifest files, target matrix, enabled channels, current gates, and current next step.
+- State that release branch manifests are authoritative if issue/PR state disagrees.
+- Record the master issue URL in workspace manifest tracking metadata and push that commit to the release branch.
+
+## Sub-Issues and Sub-PRs
+
+Prompt:
+
+```text
+@<identity> <datetime> -- Next gate requires <host-platform>: binary=<bin>, gate=<gate>, target_id=<target-id>. I will create or update a scoped sub-issue instructing the operator to branch from <release-branch>, update <binary-manifest>, and open a PR back to <release-branch> that closes the sub-issue.
+```
+
+Action:
+
+- Create one or more sub-issues for platform/channel/gate work when another operator or host is needed.
+- Each sub-issue must name the release branch, binary manifest, gate id, target id, required host/platform, commands or reference docs, expected evidence, and PR base branch.
+- Instruct the operator to commit only manifest/status/evidence changes and release-scoped artifacts to the sub-PR; never build outputs.
+- Sub-PRs target the release branch, not `main`, and should close their sub-issue on merge.
+- Update the master issue with the sub-issue and sub-PR links.
 
 ## Release Notes
 
 Prompt:
 
 ```text
-@<identity> <datetime> -- I will draft or validate release notes for <release-name>. Please provide or approve the user-visible summary, notable changes, breaking changes, known issues, and install guidance for binaries=<binaries>. I will derive names, versions, targets, packages, and asset names from the manifests.
+@<identity> <datetime> -- I will draft or validate release notes for <release-name>. Please provide or approve the user-visible summary, notable changes, breaking changes, known issues, and install guidance for binaries=<binaries>. I will derive names, versions, targets, packages, asset names, and per-binary note paths from discovered manifests.
 ```
 
 Action:
 
 - Use `.agents/skills/release/references/release-notes.md`.
-- Create or update `releases/notes.md` and every `releases/<bin>-<version>.md`.
+- Create or update every binary manifest's `[release].notes_path`, then aggregate `releases/notes.md`.
 - Check notes against manifests for binary names, versions, targets, package names, install commands, asset names, checksums when final, and known issues.
 - Do not publish the GitHub Release if notes still contain placeholders or unapproved claims.
 
@@ -132,13 +180,14 @@ Action:
 Prompt:
 
 ```text
-@<identity> <datetime> -- All required gates appear complete or deferred. Please confirm release-branch finalization. I will identify any source, doc, skill, or tooling fixes that need cherry-picks to main. I will not merge the release branch to main.
+@<identity> <datetime> -- All required gates appear complete or deferred in manifests. I will cross-check the master issue, sub-issues, and merged sub-PRs, then summarize any disagreement. Please confirm release-branch finalization. I will not merge the release branch to main.
 ```
 
 Action:
 
 - Do not tag or publish without human approval.
 - Call out any `planned` or `failed` gates.
+- Treat manifests as authoritative when issue/PR state disagrees, and comment on the master issue with the correction.
 - Cherry-pick reusable fixes to normal `main` PRs when needed. Never merge the release branch to `main`.
 
 ## Final Tag and GitHub Release
@@ -198,3 +247,4 @@ Action:
 
 - Update only release ledger metadata on the retained release branch.
 - Do not move tags or republish unless a separate fix is approved.
+- Close the master issue only after the GitHub Release is live, final ledger state is pushed, and required package/install gates are complete or explicitly deferred.

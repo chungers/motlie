@@ -3,20 +3,25 @@
 Use this checklist when coordinating an end-to-end Motlie release.
 
 - [ ] Release event captured: `RELEASE_NAME`, `RELEASE_BRANCH`, `RELEASE_TAG`, `WORKSPACE_MANIFEST`, channels, and binaries.
-- [ ] Every binary target captured: `BIN`, `CARGO_PACKAGE`, `CARGO_BIN`, `VERSION`, targets, and `BINARY_MANIFEST`.
-- [ ] Release skill inspected `WORKSPACE_MANIFEST` and referenced per-binary manifests, then identified the next incomplete gate before taking action.
+- [ ] Release skill suggested codenames, checked remote branch/tag conflicts, and received human confirmation for release name and binary list.
+- [ ] Every binary target captured in one stable `releases/<bin>.toml` with `[identity].binary`, `[identity].version`, `[build].cargo_package`, `[build].cargo_bin`, targets, and `[release].notes_path`.
+- [ ] Release skill inspected `WORKSPACE_MANIFEST`, scanned `releases/*.toml` for per-binary manifests, then identified the next incomplete gate before taking action.
 - [ ] Human prompt included current state, next gate, required platform, branch or PR to pull, files to update, and approval needed.
 - [ ] Release branch created from `main` and pushed as `release/<YYYY-MM-codename>`.
-- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, binary list, and workspace gates.
+- [ ] `releases/manifest.toml` committed with release-event identity, branch, tag, discovery policy, global defaults, tracking issue policy, workspace gates, and final binary completion ledger.
 - [ ] `releases/notes.md` committed as the GitHub Release note source.
-- [ ] `releases/<bin>-<version>.toml` committed for each binary with deterministic intent, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
-- [ ] `releases/<bin>-<version>.md` committed as each per-binary release-note source.
+- [ ] `releases/<bin>.toml` committed for each binary with deterministic intent, version, explicit names, target matrix, structured per-target status, target-specific `(id, target_id)` gates, and explicit rollup gates where a coarse gate is useful.
+- [ ] Each binary manifest's `[release].notes_path`, for example `releases/<bin>.md`, committed as its per-binary release-note source.
+- [ ] Master tracking issue created and linked from `releases/manifest.toml`.
+- [ ] Master issue states that release branch manifests are authoritative when issue/PR state disagrees.
+- [ ] Scoped sub-issues created for required platform/channel/gate work.
+- [ ] Each sub-issue instructs the operator to branch from the release branch, update the relevant manifest gate/evidence, and open a PR back to the release branch.
 - [ ] Release notes list every binary, version, target family, distribution channel, install command, user-visible change, compatibility note, and known issue.
 - [ ] Release owner has approved the final notes before `gh release create`.
 - [ ] Disabled-channel gates are absent or marked `deferred` with `deferred_reason = "channel disabled"`.
 - [ ] No PR is opened to merge the release branch to `main`.
 - [ ] Platform/channel sub-PRs opened against the release branch as needed.
-- [ ] Sub-PRs update manifest status with source commit, timestamp, actor, target id, channel, and evidence links.
+- [ ] Sub-PRs update manifest status with source commit, timestamp, actor, target id, channel, evidence links, and close matching sub-issues on merge.
 - [ ] Each gate handoff is reconstructable from manifest evidence.
 - [ ] Evidence entries follow `{ kind, ref, sha256?, note? }`.
 - [ ] Build outputs are not committed to git.
@@ -48,3 +53,4 @@ Use this checklist when coordinating an end-to-end Motlie release.
 - [ ] Homebrew bottle tests pass from installed path.
 - [ ] Homebrew tap PR merged.
 - [ ] Final release-branch ledger commit updates `releases/manifest.toml` and per-binary manifests to `state = "published"` with final URLs, checksums, npm links, Homebrew tap commit, and install evidence.
+- [ ] Master issue closed only after the GitHub Release is live, final ledger commit is pushed, and required package/install gates are complete or explicitly deferred.

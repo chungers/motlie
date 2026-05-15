@@ -2,13 +2,16 @@
 
 Use this reference when publishing Motlie packages to npm under `@motlie`.
 
-Parameterize examples by the release target:
+Parameterize examples by the current per-binary manifest, not by workspace-level binary fields:
 
 ```text
-BIN=<installed command name>
-NPM_PACKAGE=<platform package name, e.g. @motlie/<bin>-linux-x64-musl>
-PACKAGE_DIR=dist/npm/<package path>
-BINARY_MANIFEST=releases/<bin>-<version>.toml
+BINARY_MANIFEST=releases/<bin>.toml
+[identity].binary=<installed command name>
+[identity].version=<release version>
+[npm].bin_command=<installed command name>
+[npm].bin_path=<package binary path>
+[[target]].npm_package=<platform package name, e.g. @motlie/<bin>-linux-x64-musl>
+PACKAGE_DIR=<generated package directory for [[target]].npm_package>
 ```
 
 Read package names and binary paths from `BINARY_MANIFEST` when explicit fields are present. For native packages, `runner = "native-binary"` and `node_launcher = false` means the npm package must expose the binary directly and must not create `<bin>.js` or `<bin>.sh` as the runtime entrypoint.
@@ -26,10 +29,10 @@ Minimal package contract:
 
 ```json
 {
-  "name": "<npm_package from target>",
-  "version": "<binary version>",
+  "name": "<[[target]].npm_package>",
+  "version": "<[identity].version>",
   "bin": {
-    "<bin_command>": "bin/<bin>"
+    "<[npm].bin_command>": "<[npm].bin_path>"
   },
   "files": ["bin", "README.md", "LICENSE"]
 }
@@ -40,7 +43,7 @@ Package staging:
 1. Copy the final signed/release binary to the manifest `npm_bin_path`.
 2. Generate `package.json` from manifest values; do not derive package names when `npm_package` is explicit.
 3. Run `npm pack --dry-run`.
-4. Run `npm pack`, install the generated `.tgz` on a matching host, and execute `<bin> --version`.
+4. Run `npm pack`, install the generated `.tgz` on a matching host, and execute `<[npm].bin_command> --version`.
 5. Record dry-run output, `.tgz` checksum, install-test output, package name, version, and source tag in the target-specific `npm-published` gate before publishing.
 
 Preferred path:
