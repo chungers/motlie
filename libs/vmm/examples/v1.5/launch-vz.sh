@@ -26,7 +26,7 @@ ENABLE_GUEST_SSH_VSOCK="${MOTLIE_VZ_ENABLE_GUEST_SSH_VSOCK:-0}"
 EMBEDDED_EGRESS="${MOTLIE_VZ_EMBEDDED_EGRESS:-0}"
 KEEP_RUNNING="${MOTLIE_VZ_KEEP_RUNNING:-0}"
 REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
-NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/../v1.35/artifacts/source-base.vm}"
+NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/artifacts/source-base.vm}"
 BASE_SOURCE_DIR=""
 RUN_VM_DIR=""
 EGRESS_SOCKET_PATH=""
@@ -101,8 +101,11 @@ native base artifacts are required for v1.5 guest launches
 Set:
   MOTLIE_VZ_BASE_VM_DIR
 
-Or build/populate the default native cache first:
+Or build/populate the v1.5 native cache first:
   $NATIVE_SOURCE_VM_DIR
+
+Pre-v1.5 VZ source images are intentionally unsupported. Rebuild v1.5
+artifacts instead of reusing v1.35 caches.
 EOF
   exit 1
 fi
@@ -1105,17 +1108,9 @@ if [[ -z "\$existing_gid" ]]; then
   fi
   printf '${CONTROL_PASSWORD}\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
 elif [[ "\$existing_gid" != "$GID_NUM" ]]; then
-  # VZ convergence bridge:
-  # Transitional VZ images can still contain demo users baked by the native
-  # source VM path (for example alice=1000). The unified harness is the source
-  # of truth for runtime UID/GID allocation, so migrate that same login user in
-  # place instead of rejecting VZ before first SSH provisioning can complete.
-  gid_owner="\$(getent group $GID_NUM | cut -d: -f1 || true)"
-  if [[ -n "\$gid_owner" && "\$gid_owner" != '$LOGIN_USER' ]]; then
-    echo "gid $GID_NUM already belongs to \$gid_owner; cannot provision $LOGIN_USER" >&2
-    exit 1
-  fi
-  printf '${CONTROL_PASSWORD}\n' | sudo -S groupmod -g $GID_NUM '$LOGIN_USER'
+  echo "existing group $LOGIN_USER has gid \$existing_gid, expected $GID_NUM; stale baked guest identity in image" >&2
+  echo "rebuild v1.5 artifacts without baked guest users instead of mutating image identities at launch" >&2
+  exit 1
 fi
 
 existing_uid="\$(id -u '$LOGIN_USER' 2>/dev/null || true)"
@@ -1129,29 +1124,19 @@ if [[ -z "\$existing_uid" ]]; then
 else
   existing_primary_gid="\$(id -g '$LOGIN_USER' 2>/dev/null || true)"
   if [[ "\$existing_uid" != "$UID_NUM" || "\$existing_primary_gid" != "$GID_NUM" ]]; then
-    uid_owner="\$(getent passwd $UID_NUM | cut -d: -f1 || true)"
-    if [[ -n "\$uid_owner" && "\$uid_owner" != '$LOGIN_USER' ]]; then
-      echo "uid $UID_NUM already belongs to \$uid_owner; cannot provision $LOGIN_USER" >&2
-      exit 1
-    fi
-    while read -r victim_pid; do
-      [[ -n "\$victim_pid" ]] || continue
-      printf '${CONTROL_PASSWORD}\n' | sudo -S kill -KILL "\$victim_pid" >/dev/null 2>&1 || true
-    done < <(pgrep -u '$LOGIN_USER' || true)
-    sleep 1
-    printf '${CONTROL_PASSWORD}\n' | sudo -S usermod -u $UID_NUM -g $GID_NUM '$LOGIN_USER'
-    printf '${CONTROL_PASSWORD}\n' | sudo -S chown -R $UID_NUM:$GID_NUM /home/$LOGIN_USER >/dev/null 2>&1 || true
+    echo "existing user $LOGIN_USER has uid/gid \$existing_uid:\$existing_primary_gid, expected $UID_NUM:$GID_NUM; stale baked guest identity in image" >&2
+    echo "rebuild v1.5 artifacts without baked guest users instead of mutating image identities at launch" >&2
+    exit 1
   fi
 fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
 printf '${CONTROL_PASSWORD}\n' | sudo -S usermod -aG sudo '$LOGIN_USER' || true
-printf '%s\n' '${CONTROL_PASSWORD}' | sudo -S tee /etc/sudoers.d/90-motlie-demo >/dev/null <<SUDOERSEOF
-alice ALL=(ALL) NOPASSWD:ALL
-bob ALL=(ALL) NOPASSWD:ALL
+printf '%s\n' '${CONTROL_PASSWORD}' | sudo -S tee /etc/sudoers.d/90-motlie-guest >/dev/null <<SUDOERSEOF
 $LOGIN_USER ALL=(ALL) NOPASSWD:ALL
 SUDOERSEOF
-printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/sudoers.d/90-motlie-demo
-printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0440 /etc/sudoers.d/90-motlie-demo
+printf '${CONTROL_PASSWORD}\n' | sudo -S rm -f /etc/sudoers.d/90-motlie-demo
+printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/sudoers.d/90-motlie-guest
+printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0440 /etc/sudoers.d/90-motlie-guest
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /workspace
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0755 /workspace

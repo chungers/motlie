@@ -15,7 +15,7 @@ HARNESS_LOG="$CONTROL_ROOT/harness.log"
 HARNESS_PID=""
 PROXY_PORT=""
 NAMESPACE=""
-BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V15_DIR/../v1.35/artifacts/source-base.vm}"
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V15_DIR/artifacts/source-base.vm}"
 
 cleanup() {
     if [ -n "$HARNESS_PID" ]; then

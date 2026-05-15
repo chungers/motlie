@@ -23,7 +23,7 @@ ROOTFS_TARBALL_SIZE_BYTES=""
 ROOTFS_TARBALL_SHA256=""
 ROOTFS_TARBALL_SEED_NAME="motlie-assembled-rootfs.tar"
 ROOTFS_TARBALL_GUEST_PATH="/tmp/motlie-assembled-rootfs.tar"
-ROOTFS_INPUT_KIND="transitional-native-source-vm"
+ROOTFS_INPUT_KIND="v1.5-native-source-vm"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-300}"
 GUEST_SRC_DIR="/home/admin/motlie-src"
 BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
@@ -53,7 +53,7 @@ GUEST_IPV4="10.0.2.15"
 SEED_DIR="$ARTIFACTS_DIR/build-seed"
 SEED_IMAGE="$ARTIFACTS_DIR/build-seed.dmg"
 WORK_VM_DIR="$ARTIFACTS_DIR/${BASE_VM_NAME}.vm"
-NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/../v1.35/artifacts/source-base.vm}"
+NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/artifacts/source-base.vm}"
 
 zmodload zsh/datetime
 
@@ -155,10 +155,13 @@ if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin
   fi
 else
   cat >&2 <<EOF
-native source artifacts are required for v1.5 guest builds
+v1.5 native source artifacts are required for v1.5 guest builds
 
-Populate the native source cache first:
+Set MOTLIE_VZ_NATIVE_SOURCE_VM_DIR or populate the v1.5 native source cache:
   $NATIVE_SOURCE_VM_DIR
+
+Pre-v1.5 source VMs are intentionally unsupported for this greenfield image
+contract. Rebuild a v1.5 source image instead of reusing v1.35 artifacts.
 EOF
   exit 1
 fi
@@ -1062,9 +1065,26 @@ remap_conflicting_identity() {
 
 remap_conflicting_identity admin 1000 1000 2000 2000
 remap_conflicting_identity ubuntu 1001 1001 2001 2001
-# The reusable VZ image must not bake demo guest identities. The launcher is
-# responsible for creating alice/bob or any later harness guest from per-guest
-# seed/provisioning inputs.
+
+remove_baked_guest_identity() {
+    user_name="$1"
+
+    if id -u "$user_name" >/dev/null 2>&1; then
+        loginctl terminate-user "$user_name" >/dev/null 2>&1 || true
+        pkill -KILL -u "$user_name" >/dev/null 2>&1 || true
+        userdel -r "$user_name" >/dev/null 2>&1 || true
+    fi
+    groupdel "$user_name" >/dev/null 2>&1 || true
+    rm -rf "/home/$user_name" "/var/mail/$user_name"
+    rm -f "/etc/ssh/auth_principals/$user_name"
+    rm -f "/etc/sudoers.d/90-motlie-$user_name"
+}
+
+# The reusable VZ image must not bake harness/demo guest identities. The
+# launcher creates alice, bob, and future principals from per-guest seed/runtime
+# inputs.
+remove_baked_guest_identity alice
+remove_baked_guest_identity bob
 rm -f /etc/sudoers.d/90-motlie-demo
 
 cat <<'TMUXEOF' > /etc/profile.d/tmux-auto.sh
@@ -1214,6 +1234,9 @@ payload = {
         "motlie-build": group_entry("motlie-build"),
     },
 }
+for name in ("alice", "bob", "motlie-build"):
+    if payload["passwd"][name] is not None or payload["group"][name] is not None:
+        raise SystemExit(f"{name} must not be baked into the reusable v1.5 image")
 with open("/tmp/motlie-identity-probe.json", "w", encoding="utf-8") as fh:
     json.dump(payload, fh, sort_keys=True)
 PY
@@ -1260,7 +1283,7 @@ guest_contract = {
     "motlie_vfs_guest_path": guest_binary,
     "motlie_vfs_guest_marker": "MOTLIE_VMM_GUEST_MOUNTER_V1_5",
     "motlie_vfs_guest_build_features": "--no-default-features --features guest-vfs",
-    "guest_identity": "per-guest seed/provisioning only; no demo users are baked into the reusable image",
+    "guest_identity": "per-guest seed/provisioning only; no alice/bob or future harness guests are baked into the reusable image",
     "agent_state": "/agent-state",
     "rootfs_input": rootfs_input,
 }

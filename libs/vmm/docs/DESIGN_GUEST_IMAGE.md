@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-15 | @vmm-cdx | Address PR #270 regression feedback for the greenfield v1.5 contract: pre-v1.5 VZ source images are unsupported, reusable images must not bake harness users, and failed readiness must clean up VZ runners |
 | 2026-05-15 | @vmm-cdx | Merge the VZ rootfs handoff bridge and tighten issue #271 closure: the CH native OCI builder now emits `assembled-rootfs.tar` plus digest evidence for VZ consumption, and VZ image build no longer intentionally bakes demo users |
 | 2026-05-14 | @vmm-cdx | Complete the Linux/CH native OCI builder path for issue #271: `mbuild build --target ch` now imports pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH harness matrix |
 | 2026-05-12 | @codex-vz | Add the VZ contributor handoff for issue #271: the VZ emitter can consume an assembled rootfs tarball during image build, records that rootfs input in emitted artifacts, and still documents the remaining Apple VZ EFI/NVRAM boot-container constraint |
@@ -1103,6 +1104,15 @@ extraction so CA auth remains a launch-time consumption of image state, not a
 reason to weaken sshd or rerun build work during guest startup. Guest demo
 identities are per-guest provisioning state; reusable VZ images must not bake
 `alice`, `bob`, or any later harness guest.
+
+This is greenfield v1.5 product work. There is no migration or backward
+compatibility requirement for pre-v1.5 cached VZ disks, v1.35 source VMs, or
+images that already contain harness principals. Launch-time provisioning must
+fail loudly if the image contains a requested guest with a different UID/GID;
+it must not migrate stale baked users in place. The accepted path is to rebuild
+fresh v1.5 artifacts through `mbuild`, with per-guest identity, uid/gid,
+sudoers, CA principals, mounts, and backend routing supplied by seed/runtime
+inputs.
 
 Required product surface:
 

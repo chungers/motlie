@@ -117,12 +117,14 @@ emitters:
       artifact_dir_env: MOTLIE_V15_CH_BASE_ARTIFACTS_DIR
       artifact_dir_suffix: base
   - id: vz
-    # Transitional VZ source: this remains the Apple VZ EFI/NVRAM boot
-    # substrate. When MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL is set, the adapter
-    # consumes the common assembled rootfs payload during image build and
-    # records that handoff in guest-contract/build-result metadata.
+    # VZ source: this remains the Apple VZ EFI/NVRAM boot substrate until the
+    # native VZ emitter can create that container directly. It is v1.5-local by
+    # contract; pre-v1.5/v1.35 source VMs are intentionally unsupported.
+    # When MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL is set, the adapter consumes the
+    # common assembled rootfs payload during image build and records that
+    # handoff in guest-contract/build-result metadata.
     materialized_source:
-      image: local://libs/vmm/examples/v1.35/artifacts/source-base.vm
+      image: local://libs/vmm/examples/v1.5/artifacts/source-base.vm
       profile: vz-native-systemd
       platform: host-native-macos
       materializer: apple-virtualization-source-vm

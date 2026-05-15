@@ -212,11 +212,14 @@ during VZ image build only. The current VZ adapter still preserves a native
 Apple VZ EFI/NVRAM boot container, applies the assembled rootfs payload into
 that container, and records `rootfs_input` with canonical path, size, and
 sha256 in `build-result.json` and `guest-contract.json`. Guest launch and first
-SSH must not apply this tarball, install packages, or build binaries. If
-`--rootfs-tarball` is unset, the artifact records `transitional-native-source-vm`
-so the remaining #271 gap is visible. Reusable VZ images do not intentionally
-bake demo guest users; `alice`, `bob`, and future harness guests are
-per-guest provisioning state.
+SSH must not apply this tarball, install packages, or build binaries. Reusable
+VZ images do not intentionally bake demo guest users; `alice`, `bob`, and
+future harness guests are per-guest provisioning state.
+
+v1.5 is greenfield for the image-builder product contract. Do not reuse
+pre-v1.5/v1.35 source VMs or cached disks. If a launch finds a requested guest
+already baked into the image with the wrong UID/GID, the run fails closed so the
+image can be rebuilt instead of mutating stale identity state at first contact.
 
 The VZ adapter also normalizes OpenSSH StrictModes path ancestors after the
 tarball overlay. `/`, `/etc`, `/etc/ssh`, `/etc/ssh/ca`, and

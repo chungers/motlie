@@ -252,7 +252,16 @@ impl GuestProvisioner {
         // interactive-ready contract. Slow certification belongs in explicit
         // harness validation, otherwise an unknown SSH principal inherits Vz
         // image/package/build long poles that CH does not expose here.
-        handle.ready(&self.inner.readiness_policy).await?;
+        if let Err(error) = handle.ready(&self.inner.readiness_policy).await {
+            if let Err(shutdown_error) = handle.shutdown().await {
+                tracing::warn!(
+                    principal = %principal,
+                    error = %shutdown_error,
+                    "ignoring shutdown error after failed guest readiness"
+                );
+            }
+            return Err(error.into());
+        }
         self.upsert_record(&principal, spec.clone(), Some(Arc::clone(&handle)))?;
 
         Ok(EnsuredGuest {

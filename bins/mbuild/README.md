@@ -15,7 +15,9 @@ seed overlays without rebuilding the immutable image. `mbuild validate`
 validates manifests, can require execution evidence, and can delegate live guest
 conformance to the v1.5 harness. The VZ target consumes the CH-emitted tarball
 with `--rootfs-tarball` while the durable Apple VZ boot-container emitter is
-still transitional.
+still transitional. v1.5 is greenfield for this product contract: pre-v1.5 VZ
+source VMs/cached disks are unsupported, and per-guest users are seed/runtime
+state rather than image content.
 
 ## Commands
 
