@@ -20,7 +20,7 @@ Ask the release owner for:
 - install guidance for each enabled channel
 - audience-specific warnings such as CUDA, glibc fallback, SSH ForceCommand safety, or macOS signing
 
-Draft each binary manifest's `[release].notes_path` first, then aggregate `releases/notes.md` from those files and release-event summary text.
+Draft each binary manifest's `[release].notes_path` first, then aggregate `releases/notes.md` from those files, release-event summary text, final manifest state, and relevant sub-issue/sub-PR evidence.
 
 Draft `releases/notes.md` with:
 
@@ -70,4 +70,5 @@ Validation rules:
 - Notes must not contain placeholders before `gh release create`.
 - Workspace notes must reference or summarize every per-binary note discovered from `[release].notes_path`.
 - Final notes should mention checksum verification and the release-pinned installer URL when installer distribution is enabled.
+- Final notes should be regenerated after required sub-PRs merge so target/package/checksum/install details match the manifest ledger.
 - Record human approval and the notes path in the `github-release-published` gate evidence.

@@ -15,6 +15,7 @@
 - 2026-05-14, @gpt55-dgx: Clarified codename terminology, concurrent release branch handling, and installer template lifecycle.
 - 2026-05-14, @gpt55-dgx: Added release notes workflow for workspace and per-binary notes, including operator prompts and publication gates.
 - 2026-05-14, @gpt55-dgx: Changed per-binary release manifests to stable `releases/<bin>.toml` files discovered by scanning `releases/`, with versions stored in manifest schema and aggregate GitHub notes generated from per-binary notes.
+- 2026-05-14, @gpt55-dgx: Added master tracking issue and sub-issue/sub-PR orchestration around the release branch manifest ledger.
 
 ## Status
 
@@ -66,6 +67,10 @@ Release branches are retained release ledgers and never merge back to `main`. So
 Codename uniqueness is enforced by remote branch and tag names. A main-branch codename registry is intentionally not required for v0 because it would reintroduce release-event state into `main`. If later automation needs a registry, it should be generated from remote refs or kept outside the source tree rather than becoming a required release artifact on `main`.
 
 Release events may run concurrently as independent release branches. Each branch is self-contained; fixes cherry-picked to `main` from one release branch can flow into another concurrent release branch through a normal merge from `main` when relevant.
+
+The release skill may bootstrap a release event after human confirmation. It can suggest calver-codename candidates, check remote branch/tag conflicts, create the release branch from `main`, generate initial `releases/manifest.toml`, generate one stable per-binary manifest and note file per binary, push the branch, and create a master tracking GitHub issue. The master issue coordinates human/agent handoffs, but it does not replace the release branch manifests as the authoritative ledger.
+
+Scoped platform/channel work should be represented as sub-issues and sub-PRs targeting the release branch. Each sub-issue identifies the binary, gate, target id, required host/platform, release branch, expected evidence, and manifest fields to update. Each sub-PR updates branch-local manifest state and closes its sub-issue when merged. A later agent can resume by reading the master issue, sub-issue/PR state, and the release branch manifests; if those sources disagree, the manifests win.
 
 Each release event can contain one or more binary targets. Each binary target must define the binary-specific fields before implementation or publication begins.
 
@@ -670,15 +675,19 @@ A non-CUDA gnu fallback is allowed only when static musl is not feasible and the
 1. Create a release branch from `main`, for example `release/2026-05-amber-aardvark`.
 2. Add branch-local release files under `releases/`: `manifest.toml`, `notes.md`, and one stable `releases/<bin>.toml` plus `releases/<bin>.md` pair for every binary in scope.
 3. Push the release branch. The release branch is the coordination surface and release ledger; it is not a PR that will merge to `main`.
-4. Land platform-specific sub-PRs into the release branch. Each sub-PR updates branch-local manifest status with staging evidence.
-5. Cherry-pick source or process fixes back to `main` through normal PRs when those fixes matter outside the release branch. Do not merge the full release branch to `main`.
-6. After all required gates are complete or explicitly deferred, create the final release tag from the final release-branch commit.
-7. Build, sign, and package final artifacts from that final tag.
-8. Upload canonical archives, checksums, installer scripts, workspace manifest, per-binary manifests, and release notes to the `chungers/motlie` GitHub Release.
-9. Generate and publish native npm packages from the same final build outputs.
-10. Update `motlie/homebrew-tap` with the new formula version and source tarball checksum.
-11. Run install verification for npm, direct installer, and Homebrew from final installed paths.
-12. Commit final ledger status back to the retained release branch or upload a final ledger manifest as a GitHub Release asset. Do not move the release tag to include ledger-only metadata.
+4. Create a master tracking issue that links the release branch and manifest files.
+5. Create scoped sub-issues for platform/channel/gate work. Each sub-issue instructs the operator to open a sub-PR back to the release branch.
+6. Land platform-specific sub-PRs into the release branch. Each sub-PR updates branch-local manifest status with staging evidence and closes its sub-issue.
+7. Cherry-pick source or process fixes back to `main` through normal PRs when those fixes matter outside the release branch. Do not merge the full release branch to `main`.
+8. After all required gates are complete or explicitly deferred, generate final aggregate release notes and ledger updates from manifests plus sub-issue/PR evidence.
+9. Create the final release tag from the final release-branch commit after explicit human approval.
+10. Build, sign, and package final artifacts from that final tag.
+11. Upload canonical archives, checksums, installer scripts, workspace manifest, per-binary manifests, and release notes to the `chungers/motlie` GitHub Release.
+12. Generate and publish native npm packages from the same final build outputs.
+13. Update `motlie/homebrew-tap` with the new formula version and source tarball checksum.
+14. Run install verification for npm, direct installer, and Homebrew from final installed paths.
+15. Commit final ledger status back to the retained release branch or upload a final ledger manifest as a GitHub Release asset. Do not move the release tag to include ledger-only metadata.
+16. Close the master tracking issue only after the GitHub Release is live, all required package/install gates are complete or deferred, and final ledger state is pushed.
 
 Important GitHub constraint: a full GitHub Release is tag-centric, not PR-centric. The final release tag must point to the exact release-branch source commit used for final artifacts. Staging builds performed earlier on the release branch are useful evidence, but if the final tag commit differs from the staging commit, final artifacts must be rebuilt or revalidated from the final tag.
 
@@ -747,6 +756,12 @@ release_branch = "release/2026-05-amber-aardvark"
 sub_prs_allowed = true
 main_merge_policy = "never-merge-release-branch"
 main_fix_policy = "cherry-pick-source-fixes-only"
+
+[tracking]
+master_issue = ""
+master_issue_state = "planned"
+master_issue_policy = "close-after-github-release-live-and-final-ledger-pushed"
+sub_issue_policy = "one-or-more-issues-per-platform-channel-or-binary-gate"
 
 [release]
 tag = "2026-05-amber-aardvark"

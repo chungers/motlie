@@ -1,6 +1,6 @@
 ---
 name: release
-description: Execute or plan Motlie binary releases across GitHub Releases, npm @motlie native packages, direct installers, and the motlie/homebrew-tap Homebrew tap. Use when asked to release, stage, publish, package, codesign, create release branches, update release docs, or verify release artifacts.
+description: Execute or plan Motlie binary releases across GitHub Releases, npm @motlie native packages, direct installers, and the motlie/homebrew-tap Homebrew tap. Use when asked to release, stage, publish, package, codesign, suggest release codenames, create release branches, create release tracking issues, update release docs, or verify release artifacts.
 ---
 
 # Motlie Release
@@ -12,6 +12,7 @@ Before changing anything:
 - identify yourself as required by `AGENTS.md`
 - check `git status --short --branch`
 - confirm the release branch, release tag, and binaries in scope
+- for new releases, suggest 3-5 calver-codename candidates, check remote branch/tag conflicts, and ask the human to select the release name
 - do not publish npm packages, GitHub Releases, or Homebrew tap changes without explicit human approval
 - do not commit unrelated files
 - default to the manual v0 process in `docs/PLAN_RELEASES.md`; do not propose new CI jobs unless the human explicitly asks for automation
@@ -74,17 +75,21 @@ Primary references:
 
 Manual v0 release sequence:
 
-1. Create a release branch from `main`, for example `release/2026-05-amber-aardvark`.
-2. Add or update branch-local `releases/manifest.toml`, `releases/notes.md`, and one stable `releases/<bin>.toml` plus referenced notes file per released binary.
-3. Push the release branch. Do not open a PR that merges it to `main`.
-4. Land platform/channel sub-PRs into the release branch.
-5. Update manifest status with staging evidence, source commits, timestamps, actors, and links.
-6. Cherry-pick reusable source, doc, skill, or tooling fixes to `main` through separate PRs when needed.
-7. Create the final source tag from the release branch after all required gates are complete or explicitly deferred.
-8. Build, sign, package, and publish final artifacts from the final tag.
-9. Validate release-pinned installers and update `installer-validated` gates.
-10. Publish native npm packages and update `motlie/homebrew-tap`.
-11. Push a final release-branch ledger commit that marks manifests `state = "published"` and records final URLs/checksums/package links.
+1. Suggest release codenames, check conflicts, and get human confirmation for release name and binaries.
+2. Create a release branch from `main`, for example `release/2026-05-amber-aardvark`.
+3. Add or update branch-local `releases/manifest.toml`, `releases/notes.md`, and one stable `releases/<bin>.toml` plus referenced notes file per released binary.
+4. Push the release branch. Do not open a PR that merges it to `main`.
+5. Create a master tracking issue and record it in the workspace manifest tracking metadata.
+6. Create scoped sub-issues for platform/channel/gate work; each should instruct the operator to open a sub-PR back to the release branch.
+7. Land platform/channel sub-PRs into the release branch; each sub-PR updates manifest status and closes its sub-issue.
+8. Cherry-pick reusable source, doc, skill, or tooling fixes to `main` through separate PRs when needed.
+9. Generate final notes/ledger state from manifests plus issue/PR evidence after required gates complete or defer.
+10. Create the final source tag from the release branch after explicit approval.
+11. Build, sign, package, and publish final artifacts from the final tag.
+12. Validate release-pinned installers and update `installer-validated` gates.
+13. Publish native npm packages and update `motlie/homebrew-tap`.
+14. Push a final release-branch ledger commit that marks manifests `state = "published"` and records final URLs/checksums/package links.
+15. Close the master issue only after the GitHub Release is live and final ledger state is pushed.
 
 Release branch source files:
 
@@ -99,20 +104,13 @@ Release branch source files:
 - `releases/homebrew/*`: source-side formula template or notes only; the live formula PR belongs in `motlie/homebrew-tap`.
 - `docs/*` and `.agents/skills/release/*`: update on `main` by cherry-picking through a normal PR when behavior or workflow changes.
 
-To stage macOS signing from another host:
+To stage macOS signing from another host, use a scoped sub-issue and sub-PR targeting the release branch. Read `references/macos-signing.md` and fill commands from the current per-binary manifest.
 
 ```sh
-gh pr checkout <release-pr-number>
 git switch release/<release-name>
 git pull --ff-only
-cargo build --release --locked --target <rust-target> -p <cargo-package> --bin <cargo-bin>
-codesign --force --sign - target/<rust-target>/release/<bin>
-codesign --verify --strict --verbose=2 target/<rust-target>/release/<bin>
-target/<rust-target>/release/<bin> --version
-sudo install -m 755 target/<rust-target>/release/<bin> <install-path>
-sudo codesign --force --sign - <install-path>
-codesign --verify --strict --verbose=2 <install-path>
-<install-path> --version
+# create a short branch from the release branch, update the relevant manifest gate,
+# then open a PR back to release/<release-name> that closes the scoped sub-issue.
 ```
 
 After release-branch gates are complete:
@@ -171,11 +169,12 @@ Release note rules:
 Operator prompt workflow:
 
 1. Read `WORKSPACE_MANIFEST`, then scan `releases/*.toml` for `kind = "motlie.binary-release"` manifests before proposing the next action.
-2. Identify the first incomplete workspace gate or `(binary, gate, target_id)`, its required platform, and whether the current host can perform it.
-3. If another host/operator is needed, prompt with the exact branch/PR to pull and the manifest fields to update.
-4. If the action creates tags, GitHub Releases, npm publications, or Homebrew tap changes, ask for explicit approval.
-5. After a gate is performed, update manifest status on the release branch or through a sub-PR with `completed_at`, `completed_by`, `source_commit`, and `evidence`.
-6. For handoffs, reply with current state, next gate, required host/platform, command group, files to update, and approval needed.
+2. Inspect the master issue, sub-issues, and sub-PRs when they exist; manifests remain authoritative if state conflicts.
+3. Identify the first incomplete workspace gate or `(binary, gate, target_id)`, its required platform, and whether the current host can perform it.
+4. If another host/operator is needed, create or update a scoped sub-issue that names the release branch, target manifest, required evidence, and expected sub-PR target.
+5. If the action creates tags, GitHub Releases, npm publications, Homebrew tap changes, or closes the master issue, ask for explicit approval.
+6. After a gate is performed, update manifest status on the release branch or through a sub-PR with `completed_at`, `completed_by`, `source_commit`, and `evidence`.
+7. For handoffs, reply with current state, next gate, required host/platform, command group, files to update, issue/PR links, and approval needed.
 
 Read references only when needed:
 
@@ -201,8 +200,11 @@ Use this response shape for release status:
 
 ```text
 Release state:
+- master issue:
+- release branch:
 - source tag:
 - GitHub Release:
+- sub-issues/sub-PRs:
 - artifacts:
 - macOS signing:
 - npm:
