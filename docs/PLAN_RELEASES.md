@@ -17,6 +17,7 @@
 - 2026-05-14, @gpt55-dgx: Clarified installer template copy flow and made the macOS signing example fully parameterized.
 - 2026-05-14, @gpt55-dgx: Added explicit release-note draft, review, and finalization tasks.
 - 2026-05-14, @gpt55-dgx: Changed the plan to discover stable `releases/<bin>.toml` binary manifests by scanning `releases/`, with versions stored in schema and aggregate GitHub notes built from per-binary notes.
+- 2026-05-14, @gpt55-dgx: Added codename suggestion, release bootstrap, master issue, sub-issue/sub-PR, and master issue closure tasks.
 
 ## Status
 
@@ -37,6 +38,8 @@ releases/manifest.toml
 releases/notes.md
 releases/mmux.toml
 releases/mmux.md
+releases/mbuild.toml
+releases/mbuild.md
 ```
 
 ## Skill-Guided Operator Handoffs
@@ -55,8 +58,8 @@ Prompt templates live in `.agents/skills/release/references/operator-prompts.md`
 
 ## Phase 1: Release Event and Binary Intake
 
-- [ ] 1.1 Confirm the release event name, release branch, and tag with the user. For the worked release: `RELEASE_NAME=2026-05-amber-aardvark`, `RELEASE_BRANCH=release/2026-05-amber-aardvark`, and `RELEASE_TAG=2026-05-amber-aardvark`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 1.2 Confirm every binary included in the release event and create or update one stable manifest per binary. For `mmux`: `BINARY_MANIFEST=releases/mmux.toml`, `[identity].binary=mmux`, `[identity].version=0.1.0`, `[build].cargo_package=motlie-mmux`, `[build].cargo_bin=mmux`, and `[install].default_path=/usr/local/bin/mmux`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 1.1 Have the release skill suggest 3-5 calver-codename candidates, check remote branch/tag conflicts, and ask the human to select the release event name. For the worked release: `RELEASE_NAME=2026-05-amber-aardvark`, `RELEASE_BRANCH=release/2026-05-amber-aardvark`, and `RELEASE_TAG=2026-05-amber-aardvark`. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 1.2 Confirm every binary included in the release event and create or update one stable manifest per binary. For a two-binary release: `releases/mmux.toml` with `[identity].binary=mmux` and `releases/mbuild.toml` with `[identity].binary=mbuild`; each manifest carries its own `[identity].version`, `[build].cargo_package`, `[build].cargo_bin`, and `[install]` fields. Reference: `docs/DESIGN_RELEASES.md#release-target-model`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 1.3 Confirm the release is manual v0 and that CI job creation is out of scope for the release branch. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 1.4 Confirm channel scope: GitHub Release archives, direct installer, native npm packages, and Homebrew tap. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 1.5 Confirm whether any binary has accelerator variants. CPU/default artifacts omit accelerator suffixes; CUDA artifacts use explicit suffixes such as `cuda-12-4`. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/SKILL.md`.
@@ -73,11 +76,13 @@ git push -u origin release/2026-05-amber-aardvark
 ```
 
 - [ ] 2.1 Bump release-branch versions in `Cargo.toml` or per-binary manifests as needed. If a binary inherits `version.workspace = true`, the release branch can carry the workspace version used for this release. Fix placeholder workspace metadata such as `authors = ["Your Name <your.email@example.com>"]` before the first real release. Reference: `docs/DESIGN_RELEASES.md#distribution-channels`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 2.2 Add branch-local `releases/manifest.toml` and `releases/notes.md`. The workspace manifest owns release-event identity, branch, tag, GitHub Release URL, global defaults, workspace gates, discovery policy, and final per-binary completion summaries. It does not enumerate the build fan-out. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 2.2 Add branch-local `releases/manifest.toml` and `releases/notes.md`. The workspace manifest owns release-event identity, branch, tag, GitHub Release URL, global defaults, workspace gates, discovery policy, tracking issue policy, and final per-binary completion summaries. It does not enumerate the build fan-out. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 2.3 Add one stable per-binary manifest and notes file for each binary, for example `releases/mmux.toml` and `releases/mmux.md`. Per-binary manifests capture version, explicit non-derived names, target matrix, structured per-target status, `(id, target_id)` gates, and mutable status. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 2.4 Draft every per-binary note referenced by `[release].notes_path`, then aggregate `releases/notes.md`. The workspace notes must list all binaries, versions, distribution channels, install commands, user-visible changes, verification/checksum guidance, and known issues. Per-binary notes must cover binary-specific changes and compatibility notes. Reference: `docs/DESIGN_RELEASES.md#release-notes`. Skill support: `.agents/skills/release/references/release-notes.md`.
 - [ ] 2.5 Add source-side installer, npm, or Homebrew templates under branch-local `releases/install/`, `releases/npm/`, or `releases/homebrew/` only when needed by the release. Installer scripts should be copied from canonical templates on `main`, normally `bins/<bin>/install-template.sh`, into `releases/install/install-<bin>.sh`; release-specific values may be patched in the branch-local copy. The live Homebrew formula still belongs in `motlie/homebrew-tap`. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`. Skill support: `.agents/skills/release/references/homebrew-tap.md`.
 - [ ] 2.6 Mark disabled-channel gates `deferred` when the release branch opens. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 2.7 Push the release branch, then create a master tracking GitHub issue that links the release branch, manifest files, binary list, target matrix, enabled channels, and current next step. Record the issue URL in `releases/manifest.toml` tracking metadata. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/operator-prompts.md`.
+- [ ] 2.8 Create scoped sub-issues for required platform/channel/gate work. Each sub-issue must instruct the operator to branch from the release branch, update only the relevant manifest status/evidence, and open a PR back to the release branch. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/operator-prompts.md`.
 
 Release branch scope:
 
@@ -100,8 +105,9 @@ release/2026-05-amber-aardvark-mmux-npm -> release/2026-05-amber-aardvark
 ```
 
 - [ ] 3.1 Each sub-PR builds or validates one scoped `(binary, id, target_id)` gate and updates the relevant per-binary manifest with state, source commit, timestamp, actor, target id, channel, and evidence links. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/release-checklist.md`.
-- [ ] 3.2 Status updates are staging evidence only. Final artifacts must still be rebuilt or revalidated from the final source tag if the final tag commit differs from the staging commit. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 3.3 Build outputs are not committed to git. Store only deterministic names, checksums, source commits, and validation evidence in the manifest. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/references/release-checklist.md`.
+- [ ] 3.2 Each sub-PR should close its matching sub-issue on merge and include evidence links in the manifest gate. The master issue should be updated with the sub-PR/sub-issue status, but the release branch manifests remain authoritative. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/operator-prompts.md`.
+- [ ] 3.3 Status updates are staging evidence only. Final artifacts must still be rebuilt or revalidated from the final source tag if the final tag commit differs from the staging commit. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 3.4 Build outputs are not committed to git. Store only deterministic names, checksums, source commits, and validation evidence in the manifest. Reference: `docs/DESIGN_RELEASES.md#artifact-naming`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 
 ## Phase 4: Pull the Release Branch on macOS
 
@@ -122,13 +128,14 @@ codesign --verify --strict --verbose=2 <install-path>
 ```
 
 - [ ] 4.1 Record staged macOS signing evidence in the relevant per-binary manifest, including `rust_target`, signing identity, `rustc -Vv`, `cargo -V`, and codesign evidence. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`. Skill support: `.agents/skills/release/references/macos-signing.md`.
-- [ ] 4.2 Open a sub-PR back to the release branch with the manifest status update. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/macos-signing.md`.
+- [ ] 4.2 Open a sub-PR back to the release branch with the manifest status update and close the matching sub-issue on merge. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/macos-signing.md`.
 
 ## Phase 5: Finalize the Release Branch
 
 - [ ] 5.1 Confirm every required workspace gate in `releases/manifest.toml` and every required per-binary gate is complete or explicitly deferred. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/release-checklist.md`.
-- [ ] 5.2 Confirm all sub-PRs have merged into the release branch. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
-- [ ] 5.3 Identify any reusable source, doc, skill, or tooling fixes made on the release branch. Cherry-pick those fixes into `main` through normal PRs if they matter outside the release. Do not merge the release branch to `main`. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 5.2 Confirm all sub-issues are closed or explicitly deferred and all required sub-PRs have merged into the release branch. If issue/PR state conflicts with manifest state, treat the manifests as authoritative and comment on the master issue with the correction. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 5.3 Update the master issue with the current manifest-derived state and next step. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/operator-prompts.md`.
+- [ ] 5.4 Identify any reusable source, doc, skill, or tooling fixes made on the release branch. Cherry-pick those fixes into `main` through normal PRs if they matter outside the release. Do not merge the release branch to `main`. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
 
 ## Phase 6: Tag and Publish From the Release Branch
 
@@ -147,7 +154,7 @@ git status --short --branch
 - [ ] 6.1 Build final artifacts from `RELEASE_TAG`, not from a dirty worktree. Confirm `Cargo.lock` is committed and unchanged. Always record `rustc -Vv` and `cargo -V`. For Darwin-from-Linux, use the v0 default `cargo-zigbuild` and record `cargo zigbuild -V` plus `zig version`. For pure-Rust `linux-*-musl`, use the v0 default `rustup + cargo build --target`; use `cargo-zigbuild` for musl only when C dependencies need a musl-aware linker. Record `file <binary>`, `ldd <binary>`, and `readelf -d <binary>` evidence. For any enabled `linux-*-gnu` fallback, record both `ldd --version` plus `objdump -T <binary> | grep GLIBC_ | sort -u`; update `glibc_build_host_version` and `glibc_min_version` in the target block. Reference: `docs/DESIGN_RELEASES.md#linux-libc-policy`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 - [ ] 6.2 Use the per-binary manifest's explicit `archive_asset`, `archive_binary_path`, `npm_package`, `npm.bin_path`, and installer names. Do not derive names when the manifest provides them. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 6.3 Sign and verify final Darwin artifacts from the final tag. Reference: `docs/DESIGN_RELEASES.md#macos-code-signing`. Skill support: `.agents/skills/release/references/macos-signing.md`.
-- [ ] 6.4 Finalize and human-approve `releases/notes.md` and per-binary notes. Confirm the notes match final manifest names, target matrix, install commands, known issues, and checksums. Reference: `docs/DESIGN_RELEASES.md#release-notes`. Skill support: `.agents/skills/release/references/release-notes.md`.
+- [ ] 6.4 Generate final consolidated `releases/notes.md` from per-binary notes, manifest state, and sub-issue/PR evidence, then get human approval. Confirm the notes match final manifest names, target matrix, install commands, known issues, and checksums. Reference: `docs/DESIGN_RELEASES.md#release-notes`. Skill support: `.agents/skills/release/references/release-notes.md`.
 - [ ] 6.5 Create the GitHub Release from `releases/notes.md` and upload final archives, checksums, installers, workspace manifest, per-binary manifests, and per-binary notes. Reference: `docs/DESIGN_RELEASES.md#github-releases`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 - [ ] 6.6 Validate the release-pinned direct installer on each supported target and update the target-specific `installer-validated` gates. If GitHub Pages convenience installer URLs are enabled, update the Pages repository in a separate PR after the release-pinned installer exists. Reference: `docs/DESIGN_RELEASES.md#installer-script-hosting`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 
@@ -165,6 +172,7 @@ Final GitHub Release URLs, uploaded asset URLs, npm links, Homebrew tap commits,
 - [ ] 8.1 Update `releases/manifest.toml` and per-binary manifests to `state = "published"`. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/SKILL.md`.
 - [ ] 8.2 Add final `published` metadata: tag, GitHub Release URL, release notes URL, asset URLs, checksums, npm package URLs, Homebrew tap PR/commit, and install verification evidence. Reference: `docs/DESIGN_RELEASES.md#release-manifest`. Skill support: `.agents/skills/release/references/release-checklist.md`.
 - [ ] 8.3 Push the final ledger commit to the retained release branch and upload the final manifest set to the GitHub Release if assets need to reflect post-publication URLs. Do not move the release tag to include ledger-only metadata. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/SKILL.md`.
+- [ ] 8.4 Close the master tracking issue only after GitHub Release is live, final ledger state is pushed, and all package/install gates are complete or explicitly deferred. Reference: `docs/DESIGN_RELEASES.md#upload-and-publishing-workflow`. Skill support: `.agents/skills/release/references/operator-prompts.md`.
 
 ## Phase 9: Future Automation
 
