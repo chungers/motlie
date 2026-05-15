@@ -49,6 +49,12 @@ Tool-calling loop:
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo "What is Rust?"
 ```
 
+Tool-calling smoke only:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo-only "What is Rust?"
+```
+
 The tool demo registers a local `get_weather` Rust function, sends its generated
 schema to the model, executes the model-requested tool call through
 `ToolRegistry`, appends the tool-result message, and asks the model for a final

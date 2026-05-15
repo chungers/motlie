@@ -11,7 +11,7 @@ GGUF-quantized weights. It supports switching between two models at runtime:
 | Backend | Weight format | Qwen3-4B repo | Gemma4 E2B repo |
 |---------|--------------|---------------|-----------------|
 | **mistral.rs** (`chat_mistral_qwen3` / `chat_multimodal_gemma4`) | safetensors | `Qwen/Qwen3-4B` | `google/gemma-4-E2B-it` |
-| **llama.cpp** (`chat_gguf_gwen3_gemma4`) | GGUF | `Qwen/Qwen3-4B-GGUF` | `bartowski/gemma-4-E2B-it-GGUF` |
+| **llama.cpp** (`chat_gguf_gwen3_gemma4`) | GGUF | `Qwen/Qwen3-4B-GGUF` | `unsloth/gemma-4-E2B-it-GGUF` |
 
 The two weight formats are **not interchangeable**. Each backend requires its
 own artifact set. However, both target the identical upstream model
@@ -31,7 +31,7 @@ quantization levels.
 1. Direct curated enum selection through `ChatModels::Qwen3_4B_Gguf`
 2. Runtime model switching through `--chat=google/gemma4_e2b_gguf`
 3. GGUF quantization control (Q4_K_M default, Q8_0, or F16)
-4. Descriptor/capability introspection showing `Chat` + `Completion`
+4. Descriptor/capability introspection showing `Chat` + `Completion` + `ToolUse`
 5. Optional curated artifact download via `--download-artifacts`
 6. Local-only startup through `ArtifactPolicy::LocalOnly`
 7. Single-turn and multi-turn chat
@@ -101,6 +101,25 @@ cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf 
   --example chat_gguf_gwen3_gemma4 -- --tool-demo "What is Rust's ownership model?"
 ```
 
+Tool-calling smoke only (skips ordinary chat and completion):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf \
+  --example chat_gguf_gwen3_gemma4 -- --tool-demo-only "What is Rust's ownership model?"
+```
+
+Tool-calling loop (Gemma4 GGUF):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b-gguf \
+  --bin motlie-models-download -- gemma4_e2b_gguf
+
+cargo run -p motlie-models --no-default-features \
+  --features model-qwen3-4b-gguf,model-gemma4-e2b-gguf \
+  --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_e2b_gguf --tool-demo \
+  "What is Rust's ownership model?"
+```
+
 The tool demo registers a local `get_weather` Rust function, sends its generated
 schema through the llama.cpp OpenAI-compatible chat-template path, executes the
 model-requested tool call through `ToolRegistry`, appends the tool-result
@@ -112,9 +131,10 @@ message, and asks the model for a final answer.
 - Sufficient memory for the chosen precision and model size
 - The `model-qwen3-4b-gguf` feature (minimum); add `model-gemma4-e2b-gguf` for model switching
 
-Current descriptor gate:
+Validated tool-use smoke:
 
-- The llama.cpp adapter path supports tool-bearing requests, but GGUF curated descriptors should advertise `ToolUse` only after this tool demo passes against the selected local artifacts. A local attempt on 2026-05-13 failed before model load because the default curated HF cache did not contain `Qwen/Qwen3-4B-GGUF`.
+- `qwen3_4b_gguf` Q4_K_M passed locally on 2026-05-13.
+- `gemma4_e2b_gguf` Q4_K_M passed locally on 2026-05-13.
 
 ## Source
 
