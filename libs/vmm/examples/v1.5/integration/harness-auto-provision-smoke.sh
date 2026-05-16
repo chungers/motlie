@@ -18,7 +18,7 @@ MANUAL_GUEST_OFF="alice"
 MANUAL_GUEST_ON="bob"
 DISABLED_GUEST="zoe"
 SSH_TIMEOUT_SECS="${SSH_TIMEOUT_SECS:-900}"
-BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V15_DIR/../v1.35/artifacts/source-base.vm}"
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V15_DIR/artifacts/source-base.vm}"
 
 cleanup() {
     if [ -n "$HARNESS_PID" ]; then

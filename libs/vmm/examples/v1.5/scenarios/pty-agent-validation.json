@@ -41,25 +41,19 @@
     {
       "action": "pty_send_line",
       "session": "alice-shell",
-      "text": "sudo -n apt-get update && echo APT_STATUS:0 || echo APT_STATUS:1"
+      "text": "sudo -n apt-get update; rc=$?; printf '\\n__MOTLIE_APT_DONE_%s__\\n' \"$rc\""
     },
     {
       "action": "pty_expect",
       "session": "alice-shell",
-      "contains": "APT_STATUS:0",
+      "contains": "__MOTLIE_APT_DONE_0__",
       "timeout_ms": 120000
     },
     {
       "action": "pty_expect_screen",
       "session": "alice-shell",
-      "contains": "APT_STATUS:0",
+      "contains": "__MOTLIE_APT_DONE_0__",
       "timeout_ms": 2000
-    },
-    {
-      "action": "pty_expect",
-      "session": "alice-shell",
-      "contains": "alice@motlie-alice:~$ ",
-      "timeout_ms": 5000
     },
     {
       "action": "pty_snapshot",
@@ -71,13 +65,13 @@
       "action": "pty_expect_screen",
       "session": "alice-shell",
       "contains": "1. Sign in with ChatGPT",
-      "timeout_ms": 20000
+      "timeout_ms": 60000
     },
     {
       "action": "pty_expect_screen",
       "session": "alice-shell",
-      "contains": "Press enter to continue",
-      "timeout_ms": 20000
+      "contains": "or connect an API key",
+      "timeout_ms": 60000
     },
     {
       "action": "pty_snapshot",

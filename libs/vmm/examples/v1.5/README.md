@@ -128,6 +128,105 @@ The common seed must provide:
 `backend.env.example` and `mounts.example.yaml` are schema examples for the
 first v1.5 image-builder slice.
 
+## Image Builder Contract
+
+The checked-in v1.5 image-builder contract starts at:
+
+```text
+libs/vmm/examples/v1.5/motlie-image.yaml
+```
+
+The standalone builder binary is:
+
+```text
+bins/mbuild/src/main.rs
+```
+
+Current CLI:
+
+```bash
+cargo run -p mbuild -- \
+  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch
+
+cargo run -p mbuild -- \
+  seed --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --guest alice \
+  --uid 2001 \
+  --gid 2001 \
+  --out /tmp/mbuild/seed/alice
+
+cargo run -p mbuild -- \
+  validate --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --artifact /tmp/mbuild/ch \
+  --require-executed \
+  --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+```
+
+`mbuild build --target ch` now consumes the checked-in `external-oci` source,
+resolves and fetches the pinned Ubuntu OCI arm64 platform, imports the rootfs,
+runs the apt/npm package stage, applies the native Motlie v1.5 compatibility
+layer, emits the common `assembled-rootfs.tar` handoff, and then emits CH
+artifacts. The VZ target still records its current macOS adapter source until
+the VZ emitter consumes that `mbuild`-emitted rootfs tarball and produces fresh
+VZ validation evidence.
+`mbuild seed` regenerates per-guest seed files from the config-driven seed
+topology without rebuilding the immutable image. `mbuild validate` checks the
+emitted manifest, can require execution evidence, and can delegate a live
+scenario to `harness_v1_5` while recording the harness log and exit status.
+
+Linux/CH evidence from 2026-05-14 (`@vmm-cdx`): the rebuilt artifact at
+`/tmp/mbuild-pr270-oci-ch-7` passed manifest validation and all v1.5 CH
+scenarios:
+
+```text
+multiguest-validate.json
+auto-provision-ssh.json
+agent-bootstrap.json
+pty-agent-validation.json
+pty-login.json
+```
+
+VZ has an explicit issue #271 handoff for the common rootfs contract:
+
+```bash
+cargo run -p mbuild -- \
+  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch
+
+cargo run -p mbuild -- \
+  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --target vz \
+  --out /tmp/mbuild/vz \
+  --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
+```
+
+The CH build writes `/tmp/mbuild/ch/assembled-rootfs.tar` plus
+`/tmp/mbuild/ch/mbuild-common-rootfs.json` before CH-specific boot adaptations.
+`mbuild` canonicalizes and digests that tarball, then passes it to the VZ
+adapter as `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is consumed
+during VZ image build only. The current VZ adapter still preserves a native
+Apple VZ EFI/NVRAM boot container, applies the assembled rootfs payload into
+that container, and records `rootfs_input` with canonical path, size, and
+sha256 in `build-result.json` and `guest-contract.json`. Guest launch and first
+SSH must not apply this tarball, install packages, or build binaries. Reusable
+VZ images do not intentionally bake demo guest users; `alice`, `bob`, and
+future harness guests are per-guest provisioning state.
+
+v1.5 is greenfield for the image-builder product contract. Do not reuse
+pre-v1.5/v1.35 source VMs or cached disks. If a launch finds a requested guest
+already baked into the image with the wrong UID/GID, the run fails closed so the
+image can be rebuilt instead of mutating stale identity state at first contact.
+
+The VZ adapter also normalizes OpenSSH StrictModes path ancestors after the
+tarball overlay. `/`, `/etc`, `/etc/ssh`, `/etc/ssh/ca`, and
+`/etc/ssh/auth_principals` must be `root:root 0755` in the built image; launch
+checks this contract and fails before declaring `interactive-ready` if it is
+broken.
+
 ## Service Graph
 
 The converged boot graph is:
@@ -150,6 +249,7 @@ This is now part of the OCI-derived `ubuntu-systemd` compatibility profile:
 builders and backend emitters must bake the target wiring before guest boot
 instead of repairing units through first-contact SSH or launcher mutation.
 
-First-contact SSH must wait only for interactive readiness. Full egress, CLI,
-package-manager, and VFS/VNET certification belongs in explicit harness
-validation, not in the first SSH path.
+First-contact SSH must wait only for interactive readiness. Harness scenario
+`ready` may also wait for VFS transport readiness when the next scenario step
+uses mounted paths. Full egress, CLI, package-manager, and VFS/VNET semantic
+certification belongs in explicit harness validation, not in the first SSH path.

@@ -14,6 +14,7 @@ members = [
     "libs/vfs",
     "libs/vnet",
     "libs/vmm",
+    "bins/mbuild",
 ]
 resolver = "2"
 

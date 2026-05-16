@@ -51,6 +51,8 @@ pub fn render_mounts_yaml(guest: &GuestSpec) -> Result<String, ArtifactError> {
 
 pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
     let mut out = String::from("#cloud-config\n");
+    writeln!(&mut out, "apt:").expect("writing to String cannot fail");
+    writeln!(&mut out, "  preserve_sources_list: true").expect("writing to String cannot fail");
     writeln!(&mut out, "users:").expect("writing to String cannot fail");
     writeln!(&mut out, "  - name: {}", guest.user.name).expect("writing to String cannot fail");
     writeln!(&mut out, "    uid: {}", guest.user.uid).expect("writing to String cannot fail");
@@ -416,6 +418,9 @@ pub fn render_launch_script(cfg: &LaunchArtifactRenderConfig<'_>) -> Result<Stri
             "\"$BASE_DIR/launch-vz.sh\" --guest \"$GUEST_ID\" --vm-name \"$VZ_VM_NAME\" \"$@\"\n",
         );
     } else {
+        if let Some(base_artifacts) = cfg.guest.boot.kernel.parent() {
+            export_path(&mut out, "BASE_ARTIFACTS", base_artifacts);
+        }
         out.push_str("LAUNCH_ARGS=(--guest \"$GUEST_ID\" --cloud-init-dir \"$SEED_DIR\" --admin-net \"$ADMIN_NET\" --egress-net \"$EGRESS_NET\")\n");
         out.push_str(
             "LAUNCH_ARGS+=(--cid \"$GUEST_CID\" --host-ip \"$HOST_IP\" --guest-ip \"$GUEST_IP\")\n",
@@ -561,7 +566,9 @@ mod tests {
     fn cloud_init_uses_reviewed_guest_shape() {
         let guest = sample_guest();
         let rendered = render_cloud_init(&guest).unwrap();
+        assert!(rendered.contains("preserve_sources_list: true"));
         assert!(rendered.contains("name: alice"));
+        assert!(rendered.contains("sudo: ALL=(ALL) NOPASSWD:ALL"));
         assert!(rendered.contains("packages:"));
         assert!(rendered.contains("  - vim"));
         assert!(rendered.contains("  - gh"));
@@ -599,6 +606,7 @@ mod tests {
         assert!(script.contains("VNET_SOCKET='/tmp/motlie-vmm-v14-alice.sock'"));
         assert!(script.contains("OVERLAY_SIZE='2G'"));
         assert!(script.contains("BOOT_KERNEL='/tmp/Image'"));
+        assert!(script.contains("export BASE_ARTIFACTS='/tmp'"));
         assert!(script.contains("BOOT_CMDLINE_APPEND='console=ttyS0'"));
         assert!(script.contains("LAUNCH_ARGS+=(--overlay-size \"$OVERLAY_SIZE\")"));
         assert!(script.contains("launch-ch.sh"));

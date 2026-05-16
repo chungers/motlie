@@ -10,13 +10,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common-contract.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
+ARTIFACTS_DIR="${MOTLIE_V15_ARTIFACTS_DIR:-$SCRIPT_DIR/artifacts}"
 BASE_VM_NAME="${MOTLIE_VZ_BASE_VM_NAME:-motlie-v1-5-base-iter}"
 RUN_LOG="$ARTIFACTS_DIR/build-run.log"
 RESULT_JSON="$ARTIFACTS_DIR/build-result.json"
 CONTRACT_JSON="$ARTIFACTS_DIR/guest-contract.json"
 IDENTITY_PROBE_JSON="$ARTIFACTS_DIR/identity-probe.json"
 SOURCE_TARBALL="$ARTIFACTS_DIR/motlie-src.tar.gz"
+ROOTFS_TARBALL_OVERRIDE="${MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL:-${MOTLIE_V15_VZ_ROOTFS_TARBALL:-}}"
+ROOTFS_TARBALL_SOURCE=""
+ROOTFS_TARBALL_SIZE_BYTES=""
+ROOTFS_TARBALL_SHA256=""
+ROOTFS_TARBALL_SEED_NAME="motlie-assembled-rootfs.tar"
+ROOTFS_TARBALL_GUEST_PATH="/tmp/motlie-assembled-rootfs.tar"
+ROOTFS_INPUT_KIND="v1.5-native-source-vm"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-300}"
 GUEST_SRC_DIR="/home/admin/motlie-src"
 BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
@@ -46,7 +53,7 @@ GUEST_IPV4="10.0.2.15"
 SEED_DIR="$ARTIFACTS_DIR/build-seed"
 SEED_IMAGE="$ARTIFACTS_DIR/build-seed.dmg"
 WORK_VM_DIR="$ARTIFACTS_DIR/${BASE_VM_NAME}.vm"
-NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/../v1.35/artifacts/source-base.vm}"
+NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/artifacts/source-base.vm}"
 
 zmodload zsh/datetime
 
@@ -68,6 +75,76 @@ require_cmd ssh
 require_cmd hdiutil
 require_cmd cargo
 
+if [[ -n "$ROOTFS_TARBALL_OVERRIDE" ]]; then
+  if [[ ! -f "$ROOTFS_TARBALL_OVERRIDE" ]]; then
+    cat >&2 <<EOF
+assembled rootfs tarball does not exist: $ROOTFS_TARBALL_OVERRIDE
+
+Set MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL to a tarball emitted by the common
+rootfs assembly stage, or leave it unset to use the current VZ native-source VM
+adapter path.
+EOF
+    exit 1
+  fi
+  ROOTFS_TARBALL_METADATA="$(python3 - "$ROOTFS_TARBALL_OVERRIDE" <<'PY'
+import hashlib
+import os
+import sys
+import tarfile
+
+path = sys.argv[1]
+
+def normalize_name(name: str) -> str:
+    normalized = name
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+def assert_safe_member_name(name: str) -> None:
+    normalized = normalize_name(name)
+    if (
+        name.startswith("/")
+        or normalized == ".."
+        or normalized.startswith("../")
+        or "/../" in normalized
+    ):
+        raise SystemExit(f"unsafe rootfs tar entry escapes guest root: {name}")
+
+def assert_safe_linkname(name: str, linkname: str) -> None:
+    if not linkname:
+        raise SystemExit(f"unsafe empty rootfs tar link target: {name}")
+    normalized = normalize_name(linkname)
+    if normalized == ".." or normalized.startswith("../") or "/../" in normalized:
+        raise SystemExit(f"unsafe rootfs tar link target escapes guest root: {name} -> {linkname}")
+
+try:
+    with tarfile.open(path, "r:*") as archive:
+        for member in archive:
+            assert_safe_member_name(member.name)
+            if not (member.isdir() or member.isfile() or member.issym() or member.islnk()):
+                raise SystemExit(f"unsafe rootfs tar member type for root extraction: {member.name}")
+            if member.issym() or member.islnk():
+                assert_safe_linkname(member.name, member.linkname)
+except tarfile.TarError as error:
+    raise SystemExit(f"rootfs tarball is not readable by Python tarfile: {error}") from error
+
+sha256 = hashlib.sha256()
+with open(path, "rb") as fh:
+    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        sha256.update(chunk)
+
+print(os.path.realpath(path))
+print(os.path.getsize(path))
+print(sha256.hexdigest())
+PY
+)"
+  rootfs_tarball_metadata=("${(@f)ROOTFS_TARBALL_METADATA}")
+  ROOTFS_TARBALL_SOURCE="${rootfs_tarball_metadata[1]}"
+  ROOTFS_TARBALL_SIZE_BYTES="${rootfs_tarball_metadata[2]}"
+  ROOTFS_TARBALL_SHA256="${rootfs_tarball_metadata[3]}"
+  ROOTFS_INPUT_KIND="assembled-rootfs-tar-overlay"
+fi
+
 if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin" ]]; then
   SOURCE_DISK_PATH="$NATIVE_SOURCE_VM_DIR/disk.img"
   SOURCE_NVRAM_PATH="$NATIVE_SOURCE_VM_DIR/nvram.bin"
@@ -78,10 +155,13 @@ if [[ -f "$NATIVE_SOURCE_VM_DIR/disk.img" && -f "$NATIVE_SOURCE_VM_DIR/nvram.bin
   fi
 else
   cat >&2 <<EOF
-native source artifacts are required for v1.5 guest builds
+v1.5 native source artifacts are required for v1.5 guest builds
 
-Populate the native source cache first:
+Set MOTLIE_VZ_NATIVE_SOURCE_VM_DIR or populate the v1.5 native source cache:
   $NATIVE_SOURCE_VM_DIR
+
+Pre-v1.5 source VMs are intentionally unsupported for this greenfield image
+contract. Rebuild a v1.5 source image instead of reusing v1.35 artifacts.
 EOF
   exit 1
 fi
@@ -106,6 +186,12 @@ echo "=== Vz v1.5 base guest build ==="
 echo "Base VM:      $BASE_VM_NAME"
 echo "Source disk:  $SOURCE_DISK_PATH"
 echo "Native cache: $NATIVE_SOURCE_VM_DIR"
+echo "Rootfs input: $ROOTFS_INPUT_KIND"
+if [[ -n "$ROOTFS_TARBALL_SOURCE" ]]; then
+  echo "Rootfs tar:   $ROOTFS_TARBALL_SOURCE"
+  echo "Rootfs size:  $ROOTFS_TARBALL_SIZE_BYTES"
+  echo "Rootfs sha:   $ROOTFS_TARBALL_SHA256"
+fi
 
 rm -rf "$WORK_VM_DIR"
 mkdir -p "$WORK_VM_DIR"
@@ -345,6 +431,9 @@ cp "$AGENT_STATE_SETUP_FILE" "$SEED_DIR/motlie-agent-state-setup"
 cp "$AGENT_STATE_UNIT_FILE" "$SEED_DIR/motlie-agent-state.service"
 cp "$SSH_BRIDGE_LOOP_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh-loop"
 cp "$SSH_BRIDGE_UNIT_FILE" "$SEED_DIR/motlie-vmm-vsock-ssh.service"
+if [[ -n "$ROOTFS_TARBALL_SOURCE" ]]; then
+  cp "$ROOTFS_TARBALL_SOURCE" "$SEED_DIR/$ROOTFS_TARBALL_SEED_NAME"
+fi
 cat >"$SEED_DIR/meta-data" <<EOF
 instance-id: ${BASE_VM_NAME}
 local-hostname: motlie-v1-5-build
@@ -776,7 +865,58 @@ sudo cp "\$SEED_MOUNT/motlie-agent-state-setup" /tmp/motlie-agent-state-setup
 sudo cp "\$SEED_MOUNT/motlie-agent-state.service" /tmp/motlie-agent-state.service
 sudo cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh-loop" /tmp/motlie-vmm-vsock-ssh-loop
 sudo cp "\$SEED_MOUNT/motlie-vmm-vsock-ssh.service" /tmp/motlie-vmm-vsock-ssh.service
+if [[ -f "\$SEED_MOUNT/$ROOTFS_TARBALL_SEED_NAME" ]]; then
+  sudo cp "\$SEED_MOUNT/$ROOTFS_TARBALL_SEED_NAME" "$ROOTFS_TARBALL_GUEST_PATH"
+fi
 sudo umount -lf "\$SEED_MOUNT" >/dev/null 2>&1 || true
+if [[ -f "$ROOTFS_TARBALL_GUEST_PATH" ]]; then
+  echo "[v1.5 build] applying assembled rootfs payload before guest contract build"
+  expected_rootfs_size='$ROOTFS_TARBALL_SIZE_BYTES'
+  expected_rootfs_sha256='$ROOTFS_TARBALL_SHA256'
+  if [[ -n "\$expected_rootfs_size" ]]; then
+    actual_rootfs_size="\$(stat -c '%s' "$ROOTFS_TARBALL_GUEST_PATH")"
+    if [[ "\$actual_rootfs_size" != "\$expected_rootfs_size" ]]; then
+      echo "assembled rootfs tarball size mismatch: expected \$expected_rootfs_size got \$actual_rootfs_size" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "\$expected_rootfs_sha256" ]]; then
+    actual_rootfs_sha256="\$(python3 - "$ROOTFS_TARBALL_GUEST_PATH" <<'PY'
+import hashlib
+import sys
+
+sha256 = hashlib.sha256()
+with open(sys.argv[1], "rb") as fh:
+    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        sha256.update(chunk)
+print(sha256.hexdigest())
+PY
+)"
+    if [[ "\$actual_rootfs_sha256" != "\$expected_rootfs_sha256" ]]; then
+      echo "assembled rootfs tarball sha256 mismatch: expected \$expected_rootfs_sha256 got \$actual_rootfs_sha256" >&2
+      exit 1
+    fi
+  fi
+  # VZ currently boots through an EFI disk plus NVRAM. Until the durable VZ
+  # emitter can synthesize that boot container directly from OCI, preserve
+  # firmware/boot/runtime pseudo-filesystems and apply only the rootfs payload
+  # during image assembly. Launch and first SSH must never perform this work.
+  sudo tar --numeric-owner --preserve-permissions \
+    --exclude='dev' --exclude='./dev' --exclude='dev/*' --exclude='./dev/*' \
+    --exclude='proc' --exclude='./proc' --exclude='proc/*' --exclude='./proc/*' \
+    --exclude='sys' --exclude='./sys' --exclude='sys/*' --exclude='./sys/*' \
+    --exclude='run' --exclude='./run' --exclude='run/*' --exclude='./run/*' \
+    --exclude='tmp' --exclude='./tmp' --exclude='tmp/*' --exclude='./tmp/*' \
+    --exclude='boot' --exclude='./boot' --exclude='boot/*' --exclude='./boot/*' \
+    --exclude='efi' --exclude='./efi' --exclude='efi/*' --exclude='./efi/*' \
+    -xpf "$ROOTFS_TARBALL_GUEST_PATH" -C /
+  # VZ tarball-overlay bridge:
+  # The common rootfs payload is assembled outside the native Apple VZ disk. Do
+  # not let host-side tar ownership leak into OpenSSH StrictModes path
+  # ancestors; CA auth for first-contact SSH depends on these dirs being
+  # root-owned and not group/world-writable.
+  sudo install -d -m 0755 -o root -g root /etc
+fi
 echo "[v1.5 build] unpacking source tarball"
 rm -rf '$GUEST_SRC_DIR'
 mkdir -p '$GUEST_SRC_DIR'
@@ -834,7 +974,17 @@ sudo install -D -m 0644 /tmp/motlie-vfs-guest.service /etc/systemd/system/motlie
 sudo install -D -m 0644 /tmp/motlie-vmm-backend.env /etc/motlie/v1.5/backend.env
 sudo install -D -m 0644 /tmp/99_motlie_vz.cfg /etc/cloud/cloud.cfg.d/99_motlie_vz.cfg
 sudo mkdir -p /etc/motlie-vfs
-sudo mkdir -p /etc/ssh/ca /etc/ssh/auth_principals
+sudo install -d -m 0755 -o root -g root /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
+# VZ native source images and transitional rootfs overlays can carry host UIDs
+# on StrictModes path ancestors. Normalize this in the image instead of
+# weakening sshd; launch/first SSH must only consume this contract.
+sudo chown root:root / /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
+sudo chmod 0755 / /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals /etc/ssh/sshd_config.d
+cat >/tmp/90_motlie_vmm_ca.conf <<'SSHDCAEOF'
+TrustedUserCAKeys /etc/ssh/ca/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+SSHDCAEOF
+sudo install -D -m 0644 /tmp/90_motlie_vmm_ca.conf /etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf
 sudo install -D -m 0755 /tmp/motlie-vmm-vsock-ssh-loop /usr/local/bin/motlie-vmm-vsock-ssh-loop
 sudo install -D -m 0644 /tmp/motlie-vmm-vsock-ssh.service /etc/systemd/system/motlie-vmm-vsock-ssh.service
 if ! grep -q '^TrustedUserCAKeys /etc/ssh/ca/user_ca.pub$' /etc/ssh/sshd_config; then
@@ -913,53 +1063,29 @@ remap_conflicting_identity() {
     fi
 }
 
-ensure_guest_identity() {
-    user_name="$1"
-    target_uid="$2"
-    target_gid="$3"
-    password="$4"
-
-    existing_gid="$(getent group "$user_name" | cut -d: -f3 || true)"
-    if [ -z "$existing_gid" ]; then
-        gid_owner="$(getent group "$target_gid" | cut -d: -f1 || true)"
-        if [ -n "$gid_owner" ] && [ "$gid_owner" != "$user_name" ]; then
-            echo "gid $target_gid already belongs to $gid_owner" >&2
-            exit 1
-        fi
-        groupadd -g "$target_gid" "$user_name"
-    elif [ "$existing_gid" != "$target_gid" ]; then
-        echo "group $user_name has gid $existing_gid but expected $target_gid" >&2
-        exit 1
-    fi
-
-    existing_uid="$(id -u "$user_name" 2>/dev/null || true)"
-    if [ -z "$existing_uid" ]; then
-        uid_owner="$(getent passwd "$target_uid" | cut -d: -f1 || true)"
-        if [ -n "$uid_owner" ] && [ "$uid_owner" != "$user_name" ]; then
-            echo "uid $target_uid already belongs to $uid_owner" >&2
-            exit 1
-        fi
-        useradd -m -u "$target_uid" -g "$target_gid" -s /bin/bash "$user_name"
-    elif [ "$existing_uid" != "$target_uid" ]; then
-        echo "user $user_name has uid $existing_uid but expected $target_uid" >&2
-        exit 1
-    fi
-
-    usermod -aG sudo "$user_name" || true
-    echo "$user_name:$password" | chpasswd
-}
-
 remap_conflicting_identity admin 1000 1000 2000 2000
 remap_conflicting_identity ubuntu 1001 1001 2001 2001
-ensure_guest_identity alice 1000 1000 testpass
-ensure_guest_identity bob 1001 1001 testpass
 
-cat <<'SUDOERSEOF' > /etc/sudoers.d/90-motlie-demo
-alice ALL=(ALL) NOPASSWD:ALL
-bob ALL=(ALL) NOPASSWD:ALL
-SUDOERSEOF
-chown root:root /etc/sudoers.d/90-motlie-demo
-chmod 0440 /etc/sudoers.d/90-motlie-demo
+remove_baked_guest_identity() {
+    user_name="$1"
+
+    if id -u "$user_name" >/dev/null 2>&1; then
+        loginctl terminate-user "$user_name" >/dev/null 2>&1 || true
+        pkill -KILL -u "$user_name" >/dev/null 2>&1 || true
+        userdel -r "$user_name" >/dev/null 2>&1 || true
+    fi
+    groupdel "$user_name" >/dev/null 2>&1 || true
+    rm -rf "/home/$user_name" "/var/mail/$user_name"
+    rm -f "/etc/ssh/auth_principals/$user_name"
+    rm -f "/etc/sudoers.d/90-motlie-$user_name"
+}
+
+# The reusable VZ image must not bake harness/demo guest identities. The
+# launcher creates alice, bob, and future principals from per-guest seed/runtime
+# inputs.
+remove_baked_guest_identity alice
+remove_baked_guest_identity bob
+rm -f /etc/sudoers.d/90-motlie-demo
 
 cat <<'TMUXEOF' > /etc/profile.d/tmux-auto.sh
 # Auto-start tmux only for real interactive Bash SSH logins.
@@ -1045,6 +1171,7 @@ install -D -m 0755 /tmp/motlie-agent-state-setup /usr/local/bin/motlie-agent-sta
 install -D -m 0644 /tmp/motlie-agent-state.service /etc/systemd/system/motlie-agent-state.service
 install -D -m 0755 /tmp/motlie-vmm-vsock-ssh-loop /usr/local/bin/motlie-vmm-vsock-ssh-loop
 install -D -m 0644 /tmp/motlie-vmm-vsock-ssh.service /etc/systemd/system/motlie-vmm-vsock-ssh.service
+rm -f /etc/sudoers.d/90-motlie-build
 systemctl unmask motlie-vfs-guest.service || true
 systemctl unmask motlie-agent-state.service || true
 systemctl unmask motlie-vmm-vsock-ssh.service || true
@@ -1052,6 +1179,15 @@ systemctl daemon-reload
 systemctl enable motlie-vfs-guest.service >/dev/null 2>&1 || true
 systemctl enable motlie-agent-state.service >/dev/null 2>&1 || true
 systemctl enable motlie-vmm-vsock-ssh.service >/dev/null 2>&1 || true
+EOF
+
+echo "--- removing temporary build bootstrap identity ---"
+guest_bash_as admin admin <<'EOF'
+sudo loginctl terminate-user motlie-build >/dev/null 2>&1 || true
+sudo pkill -KILL -u motlie-build >/dev/null 2>&1 || true
+sudo rm -f /etc/sudoers.d/90-motlie-build
+sudo userdel -r motlie-build >/dev/null 2>&1 || true
+sudo groupdel motlie-build >/dev/null 2>&1 || true
 EOF
 
 echo "--- cleaning cloud-init state for reusable base image ---"
@@ -1089,36 +1225,67 @@ payload = {
         "admin": passwd_entry("admin"),
         "alice": passwd_entry("alice"),
         "bob": passwd_entry("bob"),
+        "motlie-build": passwd_entry("motlie-build"),
     },
     "group": {
         "admin": group_entry("admin"),
         "alice": group_entry("alice"),
         "bob": group_entry("bob"),
+        "motlie-build": group_entry("motlie-build"),
     },
 }
+for name in ("alice", "bob", "motlie-build"):
+    if payload["passwd"][name] is not None or payload["group"][name] is not None:
+        raise SystemExit(f"{name} must not be baked into the reusable v1.5 image")
 with open("/tmp/motlie-identity-probe.json", "w", encoding="utf-8") as fh:
     json.dump(payload, fh, sort_keys=True)
 PY
 EOF
 guest_fetch /tmp/motlie-identity-probe.json "$IDENTITY_PROBE_JSON"
 
-python3 - "$RESULT_JSON" "$CONTRACT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PROBE_JSON" <<'PY'
+python3 - "$RESULT_JSON" "$CONTRACT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$GUEST_BINARY" "$IDENTITY_PROBE_JSON" "$ROOTFS_INPUT_KIND" "$NATIVE_SOURCE_VM_DIR" "$ROOTFS_TARBALL_SOURCE" "$ROOTFS_TARBALL_SIZE_BYTES" "$ROOTFS_TARBALL_SHA256" <<'PY'
 import json
 import sys
 
-path, contract_path, vm_name, ip_addr, boot_seconds, guest_binary, identity_probe_json = sys.argv[1:]
+(
+    path,
+    contract_path,
+    vm_name,
+    ip_addr,
+    boot_seconds,
+    guest_binary,
+    identity_probe_json,
+    rootfs_input_kind,
+    native_source_vm_dir,
+    rootfs_tarball_source,
+    rootfs_tarball_size_bytes,
+    rootfs_tarball_sha256,
+) = sys.argv[1:]
 with open(identity_probe_json, "r", encoding="utf-8") as fh:
     identity_payload = json.load(fh)
+
+rootfs_input = {
+    "kind": rootfs_input_kind,
+    "native_source_vm_dir": native_source_vm_dir,
+    "apple_vz_constraints": {
+        "requires_bootable_efi_disk": True,
+        "requires_nvram": True,
+        "assembled_rootfs_tarball_applied_during_image_build": bool(rootfs_tarball_source),
+        "preserves_boot_artifacts_from_native_source_vm": True,
+    },
+}
+if rootfs_tarball_source:
+    rootfs_input["assembled_rootfs_tarball"] = rootfs_tarball_source
+    rootfs_input["assembled_rootfs_tarball_size_bytes"] = int(rootfs_tarball_size_bytes)
+    rootfs_input["assembled_rootfs_tarball_sha256"] = rootfs_tarball_sha256
 
 guest_contract = {
     "motlie_vfs_guest_path": guest_binary,
     "motlie_vfs_guest_marker": "MOTLIE_VMM_GUEST_MOUNTER_V1_5",
     "motlie_vfs_guest_build_features": "--no-default-features --features guest-vfs",
-    "users": {
-        "alice": {"uid": 1000, "gid": 1000, "password": "testpass"},
-        "bob": {"uid": 1001, "gid": 1001, "password": "testpass"},
-    },
+    "guest_identity": "per-guest seed/provisioning only; no alice/bob or future harness guests are baked into the reusable image",
     "agent_state": "/agent-state",
+    "rootfs_input": rootfs_input,
 }
 
 payload = {
@@ -1128,12 +1295,14 @@ payload = {
     "boot_to_ip_seconds": float(boot_seconds),
     "guest_contract": guest_contract,
     "identity_probe": identity_payload,
+    "rootfs_input": rootfs_input,
 }
 
 contract_payload = {
     "contract_version": "v1.5",
     "packaging_backend": "vz-native",
     "guest_contract": guest_contract,
+    "rootfs_input": rootfs_input,
 }
 
 for output_path, output_payload in (

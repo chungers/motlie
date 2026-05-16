@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$V15_DIR/../../../.." && pwd)"
 HARNESS_BIN="$REPO_ROOT/target/debug/examples/harness_v1_5"
 CONTROL_BASE="${MOTLIE_HARNESS_TMPDIR:-/tmp}"
 CONTROL_ROOT="$(mktemp -d "$CONTROL_BASE/motlie-vmm-v15-harness-isolation.XXXXXX")"
-BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V15_DIR/../v1.35/artifacts/source-base.vm}"
+BASE_VM_DIR="${MOTLIE_VZ_BASE_VM_DIR:-$V15_DIR/artifacts/source-base.vm}"
 
 cleanup_instance() {
     local fifo="$1"

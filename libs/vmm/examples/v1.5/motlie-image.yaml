@@ -1,0 +1,159 @@
+version: v1.5
+source:
+  kind: external-oci
+  image: docker.io/library/ubuntu:24.04
+  profile: ubuntu-systemd
+  platform: linux/arm64
+  digest_policy: pinned
+  image_index_digest: sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
+  platform_manifest_digest: sha256:7607b6f97024ef850f1bd6e91a89273beb5973d04432c5b87f15f813d64b9c05
+package_stage:
+  manager: apt
+  update: true
+  install:
+    - bash
+    - bubblewrap
+    - ca-certificates
+    - cloud-init
+    - coreutils
+    - curl
+    - dbus
+    - dnsutils
+    - fuse3
+    - git
+    - iproute2
+    - iputils-ping
+    - libfuse3-3
+    - locales
+    - npm
+    - openssh-server
+    - python3
+    - socat
+    - strace
+    - sudo
+    - systemd
+    - systemd-sysv
+    - tmux
+    - vim
+    - wget
+  npm_global:
+    - package: "@openai/codex"
+      binaries:
+        - codex
+    - package: "@anthropic-ai/claude-code"
+      binaries:
+        - claude
+  clean: true
+immutable_payloads:
+  - label: motlie-vfs-guest
+    source: target/release/motlie-vfs-guest-v1_5
+    guest_path: /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
+    mode: "0755"
+    links:
+      - /usr/local/bin/motlie-vfs-guest
+  - label: motlie-vsock-ssh-bridge
+    source: target/release/motlie-vsock-ssh-bridge-v1_5
+    guest_path: /opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge
+    mode: "0755"
+    links:
+      - /usr/local/bin/motlie-vsock-ssh-bridge
+sshd_policy:
+  trusted_user_ca_keys: /etc/ssh/ca/user_ca.pub
+  authorized_principals_file: /etc/ssh/auth_principals/%u
+  force_command: null
+services:
+  - name: motlie-vfs-guest.service
+    enable: cloud-init.target
+  - name: motlie-agent-state.service
+    enable: cloud-init.target
+  - name: motlie-vmm-vsock-ssh.service
+    enable: multi-user.target
+immutable_files:
+  - /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
+  - /usr/local/bin/motlie-vfs-guest
+  - /opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge
+  - /usr/local/bin/motlie-vsock-ssh-bridge
+  - /etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf
+  - /etc/systemd/system/motlie-vfs-guest.service
+  - /etc/systemd/system/motlie-agent-state.service
+  - /etc/systemd/system/motlie-vmm-vsock-ssh.service
+seed_files:
+  - /var/lib/cloud/seed/nocloud/user-data
+  - /var/lib/cloud/seed/nocloud/meta-data
+  - /etc/motlie/v1.5/backend.env
+  - /etc/motlie-vfs/mounts.yaml
+  - /etc/ssh/ca/user_ca.pub
+  - /etc/ssh/auth_principals/<user>
+  - /home/<user>/.env
+seed:
+  user_home: /home/{guest}
+  ssh_principal: "{guest}"
+  mounts:
+    - tag: "{guest}-home"
+      guest_path: /home/{guest}
+    - tag: "{guest}-workspace"
+      guest_path: /workspace
+    - tag: "{guest}-agent-state"
+      guest_path: /agent-state
+emitters:
+  - id: ch
+    adapter:
+      program: bash
+      args:
+        - libs/vmm/examples/v1.5/build-image.sh
+        - --backend
+        - ch
+      env:
+        artifact_dir: MOTLIE_V15_ARTIFACTS_DIR
+        build_config: MOTLIE_V15_BUILD_CONFIG
+        package_manager: MOTLIE_V15_PACKAGE_MANAGER
+        package_update: MOTLIE_V15_PACKAGE_UPDATE
+        package_include: MOTLIE_V15_PACKAGE_INCLUDE
+        package_clean: MOTLIE_V15_PACKAGE_CLEAN
+    seed:
+      motlie_backend: ch
+      motlie_net_backend: ch-vhost-user
+    validation:
+      artifact_dir_env: MOTLIE_V15_CH_BASE_ARTIFACTS_DIR
+      artifact_dir_suffix: base
+  - id: vz
+    # VZ source: this remains the Apple VZ EFI/NVRAM boot substrate until the
+    # native VZ emitter can create that container directly. It is v1.5-local by
+    # contract; pre-v1.5/v1.35 source VMs are intentionally unsupported.
+    # When MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL is set, the adapter consumes the
+    # common assembled rootfs payload during image build and records that
+    # handoff in guest-contract/build-result metadata.
+    materialized_source:
+      image: local://libs/vmm/examples/v1.5/artifacts/source-base.vm
+      profile: vz-native-systemd
+      platform: host-native-macos
+      materializer: apple-virtualization-source-vm
+    adapter:
+      program: bash
+      args:
+        - libs/vmm/examples/v1.5/build-image.sh
+        - --backend
+        - vz
+      env:
+        artifact_dir: MOTLIE_V15_ARTIFACTS_DIR
+        build_config: MOTLIE_V15_BUILD_CONFIG
+        package_manager: MOTLIE_V15_PACKAGE_MANAGER
+        package_update: MOTLIE_V15_PACKAGE_UPDATE
+        package_include: MOTLIE_V15_PACKAGE_INCLUDE
+        package_clean: MOTLIE_V15_PACKAGE_CLEAN
+        rootfs_tarball: MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL
+    seed:
+      motlie_backend: vz
+      motlie_net_backend: vz-userspace
+    validation:
+      artifact_dir_env: MOTLIE_VZ_ARTIFACTS_DIR
+      base_vm_dir_env: MOTLIE_VZ_BASE_VM_DIR
+      base_vm_dir_suffix: motlie-v1-5-base-iter.vm
+      base_vm_dir_required_files:
+        - disk.img
+        - nvram.bin
+validation:
+  - vfs_memfs
+  - internet_egress_package_update
+  - codex_cli
+  - claude_cli

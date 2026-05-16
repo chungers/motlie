@@ -59,12 +59,7 @@ pub(crate) fn resolved_native_source_dir(base_dir: &Path) -> PathBuf {
             return path;
         }
     }
-    let local = base_dir.join("artifacts/source-base.vm");
-    if local.join("disk.img").exists() && local.join("nvram.bin").exists() {
-        local
-    } else {
-        base_dir.join("../v1.35/artifacts/source-base.vm")
-    }
+    base_dir.join("artifacts/source-base.vm")
 }
 
 pub(crate) async fn wait_for_proxy_listener(

@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -182,6 +183,37 @@ impl VzShellBackend {
             .status()
             .is_ok_and(|status| status.success())
     }
+
+    fn terminate_pid_file(path: &Path) {
+        let Ok(pid) = fs::read_to_string(path) else {
+            return;
+        };
+        let pid = pid.trim();
+        if pid.is_empty() {
+            let _ = fs::remove_file(path);
+            return;
+        }
+
+        let _ = Command::new("kill").arg(pid).status();
+        for _ in 0..20 {
+            if !Self::pid_string_alive(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if Self::pid_string_alive(pid) {
+            let _ = Command::new("kill").arg("-9").arg(pid).status();
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    fn pid_string_alive(pid: &str) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 }
 
 impl VzShellHandle {
@@ -207,6 +239,18 @@ impl VzShellHandle {
                 source,
             }),
         }
+    }
+}
+
+impl Drop for VzShellHandle {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            if let Some(mut running_child) = child.take() {
+                let _ = running_child.kill();
+                let _ = running_child.wait();
+            }
+        }
+        VzShellBackend::terminate_pid_file(&self.runner_pid_file);
     }
 }
 
@@ -304,5 +348,23 @@ impl VzShellBackend {
             api_attempted: false,
             forced: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminate_pid_file_kills_tracked_process_and_removes_file() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let pid_file = tempdir.path().join("vz-runner.pid");
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        fs::write(&pid_file, child.id().to_string()).unwrap();
+
+        VzShellBackend::terminate_pid_file(&pid_file);
+
+        assert!(!pid_file.exists());
+        assert!(child.try_wait().unwrap().is_some());
     }
 }

@@ -26,7 +26,7 @@ ENABLE_GUEST_SSH_VSOCK="${MOTLIE_VZ_ENABLE_GUEST_SSH_VSOCK:-0}"
 EMBEDDED_EGRESS="${MOTLIE_VZ_EMBEDDED_EGRESS:-0}"
 KEEP_RUNNING="${MOTLIE_VZ_KEEP_RUNNING:-0}"
 REUSE_VM="${MOTLIE_VZ_REUSE_VM:-0}"
-NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/../v1.35/artifacts/source-base.vm}"
+NATIVE_SOURCE_VM_DIR="${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-$SCRIPT_DIR/artifacts/source-base.vm}"
 BASE_SOURCE_DIR=""
 RUN_VM_DIR=""
 EGRESS_SOCKET_PATH=""
@@ -101,8 +101,11 @@ native base artifacts are required for v1.5 guest launches
 Set:
   MOTLIE_VZ_BASE_VM_DIR
 
-Or build/populate the default native cache first:
+Or build/populate the v1.5 native cache first:
   $NATIVE_SOURCE_VM_DIR
+
+Pre-v1.5 VZ source images are intentionally unsupported. Rebuild v1.5
+artifacts instead of reusing v1.35 caches.
 EOF
   exit 1
 fi
@@ -1105,7 +1108,8 @@ if [[ -z "\$existing_gid" ]]; then
   fi
   printf '${CONTROL_PASSWORD}\n' | sudo -S groupadd -g $GID_NUM '$LOGIN_USER'
 elif [[ "\$existing_gid" != "$GID_NUM" ]]; then
-  echo "guest group $LOGIN_USER has gid \$existing_gid but expected $GID_NUM" >&2
+  echo "existing group $LOGIN_USER has gid \$existing_gid, expected $GID_NUM; stale baked guest identity in image" >&2
+  echo "rebuild v1.5 artifacts without baked guest users instead of mutating image identities at launch" >&2
   exit 1
 fi
 
@@ -1117,19 +1121,22 @@ if [[ -z "\$existing_uid" ]]; then
     exit 1
   fi
   printf '${CONTROL_PASSWORD}\n' | sudo -S useradd -m -u $UID_NUM -g $GID_NUM -s /bin/bash '$LOGIN_USER'
-elif [[ "\$existing_uid" != "$UID_NUM" ]]; then
-  echo "guest user $LOGIN_USER has uid \$existing_uid but expected $UID_NUM" >&2
-  exit 1
+else
+  existing_primary_gid="\$(id -g '$LOGIN_USER' 2>/dev/null || true)"
+  if [[ "\$existing_uid" != "$UID_NUM" || "\$existing_primary_gid" != "$GID_NUM" ]]; then
+    echo "existing user $LOGIN_USER has uid/gid \$existing_uid:\$existing_primary_gid, expected $UID_NUM:$GID_NUM; stale baked guest identity in image" >&2
+    echo "rebuild v1.5 artifacts without baked guest users instead of mutating image identities at launch" >&2
+    exit 1
+  fi
 fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S bash -c "printf '%s:%s\n' '$LOGIN_USER' 'testpass' | chpasswd"
 printf '${CONTROL_PASSWORD}\n' | sudo -S usermod -aG sudo '$LOGIN_USER' || true
-printf '%s\n' '${CONTROL_PASSWORD}' | sudo -S tee /etc/sudoers.d/90-motlie-demo >/dev/null <<SUDOERSEOF
-alice ALL=(ALL) NOPASSWD:ALL
-bob ALL=(ALL) NOPASSWD:ALL
+printf '%s\n' '${CONTROL_PASSWORD}' | sudo -S tee /etc/sudoers.d/90-motlie-guest >/dev/null <<SUDOERSEOF
 $LOGIN_USER ALL=(ALL) NOPASSWD:ALL
 SUDOERSEOF
-printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/sudoers.d/90-motlie-demo
-printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0440 /etc/sudoers.d/90-motlie-demo
+printf '${CONTROL_PASSWORD}\n' | sudo -S rm -f /etc/sudoers.d/90-motlie-demo
+printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/sudoers.d/90-motlie-guest
+printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0440 /etc/sudoers.d/90-motlie-guest
 printf '${CONTROL_PASSWORD}\n' | sudo -S install -d -m 0700 -o $UID_NUM -g $GID_NUM /home/$LOGIN_USER/.ssh
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /workspace
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0755 /workspace
@@ -1198,11 +1205,35 @@ fi
 if [[ ! -s /etc/profile.d/agent-state.sh ]]; then
   contract_missing+=("/etc/profile.d/agent-state.sh from the base image")
 fi
-if ! grep -q '^TrustedUserCAKeys /etc/ssh/ca/user_ca.pub$' /etc/ssh/sshd_config; then
-  contract_missing+=("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub baked into /etc/ssh/sshd_config")
+for strict_path in / /etc /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals; do
+  strict_owner="\$(stat -c '%u:%g' "\$strict_path" 2>/dev/null || true)"
+  strict_mode="\$(stat -c '%a' "\$strict_path" 2>/dev/null || true)"
+  if [[ "\$strict_owner" != "0:0" || "\$strict_mode" != "755" ]]; then
+    contract_missing+=(
+      "\$strict_path must be root:root 0755 for OpenSSH StrictModes; got owner=\${strict_owner:-unknown} mode=\${strict_mode:-unknown}"
+    )
+  fi
+done
+sshd_config_probe=/usr/sbin/sshd
+if [[ ! -x "\$sshd_config_probe" ]]; then
+  sshd_config_probe="\$(command -v sshd 2>/dev/null || true)"
 fi
-if ! grep -q '^AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u$' /etc/ssh/sshd_config; then
-  contract_missing+=("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u baked into /etc/ssh/sshd_config")
+if [[ -z "\$sshd_config_probe" ]]; then
+  contract_missing+=("sshd executable for effective CA policy validation")
+else
+  sshd_probe_err=/tmp/motlie-sshd-config.err
+  effective_sshd_config="\$(printf '${CONTROL_PASSWORD}\n' | sudo -S "\$sshd_config_probe" -T -C user=${LOGIN_USER},host=${GUEST_HOSTNAME},addr=127.0.0.1 2>"\$sshd_probe_err" || true)"
+  if [[ -z "\$effective_sshd_config" ]]; then
+    sshd_probe_error="\$(cat "\$sshd_probe_err" 2>/dev/null || true)"
+    contract_missing+=("sshd effective CA policy probe produced no config: \${sshd_probe_error:-unknown sshd -T failure}")
+  else
+    if ! printf '%s\n' "\$effective_sshd_config" | grep -q '^trustedusercakeys /etc/ssh/ca/user_ca.pub$'; then
+      contract_missing+=("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub effective in sshd config")
+    fi
+    if ! printf '%s\n' "\$effective_sshd_config" | grep -q '^authorizedprincipalsfile /etc/ssh/auth_principals/%u$'; then
+      contract_missing+=("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u effective in sshd config")
+    fi
+  fi
 fi
 if [[ ! -s /usr/local/bin/codex || ! -x /usr/local/bin/codex ]]; then
   contract_missing+=("/usr/local/bin/codex executable from the base image")
@@ -1244,6 +1275,10 @@ printf '${CONTROL_PASSWORD}\n' | sudo -S install -D -m 0644 /tmp/motlie-vmm-prin
 printf '${CONTROL_PASSWORD}\n' | sudo -S chown root:root /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 printf '${CONTROL_PASSWORD}\n' | sudo -S chmod 0644 /etc/ssh/ca/user_ca.pub /etc/ssh/auth_principals/${LOGIN_USER}
 motlie_guest_phase guest-runtime-files-installed
+# VZ parity with v1.45: do not reload/restart sshd in the first-contact path.
+# The sshd policy is immutable image content, and OpenSSH reads the CA and
+# AuthorizedPrincipals files during auth. Restarting sshd here introduces a
+# control-port race before the Rust SSH bridge can register the guest.
 printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
 motlie_guest_phase vfs-service-restarted
 mounts_ready=0

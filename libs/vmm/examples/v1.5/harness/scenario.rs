@@ -1096,7 +1096,12 @@ fn check_exec_expectation(
             return Err(TerminalSessionError::Assertion {
                 step: "exec",
                 expected: format!("exit code {exit_code}"),
-                observed_excerpt: format!("actual exit code {}", output.exit_code),
+                observed_excerpt: format!(
+                    "actual exit code {}; stdout: {}; stderr: {}",
+                    output.exit_code,
+                    excerpt(&output.stdout),
+                    excerpt(&output.stderr)
+                ),
             }
             .into());
         }
@@ -1122,6 +1127,15 @@ fn check_exec_expectation(
         }
     }
     Ok(())
+}
+
+fn excerpt(value: &str) -> String {
+    const LIMIT: usize = 1200;
+    let mut out: String = value.replace('\n', "\\n").chars().take(LIMIT).collect();
+    if value.chars().count() > LIMIT {
+        out.push_str("...");
+    }
+    out
 }
 
 fn classify_driver_failure(error: &ScenarioDriverError) -> DriverFailure {

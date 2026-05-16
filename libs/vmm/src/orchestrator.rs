@@ -445,8 +445,12 @@ impl VmHandle {
     }
 
     pub async fn ready(&self, policy: &ReadinessPolicy) -> Result<(), OrchestratorError> {
+        let trace_ready = std::env::var_os("MOTLIE_VMM_READY_TRACE").is_some();
         match self.backend_handle.kind() {
             BackendKind::ChShell | BackendKind::ChForkExec | BackendKind::ChVmmThread => {
+                if trace_ready {
+                    eprintln!("motlie-vmm-ready[{}]: wait api socket", self.guest_id);
+                }
                 self.wait_for_path(
                     &self.runtime_paths.api_socket,
                     ReadinessStage::ApiSocketReady,
@@ -454,13 +458,31 @@ impl VmHandle {
                 )
                 .await?;
 
+                // CH ready() includes the mounted filesystem contract because
+                // the scenario driver immediately validates VFS paths after
+                // boot. VNET/egress certification remains explicit in the
+                // harness scenario steps.
+                if let Some(control_plane) = self.control_plane.as_ref() {
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: wait ssh bridge", self.guest_id);
+                    }
+                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: exec /bin/true", self.guest_id);
+                    }
+                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: exec ready", self.guest_id);
+                    }
+                }
                 if let Some(filesystem) = self.filesystem.as_ref() {
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: wait vfs", self.guest_id);
+                    }
                     filesystem.wait_ready(policy.guestfs_timeout).await?;
                 }
-
-                if let Some(control_plane) = self.control_plane.as_ref() {
-                    control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
-                    self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                if trace_ready {
+                    eprintln!("motlie-vmm-ready[{}]: ready", self.guest_id);
                 }
             }
             BackendKind::Vz => {
@@ -469,12 +491,27 @@ impl VmHandle {
                 // SSH, not full VFS/VNET/egress certification. Full
                 // validation remains explicit in harness validate/scenario.
                 if let Some(control_plane) = self.control_plane.as_ref() {
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: wait ssh bridge", self.guest_id);
+                    }
                     control_plane.wait_ready(policy.ssh_bridge_timeout).await?;
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: exec /bin/true", self.guest_id);
+                    }
                     self.exec("/bin/true", policy.exec_ready_timeout).await?;
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: ssh ready", self.guest_id);
+                    }
                 }
 
                 if let Some(filesystem) = self.filesystem.as_ref() {
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: wait vfs", self.guest_id);
+                    }
                     filesystem.wait_ready(policy.guestfs_timeout).await?;
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{}]: ready", self.guest_id);
+                    }
                 }
             }
         }

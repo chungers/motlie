@@ -4,6 +4,8 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-15 | @vmm-cdx | Remove pre-v1.5 VZ image compatibility from the harness contract: stale baked guest users now fail closed, fresh v1.5 artifacts are required, and failed readiness cleans up VZ runners |
+| 2026-05-15 | @vmm-cdx | Record the CH-to-VZ rootfs handoff: `mbuild build --target ch` emits `assembled-rootfs.tar` with digest evidence, VZ consumes that tarball during image build without baking demo guest identities, and the Codex PTY scenario now checks stable welcome text instead of a layout-dependent footer |
 | 2026-05-05 | @vmm-cdx | Fix CH guest boot-graph cycles by moving the VFS/agent-state units under `cloud-init.target`, and update the PTY Codex welcome assertion to the current footer text |
 | 2026-05-04 | @codex-vz | Remove the standalone `vz_egress_helper_v1_5`; VZ egress is hosted by `harness_v1_5` either as embedded runtime state or the `vz-egress` image-build subcommand |
 | 2026-05-04 | @codex-vz | Move default VZ userspace egress into the VMM runtime/harness path and make `launch-vz.sh` consume, not own, the egress socket |
@@ -127,6 +129,34 @@ The v1.5 builders bake smoke-image hardening during image assembly:
 
 This is image content, not first-contact repair. If a backend cannot use this
 hardening, document the technical reason before diverging.
+
+For the VZ #271 bridge, `mbuild build --target ch` emits
+`assembled-rootfs.tar` and `mbuild-common-rootfs.json` from the common
+OCI-derived rootfs before CH-specific boot adaptations. `build-guest.sh` accepts
+that tarball through `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is
+copied through the build seed disk and applied while producing VZ artifacts; the
+emitted `build-result.json` and `guest-contract.json` record `rootfs_input`
+with the canonical tarball path, byte size, and sha256 digest. The VZ adapter
+pre-scans the tarball before copying and verifies the seeded guest copy before
+root extraction. After extraction it normalizes OpenSSH StrictModes path
+ancestors (`/`, `/etc`, and `/etc/ssh/*`) to `root:root 0755`; launch-time
+provisioning must fail fast if this image contract is broken rather than
+weakening sshd. `mbuild build --target vz --rootfs-tarball <tar>` is the
+preferred macOS entrypoint because the builder validates the tarball and passes
+it through the configured VZ adapter env. This is the only allowed transitional
+handoff from the common rootfs assembler into the Apple VZ adapter. Harness
+launch, `ready`, first SSH, and scenario steps must consume the completed
+artifacts only; they must not run rootfs assembly, package installation, npm
+repair, or guest binary builds. Reusable VZ image build must not bake demo
+guest identities; `alice`, `bob`, and future harness guests are provisioned from
+per-guest seed/runtime inputs.
+
+v1.5 is greenfield in the product sense. The harness does not preserve
+compatibility with pre-v1.5 cached VZ disks or v1.35 source VMs. If launch-time
+provisioning finds a requested principal already present with a different
+UID/GID, that is a stale image regression and the run fails; it is not repaired
+with `usermod`/`groupmod`. Rebuild through `mbuild` and rerun the full CH/VZ
+scenario matrix from fresh artifacts.
 
 The first-contact path must fail fast when immutable base-image content is
 missing. Rebuild the image; do not add hidden runtime repair to `launch-vz.sh`

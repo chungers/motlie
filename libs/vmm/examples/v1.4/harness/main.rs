@@ -918,12 +918,14 @@ fn classify_runtime_failure(stage: &'static str, error: &RuntimeError) -> Scenar
             message: error.to_string(),
         },
         RuntimeError::Ssh(ssh) => classify_ssh_failure(stage, ssh),
-        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) | RuntimeError::VzEgress(_) => ScenarioFailure {
-            class: FailureClass::Network,
-            stage,
-            code: "vnet_failed",
-            message: error.to_string(),
-        },
+        RuntimeError::Vnet(_) | RuntimeError::VnetShutdown(_) | RuntimeError::VzEgress(_) => {
+            ScenarioFailure {
+                class: FailureClass::Network,
+                stage,
+                code: "vnet_failed",
+                message: error.to_string(),
+            }
+        }
         RuntimeError::UnsupportedHypervisor => ScenarioFailure {
             class: FailureClass::Backend,
             stage,

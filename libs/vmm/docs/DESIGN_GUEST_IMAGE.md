@@ -4,6 +4,18 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-15 | @vmm-cdx | Address PR #270 regression feedback for the greenfield v1.5 contract: pre-v1.5 VZ source images are unsupported, reusable images must not bake harness users, and failed readiness must clean up VZ runners |
+| 2026-05-15 | @vmm-cdx | Merge the VZ rootfs handoff bridge and tighten issue #271 closure: the CH native OCI builder now emits `assembled-rootfs.tar` plus digest evidence for VZ consumption, and VZ image build no longer intentionally bakes demo users |
+| 2026-05-14 | @vmm-cdx | Complete the Linux/CH native OCI builder path for issue #271: `mbuild build --target ch` now imports pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH harness matrix |
+| 2026-05-12 | @codex-vz | Add the VZ contributor handoff for issue #271: the VZ emitter can consume an assembled rootfs tarball during image build, records that rootfs input in emitted artifacts, and still documents the remaining Apple VZ EFI/NVRAM boot-container constraint |
+| 2026-05-11 | @vmm-cdx | Strengthen the `mbuild` build-file contract: YAML config rejects unknown fields, APT package entries use package-manager-aware validation, and `mbuild validate` compares manifests back to the current config |
+| 2026-05-11 | @vmm-cdx | Tighten the `mbuild` contract after PR #270 review: current configs identify transitional shell adapters honestly, record per-emitter materialized sources, make seed topology config-driven, keep only apt executable for now, and move seed uid/gid handling to guest ownership metadata instead of host chown |
+| 2026-05-09 | @vmm-cdx | Expand the issue #271 `mbuild` design status: app-layer CLI delegates current CH/VZ adapters, emits artifact digests, regenerates per-guest seed overlays, and delegates optional live harness validation with a validation manifest |
+| 2026-05-09 | @vmm-cdx | Add the initial issue #271 product surface: `libs/vmm/examples/v1.5/motlie-image.yaml` and the standalone top-level `mbuild` builder/validator binary, currently emitting a stage manifest while package/emitter execution remains pending |
+| 2026-05-09 | @vmm-cdx | Record GitHub issue #271 as a v1.5 demo success criterion: a Dockerfile-like build spec plus standalone top-level `mbuild` CLI must drive the staged image builder before the demo is accepted |
+| 2026-05-09 | @vmm-cdx | Split immutable rootfs compatibility assembly from per-guest seed overlay emission; document NoCloud seed ownership, uid/gid ownership enforcement, VFS readiness waiting, dynamic backend.env sourcing, and fail-loud CH egress setup |
+| 2026-05-08 | @vmm-cdx | Address PR #270 feedback in the rootfs assembler contract: install SSHD CA trust directives, make the vsock SSH loop consume backend.env, and require strict mount YAML-safe tag/path values |
+| 2026-05-07 | @vmm-cdx | Add the first rootfs compatibility assembler design: mutate imported rootfs trees with v1.5 Motlie files, emit a machine-readable manifest, and record package/runtime requirements still pending for later builder/emitter stages |
 | 2026-05-07 | @vmm-cdx | Tighten rootfs classifier executable probes so package-manager and systemd indicators require resolved regular files, not merely existing paths |
 | 2026-05-07 | @vmm-cdx | Harden the rootfs classifier trust boundary: path reads/classification use guest-root-aware symlink resolution, escaping symlinks are rejected, and `/sbin/init` is accepted only when it resolves to systemd |
 | 2026-05-07 | @vmm-cdx | Define the rootfs classifier requirements and design: stable VMM/VFS/VNET invariants stay typed in Rust while admin/profile package, mount, and init requirements are data driven |
@@ -391,6 +403,8 @@ The seed schema is common. Backend packaging may differ.
 Seed-owned files:
 
 ```text
+/var/lib/cloud/seed/nocloud/user-data
+/var/lib/cloud/seed/nocloud/meta-data
 /etc/motlie/v1.5/backend.env
 /etc/motlie-vfs/mounts.yaml
 /etc/ssh/ca/user_ca.pub
@@ -398,7 +412,13 @@ Seed-owned files:
 /home/<user>/.env
 ```
 
-Cloud-init owns:
+The rootfs builder must keep those files out of the immutable common rootfs.
+They are emitted per guest as NoCloud seed content or as an ephemeral/persistent
+overlay applied before boot. Cloud-init consumes `user-data` and `meta-data`.
+The Motlie guest services consume `backend.env`, `mounts.yaml`, SSH principal
+material, and user environment files from the same per-guest seed/overlay.
+
+Seed/overlay-owned dynamic semantics:
 
 - user creation
 - uid/gid
@@ -615,8 +635,8 @@ Pre-boot adaptation owns:
   `/agent-state`, and `/home/<user>` templates where the image policy requires
   them
 - installing baseline packages required by the selected validation profile
-- installing backend-neutral config schemas such as
-  `/etc/motlie/v1.5/backend.env` and `/etc/motlie-vfs/mounts.yaml`
+- creating backend-neutral config directories and service defaults; concrete
+  `backend.env` and `mounts.yaml` contents are per-guest seed/overlay files
 - enabling the CH egress setup service only in CH-emitted artifacts when CH
   requires guest-side route/DNS programming
 
@@ -680,6 +700,17 @@ Implications for VZ:
 - A file-handle storage path may be possible through
   `VZDiskBlockDeviceStorageDeviceAttachment`, but that is a different backend
   contract and should be designed explicitly before becoming the default.
+- The current `examples/v1.5/build-guest.sh` VZ adapter has an explicit
+  contributor bridge for #271: `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` copies a
+  common builder-emitted rootfs tarball through the VZ seed disk, applies it
+  during image build, and records `rootfs_input` in `build-result.json` and
+  `guest-contract.json`. This is image-build work only; launch and first SSH
+  must not apply rootfs payloads, install packages, or build binaries.
+- That bridge does not remove the Apple VZ boot-container problem. Until the
+  durable VZ emitter can synthesize a bootable VZ disk from the OCI rootfs
+  contract, the adapter still preserves EFI, NVRAM, and boot partition content
+  from a native source VM and overlays the assembled rootfs payload into that
+  container.
 
 Implications for CH:
 
@@ -797,12 +828,12 @@ and profile-specific requirements once a second base image is implemented.
 
 `libs/vmm/src/image.rs` is the first Rust surface for this roadmap. It resolves
 registry manifest metadata, fetches selected platform manifests and layer blobs
-into a content-addressed cache, parses selected platform manifests, and unpacks
-digest-checked rootfs layer blobs into a deterministic assembly root. It
-establishes the typed metadata that later classifier, assembler, emitter,
-harness, and CI code must share. It now classifies the imported rootfs against a
-data-driven profile before compatibility-layer assembly. It does not yet emit VM
-boot artifacts.
+into a content-addressed cache, parses selected platform manifests, unpacks
+digest-checked rootfs layer blobs into a deterministic assembly root, classifies
+that rootfs, and applies the first mutation-only Motlie compatibility layer. It
+establishes the typed metadata that classifier, assembler, emitter, harness, and
+CI code must share. It does not yet run package-manager installation and it does
+not yet emit VM boot artifacts.
 
 - `OciPlatform` and `GuestArchitecture` record the selected OCI platform.
 - `OciDigest` records immutable image-index, platform-manifest, and emitted
@@ -855,6 +886,28 @@ boot artifacts.
   `/lib/systemd/systemd`. Package-manager and systemd indicator probes require
   resolved regular files; directories or other non-file path types are not
   accepted as present.
+- `RootfsCompatibilityAssembler` applies the immutable Motlie compatibility
+  layer to a supported imported rootfs. It installs v1.5 guest payloads under
+  `/opt/motlie/v1.5/guest/bin`, exposes compatibility symlinks under
+  `/usr/local/bin`, installs the `ubuntu-systemd` service graph, creates stable
+  directories, installs SSHD CA trust directives, and emits
+  `RootfsCompatibilityAssemblyManifest` with installed paths and pending
+  requirements. The native support file set includes the Rust guest
+  vsock-to-SSH bridge and tmux auto-start profile used by PTY/TUI validation.
+  It does not write per-guest `backend.env`, `mounts.yaml`, SSH principals,
+  sudo/user env files, or cloud-init seed files.
+- `RootfsSeedOverlayAssembler` emits the per-guest seed/overlay layer. It writes
+  NoCloud `user-data` / `meta-data`, `backend.env`, `mounts.yaml`, SSH CA and
+  principal material, sudoers, and user `.env` files. User seeds require uid/gid
+  so cloud-init can create the OS user and the seed manifest can carry desired
+  guest ownership for user-owned files such as `/home/<user>/.env`. The seed
+  overlay writer does not call host `chown`; that would fail on macOS and
+  non-root hosts and would make the seed command backend-host-specific.
+  Cloud-init preserves OCI-provided apt sources and uses scalar passwordless
+  sudo rules so Ubuntu guests keep valid release suites and `sudo -n` works.
+  Missing installable packages or missing systemd remain explicit manifest
+  evidence unless the caller runs a concrete package strategy; the supported apt
+  strategy is implemented for the v1.5 CH path.
 
 ### Rootfs Classifier Requirements And Design
 
@@ -909,12 +962,219 @@ must fail if a caller combines the Ubuntu profile name with a different source
 image or init profile. SHA-family OCI digests must be full-length digests, not
 short placeholders, because validation records are provenance artifacts.
 
-The current helper
-`OciPlatform::default_for_v1_5_validation_backend(BackendKind)` is only a lab
-default: CH validation currently targets native amd64 DGX hosts and VZ
-validation currently targets Apple Silicon arm64 hosts. The selected platform
-remains explicit in `ExternalOciSource` and must be supplied by callers when a
-different CH or VZ host architecture is used.
+### Rootfs Compatibility And Seed Overlay Requirements And Design
+
+The immutable compatibility assembler is the first mutating step after rootfs
+import and classification. Its job is to turn a supported foundation rootfs into
+a reusable Motlie v1.5 rootfs contract before any CH or VZ backend emitter
+packages it. Per-guest state is a separate seed/overlay emission step.
+
+Functional requirements:
+
+- The assembler input is an imported rootfs path plus a typed
+  `RootfsCompatibilityLayerSpec`.
+- The assembler must classify the rootfs first and refuse `unsupported`
+  foundations. Mutation only begins after the read-only classifier reports a
+  supported foundation.
+- The compatibility assembler installs immutable Motlie contract files only:
+  guest binaries, support scripts, systemd units, compatibility symlinks,
+  profile scripts, SSHD CA trust directives, backend-neutral directories, and
+  required mount-point directories.
+- The compatibility assembler must not write per-guest state into the common
+  rootfs: no `backend.env`, no `mounts.yaml`, no NoCloud seed, no SSH
+  principals, no sudoers, and no user `.env` files.
+- `RootfsSeedOverlayAssembler` owns the per-guest seed/overlay layer:
+  NoCloud `user-data` and `meta-data`, `backend.env`, `mounts.yaml`, SSH CA key,
+  auth principals, sudoers, and user `.env` files.
+- User seed entries require uid/gid. The seed overlay renders cloud-init user
+  creation and records the same uid/gid as desired guest ownership metadata for
+  user-owned seed files. The portable seed command must not rely on host
+  `chown`; backend emitters or guest boot mechanisms must preserve or apply that
+  metadata when they package seed files into a boot artifact.
+- The assembler must not run apt, dpkg, systemctl, chroot, SSH, TTY, or any
+  backend-specific emitter operation. Package-manager execution belongs to a
+  later builder/package strategy. Backend artifact packaging belongs to CH/VZ
+  emitters.
+- Missing installable requirements are explicit data. The default policy records
+  them in `RootfsCompatibilityAssemblyManifest.pending_requirements`; a stricter
+  caller can fail on installable pending requirements.
+- The built-in `ubuntu-systemd` package baseline mirrors the current v1.5
+  validation image assumptions, including systemd/cloud-init, OpenSSH/sudo,
+  VFS/FUSE support, networking/debugging tools, `socat` for the vsock SSH loop,
+  and coding-agent CLI prerequisites such as `git` and `npm`. Production
+  builders can supply a different package set through `RootfsProfileSpec`.
+- SSH CA auto-provisioning is split: the common rootfs installs the OpenSSH
+  drop-in at `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` and an empty
+  `/etc/ssh/ca/user_ca.pub` placeholder, while the seed overlay supplies the
+  per-guest CA key contents and `/etc/ssh/auth_principals/<user>`.
+- The vsock SSH loop re-sources `/etc/motlie/v1.5/backend.env` inside its retry
+  loop so seed/overlay refreshes are visible without relying on stale shell
+  variables. The default remains port `2222`.
+- `motlie-agent-state-setup` waits for `/agent-state` and the target home
+  directory to appear in `/proc/mounts` before bind-mounting agent state into
+  the guest home. The unit graph therefore does not depend on `Type=notify`,
+  but the script has an explicit readiness contract rather than only
+  `After=motlie-vfs-guest.service`.
+- CH egress setup must fail loudly if the selected egress interface cannot be
+  brought up. Skipping route/DNS configuration after a failed `ip link set up`
+  is not a successful boot contract.
+- Mount config rendering stays manual for this first slice, but it is not
+  freeform: mount tags and mount guest-path components must be ASCII tokens
+  using only letters, digits, `_`, `-`, or `.`. Guest mount paths must be
+  absolute, non-root paths. This keeps the YAML surface deterministic until a
+  later typed config serializer is introduced.
+- Runtime requirements such as `/dev/fuse` stay visible as pending runtime
+  provisioning rather than being hidden by rootfs mutation.
+- All writes must stay inside the imported rootfs. Parent path symlinks are
+  rejected during writes so a hostile or malformed OCI rootfs cannot redirect
+  assembler output into the host filesystem.
+- The manifest must be machine-readable and sufficient for later emitters and
+  harness/CI to explain what was installed and what remains pending.
+
+The first API surface is:
+
+```rust
+let mut rootfs_spec = RootfsCompatibilityLayerSpec::new(rootfs_profile_spec);
+rootfs_spec.guest_binaries.push(
+    RootfsPayloadFile::new(host_guest_binary, MOTLIE_V15_GUEST_BIN_OPT, 0o755)
+        .with_link(MOTLIE_V15_GUEST_BIN_COMPAT),
+);
+
+let rootfs_manifest = RootfsCompatibilityAssembler::new().assemble(rootfs, &rootfs_spec)?;
+
+let mut seed_spec = RootfsSeedOverlaySpec::new(
+    RootfsCloudInitSeed::new("alice", "motlie-alice"),
+    RootfsCompatibilityBackendEnv::for_backend("ch", "ch-vhost-user"),
+);
+seed_spec.mounts.push(RootfsMountSpec::new("alice-workspace", "/workspace"));
+let mut alice = RootfsUserSeed::new("alice", "alice");
+alice.uid = Some(1000);
+alice.gid = Some(1000);
+seed_spec.users.push(alice);
+
+let seed_manifest = RootfsSeedOverlayAssembler::new().assemble(seed_overlay_root, &seed_spec)?;
+```
+
+The manifest is the handoff contract for the next slices:
+
+- Package strategy consumes the selected profile/package stage and either
+  installs the package/profile baseline or rejects the image before emit. The
+  first implemented strategy is apt plus configured npm globals for the Ubuntu
+  profile.
+- CH/VZ emitters consume the mutated rootfs plus installed-path metadata and add
+  only backend artifact packaging, seed overlays, kernel/disk metadata, and
+  backend-specific launch inputs.
+- Harness validation records consume the source profile plus emitted artifact
+  digests and prove v1.5 parity against CH and VZ.
+
+The Linux/CH issue #271 validation on 2026-05-14 used the checked-in
+`linux/arm64` Ubuntu OCI platform. VZ validation currently targets Apple
+Silicon arm64 hosts. Platform selection must remain an explicit image-builder
+input so a different CH or VZ host architecture cannot silently validate the
+wrong OCI platform variant.
+
+### Dockerfile-Like Builder Contract For v1.5 Demo
+
+GitHub issue #271 is the tracking issue for the durable v1.5 image-builder
+contract. PR #270 introduces lower-level implementation stages plus the first
+checked-in config/CLI surface. It must not be read as making Rust structs the
+product interface. The v1.5 demo is accepted only after #271 is closed by the
+config-driven builder running the full staged image flow.
+
+The current checked-in `motlie-image.yaml` uses `source.kind = external-oci`
+with pinned `docker.io/library/ubuntu:24.04` image-index and selected
+platform-manifest digests. The Linux/CH emitter consumes that native
+source/import/package/compatibility path. The VZ emitter still records its
+current `materialized_source` for the macOS source-VM adapter until VZ consumes
+the same assembled OCI rootfs path.
+
+The VZ side of this transition must be explicit. The Linux/CH native OCI build
+emits a common `assembled-rootfs.tar` before CH-specific boot adaptations are
+applied. That tarball is the cross-backend immutable rootfs handoff. When
+`mbuild build --target vz --rootfs-tarball <tar>` is run on macOS, the builder
+passes the tarball through the configured VZ adapter environment as
+`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` so VZ consumes the same logical rootfs
+contract as CH while still adapting it into Apple VZ's required disk/NVRAM boot
+shape. The emitted CH and VZ artifacts must include the canonical tarball path,
+byte size, and sha256 digest so validation evidence distinguishes
+"native-source VM only" from "assembled rootfs consumed by VZ emitter." Closing
+#271 requires VZ live harness validation from the `mbuild`-emitted tarball. The
+VZ bridge must also normalize OpenSSH StrictModes path ancestors after overlay
+extraction so CA auth remains a launch-time consumption of image state, not a
+reason to weaken sshd or rerun build work during guest startup. Guest demo
+identities are per-guest provisioning state; reusable VZ images must not bake
+`alice`, `bob`, or any later harness guest.
+
+This is greenfield v1.5 product work. There is no migration or backward
+compatibility requirement for pre-v1.5 cached VZ disks, v1.35 source VMs, or
+images that already contain harness principals. Launch-time provisioning must
+fail loudly if the image contains a requested guest with a different UID/GID;
+it must not migrate stale baked users in place. The accepted path is to rebuild
+fresh v1.5 artifacts through `mbuild`, with per-guest identity, uid/gid,
+sudoers, CA principals, mounts, and backend routing supplied by seed/runtime
+inputs.
+
+Required product surface:
+
+- checked-in Dockerfile-like config:
+  `libs/vmm/examples/v1.5/motlie-image.yaml`
+- strict schema loading that rejects unknown fields so typos and unsupported
+  directives do not silently pass
+- ordered stages for source resolve, import, classify, package install,
+  immutable Motlie layer, image policy, seed overlay, backend emission, and
+  validation
+- explicit immutable image files versus per-guest seed files
+- package-manager stages for apt first, with package-manager-aware package
+  spec validation; apk/dnf/zypper/pacman identifiers are reserved but rejected
+  until concrete package strategies are implemented
+- config-driven seed topology for user home, SSH principal, and mount
+  declarations so the CLI does not hardcode example paths
+- sshd image policy for CA trust, ForceCommand/on-login hooks, and reusable
+  hardening; dynamic CA key and principals stay seed data
+- CH and VZ emitter targets from the same immutable rootfs contract
+- validation requirements for VFS memfs views, egress/package-index refresh,
+  Codex startup, and Claude startup
+
+The standalone binary is the durable operator/CI entrypoint:
+
+```sh
+mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out artifacts/v1.5/ch
+mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
+mbuild seed --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --guest alice --uid 2001 --gid 2001 --out artifacts/v1.5/seed/alice
+mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch --require-executed --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+```
+
+`RootfsClassifier`, `RootfsCompatibilityAssembler`, and
+`RootfsSeedOverlayAssembler` are builder stages behind that config/CLI
+contract. Downstream CH/VZ emitters should consume stage manifests from the
+builder, not reconstruct the lifecycle from example shell scripts.
+
+Current binary location:
+
+```text
+bins/mbuild/src/main.rs
+```
+
+`mbuild build` consumes the config and writes `mbuild-manifest.json` with source
+kind, package intent, source/import/classify/package/immutable-layer/policy/
+backend-emitter evidence, and emitted artifact digests. `mbuild
+validate` compares the manifest source, package stage, immutable files, seed
+files, validation list, and executed adapter materialized source back to the
+current config. A manifest produced from an older build file is not valid
+evidence for the current build file. The CH build path is native external OCI.
+The VZ build path remains adapter-backed until it derives VZ artifacts from the
+assembled OCI rootfs path.
+`mbuild seed` writes `mbuild-seed-manifest.json` and regenerates per-guest
+NoCloud/backend/VFS/SSH/user seed files without rebuilding the immutable image.
+`mbuild validate --scenario` delegates live conformance to `harness_v1_5` and
+writes `mbuild-validation-manifest.json` with the harness command, log path,
+scenario, target, and exit status.
+
+Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`): artifact
+`/tmp/mbuild-pr270-oci-ch-7` was built with `mbuild build --target ch`,
+validated with `mbuild validate --require-executed`, and passed
+`multiguest-validate`, `auto-provision-ssh`, `agent-bootstrap`,
+`pty-agent-validation`, and `pty-login`.
 
 ## Success Criteria
 
@@ -939,6 +1199,11 @@ v1.5 succeeds when:
     rootfs assembler, per-arch OCI guest payloads, backend emitters that
     consume those payloads, and a final published multi-arch OCI guest image
     reference.
+11. GitHub issue #271 is closed by the v1.5 demo: a Dockerfile-like checked-in
+    builder spec and standalone top-level `mbuild` binary drive the image build,
+    validation, and machine-readable stage manifests through the native OCI
+    source/import/package/emitter path rather than only transitional shell
+    adapters.
 
 ## v1.5 Functional Parity Acceptance
 
