@@ -2,13 +2,13 @@ use std::cmp::{max, min};
 
 use ansi_to_tui::IntoText;
 use motlie_tmux::strip_ansi;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as TuiSpan, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::consts::{
@@ -930,7 +930,7 @@ fn modal_content_width(view: &ModalView) -> u16 {
         .into_iter()
         .max()
         .unwrap_or(0),
-        ModalBody::RenameSession { input } => {
+        ModalBody::RenameSession { input, .. } => {
             max("Session Name".chars().count(), input.chars().count())
         }
         ModalBody::SendKeys { label, .. } => {
@@ -994,11 +994,14 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
         }
         ModalBody::NewSession {
             input,
+            input_cursor,
             host_label,
             host_count,
             env_rows,
             env_key_input,
+            env_key_cursor,
             env_value_input,
+            env_value_cursor,
             focus,
         } => {
             draw_new_session_body(
@@ -1006,31 +1009,37 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
                 area,
                 NewSessionBody {
                     input,
+                    input_cursor: *input_cursor,
                     host_label,
                     host_count: *host_count,
                     env_rows,
                     env_key_input,
+                    env_key_cursor: *env_key_cursor,
                     env_value_input,
+                    env_value_cursor: *env_value_cursor,
                     focus: *focus,
                 },
             );
         }
-        ModalBody::RenameSession { input } => {
-            draw_labeled_text_field(frame, area, "Session Name", input, true);
+        ModalBody::RenameSession { input, cursor } => {
+            draw_labeled_text_field(frame, area, "Session Name", input, *cursor, true);
         }
         ModalBody::SendKeys {
             label,
             input,
+            cursor,
             focused,
         } => {
-            draw_labeled_multiline_text_field(frame, area, label, input, *focused);
+            draw_labeled_multiline_text_field(frame, area, label, input, *cursor, *focused);
         }
         ModalBody::SessionKeyValues {
             kind,
             rows,
             selected_key,
             key_input,
+            key_cursor,
             value_input,
+            value_cursor,
             focus,
         } => {
             draw_session_key_values_body(
@@ -1041,7 +1050,9 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
                     rows,
                     selected_key,
                     key_input,
+                    key_cursor: *key_cursor,
                     value_input,
+                    value_cursor: *value_cursor,
                     focus: *focus,
                 },
             );
@@ -1051,11 +1062,14 @@ fn draw_modal_body(frame: &mut Frame<'_>, area: Rect, body: &ModalBody) {
 
 struct NewSessionBody<'a> {
     input: &'a str,
+    input_cursor: usize,
     host_label: &'a Option<String>,
     host_count: usize,
     env_rows: &'a [SessionKeyValueRow],
     env_key_input: &'a str,
+    env_key_cursor: usize,
     env_value_input: &'a str,
+    env_value_cursor: usize,
     focus: NewSessionFocus,
 }
 
@@ -1089,6 +1103,7 @@ fn draw_new_session_body(frame: &mut Frame<'_>, area: Rect, body: NewSessionBody
         session_area,
         "Session name",
         body.input,
+        body.input_cursor,
         body.focus == NewSessionFocus::Name,
     );
     y = session_y.saturating_add(field_height + 1);
@@ -1110,7 +1125,9 @@ fn draw_new_session_body(frame: &mut Frame<'_>, area: Rect, body: NewSessionBody
             rows: body.env_rows,
             selected_key: &no_selected_key,
             key_input: body.env_key_input,
+            key_cursor: body.env_key_cursor,
             value_input: body.env_value_input,
+            value_cursor: body.env_value_cursor,
             focus: env_focus,
         },
     );
@@ -1121,7 +1138,9 @@ struct SessionKeyValueBody<'a> {
     rows: &'a [SessionKeyValueRow],
     selected_key: &'a Option<String>,
     key_input: &'a str,
+    key_cursor: usize,
     value_input: &'a str,
+    value_cursor: usize,
     focus: SessionKeyValueFocus,
 }
 
@@ -1192,7 +1211,9 @@ fn draw_session_key_values_body(frame: &mut Frame<'_>, area: Rect, body: Session
             frame,
             Rect::new(area.x, row_y, area.width, 1),
             body.key_input,
+            body.key_cursor,
             body.value_input,
+            body.value_cursor,
             body.focus,
             columns,
         );
@@ -1239,12 +1260,19 @@ struct SendKeysInputView {
     cursor_y: u16,
 }
 
-fn send_keys_input_view(input: &str, width: usize, visible_rows: usize) -> SendKeysInputView {
+fn send_keys_input_view(
+    input: &str,
+    cursor: usize,
+    width: usize,
+    visible_rows: usize,
+) -> SendKeysInputView {
     let width = max(1, width);
     let visible_rows = max(1, visible_rows);
     let lines = send_keys_wrapped_lines(input, width);
-    let cursor_row = lines.len().saturating_sub(1);
-    let cursor_col = lines
+    let prefix = &input[..char_to_byte_index(input, min(cursor, input.chars().count()))];
+    let cursor_lines = send_keys_wrapped_lines(prefix, width);
+    let cursor_row = cursor_lines.len().saturating_sub(1);
+    let cursor_col = cursor_lines
         .last()
         .map(|line| min(char_width(line), width.saturating_sub(1)))
         .unwrap_or(0);
@@ -1585,7 +1613,9 @@ fn draw_session_key_value_input_row(
     frame: &mut Frame<'_>,
     area: Rect,
     key_input: &str,
+    key_cursor: usize,
     value_input: &str,
+    value_cursor: usize,
     focus: SessionKeyValueFocus,
     columns: KeyValueColumns,
 ) {
@@ -1599,8 +1629,18 @@ fn draw_session_key_value_input_row(
     let value_focused = focus == SessionKeyValueFocus::Value;
     let line = key_value_input_row_line(
         pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
-        input_cell_text(key_input, columns.key_width as usize, key_focused),
-        input_cell_text(value_input, value_width as usize, value_focused),
+        input_cell_text(
+            key_input,
+            key_cursor,
+            columns.key_width as usize,
+            key_focused,
+        ),
+        input_cell_text(
+            value_input,
+            value_cursor,
+            value_width as usize,
+            value_focused,
+        ),
         key_style,
         value_style,
     );
@@ -1613,6 +1653,7 @@ fn draw_session_key_value_input_row(
             frame,
             Rect::new(area.x + columns.prefix_width, area.y, columns.key_width, 1),
             key_input,
+            key_cursor,
         ),
         SessionKeyValueFocus::Value => set_inline_text_cursor(
             frame,
@@ -1623,6 +1664,7 @@ fn draw_session_key_value_input_row(
                 1,
             ),
             value_input,
+            value_cursor,
         ),
         _ => {}
     }
@@ -1663,17 +1705,17 @@ fn key_value_input_separator_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-fn set_inline_text_cursor(frame: &mut Frame<'_>, area: Rect, value: &str) {
+fn set_inline_text_cursor(frame: &mut Frame<'_>, area: Rect, value: &str, cursor: usize) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let offset = input_cursor_offset(value, area.width as usize);
+    let offset = input_cursor_offset(value, cursor, area.width as usize);
     frame.set_cursor_position(Position::new(area.x + offset, area.y));
 }
 
-fn input_cell_text(value: &str, width: usize, focused: bool) -> String {
+fn input_cell_text(value: &str, cursor: usize, width: usize, focused: bool) -> String {
     let visible = if focused {
-        focused_input_visible_text(value, width)
+        focused_input_visible_text(value, cursor, width)
     } else {
         truncate_chars(value, width)
     };
@@ -1685,27 +1727,33 @@ fn input_cell_text(value: &str, width: usize, focused: bool) -> String {
     }
 }
 
-fn focused_input_visible_text(value: &str, width: usize) -> String {
+fn focused_input_visible_text(value: &str, cursor: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
     let len = value.chars().count();
-    if len < width {
-        value.to_string()
-    } else {
-        value
-            .chars()
-            .skip(len.saturating_sub(width.saturating_sub(1)))
-            .collect()
-    }
+    let cursor = min(cursor, len);
+    let start = cursor.saturating_add(1).saturating_sub(width);
+    value.chars().skip(start).take(width).collect()
 }
 
-fn input_cursor_offset(value: &str, width: usize) -> u16 {
+fn input_cursor_offset(value: &str, cursor: usize, width: usize) -> u16 {
     if width == 0 {
         0
     } else {
-        min(value.chars().count(), width.saturating_sub(1)) as u16
+        let len = value.chars().count();
+        let cursor = min(cursor, len);
+        let start = cursor.saturating_add(1).saturating_sub(width);
+        min(cursor.saturating_sub(start), width.saturating_sub(1)) as u16
     }
+}
+
+fn char_to_byte_index(input: &str, cursor: usize) -> usize {
+    input
+        .char_indices()
+        .nth(cursor)
+        .map(|(index, _)| index)
+        .unwrap_or(input.len())
 }
 
 fn selected_list_row_style() -> Style {
@@ -1742,6 +1790,7 @@ fn draw_labeled_text_field(
     area: Rect,
     label: &str,
     value: &str,
+    cursor: usize,
     focused: bool,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -1774,11 +1823,16 @@ fn draw_labeled_text_field(
     let input_inner = inset_rect(input_rect, 1, 1);
     if input_inner.width > 0 && input_inner.height > 0 {
         frame.render_widget(
-            Paragraph::new(input_cell_text(value, input_inner.width as usize, focused)),
+            Paragraph::new(input_cell_text(
+                value,
+                cursor,
+                input_inner.width as usize,
+                focused,
+            )),
             input_inner,
         );
         if focused {
-            set_inline_text_cursor(frame, input_inner, value);
+            set_inline_text_cursor(frame, input_inner, value, cursor);
         }
     }
 }
@@ -1788,6 +1842,7 @@ fn draw_labeled_multiline_text_field(
     area: Rect,
     label: &str,
     value: &str,
+    cursor: usize,
     focused: bool,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -1824,6 +1879,7 @@ fn draw_labeled_multiline_text_field(
     if input_inner.width > 0 && input_inner.height > 0 {
         let view = send_keys_input_view(
             value,
+            cursor,
             input_inner.width as usize,
             input_inner.height as usize,
         );
@@ -1937,6 +1993,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             title: " New Session ",
             body: ModalBody::NewSession {
                 input: ui.input.clone(),
+                input_cursor: ui.input_cursor,
                 host_label: if ui.hosts.len() > 1 {
                     ui.selected_host().map(|host| host.label.clone())
                 } else {
@@ -1945,7 +2002,9 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                 host_count: ui.hosts.len(),
                 env_rows: ui.env_rows.clone(),
                 env_key_input: ui.env_key_input.clone(),
+                env_key_cursor: ui.env_key_cursor,
                 env_value_input: ui.env_value_input.clone(),
+                env_value_cursor: ui.env_value_cursor,
                 focus: ui.focus,
             },
             buttons: format!(
@@ -1967,10 +2026,16 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
             ),
             active_button: Some(*button),
         },
-        ModalState::RenameSession { input, button, .. } => ModalView {
+        ModalState::RenameSession {
+            input,
+            cursor,
+            button,
+            ..
+        } => ModalView {
             title: " Rename Session ",
             body: ModalBody::RenameSession {
                 input: input.clone(),
+                cursor: *cursor,
             },
             buttons: format!(
                 "{}   {}",
@@ -1990,6 +2055,7 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                 body: ModalBody::SendKeys {
                     label: format!("To: {} on {}", session.name(), session.host_label),
                     input: ui.input.clone(),
+                    cursor: ui.cursor,
                     focused: ui.focus == SendKeysFocus::Input,
                 },
                 buttons: format!(
@@ -2013,7 +2079,9 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
                     rows: ui.rows.clone(),
                     selected_key: ui.selected_key.clone(),
                     key_input: ui.key_input.clone(),
+                    key_cursor: ui.key_cursor,
                     value_input: ui.value_input.clone(),
+                    value_cursor: ui.value_cursor,
                     focus: ui.focus,
                 },
                 buttons: format!(

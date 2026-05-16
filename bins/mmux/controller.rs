@@ -519,8 +519,10 @@ pub(crate) async fn handle_key(
         }
         (KeyCode::Char('r'), _) if app.layout.focus == Focus::List => {
             if let Some(selected) = app.selected_session() {
+                let input = selected.name().to_string();
                 app.modal = Some(ModalState::RenameSession {
-                    input: selected.name().to_string(),
+                    cursor: input.chars().count(),
+                    input,
                     session: selected,
                     button: Button::Ok,
                 });
@@ -549,6 +551,7 @@ pub(crate) async fn handle_key(
                     session: selected,
                     ui: SendKeysModalUi {
                         input: String::new(),
+                        cursor: 0,
                         focus: SendKeysFocus::Input,
                     },
                 });
@@ -770,11 +773,14 @@ fn new_session_modal_state(fleet: &HostFleet, app: &AppState) -> ModalState {
     ModalState::NewSession {
         ui: NewSessionModalUi {
             input: String::new(),
+            input_cursor: 0,
             hosts,
             host_index,
             env_rows: Vec::new(),
             env_key_input: String::new(),
+            env_key_cursor: 0,
             env_value_input: String::new(),
+            env_value_cursor: 0,
             focus: NewSessionFocus::Name,
             button: Button::Ok,
         },
@@ -872,9 +878,11 @@ async fn handle_modal_key(
         Some(ModalState::RenameSession {
             session,
             input,
+            cursor,
             button,
         }) => match key.code {
             KeyCode::Esc => ModalAction::Close,
+            _ if edit_focused_text_field(&key, true, input, cursor) => ModalAction::None,
             KeyCode::Left => {
                 *button = Button::Cancel;
                 ModalAction::None
@@ -888,7 +896,6 @@ async fn handle_modal_key(
                 input: input.clone(),
             },
             KeyCode::Enter => ModalAction::Close,
-            _ if edit_focused_text_field(&key, true, input) => ModalAction::None,
             _ => ModalAction::None,
         },
         Some(ModalState::SendKeys { session, ui }) => {
@@ -992,6 +999,15 @@ fn handle_send_keys_modal_key(
             ui.focus = previous_focus(ui.focus, &SEND_KEYS_FOCUS_ORDER);
             ModalAction::None
         }
+        _ if edit_focused_text_field(
+            &key,
+            ui.focus == SendKeysFocus::Input,
+            &mut ui.input,
+            &mut ui.cursor,
+        ) =>
+        {
+            ModalAction::None
+        }
         KeyCode::Left => {
             ui.focus = SendKeysFocus::Cancel;
             ModalAction::None
@@ -1002,9 +1018,6 @@ fn handle_send_keys_modal_key(
         }
         KeyCode::Enter => {
             submit_send_keys_modal(key.modifiers.contains(KeyModifiers::CONTROL), session, ui)
-        }
-        _ if edit_focused_text_field(&key, ui.focus == SendKeysFocus::Input, &mut ui.input) => {
-            ModalAction::None
         }
         _ => ModalAction::None,
     }
@@ -1058,6 +1071,7 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             );
             ModalAction::None
         }
+        _ if edit_new_session_text_field(&key, ui) => ModalAction::None,
         KeyCode::Up
             if multi_host && matches!(ui.focus, NewSessionFocus::Host | NewSessionFocus::Name) =>
         {
@@ -1144,12 +1158,13 @@ fn handle_new_session_modal_key(key: KeyEvent, ui: &mut NewSessionModalUi) -> Mo
             };
             if let Some(row) = ui.env_rows.get(index) {
                 ui.env_key_input = row.key.clone();
+                ui.env_key_cursor = ui.env_key_input.chars().count();
                 ui.env_value_input = row.value.clone();
+                ui.env_value_cursor = ui.env_value_input.chars().count();
                 set_new_session_focus(ui, NewSessionFocus::EnvValue);
             }
             ModalAction::None
         }
-        _ if edit_new_session_text_field(&key, ui) => ModalAction::None,
         _ => ModalAction::None,
     }
 }
@@ -1164,9 +1179,13 @@ fn set_new_session_focus(ui: &mut NewSessionModalUi, focus: NewSessionFocus) {
 
 fn edit_new_session_text_field(key: &KeyEvent, ui: &mut NewSessionModalUi) -> bool {
     match ui.focus {
-        NewSessionFocus::Name => edit_text_field(key, &mut ui.input),
-        NewSessionFocus::EnvKey => edit_text_field(key, &mut ui.env_key_input),
-        NewSessionFocus::EnvValue => edit_text_field(key, &mut ui.env_value_input),
+        NewSessionFocus::Name => edit_text_field(key, &mut ui.input, &mut ui.input_cursor),
+        NewSessionFocus::EnvKey => {
+            edit_text_field(key, &mut ui.env_key_input, &mut ui.env_key_cursor)
+        }
+        NewSessionFocus::EnvValue => {
+            edit_text_field(key, &mut ui.env_value_input, &mut ui.env_value_cursor)
+        }
         _ => false,
     }
 }
@@ -1188,22 +1207,77 @@ fn move_new_session_env_row_focus_down(ui: &mut NewSessionModalUi) {
     );
 }
 
-fn edit_focused_text_field(key: &KeyEvent, focused: bool, input: &mut String) -> bool {
-    focused && edit_text_field(key, input)
+fn edit_focused_text_field(
+    key: &KeyEvent,
+    focused: bool,
+    input: &mut String,
+    cursor: &mut usize,
+) -> bool {
+    focused && edit_text_field(key, input, cursor)
 }
 
-fn edit_text_field(key: &KeyEvent, input: &mut String) -> bool {
+fn edit_text_field(key: &KeyEvent, input: &mut String, cursor: &mut usize) -> bool {
     match key.code {
-        KeyCode::Backspace => {
-            input.pop();
+        KeyCode::Backspace => remove_prev_char(input, cursor),
+        KeyCode::Delete => remove_next_char(input, cursor),
+        KeyCode::Left => {
+            *cursor = cursor.saturating_sub(1);
+            true
+        }
+        KeyCode::Right => {
+            *cursor = min(cursor.saturating_add(1), input.chars().count());
+            true
+        }
+        KeyCode::Home => {
+            *cursor = 0;
+            true
+        }
+        KeyCode::End => {
+            *cursor = input.chars().count();
             true
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            input.push(c);
+            insert_char(input, cursor, c);
             true
         }
         _ => false,
     }
+}
+
+fn insert_char(input: &mut String, cursor: &mut usize, ch: char) {
+    let byte_index = char_to_byte_index(input, *cursor);
+    input.insert(byte_index, ch);
+    *cursor = cursor.saturating_add(1);
+}
+
+fn remove_prev_char(input: &mut String, cursor: &mut usize) -> bool {
+    if *cursor == 0 {
+        return true;
+    }
+    let end = char_to_byte_index(input, *cursor);
+    let start = char_to_byte_index(input, cursor.saturating_sub(1));
+    input.replace_range(start..end, "");
+    *cursor = cursor.saturating_sub(1);
+    true
+}
+
+fn remove_next_char(input: &mut String, cursor: &mut usize) -> bool {
+    let char_count = input.chars().count();
+    if *cursor >= char_count {
+        return true;
+    }
+    let start = char_to_byte_index(input, *cursor);
+    let end = char_to_byte_index(input, cursor.saturating_add(1));
+    input.replace_range(start..end, "");
+    true
+}
+
+fn char_to_byte_index(input: &str, cursor: usize) -> usize {
+    input
+        .char_indices()
+        .nth(cursor)
+        .map(|(index, _)| index)
+        .unwrap_or(input.len())
 }
 
 fn next_focus<T: Copy + Eq>(focus: T, order: &[T]) -> T {
@@ -1312,7 +1386,14 @@ fn handle_session_key_values_modal_key(
     if let Some(action) = handle_session_key_values_row_action(&key, ui) {
         return action;
     }
-    handle_session_key_values_edit(&key, &mut ui.key_input, &mut ui.value_input, ui.focus);
+    handle_session_key_values_edit(
+        &key,
+        &mut ui.key_input,
+        &mut ui.key_cursor,
+        &mut ui.value_input,
+        &mut ui.value_cursor,
+        ui.focus,
+    );
     ModalAction::None
 }
 
@@ -1430,7 +1511,9 @@ fn handle_session_key_values_row_action(
         KeyCode::Char('m') => {
             if let Some(row) = ui.rows.get(index) {
                 ui.key_input = row.key.clone();
+                ui.key_cursor = ui.key_input.chars().count();
                 ui.value_input = row.value.clone();
+                ui.value_cursor = ui.value_input.chars().count();
                 ui.focus = SessionKeyValueFocus::Value;
             }
             Some(ModalAction::None)
@@ -1442,12 +1525,14 @@ fn handle_session_key_values_row_action(
 fn handle_session_key_values_edit(
     key: &KeyEvent,
     key_input: &mut String,
+    key_cursor: &mut usize,
     value_input: &mut String,
+    value_cursor: &mut usize,
     focus: SessionKeyValueFocus,
 ) -> bool {
     match focus {
-        SessionKeyValueFocus::Key => edit_text_field(key, key_input),
-        SessionKeyValueFocus::Value => edit_text_field(key, value_input),
+        SessionKeyValueFocus::Key => edit_text_field(key, key_input, key_cursor),
+        SessionKeyValueFocus::Value => edit_text_field(key, value_input, value_cursor),
         _ => false,
     }
 }
@@ -1556,7 +1641,9 @@ fn stage_new_session_env(app: &mut AppState, key: String, value: String) {
         .position(|row| row.key == key)
         .unwrap_or(0);
     ui.env_key_input.clear();
+    ui.env_key_cursor = 0;
     ui.env_value_input.clear();
+    ui.env_value_cursor = 0;
     set_new_session_focus(ui, NewSessionFocus::EnvRow(index));
     app.status = StatusBanner::info(format!("staged env var {key}"));
 }
@@ -1777,7 +1864,9 @@ async fn open_session_key_values_modal(
                     original_selected_key: selected_key.clone(),
                     selected_key,
                     key_input: String::new(),
+                    key_cursor: 0,
                     value_input: String::new(),
+                    value_cursor: 0,
                     focus,
                 },
             });
@@ -1826,7 +1915,9 @@ fn stage_key_value_in_modal(
         }
         let index = upsert_session_key_value_row(ui, key.clone(), value);
         ui.key_input.clear();
+        ui.key_cursor = 0;
         ui.value_input.clear();
+        ui.value_cursor = 0;
         ui.focus = SessionKeyValueFocus::Row(index);
         format!("staged {} {key} on {}", kind.noun(), session.name())
     };
