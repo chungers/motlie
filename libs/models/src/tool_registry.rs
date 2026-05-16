@@ -73,8 +73,36 @@ impl ToolList for () {
         &self,
         call: ToolCall,
     ) -> impl Future<Output = Result<ToolDispatch, ToolListError>> + Send + '_ {
-        async move { Ok(ToolDispatch::NotMine(call)) }
+        std::future::ready(Ok(ToolDispatch::NotMine(call)))
     }
+}
+
+async fn dispatch_tool_list<T, R>(
+    head: &T,
+    tail: &R,
+    call: ToolCall,
+) -> Result<ToolDispatch, ToolListError>
+where
+    T: Tool,
+    R: ToolList,
+{
+    if call.name.as_str() != head.name() {
+        return tail.dispatch(call).await;
+    }
+
+    let ToolCall {
+        id,
+        name,
+        arguments,
+    } = call;
+
+    let args = arguments.parse::<T::Args>()?;
+    let output = head.call(args).await.map_err(ToolListError::tool_failed)?;
+    let content = serde_json::to_string(&output).map_err(ToolListError::OutputSerialization)?;
+
+    Ok(ToolDispatch::Handled(ChatMessage::tool_result_parts(
+        id, name, content,
+    )))
 }
 
 impl<T, R> ToolList for (T, R)
@@ -91,30 +119,7 @@ where
         &self,
         call: ToolCall,
     ) -> impl Future<Output = Result<ToolDispatch, ToolListError>> + Send + '_ {
-        async move {
-            if call.name.as_str() != self.0.name() {
-                return self.1.dispatch(call).await;
-            }
-
-            let ToolCall {
-                id,
-                name,
-                arguments,
-            } = call;
-
-            let args = arguments.parse::<T::Args>()?;
-            let output = self
-                .0
-                .call(args)
-                .await
-                .map_err(ToolListError::tool_failed)?;
-            let content =
-                serde_json::to_string(&output).map_err(ToolListError::OutputSerialization)?;
-
-            Ok(ToolDispatch::Handled(ChatMessage::tool_result_parts(
-                id, name, content,
-            )))
-        }
+        dispatch_tool_list(&self.0, &self.1, call)
     }
 }
 
@@ -233,11 +238,9 @@ mod tests {
             &self,
             args: Self::Args,
         ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
-            async move {
-                Ok(AddOutput {
-                    value: args.left + args.right,
-                })
-            }
+            std::future::ready(Ok(AddOutput {
+                value: args.left + args.right,
+            }))
         }
     }
 

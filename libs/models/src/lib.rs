@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn resolve_typed_artifact_policy_rewrites_local_only_root() {
         let options = StartOptions {
-            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            artifact_policy: Some(motlie_model::ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/cache"),
             }),
             quantization: Some(motlie_model::QuantizationBits::Four),
@@ -1522,7 +1522,7 @@ mod tests {
 
         assert_eq!(
             resolved.artifact_policy,
-            Some(ArtifactPolicy::LocalOnly {
+            Some(motlie_model::ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/cache/snapshots/commit"),
             })
         );
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn resolve_typed_artifact_policy_leaves_allow_fetch_unchanged() {
         let options = StartOptions {
-            artifact_policy: Some(ArtifactPolicy::AllowFetch {
+            artifact_policy: Some(motlie_model::ArtifactPolicy::AllowFetch {
                 root: Some(PathBuf::from("/tmp/cache")),
             }),
             ..Default::default()
