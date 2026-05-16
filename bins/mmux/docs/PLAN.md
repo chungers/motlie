@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @codex-tmux-tl | Tracked issue #282 and fixed modal text inputs so focused Left/Right move the insertion point inside New Session, Rename Session, Send Keys, and Session Tags fields instead of jumping to modal buttons. |
 | 2026-05-06 | @codex-tts | Added list-only `$` direct-send follow-ons for Send Keys: `$0`..`$9` dispatch digits immediately and `$!` dispatches `{Esc}` to the highlighted session. |
 | 2026-05-03 | @codex | Added Phase 13 for the `s` Send Keys modal and moved pane cycling to Tab. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply as one diff only on Ok; Cancel/Esc discard staged edits. |
