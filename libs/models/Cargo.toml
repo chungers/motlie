@@ -59,6 +59,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 hound = "3.5"
 libc = "0.2"
+cel-cxx = { version = "0.2.4", default-features = false }
 sysinfo = "0.36.1"
 tokio.workspace = true
 

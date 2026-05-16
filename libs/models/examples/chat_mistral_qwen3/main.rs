@@ -1,51 +1,17 @@
 use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
-    ContentPart, GenerationParams, QuantizationBits, StartOptions, ToolChoice,
+    QuantizationBits, StartOptions,
 };
 use motlie_models::{
-    chat::ChatModels, default_artifact_root, quantization_label_isq, ModelSelector, ToolError,
-    ToolRegistry,
+    chat::ChatModels, default_artifact_root, quantization_label_isq, ModelSelector,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 #[path = "../support.rs"]
 mod support;
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct WeatherArgs {
-    city: String,
-    units: TemperatureUnits,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum TemperatureUnits {
-    Celsius,
-    Fahrenheit,
-}
-
-#[derive(Debug, Serialize)]
-struct WeatherOutput {
-    city: String,
-    temperature: f32,
-    units: TemperatureUnits,
-    summary: String,
-}
-
-async fn get_weather(args: WeatherArgs) -> std::result::Result<WeatherOutput, ToolError> {
-    Ok(WeatherOutput {
-        city: args.city,
-        temperature: match args.units {
-            TemperatureUnits::Celsius => 22.0,
-            TemperatureUnits::Fahrenheit => 72.0,
-        },
-        units: args.units,
-        summary: "clear".to_string(),
-    })
-}
+#[path = "../tool_demo_support.rs"]
+mod tool_demo_support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -180,7 +146,7 @@ async fn main() -> Result<()> {
     let chat = handle.chat().context("qwen3 bundle should expose chat")?;
 
     if tool_demo_only {
-        run_tool_demo(chat).await?;
+        tool_demo_support::run_tool_demo(chat).await?;
         support::print_process_snapshot(
             "process-after-tool-demo",
             &support::current_process_snapshot(),
@@ -251,7 +217,7 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-follow-up", handle.metric_snapshot());
 
     if tool_demo {
-        run_tool_demo(chat).await?;
+        tool_demo_support::run_tool_demo(chat).await?;
         support::print_process_snapshot(
             "process-after-tool-demo",
             &support::current_process_snapshot(),
@@ -296,102 +262,4 @@ async fn main() -> Result<()> {
     );
 
     Ok(())
-}
-
-async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
-    println!("\n--- tool calling ---");
-
-    let mut registry = ToolRegistry::new();
-    registry
-        .insert_fn(
-            "get_weather",
-            "Return a current weather summary for a city.",
-            get_weather,
-        )
-        .context("register get_weather tool")?;
-
-    let tools = registry.specs();
-    let mut messages = vec![
-        ChatMessage::new(
-            ChatRole::System,
-            "Use tools when they are relevant. After receiving tool results, answer in one concise sentence.",
-        ),
-        ChatMessage::new(
-            ChatRole::User,
-            "What is the current weather in Seattle in fahrenheit?",
-        ),
-    ];
-
-    let tool_request_started_at = Instant::now();
-    let response = chat
-        .generate(ChatRequest {
-            messages: messages.clone(),
-            params: tool_demo_generation_params(),
-            tools: tools.clone(),
-            tool_choice: Some(ToolChoice::Auto),
-            ..Default::default()
-        })
-        .await
-        .context("tool-call generation should succeed")?;
-    let tool_request_latency = tool_request_started_at.elapsed();
-
-    println!("tool-request-response: {}", response.content);
-    println!("tool-call-count: {}", response.tool_calls.len());
-    println!(
-        "tool-request-latency-ms: {:.2}",
-        tool_request_latency.as_secs_f64() * 1000.0
-    );
-    ensure!(
-        !response.tool_calls.is_empty(),
-        "model did not return any tool calls"
-    );
-
-    messages.push(ChatMessage::assistant_tool_calls(
-        response.tool_calls.clone(),
-    ));
-    for call in response.tool_calls {
-        println!("tool-call-id: {}", call.id);
-        println!("tool-call-name: {}", call.name);
-        println!("tool-call-args: {}", call.arguments.raw_json_str());
-
-        let tool_message = registry
-            .call_to_message(call)
-            .await
-            .context("execute model-requested tool")?;
-        for part in &tool_message.content {
-            if let ContentPart::Text(text) = part {
-                println!("tool-result: {text}");
-            }
-        }
-        messages.push(tool_message);
-    }
-
-    let final_started_at = Instant::now();
-    let final_response = chat
-        .generate(ChatRequest {
-            messages,
-            params: tool_demo_generation_params(),
-            tools,
-            tool_choice: Some(ToolChoice::None),
-            ..Default::default()
-        })
-        .await
-        .context("final answer after tool results should succeed")?;
-    let final_latency = final_started_at.elapsed();
-
-    println!("tool-final-response: {}", final_response.content);
-    println!(
-        "tool-final-latency-ms: {:.2}",
-        final_latency.as_secs_f64() * 1000.0
-    );
-
-    Ok(())
-}
-
-fn tool_demo_generation_params() -> GenerationParams {
-    GenerationParams {
-        max_tokens: Some(128),
-        temperature: Some(0.2),
-        ..Default::default()
-    }
 }
