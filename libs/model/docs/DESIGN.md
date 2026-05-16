@@ -217,10 +217,12 @@ Primary contract:
 
 ```rust
 pub trait ModelBundle: Send + Sync {
+    type Handle: BundleHandle;
+
     fn id(&self) -> &BundleId;
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError>;
 }
 ```
 

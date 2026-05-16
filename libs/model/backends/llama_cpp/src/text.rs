@@ -34,8 +34,13 @@ const DEFAULT_TEMPERATURE: f32 = 0.7;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LlamaCppTextArch {
     Qwen3,
-    Qwen35,
     Gemma4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThinkingMode {
+    Disabled,
+    Auto,
 }
 
 /// Maps `QuantizationBits` to the curated GGUF filename for a given model.
@@ -66,6 +71,7 @@ pub struct LlamaCppTextSpec {
     pub display_name: &'static str,
     pub model_prefix: &'static str,
     pub arch: LlamaCppTextArch,
+    pub thinking: ThinkingMode,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
     pub default_context_length: u32,
@@ -78,6 +84,7 @@ impl LlamaCppTextSpec {
             display_name: "Qwen3 4B (GGUF)",
             model_prefix: "Qwen3-4B",
             arch: LlamaCppTextArch::Qwen3,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support(),
             default_context_length: 4096,
@@ -90,6 +97,7 @@ impl LlamaCppTextSpec {
             display_name: "Gemma 4 E2B-it (GGUF)",
             model_prefix: "gemma-4-E2B-it",
             arch: LlamaCppTextArch::Gemma4,
+            thinking: ThinkingMode::Disabled,
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support(),
             default_context_length: 4096,
@@ -101,7 +109,8 @@ impl LlamaCppTextSpec {
             id: BundleId::new("qwen3_6_27b_gguf"),
             display_name: "Qwen3.6 27B (GGUF)",
             model_prefix: "Qwen3.6-27B",
-            arch: LlamaCppTextArch::Qwen35,
+            arch: LlamaCppTextArch::Qwen3,
+            thinking: ThinkingMode::Auto,
             capabilities: Capabilities::chat_and_completion(),
             quantization: curated_qwen36_gguf_support(),
             default_context_length: 32768,
@@ -113,6 +122,7 @@ impl LlamaCppTextSpec {
 #[derive(Clone, Debug)]
 pub struct LlamaCppTextAdapter {
     arch: LlamaCppTextArch,
+    thinking: ThinkingMode,
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     default_context_length: u32,
@@ -123,6 +133,7 @@ impl LlamaCppTextAdapter {
         let spec = LlamaCppTextSpec::qwen3_4b();
         Self {
             arch: spec.arch,
+            thinking: spec.thinking,
             capabilities: spec.capabilities,
             quantization: spec.quantization,
             default_context_length: spec.default_context_length,
@@ -133,16 +144,18 @@ impl LlamaCppTextAdapter {
         let spec = LlamaCppTextSpec::gemma4_e2b();
         Self {
             arch: spec.arch,
+            thinking: spec.thinking,
             capabilities: spec.capabilities,
             quantization: spec.quantization,
             default_context_length: spec.default_context_length,
         }
     }
 
-    pub fn qwen35() -> Self {
+    pub fn qwen36() -> Self {
         let spec = LlamaCppTextSpec::qwen3_6_27b();
         Self {
             arch: spec.arch,
+            thinking: spec.thinking,
             capabilities: spec.capabilities,
             quantization: spec.quantization,
             default_context_length: spec.default_context_length,
@@ -190,6 +203,7 @@ impl BackendAdapter for LlamaCppTextAdapter {
                 quantization: self.quantization.clone(),
                 resolved_quantization,
                 arch: self.arch,
+                thinking: self.thinking,
                 context_length: self.default_context_length,
             },
             built,
@@ -284,6 +298,7 @@ impl ModelBundle for LlamaCppTextBundle {
                 quantization: self.metadata.quantization.clone(),
                 resolved_quantization,
                 arch: self.spec.arch,
+                thinking: self.spec.thinking,
                 context_length: self.spec.default_context_length,
             },
             built,
@@ -350,6 +365,7 @@ struct LlamaCppRuntime {
     backend: Arc<LlamaBackend>,
     model: Arc<LlamaModel>,
     arch: LlamaCppTextArch,
+    thinking: ThinkingMode,
     context_length: u32,
     metrics: Arc<Mutex<TextMetrics>>,
 }
@@ -369,7 +385,7 @@ unsafe impl Sync for LlamaCppRuntime {}
 impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         if request.requires_tool_use() {
-            let rendered = render_openai_compatible_chat(&self.model, self.arch, &request)?;
+            let rendered = render_openai_compatible_chat(&self.model, self.thinking, &request)?;
             return self.generate_rendered_chat(rendered, &request.params).await;
         }
 
@@ -610,7 +626,7 @@ fn truncate_on_stop_sequence(generated_text: &mut String, stop_sequences: &[Stri
 
 fn render_openai_compatible_chat(
     model: &LlamaModel,
-    arch: LlamaCppTextArch,
+    thinking: ThinkingMode,
     request: &ChatRequest,
 ) -> Result<RenderedChatPrompt, ModelError> {
     let template = model
@@ -629,7 +645,7 @@ fn render_openai_compatible_chat(
     let tool_choice = openai_tool_choice(request.tool_choice.as_ref(), &request.tools)?;
     let parse_tool_calls =
         tools_json.is_some() && !matches!(request.tool_choice, Some(ToolChoice::None));
-    let reasoning_format = if matches!(arch, LlamaCppTextArch::Qwen35) {
+    let reasoning_format = if thinking == ThinkingMode::Auto {
         Some("auto")
     } else {
         None
@@ -646,7 +662,7 @@ fn render_openai_compatible_chat(
         add_generation_prompt: true,
         use_jinja: true,
         parallel_tool_calls: false,
-        enable_thinking: matches!(arch, LlamaCppTextArch::Qwen35),
+        enable_thinking: thinking == ThinkingMode::Auto,
         add_bos: false,
         add_eos: false,
         parse_tool_calls,
@@ -697,11 +713,10 @@ fn openai_messages_json(messages: &[motlie_model::ChatMessage]) -> Result<String
                 }
             }
             ChatRole::Tool => {
-                let tool_call_id = message.tool_call_id.as_ref().ok_or_else(|| {
-                    ModelError::InvalidConfiguration(
-                        "tool messages require `tool_call_id` metadata".into(),
-                    )
-                })?;
+                let tool_call_id = message
+                    .tool_call_id
+                    .as_ref()
+                    .expect("validated tool messages carry a tool call id");
                 value.insert(
                     "tool_call_id".into(),
                     Value::String(tool_call_id.as_str().to_string()),
@@ -709,11 +724,6 @@ fn openai_messages_json(messages: &[motlie_model::ChatMessage]) -> Result<String
                 if let Some(name) = &message.name {
                     value.insert("name".into(), Value::String(name.as_str().to_string()));
                 }
-            }
-            ChatRole::System | ChatRole::User if !message.tool_calls.is_empty() => {
-                return Err(ModelError::InvalidConfiguration(
-                    "only assistant messages may carry tool calls".into(),
-                ));
             }
             ChatRole::System | ChatRole::User => {}
         }
@@ -956,11 +966,7 @@ fn openai_response_tool_call(
 /// llama.cpp text-only backends do not support multimodal input.
 fn format_chat_prompt(arch: LlamaCppTextArch, request: &ChatRequest) -> Result<String, ModelError> {
     match arch {
-        LlamaCppTextArch::Qwen3 | LlamaCppTextArch::Qwen35 => {
-            // Qwen35 currently shares the Qwen3 ChatML template; split this arm
-            // if Qwen3.5 chat tokens or think-block handling diverge.
-            format_qwen3_prompt(&request.messages)
-        }
+        LlamaCppTextArch::Qwen3 => format_qwen3_prompt(&request.messages),
         LlamaCppTextArch::Gemma4 => format_gemma4_prompt(&request.messages),
     }
 }
@@ -1088,6 +1094,7 @@ struct TextHandleConfig {
     quantization: QuantizationSupport,
     resolved_quantization: Option<QuantizationBits>,
     arch: LlamaCppTextArch,
+    thinking: ThinkingMode,
     context_length: u32,
 }
 
@@ -1105,6 +1112,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> LlamaCppTextH
         quantization,
         resolved_quantization,
         arch,
+        thinking,
         context_length,
     } = config;
 
@@ -1120,6 +1128,7 @@ fn new_text_handle(config: TextHandleConfig, built: BuiltModel) -> LlamaCppTextH
             backend: built.backend,
             model: built.model,
             arch,
+            thinking,
             context_length,
             metrics: Arc::clone(&metrics),
         }),
@@ -1288,12 +1297,13 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_spec_has_expected_identity_and_quantization() {
+    fn qwen36_spec_has_expected_identity_quantization_and_thinking_mode() {
         let spec = LlamaCppTextSpec::qwen3_6_27b();
 
         assert_eq!(spec.id.as_str(), "qwen3_6_27b_gguf");
         assert_eq!(spec.display_name, "Qwen3.6 27B (GGUF)");
-        assert_eq!(spec.arch, LlamaCppTextArch::Qwen35);
+        assert_eq!(spec.arch, LlamaCppTextArch::Qwen3);
+        assert_eq!(spec.thinking, ThinkingMode::Auto);
         assert_eq!(
             spec.quantization.recommended(),
             Some(QuantizationBits::Five)

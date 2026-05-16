@@ -182,24 +182,16 @@ impl ChatMessage {
 
     pub fn validate_tool_metadata(&self) -> Result<(), ChatMessageError> {
         if self.role != ChatRole::Assistant && !self.tool_calls.is_empty() {
-            return Err(ChatMessageError::InvalidToolMetadata(
-                "only assistant messages may carry tool calls",
-            ));
+            return Err(ChatMessageError::ToolCallsOnNonAssistant);
         }
         if self.role != ChatRole::Tool && self.tool_call_id.is_some() {
-            return Err(ChatMessageError::InvalidToolMetadata(
-                "only tool messages may carry a tool call id",
-            ));
+            return Err(ChatMessageError::ToolCallIdOnNonTool);
         }
         if self.role == ChatRole::Tool && self.tool_call_id.is_none() {
-            return Err(ChatMessageError::InvalidToolMetadata(
-                "tool messages require a tool call id",
-            ));
+            return Err(ChatMessageError::ToolMessageMissingToolCallId);
         }
         if self.role == ChatRole::Tool && !self.tool_calls.is_empty() {
-            return Err(ChatMessageError::InvalidToolMetadata(
-                "tool result messages cannot carry new tool calls",
-            ));
+            return Err(ChatMessageError::ToolMessageWithToolCalls);
         }
 
         Ok(())
@@ -212,8 +204,14 @@ pub enum ChatMessageError {
     InvalidToolCallId(#[from] ToolCallIdError),
     #[error(transparent)]
     InvalidToolName(#[from] ToolNameError),
-    #[error("{0}")]
-    InvalidToolMetadata(&'static str),
+    #[error("only assistant messages may carry tool calls")]
+    ToolCallsOnNonAssistant,
+    #[error("only tool messages may carry a tool call id")]
+    ToolCallIdOnNonTool,
+    #[error("tool messages require a tool call id")]
+    ToolMessageMissingToolCallId,
+    #[error("tool result messages cannot carry new tool calls")]
+    ToolMessageWithToolCalls,
 }
 
 #[cfg(test)]
@@ -293,9 +291,7 @@ mod tests {
             .expect("id should validate");
         assert!(matches!(
             user_message.validate_tool_metadata(),
-            Err(ChatMessageError::InvalidToolMetadata(
-                "only tool messages may carry a tool call id"
-            ))
+            Err(ChatMessageError::ToolCallIdOnNonTool)
         ));
 
         user_message.tool_call_id = None;
@@ -305,17 +301,13 @@ mod tests {
         );
         assert!(matches!(
             user_message.validate_tool_metadata(),
-            Err(ChatMessageError::InvalidToolMetadata(
-                "only assistant messages may carry tool calls"
-            ))
+            Err(ChatMessageError::ToolCallsOnNonAssistant)
         ));
 
         let tool_message = ChatMessage::text(ChatRole::Tool, "{}");
         assert!(matches!(
             tool_message.validate_tool_metadata(),
-            Err(ChatMessageError::InvalidToolMetadata(
-                "tool messages require a tool call id"
-            ))
+            Err(ChatMessageError::ToolMessageMissingToolCallId)
         ));
     }
 }

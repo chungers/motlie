@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
-use motlie_model::{
-    ChatMessage, ChatRequest, ChatRole, ContentPart, ToolCall, ToolChoice, ToolError, ToolRegistry,
-};
+use motlie_model::{ChatMessage, ChatRequest, ChatRole, ContentPart, ToolCall, ToolChoice};
+use motlie_models::{ToolError, ToolRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +62,7 @@ async fn main() -> Result<()> {
             "add",
             "Add two signed integers.",
             |args: AddArgs| async move {
-                Ok(AddOutput {
+                Ok::<_, ToolError>(AddOutput {
                     value: args.left + args.right,
                 })
             },

@@ -1,8 +1,4 @@
-use std::collections::BTreeMap;
-use std::error::Error as StdError;
 use std::fmt;
-use std::future::Future;
-use std::marker::PhantomData;
 use std::ops::Deref;
 
 use async_trait::async_trait;
@@ -11,8 +7,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use thiserror::Error;
-
-use crate::ChatMessage;
 
 /// Stable model-visible name for a callable tool.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -384,202 +378,20 @@ pub enum ToolCallError {
     InvalidArguments(#[from] ToolArgumentError),
 }
 
-#[derive(Debug, Error)]
-pub enum ToolError {
-    #[error("tool `{0}` is already registered")]
-    DuplicateTool(ToolName),
-    #[error("tool execution failed: {0}")]
-    Execution(#[source] Box<dyn StdError + Send + Sync>),
-    #[error(transparent)]
-    InvalidArguments(#[from] ToolArgumentError),
-    #[error("failed to serialize tool output: {0}")]
-    OutputSerialization(serde_json::Error),
-    #[error(transparent)]
-    Schema(#[from] ToolSchemaError),
-    #[error("tool `{0}` is not registered")]
-    UnknownTool(ToolName),
-}
-
-impl ToolError {
-    pub fn execution(message: impl Into<String>) -> Self {
-        Self::Execution(Box::new(ToolExecutionMessage(message.into())))
-    }
-
-    /// Preserve an execution error as the source of `ToolError::Execution`.
-    pub fn execution_source(error: impl StdError + Send + Sync + 'static) -> Self {
-        Self::Execution(Box::new(error))
-    }
-}
-
-#[derive(Debug)]
-struct ToolExecutionMessage(String);
-
-impl fmt::Display for ToolExecutionMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl StdError for ToolExecutionMessage {}
-
 /// Typed Rust binding for one callable tool.
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
     type Args: DeserializeOwned + JsonSchema + Send + 'static;
     type Output: Serialize + Send + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
 
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, ToolError>;
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error>;
 
     fn spec(&self) -> Result<ToolSpec, ToolSchemaError> {
         ToolSpec::from_args::<Self::Args>(self.name(), self.description())
-    }
-}
-
-#[async_trait]
-trait ErasedTool: Send + Sync {
-    fn spec(&self) -> &ToolSpec;
-    async fn call_json(&self, args: ToolArguments) -> Result<String, ToolError>;
-}
-
-struct ToolAdapter<T: Tool> {
-    tool: T,
-    spec: ToolSpec,
-}
-
-impl<T: Tool> ToolAdapter<T> {
-    fn new(tool: T) -> Result<Self, ToolError> {
-        let spec = tool.spec()?;
-        Ok(Self { tool, spec })
-    }
-}
-
-#[async_trait]
-impl<T: Tool> ErasedTool for ToolAdapter<T> {
-    fn spec(&self) -> &ToolSpec {
-        &self.spec
-    }
-
-    async fn call_json(&self, args: ToolArguments) -> Result<String, ToolError> {
-        let args = args.parse::<T::Args>()?;
-        let output = self.tool.call(args).await?;
-        serde_json::to_string(&output).map_err(ToolError::OutputSerialization)
-    }
-}
-
-struct FunctionTool<Args, Output, F> {
-    name: &'static str,
-    description: &'static str,
-    f: F,
-    _marker: PhantomData<fn(Args) -> Output>,
-}
-
-impl<Args, Output, F> FunctionTool<Args, Output, F> {
-    fn new(name: &'static str, description: &'static str, f: F) -> Self {
-        Self {
-            name,
-            description,
-            f,
-            _marker: PhantomData,
-        }
-    }
-}
-
-#[async_trait]
-impl<Args, Output, F, Fut> Tool for FunctionTool<Args, Output, F>
-where
-    Args: DeserializeOwned + JsonSchema + Send + 'static,
-    Output: Serialize + Send + 'static,
-    F: Fn(Args) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Output, ToolError>> + Send + 'static,
-{
-    type Args = Args;
-    type Output = Output;
-
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn description(&self) -> &'static str {
-        self.description
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, ToolError> {
-        (self.f)(args).await
-    }
-}
-
-/// Caller-owned registry for typed Rust tools.
-#[derive(Default)]
-pub struct ToolRegistry {
-    // JUSTIFICATION: the registry must hold heterogeneous `Tool`
-    // implementations whose `Args` and `Output` associated types differ by
-    // tool. The erased adapter preserves one validated `ToolSpec` plus one
-    // JSON call boundary per tool while keeping Rust callers fully typed at
-    // registration time. Typed tuple or HList registries would force the full
-    // tool set into the caller's type and would not support runtime
-    // registration. The existing async trait object allocation is paid once at
-    // registration and once per async call boundary, which is acceptable for
-    // model-driven tool execution latency.
-    tools: BTreeMap<ToolName, Box<dyn ErasedTool>>,
-}
-
-impl ToolRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert<T>(&mut self, tool: T) -> Result<&mut Self, ToolError>
-    where
-        T: Tool,
-    {
-        let adapter = ToolAdapter::new(tool)?;
-        self.insert_erased(Box::new(adapter))
-    }
-
-    pub fn insert_fn<Args, Output, F, Fut>(
-        &mut self,
-        name: &'static str,
-        description: &'static str,
-        f: F,
-    ) -> Result<&mut Self, ToolError>
-    where
-        Args: DeserializeOwned + JsonSchema + Send + 'static,
-        Output: Serialize + Send + 'static,
-        F: Fn(Args) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Output, ToolError>> + Send + 'static,
-    {
-        self.insert(FunctionTool::<Args, Output, F>::new(name, description, f))
-    }
-
-    pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools
-            .values()
-            .map(|tool| tool.spec().clone())
-            .collect()
-    }
-
-    pub async fn call_to_message(&self, call: ToolCall) -> Result<ChatMessage, ToolError> {
-        let id = call.id.clone();
-        let name = call.name.clone();
-        let tool = self
-            .tools
-            .get(&name)
-            .ok_or_else(|| ToolError::UnknownTool(name.clone()))?;
-        let content = tool.call_json(call.arguments).await?;
-        Ok(ChatMessage::tool_result_parts(id, name, content))
-    }
-
-    fn insert_erased(&mut self, tool: Box<dyn ErasedTool>) -> Result<&mut Self, ToolError> {
-        let name = tool.spec().name.clone();
-        if self.tools.contains_key(&name) {
-            return Err(ToolError::DuplicateTool(name));
-        }
-
-        self.tools.insert(name, tool);
-        Ok(self)
     }
 }
 
@@ -598,10 +410,31 @@ mod tests {
         value: i64,
     }
 
-    async fn add(args: AddArgs) -> Result<AddOutput, ToolError> {
-        Ok(AddOutput {
-            value: args.left + args.right,
-        })
+    #[derive(Debug, Error)]
+    #[error("add failed")]
+    struct AddError;
+
+    struct AddTool;
+
+    #[async_trait]
+    impl Tool for AddTool {
+        type Args = AddArgs;
+        type Output = AddOutput;
+        type Error = AddError;
+
+        fn name(&self) -> &'static str {
+            "add"
+        }
+
+        fn description(&self) -> &'static str {
+            "Add two integers."
+        }
+
+        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+            Ok(AddOutput {
+                value: args.left + args.right,
+            })
+        }
     }
 
     #[test]
@@ -684,63 +517,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_executes_existing_function_binding() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .insert_fn("add", "Add two integers.", add)
-            .expect("function should register");
-
-        let call =
-            ToolCall::from_serializable_args("call-1", "add", &AddArgs { left: 2, right: 3 })
-                .expect("args should serialize");
-        let message = registry
-            .call_to_message(call)
+    async fn tool_trait_exposes_spec_and_typed_call() {
+        let tool = AddTool;
+        let spec = tool.spec().expect("schema should build");
+        let output = tool
+            .call(AddArgs { left: 2, right: 3 })
             .await
             .expect("tool should run");
 
-        assert_eq!(message.name.as_ref().map(ToolName::as_str), Some("add"));
-        assert_eq!(message.tool_call_id.as_deref(), Some("call-1"));
-        assert_eq!(
-            message.content,
-            vec![crate::ContentPart::Text(r#"{"value":5}"#.into())]
-        );
-    }
-
-    #[tokio::test]
-    async fn registry_executes_closure_binding() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .insert_fn("add", "Add two integers.", |args: AddArgs| async move {
-                Ok(AddOutput {
-                    value: args.left + args.right,
-                })
-            })
-            .expect("closure should register");
-
-        let call = ToolCall::from_json_args("call-1", "add", r#"{"left":4,"right":5}"#)
-            .expect("args should validate");
-        let message = registry
-            .call_to_message(call)
-            .await
-            .expect("tool should run");
-
-        assert_eq!(
-            message.content,
-            vec![crate::ContentPart::Text(r#"{"value":9}"#.into())]
-        );
-    }
-
-    #[test]
-    fn registry_rejects_duplicate_names() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .insert_fn("add", "Add two integers.", add)
-            .expect("first insert should succeed");
-        let error = match registry.insert_fn("add", "Add two integers.", add) {
-            Ok(_) => panic!("duplicate insert should fail"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(error, ToolError::DuplicateTool(name) if name.as_str() == "add"));
+        assert_eq!(spec.name.as_str(), "add");
+        assert_eq!(output.value, 5);
     }
 }

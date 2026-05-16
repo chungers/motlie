@@ -237,11 +237,11 @@ design is in [`DESIGN_QWEN3_6_27B_GGUF.md`](./DESIGN_QWEN3_6_27B_GGUF.md).
   If not, keep the first runtime slice text-only and do not advertise vision
   capability.
 - [x] Confirm the first implementation can reuse the existing Qwen3 formatter
-  for text-only chat while keeping the arch tracked separately as Qwen35.
+  for text-only chat while tracking Qwen3.6 behavior through `ThinkingMode::Auto`.
 
 ### 9.2 — llama.cpp backend support
 
-- [x] Extend `motlie-model-llama-cpp` with a Qwen3.6/Qwen35 spec that reuses the
+- [x] Extend `motlie-model-llama-cpp` with a Qwen3.6 spec that reuses the
   existing GGUF load path and generation metrics.
 - [x] Add native GGUF quant selection support for Q4-class, Q5-class, Q8, and
   reserved FP8 mapping. Do not overload `QuantizationBits::Eight` to mean both
