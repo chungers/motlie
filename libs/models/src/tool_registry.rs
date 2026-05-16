@@ -92,22 +92,15 @@ where
         call: ToolCall,
     ) -> impl Future<Output = Result<ToolDispatch, ToolListError>> + Send + '_ {
         async move {
+            if call.name.as_str() != self.0.name() {
+                return self.1.dispatch(call).await;
+            }
+
             let ToolCall {
                 id,
                 name,
                 arguments,
             } = call;
-
-            if name.as_str() != self.0.name() {
-                return self
-                    .1
-                    .dispatch(ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    })
-                    .await;
-            }
 
             let args = arguments.parse::<T::Args>()?;
             let output = self
