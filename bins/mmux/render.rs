@@ -1144,6 +1144,13 @@ struct SessionKeyValueBody<'a> {
     focus: SessionKeyValueFocus,
 }
 
+#[derive(Clone, Copy)]
+struct InlineTextField<'a> {
+    value: &'a str,
+    cursor: usize,
+    focused: bool,
+}
+
 fn draw_session_key_values_body(frame: &mut Frame<'_>, area: Rect, body: SessionKeyValueBody<'_>) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1210,10 +1217,16 @@ fn draw_session_key_values_body(frame: &mut Frame<'_>, area: Rect, body: Session
         draw_session_key_value_input_row(
             frame,
             Rect::new(area.x, row_y, area.width, 1),
-            body.key_input,
-            body.key_cursor,
-            body.value_input,
-            body.value_cursor,
+            InlineTextField {
+                value: body.key_input,
+                cursor: body.key_cursor,
+                focused: body.focus == SessionKeyValueFocus::Key,
+            },
+            InlineTextField {
+                value: body.value_input,
+                cursor: body.value_cursor,
+                focused: body.focus == SessionKeyValueFocus::Value,
+            },
             body.focus,
             columns,
         );
@@ -1268,14 +1281,10 @@ fn send_keys_input_view(
 ) -> SendKeysInputView {
     let width = max(1, width);
     let visible_rows = max(1, visible_rows);
-    let lines = send_keys_wrapped_lines(input, width);
-    let prefix = &input[..char_to_byte_index(input, min(cursor, input.chars().count()))];
-    let cursor_lines = send_keys_wrapped_lines(prefix, width);
-    let cursor_row = cursor_lines.len().saturating_sub(1);
-    let cursor_col = cursor_lines
-        .last()
-        .map(|line| min(char_width(line), width.saturating_sub(1)))
-        .unwrap_or(0);
+    let view = collect_send_keys_input_view(input, cursor, width);
+    let lines = view.lines;
+    let cursor_row = view.cursor_row;
+    let cursor_col = view.cursor_col;
     let first_row = cursor_row.saturating_add(1).saturating_sub(visible_rows);
     let visible = lines
         .iter()
@@ -1298,8 +1307,11 @@ fn send_keys_input_view(
 fn send_keys_wrapped_line_count(input: &str, width: usize) -> usize {
     let width = max(1, width);
     let mut target = CountSendKeysLines::default();
-    for logical_line in input.split('\n') {
+    for (logical_line, has_trailing_newline) in split_send_keys_lines(input) {
         wrap_send_keys_logical_line(logical_line, width, &mut target);
+        if has_trailing_newline {
+            target.advance_hidden_char();
+        }
     }
     target.count()
 }
@@ -1307,14 +1319,38 @@ fn send_keys_wrapped_line_count(input: &str, width: usize) -> usize {
 fn send_keys_wrapped_lines(input: &str, width: usize) -> Vec<String> {
     let width = max(1, width);
     let mut target = CollectSendKeysLines::default();
-    for logical_line in input.split('\n') {
+    for (logical_line, has_trailing_newline) in split_send_keys_lines(input) {
         wrap_send_keys_logical_line(logical_line, width, &mut target);
+        if has_trailing_newline {
+            target.advance_hidden_char();
+        }
     }
     target.into_lines()
 }
 
+fn collect_send_keys_input_view(input: &str, cursor: usize, width: usize) -> CollectedSendKeysView {
+    let width = max(1, width);
+    let mut target = CollectSendKeysInputView::new(min(cursor, input.chars().count()));
+    for (logical_line, has_trailing_newline) in split_send_keys_lines(input) {
+        wrap_send_keys_logical_line(logical_line, width, &mut target);
+        if has_trailing_newline {
+            target.advance_hidden_char();
+        }
+    }
+    target.finish()
+}
+
+fn split_send_keys_lines(input: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut parts = input.split('\n').peekable();
+    std::iter::from_fn(move || {
+        let line = parts.next()?;
+        Some((line, parts.peek().is_some()))
+    })
+}
+
 fn wrap_send_keys_logical_line(input: &str, width: usize, target: &mut impl SendKeysLineTarget) {
     if input.is_empty() {
+        target.mark_cursor();
         target.push_line();
         return;
     }
@@ -1333,6 +1369,10 @@ fn wrap_send_keys_logical_line(input: &str, width: usize, target: &mut impl Send
         if target.current_width() > 0
             && target.current_width() + pending_space_width + run_width > width
         {
+            for _ in pending_space.chars() {
+                target.mark_cursor();
+                target.advance_hidden_char();
+            }
             target.push_line();
             pending_space = "";
             pending_space_width = 0;
@@ -1349,6 +1389,7 @@ fn wrap_send_keys_logical_line(input: &str, width: usize, target: &mut impl Send
         append_hard_wrapped_send_keys_run(pending_space, width, target);
     }
 
+    target.mark_cursor();
     target.push_line();
 }
 
@@ -1361,12 +1402,16 @@ fn append_hard_wrapped_send_keys_run(
         let Some(ch_width) = ch.width() else {
             // Keep non-rendering control characters in the submitted key
             // sequence, but omit them from display and cursor accounting.
+            target.mark_cursor();
+            target.advance_hidden_char();
             continue;
         };
         if target.current_width() > 0 && target.current_width().saturating_add(ch_width) > width {
             target.push_line();
         }
+        target.mark_cursor();
         target.push_char(ch, ch_width);
+        target.advance_hidden_char();
     }
 }
 
@@ -1374,6 +1419,8 @@ trait SendKeysLineTarget {
     fn current_width(&self) -> usize;
     fn push_char(&mut self, ch: char, ch_width: usize);
     fn push_line(&mut self);
+    fn mark_cursor(&mut self) {}
+    fn advance_hidden_char(&mut self) {}
 }
 
 #[derive(Default)]
@@ -1436,6 +1483,79 @@ impl SendKeysLineTarget for CollectSendKeysLines {
     }
 }
 
+struct CollectedSendKeysView {
+    lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+struct CollectSendKeysInputView {
+    cursor: usize,
+    seen_chars: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+    cursor_captured: bool,
+    lines: Vec<String>,
+    current: String,
+    current_width: usize,
+}
+
+impl CollectSendKeysInputView {
+    fn new(cursor: usize) -> Self {
+        Self {
+            cursor,
+            seen_chars: 0,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_captured: false,
+            lines: Vec::new(),
+            current: String::new(),
+            current_width: 0,
+        }
+    }
+
+    fn finish(mut self) -> CollectedSendKeysView {
+        self.mark_cursor();
+        CollectedSendKeysView {
+            lines: if self.lines.is_empty() {
+                vec![String::new()]
+            } else {
+                self.lines
+            },
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+        }
+    }
+}
+
+impl SendKeysLineTarget for CollectSendKeysInputView {
+    fn current_width(&self) -> usize {
+        self.current_width
+    }
+
+    fn push_char(&mut self, ch: char, ch_width: usize) {
+        self.current.push(ch);
+        self.current_width = self.current_width.saturating_add(ch_width);
+    }
+
+    fn push_line(&mut self) {
+        self.lines.push(std::mem::take(&mut self.current));
+        self.current_width = 0;
+    }
+
+    fn mark_cursor(&mut self) {
+        if !self.cursor_captured && self.seen_chars == self.cursor {
+            self.cursor_row = self.lines.len();
+            self.cursor_col = self.current_width;
+            self.cursor_captured = true;
+        }
+    }
+
+    fn advance_hidden_char(&mut self) {
+        self.seen_chars = self.seen_chars.saturating_add(1);
+    }
+}
+
 fn text_runs(input: &str) -> impl Iterator<Item = (&str, bool)> {
     let mut rest = input;
     std::iter::from_fn(move || {
@@ -1458,60 +1578,6 @@ fn text_runs(input: &str) -> impl Iterator<Item = (&str, bool)> {
         rest = remaining;
         Some((run, is_whitespace))
     })
-}
-
-#[cfg(test)]
-mod send_keys_wrap_tests {
-    use super::*;
-
-    fn strings(lines: &[&str]) -> Vec<String> {
-        lines.iter().map(|line| (*line).to_string()).collect()
-    }
-
-    #[test]
-    fn send_keys_word_wrap_hard_wraps_unbroken_words() {
-        assert_eq!(
-            send_keys_wrapped_lines("abcdef", 3),
-            strings(&["abc", "def"])
-        );
-    }
-
-    #[test]
-    fn send_keys_word_wrap_preserves_spaces_that_fit_and_trailing_spaces() {
-        assert_eq!(send_keys_wrapped_lines("a  b", 4), strings(&["a  b"]));
-        assert_eq!(send_keys_wrapped_lines("abc  ", 4), strings(&["abc ", " "]));
-    }
-
-    #[test]
-    fn send_keys_word_wrap_handles_width_one() {
-        assert_eq!(
-            send_keys_wrapped_lines("ab cd", 1),
-            strings(&["a", "b", "c", "d"])
-        );
-    }
-
-    #[test]
-    fn send_keys_word_wrap_omits_control_chars_from_display() {
-        assert_eq!(send_keys_wrapped_lines("ab\u{7}cd", 10), strings(&["abcd"]));
-    }
-
-    #[test]
-    fn send_keys_word_wrap_count_matches_collected_lines() {
-        for (input, width) in [
-            ("", 1),
-            ("abcdef", 3),
-            ("a  b", 4),
-            ("abc  ", 4),
-            ("ab cd", 1),
-            ("alpha beta\ngamma delta", 7),
-            ("ab\u{7}cd", 10),
-        ] {
-            assert_eq!(
-                send_keys_wrapped_line_count(input, width),
-                send_keys_wrapped_lines(input, width).len()
-            );
-        }
-    }
 }
 
 fn key_value_prefix_column_width(area_width: u16) -> u16 {
@@ -1612,10 +1678,8 @@ fn session_key_value_line(
 fn draw_session_key_value_input_row(
     frame: &mut Frame<'_>,
     area: Rect,
-    key_input: &str,
-    key_cursor: usize,
-    value_input: &str,
-    value_cursor: usize,
+    key_field: InlineTextField<'_>,
+    value_field: InlineTextField<'_>,
     focus: SessionKeyValueFocus,
     columns: KeyValueColumns,
 ) {
@@ -1625,21 +1689,19 @@ fn draw_session_key_value_input_row(
     let key_style = key_value_edit_cell_style(focus == SessionKeyValueFocus::Key);
     let value_style = key_value_edit_cell_style(focus == SessionKeyValueFocus::Value);
     let value_width = columns.value_width.saturating_add(columns.indicator_width);
-    let key_focused = focus == SessionKeyValueFocus::Key;
-    let value_focused = focus == SessionKeyValueFocus::Value;
     let line = key_value_input_row_line(
         pad_or_truncate_owned(String::new(), columns.prefix_width as usize),
         input_cell_text(
-            key_input,
-            key_cursor,
+            key_field.value,
+            key_field.cursor,
             columns.key_width as usize,
-            key_focused,
+            key_field.focused,
         ),
         input_cell_text(
-            value_input,
-            value_cursor,
+            value_field.value,
+            value_field.cursor,
             value_width as usize,
-            value_focused,
+            value_field.focused,
         ),
         key_style,
         value_style,
@@ -1652,8 +1714,8 @@ fn draw_session_key_value_input_row(
         SessionKeyValueFocus::Key => set_inline_text_cursor(
             frame,
             Rect::new(area.x + columns.prefix_width, area.y, columns.key_width, 1),
-            key_input,
-            key_cursor,
+            key_field.value,
+            key_field.cursor,
         ),
         SessionKeyValueFocus::Value => set_inline_text_cursor(
             frame,
@@ -1663,8 +1725,8 @@ fn draw_session_key_value_input_row(
                 value_width,
                 1,
             ),
-            value_input,
-            value_cursor,
+            value_field.value,
+            value_field.cursor,
         ),
         _ => {}
     }
@@ -1746,14 +1808,6 @@ fn input_cursor_offset(value: &str, cursor: usize, width: usize) -> u16 {
         let start = cursor.saturating_add(1).saturating_sub(width);
         min(cursor.saturating_sub(start), width.saturating_sub(1)) as u16
     }
-}
-
-fn char_to_byte_index(input: &str, cursor: usize) -> usize {
-    input
-        .char_indices()
-        .nth(cursor)
-        .map(|(index, _)| index)
-        .unwrap_or(input.len())
 }
 
 fn selected_list_row_style() -> Style {
@@ -2122,5 +2176,68 @@ fn button_text(active: Option<Button>, button: Button) -> String {
         format!("[{label}]")
     } else {
         format!(" {label} ")
+    }
+}
+
+#[cfg(test)]
+mod send_keys_wrap_tests {
+    use super::*;
+
+    fn strings(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    #[test]
+    fn send_keys_word_wrap_hard_wraps_unbroken_words() {
+        assert_eq!(
+            send_keys_wrapped_lines("abcdef", 3),
+            strings(&["abc", "def"])
+        );
+    }
+
+    #[test]
+    fn send_keys_word_wrap_preserves_spaces_that_fit_and_trailing_spaces() {
+        assert_eq!(send_keys_wrapped_lines("a  b", 4), strings(&["a  b"]));
+        assert_eq!(send_keys_wrapped_lines("abc  ", 4), strings(&["abc ", " "]));
+    }
+
+    #[test]
+    fn send_keys_word_wrap_handles_width_one() {
+        assert_eq!(
+            send_keys_wrapped_lines("ab cd", 1),
+            strings(&["a", "b", "c", "d"])
+        );
+    }
+
+    #[test]
+    fn send_keys_word_wrap_omits_control_chars_from_display() {
+        assert_eq!(send_keys_wrapped_lines("ab\u{7}cd", 10), strings(&["abcd"]));
+    }
+
+    #[test]
+    fn send_keys_word_wrap_count_matches_collected_lines() {
+        for (input, width) in [
+            ("", 1),
+            ("abcdef", 3),
+            ("a  b", 4),
+            ("abc  ", 4),
+            ("ab cd", 1),
+            ("alpha beta\ngamma delta", 7),
+            ("ab\u{7}cd", 10),
+        ] {
+            assert_eq!(
+                send_keys_wrapped_line_count(input, width),
+                send_keys_wrapped_lines(input, width).len()
+            );
+        }
+    }
+
+    #[test]
+    fn send_keys_input_view_tracks_cursor_inside_wrapped_long_word() {
+        let view = send_keys_input_view("hello worldlong", 8, 10, 3);
+
+        assert_eq!(view.text, "hello\nworldlong");
+        assert_eq!(view.cursor_y, 1);
+        assert_eq!(view.cursor_x, 2);
     }
 }

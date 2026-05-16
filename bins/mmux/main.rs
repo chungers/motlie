@@ -7,6 +7,7 @@ mod model;
 mod render;
 mod target_host;
 mod terminal;
+mod text;
 
 #[cfg(test)]
 mod tests;
@@ -17,17 +18,17 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::style::Color;
-use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender, UnboundedReceiver};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, error::TrySendError};
 use tokio::time::sleep;
 
-use cli::{select_layout, Cli};
+use cli::{Cli, select_layout};
 use consts::{
-    mmux_attach_status_style, mmux_attach_window_style, MMUX_ATTACH_STATUS_LEFT,
-    MMUX_ATTACH_STATUS_LEFT_LENGTH,
+    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, mmux_attach_status_style,
+    mmux_attach_window_style,
 };
 use controller::{
-    apply_streaming_host_results, fetch_host_refresh, handle_key, refresh_detail,
-    HostRefreshResult, KeyOutcome, RefreshApplyOptions,
+    HostRefreshResult, KeyOutcome, RefreshApplyOptions, apply_streaming_host_results,
+    fetch_host_refresh, handle_key, refresh_detail,
 };
 use forcecommand::maybe_run_forcecommand_bypass;
 use model::{
@@ -39,7 +40,7 @@ use motlie_tmux::{
     SessionWindowStyleOverrides, SessionWindowStyles, SessionWindowStylesSnapshot, StatusLeft,
     StatusLeftLength, StatusStyle, Target, WindowStyle,
 };
-use target_host::{connect_initial_fleet, connect_ssh_spec, HostConnectSpec};
+use target_host::{HostConnectSpec, connect_initial_fleet, connect_ssh_spec};
 use terminal::TerminalSession;
 
 #[derive(Debug)]

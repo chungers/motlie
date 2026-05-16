@@ -2309,6 +2309,85 @@ async fn session_tags_modal_arrow_keys_edit_at_insertion_point() {
 }
 
 #[tokio::test]
+async fn new_session_modal_arrow_keys_edit_all_text_fields() {
+    let fleet = local_fleet();
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.modal = Some(test_new_session_modal("build", Button::Ok));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    let Some(ModalState::NewSession { ui }) = app.modal.as_mut() else {
+        panic!("new session modal should be open");
+    };
+    ui.focus = NewSessionFocus::EnvKey;
+    ui.env_key_input = "BUILD_ID".to_string();
+    ui.env_key_cursor = "BUILD_ID".chars().count();
+    ui.env_value_input = "42".to_string();
+    ui.env_value_cursor = "42".chars().count();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.input == "builXd"
+                && ui.input_cursor == 5
+                && ui.env_key_input == "BUILD_IXD"
+                && ui.env_key_cursor == 8
+                && ui.env_value_input == "4X2"
+                && ui.env_value_cursor == 2
+                && ui.focus == NewSessionFocus::EnvValue
+    ));
+}
+
+#[tokio::test]
 async fn new_session_modal_selects_host_in_multi_host_mode() {
     let fleet = HostFleet::from_entries(vec![
         ssh_host_entry("ssh://a", "alpha", "x", HostHandle::local()),
