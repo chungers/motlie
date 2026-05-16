@@ -1316,18 +1316,6 @@ fn send_keys_wrapped_line_count(input: &str, width: usize) -> usize {
     target.count()
 }
 
-fn send_keys_wrapped_lines(input: &str, width: usize) -> Vec<String> {
-    let width = max(1, width);
-    let mut target = CollectSendKeysLines::default();
-    for (logical_line, has_trailing_newline) in split_send_keys_lines(input) {
-        wrap_send_keys_logical_line(logical_line, width, &mut target);
-        if has_trailing_newline {
-            target.advance_hidden_char();
-        }
-    }
-    target.into_lines()
-}
-
 fn collect_send_keys_input_view(input: &str, cursor: usize, width: usize) -> CollectedSendKeysView {
     let width = max(1, width);
     let mut target = CollectSendKeysInputView::new(min(cursor, input.chars().count()));
@@ -1446,39 +1434,6 @@ impl SendKeysLineTarget for CountSendKeysLines {
 
     fn push_line(&mut self) {
         self.rows = self.rows.saturating_add(1);
-        self.current_width = 0;
-    }
-}
-
-#[derive(Default)]
-struct CollectSendKeysLines {
-    lines: Vec<String>,
-    current: String,
-    current_width: usize,
-}
-
-impl CollectSendKeysLines {
-    fn into_lines(self) -> Vec<String> {
-        if self.lines.is_empty() {
-            vec![String::new()]
-        } else {
-            self.lines
-        }
-    }
-}
-
-impl SendKeysLineTarget for CollectSendKeysLines {
-    fn current_width(&self) -> usize {
-        self.current_width
-    }
-
-    fn push_char(&mut self, ch: char, ch_width: usize) {
-        self.current.push(ch);
-        self.current_width = self.current_width.saturating_add(ch_width);
-    }
-
-    fn push_line(&mut self) {
-        self.lines.push(std::mem::take(&mut self.current));
         self.current_width = 0;
     }
 }
@@ -2187,31 +2142,29 @@ mod send_keys_wrap_tests {
         lines.iter().map(|line| (*line).to_string()).collect()
     }
 
+    fn wrapped_lines(input: &str, width: usize) -> Vec<String> {
+        collect_send_keys_input_view(input, input.chars().count(), width).lines
+    }
+
     #[test]
     fn send_keys_word_wrap_hard_wraps_unbroken_words() {
-        assert_eq!(
-            send_keys_wrapped_lines("abcdef", 3),
-            strings(&["abc", "def"])
-        );
+        assert_eq!(wrapped_lines("abcdef", 3), strings(&["abc", "def"]));
     }
 
     #[test]
     fn send_keys_word_wrap_preserves_spaces_that_fit_and_trailing_spaces() {
-        assert_eq!(send_keys_wrapped_lines("a  b", 4), strings(&["a  b"]));
-        assert_eq!(send_keys_wrapped_lines("abc  ", 4), strings(&["abc ", " "]));
+        assert_eq!(wrapped_lines("a  b", 4), strings(&["a  b"]));
+        assert_eq!(wrapped_lines("abc  ", 4), strings(&["abc ", " "]));
     }
 
     #[test]
     fn send_keys_word_wrap_handles_width_one() {
-        assert_eq!(
-            send_keys_wrapped_lines("ab cd", 1),
-            strings(&["a", "b", "c", "d"])
-        );
+        assert_eq!(wrapped_lines("ab cd", 1), strings(&["a", "b", "c", "d"]));
     }
 
     #[test]
     fn send_keys_word_wrap_omits_control_chars_from_display() {
-        assert_eq!(send_keys_wrapped_lines("ab\u{7}cd", 10), strings(&["abcd"]));
+        assert_eq!(wrapped_lines("ab\u{7}cd", 10), strings(&["abcd"]));
     }
 
     #[test]
@@ -2227,7 +2180,7 @@ mod send_keys_wrap_tests {
         ] {
             assert_eq!(
                 send_keys_wrapped_line_count(input, width),
-                send_keys_wrapped_lines(input, width).len()
+                wrapped_lines(input, width).len()
             );
         }
     }
