@@ -21,6 +21,7 @@ use crate::model::{
     SessionKeyValueModalUi, SessionKeyValueRow, SessionRow, SessionSelectedTag, SessionSortMode,
     StatusBanner,
 };
+use crate::text::char_to_byte_index;
 
 const TAG_PREFIX: &str = "mmux";
 const SELECTED_TAG_KEY_OPTION: &str = "__selected-key";
@@ -883,14 +884,6 @@ async fn handle_modal_key(
         }) => match key.code {
             KeyCode::Esc => ModalAction::Close,
             _ if edit_focused_text_field(&key, true, input, cursor) => ModalAction::None,
-            KeyCode::Left => {
-                *button = Button::Cancel;
-                ModalAction::None
-            }
-            KeyCode::Right => {
-                *button = Button::Ok;
-                ModalAction::None
-            }
             KeyCode::Enter if *button == Button::Ok => ModalAction::RenameSession {
                 session: session.clone(),
                 input: input.clone(),
@@ -1270,14 +1263,6 @@ fn remove_next_char(input: &mut String, cursor: &mut usize) -> bool {
     let end = char_to_byte_index(input, cursor.saturating_add(1));
     input.replace_range(start..end, "");
     true
-}
-
-fn char_to_byte_index(input: &str, cursor: usize) -> usize {
-    input
-        .char_indices()
-        .nth(cursor)
-        .map(|(index, _)| index)
-        .unwrap_or(input.len())
 }
 
 fn next_focus<T: Copy + Eq>(focus: T, order: &[T]) -> T {
@@ -2241,4 +2226,95 @@ async fn fetch_older_detail(fleet: &HostFleet, app: &mut AppState) -> Result<()>
         app.status = StatusBanner::info("fetched older scrollback");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod text_edit_tests {
+    use super::*;
+
+    fn plain_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn edit_text_field_backspace_at_start_is_stable() {
+        let mut input = "hello".to_string();
+        let mut cursor = 0;
+
+        assert!(edit_text_field(
+            &plain_key(KeyCode::Backspace),
+            &mut input,
+            &mut cursor,
+        ));
+        assert_eq!(input, "hello");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn edit_text_field_delete_at_end_is_stable() {
+        let mut input = "hello".to_string();
+        let mut cursor = input.chars().count();
+
+        assert!(edit_text_field(
+            &plain_key(KeyCode::Delete),
+            &mut input,
+            &mut cursor,
+        ));
+        assert_eq!(input, "hello");
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn edit_text_field_home_and_end_move_cursor() {
+        let mut input = "hello".to_string();
+        let mut cursor = 2;
+
+        assert!(edit_text_field(
+            &plain_key(KeyCode::End),
+            &mut input,
+            &mut cursor,
+        ));
+        assert_eq!(cursor, 5);
+        assert!(edit_text_field(
+            &plain_key(KeyCode::Home),
+            &mut input,
+            &mut cursor,
+        ));
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn edit_text_field_handles_utf8_insert_delete_and_backspace() {
+        let mut input = "héllo😀".to_string();
+        let mut cursor = input.chars().count();
+
+        assert!(edit_text_field(
+            &plain_key(KeyCode::Left),
+            &mut input,
+            &mut cursor,
+        ));
+        assert!(edit_text_field(
+            &plain_key(KeyCode::Char('界')),
+            &mut input,
+            &mut cursor,
+        ));
+        assert_eq!(input, "héllo界😀");
+        assert_eq!(cursor, "héllo界".chars().count());
+
+        assert!(edit_text_field(
+            &plain_key(KeyCode::Delete),
+            &mut input,
+            &mut cursor,
+        ));
+        assert_eq!(input, "héllo界");
+        assert_eq!(cursor, "héllo界".chars().count());
+
+        assert!(edit_text_field(
+            &plain_key(KeyCode::Backspace),
+            &mut input,
+            &mut cursor,
+        ));
+        assert_eq!(input, "héllo");
+        assert_eq!(cursor, "héllo".chars().count());
+    }
 }
