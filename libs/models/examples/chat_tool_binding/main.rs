@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use motlie_model::{ChatMessage, ChatRequest, ChatRole, ContentPart, ToolCall, ToolChoice};
-use motlie_models::ToolRegistry;
+use motlie_models::{tool_list, ToolDispatch, ToolList};
 
 #[allow(dead_code)]
 #[path = "../tool_demo_support.rs"]
@@ -8,29 +8,17 @@ mod tool_demo_support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut registry = ToolRegistry::new();
-    registry
-        .insert_fn(
-            "get_weather",
-            "Return a current weather summary for a city.",
-            tool_demo_support::get_weather,
-        )
-        .context("register existing function tool")?
-        .insert_fn(
-            "evaluate_math_expression",
-            "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions. Use matching numeric types in division, for example divide decimal values by 3.0.",
-            |args: tool_demo_support::MathExpressionArgs| async move {
-                tool_demo_support::evaluate_math_expression(args).await
-            },
-        )
-        .context("register closure tool")?;
+    let tools = tool_list!(
+        tool_demo_support::WeatherTool,
+        tool_demo_support::EvaluateMathExpressionTool,
+    );
 
     let request = ChatRequest {
         messages: vec![ChatMessage::text(
             ChatRole::User,
             "What is Rust, and what is the average fahrenheit temperature across Seattle, Portland, and San Francisco?",
         )],
-        tools: registry.specs(),
+        tools: tools.specs().context("collect tool specs")?,
         tool_choice: Some(ToolChoice::Auto),
         ..Default::default()
     };
@@ -81,10 +69,14 @@ async fn main() -> Result<()> {
 
     for call in model_calls {
         let assistant_turn = ChatMessage::assistant_tool_calls(vec![call.clone()]);
-        let tool_turn = registry
-            .call_to_message(call)
-            .await
-            .context("execute tool call")?;
+        let tool_turn = match tools.dispatch(call).await.context("execute tool call")? {
+            ToolDispatch::Handled(message) => message,
+            ToolDispatch::NotMine(call) => {
+                // Future per #284: iterate mcp_servers here.
+                // for server in &mcp_servers { if server.owns(&call.name) { ... } }
+                anyhow::bail!("unknown tool: {}", call.name);
+            }
+        };
 
         print_message("assistant", &assistant_turn);
         print_message("tool", &tool_turn);

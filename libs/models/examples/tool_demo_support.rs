@@ -1,13 +1,14 @@
 use anyhow::{bail, ensure, Context, Result};
 use cel_cxx::{Activation, Env, Value};
 use motlie_model::{
-    ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart, GenerationParams, ToolChoice,
+    ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart, GenerationParams, Tool, ToolChoice,
     ToolName,
 };
-use motlie_models::{ToolError, ToolRegistry};
+use motlie_models::{tool_list, ToolDispatch, ToolList};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -31,7 +32,11 @@ pub struct WeatherOutput {
     pub summary: String,
 }
 
-pub async fn get_weather(args: WeatherArgs) -> std::result::Result<WeatherOutput, ToolError> {
+#[derive(Debug, thiserror::Error)]
+#[error("weather lookup failed")]
+pub struct WeatherError;
+
+pub async fn get_weather(args: WeatherArgs) -> std::result::Result<WeatherOutput, WeatherError> {
     let temperature_fahrenheit = match args.city.to_ascii_lowercase().as_str() {
         "seattle" => 72.0,
         "portland" => 68.0,
@@ -54,6 +59,30 @@ pub async fn get_weather(args: WeatherArgs) -> std::result::Result<WeatherOutput
     })
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WeatherTool;
+
+impl Tool for WeatherTool {
+    type Args = WeatherArgs;
+    type Output = WeatherOutput;
+    type Error = WeatherError;
+
+    fn name(&self) -> &'static str {
+        "get_weather"
+    }
+
+    fn description(&self) -> &'static str {
+        "Return a current weather summary for a city."
+    }
+
+    fn call(
+        &self,
+        args: Self::Args,
+    ) -> impl Future<Output = std::result::Result<Self::Output, Self::Error>> + Send {
+        get_weather(args)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MathExpressionArgs {
     /// CEL arithmetic expression to evaluate. Supports parentheses, numeric
@@ -71,43 +100,55 @@ pub struct MathExpressionOutput {
     pub engine: &'static str,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum MathExpressionError {
+    #[error("expression cannot be empty")]
+    Empty,
+    #[error("expression is too long; keep examples under 512 bytes")]
+    TooLong,
+    #[error("failed to build CEL environment: {0}")]
+    BuildEnvironment(#[source] cel_cxx::Error),
+    #[error("failed to compile CEL expression: {0}")]
+    CompileExpression(#[source] cel_cxx::Error),
+    #[error("failed to evaluate CEL expression: {0}")]
+    EvaluateExpression(#[source] cel_cxx::Error),
+    #[error("CEL expression evaluated to non-numeric value: {0}")]
+    NonNumeric(String),
+    #[error("expression evaluated to a non-finite number")]
+    NonFinite,
+}
+
 pub async fn evaluate_math_expression(
     args: MathExpressionArgs,
-) -> std::result::Result<MathExpressionOutput, ToolError> {
+) -> std::result::Result<MathExpressionOutput, MathExpressionError> {
     let expression = args.expression.trim();
     if expression.is_empty() {
-        return Err(ToolError::execution("expression cannot be empty"));
+        return Err(MathExpressionError::Empty);
     }
     if expression.len() > 512 {
-        return Err(ToolError::execution(
-            "expression is too long; keep examples under 512 bytes",
-        ));
+        return Err(MathExpressionError::TooLong);
     }
 
     let env = Env::builder()
         .with_ext_math(true)
         .build()
-        .map_err(|err| ToolError::execution(format!("failed to build CEL environment: {err}")))?;
+        .map_err(MathExpressionError::BuildEnvironment)?;
     let program = env
         .compile(expression)
-        .map_err(|err| ToolError::execution(format!("failed to compile CEL expression: {err}")))?;
+        .map_err(MathExpressionError::CompileExpression)?;
     let value = program
         .evaluate(&Activation::new())
-        .map_err(|err| ToolError::execution(format!("failed to evaluate CEL expression: {err}")))?;
+        .map_err(MathExpressionError::EvaluateExpression)?;
     let value = match value {
         Value::Int(value) => value as f64,
         Value::Uint(value) => value as f64,
         Value::Double(value) => value,
         other => {
-            return Err(ToolError::execution(format!(
-                "CEL expression evaluated to non-numeric value: {other}"
-            )));
+            return Err(MathExpressionError::NonNumeric(other.to_string()));
         }
     };
     if !value.is_finite() {
-        return Err(ToolError::execution(
-            "expression evaluated to a non-finite number",
-        ));
+        return Err(MathExpressionError::NonFinite);
     }
 
     Ok(MathExpressionOutput {
@@ -118,28 +159,39 @@ pub async fn evaluate_math_expression(
     })
 }
 
-pub fn register_demo_tools(registry: &mut ToolRegistry) -> std::result::Result<(), ToolError> {
-    registry
-        .insert_fn(
-            "get_weather",
-            "Return a current weather summary for a city.",
-            get_weather,
-        )?
-        .insert_fn(
-            "evaluate_math_expression",
-            "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions. Use matching numeric types in division, for example divide decimal values by 3.0.",
-            evaluate_math_expression,
-        )?;
-    Ok(())
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvaluateMathExpressionTool;
+
+impl Tool for EvaluateMathExpressionTool {
+    type Args = MathExpressionArgs;
+    type Output = MathExpressionOutput;
+    type Error = MathExpressionError;
+
+    fn name(&self) -> &'static str {
+        "evaluate_math_expression"
+    }
+
+    fn description(&self) -> &'static str {
+        "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions. Use matching numeric types in division, for example divide decimal values by 3.0."
+    }
+
+    fn call(
+        &self,
+        args: Self::Args,
+    ) -> impl Future<Output = std::result::Result<Self::Output, Self::Error>> + Send {
+        evaluate_math_expression(args)
+    }
+}
+
+pub fn demo_tools() -> impl ToolList {
+    tool_list!(WeatherTool, EvaluateMathExpressionTool)
 }
 
 pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
     println!("\n--- tool calling ---");
 
-    let mut registry = ToolRegistry::new();
-    register_demo_tools(&mut registry).context("register demo tools")?;
-
-    let tools = registry.specs();
+    let tools = demo_tools();
+    let tool_specs = tools.specs().context("collect demo tool specs")?;
     let mut messages = vec![
         ChatMessage::new(
             ChatRole::System,
@@ -160,7 +212,7 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
             .generate(ChatRequest {
                 messages: messages.clone(),
                 params: tool_demo_generation_params(),
-                tools: tools.clone(),
+                tools: tool_specs.clone(),
                 tool_choice: Some(ToolChoice::Auto),
                 ..Default::default()
             })
@@ -190,10 +242,18 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
             println!("tool-call-args: {}", call.arguments.raw_json_str());
             seen_tools.insert(call.name.clone());
 
-            let tool_message = registry
-                .call_to_message(call)
+            let tool_message = match tools
+                .dispatch(call)
                 .await
-                .context("execute model-requested tool")?;
+                .context("execute model-requested tool")?
+            {
+                ToolDispatch::Handled(message) => message,
+                ToolDispatch::NotMine(call) => {
+                    // Future per #284: iterate mcp_servers here.
+                    // for server in &mcp_servers { if server.owns(&call.name) { ... } }
+                    bail!("unknown tool: {}", call.name);
+                }
+            };
             for part in &tool_message.content {
                 if let ContentPart::Text(text) = part {
                     println!("tool-result: {text}");
@@ -220,7 +280,7 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
                 .generate(ChatRequest {
                     messages,
                     params: tool_demo_generation_params(),
-                    tools,
+                    tools: tool_specs,
                     tool_choice: Some(ToolChoice::None),
                     ..Default::default()
                 })

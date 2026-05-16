@@ -24,7 +24,7 @@ Current example groups:
 
 | Example | Backend | Curated model(s) | Advertised capabilities | Tool-use demo status |
 |---------|---------|------------------|-------------------------|----------------------|
-| `chat_tool_binding` | none | API-only | typed Rust tool binding | Runs without loading an LLM; binds `get_weather` as an existing async function and `evaluate_math_expression` as an async closure. |
+| `chat_tool_binding` | none | API-only | typed Rust tool binding | Runs without loading an LLM; builds a static `ToolList` with `get_weather` and `evaluate_math_expression`. |
 | `chat_mistral_qwen3` | `mistral.rs` | Qwen3 4B safetensors | `Chat` + `Completion` + `ToolUse` | `--tool-demo` / `--tool-demo-only` run a multi-round tool loop: weather for Seattle, Portland, and San Francisco, then math-expression average. |
 | `chat_multimodal_gemma4` | `mistral.rs` | Gemma 4 E2B-it safetensors | `Chat` + `Vision` + `ToolUse` | Same weather-plus-math tool loop; image+text chat remains a separate `--image=...` path. |
 | `chat_gguf_gwen3_gemma4` | `llama.cpp` | Qwen3 4B GGUF, Gemma 4 E2B-it GGUF | `Chat` + `Completion` + `ToolUse` | Same weather-plus-math tool loop through llama.cpp's OpenAI-compatible chat-template path. |
@@ -33,9 +33,14 @@ Current example groups:
 The shared tool demo support lives in [`tool_demo_support.rs`](./tool_demo_support.rs).
 It intentionally keeps tool execution caller-owned: model backends request
 `ToolCall`s, and the example layer executes the Rust functions through
-`ToolRegistry`. The math tool uses `cel-cxx`, a Rust binding to the mature
+static `ToolList` tuple dispatch. The math tool uses `cel-cxx`, a Rust binding to the mature
 Common Expression Language implementation, so the example demonstrates binding
 a real Rust function instead of a hand-rolled parser.
+
+These examples demonstrate the type-level local Rust tool path. The data-level
+MCP path is intentionally scaffolding-only in this PR; concrete MCP transports
+and JSON-RPC lifecycle support are tracked by GitHub issue `#284` and should
+land in a future PR.
 
 Use `--tool-demo "What is Rust?"` on the model-backed chat examples to run the
 ordinary chat path first and then the weather-plus-math tool loop. Use
@@ -57,8 +62,8 @@ Representative API-only output:
 
 ```text
 registered-tools: 2
-tool: evaluate_math_expression
 tool: get_weather
+tool: evaluate_math_expression
 assistant-call-name: get_weather
 assistant-call-args: {"city":"Seattle","units":"fahrenheit"}
 tool-content: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}

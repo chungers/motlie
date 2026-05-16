@@ -1,207 +1,205 @@
-use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::future::Future;
-use std::marker::PhantomData;
 
-use async_trait::async_trait;
 use motlie_model::{
     ChatMessage, Tool, ToolArgumentError, ToolArguments, ToolCall, ToolName, ToolSchemaError,
     ToolSpec,
 };
-use schemars::JsonSchema;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use thiserror::Error;
 
+/// Result of asking a statically-typed tool list to handle a model tool call.
+///
+/// `NotMine` is deliberate: callers can compose local Rust tools with later
+/// data-routed providers such as MCP servers without treating fallthrough as an
+/// execution failure.
+#[derive(Debug)]
+pub enum ToolDispatch {
+    Handled(ChatMessage),
+    NotMine(ToolCall),
+}
+
+impl ToolDispatch {
+    pub fn handled(self) -> Option<ChatMessage> {
+        match self {
+            Self::Handled(message) => Some(message),
+            Self::NotMine(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
-pub enum ToolError {
-    #[error("tool `{0}` is already registered")]
-    DuplicateTool(ToolName),
-    #[error("tool execution failed: {0}")]
-    Execution(#[source] Box<dyn StdError + Send + Sync>),
+pub enum ToolListError {
     #[error(transparent)]
     InvalidArguments(#[from] ToolArgumentError),
     #[error("failed to serialize tool output: {0}")]
-    OutputSerialization(serde_json::Error),
+    OutputSerialization(#[source] serde_json::Error),
     #[error(transparent)]
     Schema(#[from] ToolSchemaError),
-    #[error("tool `{0}` is not registered")]
-    UnknownTool(ToolName),
+    #[error("tool execution failed: {0}")]
+    ToolFailed(#[source] Box<dyn StdError + Send + Sync>),
 }
 
-impl ToolError {
-    pub fn execution(message: impl Into<String>) -> Self {
-        Self::Execution(Box::new(ToolExecutionMessage(message.into())))
+impl ToolListError {
+    pub fn tool_failed(error: impl StdError + Send + Sync + 'static) -> Self {
+        Self::ToolFailed(Box::new(error))
+    }
+}
+
+/// Static-dispatched collection of typed Rust tools.
+///
+/// Implementations are provided for `()` and recursive `(Tool, ToolList)`
+/// tuples. Use [`tool_list!`] for ergonomic construction.
+pub trait ToolList: Send + Sync {
+    fn collect_specs(&self, out: &mut Vec<ToolSpec>) -> Result<(), ToolListError>;
+
+    fn dispatch(
+        &self,
+        call: ToolCall,
+    ) -> impl Future<Output = Result<ToolDispatch, ToolListError>> + Send + '_;
+
+    fn specs(&self) -> Result<Vec<ToolSpec>, ToolListError> {
+        let mut specs = Vec::new();
+        self.collect_specs(&mut specs)?;
+        Ok(specs)
+    }
+}
+
+impl ToolList for () {
+    fn collect_specs(&self, _out: &mut Vec<ToolSpec>) -> Result<(), ToolListError> {
+        Ok(())
     }
 
-    pub fn execution_source(error: impl StdError + Send + Sync + 'static) -> Self {
-        Self::Execution(Box::new(error))
+    fn dispatch(
+        &self,
+        call: ToolCall,
+    ) -> impl Future<Output = Result<ToolDispatch, ToolListError>> + Send + '_ {
+        async move { Ok(ToolDispatch::NotMine(call)) }
     }
+}
+
+impl<T, R> ToolList for (T, R)
+where
+    T: Tool,
+    R: ToolList,
+{
+    fn collect_specs(&self, out: &mut Vec<ToolSpec>) -> Result<(), ToolListError> {
+        out.push(self.0.spec()?);
+        self.1.collect_specs(out)
+    }
+
+    fn dispatch(
+        &self,
+        call: ToolCall,
+    ) -> impl Future<Output = Result<ToolDispatch, ToolListError>> + Send + '_ {
+        async move {
+            let ToolCall {
+                id,
+                name,
+                arguments,
+            } = call;
+
+            if name.as_str() != self.0.name() {
+                return self
+                    .1
+                    .dispatch(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })
+                    .await;
+            }
+
+            let args = arguments.parse::<T::Args>()?;
+            let output = self
+                .0
+                .call(args)
+                .await
+                .map_err(ToolListError::tool_failed)?;
+            let content =
+                serde_json::to_string(&output).map_err(ToolListError::OutputSerialization)?;
+
+            Ok(ToolDispatch::Handled(ChatMessage::tool_result_parts(
+                id, name, content,
+            )))
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! tool_list {
+    () => {
+        ()
+    };
+    ($head:expr $(, $tail:expr)* $(,)?) => {
+        ($head, $crate::tool_list!($($tail),*))
+    };
+}
+
+/// Scaffold for future Model Context Protocol data-routed tool integration.
+///
+/// PR #279 only defines the concrete type and host composition shape. Concrete
+/// transports, JSON-RPC framing, initialize/shutdown lifecycle, and capability
+/// negotiation are tracked by GitHub issue #284 and should land in a follow-up
+/// PR.
+#[derive(Debug)]
+pub struct Mcp {
+    server_name: String,
+    transport: McpTransport,
+    catalog: Vec<ToolSpec>,
 }
 
 #[derive(Debug)]
-struct ToolExecutionMessage(String);
-
-impl std::fmt::Display for ToolExecutionMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
+pub enum McpTransport {
+    Unimplemented,
 }
 
-impl StdError for ToolExecutionMessage {}
-
-#[async_trait]
-trait ErasedTool: Send + Sync {
-    fn spec(&self) -> &ToolSpec;
-    async fn call_json(&self, args: ToolArguments) -> Result<String, ToolError>;
-}
-
-struct ToolAdapter<T: Tool> {
-    tool: T,
-    spec: ToolSpec,
-}
-
-impl<T: Tool> ToolAdapter<T> {
-    fn new(tool: T) -> Result<Self, ToolError> {
-        let spec = tool.spec()?;
-        Ok(Self { tool, spec })
-    }
-}
-
-#[async_trait]
-impl<T: Tool> ErasedTool for ToolAdapter<T> {
-    fn spec(&self) -> &ToolSpec {
-        &self.spec
-    }
-
-    async fn call_json(&self, args: ToolArguments) -> Result<String, ToolError> {
-        let args = args.parse::<T::Args>()?;
-        let output = self
-            .tool
-            .call(args)
-            .await
-            .map_err(ToolError::execution_source)?;
-        serde_json::to_string(&output).map_err(ToolError::OutputSerialization)
-    }
-}
-
-struct FunctionTool<Args, Output, E, F> {
-    name: &'static str,
-    description: &'static str,
-    f: F,
-    _marker: PhantomData<fn(Args) -> Result<Output, E>>,
-}
-
-impl<Args, Output, E, F> FunctionTool<Args, Output, E, F> {
-    fn new(name: &'static str, description: &'static str, f: F) -> Self {
+impl Mcp {
+    pub fn new_unimplemented(server_name: impl Into<String>, catalog: Vec<ToolSpec>) -> Self {
         Self {
-            name,
-            description,
-            f,
-            _marker: PhantomData,
+            server_name: server_name.into(),
+            transport: McpTransport::Unimplemented,
+            catalog,
+        }
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    pub fn transport(&self) -> &McpTransport {
+        &self.transport
+    }
+
+    pub fn specs(&self) -> &[ToolSpec] {
+        &self.catalog
+    }
+
+    pub fn owns(&self, name: &ToolName) -> bool {
+        let prefixed = format!("{}.", self.server_name);
+        name.as_str().starts_with(&prefixed) || self.catalog.iter().any(|spec| spec.name == *name)
+    }
+
+    pub async fn call(&self, _name: &ToolName, _args: &ToolArguments) -> Result<String, McpError> {
+        match self.transport {
+            McpTransport::Unimplemented => Err(McpError::NotImplemented),
         }
     }
 }
 
-impl<Args, Output, E, F, Fut> Tool for FunctionTool<Args, Output, E, F>
-where
-    Args: DeserializeOwned + JsonSchema + Send + 'static,
-    Output: Serialize + Send + 'static,
-    E: StdError + Send + Sync + 'static,
-    F: Fn(Args) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Output, E>> + Send + 'static,
-{
-    type Args = Args;
-    type Output = Output;
-    type Error = E;
-
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn description(&self) -> &'static str {
-        self.description
-    }
-
-    fn call(
-        &self,
-        args: Self::Args,
-    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
-        (self.f)(args)
-    }
-}
-
-/// Caller-owned registry for examples and applications that execute Rust tools.
-///
-/// The core `motlie-model` crate stays statically dispatched and only defines
-/// portable tool-call contracts. This curated/examples crate owns the
-/// runtime-extensible registry because heterogeneous Rust tools require type
-/// erasure at the execution boundary.
-#[derive(Default)]
-pub struct ToolRegistry {
-    tools: BTreeMap<ToolName, Box<dyn ErasedTool>>,
-}
-
-impl ToolRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert<T>(&mut self, tool: T) -> Result<&mut Self, ToolError>
-    where
-        T: Tool,
-    {
-        let adapter = ToolAdapter::new(tool)?;
-        self.insert_erased(Box::new(adapter))
-    }
-
-    pub fn insert_fn<Args, Output, E, F, Fut>(
-        &mut self,
-        name: &'static str,
-        description: &'static str,
-        f: F,
-    ) -> Result<&mut Self, ToolError>
-    where
-        Args: DeserializeOwned + JsonSchema + Send + 'static,
-        Output: Serialize + Send + 'static,
-        E: StdError + Send + Sync + 'static,
-        F: Fn(Args) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Output, E>> + Send + 'static,
-    {
-        self.insert(FunctionTool::<Args, Output, E, F>::new(
-            name,
-            description,
-            f,
-        ))
-    }
-
-    pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools
-            .values()
-            .map(|tool| tool.spec().clone())
-            .collect()
-    }
-
-    pub async fn call_to_message(&self, call: ToolCall) -> Result<ChatMessage, ToolError> {
-        let id = call.id.clone();
-        let name = call.name.clone();
-        let tool = self
-            .tools
-            .get(&name)
-            .ok_or_else(|| ToolError::UnknownTool(name.clone()))?;
-        let content = tool.call_json(call.arguments).await?;
-        Ok(ChatMessage::tool_result_parts(id, name, content))
-    }
-
-    fn insert_erased(&mut self, tool: Box<dyn ErasedTool>) -> Result<&mut Self, ToolError> {
-        let name = tool.spec().name.clone();
-        if self.tools.contains_key(&name) {
-            return Err(ToolError::DuplicateTool(name));
-        }
-
-        self.tools.insert(name, tool);
-        Ok(self)
-    }
+#[derive(Debug, Error)]
+pub enum McpError {
+    #[error("MCP transports are not implemented in this PR; see GitHub issue #284")]
+    NotImplemented,
+    #[error("MCP transport failure: {message}")]
+    Transport { message: String },
+    #[error("MCP JSON-RPC error {code}: {message}")]
+    Rpc { code: i64, message: String },
+    #[error("MCP tool `{name}` failed: {content}")]
+    ToolFailed { name: ToolName, content: String },
+    #[error("MCP tool `{0}` is not in the cached catalog")]
+    UnknownTool(ToolName),
+    #[error("MCP capability `{0}` was not negotiated")]
+    CapabilityUnavailable(String),
 }
 
 #[cfg(test)]
@@ -219,26 +217,48 @@ mod tests {
         value: i64,
     }
 
-    async fn add(args: AddArgs) -> Result<AddOutput, ToolError> {
-        Ok(AddOutput {
-            value: args.left + args.right,
-        })
+    #[derive(Debug, Error)]
+    #[error("add failed")]
+    struct AddError;
+
+    struct AddTool;
+
+    impl Tool for AddTool {
+        type Args = AddArgs;
+        type Output = AddOutput;
+        type Error = AddError;
+
+        fn name(&self) -> &'static str {
+            "add"
+        }
+
+        fn description(&self) -> &'static str {
+            "Add two integers."
+        }
+
+        fn call(
+            &self,
+            args: Self::Args,
+        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+            async move {
+                Ok(AddOutput {
+                    value: args.left + args.right,
+                })
+            }
+        }
     }
 
     #[tokio::test]
-    async fn registry_executes_existing_function_binding() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .insert_fn("add", "Add two integers.", add)
-            .expect("function should register");
-
+    async fn tool_list_executes_matching_tool() {
+        let tools = tool_list!(AddTool);
         let call =
             ToolCall::from_serializable_args("call-1", "add", &AddArgs { left: 2, right: 3 })
                 .expect("args should serialize");
-        let message = registry
-            .call_to_message(call)
-            .await
-            .expect("tool should run");
+
+        let message = match tools.dispatch(call).await.expect("tool should run") {
+            ToolDispatch::Handled(message) => message,
+            ToolDispatch::NotMine(call) => panic!("unexpected unknown tool: {}", call.name),
+        };
 
         assert_eq!(message.name.as_ref().map(ToolName::as_str), Some("add"));
         assert_eq!(message.tool_call_id.as_deref(), Some("call-1"));
@@ -249,40 +269,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_executes_closure_binding() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .insert_fn("add", "Add two integers.", |args: AddArgs| async move {
-                Ok::<_, ToolError>(AddOutput {
-                    value: args.left + args.right,
-                })
-            })
-            .expect("closure should register");
+    async fn tool_list_falls_through_unknown_tool() {
+        let tools = tool_list!(AddTool);
+        let call =
+            ToolCall::from_serializable_args("call-1", "other", &AddArgs { left: 2, right: 3 })
+                .expect("args should serialize");
 
-        let call = ToolCall::from_json_args("call-1", "add", r#"{"left":4,"right":5}"#)
-            .expect("args should validate");
-        let message = registry
-            .call_to_message(call)
+        let dispatch = tools
+            .dispatch(call)
             .await
-            .expect("tool should run");
+            .expect("fallthrough is not an error");
 
-        assert_eq!(
-            message.content,
-            vec![motlie_model::ContentPart::Text(r#"{"value":9}"#.into())]
-        );
+        assert!(matches!(dispatch, ToolDispatch::NotMine(call) if call.name.as_str() == "other"));
     }
 
     #[test]
-    fn registry_rejects_duplicate_names() {
-        let mut registry = ToolRegistry::new();
-        registry
-            .insert_fn("add", "Add two integers.", add)
-            .expect("first insert should succeed");
-        let error = match registry.insert_fn("add", "Add two integers.", add) {
-            Ok(_) => panic!("duplicate insert should fail"),
-            Err(error) => error,
-        };
+    fn tool_list_collects_specs() {
+        let tools = tool_list!(AddTool);
+        let specs = tools.specs().expect("specs should collect");
 
-        assert!(matches!(error, ToolError::DuplicateTool(name) if name.as_str() == "add"));
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name.as_str(), "add");
+    }
+
+    #[test]
+    fn mcp_owns_catalog_tool() {
+        let spec = ToolSpec::from_args::<AddArgs>("add", "Add two integers.").expect("valid spec");
+        let mcp = Mcp::new_unimplemented("math_server", vec![spec]);
+        let add = ToolName::new("add").expect("valid name");
+        let other = ToolName::new("other").expect("valid name");
+
+        assert!(mcp.owns(&add));
+        assert!(!mcp.owns(&other));
     }
 }
