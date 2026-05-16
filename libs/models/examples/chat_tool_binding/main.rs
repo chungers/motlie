@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
         .context("register existing function tool")?
         .insert_fn(
             "evaluate_math_expression",
-            "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions.",
+            "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions. Use matching numeric types in division, for example divide decimal values by 3.0.",
             |args: tool_demo_support::MathExpressionArgs| async move {
                 tool_demo_support::evaluate_math_expression(args).await
             },
