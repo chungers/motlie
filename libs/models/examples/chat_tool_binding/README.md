@@ -1,10 +1,11 @@
 # `chat_tool_binding`
 
 This example demonstrates the common typed tool-binding API without loading a
-model backend. It covers both supported caller styles:
+model backend. It covers the static caller-owned shape:
 
-- binding `get_weather` as an existing async Rust function with typed arguments and output
-- binding `evaluate_math_expression` as an inline async closure with typed arguments and output
+- `WeatherTool` delegates to the existing async Rust function `get_weather`
+- `EvaluateMathExpressionTool` delegates to the typed CEL-backed math function
+- `tool_list!(...)` builds the statically dispatched local tool set
 
 Run it with:
 
@@ -12,10 +13,11 @@ Run it with:
 cargo run -p motlie-models --example chat_tool_binding --no-default-features
 ```
 
-The example registers both tools in `ToolRegistry`, builds a `ChatRequest` from
-`registry.specs()`, simulates assistant `ToolCall`s for weather in three cities
-plus a math-expression average, and converts each executed tool result back
-into a `ChatRole::Tool` message.
+The example builds a `ChatRequest` from `tools.specs()`, simulates assistant
+`ToolCall`s for weather in three cities plus a math-expression average, and
+converts each `ToolDispatch::Handled` result back into a `ChatRole::Tool`
+message. The `ToolDispatch::NotMine` arm is where caller code can route to
+future MCP servers from issue `#284`.
 
 The backend-specific examples that should get live model tool-call smoke tests
 after adapter wiring are:

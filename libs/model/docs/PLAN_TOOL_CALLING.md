@@ -98,10 +98,11 @@ Tasks:
 
 - [x] Add `Tool` for typed Rust argument/output bindings.
 - [x] Keep the core crate free of runtime tool execution/type-erased registries.
-- [x] Add `ToolRegistry` in `motlie-models` for caller-owned example/application tool execution.
-- [x] Support binding an existing async function with `insert_fn` in the `motlie-models` helper.
-- [x] Support binding an inline async closure with `insert_fn` in the `motlie-models` helper.
-- [x] Return executed tool results as `ChatRole::Tool` messages through the helper's `call_to_message`.
+- [x] Add static `ToolList` tuple dispatch in `motlie-models` for caller-owned example/application tool execution.
+- [x] Support binding an existing async function by delegating from a concrete `Tool` impl.
+- [x] Support binding an inline async closure by storing it in a concrete `Tool` wrapper.
+- [x] Return executed tool results as `ChatRole::Tool` messages through `ToolList::dispatch`.
+- [x] Add MCP scaffolding (`Mcp`, `McpTransport::Unimplemented`, `McpError`) and defer concrete transports to GitHub issue #284.
 - [x] Preserve raw model argument JSON through `ToolArguments`.
 
 ### 1.4 - Capability introspection

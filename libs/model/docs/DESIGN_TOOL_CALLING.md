@@ -13,6 +13,7 @@
 | 2026-05-11 | @codex-tool-calling: Initial design for a unified tool-calling chat contract that supports the curated Gemma 4 and Qwen3/Qwen3.6 LLMs with backend-local adaptation. | All |
 | 2026-05-13 | @codex-tool-calling: Refined the API around typed Rust tool binding, documented existing function and closure binding, implemented the `mistral.rs` adapter path, and enabled `ToolUse` for safetensors Qwen3/Gemma 4 descriptors. | Proposed Core API, Backend Adaptation, Validation Strategy |
 | 2026-05-13 | @codex-tool-calling: Implemented the llama.cpp GGUF tool-aware adapter path using OpenAI-compatible chat templates and documented the remaining GGUF descriptor gate. | Backend Adaptation, Validation Strategy |
+| 2026-05-16 | @codex-tool-calling: Replaced runtime-erased tool registries with static `ToolList` dispatch and documented the future MCP data-routing path tracked by issue #284. | Design Principle, Typed Rust Tool Binding, Dispatch Architecture |
 
 This document extends the `libs/model` chat contract with a common tool-calling API. It is intentionally focused on the Motlie contract layer, but it includes backend and curated-bundle implications because the design only works if the common shape can map cleanly to the current `mistral.rs` and `llama.cpp` paths.
 
@@ -20,6 +21,7 @@ Related tracking:
 
 - GitHub issue #272: unified tool-calling chat contract for Gemma 4 and Qwen3
 - GitHub issue #273: gap map, implementation scope, and current model convention notes
+- GitHub issue #284: MCP integration architecture and future transport work
 - [PLAN_TOOL_CALLING.md](./PLAN_TOOL_CALLING.md)
 
 ## Problem
@@ -90,6 +92,29 @@ Backend adapters translate the common shape into the concrete family convention:
 - `mistral.rs`: native `Tool`, `ToolChoice`, request fields, response `tool_calls`, and template preprocessing.
 - `llama.cpp`: `OpenAIChatTemplateParams`, generated tool grammar, and OpenAI-compatible response parsing.
 
+## Dispatch Architecture
+
+The implementation deliberately separates three mechanisms that are often
+collapsed under the word "dispatch":
+
+| Term | Mechanism | Uses `Box<dyn>`? | Motlie use |
+| --- | --- | --- | --- |
+| Static dispatch | Compile-time monomorphization | No | Local typed Rust tools via `ToolList` tuple recursion |
+| Dynamic dispatch | Trait-object vtable | Yes | Avoided for tool dispatch in `libs/` |
+| Data routing | Runtime match or lookup on values | No | Future MCP server/tool selection by name |
+
+Typed Rust tools are a type-level problem: every tool has its own `Args`,
+`Output`, and `Error` associated types. Motlie models that with a recursive
+`ToolList` over tuples, so the compiler monomorphizes each tool call path.
+`ToolListError` may still box a source error to preserve arbitrary tool error
+chains; that is error reporting, not tool dispatch.
+
+MCP tools are a data-level routing problem: every MCP tool crosses the same
+JSON-RPC `tools/call` boundary with JSON arguments and content results. PR #279
+only adds the `Mcp` scaffolding. Concrete stdio/SSE/HTTP transports,
+initialize/shutdown lifecycle, JSON-RPC framing, capability negotiation, and
+permission policy are explicitly future work for issue #284.
+
 ## Proposed Core API
 
 The public tool API is typed at the Rust boundary and raw JSON only at the model
@@ -136,7 +161,7 @@ Rules:
 - `ToolName::new(...)` validates the OpenAI-compatible name shape once in the shared contract: non-empty, at most 64 characters, and ASCII letters, digits, `_`, or `-`
 - `ToolInputSchema` validates that the schema document is JSON and describes an object-shaped argument payload before it reaches a backend
 - adapters serialize `ToolSpec` to the model/backend-specific JSON shape
-- the contract does not execute functions through `ToolSpec`; execution is caller-owned, with the current example/runtime registry provided by `motlie_models::ToolRegistry` instead of the core `motlie-model` crate
+- the contract does not execute functions through `ToolSpec`; execution is caller-owned, with static `motlie_models::ToolList` helpers available for local typed Rust tools
 
 ### Tool Choice
 
@@ -188,11 +213,11 @@ Rules:
 - `name` should match a registered `ToolSpec.name`; unknown tools still surface so the caller can reject them explicitly.
 - `ToolArguments` preserves the exact model/backend argument JSON while making typed parsing the normal Rust path.
 - `ToolArguments` rejects non-object JSON payloads; Rust tool arguments should be named structs.
-- If argument JSON cannot be parsed or deserialized into the requested Rust type, the caller receives `ToolArgumentError`; the `motlie_models::ToolRegistry` helper surfaces that through `ToolError::InvalidArguments`.
+- If argument JSON cannot be parsed or deserialized into the requested Rust type, the caller receives `ToolArgumentError`; the `motlie_models::ToolList` helper surfaces that through `ToolListError::InvalidArguments`.
 
 ### Typed Rust Tool Binding
 
-`libs/model` keeps model invocation separate from tool execution. The core crate defines the typed `Tool` trait and portable model-facing vocabulary. Runtime-extensible execution registries live outside the core crate so `motlie-model` does not need runtime type erasure for heterogeneous Rust tools. The curated examples use `motlie_models::ToolRegistry`, which can produce model-facing `ToolSpec`s and execute structured `ToolCall`s after the model asks for a tool.
+`libs/model` keeps model invocation separate from tool execution. The core crate defines the typed `Tool` trait and portable model-facing vocabulary. The curated examples use `motlie_models::ToolList`, which collects model-facing `ToolSpec`s and executes structured `ToolCall`s through statically dispatched tuple recursion after the model asks for a tool.
 
 Core binding trait:
 
@@ -216,36 +241,30 @@ pub trait Tool: Send + Sync + 'static {
 }
 ```
 
-Example/runtime registry helper, provided by `motlie-models`:
+Static tool-list helper, provided by `motlie-models`:
 
 ```rust
-pub struct ToolRegistry { /* opaque */ }
-
-impl ToolRegistry {
-    pub fn insert<T: motlie_model::Tool>(&mut self, tool: T) -> Result<&mut Self, ToolError>;
-
-    pub fn insert_fn<Args, Output, E, F, Fut>(
-        &mut self,
-        name: &'static str,
-        description: &'static str,
-        f: F,
-    ) -> Result<&mut Self, ToolError>
-    where
-        Args: serde::de::DeserializeOwned + schemars::JsonSchema + Send + 'static,
-        Output: serde::Serialize + Send + 'static,
-        E: std::error::Error + Send + Sync + 'static,
-        F: Fn(Args) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Output, E>> + Send + 'static;
-
-    pub fn specs(&self) -> Vec<ToolSpec>;
-    pub async fn call_to_message(&self, call: ToolCall) -> Result<ChatMessage, ToolError>;
+pub trait ToolList: Send + Sync {
+    fn collect_specs(&self, out: &mut Vec<ToolSpec>) -> Result<(), ToolListError>;
+    fn dispatch(
+        &self,
+        call: ToolCall,
+    ) -> impl Future<Output = Result<ToolDispatch, ToolListError>> + Send + '_;
 }
+
+pub enum ToolDispatch {
+    Handled(ChatMessage),
+    NotMine(ToolCall),
+}
+
+let tools = motlie_models::tool_list!(WeatherTool, MathTool);
 ```
 
-Binding an existing function:
+Binding an existing function by delegating from a concrete tool:
 
 ```rust
-use motlie_models::{ToolError, ToolRegistry};
+use motlie_model::Tool;
+use std::future::Future;
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct WeatherArgs {
@@ -266,25 +285,38 @@ struct WeatherOutput {
     summary: String,
 }
 
-async fn get_weather(args: WeatherArgs) -> Result<WeatherOutput, ToolError> {
+#[derive(Debug, thiserror::Error)]
+#[error("weather lookup failed")]
+struct WeatherError;
+
+async fn get_weather(args: WeatherArgs) -> Result<WeatherOutput, WeatherError> {
     Ok(WeatherOutput {
         temperature: 72.0,
         summary: format!("clear in {}", args.city),
     })
 }
 
-let mut registry = ToolRegistry::default();
-registry.insert_fn(
-    "get_weather",
-    "Get current weather for a city.",
-    get_weather,
-)?;
+struct WeatherTool;
+
+impl Tool for WeatherTool {
+    type Args = WeatherArgs;
+    type Output = WeatherOutput;
+    type Error = WeatherError;
+
+    fn name(&self) -> &'static str { "get_weather" }
+    fn description(&self) -> &'static str { "Get current weather for a city." }
+    fn call(&self, args: Self::Args) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        get_weather(args)
+    }
+}
 ```
 
-Binding a closure:
+Binding a closure uses the same pattern: the caller owns a concrete tool struct
+that stores the closure type, so the dispatch remains static:
 
 ```rust
-use motlie_models::{ToolError, ToolRegistry};
+use motlie_model::Tool;
+use std::future::Future;
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct AddArgs {
@@ -297,31 +329,58 @@ struct AddOutput {
     value: i64,
 }
 
-let mut registry = ToolRegistry::default();
-registry.insert_fn(
-    "add",
-    "Add two integers.",
-    |args: AddArgs| async move {
-        Ok::<_, ToolError>(AddOutput {
-            value: args.left + args.right,
-        })
+#[derive(Debug, thiserror::Error)]
+#[error("add failed")]
+struct AddError;
+
+struct AddTool<F> {
+    f: F,
+}
+
+impl<F, Fut> Tool for AddTool<F>
+where
+    F: Fn(AddArgs) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<AddOutput, AddError>> + Send,
+{
+    type Args = AddArgs;
+    type Output = AddOutput;
+    type Error = AddError;
+
+    fn name(&self) -> &'static str { "add" }
+    fn description(&self) -> &'static str { "Add two integers." }
+    fn call(&self, args: Self::Args) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        (self.f)(args)
+    }
+}
+
+let tools = motlie_models::tool_list!(AddTool {
+    f: |args: AddArgs| async move {
+        Ok(AddOutput { value: args.left + args.right })
     },
-)?;
+});
 ```
 
-Using the registry with chat:
+Using the tool list with chat:
 
 ```rust
+let tool_specs = tools.specs()?;
+
 let response = chat.generate(ChatRequest {
     messages,
-    tools: registry.specs(),
+    tools: tool_specs,
     tool_choice: Some(ToolChoice::Auto),
     ..Default::default()
 }).await?;
 
 for call in response.tool_calls {
     messages.push(ChatMessage::assistant_tool_calls(vec![call.clone()]));
-    messages.push(registry.call_to_message(call).await?);
+    match tools.dispatch(call).await? {
+        ToolDispatch::Handled(message) => messages.push(message),
+        ToolDispatch::NotMine(call) => {
+            // Future per #284: iterate mcp_servers here.
+            return Err(AppError::UnknownTool(call.name));
+        }
+    }
 }
 ```
 

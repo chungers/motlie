@@ -122,7 +122,7 @@ cargo run -p motlie-models --no-default-features \
 
 The tool demo registers `get_weather` and `evaluate_math_expression`, sends
 their generated schemas through the llama.cpp OpenAI-compatible chat-template
-path, executes model-requested tool calls through `ToolRegistry`, appends each
+path, executes model-requested tool calls through static `ToolList` dispatch, appends each
 tool-result message, and lets the model combine a plain Rust explanation with a
 weather-derived average temperature.
 

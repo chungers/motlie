@@ -68,7 +68,7 @@ use motlie_model::{
     ModelMetricSnapshot, StartOptions, UnsupportedChat, UnsupportedCompletion,
     UnsupportedEmbeddings,
 };
-pub use tool_registry::{ToolError, ToolRegistry};
+pub use tool_registry::{Mcp, McpError, McpTransport, ToolDispatch, ToolList, ToolListError};
 pub use tts::TtsModels;
 
 #[derive(Debug, Error)]
