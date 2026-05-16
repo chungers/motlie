@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
-    v1_5, ExternalOciSource, GuestImageProfile, OciContentCache, OciDigest, OciImageReference,
-    OciPlatform, OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed,
+    v1_5, ExternalOciSource, GuestArchitecture, GuestImageProfile, OciContentCache, OciDigest,
+    OciImageReference, OciPlatform, OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed,
     RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec,
     RootfsMountSpec, RootfsPayloadFile, RootfsPendingRequirementPolicy, RootfsProfileSpec,
     RootfsSeedOverlayAssembler, RootfsSeedOverlayManifest, RootfsSeedOverlaySpec, RootfsUserSeed,
@@ -40,6 +40,7 @@ const COMMON_ROOTFS_TARBALL_NAME: &str = "assembled-rootfs.tar";
 const COMMON_ROOTFS_RECORD_NAME: &str = "mbuild-common-rootfs.json";
 const VALIDATION_LOG_NAME: &str = "mbuild-validation.log";
 const OCI_CACHE_DIR_ENV: &str = "MOTLIE_MBUILD_OCI_CACHE_DIR";
+const CROSS_ARCH_CHROOT_ENV: &str = "MOTLIE_MBUILD_ALLOW_CROSS_ARCH_CHROOT";
 const CH_KERNEL_RELEASE_DEFAULT: &str = "ch-release-v6.16.9-20251112";
 const OCI_LAYOUT_VERSION: &str = "1.0.0";
 const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -422,14 +423,16 @@ fn run_ch_external_oci_build(
         ),
     )?;
 
-    let host = ChHostTarget::detect()?;
-    if platform != host.platform {
-        bail!(
-            "CH external-OCI build currently requires host-native platform {}; config resolved {}",
-            host.platform,
-            platform
-        );
-    }
+    let host = HostPlatformTarget::detect()?;
+    let guest = ChGuestTarget::from_platform(platform)?;
+    append_log(
+        &log_path,
+        &format!(
+            "builder_host={} guest_platform={} guest_rust_target={} guest_deb_arch={}\n",
+            host.platform, guest.platform, guest.rust_target, guest.deb_arch
+        ),
+    )?;
+    preflight_guest_chroot_execution(&host, &guest, &log_path)?;
 
     let work_root = create_work_root("mbuild-ch-rootfs")?;
     let rootfs_dir = work_root.join("rootfs");
@@ -443,7 +446,8 @@ fn run_ch_external_oci_build(
         serde_json::to_vec_pretty(&imported)?,
     )?;
 
-    let guest_binaries = build_guest_binaries(repo_root, &host, &log_path)?;
+    let chroot_support = prepare_guest_chroot_execution(&rootfs_dir, &host, &guest, &log_path)?;
+    let guest_binaries = build_guest_binaries(repo_root, &guest, &log_path)?;
     run_apt_package_stage(&rootfs_dir, config, &options.out)?;
 
     let assembly_manifest =
@@ -452,6 +456,8 @@ fn run_ch_external_oci_build(
         options.out.join("mbuild-rootfs-assembly.json"),
         serde_json::to_vec_pretty(&assembly_manifest)?,
     )?;
+    verify_guest_binary_contract_marker(&rootfs_dir, &log_path)?;
+    cleanup_guest_chroot_execution(&rootfs_dir, chroot_support.as_ref(), &log_path)?;
     let common_rootfs_tarball = emit_rootfs_tarball(
         &rootfs_dir,
         &options.out.join(COMMON_ROOTFS_TARBALL_NAME),
@@ -459,12 +465,12 @@ fn run_ch_external_oci_build(
     )?;
     write_common_rootfs_record(&options.out, &source, &common_rootfs_tarball)?;
 
-    install_ch_boot_adaptations(repo_root, &rootfs_dir, &source, &host, &guest_binaries.vfs)?;
+    install_ch_boot_adaptations(repo_root, &rootfs_dir, &source, &guest, &guest_binaries.vfs)?;
     write_ch_guest_contract(
         &rootfs_dir.join("opt/motlie/v1.5/guest/guest-contract.json"),
         &source,
-        &host,
-        Path::new(host.kernel_image),
+        &guest,
+        Path::new(guest.kernel_image),
         &guest_binaries.vfs,
     )?;
     let rootfs_path = base_dir.join(CH_ROOTFS_NAME);
@@ -473,12 +479,12 @@ fn run_ch_external_oci_build(
         &rootfs_path,
         &options.out.join(CH_EMITTER_LOG_NAME),
     )?;
-    let kernel_path = emit_ch_kernel(&base_dir, &host, &log_path)?;
+    let kernel_path = emit_ch_kernel(&base_dir, &guest, &log_path)?;
     let contract_path = base_dir.join(CH_GUEST_CONTRACT_NAME);
     write_ch_guest_contract(
         &contract_path,
         &source,
-        &host,
+        &guest,
         &kernel_path,
         &guest_binaries.vfs,
     )?;
@@ -509,6 +515,8 @@ fn run_ch_external_oci_build(
         package_include: config.package_stage.install.clone(),
         materialized_source: None,
         external_oci_source: Some(source),
+        build_host: Some(BuildHostRecord::from(&host)),
+        guest_target: Some(GuestTargetRecord::from(&guest)),
         rootfs_tarball: Some(common_rootfs_tarball),
     })
 }
@@ -589,37 +597,66 @@ fn run_backend_adapter(
         package_include: config.package_stage.install.clone(),
         materialized_source: emitter.materialized_source.clone(),
         external_oci_source: None,
+        build_host: None,
+        guest_target: None,
         rootfs_tarball: rootfs_tarball.cloned(),
     })
 }
 
 #[derive(Debug, Clone)]
-struct ChHostTarget {
+struct HostPlatformTarget {
+    platform: OciPlatform,
+    deb_arch: &'static str,
+}
+
+impl HostPlatformTarget {
+    fn detect() -> Result<Self> {
+        match env::consts::ARCH {
+            "x86_64" => Ok(Self {
+                platform: OciPlatform::linux_amd64(),
+                deb_arch: "amd64",
+            }),
+            "aarch64" => Ok(Self {
+                platform: OciPlatform::linux_arm64(),
+                deb_arch: "arm64",
+            }),
+            other => bail!("unsupported CH build host architecture: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ChGuestTarget {
     platform: OciPlatform,
     rust_target: &'static str,
     deb_arch: &'static str,
     kernel_image: &'static str,
     kernel_asset: &'static str,
+    qemu_binfmt_name: &'static str,
+    qemu_static_binary: &'static str,
 }
 
-impl ChHostTarget {
-    fn detect() -> Result<Self> {
-        match env::consts::ARCH {
-            "x86_64" => Ok(Self {
+impl ChGuestTarget {
+    fn from_platform(platform: OciPlatform) -> Result<Self> {
+        match platform.architecture {
+            GuestArchitecture::Amd64 => Ok(Self {
                 platform: OciPlatform::linux_amd64(),
-                rust_target: "x86_64-unknown-linux-gnu",
+                rust_target: "x86_64-unknown-linux-musl",
                 deb_arch: "amd64",
                 kernel_image: "vmlinux.bin",
                 kernel_asset: "vmlinux",
+                qemu_binfmt_name: "qemu-x86_64",
+                qemu_static_binary: "qemu-x86_64-static",
             }),
-            "aarch64" => Ok(Self {
+            GuestArchitecture::Arm64 => Ok(Self {
                 platform: OciPlatform::linux_arm64(),
-                rust_target: "aarch64-unknown-linux-gnu",
+                rust_target: "aarch64-unknown-linux-musl",
                 deb_arch: "arm64",
                 kernel_image: "Image",
                 kernel_asset: "Image-arm64",
+                qemu_binfmt_name: "qemu-aarch64",
+                qemu_static_binary: "qemu-aarch64-static",
             }),
-            other => bail!("unsupported CH host architecture for v1.5 build: {other}"),
         }
     }
 }
@@ -628,7 +665,7 @@ fn parse_source_platform(value: &str) -> Result<OciPlatform> {
     match value {
         "linux/amd64" | "amd64" => Ok(OciPlatform::linux_amd64()),
         "linux/arm64" | "arm64" => Ok(OciPlatform::linux_arm64()),
-        "host-native" | "host-native-linux" => Ok(ChHostTarget::detect()?.platform),
+        "host-native" | "host-native-linux" => Ok(HostPlatformTarget::detect()?.platform),
         other => bail!(
             "unsupported source.platform {other:?}; expected linux/amd64, linux/arm64, or host-native-linux"
         ),
@@ -756,15 +793,16 @@ struct GuestBinaries {
 
 fn build_guest_binaries(
     repo_root: &Path,
-    host: &ChHostTarget,
+    guest: &ChGuestTarget,
     log_path: &Path,
 ) -> Result<GuestBinaries> {
     let target_dir = repo_root
         .join("target")
-        .join(host.rust_target)
+        .join(guest.rust_target)
         .join("release");
     let vfs = target_dir.join("motlie-vfs-guest-v1_5");
     let ssh_bridge = target_dir.join("motlie-vsock-ssh-bridge-v1_5");
+    let rust_lld = rust_lld_path()?;
     let mut command = Command::new("cargo");
     command
         .arg("build")
@@ -772,7 +810,7 @@ fn build_guest_binaries(
         .arg(repo_root.join("libs/vmm/Cargo.toml"))
         .arg("--release")
         .arg("--target")
-        .arg(host.rust_target)
+        .arg(guest.rust_target)
         .arg("--no-default-features")
         .arg("--features")
         .arg("guest-vfs")
@@ -780,7 +818,11 @@ fn build_guest_binaries(
         .arg("motlie-vfs-guest-v1_5")
         .arg("--bin")
         .arg("motlie-vsock-ssh-bridge-v1_5")
-        .current_dir(repo_root);
+        .current_dir(repo_root)
+        .env(
+            cargo_target_linker_env(guest.rust_target),
+            rust_lld.as_os_str(),
+        );
     run_logged_command(&mut command, log_path, "build v1.5 guest binaries")?;
     if !vfs.is_file() {
         bail!("guest binary was not produced at {}", vfs.display());
@@ -791,12 +833,234 @@ fn build_guest_binaries(
             ssh_bridge.display()
         );
     }
-    let marker = Command::new(&vfs)
-        .arg("--contract")
+    Ok(GuestBinaries { vfs, ssh_bridge })
+}
+
+fn rust_lld_path() -> Result<PathBuf> {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
         .output()
-        .with_context(|| format!("run guest binary contract check {}", vfs.display()))?;
-    let marker_stdout =
-        String::from_utf8(marker.stdout).context("guest binary contract marker is not UTF-8")?;
+        .context("locate Rust sysroot for rust-lld")?;
+    if !output.status.success() {
+        bail!(
+            "rustc --print sysroot failed with status {}",
+            output.status.code().unwrap_or(-1)
+        );
+    }
+    let sysroot =
+        String::from_utf8(output.stdout).context("rustc --print sysroot returned non-UTF-8")?;
+    let host_triple = rust_host_triple()?;
+    let path = PathBuf::from(sysroot.trim())
+        .join("lib/rustlib")
+        .join(host_triple)
+        .join("bin/rust-lld");
+    if path.is_file() {
+        return Ok(path);
+    }
+    if let Some(path) = find_executable("rust-lld") {
+        return Ok(path);
+    }
+    bail!("rust-lld was not found in the active Rust toolchain; install the rust-lld component")
+}
+
+fn rust_host_triple() -> Result<String> {
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .context("locate Rust host triple")?;
+    if !output.status.success() {
+        bail!(
+            "rustc -vV failed with status {}",
+            output.status.code().unwrap_or(-1)
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("rustc -vV returned non-UTF-8")?;
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(ToOwned::to_owned)
+        .context("rustc -vV did not report a host triple")
+}
+
+fn cargo_target_linker_env(rust_target: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_LINKER",
+        rust_target.replace('-', "_").to_ascii_uppercase()
+    )
+}
+
+#[derive(Debug, Clone)]
+struct GuestChrootSupport {
+    copied_qemu_guest_path: Option<PathBuf>,
+}
+
+fn preflight_guest_chroot_execution(
+    host: &HostPlatformTarget,
+    guest: &ChGuestTarget,
+    log_path: &Path,
+) -> Result<()> {
+    if host.platform == guest.platform {
+        return Ok(());
+    }
+    let qemu = cross_chroot_qemu_path(host, guest)?;
+    append_log(
+        log_path,
+        &format!(
+            "cross-arch chroot preflight passed: host={} guest={} qemu={} binfmt={}\n",
+            host.platform,
+            guest.platform,
+            qemu.display(),
+            guest.qemu_binfmt_name
+        ),
+    )?;
+    Ok(())
+}
+
+fn prepare_guest_chroot_execution(
+    rootfs_dir: &Path,
+    host: &HostPlatformTarget,
+    guest: &ChGuestTarget,
+    log_path: &Path,
+) -> Result<Option<GuestChrootSupport>> {
+    if host.platform == guest.platform {
+        append_log(
+            log_path,
+            &format!(
+                "guest chroot execution is native: host={} guest={}\n",
+                host.platform, guest.platform
+            ),
+        )?;
+        return Ok(None);
+    }
+    let qemu = cross_chroot_qemu_path(host, guest)?;
+    let guest_qemu_path = rootfs_dir.join("usr/bin").join(guest.qemu_static_binary);
+    let copied_qemu_guest_path = if guest_qemu_path.exists() {
+        None
+    } else {
+        if let Some(parent) = guest_qemu_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&qemu, &guest_qemu_path).with_context(|| {
+            format!(
+                "copy {} into guest rootfs at {}",
+                qemu.display(),
+                guest_qemu_path.display()
+            )
+        })?;
+        set_mode(&guest_qemu_path, 0o755)?;
+        Some(guest_qemu_path)
+    };
+    append_log(
+        log_path,
+        &format!(
+            "guest chroot execution is cross-arch: host={} guest={} qemu={} binfmt={}\n",
+            host.platform,
+            guest.platform,
+            qemu.display(),
+            guest.qemu_binfmt_name
+        ),
+    )?;
+    Ok(Some(GuestChrootSupport {
+        copied_qemu_guest_path,
+    }))
+}
+
+fn cross_chroot_qemu_path(host: &HostPlatformTarget, guest: &ChGuestTarget) -> Result<PathBuf> {
+    if env::var_os(CROSS_ARCH_CHROOT_ENV).is_some_and(|value| value == "0") {
+        bail!(
+            "cross-architecture CH package staging is disabled by {CROSS_ARCH_CHROOT_ENV}=0; host={} guest={}",
+            host.platform,
+            guest.platform
+        );
+    }
+
+    ensure_binfmt_enabled(guest)?;
+    find_executable(guest.qemu_static_binary).with_context(|| {
+        format!(
+            "cross-architecture CH package staging requires {}; install qemu-user-static and enable binfmt for {}",
+            guest.qemu_static_binary, guest.qemu_binfmt_name
+        )
+    })
+}
+
+fn cleanup_guest_chroot_execution(
+    _rootfs_dir: &Path,
+    support: Option<&GuestChrootSupport>,
+    log_path: &Path,
+) -> Result<()> {
+    if let Some(path) = support.and_then(|support| support.copied_qemu_guest_path.as_ref()) {
+        fs::remove_file(path)
+            .with_context(|| format!("remove build-time qemu helper {}", path.display()))?;
+        append_log(
+            log_path,
+            &format!("removed build-time qemu helper {}\n", path.display()),
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_binfmt_enabled(guest: &ChGuestTarget) -> Result<()> {
+    let entry = Path::new("/proc/sys/fs/binfmt_misc").join(guest.qemu_binfmt_name);
+    let contents = fs::read_to_string(&entry).with_context(|| {
+        format!(
+            "cross-architecture CH package staging requires enabled binfmt entry {}; install qemu-user-static/binfmt-support or run the build on native {} hardware",
+            entry.display(),
+            guest.platform
+        )
+    })?;
+    if !contents.lines().any(|line| line.trim() == "enabled") {
+        bail!(
+            "binfmt entry {} is not enabled; enable {} before cross-architecture CH package staging",
+            entry.display(),
+            guest.qemu_binfmt_name
+        );
+    }
+    Ok(())
+}
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 && candidate.is_file() {
+        return Some(candidate.to_path_buf());
+    }
+    env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn verify_guest_binary_contract_marker(rootfs_dir: &Path, log_path: &Path) -> Result<()> {
+    let mut command = rootless_unshare_command()?;
+    command
+        .arg("chroot")
+        .arg(rootfs_dir)
+        .arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT)
+        .arg("--contract");
+    append_log(
+        log_path,
+        &format!("\n--- verify installed guest binary contract marker ---\ncommand={command:?}\n"),
+    )?;
+    let output = command
+        .output()
+        .context("run guest binary contract check")?;
+    append_log(
+        log_path,
+        &format!(
+            "stdout={}\nstderr={}\n",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "guest binary contract check failed with status {}; see {}",
+            output.status.code().unwrap_or(-1),
+            log_path.display()
+        );
+    }
+    let marker_stdout = String::from_utf8(output.stdout)
+        .context("guest binary contract marker output is not UTF-8")?;
     if marker_stdout.trim() != v1_5::MOTLIE_V15_GUEST_MOUNTER_MARKER {
         bail!(
             "guest binary contract marker mismatch: expected {}, got {:?}",
@@ -804,7 +1068,26 @@ fn build_guest_binaries(
             marker_stdout.trim()
         );
     }
-    Ok(GuestBinaries { vfs, ssh_bridge })
+    Ok(())
+}
+
+fn rootless_unshare_command() -> Result<Command> {
+    let (subuid_start, subuid_count) = subordinate_id_range("/etc/subuid")?;
+    let (subgid_start, subgid_count) = subordinate_id_range("/etc/subgid")?;
+    let uid_count = subuid_count.min(65_535);
+    let gid_count = subgid_count.min(65_535);
+    let mut command = Command::new("unshare");
+    command
+        .arg("--user")
+        .arg("--map-root-user")
+        .arg(format!("--map-users=1:{subuid_start}:{uid_count}"))
+        .arg(format!("--map-groups=1:{subgid_start}:{gid_count}"))
+        .arg("--setgroups")
+        .arg("allow")
+        .arg("--mount")
+        .arg("--pid")
+        .arg("--fork");
+    Ok(command)
 }
 
 fn run_apt_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -> Result<()> {
@@ -818,22 +1101,9 @@ fn run_apt_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Pat
     let log_path = out.join(CH_PACKAGE_STAGE_LOG_NAME);
     fs::write(&script_path, apt_stage_script())?;
     set_mode(&script_path, 0o755)?;
-    let (subuid_start, subuid_count) = subordinate_id_range("/etc/subuid")?;
-    let (subgid_start, subgid_count) = subordinate_id_range("/etc/subgid")?;
-    let uid_count = subuid_count.min(65_535);
-    let gid_count = subgid_count.min(65_535);
 
-    let mut command = Command::new("unshare");
+    let mut command = rootless_unshare_command()?;
     command
-        .arg("--user")
-        .arg("--map-root-user")
-        .arg(format!("--map-users=1:{subuid_start}:{uid_count}"))
-        .arg(format!("--map-groups=1:{subgid_start}:{gid_count}"))
-        .arg("--setgroups")
-        .arg("allow")
-        .arg("--mount")
-        .arg("--pid")
-        .arg("--fork")
         .arg("--mount-proc")
         .arg("bash")
         .arg(&script_path)
@@ -969,7 +1239,7 @@ fn install_ch_boot_adaptations(
     repo_root: &Path,
     rootfs_dir: &Path,
     source: &ExternalOciSource,
-    host: &ChHostTarget,
+    guest: &ChGuestTarget,
     guest_binary: &Path,
 ) -> Result<()> {
     let example_dir = repo_root.join("libs/vmm/examples/v1.5");
@@ -994,17 +1264,17 @@ fn install_ch_boot_adaptations(
     write_rootfs_file(
         rootfs_dir,
         "/etc/motd",
-        ch_motd(source, host).as_bytes(),
+        ch_motd(source, guest).as_bytes(),
         0o644,
     )?;
     let _ = guest_binary;
     Ok(())
 }
 
-fn ch_motd(source: &ExternalOciSource, host: &ChHostTarget) -> String {
+fn ch_motd(source: &ExternalOciSource, guest: &ChGuestTarget) -> String {
     format!(
         "motlie v1.5 CH guest\nsource={}\nplatform={}\narch={}\n",
-        source.image_ref, source.platform, host.deb_arch
+        source.image_ref, source.platform, guest.deb_arch
     )
 }
 
@@ -1043,8 +1313,8 @@ fn emit_rootfs_tarball(
     rootfs_tarball_record(tarball_path)
 }
 
-fn emit_ch_kernel(base_dir: &Path, host: &ChHostTarget, log_path: &Path) -> Result<PathBuf> {
-    let kernel_path = base_dir.join(host.kernel_image);
+fn emit_ch_kernel(base_dir: &Path, guest: &ChGuestTarget, log_path: &Path) -> Result<PathBuf> {
+    let kernel_path = base_dir.join(guest.kernel_image);
     if kernel_path.is_file() {
         return Ok(kernel_path);
     }
@@ -1053,7 +1323,7 @@ fn emit_ch_kernel(base_dir: &Path, host: &ChHostTarget, log_path: &Path) -> Resu
     let url = env::var("CH_KERNEL_URL").unwrap_or_else(|_| {
         format!(
             "https://github.com/cloud-hypervisor/linux/releases/download/{release}/{}",
-            host.kernel_asset
+            guest.kernel_asset
         )
     });
     let mut command = Command::new("wget");
@@ -1070,7 +1340,7 @@ fn emit_ch_kernel(base_dir: &Path, host: &ChHostTarget, log_path: &Path) -> Resu
 fn write_ch_guest_contract(
     path: &Path,
     source: &ExternalOciSource,
-    host: &ChHostTarget,
+    guest: &ChGuestTarget,
     kernel_path: &Path,
     guest_binary: &Path,
 ) -> Result<()> {
@@ -1080,8 +1350,10 @@ fn write_ch_guest_contract(
     let value = serde_json::json!({
         "contract_version": v1_5::MOTLIE_V15_CONTRACT_VERSION,
         "packaging_backend": "ch-squashfs",
-        "guest_arch": host.deb_arch,
-        "kernel_image": kernel_path.file_name().and_then(|name| name.to_str()).unwrap_or(host.kernel_image),
+        "guest_arch": guest.deb_arch,
+        "guest_platform": guest.platform.to_string(),
+        "guest_rust_target": guest.rust_target,
+        "kernel_image": kernel_path.file_name().and_then(|name| name.to_str()).unwrap_or(guest.kernel_image),
         "source": {
             "kind": "external-oci",
             "image": source.image_ref.clone(),
@@ -2593,7 +2865,47 @@ struct AdapterRecord {
     #[serde(default)]
     external_oci_source: Option<ExternalOciSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_host: Option<BuildHostRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guest_target: Option<GuestTargetRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     rootfs_tarball: Option<RootfsTarballRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BuildHostRecord {
+    platform: String,
+    deb_arch: String,
+}
+
+impl From<&HostPlatformTarget> for BuildHostRecord {
+    fn from(target: &HostPlatformTarget) -> Self {
+        Self {
+            platform: target.platform.to_string(),
+            deb_arch: target.deb_arch.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GuestTargetRecord {
+    platform: String,
+    rust_target: String,
+    deb_arch: String,
+    kernel_image: String,
+    kernel_asset: String,
+}
+
+impl From<&ChGuestTarget> for GuestTargetRecord {
+    fn from(target: &ChGuestTarget) -> Self {
+        Self {
+            platform: target.platform.to_string(),
+            rust_target: target.rust_target.to_string(),
+            deb_arch: target.deb_arch.to_string(),
+            kernel_image: target.kernel_image.to_string(),
+            kernel_asset: target.kernel_asset.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2837,6 +3149,16 @@ fn stage_evidence(adapter: &AdapterRecord) -> Vec<String> {
             "platform_manifest_digest={}",
             source.platform_manifest_digest
         ));
+    }
+    if let Some(host) = &adapter.build_host {
+        evidence.push(format!("build_host_platform={}", host.platform));
+        evidence.push(format!("build_host_deb_arch={}", host.deb_arch));
+    }
+    if let Some(guest) = &adapter.guest_target {
+        evidence.push(format!("guest_platform={}", guest.platform));
+        evidence.push(format!("guest_rust_target={}", guest.rust_target));
+        evidence.push(format!("guest_deb_arch={}", guest.deb_arch));
+        evidence.push(format!("guest_kernel_image={}", guest.kernel_image));
     }
     if let Some(rootfs_tarball) = &adapter.rootfs_tarball {
         evidence.push(format!(
@@ -3397,6 +3719,29 @@ validation:
     }
 
     #[test]
+    fn ch_guest_target_comes_from_requested_platform() {
+        let amd64 = ChGuestTarget::from_platform(OciPlatform::linux_amd64()).unwrap();
+        let arm64 = ChGuestTarget::from_platform(OciPlatform::linux_arm64()).unwrap();
+
+        assert_eq!(amd64.platform, OciPlatform::linux_amd64());
+        assert_eq!(amd64.rust_target, "x86_64-unknown-linux-musl");
+        assert_eq!(amd64.deb_arch, "amd64");
+        assert_eq!(amd64.kernel_image, "vmlinux.bin");
+        assert_eq!(arm64.platform, OciPlatform::linux_arm64());
+        assert_eq!(arm64.rust_target, "aarch64-unknown-linux-musl");
+        assert_eq!(arm64.deb_arch, "arm64");
+        assert_eq!(arm64.kernel_image, "Image");
+    }
+
+    #[test]
+    fn cargo_target_linker_env_formats_target_triple() {
+        assert_eq!(
+            cargo_target_linker_env("x86_64-unknown-linux-musl"),
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER"
+        );
+    }
+
+    #[test]
     fn config_rejects_unknown_top_level_fields() {
         let error =
             serde_yaml::from_str::<ImageBuildConfig>(&image_config_yaml("unexpected: true\n", ""))
@@ -3459,6 +3804,8 @@ validation:
                     materializer: "oci-importer".to_string(),
                 }),
                 external_oci_source: None,
+                build_host: None,
+                guest_target: None,
                 rootfs_tarball: None,
             }),
             Vec::new(),
@@ -3508,6 +3855,17 @@ validation:
                 package_include: config.package_stage.install.clone(),
                 materialized_source: None,
                 external_oci_source: Some(source),
+                build_host: Some(BuildHostRecord {
+                    platform: OciPlatform::linux_arm64().to_string(),
+                    deb_arch: "arm64".to_string(),
+                }),
+                guest_target: Some(GuestTargetRecord {
+                    platform: OciPlatform::linux_arm64().to_string(),
+                    rust_target: "aarch64-unknown-linux-musl".to_string(),
+                    deb_arch: "arm64".to_string(),
+                    kernel_image: "Image".to_string(),
+                    kernel_asset: "Image-arm64".to_string(),
+                }),
                 rootfs_tarball: Some(rootfs.clone()),
             }),
             Vec::new(),

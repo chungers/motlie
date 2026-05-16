@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Remove the CH builder host-native guest-platform assumption: requested OCI platform now selects the guest target, guest binaries are static musl payloads linked with `rust-lld`, and cross-arch package staging requires qemu-user/binfmt or a native builder |
 | 2026-05-16 | @vmm-cdx | Start issue #258 implementation: define the local OCI image-layout export contract from `assembled-rootfs.tar` as the first step toward per-arch payload publication and a final multi-arch guest image index |
 | 2026-05-15 | @vmm-cdx | Address PR #270 regression feedback for the greenfield v1.5 contract: pre-v1.5 VZ source images are unsupported, reusable images must not bake harness users, and failed readiness must clean up VZ runners |
 | 2026-05-15 | @vmm-cdx | Merge the VZ rootfs handoff bridge and tighten issue #271 closure: the CH native OCI builder now emits `assembled-rootfs.tar` plus digest evidence for VZ consumption, and VZ image build no longer intentionally bakes demo users |
@@ -223,9 +224,37 @@ The v1.5 builder should be a matrix, not one host assumption:
 7. Run the CH/VZ harness matrix.
 ```
 
-Guest Linux binaries are built for the guest architecture. The primary v1.5
-validation target should be arm64 first because Apple VZ on Apple Silicon
-requires an arm64 guest.
+Guest Linux binaries are built for the requested guest architecture, not the
+builder host architecture. The CH builder must keep these concepts separate:
+
+- build host: the machine running `mbuild`
+- guest platform: the OCI platform selected from the image config
+- guest Rust target: the Linux target used for Motlie guest binaries
+- backend boot target: the kernel/rootfs packaging expected by CH or VZ
+
+The current v1.5 CH guest binary target is static musl for each guest
+architecture:
+
+```text
+linux/amd64 -> x86_64-unknown-linux-musl
+linux/arm64 -> aarch64-unknown-linux-musl
+```
+
+`mbuild` links those binaries with the toolchain `rust-lld` so guest binary
+cross-compilation does not require target-architecture libfuse development
+packages or a target-architecture GNU linker. The VFS guest dependency on
+`fuser` must stay in pure-Rust mode for this reason.
+
+Package staging is different from guest binary compilation. The apt/npm stage
+executes programs from the imported guest rootfs. When the selected guest
+platform differs from the build host platform, the CH builder requires
+qemu-user/binfmt for the guest architecture, or the build must run on native
+hardware for that guest platform. This is an explicit preflight requirement,
+not a silent fallback to host-native artifacts.
+
+The primary v1.5 validation target should be arm64 first because Apple VZ on
+Apple Silicon requires an arm64 guest. Native amd64 CH validation remains
+required for the DGX/Intel Linux path.
 
 Host macOS artifacts such as `vz-vsock-runner` are host binaries. They are
 built and signed by a macOS job or developer machine and are not installed into

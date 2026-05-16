@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Update Phase 12 after removing the CH host-native platform guard: guest platform now drives CH guest target metadata, guest binaries build as static musl payloads, and cross-arch package staging is explicitly gated on qemu-user/binfmt or native per-arch builders |
 | 2026-05-16 | @vmm-cdx | Add Phase 12 for GitHub issue #258: local OCI image-layout export from the v1.5 assembled rootfs, then per-arch payload publication, backend consumption from OCI payloads, digest-keyed validation, and final multi-arch image-index publishing |
 | 2026-05-14 | @vmm-cdx | Complete the Linux/CH side of issue #271: native `mbuild build --target ch` now consumes pinned Ubuntu OCI, runs apt/npm packaging, emits CH artifacts, and passes the v1.5 CH harness matrix |
 | 2026-05-11 | @vmm-cdx | Add the PR #270 build-file hardening tasks: strict YAML schema, APT-aware package spec validation, and manifest/config comparison during `mbuild validate` |
@@ -837,8 +838,17 @@ Tasks:
 - [ ] add per-arch native build/export acceptance:
   - [x] first exported platform is `linux/arm64`, matching current v1.5
         `motlie-image.yaml`
-  - [ ] add `linux/amd64` config/profile support without hidden emulation
+  - [x] remove the CH host-native guest-platform guard so `source.platform`
+        selects the guest target instead of `env::consts::ARCH`
+  - [x] build Motlie guest binaries as static musl payloads for the requested
+        guest platform using `rust-lld`
+  - [x] fail cross-arch CH package staging explicitly unless qemu-user/binfmt
+        for the selected guest platform is available
+  - [ ] add checked-in per-platform config/digest inputs for `linux/amd64`
+        and `linux/arm64` instead of using temporary floating configs
   - [ ] run the CH build/export path on a native amd64 Linux builder
+  - [ ] run the CH cross-arch build/export path on a builder with qemu-user
+        binfmt enabled and compare the output with native per-arch builds
   - [ ] record per-arch source image-index digest, selected platform-manifest
         digest, rootfs layer digest, and OCI manifest digest
 - [ ] make backend emitters consume OCI payloads:

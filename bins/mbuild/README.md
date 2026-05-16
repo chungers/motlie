@@ -10,16 +10,20 @@ durable Linux/CH image-builder entrypoint for the v1.5 demo. It resolves the
 pinned Ubuntu OCI source, imports rootfs layers, runs the apt/npm package stage,
 applies the native v1.5 Motlie compatibility layer, emits the common
 `assembled-rootfs.tar` handoff before CH-specific boot adaptations, and emits CH
-artifacts plus machine-readable manifests. `mbuild seed` regenerates per-guest
-seed overlays without rebuilding the immutable image. `mbuild validate`
-validates manifests, can require execution evidence, and can delegate live guest
-conformance to the v1.5 harness. `mbuild oci export` converts an executed
-artifact's `assembled-rootfs.tar` into a local OCI image layout for issue #258
-per-arch payload work. The VZ target consumes the CH-emitted tarball with
-`--rootfs-tarball` while the durable Apple VZ boot-container emitter is still
-transitional. v1.5 is greenfield for this product contract: pre-v1.5 VZ source
-VMs/cached disks are unsupported, and per-guest users are seed/runtime state
-rather than image content.
+artifacts plus machine-readable manifests. The CH path no longer assumes the
+guest platform is the same as the builder host platform: `source.platform`
+selects the guest architecture, guest binaries are built as static musl
+payloads with `rust-lld`, and cross-arch package staging requires qemu-user
+binfmt or a native builder for that guest architecture. `mbuild seed`
+regenerates per-guest seed overlays without rebuilding the immutable image.
+`mbuild validate` validates manifests, can require execution evidence, and can
+delegate live guest conformance to the v1.5 harness. `mbuild oci export`
+converts an executed artifact's `assembled-rootfs.tar` into a local OCI image
+layout for issue #258 per-arch payload work. The VZ target consumes the
+CH-emitted tarball with `--rootfs-tarball` while the durable Apple VZ
+boot-container emitter is still transitional. v1.5 is greenfield for this
+product contract: pre-v1.5 VZ source VMs/cached disks are unsupported, and
+per-guest users are seed/runtime state rather than image content.
 
 ## Commands
 
@@ -31,6 +35,26 @@ cargo run -p mbuild -- build \
   --target ch \
   --out /tmp/mbuild/ch
 ```
+
+Build CH artifacts for a non-native guest platform by setting
+`source.platform` in the image config to the desired OCI platform. For example,
+an arm64 Linux builder can build a `linux/amd64` CH guest when the host has:
+
+- Rust target `x86_64-unknown-linux-musl`
+- toolchain `rust-lld`
+- `qemu-x86_64-static`
+- enabled `/proc/sys/fs/binfmt_misc/qemu-x86_64`
+
+The matching arm64 guest requirements on an amd64 Linux builder are:
+
+- Rust target `aarch64-unknown-linux-musl`
+- toolchain `rust-lld`
+- `qemu-aarch64-static`
+- enabled `/proc/sys/fs/binfmt_misc/qemu-aarch64`
+
+Without qemu-user/binfmt, run the per-arch CH build on native hardware for that
+guest platform. `mbuild` fails before OCI layer import if cross-arch package
+staging cannot execute guest rootfs binaries.
 
 Build VZ artifacts through the current VZ adapter:
 

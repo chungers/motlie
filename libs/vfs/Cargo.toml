@@ -35,8 +35,9 @@ tokio = { workspace = true, features = ["sync", "rt", "net", "time", "io-util"] 
 tokio-vsock = { version = "0.7", optional = true }
 bincode = { version = "2", optional = true, features = ["serde"] }
 
-# FUSE client (optional)
-fuser = { version = "0.15", optional = true }
+# FUSE client (optional). Keep libfuse/pkg-config out of guest binary builds so
+# mbuild can cross-compile guest targets without a target-arch libfuse sysroot.
+fuser = { version = "0.15", optional = true, default-features = false }
 
 # Snapshot / concurrency helpers
 arc-swap = "1"
