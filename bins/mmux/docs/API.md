@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @codex-tmux-tl | Added insertion-point cursor state for mmux modal text fields so focused Left/Right edit inside the field, with single-line and wrapped Send Keys rendering keeping the terminal cursor aligned. |
 | 2026-05-03 | @codex | Added `SendKeys` modal state and documented the `s` send-keys flow through `Target::send_keys`. |
 | 2026-05-02 | @codex | Changed Session Tags modal add/update/delete/check operations to stage in modal state and flush as a diff only on Ok; Cancel/Esc discard the draft. |
 | 2026-05-02 | @codex | Refactored attach status setup to use `Target::status()` with `SessionStatusSnapshot` / `SessionStatusOverrides` instead of app-owned status option plumbing. |

@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @codex-tmux-tl | Focused modal text fields now keep Left/Right inside the field for cursor movement and mid-string editing; modal buttons only take Left/Right when a button is focused. |
 | 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts: `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
 | 2026-05-03 | @codex | Added the `s` Send Keys modal for highlighted sessions and moved main-view pane cycling to `Tab`. |
 | 2026-05-02 | @codex | Changed Session Tags modal mutations to stage locally and apply to tmux only when Ok closes the dialog; Cancel/Esc discard staged edits. |
@@ -368,7 +369,7 @@ Modal keys:
 
 | Key | Behavior |
 |-----|----------|
-| Left / Right | Choose Cancel or Ok in New Session, Kill Session, Rename Session, and Send Keys modals. No-op in Help and Session Tags. |
+| Left / Right | In focused text fields, move the insertion point left/right within New Session, Rename Session, Send Keys, and Session Tags inputs. Otherwise choose Cancel or Ok in action modals. No-op in Help. |
 | Tab / Shift-Tab | In New Session, cycle Host when present, Session name, env rows, env Key, env Value, Ok, and Cancel. In Kill Session, cycle Cancel and Ok. In Send Keys, cycle text field, Ok, and Cancel. In Session Tags, cycle focus between Key, Value, Ok, and Cancel. |
 | Up / Down | In multi-host New Session, cycle the Host dropdown when Host or Session name is focused; in New Session env rows and Session Tags, move focus row-to-row. |
 | `u` / `b` | In New Session env rows and Session Tags, move focus up/down through rows. |
