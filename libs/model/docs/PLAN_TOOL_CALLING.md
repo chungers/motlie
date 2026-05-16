@@ -144,6 +144,7 @@ Wire the new contract into the safetensors-backed Qwen3 and Gemma 4 paths.
 Files:
 
 - `libs/model/backends/mistral/src/common.rs`
+- `libs/model/backends/mistral/src/runtime.rs`
 - `libs/model/backends/mistral/src/text.rs`
 - `libs/model/backends/mistral/src/multimodal.rs`
 - `libs/model/backends/mistral/Cargo.toml` only if an explicit dependency is needed
@@ -151,6 +152,7 @@ Files:
 Tasks:
 
 - [x] Extend role mapping to support `ChatRole::Tool`.
+- [x] Share backend startup, runtime dispatch, handle plumbing, metrics, and tool-aware request construction through the `MistralProfile` runtime layer.
 - [x] Map `ToolSpec` to `mistralrs::Tool`.
 - [x] Map `ToolChoice` to `mistralrs::ToolChoice`.
 - [x] Map assistant replay messages with `tool_calls`.

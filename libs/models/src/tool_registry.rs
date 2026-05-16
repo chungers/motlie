@@ -103,7 +103,6 @@ impl<Args, Output, E, F> FunctionTool<Args, Output, E, F> {
     }
 }
 
-#[async_trait]
 impl<Args, Output, E, F, Fut> Tool for FunctionTool<Args, Output, E, F>
 where
     Args: DeserializeOwned + JsonSchema + Send + 'static,
@@ -124,8 +123,11 @@ where
         self.description
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        (self.f)(args).await
+    fn call(
+        &self,
+        args: Self::Args,
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        (self.f)(args)
     }
 }
 

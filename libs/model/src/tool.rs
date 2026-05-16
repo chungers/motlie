@@ -1,7 +1,7 @@
 use std::fmt;
+use std::future::Future;
 use std::ops::Deref;
 
-use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -379,7 +379,6 @@ pub enum ToolCallError {
 }
 
 /// Typed Rust binding for one callable tool.
-#[async_trait]
 pub trait Tool: Send + Sync + 'static {
     type Args: DeserializeOwned + JsonSchema + Send + 'static;
     type Output: Serialize + Send + 'static;
@@ -388,7 +387,10 @@ pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error>;
+    fn call(
+        &self,
+        args: Self::Args,
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
 
     fn spec(&self) -> Result<ToolSpec, ToolSchemaError> {
         ToolSpec::from_args::<Self::Args>(self.name(), self.description())
@@ -416,7 +418,6 @@ mod tests {
 
     struct AddTool;
 
-    #[async_trait]
     impl Tool for AddTool {
         type Args = AddArgs;
         type Output = AddOutput;
@@ -430,10 +431,15 @@ mod tests {
             "Add two integers."
         }
 
-        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-            Ok(AddOutput {
-                value: args.left + args.right,
-            })
+        fn call(
+            &self,
+            args: Self::Args,
+        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+            async move {
+                Ok(AddOutput {
+                    value: args.left + args.right,
+                })
+            }
         }
     }
 
