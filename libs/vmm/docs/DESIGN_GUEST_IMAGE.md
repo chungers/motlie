@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Align issue #258 with the Motlie release-branch model from `origin/main`: optional VM image artifact targets coordinate native per-platform builders through release manifests, master issue, sub-issues, and sub-PR evidence; qemu/binfmt is optional local convenience, not acceptance criteria |
 | 2026-05-16 | @vmm-cdx | Remove the CH builder host-native guest-platform assumption: requested OCI platform now selects the guest target, guest binaries are static musl payloads linked with `rust-lld`, and cross-arch package staging requires qemu-user/binfmt or a native builder |
 | 2026-05-16 | @vmm-cdx | Start issue #258 implementation: define the local OCI image-layout export contract from `assembled-rootfs.tar` as the first step toward per-arch payload publication and a final multi-arch guest image index |
 | 2026-05-15 | @vmm-cdx | Address PR #270 regression feedback for the greenfield v1.5 contract: pre-v1.5 VZ source images are unsupported, reusable images must not bake harness users, and failed readiness must clean up VZ runners |
@@ -697,6 +698,82 @@ Registry push and multi-arch image-index publication are intentionally out of
 scope for the first export slice. They require registry credentials, immutable
 tag/digest policy, and cross-arch validation evidence that should be reviewed
 separately.
+
+### Native Per-Platform Image Build Coordination
+
+Issue #258 should use the release coordination pattern now documented on
+`origin/main` in `docs/RELEASES.md`, `docs/DESIGN_RELEASES.md`, and
+`docs/PLAN_RELEASES.md`: a retained branch owns manifests and evidence, a
+master issue coordinates work, and platform-specific sub-issues/sub-PRs update
+only their target gate status.
+
+VM images are optional artifact targets in that release model. Binary-only
+releases do not build VM images and do not have VM image gates. When a release
+event includes Motlie guest images or OCI guest payloads, the artifact manifest
+kind is:
+
+```text
+kind = "motlie.vm-image-artifact"
+```
+
+The manifest describes one logical Motlie guest contract and per-platform
+builder targets. For v1.5, the required issue #258 acceptance targets are:
+
+```text
+ch-linux-amd64   -> native Linux/KVM/Cloud Hypervisor builder, guest linux/amd64
+vz-darwin-arm64  -> native Apple Silicon VZ builder, guest linux/arm64
+```
+
+Optional targets may include `ch-linux-arm64` when an arm64 Linux CH host is
+available. They are useful parity evidence but do not replace native amd64 CH
+acceptance.
+
+This design intentionally does not require qemu/binfmt for issue #258
+acceptance. The current `mbuild` emitter supports OCI source import, static
+musl Motlie guest binaries for the requested guest platform, rootless-`chroot`
+package staging, CH artifact emission, and local OCI layout export. That
+rootless-`chroot` package stage requires qemu-user/binfmt when the requested
+guest platform differs from the build host architecture.
+
+qemu-user/binfmt remains a useful local cross-architecture convenience, but
+the product acceptance path should use native per-platform builders. Cloud
+Hypervisor can replace `chroot` package staging only on a host with the same
+architecture as the requested guest platform because CH uses KVM; it does not
+emulate a different CPU ISA.
+
+The outstanding preferred native CH package engine is:
+
+```text
+native-ch-bootstrap
+```
+
+That engine should:
+
+1. Import the selected OCI platform rootfs.
+2. Emit temporary CH boot artifacts for the same guest platform.
+3. Boot a provisioning VM with isolated seed/provisioner credentials.
+4. Run package, npm, locale, ssh-key, service-enable, and cleanup steps inside
+   the guest.
+5. Shut the VM down cleanly.
+6. Extract or snapshot the finalized rootfs.
+7. Emit `assembled-rootfs.tar`, final CH artifacts, OCI payload export, and
+   machine-readable provenance.
+
+The release/sub-PR evidence for each VM image target must include:
+
+- source commit and `mbuild` version/command
+- build host platform and guest platform
+- source OCI image-index digest
+- selected source platform-manifest digest
+- assembled rootfs size and sha256
+- backend artifact digests
+- exported or published OCI image manifest digest
+- required v1.5 harness scenario results
+
+Built artifacts are not committed to git. The retained branch records
+manifest status, checksums, URLs, and issue/PR evidence; rootfs tarballs, VM
+disks, local OCI layouts, and registry blobs stay in artifact storage or a
+registry.
 
 ### Pre-Boot Emitter Adaptation Versus Post-Boot Mutation
 

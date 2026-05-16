@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Align Phase 12 with the `origin/main` release process: VM guest images are optional release artifact targets, binary-only releases do not require image gates, native per-platform builders are the #258 acceptance path, and `native-ch-bootstrap` remains the outstanding CH package-engine improvement |
 | 2026-05-16 | @vmm-cdx | Update Phase 12 after removing the CH host-native platform guard: guest platform now drives CH guest target metadata, guest binaries build as static musl payloads, and cross-arch package staging is explicitly gated on qemu-user/binfmt or native per-arch builders |
 | 2026-05-16 | @vmm-cdx | Add Phase 12 for GitHub issue #258: local OCI image-layout export from the v1.5 assembled rootfs, then per-arch payload publication, backend consumption from OCI payloads, digest-keyed validation, and final multi-arch image-index publishing |
 | 2026-05-14 | @vmm-cdx | Complete the Linux/CH side of issue #271: native `mbuild build --target ch` now consumes pinned Ubuntu OCI, runs apt/npm packaging, emits CH artifacts, and passes the v1.5 CH harness matrix |
@@ -803,22 +804,41 @@ Acceptance:
 Design reference:
 - `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#roadmap-to-a-shared-oci-guest-image`
 - `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#oci-payload-export-contract`
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#native-per-platform-image-build-coordination`
+- `docs/DESIGN_RELEASES.md#optional-vm-image-artifact-targets`
 
 Goal:
 - close GitHub issue #258 by making the v1.5 Motlie guest payload a published
   multi-arch OCI image reference consumed by CH and VZ emitters
+- align VM guest image publication with the release branch/master issue/sub-PR
+  process as optional artifact targets; binary-only releases do not depend on
+  VM image generation or VM image gates
 
 Current starting point:
 - Phase 11 closed #245 and #271 on `feature/vmm-vz`: the v1.5 demo has a
   common guest contract, common seed schema, shared harness scenarios, native
   CH external-OCI build path, and a VZ rootfs-tarball handoff over the same
   assembled rootfs contract.
+- The current `mbuild` emitter imports compatible OCI roots, builds requested
+  guest-platform binaries as static musl payloads, stages packages through
+  rootless `chroot`, emits CH artifacts, and exports a local OCI image layout.
+  Cross-architecture rootless-`chroot` staging requires qemu-user/binfmt.
 - #258 remains open because the common rootfs is not yet republished as a
   Motlie-owned per-arch OCI payload, backend emitters do not yet consume a
   published OCI payload as their primary input, and no multi-arch image index is
   published.
 
 Tasks:
+- [x] document the release-process alignment for optional VM image artifact
+      targets:
+  - [x] VM images are optional release artifacts, not prerequisites for binary
+        releases
+  - [x] `kind = "motlie.vm-image-artifact"` distinguishes VM guest image
+        manifests from `kind = "motlie.binary-release"` manifests
+  - [x] release branches remain ledgers; rootfs tarballs, disk images, and OCI
+        blobs are not committed to git
+  - [x] target sub-PRs record build/validation evidence for native
+        per-platform builders
 - [x] add the first local OCI payload export surface:
   - [x] `mbuild oci export --config ... --artifact ... --out ...`
   - [x] consume an executed artifact containing `assembled-rootfs.tar`
@@ -851,6 +871,17 @@ Tasks:
         binfmt enabled and compare the output with native per-arch builds
   - [ ] record per-arch source image-index digest, selected platform-manifest
         digest, rootfs layer digest, and OCI manifest digest
+- [ ] implement native same-architecture package staging for CH:
+  - [ ] add `package_engine = "native-ch-bootstrap"` as an mbuild option
+  - [ ] emit temporary CH boot artifacts from the selected OCI platform rootfs
+  - [ ] boot a same-architecture provisioning VM with isolated credentials
+  - [ ] run package, npm, locale, ssh-key, service-enable, and cleanup steps
+        inside the guest
+  - [ ] shut down the provisioning VM cleanly and extract or snapshot the
+        finalized rootfs for normal CH artifact emission
+  - [ ] keep qemu-user/binfmt as optional cross-arch local convenience only,
+        not an acceptance substitute for native `ch-linux-amd64` and
+        `vz-darwin-arm64` evidence
 - [ ] make backend emitters consume OCI payloads:
   - [ ] CH emitter can import from a local OCI image layout or registry
         reference instead of only an in-process assembled rootfs directory
@@ -871,6 +902,14 @@ Tasks:
         Motlie guest contract and source image index
   - [ ] source digest updates require rerunning the shared scenario matrix on
         every supported backend/platform pair
+- [ ] integrate VM image artifact evidence with release manifests:
+  - [ ] define the `releases/motlie-vmm-guest-v1.5.toml` schema for
+        `kind = "motlie.vm-image-artifact"`
+  - [ ] teach `mbuild` or release tooling to emit manifest-ready evidence for
+        source commit, host platform, guest platform, OCI digests, backend
+        artifact digests, harness result paths, and publication URLs
+  - [ ] use release sub-issues/sub-PRs for `ch-linux-amd64` and
+        `vz-darwin-arm64` target evidence
 
 Acceptance:
 - one canonical reference, for example `ghcr.io/chungers/motlie-guest:v1.5`,
