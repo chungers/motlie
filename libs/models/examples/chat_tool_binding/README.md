@@ -3,8 +3,8 @@
 This example demonstrates the common typed tool-binding API without loading a
 model backend. It covers both supported caller styles:
 
-- binding an existing async Rust function with typed arguments and output
-- binding an inline async closure with typed arguments and output
+- binding `get_weather` as an existing async Rust function with typed arguments and output
+- binding `evaluate_math_expression` as an inline async closure with typed arguments and output
 
 Run it with:
 
@@ -12,9 +12,10 @@ Run it with:
 cargo run -p motlie-models --example chat_tool_binding --no-default-features
 ```
 
-The example registers two tools in `ToolRegistry`, builds a `ChatRequest` from
-`registry.specs()`, simulates assistant `ToolCall`s, and converts each executed
-tool result back into a `ChatRole::Tool` message.
+The example registers both tools in `ToolRegistry`, builds a `ChatRequest` from
+`registry.specs()`, simulates assistant `ToolCall`s for weather in three cities
+plus a math-expression average, and converts each executed tool result back
+into a `ChatRole::Tool` message.
 
 The backend-specific examples that should get live model tool-call smoke tests
 after adapter wiring are:

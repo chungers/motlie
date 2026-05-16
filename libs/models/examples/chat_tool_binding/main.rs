@@ -1,52 +1,10 @@
 use anyhow::{Context, Result};
 use motlie_model::{ChatMessage, ChatRequest, ChatRole, ContentPart, ToolCall, ToolChoice};
-use motlie_models::{ToolError, ToolRegistry};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use motlie_models::ToolRegistry;
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct WeatherArgs {
-    city: String,
-    units: TemperatureUnits,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum TemperatureUnits {
-    Celsius,
-    Fahrenheit,
-}
-
-#[derive(Debug, Serialize)]
-struct WeatherOutput {
-    city: String,
-    temperature: f32,
-    units: TemperatureUnits,
-    summary: String,
-}
-
-async fn get_weather(args: WeatherArgs) -> Result<WeatherOutput, ToolError> {
-    Ok(WeatherOutput {
-        city: args.city,
-        temperature: match args.units {
-            TemperatureUnits::Celsius => 22.0,
-            TemperatureUnits::Fahrenheit => 72.0,
-        },
-        units: args.units,
-        summary: "clear".to_string(),
-    })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct AddArgs {
-    left: i64,
-    right: i64,
-}
-
-#[derive(Debug, Serialize)]
-struct AddOutput {
-    value: i64,
-}
+#[allow(dead_code)]
+#[path = "../tool_demo_support.rs"]
+mod tool_demo_support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -55,16 +13,14 @@ async fn main() -> Result<()> {
         .insert_fn(
             "get_weather",
             "Return a current weather summary for a city.",
-            get_weather,
+            tool_demo_support::get_weather,
         )
         .context("register existing function tool")?
         .insert_fn(
-            "add",
-            "Add two signed integers.",
-            |args: AddArgs| async move {
-                Ok::<_, ToolError>(AddOutput {
-                    value: args.left + args.right,
-                })
+            "evaluate_math_expression",
+            "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions.",
+            |args: tool_demo_support::MathExpressionArgs| async move {
+                tool_demo_support::evaluate_math_expression(args).await
             },
         )
         .context("register closure tool")?;
@@ -72,7 +28,7 @@ async fn main() -> Result<()> {
     let request = ChatRequest {
         messages: vec![ChatMessage::text(
             ChatRole::User,
-            "What is the weather in Seattle, and what is 40 + 2?",
+            "What is Rust, and what is the average fahrenheit temperature across Seattle, Portland, and San Francisco?",
         )],
         tools: registry.specs(),
         tool_choice: Some(ToolChoice::Auto),
@@ -87,16 +43,40 @@ async fn main() -> Result<()> {
 
     let model_calls = vec![
         ToolCall::from_serializable_args(
-            "call-weather",
+            "call-weather-seattle",
             "get_weather",
-            &WeatherArgs {
+            &tool_demo_support::WeatherArgs {
                 city: "Seattle".to_string(),
-                units: TemperatureUnits::Fahrenheit,
+                units: tool_demo_support::TemperatureUnits::Fahrenheit,
             },
         )
-        .context("serialize weather tool call")?,
-        ToolCall::from_serializable_args("call-add", "add", &AddArgs { left: 40, right: 2 })
-            .context("serialize add tool call")?,
+        .context("serialize Seattle weather tool call")?,
+        ToolCall::from_serializable_args(
+            "call-weather-portland",
+            "get_weather",
+            &tool_demo_support::WeatherArgs {
+                city: "Portland".to_string(),
+                units: tool_demo_support::TemperatureUnits::Fahrenheit,
+            },
+        )
+        .context("serialize Portland weather tool call")?,
+        ToolCall::from_serializable_args(
+            "call-weather-san-francisco",
+            "get_weather",
+            &tool_demo_support::WeatherArgs {
+                city: "San Francisco".to_string(),
+                units: tool_demo_support::TemperatureUnits::Fahrenheit,
+            },
+        )
+        .context("serialize San Francisco weather tool call")?,
+        ToolCall::from_serializable_args(
+            "call-average",
+            "evaluate_math_expression",
+            &tool_demo_support::MathExpressionArgs {
+                expression: "(72.0 + 68.0 + 64.0) / 3.0".to_string(),
+            },
+        )
+        .context("serialize average math tool call")?,
     ];
 
     for call in model_calls {

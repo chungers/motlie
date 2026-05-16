@@ -55,10 +55,10 @@ Tool-calling smoke only:
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo-only "What is Rust?"
 ```
 
-The tool demo registers a local `get_weather` Rust function, sends its generated
-schema to the model, executes the model-requested tool call through
-`ToolRegistry`, appends the tool-result message, and asks the model for a final
-answer.
+The tool demo registers `get_weather` and `evaluate_math_expression`, sends
+their generated schemas to the model, executes model-requested tool calls
+through `ToolRegistry`, appends each tool-result message, and lets the model
+combine a plain Rust explanation with a weather-derived average temperature.
 
 ## Preconditions
 

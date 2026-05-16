@@ -20,6 +20,27 @@ Current example groups:
   - [`chat_gguf_gwen3_gemma4`](./chat_gguf_gwen3_gemma4/README.md)
   - [`chat_multimodal_qwen3_6_27b`](./chat_multimodal_qwen3_6_27b/README.md)
 
+## Chat and Tool-Use Capability Ledger
+
+| Example | Backend | Curated model(s) | Advertised capabilities | Tool-use demo status |
+|---------|---------|------------------|-------------------------|----------------------|
+| `chat_tool_binding` | none | API-only | typed Rust tool binding | Runs without loading an LLM; binds `get_weather` as an existing async function and `evaluate_math_expression` as an async closure. |
+| `chat_mistral_qwen3` | `mistral.rs` | Qwen3 4B safetensors | `Chat` + `Completion` + `ToolUse` | `--tool-demo` / `--tool-demo-only` run a multi-round tool loop: weather for Seattle, Portland, and San Francisco, then math-expression average. |
+| `chat_multimodal_gemma4` | `mistral.rs` | Gemma 4 E2B-it safetensors | `Chat` + `Vision` + `ToolUse` | Same weather-plus-math tool loop; image+text chat remains a separate `--image=...` path. |
+| `chat_gguf_gwen3_gemma4` | `llama.cpp` | Qwen3 4B GGUF, Gemma 4 E2B-it GGUF | `Chat` + `Completion` + `ToolUse` | Same weather-plus-math tool loop through llama.cpp's OpenAI-compatible chat-template path. |
+| `chat_multimodal_qwen3_6_27b` | `llama.cpp` | Qwen3.6 27B GGUF | `Chat` + `Completion` | Text chat/completion only. `Vision` and `ToolUse` are not advertised for this bundle yet. |
+
+The shared tool demo support lives in [`tool_demo_support.rs`](./tool_demo_support.rs).
+It intentionally keeps tool execution caller-owned: model backends request
+`ToolCall`s, and the example layer executes the Rust functions through
+`ToolRegistry`. The math tool uses `cel-cxx`, a Rust binding to the mature
+Common Expression Language implementation, so the example demonstrates binding
+a real Rust function instead of a hand-rolled parser.
+
+Use `--tool-demo "What is Rust?"` on the model-backed chat examples to run the
+ordinary chat path first and then the weather-plus-math tool loop. Use
+`--tool-demo-only` to isolate just the tool loop.
+
 The detailed 2x3 TTS-to-ASR validation matrix lives in
 [`../docs/VALIDATION_TTS_ASR_PIPELINES.md`](../docs/VALIDATION_TTS_ASR_PIPELINES.md).
 
