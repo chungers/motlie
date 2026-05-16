@@ -136,7 +136,7 @@ Rules:
 - `ToolName::new(...)` validates the OpenAI-compatible name shape once in the shared contract: non-empty, at most 64 characters, and ASCII letters, digits, `_`, or `-`
 - `ToolInputSchema` validates that the schema document is JSON and describes an object-shaped argument payload before it reaches a backend
 - adapters serialize `ToolSpec` to the model/backend-specific JSON shape
-- the contract does not execute functions through `ToolSpec`; execution is caller-owned through `ToolRegistry`
+- the contract does not execute functions through `ToolSpec`; execution is caller-owned, with the current example/runtime registry provided by `motlie_models::ToolRegistry` instead of the core `motlie-model` crate
 
 ### Tool Choice
 
@@ -188,11 +188,11 @@ Rules:
 - `name` should match a registered `ToolSpec.name`; unknown tools still surface so the caller can reject them explicitly.
 - `ToolArguments` preserves the exact model/backend argument JSON while making typed parsing the normal Rust path.
 - `ToolArguments` rejects non-object JSON payloads; Rust tool arguments should be named structs.
-- If argument JSON cannot be parsed or deserialized into the requested Rust type, the caller receives `ToolArgumentError` through `ToolError::InvalidArguments`.
+- If argument JSON cannot be parsed or deserialized into the requested Rust type, the caller receives `ToolArgumentError`; the `motlie_models::ToolRegistry` helper surfaces that through `ToolError::InvalidArguments`.
 
 ### Typed Rust Tool Binding
 
-`libs/model` should keep model invocation separate from tool execution, but a Rust binding helper should make it easy for callers to build a safe tool registry. The registry can produce model-facing `ToolSpec`s and execute structured `ToolCall`s after the model asks for a tool.
+`libs/model` keeps model invocation separate from tool execution. The core crate defines the typed `Tool` trait and portable model-facing vocabulary. Runtime-extensible execution registries live outside the core crate so `motlie-model` does not need runtime type erasure for heterogeneous Rust tools. The curated examples use `motlie_models::ToolRegistry`, which can produce model-facing `ToolSpec`s and execute structured `ToolCall`s after the model asks for a tool.
 
 Core binding trait:
 
@@ -201,23 +201,28 @@ Core binding trait:
 pub trait Tool: Send + Sync + 'static {
     type Args: serde::de::DeserializeOwned + schemars::JsonSchema + Send + 'static;
     type Output: serde::Serialize + Send + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
 
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, ToolError>;
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error>;
 
     fn spec(&self) -> Result<ToolSpec, ToolSchemaError> {
         ToolSpec::from_args::<Self::Args>(self.name(), self.description())
     }
 }
+```
 
+Example/runtime registry helper, provided by `motlie-models`:
+
+```rust
 pub struct ToolRegistry { /* opaque */ }
 
 impl ToolRegistry {
-    pub fn insert<T: Tool>(&mut self, tool: T) -> Result<&mut Self, ToolError>;
+    pub fn insert<T: motlie_model::Tool>(&mut self, tool: T) -> Result<&mut Self, ToolError>;
 
-    pub fn insert_fn<Args, Output, F, Fut>(
+    pub fn insert_fn<Args, Output, E, F, Fut>(
         &mut self,
         name: &'static str,
         description: &'static str,
@@ -226,8 +231,9 @@ impl ToolRegistry {
     where
         Args: serde::de::DeserializeOwned + schemars::JsonSchema + Send + 'static,
         Output: serde::Serialize + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
         F: Fn(Args) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Output, ToolError>> + Send + 'static;
+        Fut: std::future::Future<Output = Result<Output, E>> + Send + 'static;
 
     pub fn specs(&self) -> Vec<ToolSpec>;
     pub async fn call_to_message(&self, call: ToolCall) -> Result<ChatMessage, ToolError>;
@@ -237,6 +243,8 @@ impl ToolRegistry {
 Binding an existing function:
 
 ```rust
+use motlie_models::{ToolError, ToolRegistry};
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct WeatherArgs {
     city: String,
@@ -274,6 +282,8 @@ registry.insert_fn(
 Binding a closure:
 
 ```rust
+use motlie_models::{ToolError, ToolRegistry};
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct AddArgs {
     left: i64,
@@ -290,7 +300,7 @@ registry.insert_fn(
     "add",
     "Add two integers.",
     |args: AddArgs| async move {
-        Ok(AddOutput {
+        Ok::<_, ToolError>(AddOutput {
             value: args.left + args.right,
         })
     },

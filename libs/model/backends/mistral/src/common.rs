@@ -1,17 +1,19 @@
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
+use image::DynamicImage;
 use mistralrs::core::{StopTokens, Usage};
 use mistralrs::{
     CalledFunction, Function, IsqBits, RequestBuilder, ResponseMessage, SamplingParams, Tool,
     ToolCallResponse, ToolCallType, ToolChoice as MistralToolChoice, ToolType,
 };
 use motlie_model::{
-    ArtifactPolicy, ArtifactSource, Bytes, ChatFinishReason, ChatResponse, ChatRole,
-    CheckpointFormat, EmbeddingMetrics, GenerationParams, GenerationUsage, Milliseconds,
-    ModelError, ModelMetricSnapshot, QuantizationBits, ResolvedCheckpoint, RuntimeMetrics,
-    StartOptions, TextGenerationMetrics, Tokens, TokensPerSecond,
+    ArtifactPolicy, ArtifactSource, Bytes, CapabilityKind, ChatFinishReason, ChatMessage,
+    ChatRequest, ChatResponse, ChatRole, CheckpointFormat, ContentPart, EmbeddingMetrics,
+    GenerationParams, GenerationUsage, Milliseconds, ModelError, ModelMetricSnapshot,
+    QuantizationBits, ResolvedCheckpoint, RuntimeMetrics, StartOptions, TextGenerationMetrics,
+    Tokens, TokensPerSecond,
 };
 use serde_json::Value;
 
@@ -146,6 +148,180 @@ pub(crate) fn apply_tools(
     let tool_choice = motlie_tool_choice_to_mistral(request.tool_choice.as_ref(), &request.tools)?;
 
     Ok(builder.set_tools(tools).set_tool_choice(tool_choice))
+}
+
+#[derive(Debug)]
+pub(crate) struct MistralMessageParts {
+    pub(crate) text: String,
+    pub(crate) images: Vec<DynamicImage>,
+}
+
+pub(crate) fn text_only_message_parts(
+    message: &ChatMessage,
+) -> Result<MistralMessageParts, ModelError> {
+    let mut text = String::new();
+    for part in &message.content {
+        match part {
+            ContentPart::Text(part) => text.push_str(part),
+            ContentPart::Image { .. } | ContentPart::ImageUrl { .. } => {
+                return Err(ModelError::UnsupportedCapability(CapabilityKind::Vision));
+            }
+        }
+    }
+
+    Ok(MistralMessageParts {
+        text,
+        images: Vec::new(),
+    })
+}
+
+pub(crate) fn multimodal_message_parts(
+    message: &ChatMessage,
+) -> Result<MistralMessageParts, ModelError> {
+    let mut text = String::new();
+    let mut images = Vec::new();
+
+    for part in &message.content {
+        match part {
+            ContentPart::Text(part) => text.push_str(part),
+            ContentPart::Image { data, media_type } => {
+                if !media_type.starts_with("image/") {
+                    return Err(ModelError::InvalidConfiguration(format!(
+                        "mistralrs multimodal chat requires image/* media types, got `{media_type}`"
+                    )));
+                }
+                let image = image::load_from_memory(data).map_err(|err| {
+                    ModelError::InvalidConfiguration(format!(
+                        "failed to decode image content part: {err}"
+                    ))
+                })?;
+                images.push(image);
+            }
+            ContentPart::ImageUrl { url } => {
+                return Err(ModelError::InvalidConfiguration(format!(
+                    "mistralrs multimodal chat does not support `ContentPart::ImageUrl` yet (`{url}`); provide inline image bytes instead"
+                )));
+            }
+        }
+    }
+
+    Ok(MistralMessageParts { text, images })
+}
+
+pub(crate) fn chat_request_to_builder<F>(
+    request: &ChatRequest,
+    collect_parts: F,
+) -> Result<RequestBuilder, ModelError>
+where
+    F: Fn(&ChatMessage) -> Result<MistralMessageParts, ModelError>,
+{
+    let mut builder = RequestBuilder::new();
+    for message in &request.messages {
+        message
+            .validate_tool_metadata()
+            .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
+        let MistralMessageParts { text, images } = collect_parts(message)?;
+        builder = match message.role {
+            ChatRole::Tool => {
+                if !images.is_empty() {
+                    return Err(ModelError::InvalidConfiguration(
+                        "tool result messages cannot carry image content".into(),
+                    ));
+                }
+                let tool_call_id = message
+                    .tool_call_id
+                    .as_ref()
+                    .expect("validated tool messages carry a tool call id");
+                builder.add_tool_message(text, tool_call_id.as_str())
+            }
+            ChatRole::Assistant if !message.tool_calls.is_empty() => {
+                if !images.is_empty() {
+                    return Err(ModelError::InvalidConfiguration(
+                        "assistant tool-call replay messages cannot carry image content".into(),
+                    ));
+                }
+                let tool_calls = message
+                    .tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| motlie_tool_call_to_mistral(index, call))
+                    .collect();
+                builder.add_message_with_tool_call(map_chat_role(message.role), text, tool_calls)
+            }
+            _ if images.is_empty() => builder.add_message(map_chat_role(message.role), text),
+            _ => builder.add_image_message(map_chat_role(message.role), text, images),
+        };
+    }
+
+    let builder = apply_tools(builder, request)?;
+    Ok(apply_generation_params(builder, &request.params))
+}
+
+type MessagePartCollector = fn(&ChatMessage) -> Result<MistralMessageParts, ModelError>;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MistralChatMetrics {
+    pub(crate) runtime: RuntimeMetricState,
+    pub(crate) text: TextMetricState,
+}
+
+pub(crate) struct MistralChatRuntime {
+    model: mistralrs::Model,
+    metrics: Arc<Mutex<MistralChatMetrics>>,
+    metric_context: &'static str,
+    collect_parts: MessagePartCollector,
+}
+
+impl MistralChatRuntime {
+    pub(crate) fn new(
+        model: mistralrs::Model,
+        metrics: Arc<Mutex<MistralChatMetrics>>,
+        metric_context: &'static str,
+        collect_parts: MessagePartCollector,
+    ) -> Self {
+        Self {
+            model,
+            metrics,
+            metric_context,
+            collect_parts,
+        }
+    }
+
+    pub(crate) async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        let builder = chat_request_to_builder(&request, self.collect_parts)?;
+        let started_at = Instant::now();
+
+        let response = self.model.send_chat_request(builder).await.map_err(|err| {
+            ModelError::BackendExecution {
+                backend: "mistralrs",
+                operation: "send_chat_request",
+                message: err.to_string(),
+            }
+        })?;
+        let elapsed = started_at.elapsed();
+
+        let usage = response.usage.clone();
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| ModelError::BackendExecution {
+                    backend: "mistralrs",
+                    operation: "send_chat_request",
+                    message: "response contained no choices".into(),
+                })?;
+        let response =
+            mistral_response_to_chat_response(choice.message, choice.finish_reason, &usage)?;
+
+        {
+            let mut metrics = lock_metrics(&self.metrics, self.metric_context);
+            observe_latency(&mut metrics.runtime, elapsed);
+            observe_text_usage(&mut metrics.text, &usage);
+        }
+
+        Ok(response)
+    }
 }
 
 pub(crate) fn motlie_tool_spec_to_mistral(

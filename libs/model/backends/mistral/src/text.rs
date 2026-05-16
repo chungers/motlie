@@ -1,9 +1,8 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use async_trait::async_trait;
 use mistralrs::core::NormalLoaderType;
-use mistralrs::{RequestBuilder, TextModelBuilder};
+use mistralrs::TextModelBuilder;
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
@@ -13,11 +12,9 @@ use motlie_model::{
 };
 
 use crate::common::{
-    apply_generation_params, apply_tools, configure_artifact_policy, lock_metrics, map_chat_role,
-    map_quantization_bits, mistral_response_to_chat_response, motlie_tool_call_to_mistral,
-    observe_latency, observe_memory, observe_text_usage, paged_attn_context_size,
-    resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_memory,
+    paged_attn_context_size, resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics,
+    text_only_message_parts, MistralChatMetrics, MistralChatRuntime,
 };
 
 const MISTRAL_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -196,7 +193,7 @@ impl ModelBundle for MistralTextBundle {
 // ---------------------------------------------------------------------------
 
 enum TextRuntime {
-    Real(MistralTextRuntime),
+    Real(MistralChatRuntime),
     #[cfg(test)]
     Stub(StubTextRuntime),
 }
@@ -237,119 +234,24 @@ impl TextRuntime {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
         match self {
-            Self::Real(runtime) => runtime.complete(request).await,
+            Self::Real(runtime) => {
+                let chat_request = ChatRequest {
+                    messages: vec![motlie_model::ChatMessage::new(
+                        ChatRole::User,
+                        request.prompt,
+                    )],
+                    params: request.params,
+                    ..Default::default()
+                };
+                let chat_response = runtime.chat(chat_request).await?;
+                Ok(CompletionResponse {
+                    content: chat_response.content,
+                })
+            }
             #[cfg(test)]
             Self::Stub(runtime) => runtime.complete(request).await,
         }
     }
-}
-
-struct MistralTextRuntime {
-    model: mistralrs::Model,
-    metrics: Arc<Mutex<TextMetrics>>,
-}
-
-impl MistralTextRuntime {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let builder = to_request_builder(&request)?;
-        let started_at = Instant::now();
-
-        let response = self.model.send_chat_request(builder).await.map_err(|err| {
-            ModelError::BackendExecution {
-                backend: "mistralrs",
-                operation: "send_chat_request",
-                message: err.to_string(),
-            }
-        })?;
-        let elapsed = started_at.elapsed();
-
-        let usage = response.usage.clone();
-        let choice =
-            response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| ModelError::BackendExecution {
-                    backend: "mistralrs",
-                    operation: "send_chat_request",
-                    message: "response contained no choices".into(),
-                })?;
-        let response =
-            mistral_response_to_chat_response(choice.message, choice.finish_reason, &usage)?;
-
-        {
-            let mut metrics = lock_metrics(&self.metrics, "mistral-text-chat");
-            observe_latency(&mut metrics.runtime, elapsed);
-            observe_text_usage(&mut metrics.text, &usage);
-        }
-
-        Ok(response)
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        let chat_request = ChatRequest {
-            messages: vec![motlie_model::ChatMessage::new(
-                ChatRole::User,
-                request.prompt,
-            )],
-            params: request.params,
-            ..Default::default()
-        };
-        let chat_response = self.chat(chat_request).await?;
-        Ok(CompletionResponse {
-            content: chat_response.content,
-        })
-    }
-}
-
-fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelError> {
-    let mut builder = RequestBuilder::new();
-    for msg in &request.messages {
-        msg.validate_tool_metadata()
-            .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
-        let text = collect_text_only_message(msg)?;
-        builder = match msg.role {
-            ChatRole::Tool => {
-                let tool_call_id = msg.tool_call_id.as_ref().ok_or_else(|| {
-                    ModelError::InvalidConfiguration(
-                        "tool messages require `tool_call_id` metadata".into(),
-                    )
-                })?;
-                builder.add_tool_message(text, tool_call_id.as_str())
-            }
-            ChatRole::Assistant if !msg.tool_calls.is_empty() => {
-                let tool_calls = msg
-                    .tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(index, call)| motlie_tool_call_to_mistral(index, call))
-                    .collect();
-                builder.add_message_with_tool_call(map_chat_role(msg.role), text, tool_calls)
-            }
-            ChatRole::System | ChatRole::User if !msg.tool_calls.is_empty() => {
-                return Err(ModelError::InvalidConfiguration(
-                    "only assistant messages may carry tool calls".into(),
-                ));
-            }
-            _ => builder.add_message(map_chat_role(msg.role), text),
-        };
-    }
-    let builder = apply_tools(builder, request)?;
-    Ok(apply_generation_params(builder, &request.params))
-}
-
-fn collect_text_only_message(message: &motlie_model::ChatMessage) -> Result<String, ModelError> {
-    let mut text = String::new();
-    for part in &message.content {
-        match part {
-            motlie_model::ContentPart::Text(part) => text.push_str(part),
-            motlie_model::ContentPart::Image { .. }
-            | motlie_model::ContentPart::ImageUrl { .. } => {
-                return Err(ModelError::UnsupportedCapability(CapabilityKind::Vision));
-            }
-        }
-    }
-    Ok(text)
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +261,7 @@ fn collect_text_only_message(message: &motlie_model::ChatMessage) -> Result<Stri
 pub struct MistralTextHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: TextRuntime,
-    metrics: Arc<Mutex<TextMetrics>>,
+    metrics: Arc<Mutex<MistralChatMetrics>>,
 }
 
 #[async_trait]
@@ -400,12 +302,6 @@ impl BundleHandle for MistralTextHandle {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct TextMetrics {
-    runtime: RuntimeMetricState,
-    text: TextMetricState,
-}
-
 #[async_trait]
 impl ChatModel for MistralTextHandle {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
@@ -428,7 +324,7 @@ fn new_text_handle(
     resolved_quantization: Option<QuantizationBits>,
     model: mistralrs::Model,
 ) -> MistralTextHandle {
-    let metrics = Arc::new(Mutex::new(TextMetrics::default()));
+    let metrics = Arc::new(Mutex::new(MistralChatMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "mistral-text-start");
         observe_memory(&mut metrics.runtime);
@@ -442,10 +338,12 @@ fn new_text_handle(
             quantization,
             resolved_quantization,
         },
-        runtime: TextRuntime::Real(MistralTextRuntime {
+        runtime: TextRuntime::Real(MistralChatRuntime::new(
             model,
-            metrics: Arc::clone(&metrics),
-        }),
+            Arc::clone(&metrics),
+            "mistral-text-chat",
+            text_only_message_parts,
+        )),
         metrics,
     }
 }
@@ -580,7 +478,7 @@ mod tests {
                 resolved_quantization: Some(QuantizationBits::Four),
             },
             runtime: TextRuntime::Stub(StubTextRuntime),
-            metrics: Arc::new(Mutex::new(TextMetrics::default())),
+            metrics: Arc::new(Mutex::new(MistralChatMetrics::default())),
         };
 
         assert!(handle.supports(CapabilityKind::Chat));

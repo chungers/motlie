@@ -1,23 +1,19 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use async_trait::async_trait;
-use image::DynamicImage;
-use mistralrs::{ModelBuilder, RequestBuilder};
+use mistralrs::ModelBuilder;
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, ChatRequest, ChatResponse, CheckpointFormat, ContentPart,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot,
-    QuantizationBits, QuantizationSupport, ResolvedCheckpoint, StartOptions, UnsupportedCompletion,
+    CapabilityKind, ChatModel, ChatRequest, ChatResponse, CheckpointFormat, LoadedBundleDescriptor,
+    ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits,
+    QuantizationSupport, ResolvedCheckpoint, StartOptions, UnsupportedCompletion,
     UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    apply_generation_params, apply_tools, configure_artifact_policy, lock_metrics, map_chat_role,
-    map_quantization_bits, mistral_response_to_chat_response, motlie_tool_call_to_mistral,
-    observe_latency, observe_memory, observe_text_usage, paged_attn_context_size,
-    resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics, RuntimeMetricState,
-    TextMetricState,
+    configure_artifact_policy, lock_metrics, map_quantization_bits, multimodal_message_parts,
+    observe_memory, paged_attn_context_size, resolve_local_checkpoint, should_force_cpu,
+    snapshot_text_metrics, MistralChatMetrics, MistralChatRuntime,
 };
 
 const MISTRAL_MULTIMODAL_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
@@ -183,7 +179,7 @@ impl ModelBundle for MistralMultimodalBundle {
 }
 
 enum MultimodalRuntime {
-    Real(MistralMultimodalRuntime),
+    Real(MistralChatRuntime),
     #[cfg(test)]
     Stub(StubMultimodalRuntime),
 }
@@ -201,7 +197,7 @@ impl StubMultimodalRuntime {
                 m.content
                     .iter()
                     .filter_map(|part| match part {
-                        ContentPart::Text(text) => Some(text.as_str()),
+                        motlie_model::ContentPart::Text(text) => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<String>()
@@ -223,135 +219,10 @@ impl MultimodalRuntime {
     }
 }
 
-struct MistralMultimodalRuntime {
-    model: mistralrs::Model,
-    metrics: Arc<Mutex<MultimodalMetrics>>,
-}
-
-impl MistralMultimodalRuntime {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let builder = to_request_builder(&request)?;
-        let started_at = Instant::now();
-
-        let response = self.model.send_chat_request(builder).await.map_err(|err| {
-            ModelError::BackendExecution {
-                backend: "mistralrs",
-                operation: "send_chat_request",
-                message: err.to_string(),
-            }
-        })?;
-        let elapsed = started_at.elapsed();
-
-        let usage = response.usage.clone();
-        let choice =
-            response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| ModelError::BackendExecution {
-                    backend: "mistralrs",
-                    operation: "send_chat_request",
-                    message: "response contained no choices".into(),
-                })?;
-        let response =
-            mistral_response_to_chat_response(choice.message, choice.finish_reason, &usage)?;
-
-        {
-            let mut metrics = lock_metrics(&self.metrics, "mistral-multimodal-chat");
-            observe_latency(&mut metrics.runtime, elapsed);
-            observe_text_usage(&mut metrics.text, &usage);
-        }
-
-        Ok(response)
-    }
-}
-
-fn to_request_builder(request: &ChatRequest) -> Result<RequestBuilder, ModelError> {
-    let mut builder = RequestBuilder::new();
-    for msg in &request.messages {
-        msg.validate_tool_metadata()
-            .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
-        let (text, images) = collect_multimodal_parts(msg)?;
-        builder = match msg.role {
-            motlie_model::ChatRole::Tool => {
-                if !images.is_empty() {
-                    return Err(ModelError::InvalidConfiguration(
-                        "tool result messages cannot carry image content".into(),
-                    ));
-                }
-                let tool_call_id = msg.tool_call_id.as_ref().ok_or_else(|| {
-                    ModelError::InvalidConfiguration(
-                        "tool messages require `tool_call_id` metadata".into(),
-                    )
-                })?;
-                builder.add_tool_message(text, tool_call_id.as_str())
-            }
-            motlie_model::ChatRole::Assistant if !msg.tool_calls.is_empty() => {
-                if !images.is_empty() {
-                    return Err(ModelError::InvalidConfiguration(
-                        "assistant tool-call replay messages cannot carry image content".into(),
-                    ));
-                }
-                let tool_calls = msg
-                    .tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(index, call)| motlie_tool_call_to_mistral(index, call))
-                    .collect();
-                builder.add_message_with_tool_call(map_chat_role(msg.role), text, tool_calls)
-            }
-            motlie_model::ChatRole::System | motlie_model::ChatRole::User
-                if !msg.tool_calls.is_empty() =>
-            {
-                return Err(ModelError::InvalidConfiguration(
-                    "only assistant messages may carry tool calls".into(),
-                ));
-            }
-            _ if images.is_empty() => builder.add_message(map_chat_role(msg.role), text),
-            _ => builder.add_image_message(map_chat_role(msg.role), text, images),
-        };
-    }
-    let builder = apply_tools(builder, request)?;
-    Ok(apply_generation_params(builder, &request.params))
-}
-
-fn collect_multimodal_parts(
-    message: &motlie_model::ChatMessage,
-) -> Result<(String, Vec<DynamicImage>), ModelError> {
-    let mut text = String::new();
-    let mut images = Vec::new();
-
-    for part in &message.content {
-        match part {
-            ContentPart::Text(part) => text.push_str(part),
-            ContentPart::Image { data, media_type } => {
-                if !media_type.starts_with("image/") {
-                    return Err(ModelError::InvalidConfiguration(format!(
-                        "mistralrs multimodal chat requires image/* media types, got `{media_type}`"
-                    )));
-                }
-                let image = image::load_from_memory(data).map_err(|err| {
-                    ModelError::InvalidConfiguration(format!(
-                        "failed to decode image content part: {err}"
-                    ))
-                })?;
-                images.push(image);
-            }
-            ContentPart::ImageUrl { url } => {
-                return Err(ModelError::InvalidConfiguration(format!(
-                    "mistralrs multimodal chat does not support `ContentPart::ImageUrl` yet (`{url}`); provide inline image bytes instead"
-                )));
-            }
-        }
-    }
-
-    Ok((text, images))
-}
-
 pub struct MistralMultimodalHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: MultimodalRuntime,
-    metrics: Arc<Mutex<MultimodalMetrics>>,
+    metrics: Arc<Mutex<MistralChatMetrics>>,
 }
 
 #[async_trait]
@@ -401,12 +272,6 @@ impl ChatModel for MistralMultimodalHandle {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct MultimodalMetrics {
-    runtime: RuntimeMetricState,
-    text: TextMetricState,
-}
-
 fn new_multimodal_handle(
     id: BundleId,
     display_name: String,
@@ -415,7 +280,7 @@ fn new_multimodal_handle(
     resolved_quantization: Option<QuantizationBits>,
     model: mistralrs::Model,
 ) -> MistralMultimodalHandle {
-    let metrics = Arc::new(Mutex::new(MultimodalMetrics::default()));
+    let metrics = Arc::new(Mutex::new(MistralChatMetrics::default()));
     {
         let mut metrics = lock_metrics(&metrics, "mistral-multimodal-start");
         observe_memory(&mut metrics.runtime);
@@ -429,10 +294,12 @@ fn new_multimodal_handle(
             quantization,
             resolved_quantization,
         },
-        runtime: MultimodalRuntime::Real(MistralMultimodalRuntime {
+        runtime: MultimodalRuntime::Real(MistralChatRuntime::new(
             model,
-            metrics: Arc::clone(&metrics),
-        }),
+            Arc::clone(&metrics),
+            "mistral-multimodal-chat",
+            multimodal_message_parts,
+        )),
         metrics,
     }
 }
@@ -558,7 +425,7 @@ mod tests {
                 resolved_quantization: Some(QuantizationBits::Four),
             },
             runtime: MultimodalRuntime::Stub(StubMultimodalRuntime),
-            metrics: Arc::new(Mutex::new(MultimodalMetrics::default())),
+            metrics: Arc::new(Mutex::new(MistralChatMetrics::default())),
         };
 
         assert!(handle.supports(CapabilityKind::Chat));
@@ -604,7 +471,7 @@ mod tests {
             vec![ContentPart::image_url("https://example.com/cat.jpg")],
         );
 
-        let error = collect_multimodal_parts(&message)
+        let error = multimodal_message_parts(&message)
             .expect_err("image urls should be rejected for local mistral runtime");
         assert!(matches!(error, ModelError::InvalidConfiguration(_)));
     }

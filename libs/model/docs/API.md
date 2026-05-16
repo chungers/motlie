@@ -19,8 +19,8 @@
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshots and unit-safe wrappers. Runtime/request aggregates now live on `BundleHandle::metric_snapshot()` instead of individual responses. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-09 | @codex-researcher: Documented the current cross-platform runtime-metrics implementation. `mistral` backends and examples use `sysinfo` for current RSS on macOS and Linux, with Motlie maintaining the observed peak in-handle rather than relying on an OS-native historical peak counter. | Handle-Level Metrics, Notes |
 | 2026-04-09 | @codex-researcher: Added the second embedding slice to the quantization examples. `QuantizationSupport::without_recommended([Q8])` is now concretely exercised by the Qwen3-Embedding-0.6B bundle, while EmbeddingGemma remains unquantized. | Core Types |
-| 2026-05-11 | @codex-tool-calling: Added the typed tool-calling chat vocabulary: `ToolSpec`, `ToolInputSchema`, `ToolArguments`, `ToolChoice`, `ToolCall`, `ToolRegistry`, `ChatRole::Tool`, tool-aware `ChatRequest`/`ChatResponse` fields, and descriptive `CapabilityKind::ToolUse`. Backend adapters still gate tool-bearing requests until concrete model paths are wired and tested. | Overview, Core Types, Request Envelopes |
-| 2026-05-13 | @codex-tool-calling: Added typed Rust tool binding helpers, `Capabilities` helpers for chat/completion/tool-use combinations, and the safetensors `mistral.rs` adapter path for Qwen3/Gemma 4 tool calls. GGUF tool-bearing requests remain gated by the llama.cpp adapter. | Overview, Core Types, Request Envelopes |
+| 2026-05-11 | @codex-tool-calling: Added the typed tool-calling chat vocabulary: `ToolSpec`, `ToolInputSchema`, `ToolArguments`, `ToolChoice`, `ToolCall`, `ChatRole::Tool`, tool-aware `ChatRequest`/`ChatResponse` fields, and descriptive `CapabilityKind::ToolUse`. Backend adapters still gate tool-bearing requests until concrete model paths are wired and tested. | Overview, Core Types, Request Envelopes |
+| 2026-05-13 | @codex-tool-calling: Added typed Rust tool binding helpers, `Capabilities` helpers for chat/completion/tool-use combinations, and the safetensors `mistral.rs` adapter path for Qwen3/Gemma 4 tool calls. Runtime tool registries stay outside the core `motlie-model` contract; examples use `motlie_models::ToolRegistry`. GGUF tool-bearing requests remain gated by the llama.cpp adapter. | Overview, Core Types, Request Envelopes |
 | 2026-05-13 | @codex-tool-calling: Added the llama.cpp GGUF adapter path for tool-bearing chat through OpenAI-compatible chat templates. GGUF descriptor advertising remains gated pending local artifact smoke validation. | Overview |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
@@ -98,7 +98,6 @@ Primary capability request/response types:
 - `ToolArguments`
 - `ToolChoice`
 - `ToolCall`
-- `ToolRegistry`
 - `GenerationParams`
 - `ChatRequest`
 - `ChatResponse`
@@ -268,7 +267,8 @@ or tuple payloads. Tool names are validated once through `ToolName`, and model
 tool-call correlation ids are carried as `ToolCallId` rather than plain strings.
 
 ```rust
-use motlie_model::{ChatRequest, ToolChoice, ToolError, ToolRegistry};
+use motlie_model::{ChatRequest, ToolChoice};
+use motlie_models::{ToolError, ToolRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -306,7 +306,7 @@ registry.insert_fn(
     "multiply",
     "Multiply two signed integers.",
     |args: AddArgs| async move {
-        Ok(AddOutput {
+        Ok::<_, ToolError>(AddOutput {
             value: args.left * args.right,
         })
     },
@@ -325,6 +325,8 @@ use motlie_model::{
 
 #[async_trait]
 impl ModelBundle for MyBundle {
+    type Handle = MyHandle;
+
     fn id(&self) -> &BundleId { todo!() }
     fn metadata(&self) -> &BundleMetadata { todo!() }
     fn capabilities(&self) -> &Capabilities { todo!() }
@@ -332,7 +334,7 @@ impl ModelBundle for MyBundle {
     async fn start(
         &self,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         todo!()
     }
 }

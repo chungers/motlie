@@ -31,8 +31,7 @@ pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGen
 pub use speech::SpeechParams;
 pub use tool::{
     Tool, ToolArgumentError, ToolArguments, ToolCall, ToolCallError, ToolCallId, ToolCallIdError,
-    ToolChoice, ToolError, ToolInputSchema, ToolName, ToolNameError, ToolRegistry, ToolSchemaError,
-    ToolSpec,
+    ToolChoice, ToolInputSchema, ToolName, ToolNameError, ToolSchemaError, ToolSpec,
 };
 pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
 pub use typed::{

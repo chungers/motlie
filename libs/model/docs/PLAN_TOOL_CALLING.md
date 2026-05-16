@@ -92,14 +92,16 @@ Tasks:
 Files:
 
 - `libs/model/src/tool.rs`
+- `libs/models/src/tool_registry.rs`
 
 Tasks:
 
 - [x] Add `Tool` for typed Rust argument/output bindings.
-- [x] Add `ToolRegistry` for caller-owned tool execution.
-- [x] Support binding an existing async function with `insert_fn`.
-- [x] Support binding an inline async closure with `insert_fn`.
-- [x] Return executed tool results as `ChatRole::Tool` messages through `call_to_message`.
+- [x] Keep the core crate free of runtime tool execution/type-erased registries.
+- [x] Add `ToolRegistry` in `motlie-models` for caller-owned example/application tool execution.
+- [x] Support binding an existing async function with `insert_fn` in the `motlie-models` helper.
+- [x] Support binding an inline async closure with `insert_fn` in the `motlie-models` helper.
+- [x] Return executed tool results as `ChatRole::Tool` messages through the helper's `call_to_message`.
 - [x] Preserve raw model argument JSON through `ToolArguments`.
 
 ### 1.4 - Capability introspection

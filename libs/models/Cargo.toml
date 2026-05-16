@@ -50,14 +50,15 @@ motlie-model-qwen3-tts-cpp = { path = "../model/backends/qwen3_tts_cpp", optiona
 motlie-model-moonshine = { path = "../model/backends/moonshine", optional = true }
 motlie-model-sherpa-onnx = { path = "../model/backends/sherpa_onnx", optional = true }
 motlie-model-whisper-cpp = { path = "../model/backends/whisper_cpp", optional = true }
+schemars.workspace = true
+serde.workspace = true
+serde_json = "1.0.149"
 thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 hound = "3.5"
 libc = "0.2"
-schemars.workspace = true
-serde.workspace = true
 sysinfo = "0.36.1"
 tokio.workspace = true
 

@@ -24,6 +24,7 @@ use std::str::FromStr;
 pub mod asr;
 pub mod chat;
 pub mod embeddings;
+pub mod tool_registry;
 pub mod tts;
 
 use hf_hub::api::sync::ApiBuilder;
@@ -67,6 +68,7 @@ use motlie_model::{
     ModelMetricSnapshot, StartOptions, UnsupportedChat, UnsupportedCompletion,
     UnsupportedEmbeddings,
 };
+pub use tool_registry::{ToolError, ToolRegistry};
 pub use tts::TtsModels;
 
 #[derive(Debug, Error)]

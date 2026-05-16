@@ -1,11 +1,11 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
-    ContentPart, GenerationParams, QuantizationBits, StartOptions, ToolChoice, ToolError,
-    ToolRegistry,
+    ContentPart, GenerationParams, QuantizationBits, StartOptions, ToolChoice,
 };
 use motlie_models::{
-    ModelSelector, chat::ChatModels, default_artifact_root, quantization_label_isq,
+    chat::ChatModels, default_artifact_root, quantization_label_isq, ModelSelector, ToolError,
+    ToolRegistry,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
