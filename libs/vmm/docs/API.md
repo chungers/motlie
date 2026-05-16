@@ -15,6 +15,7 @@ Rules for this document:
 
 Changelog:
 
+- 2026-05-16 | @vmm-cdx | add the first issue #258 CLI surface: `mbuild oci export` validates an executed v1.5 artifact and emits a local OCI image layout plus `mbuild-oci-export.json`
 - 2026-05-14 | @vmm-cdx | complete the Linux/CH issue #271 path: `mbuild build --target ch` consumes pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH scenario matrix
 - 2026-05-11 | @vmm-cdx | remove the stale platform-default helper API reference; platform selection is now explicit in the builder/harness contract
 - 2026-05-09 | @vmm-cdx | expand `mbuild` into the issue #271 app-layer entrypoint: `build` delegates current CH/VZ adapters, `seed` regenerates per-guest seed overlays, and `validate --scenario` delegates live harness validation with a validation manifest
@@ -846,6 +847,7 @@ mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out
 mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
 mbuild seed --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --guest alice --uid 2001 --gid 2001 --out artifacts/v1.5/seed/alice
 mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch --require-executed --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+mbuild oci export --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch --out artifacts/v1.5/oci-arm64 --tag motlie-guest:v1.5-arm64
 ```
 
 The v1.5 demo success criteria require closing #271 with that config/CLI
@@ -858,6 +860,10 @@ OCI rootfs contract. `mbuild seed` produces per-guest seed files separately
 from the immutable image. With `--scenario`, `mbuild validate` delegates live
 conformance to `harness_v1_5` and writes `mbuild-validation-manifest.json` with
 the command, log path, scenario, target, and exit status.
+`mbuild oci export` is the first issue #258 payload surface: it requires an
+executed artifact with `assembled-rootfs.tar`, validates `mbuild-manifest.json`
+against the current config, checks the tarball size/sha against adapter
+evidence, and writes a local OCI image layout plus `mbuild-oci-export.json`.
 
 Linux/CH evidence from 2026-05-14 (`@vmm-cdx`): artifact
 `/tmp/mbuild-pr270-oci-ch-7` was built with `mbuild build --target ch`,

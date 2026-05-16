@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Start issue #258 implementation: define the local OCI image-layout export contract from `assembled-rootfs.tar` as the first step toward per-arch payload publication and a final multi-arch guest image index |
 | 2026-05-15 | @vmm-cdx | Address PR #270 regression feedback for the greenfield v1.5 contract: pre-v1.5 VZ source images are unsupported, reusable images must not bake harness users, and failed readiness must clean up VZ runners |
 | 2026-05-15 | @vmm-cdx | Merge the VZ rootfs handoff bridge and tighten issue #271 closure: the CH native OCI builder now emits `assembled-rootfs.tar` plus digest evidence for VZ consumption, and VZ image build no longer intentionally bakes demo users |
 | 2026-05-14 | @vmm-cdx | Complete the Linux/CH native OCI builder path for issue #271: `mbuild build --target ch` now imports pinned Ubuntu OCI, packages apt/npm requirements, emits CH artifacts, and passes the v1.5 CH harness matrix |
@@ -608,6 +609,65 @@ OCI image index
 The OCI payload does not remove the need for backend emitters. The emitters
 still own kernel/initramfs or disk boot metadata, seed/cloud-init material,
 runtime overlays, launch manifests, and platform-specific host artifacts.
+
+### OCI Payload Export Contract
+
+The first issue #258 implementation step is a local OCI image-layout export,
+not registry publication. This keeps the contract reviewable and testable
+before adding credentials, registry mutation, or multi-arch manifest-list
+publishing.
+
+The export input is an executed `mbuild` artifact directory that contains:
+
+- `mbuild-manifest.json`
+- `assembled-rootfs.tar`
+- adapter evidence with source image-index digest, selected platform-manifest
+  digest, and assembled-rootfs size/sha
+
+The CLI surface is:
+
+```sh
+mbuild oci export \
+  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --artifact /tmp/mbuild/ch \
+  --out /tmp/mbuild/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+```
+
+`mbuild oci export` must validate the artifact manifest against the current
+build config before writing output. It then verifies that the local
+`assembled-rootfs.tar` size and sha match the recorded adapter evidence. This
+prevents stale rootfs payloads from being exported under a current config or
+source digest.
+
+The output is an OCI image layout:
+
+```text
+oci-layout
+index.json
+blobs/sha256/<config-digest>
+blobs/sha256/<manifest-digest>
+blobs/sha256/<rootfs-layer-digest>
+mbuild-oci-export.json
+```
+
+The rootfs layer is currently the uncompressed deterministic tarball emitted by
+the Phase 11 builder. The config and manifest descriptors carry the Motlie
+contract version, source OCI digests, selected platform, validation profile,
+and ref-name annotation. The export manifest records the same data in a
+Motlie-specific machine-readable shape for harnesses and CI.
+
+This local image layout is the handoff to the next issue #258 steps:
+
+- validate/export the same contract for each supported architecture
+- teach CH and VZ emitters to consume a local OCI layout or registry reference
+- publish per-arch payloads
+- publish one multi-arch OCI image index as the canonical guest reference
+
+Registry push and multi-arch image-index publication are intentionally out of
+scope for the first export slice. They require registry credentials, immutable
+tag/digest policy, and cross-arch validation evidence that should be reviewed
+separately.
 
 ### Pre-Boot Emitter Adaptation Versus Post-Boot Mutation
 

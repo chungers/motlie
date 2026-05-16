@@ -5,7 +5,7 @@ Dockerfile-like image contract used by the v1.5 examples, drives the current
 backend image adapters, regenerates per-guest seed artifacts, and emits
 machine-readable manifests for CI and harness consumption.
 
-Status as of 2026-05-15 (`@vmm-cdx`): `mbuild build --target ch` is the
+Status as of 2026-05-16 (`@vmm-cdx`): `mbuild build --target ch` is the
 durable Linux/CH image-builder entrypoint for the v1.5 demo. It resolves the
 pinned Ubuntu OCI source, imports rootfs layers, runs the apt/npm package stage,
 applies the native v1.5 Motlie compatibility layer, emits the common
@@ -13,11 +13,13 @@ applies the native v1.5 Motlie compatibility layer, emits the common
 artifacts plus machine-readable manifests. `mbuild seed` regenerates per-guest
 seed overlays without rebuilding the immutable image. `mbuild validate`
 validates manifests, can require execution evidence, and can delegate live guest
-conformance to the v1.5 harness. The VZ target consumes the CH-emitted tarball
-with `--rootfs-tarball` while the durable Apple VZ boot-container emitter is
-still transitional. v1.5 is greenfield for this product contract: pre-v1.5 VZ
-source VMs/cached disks are unsupported, and per-guest users are seed/runtime
-state rather than image content.
+conformance to the v1.5 harness. `mbuild oci export` converts an executed
+artifact's `assembled-rootfs.tar` into a local OCI image layout for issue #258
+per-arch payload work. The VZ target consumes the CH-emitted tarball with
+`--rootfs-tarball` while the durable Apple VZ boot-container emitter is still
+transitional. v1.5 is greenfield for this product contract: pre-v1.5 VZ source
+VMs/cached disks are unsupported, and per-guest users are seed/runtime state
+rather than image content.
 
 ## Commands
 
@@ -86,6 +88,16 @@ cargo run -p mbuild -- validate \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
+Export the assembled rootfs handoff as a local OCI image layout:
+
+```bash
+cargo run -p mbuild -- oci export \
+  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --artifact /tmp/mbuild/ch \
+  --out /tmp/mbuild/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+```
+
 The build command writes:
 
 ```text
@@ -111,6 +123,17 @@ When `validate --scenario` is used, validation also writes:
 ```text
 <artifact>/mbuild-validation-manifest.json
 <artifact>/mbuild-validation.log
+```
+
+When `oci export` is used, the output directory contains:
+
+```text
+<out>/oci-layout
+<out>/index.json
+<out>/blobs/sha256/<config-digest>
+<out>/blobs/sha256/<manifest-digest>
+<out>/blobs/sha256/<rootfs-layer-digest>
+<out>/mbuild-oci-export.json
 ```
 
 Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`) used:
@@ -200,6 +223,13 @@ log path, and exit status.
 The manifests are deliberately machine-readable so harnesses and CI can verify
 what stage was produced without rediscovering output paths or inferring backend
 intent from directory names.
+
+`mbuild-oci-export.json` records the exported OCI layout descriptors, source
+image-index digest, selected platform-manifest digest, contract version,
+selected platform, input rootfs size/sha, and ref-name annotation. This is the
+first #258 handoff format: future publish/multi-arch work should consume this
+layout instead of rediscovering rootfs tarball paths or rebuilding backend
+artifacts from shell defaults.
 
 `mbuild` emits structured tracing logs. Use `RUST_LOG=debug` when debugging OCI
 fetch/import, rootfs classification, backend adapter delegation, or harness
