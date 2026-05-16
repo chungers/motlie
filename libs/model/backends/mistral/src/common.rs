@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use image::DynamicImage;
 use mistralrs::core::{StopTokens, Usage};
@@ -151,7 +151,7 @@ pub(crate) fn apply_tools(
 }
 
 #[derive(Debug)]
-pub(crate) struct MistralMessageParts {
+pub struct MistralMessageParts {
     pub(crate) text: String,
     pub(crate) images: Vec<DynamicImage>,
 }
@@ -255,73 +255,6 @@ where
 
     let builder = apply_tools(builder, request)?;
     Ok(apply_generation_params(builder, &request.params))
-}
-
-type MessagePartCollector = fn(&ChatMessage) -> Result<MistralMessageParts, ModelError>;
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MistralChatMetrics {
-    pub(crate) runtime: RuntimeMetricState,
-    pub(crate) text: TextMetricState,
-}
-
-pub(crate) struct MistralChatRuntime {
-    model: mistralrs::Model,
-    metrics: Arc<Mutex<MistralChatMetrics>>,
-    metric_context: &'static str,
-    collect_parts: MessagePartCollector,
-}
-
-impl MistralChatRuntime {
-    pub(crate) fn new(
-        model: mistralrs::Model,
-        metrics: Arc<Mutex<MistralChatMetrics>>,
-        metric_context: &'static str,
-        collect_parts: MessagePartCollector,
-    ) -> Self {
-        Self {
-            model,
-            metrics,
-            metric_context,
-            collect_parts,
-        }
-    }
-
-    pub(crate) async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let builder = chat_request_to_builder(&request, self.collect_parts)?;
-        let started_at = Instant::now();
-
-        let response = self.model.send_chat_request(builder).await.map_err(|err| {
-            ModelError::BackendExecution {
-                backend: "mistralrs",
-                operation: "send_chat_request",
-                message: err.to_string(),
-            }
-        })?;
-        let elapsed = started_at.elapsed();
-
-        let usage = response.usage.clone();
-        let choice =
-            response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| ModelError::BackendExecution {
-                    backend: "mistralrs",
-                    operation: "send_chat_request",
-                    message: "response contained no choices".into(),
-                })?;
-        let response =
-            mistral_response_to_chat_response(choice.message, choice.finish_reason, &usage)?;
-
-        {
-            let mut metrics = lock_metrics(&self.metrics, self.metric_context);
-            observe_latency(&mut metrics.runtime, elapsed);
-            observe_text_usage(&mut metrics.text, &usage);
-        }
-
-        Ok(response)
-    }
 }
 
 pub(crate) fn motlie_tool_spec_to_mistral(

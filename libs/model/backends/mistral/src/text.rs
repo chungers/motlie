@@ -1,21 +1,17 @@
-use std::sync::{Arc, Mutex};
+use std::future::Future;
 
-use async_trait::async_trait;
 use mistralrs::core::NormalLoaderType;
 use mistralrs::TextModelBuilder;
 use motlie_model::{
-    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, ChatRequest, ChatResponse, ChatRole, CheckpointFormat,
-    CompletionModel, CompletionRequest, CompletionResponse, LoadedBundleDescriptor, ModelBundle,
-    ModelError, ModelIdentity, ModelMetricSnapshot, QuantizationBits, QuantizationSupport,
-    ResolvedCheckpoint, StartOptions, UnsupportedEmbeddings,
+    BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, ModelError,
+    QuantizationBits, QuantizationSupport, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_memory,
-    paged_attn_context_size, resolve_local_checkpoint, should_force_cpu, snapshot_text_metrics,
-    text_only_message_parts, MistralChatMetrics, MistralChatRuntime,
+    configure_artifact_policy, map_quantization_bits, paged_attn_context_size, should_force_cpu,
+    text_only_message_parts, MistralMessageParts,
 };
+use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 
 const MISTRAL_TEXT_FORMATS: [CheckpointFormat; 1] = [CheckpointFormat::Safetensors];
 
@@ -67,284 +63,64 @@ impl MistralTextSpec {
     }
 }
 
-/// Backend adapter for `mistralrs` text-generation architectures over safetensors checkpoints.
-#[derive(Clone, Debug)]
-pub struct MistralTextAdapter {
-    arch: MistralTextArch,
-    capabilities: Capabilities,
-    quantization: QuantizationSupport,
-}
+pub struct TextProfile;
 
-impl MistralTextAdapter {
+pub type MistralTextAdapter = MistralAdapter<TextProfile>;
+pub type MistralTextBundle = MistralBundle<TextProfile>;
+pub type MistralTextHandle = MistralHandle<TextProfile>;
+
+impl MistralAdapter<TextProfile> {
     pub fn qwen3() -> Self {
         let spec = MistralTextSpec::qwen3_4b();
-        Self {
-            arch: spec.arch,
-            capabilities: spec.capabilities,
-            quantization: spec.quantization,
-        }
+        Self::from_parts(spec.arch, spec.capabilities, spec.quantization)
     }
 }
 
-#[async_trait]
-impl BackendAdapter for MistralTextAdapter {
-    type Handle = MistralTextHandle;
-
-    fn supported_formats(&self) -> &[CheckpointFormat] {
-        &MISTRAL_TEXT_FORMATS
-    }
-
-    fn backend_kind(&self) -> BackendKind {
-        BackendKind::MistralRs
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
-    }
-
-    fn quantization(&self) -> &QuantizationSupport {
-        &self.quantization
-    }
-
-    async fn start(
-        &self,
-        identity: &ModelIdentity,
-        checkpoint: &ResolvedCheckpoint,
-        options: StartOptions,
-    ) -> Result<Self::Handle, ModelError> {
-        let resolved_quantization = self
-            .quantization
-            .resolve(options.quantization, &identity.id)?;
-        let (model_id, options) =
-            resolve_local_checkpoint(checkpoint, CheckpointFormat::Safetensors, options)?;
-        let model = build_text_model(model_id, self.arch, resolved_quantization, options).await?;
-
-        Ok(new_text_handle(
-            identity.id.clone(),
-            identity.display_name.clone(),
-            self.capabilities.clone(),
-            self.quantization.clone(),
-            resolved_quantization,
-            model,
-        ))
-    }
-}
-
-/// Generic `ModelBundle` implementation backed by `mistralrs` text generation.
-#[derive(Clone, Debug)]
-pub struct MistralTextBundle {
-    metadata: BundleMetadata,
-    arch: MistralTextArch,
-    model_id: &'static str,
-}
-
-impl MistralTextBundle {
+impl MistralBundle<TextProfile> {
     pub fn new(spec: MistralTextSpec) -> Self {
-        Self {
-            metadata: BundleMetadata {
-                id: spec.id,
-                display_name: spec.display_name.into(),
-                capabilities: spec.capabilities,
-                quantization: spec.quantization,
-            },
-            arch: spec.arch,
-            model_id: spec.model_id,
-        }
+        Self::from_parts(
+            spec.id,
+            spec.display_name,
+            spec.model_id,
+            spec.arch,
+            spec.capabilities,
+            spec.quantization,
+        )
     }
 }
 
-#[async_trait]
-impl ModelBundle for MistralTextBundle {
-    type Handle = MistralTextHandle;
-
-    fn id(&self) -> &BundleId {
-        &self.metadata.id
-    }
-
-    fn metadata(&self) -> &BundleMetadata {
-        &self.metadata
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.metadata.capabilities
-    }
-
-    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
-        let resolved_quantization = self
-            .metadata
-            .quantization
-            .resolve(options.quantization, &self.metadata.id)?;
-        let model =
-            build_text_model(self.model_id, self.arch, resolved_quantization, options).await?;
-
-        Ok(new_text_handle(
-            self.metadata.id.clone(),
-            self.metadata.display_name.clone(),
-            self.metadata.capabilities.clone(),
-            self.metadata.quantization.clone(),
-            resolved_quantization,
-            model,
-        ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Internal runtime abstraction (enables stub testing without real mistralrs)
-// ---------------------------------------------------------------------------
-
-enum TextRuntime {
-    Real(MistralChatRuntime),
-    #[cfg(test)]
-    Stub(StubTextRuntime),
-}
-
-#[cfg(test)]
-struct StubTextRuntime;
-
-#[cfg(test)]
-impl StubTextRuntime {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        let prompt = request
-            .messages
-            .last()
-            .and_then(|m| m.content.first())
-            .and_then(|part| match part {
-                motlie_model::ContentPart::Text(text) => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        Ok(ChatResponse::text(format!("stub response to: {prompt}")))
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        Ok(CompletionResponse {
-            content: format!("stub completion of: {}", request.prompt),
-        })
-    }
-}
-
-impl TextRuntime {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        match self {
-            Self::Real(runtime) => runtime.chat(request).await,
-            #[cfg(test)]
-            Self::Stub(runtime) => runtime.chat(request).await,
-        }
-    }
-
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        match self {
-            Self::Real(runtime) => {
-                let chat_request = ChatRequest {
-                    messages: vec![motlie_model::ChatMessage::new(
-                        ChatRole::User,
-                        request.prompt,
-                    )],
-                    params: request.params,
-                    ..Default::default()
-                };
-                let chat_response = runtime.chat(chat_request).await?;
-                Ok(CompletionResponse {
-                    content: chat_response.content,
-                })
-            }
-            #[cfg(test)]
-            Self::Stub(runtime) => runtime.complete(request).await,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Handle
-// ---------------------------------------------------------------------------
-
-pub struct MistralTextHandle {
-    descriptor: LoadedBundleDescriptor,
-    runtime: TextRuntime,
-    metrics: Arc<Mutex<MistralChatMetrics>>,
-}
-
-#[async_trait]
-impl BundleHandle for MistralTextHandle {
-    type Chat = Self;
-    type Completion = Self;
+impl MistralProfile for TextProfile {
+    type Arch = MistralTextArch;
+    type Completion = MistralTextHandle;
     type Embeddings = UnsupportedEmbeddings;
 
-    fn descriptor(&self) -> &LoadedBundleDescriptor {
-        &self.descriptor
+    const FORMATS: &'static [CheckpointFormat] = &MISTRAL_TEXT_FORMATS;
+    const START_METRIC_CONTEXT: &'static str = "mistral-text-start";
+    const CHAT_METRIC_CONTEXT: &'static str = "mistral-text-chat";
+    const SNAPSHOT_METRIC_CONTEXT: &'static str = "mistral-text-metric-snapshot";
+
+    fn build_model(
+        model_id: &str,
+        arch: Self::Arch,
+        resolved_quantization: Option<QuantizationBits>,
+        options: StartOptions,
+    ) -> impl Future<Output = Result<mistralrs::Model, ModelError>> + Send {
+        build_text_model(model_id, arch, resolved_quantization, options)
     }
 
-    fn capabilities(&self) -> &Capabilities {
-        &self.descriptor.capabilities
+    fn collect_message(message: &ChatMessage) -> Result<MistralMessageParts, ModelError> {
+        text_only_message_parts(message)
     }
 
-    fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
-        let metrics = lock_metrics(&self.metrics, "mistral-text-metric-snapshot").clone();
-        Some(snapshot_text_metrics(&metrics.runtime, &metrics.text))
+    fn completion(handle: &MistralTextHandle) -> Result<&Self::Completion, ModelError> {
+        Ok(handle)
     }
 
-    fn chat(&self) -> Result<&Self::Chat, ModelError> {
-        Ok(self)
-    }
-
-    fn completion(&self) -> Result<&Self::Completion, ModelError> {
-        Ok(self)
-    }
-
-    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
+    fn embeddings(handle: &MistralTextHandle) -> Result<&Self::Embeddings, ModelError> {
+        let _ = handle.unsupported_embeddings();
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
-    }
-
-    async fn shutdown(self) -> Result<(), ModelError> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ChatModel for MistralTextHandle {
-    async fn generate(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        self.runtime.chat(request).await
-    }
-}
-
-#[async_trait]
-impl CompletionModel for MistralTextHandle {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        self.runtime.complete(request).await
-    }
-}
-
-fn new_text_handle(
-    id: BundleId,
-    display_name: String,
-    capabilities: Capabilities,
-    quantization: QuantizationSupport,
-    resolved_quantization: Option<QuantizationBits>,
-    model: mistralrs::Model,
-) -> MistralTextHandle {
-    let metrics = Arc::new(Mutex::new(MistralChatMetrics::default()));
-    {
-        let mut metrics = lock_metrics(&metrics, "mistral-text-start");
-        observe_memory(&mut metrics.runtime);
-    }
-
-    MistralTextHandle {
-        descriptor: LoadedBundleDescriptor {
-            id,
-            display_name,
-            capabilities,
-            quantization,
-            resolved_quantization,
-        },
-        runtime: TextRuntime::Real(MistralChatRuntime::new(
-            model,
-            Arc::clone(&metrics),
-            "mistral-text-chat",
-            text_only_message_parts,
-        )),
-        metrics,
     }
 }
 
@@ -425,9 +201,11 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    use crate::runtime::MistralStubKind;
     use mistralrs::IsqBits;
     use motlie_model::{
-        ArtifactPolicy, BackendAdapter, BackendKind, QuantizationBits, StartOptions,
+        ArtifactPolicy, BackendAdapter, BackendKind, BundleHandle, ChatModel, ChatRequest,
+        ChatRole, CompletionModel, CompletionRequest, QuantizationBits, StartOptions,
     };
 
     #[test]
@@ -465,21 +243,18 @@ mod tests {
 
     #[tokio::test]
     async fn text_handle_exposes_chat_and_completion_but_not_embeddings() {
-        let handle = MistralTextHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: BundleId::new("qwen3_4b"),
-                display_name: "Qwen3 4B".into(),
-                capabilities: Capabilities::chat_completion_and_tool_use(),
-                quantization: QuantizationSupport::with_recommended(
-                    [QuantizationBits::Four, QuantizationBits::Eight],
-                    QuantizationBits::Four,
-                )
-                .expect("test quantization support is valid"),
-                resolved_quantization: Some(QuantizationBits::Four),
-            },
-            runtime: TextRuntime::Stub(StubTextRuntime),
-            metrics: Arc::new(Mutex::new(MistralChatMetrics::default())),
-        };
+        let handle = MistralTextHandle::stub(
+            BundleId::new("qwen3_4b"),
+            "Qwen3 4B".into(),
+            Capabilities::chat_completion_and_tool_use(),
+            QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Four,
+            )
+            .expect("test quantization support is valid"),
+            Some(QuantizationBits::Four),
+            MistralStubKind::Text,
+        );
 
         assert!(handle.supports(CapabilityKind::Chat));
         assert!(handle.supports(CapabilityKind::Completion));

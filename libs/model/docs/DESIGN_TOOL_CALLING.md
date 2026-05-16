@@ -197,7 +197,6 @@ Rules:
 Core binding trait:
 
 ```rust
-#[async_trait::async_trait]
 pub trait Tool: Send + Sync + 'static {
     type Args: serde::de::DeserializeOwned + schemars::JsonSchema + Send + 'static;
     type Output: serde::Serialize + Send + 'static;
@@ -206,7 +205,10 @@ pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error>;
+    fn call(
+        &self,
+        args: Self::Args,
+    ) -> impl std::future::Future<Output = Result<Self::Output, Self::Error>> + Send;
 
     fn spec(&self) -> Result<ToolSpec, ToolSchemaError> {
         ToolSpec::from_args::<Self::Args>(self.name(), self.description())
@@ -466,6 +468,7 @@ Current implementation status: the Motlie `mistral.rs` wrappers now map the comm
 
 Implemented adaptation:
 
+- Route text and multimodal wrappers through the shared `MistralProfile` runtime layer for backend startup, handle plumbing, metrics, request construction, and response mapping.
 - Map `ToolSpec` to `mistralrs::Tool`.
 - Map `ToolChoice` to `mistralrs::ToolChoice`.
 - Map `ChatRole::Tool` and assistant `tool_calls` into the native request message shape.
