@@ -1,4 +1,4 @@
-use std::cmp::{min, Ordering};
+use std::cmp::{Ordering, min};
 use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};
@@ -124,6 +124,7 @@ pub(crate) enum ModalState {
     RenameSession {
         session: SelectedSession,
         input: String,
+        cursor: usize,
         button: Button,
     },
     SendKeys {
@@ -140,17 +141,21 @@ pub(crate) enum ModalState {
 #[derive(Debug, Clone)]
 pub(crate) struct SendKeysModalUi {
     pub(crate) input: String,
+    pub(crate) cursor: usize,
     pub(crate) focus: SendKeysFocus,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct NewSessionModalUi {
     pub(crate) input: String,
+    pub(crate) input_cursor: usize,
     pub(crate) hosts: Vec<NewSessionHostChoice>,
     pub(crate) host_index: usize,
     pub(crate) env_rows: Vec<SessionKeyValueRow>,
     pub(crate) env_key_input: String,
+    pub(crate) env_key_cursor: usize,
     pub(crate) env_value_input: String,
+    pub(crate) env_value_cursor: usize,
     pub(crate) focus: NewSessionFocus,
     pub(crate) button: Button,
 }
@@ -169,7 +174,9 @@ pub(crate) struct SessionKeyValueModalUi {
     pub(crate) original_rows: Vec<SessionKeyValueRow>,
     pub(crate) original_selected_key: Option<String>,
     pub(crate) key_input: String,
+    pub(crate) key_cursor: usize,
     pub(crate) value_input: String,
+    pub(crate) value_cursor: usize,
     pub(crate) focus: SessionKeyValueFocus,
 }
 
@@ -209,7 +216,7 @@ impl ModalView {
                 };
                 format!("{fields}\n{env}\n{env_key_input}    {env_value_input}")
             }
-            ModalBody::RenameSession { input } => format!("Session Name\n{input}"),
+            ModalBody::RenameSession { input, .. } => format!("Session Name\n{input}"),
             ModalBody::SendKeys { label, input, .. } => format!("{label}\n{input}"),
             ModalBody::SessionKeyValues {
                 kind,
@@ -247,19 +254,24 @@ pub(crate) enum ModalBody {
     Text(String),
     NewSession {
         input: String,
+        input_cursor: usize,
         host_label: Option<String>,
         host_count: usize,
         env_rows: Vec<SessionKeyValueRow>,
         env_key_input: String,
+        env_key_cursor: usize,
         env_value_input: String,
+        env_value_cursor: usize,
         focus: NewSessionFocus,
     },
     RenameSession {
         input: String,
+        cursor: usize,
     },
     SendKeys {
         label: String,
         input: String,
+        cursor: usize,
         focused: bool,
     },
     SessionKeyValues {
@@ -267,7 +279,9 @@ pub(crate) enum ModalBody {
         rows: Vec<SessionKeyValueRow>,
         selected_key: Option<String>,
         key_input: String,
+        key_cursor: usize,
         value_input: String,
+        value_cursor: usize,
         focus: SessionKeyValueFocus,
     },
 }

@@ -1,29 +1,29 @@
 use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
-    StatusStyle, TransportKind, WindowStyle, SSH_DEFAULT_PORT,
+    HostHandle, SSH_DEFAULT_PORT, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
+    StatusStyle, TransportKind, WindowStyle, transport::MockTransport,
 };
+use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Paragraph, Wrap};
-use ratatui::Terminal;
 
-use crate::cli::{is_portrait_pty, select_layout, Cli};
+use crate::cli::{Cli, is_portrait_pty, select_layout};
 use crate::consts::{
-    mmux_attach_status_style, mmux_attach_window_style, APP_BASE_BG, APP_BASE_FG, BUILD_DATE,
-    BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
-    HOST_CONNECTION_FAILED_FG, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
-    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING,
-    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
-    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
+    APP_BASE_BG, APP_BASE_FG, BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
+    HOST_COLOR_SQUARE, HOST_CONNECTION_FAILED_FG, LANDSCAPE_MAX_LEFT_PERCENT,
+    LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH,
+    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
+    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
+    mmux_attach_status_style, mmux_attach_window_style,
 };
 use crate::controller::{
-    apply_fleet_snapshot, apply_streaming_host_results, fetch_fleet_refresh, fetch_host_refresh,
-    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, KeyOutcome,
-    RefreshApplyOptions,
+    KeyOutcome, RefreshApplyOptions, apply_fleet_snapshot, apply_streaming_host_results,
+    fetch_fleet_refresh, fetch_host_refresh, handle_key, refresh_sessions_preserving,
+    refresh_sessions_quiet,
 };
 use crate::detail::render_live_preview;
 use crate::model::{
@@ -41,8 +41,8 @@ use crate::render::{
 };
 use crate::target_host::resolve_ip_address;
 use crate::{
-    prepare_attach_status, prepare_attach_styles, restore_attach_status, restore_attach_styles,
-    session_refresh_task_failure_status, PendingHostRefreshTask,
+    PendingHostRefreshTask, prepare_attach_status, prepare_attach_styles, restore_attach_status,
+    restore_attach_styles, session_refresh_task_failure_status,
 };
 
 fn sid(id: &str) -> SessionId {
@@ -172,6 +172,7 @@ fn test_new_session_modal(input: &str, button: Button) -> ModalState {
     ModalState::NewSession {
         ui: NewSessionModalUi {
             input: input.to_string(),
+            input_cursor: input.chars().count(),
             hosts: vec![NewSessionHostChoice {
                 id: local_host_id(),
                 label: "host".to_string(),
@@ -179,7 +180,9 @@ fn test_new_session_modal(input: &str, button: Button) -> ModalState {
             host_index: 0,
             env_rows: Vec::new(),
             env_key_input: String::new(),
+            env_key_cursor: 0,
             env_value_input: String::new(),
+            env_value_cursor: 0,
             focus: NewSessionFocus::Name,
             button,
         },
@@ -191,6 +194,7 @@ fn test_send_keys_modal(input: &str, focus: SendKeysFocus) -> ModalState {
         session: test_selected_session(),
         ui: SendKeysModalUi {
             input: input.to_string(),
+            cursor: input.chars().count(),
             focus,
         },
     }
@@ -212,7 +216,9 @@ fn test_session_tags_modal(
             original_selected_key: selected_key.map(str::to_string),
             selected_key: selected_key.map(str::to_string),
             key_input: key_input.to_string(),
+            key_cursor: key_input.chars().count(),
             value_input: value_input.to_string(),
+            value_cursor: value_input.chars().count(),
             focus,
         },
     }
@@ -1931,6 +1937,7 @@ fn modal_content_separates_body_from_button_bar() {
     let rename = modal_content(&ModalState::RenameSession {
         session: test_selected_session(),
         input: "dev".to_string(),
+        cursor: "dev".chars().count(),
         button: Button::Ok,
     });
     assert_eq!(rename.title, " Rename Session ");
@@ -1938,7 +1945,7 @@ fn modal_content_separates_body_from_button_bar() {
     assert_eq!(rename.buttons, " Cancel    [Ok]");
     assert!(matches!(
         rename.body,
-        ModalBody::RenameSession { ref input } if input == "dev"
+        ModalBody::RenameSession { ref input, .. } if input == "dev"
     ));
     assert!(!rename.body_text().contains("[Ok]"));
 
@@ -1948,7 +1955,12 @@ fn modal_content_separates_body_from_button_bar() {
     assert_eq!(send_keys.buttons, " Cancel     Ok ");
     assert!(matches!(
         send_keys.body,
-        ModalBody::SendKeys { ref label, ref input, focused }
+        ModalBody::SendKeys {
+            ref label,
+            ref input,
+            focused,
+            ..
+        }
             if label == "To: dev on host" && input == "echo hi" && focused
     ));
     assert!(!send_keys.body_text().contains("[Ok]"));
@@ -2091,6 +2103,7 @@ fn focused_modal_input_fields_place_terminal_cursor() {
     rename_app.modal = Some(ModalState::RenameSession {
         session: test_selected_session(),
         input: "dev".to_string(),
+        cursor: "dev".chars().count(),
         button: Button::Ok,
     });
     let (rename_lines, rename_cursor) = render_to_lines_and_cursor(&mut rename_app, 80, 24);
@@ -2153,6 +2166,9 @@ fn focused_modal_input_fields_place_terminal_cursor() {
     long_rename_app.modal = Some(ModalState::RenameSession {
         session: test_selected_session(),
         input: "prefix-prefix-prefix-prefix-very-long-session-name-that-does-not-fit".to_string(),
+        cursor: "prefix-prefix-prefix-prefix-very-long-session-name-that-does-not-fit"
+            .chars()
+            .count(),
         button: Button::Ok,
     });
     let (long_rename_lines, long_rename_cursor) =
@@ -2168,6 +2184,207 @@ fn focused_modal_input_fields_place_terminal_cursor() {
     assert!(!long_input_line.contains("very-long-session"));
     assert_eq!(long_rename_cursor.y, long_input_y as u16);
     assert!(long_rename_cursor.x > line_char_index(long_input_line, "me-that-does-not-fit") as u16);
+}
+
+#[tokio::test]
+async fn rename_modal_arrow_keys_edit_at_insertion_point() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.modal = Some(ModalState::RenameSession {
+        session: test_selected_session(),
+        input: "dev".to_string(),
+        cursor: "dev".chars().count(),
+        button: Button::Ok,
+    });
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::RenameSession {
+            input,
+            cursor,
+            button: Button::Ok,
+            ..
+        }) if input == "dXev" && *cursor == 2
+    ));
+}
+
+#[tokio::test]
+async fn send_keys_modal_arrow_keys_stay_in_input_focus() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.modal = Some(test_send_keys_modal("echo", SendKeysFocus::Input));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SendKeys { ui, .. })
+            if ui.focus == SendKeysFocus::Input && ui.input == "ec!ho" && ui.cursor == 3
+    ));
+}
+
+#[tokio::test]
+async fn session_tags_modal_arrow_keys_edit_at_insertion_point() {
+    let fleet = local_fleet();
+    let mut app = app_with_session();
+    app.modal = Some(test_session_tags_modal(
+        Vec::new(),
+        None,
+        "owner",
+        "platform",
+        SessionKeyValueFocus::Value,
+    ));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::SessionKeyValues { ui, .. })
+            if ui.focus == SessionKeyValueFocus::Value
+                && ui.value_input == "platfo!rm"
+                && ui.value_cursor == 7
+    ));
+}
+
+#[tokio::test]
+async fn new_session_modal_arrow_keys_edit_all_text_fields() {
+    let fleet = local_fleet();
+    let mut app = AppState::new(LayoutMode::Normal);
+    app.modal = Some(test_new_session_modal("build", Button::Ok));
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    let Some(ModalState::NewSession { ui }) = app.modal.as_mut() else {
+        panic!("new session modal should be open");
+    };
+    ui.focus = NewSessionFocus::EnvKey;
+    ui.env_key_input = "BUILD_ID".to_string();
+    ui.env_key_cursor = "BUILD_ID".chars().count();
+    ui.env_value_input = "42".to_string();
+    ui.env_value_cursor = "42".chars().count();
+
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+    handle_key(
+        &fleet,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        app.modal.as_ref(),
+        Some(ModalState::NewSession { ui })
+            if ui.input == "builXd"
+                && ui.input_cursor == 5
+                && ui.env_key_input == "BUILD_IXD"
+                && ui.env_key_cursor == 8
+                && ui.env_value_input == "4X2"
+                && ui.env_value_cursor == 2
+                && ui.focus == NewSessionFocus::EnvValue
+    ));
 }
 
 #[tokio::test]
@@ -4096,11 +4313,12 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
     let text = detail_text_for_render("\x1b[31mred\x1b[0m");
     assert_eq!(text.lines[0].spans[0].content.as_ref(), "red");
     assert!(!text.lines[0].spans[0].content.contains('\x1b'));
-    assert!(text
-        .lines
-        .iter()
-        .flat_map(|line| line.spans.iter())
-        .all(|span| span.style.fg != Some(Color::Reset) && span.style.bg != Some(Color::Reset)));
+    assert!(
+        text.lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .all(|span| span.style.fg != Some(Color::Reset) && span.style.bg != Some(Color::Reset))
+    );
 }
 
 #[test]
