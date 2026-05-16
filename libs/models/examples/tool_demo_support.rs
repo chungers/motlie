@@ -58,6 +58,8 @@ pub async fn get_weather(args: WeatherArgs) -> std::result::Result<WeatherOutput
 pub struct MathExpressionArgs {
     /// CEL arithmetic expression to evaluate. Supports parentheses, numeric
     /// operators, comparisons, conditionals, and math.* extension functions.
+    /// Use matching numeric types in division; for averages of decimal values,
+    /// use a decimal divisor such as 3.0.
     pub expression: String,
 }
 
@@ -125,7 +127,7 @@ pub fn register_demo_tools(registry: &mut ToolRegistry) -> std::result::Result<(
         )?
         .insert_fn(
             "evaluate_math_expression",
-            "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions.",
+            "Evaluate a CEL arithmetic expression with parentheses, numeric operators, conditionals, and math.* functions. Use matching numeric types in division, for example divide decimal values by 3.0.",
             evaluate_math_expression,
         )?;
     Ok(())
@@ -141,11 +143,11 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
     let mut messages = vec![
         ChatMessage::new(
             ChatRole::System,
-            "Use tools when they are relevant. Make exactly one tool call per assistant turn. Start by calling get_weather for Seattle only. After each weather result, call get_weather for the next city until Seattle, Portland, and San Francisco are complete. Then call evaluate_math_expression for the average. Do not calculate averages mentally. After all tool results are available, answer in one concise sentence.",
+            "Use tools when they are relevant. Make exactly one tool call per assistant turn. Start by calling get_weather for Seattle only. After each weather result, call get_weather for the next city until Seattle, Portland, and San Francisco are complete. Then call evaluate_math_expression for the average. Do not calculate averages mentally. CEL requires matching numeric types, so divide decimal temperature values by 3.0, not 3. After all tool results are available, answer in one concise sentence.",
         ),
         ChatMessage::new(
             ChatRole::User,
-            "Calculate the average current fahrenheit temperature for Seattle, Portland, and San Francisco. Use get_weather once for each city. After the weather results are available, call evaluate_math_expression to calculate the average.",
+            "Calculate the average current fahrenheit temperature for Seattle, Portland, and San Francisco. Use get_weather once for each city. After the weather results are available, call evaluate_math_expression to calculate the average with a CEL expression that uses 3.0 as the divisor.",
         ),
     ];
 

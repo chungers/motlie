@@ -41,6 +41,63 @@ Use `--tool-demo "What is Rust?"` on the model-backed chat examples to run the
 ordinary chat path first and then the weather-plus-math tool loop. Use
 `--tool-demo-only` to isolate just the tool loop.
 
+## Demo Output Ledger
+
+These excerpts were captured from this branch after the `cel-cxx` integration.
+Backend-native loader logs and timing noise are omitted.
+
+| Example | Scenario | Command | Captured output |
+|---------|----------|---------|-----------------|
+| `chat_tool_binding` | API-only typed binding without an LLM | `cargo run -p motlie-models --example chat_tool_binding --no-default-features` | Registers two tools, simulates three weather calls, then executes `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}` and returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`. |
+| `chat_gguf_gwen3_gemma4` | Qwen3 4B GGUF live LLM tool loop through `llama.cpp` | `cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- --tool-demo-only "What is Rust?"` | Advertises `ToolUse`, calls `get_weather` for Seattle, Portland, and San Francisco, then calls `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}`. The tool returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`, and the final model response is `The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68 degrees.` |
+| `chat_mistral_qwen3` | Qwen3 4B safetensors live LLM tool loop through `mistral.rs` | `cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo-only "What is Rust?"` | Uses the same shared `tool_demo_support::run_tool_demo` path and emits the same `tool-round`, `tool-call-*`, `tool-result`, and `tool-final-response` fields when the safetensors bundle is available. |
+| `chat_multimodal_gemma4` | Gemma 4 E2B-it safetensors live LLM tool loop through `mistral.rs` | `cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --tool-demo-only "What is Rust?"` | Uses the same shared `tool_demo_support::run_tool_demo` path as the Qwen3 examples; image+text chat remains separate from this text-only tool loop. |
+
+Representative API-only output:
+
+```text
+registered-tools: 2
+tool: evaluate_math_expression
+tool: get_weather
+assistant-call-name: get_weather
+assistant-call-args: {"city":"Seattle","units":"fahrenheit"}
+tool-content: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}
+assistant-call-name: get_weather
+assistant-call-args: {"city":"Portland","units":"fahrenheit"}
+tool-content: {"city":"Portland","temperature":68.0,"units":"fahrenheit","summary":"clear"}
+assistant-call-name: get_weather
+assistant-call-args: {"city":"San Francisco","units":"fahrenheit"}
+tool-content: {"city":"San Francisco","temperature":64.0,"units":"fahrenheit","summary":"clear"}
+assistant-call-name: evaluate_math_expression
+assistant-call-args: {"expression":"(72.0 + 68.0 + 64.0) / 3.0"}
+tool-content: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted":"68","engine":"cel-cxx"}
+```
+
+Representative Qwen3 GGUF output:
+
+```text
+capabilities:
+  - kind=ToolUse input=[Text, StructuredJson] output=[Text, StructuredJson] interaction=MultiTurn summary=Tool definitions, assistant tool calls, and tool-result turns on the chat surface.
+--- tool calling ---
+tool-round: 1
+tool-call-name: get_weather
+tool-call-args: {"city": "Seattle", "units": "fahrenheit"}
+tool-result: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}
+tool-round: 2
+tool-call-name: get_weather
+tool-call-args: {"city": "Portland", "units": "fahrenheit"}
+tool-result: {"city":"Portland","temperature":68.0,"units":"fahrenheit","summary":"clear"}
+tool-round: 3
+tool-call-name: get_weather
+tool-call-args: {"city": "San Francisco", "units": "fahrenheit"}
+tool-result: {"city":"San Francisco","temperature":64.0,"units":"fahrenheit","summary":"clear"}
+tool-round: 4
+tool-call-name: evaluate_math_expression
+tool-call-args: {"expression": "(72.0 + 68.0 + 64.0) / 3.0"}
+tool-result: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted":"68","engine":"cel-cxx"}
+tool-final-response: The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68 degrees.
+```
+
 The detailed 2x3 TTS-to-ASR validation matrix lives in
 [`../docs/VALIDATION_TTS_ASR_PIPELINES.md`](../docs/VALIDATION_TTS_ASR_PIPELINES.md).
 
