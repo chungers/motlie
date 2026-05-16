@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 use tokio_vsock::{VsockAddr, VsockStream};
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BACKEND_ENV: &str = "/etc/motlie/v1.5/backend.env";
 const DEFAULT_HOST_CID: u32 = 2;
@@ -49,31 +51,45 @@ impl BridgeConfig {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    init_tracing();
     let env_path =
         std::env::var("MOTLIE_BACKEND_ENV").unwrap_or_else(|_| DEFAULT_BACKEND_ENV.to_string());
     let env_path = Path::new(&env_path);
 
     loop {
         let config = BridgeConfig::load(env_path);
-        eprintln!(
-            "motlie-vsock-ssh-bridge: connecting cid={} port={} tcp={}",
-            config.host_cid, config.vsock_port, config.tcp_addr
+        info!(
+            host_cid = config.host_cid,
+            vsock_port = config.vsock_port,
+            tcp_addr = %config.tcp_addr,
+            "connecting guest SSH to host vsock"
         );
         if let Err(error) = bridge_once(&config).await {
-            eprintln!(
-                "motlie-vsock-ssh-bridge: cid={} port={} tcp={} error={error:#}",
-                config.host_cid, config.vsock_port, config.tcp_addr
+            warn!(
+                host_cid = config.host_cid,
+                vsock_port = config.vsock_port,
+                tcp_addr = %config.tcp_addr,
+                error = %error,
+                "bridge attempt failed"
             );
         }
         sleep(RETRY_DELAY).await;
     }
 }
 
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
+}
+
 async fn bridge_once(config: &BridgeConfig) -> Result<()> {
     let mut tcp = TcpStream::connect(&config.tcp_addr)
         .await
         .with_context(|| format!("connect guest SSH at {}", config.tcp_addr))?;
-    eprintln!("motlie-vsock-ssh-bridge: connected guest SSH");
+    info!(tcp_addr = %config.tcp_addr, "connected guest SSH");
     let addr = VsockAddr::new(config.host_cid, config.vsock_port);
     let mut vsock = VsockStream::connect(addr).await.with_context(|| {
         format!(
@@ -81,11 +97,15 @@ async fn bridge_once(config: &BridgeConfig) -> Result<()> {
             config.host_cid, config.vsock_port
         )
     })?;
-    eprintln!("motlie-vsock-ssh-bridge: connected host vsock");
+    info!(
+        host_cid = config.host_cid,
+        vsock_port = config.vsock_port,
+        "connected host vsock"
+    );
     let _ = tokio::io::copy_bidirectional(&mut tcp, &mut vsock)
         .await
         .context("bridge SSH TCP stream to host vsock")?;
-    eprintln!("motlie-vsock-ssh-bridge: bridge stream closed");
+    info!("bridge stream closed");
     Ok(())
 }
 
