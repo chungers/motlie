@@ -165,17 +165,40 @@ cargo run -p mbuild -- \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
+Explicit per-platform configs are checked in for #258 acceptance:
+
+```text
+libs/vmm/examples/v1.5/motlie-image.linux-amd64.yaml
+libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml
+```
+
+`motlie-image.yaml` remains the arm64 default for existing commands. New
+release evidence should use the explicit per-platform configs so native
+`vz-darwin-arm64` and `ch-linux-arm64` priority targets are unambiguous. The
+follow-up `ch-linux-amd64` target uses `linux/amd64` and should be coordinated
+on a separate x86_64/amd64 Linux host. Current Apple Silicon VZ acceptance uses
+the `linux/arm64` guest payload and must be built/validated on a macOS host
+with Virtualization.framework.
+
 `mbuild build --target ch` now consumes the checked-in `external-oci` source,
-resolves and fetches the pinned Ubuntu OCI arm64 platform, imports the rootfs,
-runs the apt/npm package stage, applies the native Motlie v1.5 compatibility
-layer, emits the common `assembled-rootfs.tar` handoff, and then emits CH
-artifacts. The VZ target still records its current macOS adapter source until
-the VZ emitter consumes that `mbuild`-emitted rootfs tarball and produces fresh
-VZ validation evidence.
+resolves and fetches the pinned Ubuntu OCI platform, imports the rootfs, runs
+the apt/npm package stage, applies the native Motlie v1.5 compatibility layer,
+emits the common `assembled-rootfs.tar` handoff, and then emits CH artifacts.
+`mbuild oci export` turns that common rootfs into a local OCI image layout,
+`mbuild oci validate` reads the layout back and rejects stale or corrupt
+outputs, and `mbuild build --target ch --oci-layout <layout>` consumes that OCI
+payload as the CH emitter input. `mbuild oci index` combines validated
+per-platform layouts into a local multi-arch OCI index; registry upload remains
+a release/operator step because it requires credentials and tag policy.
+
+The VZ target still records its current macOS adapter source until the VZ
+emitter consumes that `mbuild`-emitted rootfs tarball or OCI payload and
+produces fresh VZ validation evidence.
 `mbuild seed` regenerates per-guest seed files from the config-driven seed
 topology without rebuilding the immutable image. `mbuild validate` checks the
 emitted manifest, can require execution evidence, and can delegate a live
-scenario to `harness_v1_5` while recording the harness log and exit status.
+scenario to `harness_v1_5` while recording the harness log, exit status, and
+OCI source digest fields.
 
 Linux/CH evidence from 2026-05-14 (`@vmm-cdx`): the rebuilt artifact at
 `/tmp/mbuild-pr270-oci-ch-7` passed manifest validation and all v1.5 CH

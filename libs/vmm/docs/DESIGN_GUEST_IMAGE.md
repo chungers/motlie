@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Reprioritize issue #258 target sequencing: Apple Silicon VZ and DGX/aarch64 Linux CH consume/build `linux/arm64` first; Linux amd64/x86_64 CH follows on a coordinated native host; Darwin guest-image workflow must run on macOS VZ |
 | 2026-05-16 | @vmm-cdx | Align issue #258 with the Motlie release-branch model from `origin/main`: optional VM image artifact targets coordinate native per-platform builders through release manifests, master issue, sub-issues, and sub-PR evidence; qemu/binfmt is optional local convenience, not acceptance criteria |
 | 2026-05-16 | @vmm-cdx | Remove the CH builder host-native guest-platform assumption: requested OCI platform now selects the guest target, guest binaries are static musl payloads linked with `rust-lld`, and cross-arch package staging requires qemu-user/binfmt or a native builder |
 | 2026-05-16 | @vmm-cdx | Start issue #258 implementation: define the local OCI image-layout export contract from `assembled-rootfs.tar` as the first step toward per-arch payload publication and a final multi-arch guest image index |
@@ -527,8 +528,10 @@ The roadmap is:
    - Resolve `docker.io/library/ubuntu:24.04` through its OCI image index.
    - Record the image reference, image-index digest, selected platform, and
      selected platform-manifest digest.
-   - Select `linux/amd64` for native CH-on-DGX validation and `linux/arm64` for
-     Apple Silicon VZ validation.
+   - Prioritize `linux/arm64` for Apple Silicon VZ validation and DGX/aarch64
+     Linux CH validation.
+   - Add `linux/amd64` for the follow-up CH target built on a coordinated
+     x86_64/amd64 Linux host.
    - Inspect the rootfs for OS release, package manager, init system, users,
      network tooling, SSH, sudo, `/dev/fuse` assumptions, and package-manager
      state.
@@ -717,16 +720,21 @@ kind = "motlie.vm-image-artifact"
 ```
 
 The manifest describes one logical Motlie guest contract and per-platform
-builder targets. For v1.5, the required issue #258 acceptance targets are:
+builder targets. For v1.5, issue #258 target priority is:
 
 ```text
-ch-linux-amd64   -> native Linux/KVM/Cloud Hypervisor builder, guest linux/amd64
-vz-darwin-arm64  -> native Apple Silicon VZ builder, guest linux/arm64
+vz-darwin-arm64  -> priority 1, native Apple Silicon VZ builder, guest linux/arm64
+ch-linux-arm64   -> priority 1, native DGX/aarch64 Linux CH builder, guest linux/arm64
+ch-linux-amd64   -> priority 2, coordinated x86_64/amd64 Linux CH builder, guest linux/amd64
 ```
 
-Optional targets may include `ch-linux-arm64` when an arm64 Linux CH host is
-available. They are useful parity evidence but do not replace native amd64 CH
-acceptance.
+For Darwin guest images, the workflow must run the VZ emitter on an Apple
+Silicon macOS host. That target consumes/builds the `linux/arm64` guest
+payload. `linux/amd64` is not part of current Apple Silicon VZ acceptance; it
+is the later CH target for x86_64/amd64 Linux builders. OCI platform naming
+uses `linux/amd64`, Rust target naming uses `x86_64-unknown-linux-musl`, Debian
+package naming uses `amd64`, and Linux host hardware commonly reports
+`x86_64`.
 
 This design intentionally does not require qemu/binfmt for issue #258
 acceptance. The current `mbuild` emitter supports OCI source import, static

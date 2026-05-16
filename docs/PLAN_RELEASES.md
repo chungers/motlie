@@ -19,6 +19,7 @@
 - 2026-05-14, @gpt55-dgx: Changed the plan to discover stable `releases/<bin>.toml` binary manifests by scanning `releases/`, with versions stored in schema and aggregate GitHub notes built from per-binary notes.
 - 2026-05-14, @gpt55-dgx: Added codename suggestion, release bootstrap, master issue, sub-issue/sub-PR, and master issue closure tasks.
 - 2026-05-16, @vmm-cdx: Added optional VM guest-image artifact planning around native per-platform image builders, OCI payload evidence, and v1.5 harness validation gates using the existing release branch/sub-PR coordination model.
+- 2026-05-16, @vmm-cdx: Reordered VM image artifact sub-PR priorities for issue #258: `vz-darwin-arm64` and `ch-linux-arm64` first, then coordinated `ch-linux-amd64` on x86_64/amd64 Linux.
 
 ## Status
 
@@ -121,8 +122,9 @@ binary gates.
 Example target branches:
 
 ```text
-release/2026-05-amber-aardvark-vmm-guest-ch-linux-amd64 -> release/2026-05-amber-aardvark
 release/2026-05-amber-aardvark-vmm-guest-vz-darwin-arm64 -> release/2026-05-amber-aardvark
+release/2026-05-amber-aardvark-vmm-guest-ch-linux-arm64 -> release/2026-05-amber-aardvark
+release/2026-05-amber-aardvark-vmm-guest-ch-linux-amd64 -> release/2026-05-amber-aardvark
 ```
 
 - [ ] 3A.1 Add one stable VM image manifest, for example
@@ -132,9 +134,11 @@ release/2026-05-amber-aardvark-vmm-guest-vz-darwin-arm64 -> release/2026-05-ambe
       harness scenarios, and publish intent. Reference:
       `docs/DESIGN_RELEASES.md#optional-vm-image-artifact-targets`.
 - [ ] 3A.2 Create target-specific sub-issues for native builder hosts. For
-      issue #258 acceptance, require native `ch-linux-amd64` and native
-      `vz-darwin-arm64`; qemu/binfmt cross-arch builds may be recorded as
-      optional evidence but must not replace native target evidence. Reference:
+      issue #258, prioritize native `vz-darwin-arm64` on an Apple Silicon Mac
+      and native `ch-linux-arm64` on DGX/aarch64 Linux. Add
+      `ch-linux-amd64` as the next coordinated target on an x86_64/amd64 Linux
+      host. qemu/binfmt cross-arch builds may be recorded as optional evidence
+      but must not replace native target evidence. Reference:
       `docs/DESIGN_RELEASES.md#optional-vm-image-artifact-targets`.
 - [ ] 3A.3 For each target sub-PR, run `mbuild build`, `mbuild validate`,
       `mbuild oci export`, and the required v1.5 harness scenarios on the

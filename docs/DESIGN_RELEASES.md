@@ -17,6 +17,7 @@
 - 2026-05-14, @gpt55-dgx: Changed per-binary release manifests to stable `releases/<bin>.toml` files discovered by scanning `releases/`, with versions stored in manifest schema and aggregate GitHub notes generated from per-binary notes.
 - 2026-05-14, @gpt55-dgx: Added master tracking issue and sub-issue/sub-PR orchestration around the release branch manifest ledger.
 - 2026-05-16, @vmm-cdx: Added optional VM guest-image artifact targets for native per-platform image builds, OCI payload publication, and harness evidence coordinated through the same release branch, master issue, sub-issue, and sub-PR model.
+- 2026-05-16, @vmm-cdx: Reprioritized VM image artifact targets for issue #258: Apple Silicon VZ and DGX/aarch64 Linux CH build `linux/arm64` first, with Linux amd64/x86_64 CH coordinated on a later native host.
 
 ## Status
 
@@ -99,38 +100,56 @@ The manifest represents one logical guest contract, for example
 `motlie-vmm-guest-v1.5`, and a target matrix such as:
 
 ```text
-ch-linux-amd64
-vz-darwin-arm64
-ch-linux-arm64     # optional CH parity target when arm64 Linux is available
+vz-darwin-arm64    # priority 1: Apple Silicon VZ, guest linux/arm64
+ch-linux-arm64     # priority 1: DGX/aarch64 Linux CH, guest linux/arm64
+ch-linux-amd64     # priority 2: coordinated x86_64/amd64 Linux CH host
 ```
 
 Each target records both the builder host requirement and the guest platform:
 
 ```toml
 [[target]]
-id = "ch-linux-amd64"
-backend = "ch"
-host_os = "linux"
-host_arch = "amd64"
-guest_platform = "linux/amd64"
-image_config = "libs/vmm/examples/v1.5/motlie-image.yaml"
-builder = "mbuild"
-package_engine = "native-ch-bootstrap" # preferred native engine once implemented
-oci_payload_tag = "motlie-guest:v1.5-amd64"
-
-[[target]]
 id = "vz-darwin-arm64"
 backend = "vz"
 host_os = "darwin"
 host_arch = "arm64"
 guest_platform = "linux/arm64"
-image_config = "libs/vmm/examples/v1.5/motlie-image.yaml"
+image_config = "libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml"
 builder = "mbuild"
 package_engine = "native-vz-bootstrap" # VZ-native equivalent or adapter path
 oci_payload_tag = "motlie-guest:v1.5-arm64"
+
+[[target]]
+id = "ch-linux-arm64"
+backend = "ch"
+host_os = "linux"
+host_arch = "arm64"
+guest_platform = "linux/arm64"
+image_config = "libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml"
+builder = "mbuild"
+package_engine = "native-ch-bootstrap" # preferred native engine once implemented
+oci_payload_tag = "motlie-guest:v1.5-arm64"
+
+[[target]]
+id = "ch-linux-amd64"
+backend = "ch"
+host_os = "linux"
+host_arch = "amd64"
+guest_platform = "linux/amd64"
+image_config = "libs/vmm/examples/v1.5/motlie-image.linux-amd64.yaml"
+builder = "mbuild"
+package_engine = "native-ch-bootstrap"
+oci_payload_tag = "motlie-guest:v1.5-amd64"
 ```
 
-For issue #258, native builders are the acceptance path. The current `mbuild`
+For issue #258, native builders are the acceptance path. The priority order is
+Apple Silicon VZ (`vz-darwin-arm64`) and DGX/aarch64 Linux CH
+(`ch-linux-arm64`) first, then coordinated x86_64/amd64 Linux CH
+(`ch-linux-amd64`) on a separate host. OCI platform names use `linux/amd64`;
+Rust uses `x86_64-unknown-linux-musl`; Debian package architecture uses
+`amd64`; Linux hosts commonly report `x86_64`.
+
+The current `mbuild`
 emitter can import an OCI source image, build static musl Motlie guest binaries
 for the requested guest platform, run rootless-`chroot` package staging, emit
 CH artifacts, and export a local OCI image layout. That rootless-`chroot`
@@ -150,25 +169,25 @@ evidence:
 ```toml
 [[gate]]
 id = "oci-source-resolved"
-target_id = "ch-linux-amd64"
+target_id = "vz-darwin-arm64"
 state = "planned"
 evidence = []
 
 [[gate]]
 id = "guest-image-built"
-target_id = "ch-linux-amd64"
+target_id = "vz-darwin-arm64"
 state = "planned"
 evidence = []
 
 [[gate]]
 id = "oci-payload-exported"
-target_id = "ch-linux-amd64"
+target_id = "vz-darwin-arm64"
 state = "planned"
 evidence = []
 
 [[gate]]
 id = "harness-validated"
-target_id = "ch-linux-amd64"
+target_id = "vz-darwin-arm64"
 state = "planned"
 evidence = []
 ```

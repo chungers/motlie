@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -29,6 +29,8 @@ const DEFAULT_MANIFEST_NAME: &str = "mbuild-manifest.json";
 const DEFAULT_SEED_MANIFEST_NAME: &str = "mbuild-seed-manifest.json";
 const DEFAULT_VALIDATION_MANIFEST_NAME: &str = "mbuild-validation-manifest.json";
 const DEFAULT_OCI_EXPORT_MANIFEST_NAME: &str = "mbuild-oci-export.json";
+const DEFAULT_OCI_INDEX_MANIFEST_NAME: &str = "mbuild-oci-index.json";
+const DEFAULT_RELEASE_EVIDENCE_NAME: &str = "mbuild-release-evidence.json";
 const ADAPTER_LOG_NAME: &str = "mbuild-adapter.log";
 const CH_EMITTER_LOG_NAME: &str = "mbuild-ch-emitter.log";
 const CH_PACKAGE_STAGE_LOG_NAME: &str = "mbuild-package-stage.log";
@@ -47,6 +49,7 @@ const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+jso
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_IMAGE_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
 const OCI_IMAGE_LAYER_TAR_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
+const OCI_MANIFEST_ARTIFACT_KIND: &str = "motlie.vm-image-artifact";
 
 fn main() {
     init_tracing();
@@ -75,6 +78,7 @@ fn run() -> Result<()> {
             plan_only,
             adapter_arg,
             rootfs_tarball,
+            oci_layout,
         } => build(BuildOptions {
             config_path: config,
             target,
@@ -83,6 +87,7 @@ fn run() -> Result<()> {
             plan_only,
             adapter_args: adapter_arg,
             rootfs_tarball,
+            oci_layout,
         }),
         Commands::Seed {
             config,
@@ -130,6 +135,34 @@ fn run() -> Result<()> {
                 out,
                 tag,
             }),
+            OciCommands::Validate {
+                config,
+                artifact,
+                layout,
+            } => oci_validate(OciValidateOptions {
+                config_path: config,
+                artifact,
+                layout,
+            }),
+            OciCommands::Resolve { image, platform } => oci_resolve(&image, &platform),
+            OciCommands::Index { out, image, layout } => oci_index(OciIndexOptions {
+                out,
+                image,
+                layouts: layout,
+            }),
+            OciCommands::Evidence {
+                config,
+                artifact,
+                layout,
+                publish_ref,
+                out,
+            } => oci_release_evidence(OciReleaseEvidenceOptions {
+                config_path: config,
+                artifact,
+                layout,
+                publish_ref,
+                out,
+            }),
         },
     }
 }
@@ -143,6 +176,7 @@ struct BuildOptions {
     plan_only: bool,
     adapter_args: Vec<String>,
     rootfs_tarball: Option<PathBuf>,
+    oci_layout: Option<PathBuf>,
 }
 
 #[instrument(skip(options), fields(target = %options.target, config = %options.config_path.display()))]
@@ -306,6 +340,29 @@ struct OciExportOptions {
     tag: Option<String>,
 }
 
+#[derive(Debug)]
+struct OciValidateOptions {
+    config_path: PathBuf,
+    artifact: PathBuf,
+    layout: PathBuf,
+}
+
+#[derive(Debug)]
+struct OciIndexOptions {
+    out: PathBuf,
+    image: String,
+    layouts: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct OciReleaseEvidenceOptions {
+    config_path: PathBuf,
+    artifact: PathBuf,
+    layout: PathBuf,
+    publish_ref: Option<String>,
+    out: Option<PathBuf>,
+}
+
 #[instrument(skip(options), fields(config = %options.config_path.display(), artifact = %options.artifact.display(), out = %options.out.display()))]
 fn oci_export(options: OciExportOptions) -> Result<()> {
     let config = load_config(&options.config_path)?;
@@ -330,7 +387,163 @@ fn oci_export(options: OciExportOptions) -> Result<()> {
     )?;
     let export_manifest_path = options.out.join(DEFAULT_OCI_EXPORT_MANIFEST_NAME);
     fs::write(&export_manifest_path, serde_json::to_vec_pretty(&export)?)?;
+    validate_oci_layout(&options.out, &export, Some(&config), Some(&manifest))?;
     info!(path = %export_manifest_path.display(), "wrote mbuild OCI export manifest");
+    Ok(())
+}
+
+#[instrument(skip(options), fields(config = %options.config_path.display(), artifact = %options.artifact.display(), layout = %options.layout.display()))]
+fn oci_validate(options: OciValidateOptions) -> Result<()> {
+    let config = load_config(&options.config_path)?;
+    let build_manifest = load_build_manifest(&options.artifact)?;
+    build_manifest.validate_against_config(&config)?;
+    let export_manifest = load_oci_export_manifest(&options.layout)?;
+    let validation = validate_oci_layout(
+        &options.layout,
+        &export_manifest,
+        Some(&config),
+        Some(&build_manifest),
+    )?;
+    info!(
+        layout = %options.layout.display(),
+        platform = %validation.platform,
+        rootfs = %validation.rootfs_layer.digest,
+        "validated mbuild OCI layout"
+    );
+    Ok(())
+}
+
+#[instrument(fields(image = %image, platform = %platform))]
+fn oci_resolve(image: &str, platform: &str) -> Result<()> {
+    let platform = parse_source_platform(platform)?;
+    let image_ref = OciImageReference::from_str(image)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create OCI registry runtime")?;
+    let resolved = runtime.block_on(async {
+        OciRegistryClient::new()
+            .resolve_manifest(&image_ref, platform)
+            .await
+    })?;
+    let value = serde_json::json!({
+        "image": resolved.image_ref.to_string(),
+        "platform": resolved.platform.to_string(),
+        "image_index_digest": resolved.image_index_digest.to_string(),
+        "platform_manifest_digest": resolved.platform_manifest_digest.to_string(),
+    });
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+#[instrument(skip(options), fields(out = %options.out.display(), image = %options.image))]
+fn oci_index(options: OciIndexOptions) -> Result<()> {
+    if options.layouts.is_empty() {
+        bail!("oci index requires at least one --layout");
+    }
+    prepare_oci_output_dir(&options.out)?;
+    fs::create_dir_all(options.out.join("blobs/sha256"))?;
+    fs::write(
+        options.out.join("oci-layout"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "imageLayoutVersion": OCI_LAYOUT_VERSION
+        }))?,
+    )?;
+
+    let mut manifests = Vec::with_capacity(options.layouts.len());
+    let mut platform_sources = BTreeMap::new();
+    for layout in &options.layouts {
+        let export = load_oci_export_manifest(layout)?;
+        let validation = validate_oci_layout(layout, &export, None, None)?;
+        let manifest_path = descriptor_path(layout, &validation.image_manifest)?;
+        copy_oci_blob_to_layout(layout, &options.out, &validation.image_manifest)?;
+        copy_oci_blob_to_layout(layout, &options.out, &validation.image_config)?;
+        copy_oci_blob_to_layout(layout, &options.out, &validation.rootfs_layer)?;
+        let platform = parse_source_platform(&validation.platform)?;
+        if platform_sources
+            .insert(platform.to_string(), validation.source.clone())
+            .is_some()
+        {
+            bail!("duplicate OCI payload platform in index input: {platform}");
+        }
+        manifests.push(serde_json::json!({
+            "mediaType": validation.image_manifest.media_type,
+            "digest": validation.image_manifest.digest,
+            "size": validation.image_manifest.size_bytes,
+            "platform": {
+                "architecture": platform.architecture.to_string(),
+                "os": platform.os.to_string(),
+            },
+            "annotations": {
+                "org.opencontainers.image.ref.name": options.image,
+                "io.motlie.contract.version": validation.contract_version,
+                "io.motlie.source.image_index_digest": validation.source.image_index_digest.as_ref().map(ToString::to_string).unwrap_or_default(),
+                "io.motlie.source.platform_manifest_digest": validation.source.platform_manifest_digest.as_ref().map(ToString::to_string).unwrap_or_default(),
+                "io.motlie.input.layout": layout.display().to_string(),
+                "io.motlie.input.manifest": manifest_path.display().to_string(),
+            }
+        }));
+    }
+    manifests.sort_by(|left, right| {
+        left["platform"]["architecture"]
+            .as_str()
+            .cmp(&right["platform"]["architecture"].as_str())
+    });
+    let index_value = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": OCI_IMAGE_INDEX_MEDIA_TYPE,
+        "manifests": manifests,
+        "annotations": {
+            "org.opencontainers.image.ref.name": options.image,
+            "io.motlie.contract.version": v1_5::MOTLIE_V15_CONTRACT_VERSION,
+        }
+    });
+    let index_bytes = serde_json::to_vec_pretty(&index_value)?;
+    fs::write(options.out.join("index.json"), &index_bytes)?;
+    let index_manifest = OciMultiArchIndexManifest {
+        image: options.image,
+        output_dir: options.out.clone(),
+        oci_layout_version: OCI_LAYOUT_VERSION.to_string(),
+        image_index: OciBlobDescriptor {
+            media_type: OCI_IMAGE_INDEX_MEDIA_TYPE.to_string(),
+            digest: format!("sha256:{}", sha256_bytes(&index_bytes)),
+            size_bytes: index_bytes.len() as u64,
+            path: Some(PathBuf::from("index.json")),
+        },
+        platforms: platform_sources,
+        created_at_unix_seconds: unix_now()?,
+    };
+    let manifest_path = options.out.join(DEFAULT_OCI_INDEX_MANIFEST_NAME);
+    fs::write(&manifest_path, serde_json::to_vec_pretty(&index_manifest)?)?;
+    info!(path = %manifest_path.display(), "wrote mbuild OCI multi-arch index manifest");
+    Ok(())
+}
+
+#[instrument(skip(options), fields(config = %options.config_path.display(), artifact = %options.artifact.display(), layout = %options.layout.display()))]
+fn oci_release_evidence(options: OciReleaseEvidenceOptions) -> Result<()> {
+    let config = load_config(&options.config_path)?;
+    let build_manifest = load_build_manifest(&options.artifact)?;
+    build_manifest.validate_against_config(&config)?;
+    let export_manifest = load_oci_export_manifest(&options.layout)?;
+    let validation = validate_oci_layout(
+        &options.layout,
+        &export_manifest,
+        Some(&config),
+        Some(&build_manifest),
+    )?;
+    let evidence = ReleaseArtifactEvidence::from_records(
+        &build_manifest,
+        &validation,
+        options.publish_ref.as_deref(),
+    )?;
+    let out = options
+        .out
+        .unwrap_or_else(|| options.layout.join(DEFAULT_RELEASE_EVIDENCE_NAME));
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&out, serde_json::to_vec_pretty(&evidence)?)?;
+    info!(path = %out.display(), "wrote VM image artifact release evidence");
     Ok(())
 }
 
@@ -345,6 +558,12 @@ fn load_build_manifest(artifact: &Path) -> Result<ImageBuildManifest> {
     let manifest_path = artifact.join(DEFAULT_MANIFEST_NAME);
     serde_json::from_slice(&fs::read(&manifest_path)?)
         .with_context(|| format!("read build manifest {}", manifest_path.display()))
+}
+
+fn load_oci_export_manifest(layout: &Path) -> Result<OciExportManifest> {
+    let manifest_path = layout.join(DEFAULT_OCI_EXPORT_MANIFEST_NAME);
+    serde_json::from_slice(&fs::read(&manifest_path)?)
+        .with_context(|| format!("read OCI export manifest {}", manifest_path.display()))
 }
 
 fn resolve_repo_root(provided: Option<&Path>) -> Result<PathBuf> {
@@ -389,6 +608,18 @@ fn run_build_execution(
     options: &BuildOptions,
     rootfs_tarball: Option<&RootfsTarballRecord>,
 ) -> Result<AdapterRecord> {
+    if let Some(oci_layout) = options.oci_layout.as_deref() {
+        if config.source.kind != SourceKind::ExternalOci {
+            bail!("--oci-layout requires source.kind external-oci");
+        }
+        if options.target.as_str() != "ch" {
+            bail!("--oci-layout is currently implemented for the CH emitter; target {} is not supported", options.target);
+        }
+        if rootfs_tarball.is_some() {
+            bail!("--oci-layout and --rootfs-tarball are mutually exclusive");
+        }
+        return run_ch_oci_layout_build(repo_root, config, emitter, options, oci_layout);
+    }
     if config.source.kind == SourceKind::ExternalOci && options.target.as_str() == "ch" {
         return run_ch_external_oci_build(repo_root, config, emitter, options);
     }
@@ -518,6 +749,125 @@ fn run_ch_external_oci_build(
         build_host: Some(BuildHostRecord::from(&host)),
         guest_target: Some(GuestTargetRecord::from(&guest)),
         rootfs_tarball: Some(common_rootfs_tarball),
+    })
+}
+
+#[instrument(
+    skip(repo_root, config, _emitter, options, oci_layout),
+    fields(target = %options.target, out = %options.out.display(), layout = %oci_layout.display())
+)]
+fn run_ch_oci_layout_build(
+    repo_root: &Path,
+    config: &ImageBuildConfig,
+    _emitter: &BackendEmitterSpec,
+    options: &BuildOptions,
+    oci_layout: &Path,
+) -> Result<AdapterRecord> {
+    let started_at_unix_seconds = unix_now()?;
+    let log_path = options.out.join(CH_EMITTER_LOG_NAME);
+    fs::write(&log_path, b"")?;
+    append_log(&log_path, "=== mbuild CH OCI-layout builder ===\n")?;
+
+    let export_manifest = load_oci_export_manifest(oci_layout)?;
+    let validation = validate_oci_layout(oci_layout, &export_manifest, Some(config), None)?;
+    let source = external_source_from_manifest(&validation.source)?;
+    let platform = parse_source_platform(&validation.platform)?;
+    let host = HostPlatformTarget::detect()?;
+    let guest = ChGuestTarget::from_platform(platform)?;
+    append_log(
+        &log_path,
+        &format!(
+            "oci_layout={} tag={} platform={} image_index={} manifest={}\n",
+            oci_layout.display(),
+            validation.tag,
+            source.platform,
+            source.image_index_digest,
+            source.platform_manifest_digest
+        ),
+    )?;
+    append_log(
+        &log_path,
+        &format!(
+            "builder_host={} guest_platform={} guest_rust_target={} guest_deb_arch={}\n",
+            host.platform, guest.platform, guest.rust_target, guest.deb_arch
+        ),
+    )?;
+
+    let work_root = create_work_root("mbuild-ch-oci-rootfs")?;
+    let rootfs_dir = work_root.join("rootfs");
+    fs::create_dir_all(&rootfs_dir)?;
+    let rootfs_blob = descriptor_path(oci_layout, &validation.rootfs_layer)?;
+    extract_rootfs_tarball(&rootfs_blob, &rootfs_dir, &log_path)?;
+
+    let base_dir = options.out.join("base");
+    fs::create_dir_all(&base_dir)?;
+    let rootfs_record = RootfsTarballRecord {
+        canonical_path: fs::canonicalize(&rootfs_blob)?,
+        size_bytes: validation.rootfs_layer.size_bytes,
+        sha256: digest_hex(&validation.rootfs_layer.digest)?.to_string(),
+    };
+    write_common_rootfs_record(&options.out, &source, &rootfs_record)?;
+
+    let guest_binary = rootfs_dir.join(
+        v1_5::MOTLIE_V15_GUEST_BIN_OPT
+            .strip_prefix('/')
+            .unwrap_or(v1_5::MOTLIE_V15_GUEST_BIN_OPT),
+    );
+    if !guest_binary.is_file() {
+        bail!(
+            "OCI payload does not contain required guest binary {}",
+            v1_5::MOTLIE_V15_GUEST_BIN_OPT
+        );
+    }
+    install_ch_boot_adaptations(repo_root, &rootfs_dir, &source, &guest, &guest_binary)?;
+    write_ch_guest_contract(
+        &rootfs_dir.join("opt/motlie/v1.5/guest/guest-contract.json"),
+        &source,
+        &guest,
+        Path::new(guest.kernel_image),
+        &guest_binary,
+    )?;
+    let rootfs_path = base_dir.join(CH_ROOTFS_NAME);
+    emit_squashfs(
+        &rootfs_dir,
+        &rootfs_path,
+        &options.out.join(CH_EMITTER_LOG_NAME),
+    )?;
+    let kernel_path = emit_ch_kernel(&base_dir, &guest, &log_path)?;
+    let contract_path = base_dir.join(CH_GUEST_CONTRACT_NAME);
+    write_ch_guest_contract(&contract_path, &source, &guest, &kernel_path, &guest_binary)?;
+    write_ch_build_result(
+        &options.out,
+        &contract_path,
+        &kernel_path,
+        &rootfs_path,
+        &guest_binary,
+    )?;
+
+    let completed_at_unix_seconds = unix_now()?;
+    append_log(&log_path, "=== CH OCI-layout build complete ===\n")?;
+    let _ = fs::remove_dir_all(&work_root);
+
+    Ok(AdapterRecord {
+        kind: "oci-payload-ch-emitter".to_string(),
+        command: vec![
+            "mbuild".to_string(),
+            "build".to_string(),
+            "--target".to_string(),
+            options.target.to_string(),
+            "--oci-layout".to_string(),
+            oci_layout.display().to_string(),
+        ],
+        log_path,
+        exit_status: 0,
+        started_at_unix_seconds,
+        completed_at_unix_seconds,
+        package_include: config.package_stage.install.clone(),
+        materialized_source: None,
+        external_oci_source: Some(source),
+        build_host: Some(BuildHostRecord::from(&host)),
+        guest_target: Some(GuestTargetRecord::from(&guest)),
+        rootfs_tarball: Some(rootfs_record),
     })
 }
 
@@ -1562,6 +1912,7 @@ fn run_harness_validation(
         contract_version: manifest.contract_version.clone(),
         target: manifest.target.clone(),
         artifact_dir: artifact.to_path_buf(),
+        source: manifest.source.clone(),
         scenario: scenario.to_path_buf(),
         command: command_line,
         log_path,
@@ -1841,6 +2192,339 @@ fn prepare_oci_output_dir(out: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_oci_layout(
+    layout: &Path,
+    export: &OciExportManifest,
+    config: Option<&ImageBuildConfig>,
+    build_manifest: Option<&ImageBuildManifest>,
+) -> Result<OciExportManifest> {
+    if !layout.is_dir() {
+        bail!("OCI layout is not a directory: {}", layout.display());
+    }
+    if export.oci_layout_version != OCI_LAYOUT_VERSION {
+        bail!(
+            "OCI export manifest layout version {} does not match expected {}",
+            export.oci_layout_version,
+            OCI_LAYOUT_VERSION
+        );
+    }
+    let layout_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(layout.join("oci-layout"))?)?;
+    let layout_version = layout_json
+        .get("imageLayoutVersion")
+        .and_then(|value| value.as_str())
+        .context("oci-layout is missing imageLayoutVersion")?;
+    if layout_version != OCI_LAYOUT_VERSION {
+        bail!(
+            "oci-layout imageLayoutVersion {layout_version:?} does not match expected {OCI_LAYOUT_VERSION:?}"
+        );
+    }
+    if let Some(config) = config {
+        require_manifest_match(
+            "oci.contract_version",
+            &export.contract_version,
+            &config.version,
+        )?;
+        require_manifest_match(
+            "oci.source",
+            &export.source,
+            &ManifestSource::from_config(config),
+        )?;
+        require_manifest_match("oci.platform", &export.platform, &config.source.platform)?;
+    }
+    if let Some(build_manifest) = build_manifest {
+        require_manifest_match(
+            "oci.input_artifact_dir",
+            &export.input_artifact_dir,
+            &build_manifest.output_dir,
+        )?;
+        require_manifest_match("oci.source", &export.source, &build_manifest.source)?;
+        require_manifest_match(
+            "oci.contract_version",
+            &export.contract_version,
+            &build_manifest.contract_version,
+        )?;
+        if let Some(adapter) = &build_manifest.adapter {
+            if let Some(rootfs) = &adapter.rootfs_tarball {
+                require_manifest_match(
+                    "oci.input_rootfs_tarball.size_bytes",
+                    &export.input_rootfs_tarball.size_bytes,
+                    &rootfs.size_bytes,
+                )?;
+                require_manifest_match(
+                    "oci.input_rootfs_tarball.sha256",
+                    &export.input_rootfs_tarball.sha256,
+                    &rootfs.sha256,
+                )?;
+            }
+        }
+    }
+
+    verify_descriptor_blob(layout, &export.image_index)?;
+    verify_descriptor_blob(layout, &export.image_manifest)?;
+    verify_descriptor_blob(layout, &export.image_config)?;
+    verify_descriptor_blob(layout, &export.rootfs_layer)?;
+
+    let platform = parse_source_platform(&export.platform)?;
+    let index_value = read_descriptor_json(layout, &export.image_index)?;
+    let index_manifests = index_value
+        .get("manifests")
+        .and_then(|value| value.as_array())
+        .context("index.json is missing manifests array")?;
+    if index_manifests.len() != 1 {
+        bail!(
+            "mbuild OCI export expects exactly one platform manifest, found {}",
+            index_manifests.len()
+        );
+    }
+    let index_manifest = &index_manifests[0];
+    require_json_str(
+        index_manifest,
+        "mediaType",
+        &export.image_manifest.media_type,
+        "index manifest mediaType",
+    )?;
+    require_json_str(
+        index_manifest,
+        "digest",
+        &export.image_manifest.digest,
+        "index manifest digest",
+    )?;
+    require_json_u64(
+        index_manifest,
+        "size",
+        export.image_manifest.size_bytes,
+        "index manifest size",
+    )?;
+    let index_platform = index_manifest
+        .get("platform")
+        .context("index manifest is missing platform")?;
+    require_json_str(
+        index_platform,
+        "architecture",
+        &platform.architecture.to_string(),
+        "index platform architecture",
+    )?;
+    require_json_str(
+        index_platform,
+        "os",
+        &platform.os.to_string(),
+        "index platform os",
+    )?;
+
+    let manifest_value = read_descriptor_json(layout, &export.image_manifest)?;
+    let config_value = manifest_value
+        .get("config")
+        .context("image manifest is missing config descriptor")?;
+    require_json_str(
+        config_value,
+        "mediaType",
+        &export.image_config.media_type,
+        "config descriptor mediaType",
+    )?;
+    require_json_str(
+        config_value,
+        "digest",
+        &export.image_config.digest,
+        "config descriptor digest",
+    )?;
+    require_json_u64(
+        config_value,
+        "size",
+        export.image_config.size_bytes,
+        "config descriptor size",
+    )?;
+    let layers = manifest_value
+        .get("layers")
+        .and_then(|value| value.as_array())
+        .context("image manifest is missing layers array")?;
+    if layers.len() != 1 {
+        bail!(
+            "mbuild OCI export expects exactly one rootfs layer, found {}",
+            layers.len()
+        );
+    }
+    require_json_str(
+        &layers[0],
+        "mediaType",
+        &export.rootfs_layer.media_type,
+        "rootfs layer mediaType",
+    )?;
+    require_json_str(
+        &layers[0],
+        "digest",
+        &export.rootfs_layer.digest,
+        "rootfs layer digest",
+    )?;
+    require_json_u64(
+        &layers[0],
+        "size",
+        export.rootfs_layer.size_bytes,
+        "rootfs layer size",
+    )?;
+
+    let config_value = read_descriptor_json(layout, &export.image_config)?;
+    require_json_str(
+        &config_value,
+        "architecture",
+        &platform.architecture.to_string(),
+        "config architecture",
+    )?;
+    require_json_str(&config_value, "os", &platform.os.to_string(), "config os")?;
+    let diff_ids = config_value
+        .get("rootfs")
+        .and_then(|rootfs| rootfs.get("diff_ids"))
+        .and_then(|value| value.as_array())
+        .context("image config is missing rootfs.diff_ids")?;
+    if !diff_ids
+        .iter()
+        .any(|value| value.as_str() == Some(export.rootfs_layer.digest.as_str()))
+    {
+        bail!(
+            "image config rootfs.diff_ids does not include rootfs layer digest {}",
+            export.rootfs_layer.digest
+        );
+    }
+    Ok(export.clone())
+}
+
+fn descriptor_path(layout: &Path, descriptor: &OciBlobDescriptor) -> Result<PathBuf> {
+    if let Some(path) = &descriptor.path {
+        if path.is_absolute() {
+            bail!("OCI descriptor path must be relative: {}", path.display());
+        }
+        return Ok(layout.join(path));
+    }
+    let digest = digest_hex(&descriptor.digest)?;
+    Ok(layout.join("blobs/sha256").join(digest))
+}
+
+fn verify_descriptor_blob(layout: &Path, descriptor: &OciBlobDescriptor) -> Result<()> {
+    let path = descriptor_path(layout, descriptor)?;
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("read OCI descriptor blob {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("OCI descriptor path is not a file: {}", path.display());
+    }
+    if metadata.len() != descriptor.size_bytes {
+        bail!(
+            "OCI blob {} size mismatch: file={}, descriptor={}",
+            path.display(),
+            metadata.len(),
+            descriptor.size_bytes
+        );
+    }
+    let actual = format!("sha256:{}", sha256_file(&path)?);
+    if actual != descriptor.digest {
+        bail!(
+            "OCI blob {} digest mismatch: file={}, descriptor={}",
+            path.display(),
+            actual,
+            descriptor.digest
+        );
+    }
+    Ok(())
+}
+
+fn read_descriptor_json(
+    layout: &Path,
+    descriptor: &OciBlobDescriptor,
+) -> Result<serde_json::Value> {
+    let path = descriptor_path(layout, descriptor)?;
+    serde_json::from_slice(&fs::read(&path)?)
+        .with_context(|| format!("parse OCI JSON blob {}", path.display()))
+}
+
+fn copy_oci_blob_to_layout(
+    source_layout: &Path,
+    dest_layout: &Path,
+    descriptor: &OciBlobDescriptor,
+) -> Result<()> {
+    let source = descriptor_path(source_layout, descriptor)?;
+    let dest = descriptor_path(dest_layout, descriptor)?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &dest)
+        .with_context(|| format!("copy OCI blob {} to {}", source.display(), dest.display()))?;
+    verify_descriptor_blob(dest_layout, descriptor)
+}
+
+fn extract_rootfs_tarball(tarball: &Path, rootfs_dir: &Path, log_path: &Path) -> Result<()> {
+    let script = "set -euo pipefail\nmkdir -p \"$2\"\ntar -C \"$2\" -xf \"$1\"\n";
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg("mbuild-extract-rootfs")
+        .arg(tarball)
+        .arg(rootfs_dir);
+    run_logged_command(&mut command, log_path, "extract OCI rootfs payload")
+}
+
+fn external_source_from_manifest(source: &ManifestSource) -> Result<ExternalOciSource> {
+    if source.kind != SourceKind::ExternalOci.to_string() {
+        bail!(
+            "OCI payload source kind must be external-oci, got {}",
+            source.kind
+        );
+    }
+    let platform = parse_source_platform(&source.platform)?;
+    let image_index_digest = source
+        .image_index_digest
+        .clone()
+        .context("OCI payload source is missing image_index_digest")?;
+    let platform_manifest_digest = source
+        .platform_manifest_digest
+        .clone()
+        .context("OCI payload source is missing platform_manifest_digest")?;
+    Ok(ExternalOciSource {
+        image_ref: source.image.clone(),
+        platform,
+        image_index_digest,
+        platform_manifest_digest,
+    })
+}
+
+fn digest_hex(digest: &str) -> Result<&str> {
+    digest
+        .strip_prefix("sha256:")
+        .filter(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .with_context(|| format!("unsupported OCI digest {digest:?}; expected sha256:<64 hex>"))
+}
+
+fn require_json_str(
+    value: &serde_json::Value,
+    key: &str,
+    expected: &str,
+    label: &str,
+) -> Result<()> {
+    let actual = value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .with_context(|| format!("{label} is missing string field {key}"))?;
+    if actual != expected {
+        bail!("{label} mismatch: expected {expected:?}, got {actual:?}");
+    }
+    Ok(())
+}
+
+fn require_json_u64(
+    value: &serde_json::Value,
+    key: &str,
+    expected: u64,
+    label: &str,
+) -> Result<()> {
+    let actual = value
+        .get(key)
+        .and_then(|value| value.as_u64())
+        .with_context(|| format!("{label} is missing integer field {key}"))?;
+    if actual != expected {
+        bail!("{label} mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
 fn write_oci_json_blob(
     blobs_dir: &Path,
     media_type: &str,
@@ -1873,6 +2557,23 @@ fn unix_now() -> Result<u64> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before UNIX_EPOCH")?
         .as_secs())
+}
+
+fn git_source_commit() -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .context("read git source commit")?;
+    if !output.status.success() {
+        bail!(
+            "git rev-parse HEAD failed with status {}",
+            output.status.code().unwrap_or(-1)
+        );
+    }
+    Ok(String::from_utf8(output.stdout)
+        .context("git rev-parse HEAD returned non-UTF-8")?
+        .trim()
+        .to_string())
 }
 
 fn bool_env(value: bool) -> &'static str {
@@ -1920,6 +2621,9 @@ enum Commands {
         /// Assembled rootfs tarball to hand to a backend emitter.
         #[arg(long)]
         rootfs_tarball: Option<PathBuf>,
+        /// Local OCI image layout containing a Motlie assembled rootfs payload to consume.
+        #[arg(long)]
+        oci_layout: Option<PathBuf>,
     },
     /// Emit per-guest seed artifacts without rebuilding the immutable image.
     Seed {
@@ -1992,6 +2696,57 @@ enum OciCommands {
         /// Optional OCI ref-name annotation. Defaults to motlie-guest:v1.5-<arch>.
         #[arg(long)]
         tag: Option<String>,
+    },
+    /// Validate a local OCI image layout exported by mbuild.
+    Validate {
+        /// Dockerfile-like v1.5 image build config.
+        #[arg(long)]
+        config: PathBuf,
+        /// Artifact directory containing mbuild-manifest.json.
+        #[arg(long)]
+        artifact: PathBuf,
+        /// OCI image layout directory containing mbuild-oci-export.json.
+        #[arg(long)]
+        layout: PathBuf,
+    },
+    /// Resolve a registry image/platform to immutable OCI digests.
+    Resolve {
+        /// OCI image reference to resolve.
+        #[arg(long)]
+        image: String,
+        /// OCI platform, for example linux/amd64 or linux/arm64.
+        #[arg(long)]
+        platform: String,
+    },
+    /// Combine validated per-arch mbuild OCI layouts into one local multi-arch OCI index.
+    Index {
+        /// Output directory for the multi-arch OCI image layout.
+        #[arg(long)]
+        out: PathBuf,
+        /// Canonical image reference annotation for the multi-arch index.
+        #[arg(long)]
+        image: String,
+        /// Per-architecture mbuild OCI layout input. Repeat once per platform.
+        #[arg(long = "layout")]
+        layout: Vec<PathBuf>,
+    },
+    /// Emit release-manifest-ready VM image artifact evidence.
+    Evidence {
+        /// Dockerfile-like v1.5 image build config.
+        #[arg(long)]
+        config: PathBuf,
+        /// Artifact directory containing mbuild-manifest.json.
+        #[arg(long)]
+        artifact: PathBuf,
+        /// OCI image layout directory containing mbuild-oci-export.json.
+        #[arg(long)]
+        layout: PathBuf,
+        /// Optional published OCI reference or digest to include in evidence.
+        #[arg(long)]
+        publish_ref: Option<String>,
+        /// Output path for evidence JSON. Defaults to <layout>/mbuild-release-evidence.json.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -2908,14 +3663,14 @@ impl From<&ChGuestTarget> for GuestTargetRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RootfsTarballRecord {
     canonical_path: PathBuf,
     size_bytes: u64,
     sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OciExportManifest {
     contract_version: String,
     tag: String,
@@ -2932,13 +3687,112 @@ struct OciExportManifest {
     created_at_unix_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OciBlobDescriptor {
     media_type: String,
     digest: String,
     size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OciMultiArchIndexManifest {
+    image: String,
+    output_dir: PathBuf,
+    oci_layout_version: String,
+    image_index: OciBlobDescriptor,
+    platforms: BTreeMap<String, ManifestSource>,
+    created_at_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReleaseArtifactEvidence {
+    kind: String,
+    contract_version: String,
+    target: BackendTargetId,
+    backend: String,
+    package_engine: String,
+    source_commit: String,
+    config_path: PathBuf,
+    artifact_dir: PathBuf,
+    oci_layout_dir: PathBuf,
+    publish_ref: Option<String>,
+    source: ManifestSource,
+    build_host: Option<BuildHostRecord>,
+    guest_target: Option<GuestTargetRecord>,
+    oci: ReleaseOciEvidence,
+    artifacts: Vec<ManifestArtifact>,
+    validation: Option<HarnessValidationRecord>,
+    created_at_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReleaseOciEvidence {
+    tag: String,
+    platform: String,
+    image_index: OciBlobDescriptor,
+    image_manifest: OciBlobDescriptor,
+    image_config: OciBlobDescriptor,
+    rootfs_layer: OciBlobDescriptor,
+}
+
+impl ReleaseArtifactEvidence {
+    fn from_records(
+        build_manifest: &ImageBuildManifest,
+        oci_manifest: &OciExportManifest,
+        publish_ref: Option<&str>,
+    ) -> Result<Self> {
+        let validation_path = build_manifest
+            .output_dir
+            .join(DEFAULT_VALIDATION_MANIFEST_NAME);
+        let validation = if validation_path.is_file() {
+            Some(
+                serde_json::from_slice(&fs::read(&validation_path)?).with_context(|| {
+                    format!("read validation manifest {}", validation_path.display())
+                })?,
+            )
+        } else {
+            None
+        };
+        let source_commit = git_source_commit().unwrap_or_else(|_| "unknown".to_string());
+        Ok(Self {
+            kind: OCI_MANIFEST_ARTIFACT_KIND.to_string(),
+            contract_version: build_manifest.contract_version.clone(),
+            target: build_manifest.target.clone(),
+            backend: build_manifest.target.to_string(),
+            package_engine: build_manifest
+                .adapter
+                .as_ref()
+                .map(|adapter| adapter.kind.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            source_commit,
+            config_path: build_manifest.config_path.clone(),
+            artifact_dir: build_manifest.output_dir.clone(),
+            oci_layout_dir: oci_manifest.output_dir.clone(),
+            publish_ref: publish_ref.map(ToOwned::to_owned),
+            source: oci_manifest.source.clone(),
+            build_host: build_manifest
+                .adapter
+                .as_ref()
+                .and_then(|adapter| adapter.build_host.clone()),
+            guest_target: build_manifest
+                .adapter
+                .as_ref()
+                .and_then(|adapter| adapter.guest_target.clone()),
+            oci: ReleaseOciEvidence {
+                tag: oci_manifest.tag.clone(),
+                platform: oci_manifest.platform.clone(),
+                image_index: oci_manifest.image_index.clone(),
+                image_manifest: oci_manifest.image_manifest.clone(),
+                image_config: oci_manifest.image_config.clone(),
+                rootfs_layer: oci_manifest.rootfs_layer.clone(),
+            },
+            artifacts: build_manifest.artifacts.clone(),
+            validation,
+            created_at_unix_seconds: unix_now()?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2949,11 +3803,12 @@ struct ManifestArtifact {
     sha256: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct HarnessValidationRecord {
     contract_version: String,
     target: BackendTargetId,
     artifact_dir: PathBuf,
+    source: ManifestSource,
     scenario: PathBuf,
     command: Vec<String>,
     log_path: PathBuf,
@@ -3045,7 +3900,7 @@ fn declared_stages() -> Vec<StageRecord> {
 }
 
 fn executed_stages(adapter: &AdapterRecord) -> Vec<StageRecord> {
-    if adapter.kind == "external-oci-ch-emitter" {
+    if adapter.kind == "external-oci-ch-emitter" || adapter.kind == "oci-payload-ch-emitter" {
         return vec![
             StageRecord::executed(
                 "source",
@@ -3518,7 +4373,8 @@ validation:
                 repo_root: None,
                 plan_only: false,
                 adapter_arg: Vec::new(),
-                rootfs_tarball: None
+                rootfs_tarball: None,
+                oci_layout: None
             }
         );
     }
@@ -3548,7 +4404,39 @@ validation:
                 repo_root: None,
                 plan_only: false,
                 adapter_arg: Vec::new(),
-                rootfs_tarball: Some(PathBuf::from("artifacts/rootfs.tar"))
+                rootfs_tarball: Some(PathBuf::from("artifacts/rootfs.tar")),
+                oci_layout: None
+            }
+        );
+    }
+
+    #[test]
+    fn parses_build_oci_layout() {
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "build",
+            "--config",
+            "motlie-image.yaml",
+            "--target",
+            "ch",
+            "--out",
+            "artifacts/ch",
+            "--oci-layout",
+            "artifacts/oci-amd64",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.command,
+            Commands::Build {
+                config: PathBuf::from("motlie-image.yaml"),
+                target: "ch".parse().unwrap(),
+                out: PathBuf::from("artifacts/ch"),
+                repo_root: None,
+                plan_only: false,
+                adapter_arg: Vec::new(),
+                rootfs_tarball: None,
+                oci_layout: Some(PathBuf::from("artifacts/oci-amd64"))
             }
         );
     }
@@ -3578,6 +4466,65 @@ validation:
                     artifact: PathBuf::from("artifacts/ch"),
                     out: PathBuf::from("artifacts/oci"),
                     tag: Some("motlie-guest:test".to_string())
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_oci_validate_command() {
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "oci",
+            "validate",
+            "--config",
+            "motlie-image.yaml",
+            "--artifact",
+            "artifacts/ch",
+            "--layout",
+            "artifacts/oci",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.command,
+            Commands::Oci {
+                command: OciCommands::Validate {
+                    config: PathBuf::from("motlie-image.yaml"),
+                    artifact: PathBuf::from("artifacts/ch"),
+                    layout: PathBuf::from("artifacts/oci")
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_oci_index_command() {
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "oci",
+            "index",
+            "--out",
+            "artifacts/index",
+            "--image",
+            "ghcr.io/chungers/motlie-guest:v1.5",
+            "--layout",
+            "artifacts/oci-amd64",
+            "--layout",
+            "artifacts/oci-arm64",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.command,
+            Commands::Oci {
+                command: OciCommands::Index {
+                    out: PathBuf::from("artifacts/index"),
+                    image: "ghcr.io/chungers/motlie-guest:v1.5".to_string(),
+                    layout: vec![
+                        PathBuf::from("artifacts/oci-amd64"),
+                        PathBuf::from("artifacts/oci-arm64")
+                    ]
                 }
             }
         );

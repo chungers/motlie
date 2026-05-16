@@ -36,6 +36,12 @@ cargo run -p mbuild -- build \
   --out /tmp/mbuild/ch
 ```
 
+Priority #258 targets are Apple Silicon VZ (`vz-darwin-arm64`) and
+DGX/aarch64 Linux CH (`ch-linux-arm64`) first. Both consume/build the
+`linux/arm64` guest payload. CH Linux amd64 (`ch-linux-amd64`) follows on a
+coordinated x86_64/amd64 Linux host and consumes/builds the `linux/amd64`
+guest payload.
+
 Build CH artifacts for a non-native guest platform by setting
 `source.platform` in the image config to the desired OCI platform. For example,
 an arm64 Linux builder can build a `linux/amd64` CH guest when the host has:
@@ -56,20 +62,26 @@ Without qemu-user/binfmt, run the per-arch CH build on native hardware for that
 guest platform. `mbuild` fails before OCI layer import if cross-arch package
 staging cannot execute guest rootfs binaries.
 
-Build VZ artifacts through the current VZ adapter:
+Build VZ artifacts through the current VZ adapter on an Apple Silicon macOS
+host. The current VZ path consumes an assembled `linux/arm64` rootfs tarball
+as handoff input:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
   --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
 ```
+
+The first command may run on Linux/DGX to produce the arm64 common rootfs
+handoff. The second command must run on the macOS VZ builder until the VZ
+emitter consumes OCI layouts directly.
 
 Plan without running backend adapters:
 
@@ -122,6 +134,54 @@ cargo run -p mbuild -- oci export \
   --tag motlie-guest:v1.5-arm64
 ```
 
+Validate that the exported layout still matches the build config and artifact:
+
+```bash
+cargo run -p mbuild -- oci validate \
+  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --layout /tmp/mbuild/oci-arm64
+```
+
+Consume a validated local OCI payload as the CH emitter input:
+
+```bash
+cargo run -p mbuild -- build \
+  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch-from-oci \
+  --oci-layout /tmp/mbuild/oci-arm64
+```
+
+Create a local multi-arch OCI image index after both per-platform payloads
+exist:
+
+```bash
+cargo run -p mbuild -- oci index \
+  --out /tmp/mbuild/oci-index \
+  --image ghcr.io/chungers/motlie-guest:v1.5 \
+  --layout /tmp/mbuild/oci-amd64 \
+  --layout /tmp/mbuild/oci-arm64
+```
+
+Emit release-manifest-ready evidence for a VM image artifact target:
+
+```bash
+cargo run -p mbuild -- oci evidence \
+  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --layout /tmp/mbuild/oci-arm64 \
+  --publish-ref ghcr.io/chungers/motlie-guest:v1.5-arm64
+```
+
+Resolve registry pins with the same OCI client used by the builder:
+
+```bash
+cargo run -p mbuild -- oci resolve \
+  --image docker.io/library/ubuntu:24.04 \
+  --platform linux/amd64
+```
+
 The build command writes:
 
 ```text
@@ -159,6 +219,19 @@ When `oci export` is used, the output directory contains:
 <out>/blobs/sha256/<rootfs-layer-digest>
 <out>/mbuild-oci-export.json
 ```
+
+`mbuild oci validate` reads the layout back and verifies blob digests, blob
+sizes, `index.json` platform annotations, image-manifest config/layer
+descriptors, image-config platform fields, and the rootfs diff ID. It also
+rejects stale layouts when the source digest, contract version, selected
+platform, or input rootfs evidence no longer matches the current build config
+and artifact manifest.
+
+`mbuild oci index` writes a local OCI layout containing one multi-arch
+`index.json` assembled from validated per-platform mbuild layouts. Registry
+push remains an operator/release step that requires credentials and registry
+policy; the checked-in builder produces the immutable local layouts, multi-arch
+index, and release evidence consumed by that step.
 
 Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`) used:
 
@@ -211,6 +284,20 @@ The current config schema is intentionally explicit:
   the CLI accepts any target ID declared here.
 - `validation`: post-boot behavior checks the produced image must satisfy.
 
+Checked-in v1.5 platform configs:
+
+```text
+libs/vmm/examples/v1.5/motlie-image.linux-amd64.yaml
+libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml
+```
+
+`libs/vmm/examples/v1.5/motlie-image.yaml` remains the current arm64 default
+for existing v1.5 commands. New #258 acceptance work should prefer the
+explicit per-platform paths above so release evidence can distinguish priority
+`vz-darwin-arm64` and `ch-linux-arm64` targets from the later coordinated
+`ch-linux-amd64` target. In Motlie docs, `amd64` is the OCI/Debian platform
+name and `x86_64` is the Linux/Rust host architecture spelling.
+
 `package_stage.manager` currently supports only `apt` in executable adapters.
 APT package entries are validated with APT-aware syntax, including `+`, arch
 qualifiers such as `foo:amd64`, and pinned specs such as `foo=version`. The
@@ -251,9 +338,10 @@ intent from directory names.
 `mbuild-oci-export.json` records the exported OCI layout descriptors, source
 image-index digest, selected platform-manifest digest, contract version,
 selected platform, input rootfs size/sha, and ref-name annotation. This is the
-first #258 handoff format: future publish/multi-arch work should consume this
-layout instead of rediscovering rootfs tarball paths or rebuilding backend
-artifacts from shell defaults.
+first #258 handoff format: publish/multi-arch work consumes this layout instead
+of rediscovering rootfs tarball paths or rebuilding backend artifacts from shell
+defaults. `mbuild-release-evidence.json` records the same data in the
+`kind = "motlie.vm-image-artifact"` shape used by release manifests.
 
 `mbuild` emits structured tracing logs. Use `RUST_LOG=debug` when debugging OCI
 fetch/import, rootfs classification, backend adapter delegation, or harness

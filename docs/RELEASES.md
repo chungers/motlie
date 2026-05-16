@@ -18,6 +18,7 @@
 - 2026-05-14, @gpt55-dgx: Changed per-binary release manifests and notes to stable `releases/<bin>.toml` and `releases/<bin>.md` files discovered by scanning `releases/`.
 - 2026-05-14, @gpt55-dgx: Added skill-guided codename, release branch bootstrap, master issue, sub-issue/sub-PR, and final issue-closure workflow.
 - 2026-05-16, @vmm-cdx: Added optional VM guest-image artifact targets for native per-platform image builds, OCI payload publication, and v1.5 harness evidence coordinated through the release branch/sub-PR ledger model.
+- 2026-05-16, @vmm-cdx: Reordered issue #258 VM image artifact workflow around Apple Silicon VZ and DGX/aarch64 Linux CH first, followed by coordinated Linux amd64/x86_64 CH.
 
 ## Scope
 
@@ -178,9 +179,9 @@ kind="motlie.vm-image-artifact"
 Typical target matrix:
 
 ```text
-ch-linux-amd64      # Linux/KVM/Cloud Hypervisor on native amd64
-vz-darwin-arm64     # Apple Virtualization.framework on Apple Silicon
-ch-linux-arm64      # optional CH parity target when arm64 Linux is available
+vz-darwin-arm64     # priority 1: Apple Virtualization.framework on Apple Silicon, guest linux/arm64
+ch-linux-arm64      # priority 1: Linux/KVM/Cloud Hypervisor on DGX/aarch64, guest linux/arm64
+ch-linux-amd64      # priority 2: Linux/KVM/Cloud Hypervisor on coordinated x86_64/amd64 host
 ```
 
 Native per-platform builders are the acceptance path. The current `mbuild`
@@ -193,8 +194,9 @@ package/setup steps inside the guest. Because CH uses KVM, this native
 bootstrap path does not emulate another CPU architecture.
 
 qemu-user/binfmt is an allowed local cross-architecture convenience, but it is
-not required for the release gate and must not replace native
-`ch-linux-amd64` or `vz-darwin-arm64` evidence.
+not required for the release gate and must not replace native target evidence.
+For Darwin guest-image work, the required builder is an Apple Silicon macOS
+host that runs the VZ emitter for the `linux/arm64` guest payload.
 
 Each VM image sub-issue should name:
 
