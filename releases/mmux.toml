@@ -92,13 +92,13 @@ npm_bin_path = "bin/mmux"
 
 [target.status]
 state = "staged"
-completed_at = "2026-05-17T04:19:21Z"
+completed_at = "2026-05-17T05:25:20Z"
 completed_by = "@gpt55-rel-eng"
-source_commit = "1b422db4bbfb5fef5bb9a497dbe399ec7b719204"
+source_commit = "1fd05084cde7c35a5de5c609b9814b27b8811c7c"
 evidence = [
   { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mmux --bin mmux -- -C linker=rust-lld", note = "default cc linker failed on aarch64 host with unsupported -m64; rust-lld completed x64 musl static-pie build" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host aarch64-unknown-linux-gnu; x86_64-unknown-linux-musl target installed" },
-  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mmux: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "de2fc85424b467875f6b849ae2d5e96225d78023b4bb07dc70e85fd5cbf02bb4", note = "x64 musl binary checksum recorded from staging build" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mmux: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "920e1d0168727ef672999c5f9ebf243749c29e0fd2e077083b016c53643907ec", note = "x64 musl binary checksum recorded from refreshed staging build" },
   { kind = "ldd", ref = "target/x86_64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mmux", note = "static-pie dynamic section has no NEEDED entries" },
   { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mmux --version", note = "not executed on this aarch64 host; no qemu-x86_64 available" },
@@ -118,16 +118,17 @@ npm_bin_path = "bin/mmux"
 
 [target.status]
 state = "staged"
-completed_at = "2026-05-17T04:19:21Z"
+completed_at = "2026-05-17T05:25:20Z"
 completed_by = "@gpt55-rel-eng"
-source_commit = "1b422db4bbfb5fef5bb9a497dbe399ec7b719204"
+source_commit = "1fd05084cde7c35a5de5c609b9814b27b8811c7c"
 evidence = [
   { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mmux --bin mmux", note = "native arm64 musl release build completed" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host aarch64-unknown-linux-gnu; aarch64-unknown-linux-musl target installed" },
-  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mmux: ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped", sha256 = "a7a1f14231f2357f0d349af38fa49ab7fa9d8ec4b6f4052730af8ef9a0fadb4a", note = "arm64 musl binary checksum recorded from staging build" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mmux: ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped", sha256 = "ba5bc0e447a55c3be3500c281903f43db33b8513a256ceaee8ed9202d01d6331", note = "arm64 musl binary checksum recorded from refreshed staging build" },
   { kind = "ldd", ref = "target/aarch64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mmux", note = "There is no dynamic section in this file." },
   { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mmux --version", note = "mmux 0.1.0" },
+  { kind = "manual-smoke", ref = "target/release/mmux", note = "User-reported manual smoke on this Linux arm64 host after @gpt55-rel-eng built the native release binary from the same refreshed workspace; TUI launched successfully for local validation. This smoke covers the current source tree, while the target artifact evidence above covers the musl binary." },
 ]
 
 [[target]]
@@ -187,12 +188,12 @@ target_id = ""
 channel = "archive"
 rollup = true
 state = "staged"
-completed_at = "2026-05-17T04:19:21Z"
+completed_at = "2026-05-17T05:25:20Z"
 completed_by = "@gpt55-rel-eng"
-source_commit = "1b422db4bbfb5fef5bb9a497dbe399ec7b719204"
+source_commit = "1fd05084cde7c35a5de5c609b9814b27b8811c7c"
 deferred_reason = ""
 evidence = [
-  { kind = "rollup", ref = "linux-builds-staged target rows", note = "linux-x64-musl and linux-arm64-musl target rows staged from source commit 1b422db4" },
+  { kind = "rollup", ref = "linux-builds-staged target rows", note = "linux-x64-musl and linux-arm64-musl target rows refreshed from source commit 1fd05084 after PR #293 merged into release/2026-05-apex-anchor" },
 ]
 
 [[gate]]
@@ -200,14 +201,14 @@ id = "linux-builds-staged"
 target_id = "linux-x64-musl"
 channel = "archive"
 state = "staged"
-completed_at = "2026-05-17T04:19:21Z"
+completed_at = "2026-05-17T05:25:20Z"
 completed_by = "@gpt55-rel-eng"
-source_commit = "1b422db4bbfb5fef5bb9a497dbe399ec7b719204"
+source_commit = "1fd05084cde7c35a5de5c609b9814b27b8811c7c"
 deferred_reason = ""
 evidence = [
   { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mmux --bin mmux -- -C linker=rust-lld", note = "default cc linker failed on aarch64 host with unsupported -m64; rust-lld completed x64 musl static-pie build" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host aarch64-unknown-linux-gnu; x86_64-unknown-linux-musl target installed" },
-  { kind = "file", ref = "ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "de2fc85424b467875f6b849ae2d5e96225d78023b4bb07dc70e85fd5cbf02bb4", note = "target/x86_64-unknown-linux-musl/release/mmux" },
+  { kind = "file", ref = "ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "920e1d0168727ef672999c5f9ebf243749c29e0fd2e077083b016c53643907ec", note = "target/x86_64-unknown-linux-musl/release/mmux" },
   { kind = "ldd", ref = "target/x86_64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mmux", note = "static-pie dynamic section has no NEEDED entries" },
   { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mmux --version", note = "not executed on this aarch64 host; no qemu-x86_64 available" },
@@ -218,17 +219,18 @@ id = "linux-builds-staged"
 target_id = "linux-arm64-musl"
 channel = "archive"
 state = "staged"
-completed_at = "2026-05-17T04:19:21Z"
+completed_at = "2026-05-17T05:25:20Z"
 completed_by = "@gpt55-rel-eng"
-source_commit = "1b422db4bbfb5fef5bb9a497dbe399ec7b719204"
+source_commit = "1fd05084cde7c35a5de5c609b9814b27b8811c7c"
 deferred_reason = ""
 evidence = [
   { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mmux --bin mmux", note = "native arm64 musl release build completed" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host aarch64-unknown-linux-gnu; aarch64-unknown-linux-musl target installed" },
-  { kind = "file", ref = "ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped", sha256 = "a7a1f14231f2357f0d349af38fa49ab7fa9d8ec4b6f4052730af8ef9a0fadb4a", note = "target/aarch64-unknown-linux-musl/release/mmux" },
+  { kind = "file", ref = "ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped", sha256 = "ba5bc0e447a55c3be3500c281903f43db33b8513a256ceaee8ed9202d01d6331", note = "target/aarch64-unknown-linux-musl/release/mmux" },
   { kind = "ldd", ref = "target/aarch64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mmux", note = "There is no dynamic section in this file." },
   { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mmux --version", note = "mmux 0.1.0" },
+  { kind = "manual-smoke", ref = "target/release/mmux", note = "User-reported manual smoke on this Linux arm64 host after @gpt55-rel-eng built the native release binary from the same refreshed workspace; TUI launched successfully for local validation. This smoke covers the current source tree, while the target artifact evidence above covers the musl binary." },
 ]
 
 # darwin-builds-staged
