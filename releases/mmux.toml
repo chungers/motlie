@@ -49,7 +49,9 @@ gnu_enabled = false
 asset_prefix = "motlie-mmux"
 format = "tar.gz"
 binary_path = "bin/mmux"
-include = ["README.md", "LICENSE"]
+include = []
+deferred_include = ["README.md", "LICENSE"]
+deferred_include_reason = "Release owner explicitly deferred README.md and LICENSE for 2026-05-apex-anchor after final tag creation; final archives contain bin/mmux only."
 
 [installer]
 enabled = true
@@ -91,17 +93,20 @@ archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 
 [target.status]
-state = "staged"
-completed_at = "2026-05-17T05:25:20Z"
+state = "complete"
+completed_at = "2026-05-17T06:12:09Z"
 completed_by = "@gpt55-rel-eng"
-source_commit = "1fd05084cde7c35a5de5c609b9814b27b8811c7c"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 evidence = [
-  { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mmux --bin mmux -- -C linker=rust-lld", note = "default cc linker failed on aarch64 host with unsupported -m64; rust-lld completed x64 musl static-pie build" },
+  { kind = "command", ref = "git switch --detach 2026-05-apex-anchor", note = "final artifact build was performed from the final source tag" },
+  { kind = "command", ref = "cargo rustc --release --locked --target x86_64-unknown-linux-musl -p motlie-mmux --bin mmux -- -C linker=rust-lld", note = "final x64 musl static-pie build from release tag; default cc linker on aarch64 host was not used" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host aarch64-unknown-linux-gnu; x86_64-unknown-linux-musl target installed" },
-  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mmux: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "920e1d0168727ef672999c5f9ebf243749c29e0fd2e077083b016c53643907ec", note = "x64 musl binary checksum recorded from refreshed staging build" },
+  { kind = "file", ref = "target/x86_64-unknown-linux-musl/release/mmux: ELF 64-bit LSB pie executable, x86-64, static-pie linked, not stripped", sha256 = "250c531961510306ac38c653c36f68063166038f27f24a8652235b8ad90e5c14", note = "x64 musl binary checksum from final tag build" },
   { kind = "ldd", ref = "target/x86_64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/x86_64-unknown-linux-musl/release/mmux", note = "static-pie dynamic section has no NEEDED entries" },
   { kind = "runtime", ref = "target/x86_64-unknown-linux-musl/release/mmux --version", note = "not executed on this aarch64 host; no qemu-x86_64 available" },
+  { kind = "archive", ref = "target/release-assets/2026-05-apex-anchor/motlie-mmux-v0.1.0-linux-x64-musl.tar.gz", sha256 = "5e4ab4676d9a0f610f3bd24fe83ed808d3ebf8950b7fa787fee72de1058e4339", note = "candidate archive contains ./bin/mmux only; README.md and LICENSE explicitly deferred for this release" },
+  { kind = "checksum", ref = "target/release-assets/2026-05-apex-anchor/SHA256SUMS.linux", note = "linux-only checksum file verified with sha256sum -c" },
 ]
 
 [[target]]
@@ -117,18 +122,21 @@ archive_binary_path = "bin/mmux"
 npm_bin_path = "bin/mmux"
 
 [target.status]
-state = "staged"
-completed_at = "2026-05-17T05:25:20Z"
+state = "complete"
+completed_at = "2026-05-17T06:12:09Z"
 completed_by = "@gpt55-rel-eng"
-source_commit = "1fd05084cde7c35a5de5c609b9814b27b8811c7c"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 evidence = [
-  { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mmux --bin mmux", note = "native arm64 musl release build completed" },
+  { kind = "command", ref = "git switch --detach 2026-05-apex-anchor", note = "final artifact build was performed from the final source tag" },
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-unknown-linux-musl -p motlie-mmux --bin mmux", note = "final native arm64 musl release build from release tag" },
   { kind = "toolchain", ref = "rustc 1.94.0 (4a4ef493e 2026-03-02); cargo 1.94.0 (85eff7c80 2026-01-15)", note = "host aarch64-unknown-linux-gnu; aarch64-unknown-linux-musl target installed" },
-  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mmux: ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped", sha256 = "ba5bc0e447a55c3be3500c281903f43db33b8513a256ceaee8ed9202d01d6331", note = "arm64 musl binary checksum recorded from refreshed staging build" },
+  { kind = "file", ref = "target/aarch64-unknown-linux-musl/release/mmux: ELF 64-bit LSB executable, ARM aarch64, statically linked, not stripped", sha256 = "1691b93941404ee93d7d8bd048d67d3fb80398869299aedb23f28738a22b5c8a", note = "arm64 musl binary checksum from final tag build" },
   { kind = "ldd", ref = "target/aarch64-unknown-linux-musl/release/mmux", note = "not a dynamic executable" },
   { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mmux", note = "There is no dynamic section in this file." },
   { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mmux --version", note = "mmux 0.1.0" },
-  { kind = "manual-smoke", ref = "target/release/mmux", note = "User-reported manual smoke on this Linux arm64 host after @gpt55-rel-eng built the native release binary from the same refreshed workspace; TUI launched successfully for local validation. This smoke covers the current source tree, while the target artifact evidence above covers the musl binary." },
+  { kind = "archive", ref = "target/release-assets/2026-05-apex-anchor/motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "2bd777528f0c197726a46b4b5d9f55d0a9efaca9cfba3ef3169114aff0bea3ea", note = "candidate archive contains ./bin/mmux only; README.md and LICENSE explicitly deferred for this release" },
+  { kind = "checksum", ref = "target/release-assets/2026-05-apex-anchor/SHA256SUMS.linux", note = "linux-only checksum file verified with sha256sum -c" },
+  { kind = "runtime", ref = "target/release-assets/2026-05-apex-anchor/smoke-linux-arm64/bin/mmux --version", note = "extracted archive binary reports mmux 0.1.0" },
 ]
 
 [[target]]
@@ -231,6 +239,51 @@ evidence = [
   { kind = "readelf", ref = "readelf -d target/aarch64-unknown-linux-musl/release/mmux", note = "There is no dynamic section in this file." },
   { kind = "runtime", ref = "target/aarch64-unknown-linux-musl/release/mmux --version", note = "mmux 0.1.0" },
   { kind = "manual-smoke", ref = "target/release/mmux", note = "User-reported manual smoke on this Linux arm64 host after @gpt55-rel-eng built the native release binary from the same refreshed workspace; TUI launched successfully for local validation. This smoke covers the current source tree, while the target artifact evidence above covers the musl binary." },
+]
+
+# linux-archives-packaged
+
+[[gate]]
+id = "linux-archives-packaged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "complete"
+completed_at = "2026-05-17T06:12:09Z"
+completed_by = "@gpt55-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = ""
+evidence = [
+  { kind = "rollup", ref = "linux-archives-packaged target rows", note = "linux-x64-musl and linux-arm64-musl candidate archives packaged from final tag 2026-05-apex-anchor; README.md and LICENSE explicitly deferred for this release" },
+]
+
+[[gate]]
+id = "linux-archives-packaged"
+target_id = "linux-x64-musl"
+channel = "archive"
+state = "complete"
+completed_at = "2026-05-17T06:12:09Z"
+completed_by = "@gpt55-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = ""
+evidence = [
+  { kind = "archive", ref = "motlie-mmux-v0.1.0-linux-x64-musl.tar.gz", sha256 = "5e4ab4676d9a0f610f3bd24fe83ed808d3ebf8950b7fa787fee72de1058e4339", note = "contains ./bin/mmux only; README.md and LICENSE explicitly deferred" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.0-linux-x64-musl.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+]
+
+[[gate]]
+id = "linux-archives-packaged"
+target_id = "linux-arm64-musl"
+channel = "archive"
+state = "complete"
+completed_at = "2026-05-17T06:12:09Z"
+completed_by = "@gpt55-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = ""
+evidence = [
+  { kind = "archive", ref = "motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "2bd777528f0c197726a46b4b5d9f55d0a9efaca9cfba3ef3169114aff0bea3ea", note = "contains ./bin/mmux only; README.md and LICENSE explicitly deferred" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+  { kind = "runtime", ref = "extracted bin/mmux --version", note = "mmux 0.1.0" },
 ]
 
 # darwin-builds-staged
