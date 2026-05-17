@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::common::{
-    EmbeddingMetricState, RuntimeMetricState, configure_artifact_policy, lock_metrics,
-    map_quantization_bits, observe_embedding_request, observe_memory, should_force_cpu,
-    snapshot_embedding_metrics,
+    configure_artifact_policy, lock_metrics, map_quantization_bits, observe_embedding_request,
+    observe_memory, should_force_cpu, snapshot_embedding_metrics, EmbeddingMetricState,
+    RuntimeMetricState,
 };
 use async_trait::async_trait;
 use mistralrs::core::EmbeddingLoaderType;
@@ -210,6 +210,22 @@ enum EmbeddingRuntime {
     Stub(StubRuntime),
 }
 
+#[cfg(test)]
+struct StubRuntime;
+
+#[cfg(test)]
+impl StubRuntime {
+    async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        Ok(EmbeddingResponse {
+            vectors: request
+                .inputs
+                .into_iter()
+                .map(|input| vec![input.len() as f32])
+                .collect(),
+        })
+    }
+}
+
 impl EmbeddingRuntime {
     async fn embed(&self, request: ModelEmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
         match self {
@@ -412,23 +428,6 @@ mod tests {
     use motlie_model::{ArtifactPolicy, BackendAdapter, BackendKind, StartOptions};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct StubRuntime;
-
-    impl StubRuntime {
-        async fn embed(
-            &self,
-            request: ModelEmbeddingRequest,
-        ) -> Result<EmbeddingResponse, ModelError> {
-            Ok(EmbeddingResponse {
-                vectors: request
-                    .inputs
-                    .into_iter()
-                    .map(|input| vec![input.len() as f32])
-                    .collect(),
-            })
-        }
-    }
 
     #[test]
     fn embeddinggemma_spec_has_expected_identity() {

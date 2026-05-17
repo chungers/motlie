@@ -44,12 +44,13 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 pub fn descriptor() -> BundleDescriptor {
     let identity = identity();
     let checkpoint = checkpoint();
+    let spec = MistralTextSpec::qwen3_4b();
     BundleDescriptor {
         id: BundleId::new("qwen3_4b"),
         model_id: identity.id.clone(),
         display_name: identity.display_name.clone(),
         family: identity.family,
-        capabilities: identity.capabilities,
+        capabilities: spec.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
@@ -94,8 +95,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::{BundleFamily, Catalog};
-    use motlie_model::CapabilityDescriptor;
     use motlie_model::eval::EvalTrack;
+    use motlie_model::CapabilityDescriptor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -108,21 +109,21 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Chat)
-        );
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Completion)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Chat));
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Completion));
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::ToolUse));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
                 CapabilityDescriptor::chat(),
                 CapabilityDescriptor::completion(),
+                CapabilityDescriptor::tool_use(),
             ]
         );
 
@@ -143,11 +144,9 @@ mod tests {
         #[cfg(feature = "model-qwen3-4b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|b| b.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|b| b.id == bundle_id));
         }
     }
 

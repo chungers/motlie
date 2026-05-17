@@ -24,6 +24,7 @@ use std::str::FromStr;
 pub mod asr;
 pub mod chat;
 pub mod embeddings;
+pub mod tool_registry;
 pub mod tts;
 
 use hf_hub::api::sync::ApiBuilder;
@@ -56,17 +57,18 @@ use motlie_model_whisper_cpp::WhisperCppHandle;
 pub use asr::AsrModels;
 pub use chat::ChatModels;
 pub use embeddings::EmbeddingModels;
-use motlie_model::{
-    ArtifactPolicy, BundleHandle, ChatModel, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelError, ModelMetricSnapshot, StartOptions, UnsupportedChat,
-    UnsupportedCompletion, UnsupportedEmbeddings,
-};
 pub use motlie_model::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleFamily, BundleId,
     BundleRequirements, Capabilities, CapabilityDescriptor, CapabilityKind, CheckpointFormat,
     ContentKind, EvalTrack, InteractionStyle, ModelBundle, ModelCheckpoint, ModelIdentity,
     PlatformConstraint, QuantizationBits, QuantizationSupport,
 };
+use motlie_model::{
+    BundleHandle, ChatModel, CompletionModel, EmbeddingModel, LoadedBundleDescriptor, ModelError,
+    ModelMetricSnapshot, StartOptions, UnsupportedChat, UnsupportedCompletion,
+    UnsupportedEmbeddings,
+};
+pub use tool_registry::{Mcp, McpError, McpTransport, ToolDispatch, ToolList, ToolListError};
 pub use tts::TtsModels;
 
 #[derive(Debug, Error)]
@@ -287,9 +289,11 @@ pub(crate) fn resolve_typed_artifact_policy(
     } = options;
 
     let artifact_policy = match artifact_policy {
-        Some(ArtifactPolicy::LocalOnly { root }) => Some(ArtifactPolicy::LocalOnly {
-            root: resolver(&root)?,
-        }),
+        Some(motlie_model::ArtifactPolicy::LocalOnly { root }) => {
+            Some(motlie_model::ArtifactPolicy::LocalOnly {
+                root: resolver(&root)?,
+            })
+        }
         other => other,
     };
 
@@ -337,6 +341,7 @@ impl CuratedBundle {
     }
 
     pub fn descriptor(&self) -> BundleDescriptor {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B => chat::qwen3_4b::descriptor(),
@@ -362,6 +367,7 @@ impl CuratedBundle {
             Self::PiperEnUsLjspeechMedium => tts::piper_en_us_ljspeech_medium::descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::descriptor(),
+            _ => unreachable!("no curated bundle variants are enabled"),
         }
     }
 
@@ -369,6 +375,9 @@ impl CuratedBundle {
         &self,
         options: StartOptions,
     ) -> std::result::Result<CuratedHandle, ModelError> {
+        let _ = &options;
+
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B => chat::qwen3_4b::start(options)
@@ -418,6 +427,9 @@ impl CuratedBundle {
             Self::Qwen3TtsCpp0_6B => tts::qwen3_tts_cpp::start_typed(options)
                 .await
                 .map(CuratedHandle::Qwen3TtsCpp0_6B),
+            _ => Err(ModelError::InvalidConfiguration(
+                "no curated bundle variants are enabled".into(),
+            )),
         }
     }
 }
@@ -457,6 +469,7 @@ impl BundleHandle for CuratedHandle {
     type Embeddings = Self;
 
     fn descriptor(&self) -> &LoadedBundleDescriptor {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B(handle) => handle.descriptor(),
@@ -482,10 +495,12 @@ impl BundleHandle for CuratedHandle {
             Self::PiperEnUsLjspeechMedium(handle) => handle.descriptor(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.descriptor(),
+            _ => unreachable!("no curated handle variants are enabled"),
         }
     }
 
     fn capabilities(&self) -> &Capabilities {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B(handle) => handle.capabilities(),
@@ -511,10 +526,12 @@ impl BundleHandle for CuratedHandle {
             Self::PiperEnUsLjspeechMedium(handle) => handle.capabilities(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.capabilities(),
+            _ => unreachable!("no curated handle variants are enabled"),
         }
     }
 
     fn metric_snapshot(&self) -> Option<ModelMetricSnapshot> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(feature = "model-qwen3-4b")]
             Self::Qwen3_4B(handle) => handle.metric_snapshot(),
@@ -540,6 +557,7 @@ impl BundleHandle for CuratedHandle {
             Self::PiperEnUsLjspeechMedium(handle) => handle.metric_snapshot(),
             #[cfg(feature = "model-qwen3-tts-cpp")]
             Self::Qwen3TtsCpp0_6B(handle) => handle.metric_snapshot(),
+            _ => unreachable!("no curated handle variants are enabled"),
         }
     }
 
@@ -849,6 +867,7 @@ impl BundleDescriptor {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn bundle_artifacts_from_checkpoint(
     control_name: &'static str,
     checkpoint: &ModelCheckpoint,
@@ -1355,6 +1374,7 @@ impl Catalog {
             .insert(descriptor.id.clone(), descriptor.clone())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn register_model_variant(
         &mut self,
         identity: ModelIdentity,
@@ -1488,7 +1508,7 @@ mod tests {
     #[test]
     fn resolve_typed_artifact_policy_rewrites_local_only_root() {
         let options = StartOptions {
-            artifact_policy: Some(ArtifactPolicy::LocalOnly {
+            artifact_policy: Some(motlie_model::ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/cache"),
             }),
             quantization: Some(motlie_model::QuantizationBits::Four),
@@ -1502,7 +1522,7 @@ mod tests {
 
         assert_eq!(
             resolved.artifact_policy,
-            Some(ArtifactPolicy::LocalOnly {
+            Some(motlie_model::ArtifactPolicy::LocalOnly {
                 root: PathBuf::from("/tmp/cache/snapshots/commit"),
             })
         );
@@ -1524,7 +1544,7 @@ mod tests {
     #[test]
     fn resolve_typed_artifact_policy_leaves_allow_fetch_unchanged() {
         let options = StartOptions {
-            artifact_policy: Some(ArtifactPolicy::AllowFetch {
+            artifact_policy: Some(motlie_model::ArtifactPolicy::AllowFetch {
                 root: Some(PathBuf::from("/tmp/cache")),
             }),
             ..Default::default()
@@ -1668,11 +1688,9 @@ mod tests {
             let bundle_id = BundleId::new("embeddinggemma_300m");
             assert!(!catalog.is_empty());
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1691,11 +1709,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_embedding_06b");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Embeddings)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Embeddings)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -1714,11 +1730,9 @@ mod tests {
         {
             let bundle_id = BundleId::new("qwen3_6_27b_gguf");
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|bundle| bundle.id == bundle_id));
 
             let artifacts = catalog
                 .artifacts(&bundle_id)
@@ -2035,11 +2049,9 @@ mod tests {
         #[cfg(feature = "model-whisper-base-en")]
         {
             let descriptor = crate::asr::whisper_base_en::descriptor();
-            assert!(
-                descriptor
-                    .capabilities
-                    .supports(CapabilityKind::Transcription)
-            );
+            assert!(descriptor
+                .capabilities
+                .supports(CapabilityKind::Transcription));
             assert!(!descriptor.capabilities.supports(CapabilityKind::VoiceClone));
             assert_eq!(
                 descriptor.capabilities.descriptors(),

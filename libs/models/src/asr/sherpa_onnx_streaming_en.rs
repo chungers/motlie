@@ -164,11 +164,9 @@ mod tests {
             "Sherpa ONNX Streaming Zipformer EN"
         );
         assert_eq!(descriptor.backend, BackendKind::SherpaOnnx);
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Transcription)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Transcription));
     }
 
     #[test]
@@ -179,11 +177,9 @@ mod tests {
         #[cfg(feature = "model-sherpa-onnx-streaming")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Transcription)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Transcription)
+                .any(|bundle| bundle.id == bundle_id));
         }
     }
 

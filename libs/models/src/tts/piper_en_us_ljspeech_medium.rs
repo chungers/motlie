@@ -184,11 +184,9 @@ mod tests {
         assert_eq!(descriptor.id.as_str(), "piper_en_us_ljspeech_medium");
         assert_eq!(descriptor.display_name, "Piper en_US ljspeech medium");
         assert_eq!(descriptor.backend, BackendKind::Ort);
-        assert!(
-            descriptor
-                .capabilities
-                .supports(motlie_model::CapabilityKind::Speech)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::Speech));
     }
 
     #[test]
@@ -199,11 +197,9 @@ mod tests {
         #[cfg(feature = "model-piper-en-us-ljspeech-medium")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Speech)
-                    .any(|bundle| bundle.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Speech)
+                .any(|bundle| bundle.id == bundle_id));
         }
     }
 

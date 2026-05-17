@@ -18,6 +18,7 @@
 | 2026-04-08 | @codex-researcher: The first vision-capable bundle now exists via Gemma 4 E2B-it (#142). `ChatMessage` has been extended to multimodal content parts, and `Vision` remains a descriptive capability on the existing `ChatModel` surface instead of forcing a parallel `VisionModel` trait. | Capability Model, Capability Surfaces, Open Concerns |
 | 2026-04-08 | @codex-researcher: Removed the stale pre-#142 open concern about upgrading `ChatMessage.content` before the first vision-capable bundle ships. That contract change is now implemented; the remaining concerns are additive chat metadata and tool-calling work. | Open Concerns |
 | 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` as the first chat/local-model startup extension (Phase 6.3 item). ISQ quantization is a deployment concern mapped by backends to their native mechanism. | Core Abstractions, Lifecycle |
+| 2026-05-11 | @codex-tool-calling: Split the planned tool-calling extension into a focused design and implementation plan for the Gemma 4 and Qwen3/Qwen3.6 chat bundles. | Capability Surfaces |
 
 This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
 
@@ -216,10 +217,12 @@ Primary contract:
 
 ```rust
 pub trait ModelBundle: Send + Sync {
+    type Handle: BundleHandle;
+
     fn id(&self) -> &BundleId;
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError>;
 }
 ```
 
@@ -408,6 +411,8 @@ Planned additive extensions after the first multimodal and tool-calling bundles 
 - add `ChatRole::Tool`
 - extend `ChatMessage` with optional tool-call correlation fields
 - extend `ChatResponse` with finish reason, usage metadata, and tool-call output
+
+See [DESIGN_TOOL_CALLING.md](./DESIGN_TOOL_CALLING.md) for the focused tool-calling contract proposal.
 
 ### Text Completion
 
