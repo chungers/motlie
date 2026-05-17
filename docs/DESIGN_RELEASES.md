@@ -18,6 +18,7 @@
 - 2026-05-14, @gpt55-dgx: Added master tracking issue and sub-issue/sub-PR orchestration around the release branch manifest ledger.
 - 2026-05-16, @vmm-cdx: Added optional VM guest-image artifact targets for native per-platform image builds, OCI payload publication, and harness evidence coordinated through the same release branch, master issue, sub-issue, and sub-PR model.
 - 2026-05-16, @vmm-cdx: Reprioritized VM image artifact targets for issue #258: Apple Silicon VZ and DGX/aarch64 Linux CH build `linux/arm64` first, with Linux amd64/x86_64 CH coordinated on a later native host.
+- 2026-05-17, @vmm-cdx: Updated VM guest-image target examples to reference release-input configs under `releases/vmm/v1.5/configs/`.
 
 ## Status
 
@@ -114,7 +115,7 @@ backend = "vz"
 host_os = "darwin"
 host_arch = "arm64"
 guest_platform = "linux/arm64"
-image_config = "libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml"
+image_config = "releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml"
 builder = "mbuild"
 package_engine = "native-vz-bootstrap" # VZ-native equivalent or adapter path
 oci_payload_tag = "motlie-guest:v1.5-arm64"
@@ -125,7 +126,7 @@ backend = "ch"
 host_os = "linux"
 host_arch = "arm64"
 guest_platform = "linux/arm64"
-image_config = "libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml"
+image_config = "releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml"
 builder = "mbuild"
 package_engine = "native-ch-bootstrap" # preferred native engine once implemented
 oci_payload_tag = "motlie-guest:v1.5-arm64"
@@ -136,7 +137,7 @@ backend = "ch"
 host_os = "linux"
 host_arch = "amd64"
 guest_platform = "linux/amd64"
-image_config = "libs/vmm/examples/v1.5/motlie-image.linux-amd64.yaml"
+image_config = "releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-amd64.yaml"
 builder = "mbuild"
 package_engine = "native-ch-bootstrap"
 oci_payload_tag = "motlie-guest:v1.5-amd64"

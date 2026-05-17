@@ -133,7 +133,7 @@ first v1.5 image-builder slice.
 The checked-in v1.5 image-builder contract starts at:
 
 ```text
-libs/vmm/examples/v1.5/motlie-image.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
 ```
 
 The standalone builder binary is:
@@ -146,12 +146,12 @@ Current CLI:
 
 ```bash
 cargo run -p mbuild -- \
-  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- \
-  seed --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  seed --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --guest alice \
   --uid 2001 \
@@ -159,20 +159,22 @@ cargo run -p mbuild -- \
   --out /tmp/mbuild/seed/alice
 
 cargo run -p mbuild -- \
-  validate --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  validate --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --require-executed \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
-Explicit per-platform configs are checked in for #258 acceptance:
+Explicit per-platform release configs are checked in for #258 acceptance:
 
 ```text
-libs/vmm/examples/v1.5/motlie-image.linux-amd64.yaml
-libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-amd64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.default-arm64.yaml
 ```
 
-`motlie-image.yaml` remains the arm64 default for existing commands. New
+The explicit per-platform configs are the release-facing inputs. The
+`default-arm64` file preserves the former example default for traceability; new
 release evidence should use the explicit per-platform configs so native
 `vz-darwin-arm64` and `ch-linux-arm64` priority targets are unambiguous. The
 follow-up `ch-linux-amd64` target uses `linux/amd64` and should be coordinated
@@ -218,18 +220,18 @@ VZ has an explicit issue #271/#258 handoff for the common OCI rootfs contract:
 
 ```bash
 cargo run -p mbuild -- \
-  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- \
-  oci export --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  oci export --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --out /tmp/mbuild/oci-arm64 \
   --tag motlie-guest:v1.5-arm64
 
 cargo run -p mbuild -- \
-  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
   --oci-layout /tmp/mbuild/oci-arm64

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-17 | @vmm-cdx | Move v1.5 worked-example image configs into `releases/vmm/v1.5/configs/` so release inputs are separated from example harness code and future rootfs configs can be added without changing the v1.5 harness tree |
 | 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for the transitional phase: `mbuild build --target vz --oci-layout <layout>` validates the local OCI payload and feeds its rootfs layer through the current VZ adapter rootfs handoff |
 | 2026-05-16 | @vmm-cdx | Reprioritize issue #258 target sequencing: Apple Silicon VZ and DGX/aarch64 Linux CH consume/build `linux/arm64` first; Linux amd64/x86_64 CH follows on a coordinated native host; Darwin guest-image workflow must run on macOS VZ |
 | 2026-05-16 | @vmm-cdx | Align issue #258 with the Motlie release-branch model from `origin/main`: optional VM image artifact targets coordinate native per-platform builders through release manifests, master issue, sub-issues, and sub-PR evidence; qemu/binfmt is optional local convenience, not acceptance criteria |
@@ -662,7 +663,7 @@ The CLI surface is:
 
 ```sh
 mbuild oci export \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --out /tmp/mbuild/oci-arm64 \
   --tag motlie-guest:v1.5-arm64
@@ -1256,9 +1257,10 @@ checked-in config/CLI surface. It must not be read as making Rust structs the
 product interface. The v1.5 demo is accepted only after #271 is closed by the
 config-driven builder running the full staged image flow.
 
-The current checked-in `motlie-image.yaml` uses `source.kind = external-oci`
-with pinned `docker.io/library/ubuntu:24.04` image-index and selected
-platform-manifest digests. The Linux/CH emitter consumes that native
+The current worked-example release configs live under
+`releases/vmm/v1.5/configs/` and use `source.kind = external-oci` with pinned
+`docker.io/library/ubuntu:24.04` image-index and selected platform-manifest
+digests. The Linux/CH emitter consumes that native
 source/import/package/compatibility path. The VZ emitter remains
 adapter-backed, still records its current `materialized_source`, and consumes
 the same assembled OCI rootfs through the adapter rootfs handoff.
@@ -1296,7 +1298,11 @@ inputs.
 Required product surface:
 
 - checked-in Dockerfile-like config:
-  `libs/vmm/examples/v1.5/motlie-image.yaml`
+  `releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml`
+- release-input namespace:
+  `releases/vmm/v1.5/configs/` stores rootfs/platform-specific image configs,
+  while generated rootfs tarballs, OCI blobs, VM disks, and harness logs stay
+  in run directories or release artifact storage
 - strict schema loading that rejects unknown fields so typos and unsupported
   directives do not silently pass
 - ordered stages for source resolve, import, classify, package install,
@@ -1317,10 +1323,10 @@ Required product surface:
 The standalone binary is the durable operator/CI entrypoint:
 
 ```sh
-mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --out artifacts/v1.5/ch
-mbuild build --config libs/vmm/examples/v1.5/motlie-image.yaml --target vz --out artifacts/v1.5/vz
-mbuild seed --config libs/vmm/examples/v1.5/motlie-image.yaml --target ch --guest alice --uid 2001 --gid 2001 --out artifacts/v1.5/seed/alice
-mbuild validate --config libs/vmm/examples/v1.5/motlie-image.yaml --artifact artifacts/v1.5/ch --require-executed --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+mbuild build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml --target ch --out artifacts/v1.5/ch
+mbuild build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml --target vz --out artifacts/v1.5/vz
+mbuild seed --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml --target ch --guest alice --uid 2001 --gid 2001 --out artifacts/v1.5/seed/alice
+mbuild validate --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml --artifact artifacts/v1.5/ch --require-executed --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
 `RootfsClassifier`, `RootfsCompatibilityAssembler`, and

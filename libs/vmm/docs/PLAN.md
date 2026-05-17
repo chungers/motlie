@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-17 | @vmm-cdx | Move v1.5 worked-example image configs into `releases/vmm/v1.5/configs/` and document the release-input namespace for rootfs/platform-specific configs |
 | 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for this phase: adapter-backed VZ builds now accept `mbuild build --target vz --oci-layout <layout>`, validate the local OCI payload, and pass its canonical rootfs layer through the current VZ rootfs handoff |
 | 2026-05-16 | @vmm-cdx | Reprioritize #258 acceptance targets: Apple Silicon VZ (`vz-darwin-arm64`) and DGX/aarch64 Linux CH (`ch-linux-arm64`) are first, while CH Linux amd64 (`ch-linux-amd64`, guest `linux/amd64`, Rust `x86_64`) is a coordinated follow-up host target |
 | 2026-05-16 | @vmm-cdx | Implement the next #258 mbuild slice: OCI layouts are validated by reading descriptors back, CH can consume a local OCI layout as emitter input, per-platform configs are checked in for linux/amd64 and linux/arm64, local multi-arch OCI indexes can be assembled, and release-manifest-ready VM image evidence can be emitted |
@@ -123,7 +124,7 @@ Current common guest-image implementation status:
       sudo/user env seed files, and uid/gid guest ownership metadata for
       user-owned seed files without requiring host `chown`.
 - [x] GitHub issue #271 has an initial product surface:
-      `libs/vmm/examples/v1.5/motlie-image.yaml` plus
+      `releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml` plus
       `bins/mbuild/src/main.rs`.
 - [ ] GitHub issue #271 remains open as a required v1.5 demo success criterion:
       the demo is not accepted until `mbuild` drives the native OCI
@@ -689,7 +690,10 @@ Tasks:
         `sudo -n` works in validation
 - [x] close GitHub issue #271 as part of the v1.5 demo:
   - [x] define and check in the Dockerfile-like builder spec
-        (`libs/vmm/examples/v1.5/motlie-image.yaml`)
+        (`releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml`)
+  - [x] move worked-example release inputs into
+        `releases/vmm/v1.5/configs/` so future rootfs/platform configs can be
+        added without changing the v1.5 harness/example code tree
   - [x] declare ordered source/import/classify/package/immutable-layer/policy/
         seed/backend-emitter/validation stages in that spec
   - [x] make package-manager stages explicit; apt is implemented by the native
@@ -747,8 +751,8 @@ Tasks:
         such as `/dev/fuse`
 - [x] emit backend artifacts from the same assembled rootfs for the accepted
       v1.5 demo:
-  - [x] switch `motlie-image.yaml` source from `transitional-adapter` to
-        `external-oci` for the native CH path
+  - [x] switch the worked-example image config source from
+        `transitional-adapter` to `external-oci` for the native CH path
   - [x] CH kernel/rootfs/seed artifacts
   - [x] VZ disk/boot artifacts through the transitional Apple VZ adapter that
         consumes the shared assembled rootfs tarball
@@ -860,7 +864,7 @@ Tasks:
         selected platform differs from the current config
 - [ ] add per-arch native build/export acceptance:
   - [x] first exported platform is `linux/arm64`, matching current v1.5
-        `motlie-image.yaml`
+        release config
   - [x] remove the CH host-native guest-platform guard so `source.platform`
         selects the guest target instead of `env::consts::ARCH`
   - [x] build Motlie guest binaries as static musl payloads for the requested
@@ -869,6 +873,8 @@ Tasks:
         for the selected guest platform is available
   - [x] add checked-in per-platform config/digest inputs for `linux/amd64`
         and `linux/arm64` instead of using temporary floating configs
+  - [x] move those config/digest inputs under `releases/vmm/v1.5/configs/`
+        as rootfs/platform release inputs
   - [ ] run the VZ build/export/validation path on a native Apple Silicon Mac
         for `vz-darwin-arm64` using the `linux/arm64` guest payload
   - [ ] run the CH build/export/validation path on native DGX/aarch64 Linux

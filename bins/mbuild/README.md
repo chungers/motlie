@@ -5,7 +5,7 @@ Dockerfile-like image contract used by the v1.5 examples, drives the current
 backend image adapters, regenerates per-guest seed artifacts, and emits
 machine-readable manifests for CI and harness consumption.
 
-Status as of 2026-05-16 (`@vmm-cdx`): `mbuild build --target ch` is the
+Status as of 2026-05-17 (`@vmm-cdx`): `mbuild build --target ch` is the
 durable Linux/CH image-builder entrypoint for the v1.5 demo. It resolves the
 pinned Ubuntu OCI source, imports rootfs layers, runs the apt/npm package stage,
 applies the native v1.5 Motlie compatibility layer, emits the common
@@ -16,6 +16,7 @@ selects the guest architecture, guest binaries are built as static musl
 payloads with `rust-lld`, and cross-arch package staging requires qemu-user
 binfmt or a native builder for that guest architecture. `mbuild seed`
 regenerates per-guest seed overlays without rebuilding the immutable image.
+Checked-in worked-example configs now live under `releases/vmm/v1.5/configs/`.
 `mbuild validate` validates manifests, can require execution evidence, and can
 delegate live guest conformance to the v1.5 harness. `mbuild oci export`
 converts an executed artifact's `assembled-rootfs.tar` into a local OCI image
@@ -33,7 +34,7 @@ Build CH artifacts through the native external-OCI CH path:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 ```
@@ -70,18 +71,18 @@ its validated rootfs layer through the adapter rootfs handoff:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- oci export \
-  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --out /tmp/mbuild/oci-arm64 \
   --tag motlie-guest:v1.5-arm64
 
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
   --oci-layout /tmp/mbuild/oci-arm64
@@ -97,7 +98,7 @@ Plan without running backend adapters:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/plan/ch \
   --plan-only
@@ -107,7 +108,7 @@ Regenerate per-guest seed artifacts:
 
 ```bash
 cargo run -p mbuild -- seed \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --guest alice \
   --uid 2001 \
@@ -119,7 +120,7 @@ Validate an emitted build manifest:
 
 ```bash
 cargo run -p mbuild -- validate \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --require-executed
 ```
@@ -128,7 +129,7 @@ Delegate live conformance to the v1.5 harness and write a validation record:
 
 ```bash
 cargo run -p mbuild -- validate \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --require-executed \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
@@ -138,7 +139,7 @@ Export the assembled rootfs handoff as a local OCI image layout:
 
 ```bash
 cargo run -p mbuild -- oci export \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --out /tmp/mbuild/oci-arm64 \
   --tag motlie-guest:v1.5-arm64
@@ -148,7 +149,7 @@ Validate that the exported layout still matches the build config and artifact:
 
 ```bash
 cargo run -p mbuild -- oci validate \
-  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --layout /tmp/mbuild/oci-arm64
 ```
@@ -157,7 +158,7 @@ Consume a validated local OCI payload as the CH emitter input:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch-from-oci \
   --oci-layout /tmp/mbuild/oci-arm64
@@ -178,7 +179,7 @@ Emit release-manifest-ready evidence for a VM image artifact target:
 
 ```bash
 cargo run -p mbuild -- oci evidence \
-  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --layout /tmp/mbuild/oci-arm64 \
   --publish-ref ghcr.io/chungers/motlie-guest:v1.5-arm64
@@ -247,12 +248,12 @@ Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`) used:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild-pr270-oci-ch-7
 
 cargo run -p mbuild -- validate \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild-pr270-oci-ch-7 \
   --require-executed
 ```
@@ -294,19 +295,21 @@ The current config schema is intentionally explicit:
   the CLI accepts any target ID declared here.
 - `validation`: post-boot behavior checks the produced image must satisfy.
 
-Checked-in v1.5 platform configs:
+Checked-in v1.5 release configs:
 
 ```text
-libs/vmm/examples/v1.5/motlie-image.linux-amd64.yaml
-libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-amd64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.default-arm64.yaml
 ```
 
-`libs/vmm/examples/v1.5/motlie-image.yaml` remains the current arm64 default
-for existing v1.5 commands. New #258 acceptance work should prefer the
-explicit per-platform paths above so release evidence can distinguish priority
-`vz-darwin-arm64` and `ch-linux-arm64` targets from the later coordinated
-`ch-linux-amd64` target. In Motlie docs, `amd64` is the OCI/Debian platform
-name and `x86_64` is the Linux/Rust host architecture spelling.
+The explicit per-platform configs are the release-facing inputs. The
+`default-arm64` file preserves the former v1.5 example default for traceability;
+new #258 acceptance work should prefer the explicit per-platform paths so
+release evidence can distinguish priority `vz-darwin-arm64` and
+`ch-linux-arm64` targets from the later coordinated `ch-linux-amd64` target. In
+Motlie docs, `amd64` is the OCI/Debian platform name and `x86_64` is the
+Linux/Rust host architecture spelling.
 
 `package_stage.manager` currently supports only `apt` in executable adapters.
 APT package entries are validated with APT-aware syntax, including `+`, arch
