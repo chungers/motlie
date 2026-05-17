@@ -15,9 +15,93 @@ Current example groups:
   - [`embeddings`](./embeddings/README.md)
 - Chat
   - [`chat_mistral_qwen3`](./chat_mistral_qwen3/README.md)
+  - [`chat_tool_binding`](./chat_tool_binding/README.md)
   - [`chat_multimodal_gemma4`](./chat_multimodal_gemma4/README.md)
   - [`chat_gguf_gwen3_gemma4`](./chat_gguf_gwen3_gemma4/README.md)
   - [`chat_multimodal_qwen3_6_27b`](./chat_multimodal_qwen3_6_27b/README.md)
+
+## Chat and Tool-Use Capability Ledger
+
+| Example | Backend | Curated model(s) | Advertised capabilities | Tool-use demo status |
+|---------|---------|------------------|-------------------------|----------------------|
+| `chat_tool_binding` | none | API-only | typed Rust tool binding | Runs without loading an LLM; builds a static `ToolList` with `get_weather` and `evaluate_math_expression`. |
+| `chat_mistral_qwen3` | `mistral.rs` | Qwen3 4B safetensors | `Chat` + `Completion` + `ToolUse` | `--tool-demo` / `--tool-demo-only` run a multi-round tool loop: weather for Seattle, Portland, and San Francisco, then math-expression average. |
+| `chat_multimodal_gemma4` | `mistral.rs` | Gemma 4 E2B-it safetensors | `Chat` + `Vision` + `ToolUse` | Same weather-plus-math tool loop; image+text chat remains a separate `--image=...` path. |
+| `chat_gguf_gwen3_gemma4` | `llama.cpp` | Qwen3 4B GGUF, Gemma 4 E2B-it GGUF | `Chat` + `Completion` + `ToolUse` | Same weather-plus-math tool loop through llama.cpp's OpenAI-compatible chat-template path. |
+| `chat_multimodal_qwen3_6_27b` | `llama.cpp` | Qwen3.6 27B GGUF | `Chat` + `Completion` | Text chat/completion only. `Vision` and `ToolUse` are not advertised for this bundle yet. |
+
+The shared tool demo support lives in [`tool_demo_support.rs`](./tool_demo_support.rs).
+It intentionally keeps tool execution caller-owned: model backends request
+`ToolCall`s, and the example layer executes the Rust functions through
+static `ToolList` tuple dispatch. The math tool uses `cel-cxx`, a Rust binding to the mature
+Common Expression Language implementation, so the example demonstrates binding
+a real Rust function instead of a hand-rolled parser.
+
+These examples demonstrate the type-level local Rust tool path. The data-level
+MCP path is intentionally scaffolding-only in this PR; concrete MCP transports
+and JSON-RPC lifecycle support are tracked by GitHub issue `#284` and should
+land in a future PR.
+
+Use `--tool-demo "What is Rust?"` on the model-backed chat examples to run the
+ordinary chat path first and then the weather-plus-math tool loop. Use
+`--tool-demo-only` to isolate just the tool loop.
+
+## Demo Output Ledger
+
+These excerpts were captured from this branch after the `cel-cxx` integration.
+Backend-native loader logs and timing noise are omitted.
+
+| Example | Scenario | Command | Captured output |
+|---------|----------|---------|-----------------|
+| `chat_tool_binding` | API-only typed binding without an LLM | `cargo run -p motlie-models --example chat_tool_binding --no-default-features` | Registers two tools, simulates three weather calls, then executes `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}` and returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`. |
+| `chat_gguf_gwen3_gemma4` | Qwen3 4B GGUF live LLM tool loop through `llama.cpp` | `cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- --tool-demo-only "What is Rust?"` | Advertises `ToolUse`, calls `get_weather` for Seattle, Portland, and San Francisco, then calls `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}`. The tool returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`, and the final model response is `The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68 degrees.` |
+| `chat_mistral_qwen3` | Qwen3 4B safetensors live LLM tool loop through `mistral.rs` | `cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo-only "What is Rust?"` | Uses the same shared `tool_demo_support::run_tool_demo` path and emits the same `tool-round`, `tool-call-*`, `tool-result`, and `tool-final-response` fields when the safetensors bundle is available. |
+| `chat_multimodal_gemma4` | Gemma 4 E2B-it safetensors live LLM tool loop through `mistral.rs` | `cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --tool-demo-only "What is Rust?"` | Uses the same shared `tool_demo_support::run_tool_demo` path as the Qwen3 examples; image+text chat remains separate from this text-only tool loop. |
+
+Representative API-only output:
+
+```text
+registered-tools: 2
+tool: get_weather
+tool: evaluate_math_expression
+assistant-call-name: get_weather
+assistant-call-args: {"city":"Seattle","units":"fahrenheit"}
+tool-content: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}
+assistant-call-name: get_weather
+assistant-call-args: {"city":"Portland","units":"fahrenheit"}
+tool-content: {"city":"Portland","temperature":68.0,"units":"fahrenheit","summary":"clear"}
+assistant-call-name: get_weather
+assistant-call-args: {"city":"San Francisco","units":"fahrenheit"}
+tool-content: {"city":"San Francisco","temperature":64.0,"units":"fahrenheit","summary":"clear"}
+assistant-call-name: evaluate_math_expression
+assistant-call-args: {"expression":"(72.0 + 68.0 + 64.0) / 3.0"}
+tool-content: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted":"68","engine":"cel-cxx"}
+```
+
+Representative Qwen3 GGUF output:
+
+```text
+capabilities:
+  - kind=ToolUse input=[Text, StructuredJson] output=[Text, StructuredJson] interaction=MultiTurn summary=Tool definitions, assistant tool calls, and tool-result turns on the chat surface.
+--- tool calling ---
+tool-round: 1
+tool-call-name: get_weather
+tool-call-args: {"city": "Seattle", "units": "fahrenheit"}
+tool-result: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}
+tool-round: 2
+tool-call-name: get_weather
+tool-call-args: {"city": "Portland", "units": "fahrenheit"}
+tool-result: {"city":"Portland","temperature":68.0,"units":"fahrenheit","summary":"clear"}
+tool-round: 3
+tool-call-name: get_weather
+tool-call-args: {"city": "San Francisco", "units": "fahrenheit"}
+tool-result: {"city":"San Francisco","temperature":64.0,"units":"fahrenheit","summary":"clear"}
+tool-round: 4
+tool-call-name: evaluate_math_expression
+tool-call-args: {"expression": "(72.0 + 68.0 + 64.0) / 3.0"}
+tool-result: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted":"68","engine":"cel-cxx"}
+tool-final-response: The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68 degrees.
+```
 
 The detailed 2x3 TTS-to-ASR validation matrix lives in
 [`../docs/VALIDATION_TTS_ASR_PIPELINES.md`](../docs/VALIDATION_TTS_ASR_PIPELINES.md).

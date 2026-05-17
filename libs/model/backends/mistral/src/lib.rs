@@ -3,6 +3,7 @@
 mod common;
 mod embeddings;
 mod multimodal;
+mod runtime;
 mod text;
 
 pub use embeddings::{

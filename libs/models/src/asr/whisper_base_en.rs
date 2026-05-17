@@ -153,11 +153,9 @@ mod tests {
         assert_eq!(descriptor.display_name, "Whisper Base.en");
         assert_eq!(descriptor.family, BundleFamily::Whisper);
         assert_eq!(descriptor.backend, BackendKind::WhisperCpp);
-        assert!(
-            descriptor
-                .capabilities
-                .supports(CapabilityKind::Transcription)
-        );
+        assert!(descriptor
+            .capabilities
+            .supports(CapabilityKind::Transcription));
         assert!(!descriptor.capabilities.supports(CapabilityKind::Chat));
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Transcription]);
 
@@ -197,11 +195,9 @@ mod tests {
         #[cfg(feature = "model-whisper-base-en")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Transcription)
-                    .any(|b| b.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Transcription)
+                .any(|b| b.id == bundle_id));
         }
     }
 

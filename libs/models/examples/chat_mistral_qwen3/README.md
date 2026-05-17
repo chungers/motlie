@@ -15,6 +15,7 @@ This example demonstrates the curated Qwen3-4B chat bundle with ISQ quantization
 9. Latency reporting for startup and each request
 10. Process/memory snapshots before startup, after startup, and after each request path
 11. Handle-level model metrics after startup and each request path
+12. Optional `--tool-demo` path for end-to-end local tool calling
 
 ## Run
 
@@ -41,6 +42,23 @@ Pre-download artifacts:
 ```sh
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --download-artifacts "What is Rust?"
 ```
+
+Tool-calling loop:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo "What is Rust?"
+```
+
+Tool-calling smoke only:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo-only "What is Rust?"
+```
+
+The tool demo registers `get_weather` and `evaluate_math_expression`, sends
+their generated schemas to the model, executes model-requested tool calls
+through static `ToolList` dispatch, appends each tool-result message, and lets the model
+combine a plain Rust explanation with a weather-derived average temperature.
 
 ## Preconditions
 
