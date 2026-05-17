@@ -128,11 +128,16 @@ npm_bin_path = "bin/mmux"
 requires_macos_signing = true
 
 [target.status]
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-evidence = []
+state = "staged"
+completed_at = "2026-05-17T03:59:36Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "03997b45"
+evidence = [
+  { kind = "host", ref = "macmini", note = "Darwin 24.5.0 arm64, macOS 15.5 (cross-built from Apple Silicon)" },
+  { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08)", note = "rustc -Vv" },
+  { kind = "toolchain", ref = "cargo 1.92.0 (344c4567c 2025-10-21)", note = "cargo -V" },
+  { kind = "file", ref = "target/x86_64-apple-darwin/release/mmux", note = "Mach-O 64-bit executable x86_64" },
+]
 
 [[target]]
 id = "darwin-arm64"
@@ -146,11 +151,17 @@ npm_bin_path = "bin/mmux"
 requires_macos_signing = true
 
 [target.status]
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-evidence = []
+state = "staged"
+completed_at = "2026-05-17T05:10:00Z"
+completed_by = "@chungers"
+source_commit = "03997b45"
+evidence = [
+  { kind = "host", ref = "macmini", note = "Darwin 24.5.0 arm64, macOS 15.5 (native build)" },
+  { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08)", note = "rustc -Vv" },
+  { kind = "toolchain", ref = "cargo 1.92.0 (344c4567c 2025-10-21)", note = "cargo -V" },
+  { kind = "file", ref = "target/aarch64-apple-darwin/release/mmux", note = "Mach-O 64-bit executable arm64" },
+  { kind = "manual-smoke", ref = "operator interactive smoke on macmini (Darwin 24.5.0 arm64, macOS 15.5)", note = "@chungers manually launched the staged darwin-arm64 binary against a real tmux server; TUI rendered, Help modal showed the Version: 0.1.0 line, attach/detach and quit worked cleanly. Confirms the help_modal unit test result holds in a real terminal session." },
+]
 
 # ----- gates: (id, target_id) keyed with rollups -----
 
@@ -197,34 +208,44 @@ id = "darwin-builds-staged"
 target_id = ""
 channel = "archive"
 rollup = true
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "staged"
+completed_at = "2026-05-17T03:59:36Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "03997b45"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "rollup", ref = "all darwin target rows staged", note = "darwin-x64 + darwin-arm64 staging builds complete on macmini @ release/2026-05-apex-anchor-mmux-darwin-staging; re-staged at 03997b45 after Help-modal version add" },
+]
 
 [[gate]]
 id = "darwin-builds-staged"
 target_id = "darwin-x64"
 channel = "archive"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "staged"
+completed_at = "2026-05-17T03:59:36Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "03997b45"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target x86_64-apple-darwin -p motlie-mmux --bin mmux", note = "Finished release profile [optimized] target(s) in 3.61s (re-stage after 03997b45 Help-modal version add)" },
+  { kind = "file", ref = "target/x86_64-apple-darwin/release/mmux", note = "Mach-O 64-bit executable x86_64" },
+  { kind = "smoke", ref = "target/x86_64-apple-darwin/release/mmux --version", note = "mmux 0.1.0 (executed via Rosetta on Apple Silicon host)" },
+]
 
 [[gate]]
 id = "darwin-builds-staged"
 target_id = "darwin-arm64"
 channel = "archive"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "staged"
+completed_at = "2026-05-17T03:59:36Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "03997b45"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-apple-darwin -p motlie-mmux --bin mmux", note = "Finished release profile [optimized] target(s) in 3.68s (re-stage after 03997b45 Help-modal version add)" },
+  { kind = "file", ref = "target/aarch64-apple-darwin/release/mmux", note = "Mach-O 64-bit executable arm64" },
+  { kind = "smoke", ref = "target/aarch64-apple-darwin/release/mmux --version", note = "mmux 0.1.0 (native arm64 execution)" },
+]
 
 # darwin-codesign-staged
 
@@ -233,34 +254,52 @@ id = "darwin-codesign-staged"
 target_id = ""
 channel = "archive"
 rollup = true
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "staged"
+completed_at = "2026-05-17T03:59:36Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "03997b45"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "rollup", ref = "all darwin target rows codesigned + verified on build-path and installed-path", note = "ad-hoc signing; re-staged at 03997b45 after Help-modal version add; final-tag signing required at publish time" },
+]
 
 [[gate]]
 id = "darwin-codesign-staged"
 target_id = "darwin-x64"
 channel = "archive"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "staged"
+completed_at = "2026-05-17T03:59:36Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "03997b45"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "command", ref = "codesign --force --sign - target/x86_64-apple-darwin/release/mmux", note = "replacing existing signature; valid on disk; satisfies its Designated Requirement" },
+  { kind = "command", ref = "codesign --verify --strict --verbose=2 target/x86_64-apple-darwin/release/mmux", note = "verify passed on build path" },
+  { kind = "command", ref = "install -m 755 + codesign --force --sign - /tmp/mmux-staging-x86_64/bin/mmux", note = "installed-path re-sign; codesign --verify --strict --verbose=2 passed on installed path" },
+  { kind = "smoke", ref = "/tmp/mmux-staging-x86_64/bin/mmux --version", note = "mmux 0.1.0 (via Rosetta)" },
+  { kind = "codesign", ref = "Identifier=mmux-55554944ecf5dc49726d3daa80291f4f3135e2b3; Format=Mach-O thin (x86_64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv (re-stage at 03997b45)" },
+  { kind = "signing-identity", ref = "adhoc", note = "matches [signing].identity in this manifest" },
+  { kind = "test", ref = "cargo test --release --locked -p motlie-mmux h_opens_help_modal_and_enter_or_escape_closes_it", note = "Help modal version line asserts the same env!(CARGO_PKG_VERSION) source as mmux --version; 1 passed, 0 failed" },
+]
 
 [[gate]]
 id = "darwin-codesign-staged"
 target_id = "darwin-arm64"
 channel = "archive"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "staged"
+completed_at = "2026-05-17T03:59:36Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "03997b45"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "command", ref = "codesign --force --sign - target/aarch64-apple-darwin/release/mmux", note = "replacing existing signature; valid on disk; satisfies its Designated Requirement" },
+  { kind = "command", ref = "codesign --verify --strict --verbose=2 target/aarch64-apple-darwin/release/mmux", note = "verify passed on build path" },
+  { kind = "command", ref = "install -m 755 + codesign --force --sign - /tmp/mmux-staging-aarch64/bin/mmux", note = "installed-path re-sign; codesign --verify --strict --verbose=2 passed on installed path" },
+  { kind = "smoke", ref = "/tmp/mmux-staging-aarch64/bin/mmux --version", note = "mmux 0.1.0 (native arm64)" },
+  { kind = "codesign", ref = "Identifier=mmux-555549445702e3e6ed003ce89d9dc6ec4d65110e; Format=Mach-O thin (arm64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv (re-stage at 03997b45)" },
+  { kind = "signing-identity", ref = "adhoc", note = "matches [signing].identity in this manifest" },
+  { kind = "test", ref = "cargo test --release --locked -p motlie-mmux h_opens_help_modal_and_enter_or_escape_closes_it", note = "Help modal version line asserts the same env!(CARGO_PKG_VERSION) source as mmux --version; 1 passed, 0 failed" },
+]
 
 # installer-validated
 
