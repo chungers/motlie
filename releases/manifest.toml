@@ -33,7 +33,7 @@ sub_issues = [
 [release]
 tag = "2026-05-apex-anchor"
 notes_path = "releases/notes.md"
-github_release = ""
+github_release = "https://github.com/chungers/motlie/releases/tag/2026-05-apex-anchor"
 source_ref_policy = "final-artifacts-must-build-from-final-tag"
 
 [discovery]
@@ -120,12 +120,26 @@ evidence = [
 
 [[gate]]
 id = "github-release-published"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-17T06:42:23Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "release", ref = "https://github.com/chungers/motlie/releases/tag/2026-05-apex-anchor", note = "GitHub Release published from tag 2026-05-apex-anchor; marked --latest via `gh release edit --latest`; verified via `gh api repos/chungers/motlie/releases/latest` returning tag_name=2026-05-apex-anchor" },
+  { kind = "human-approval", ref = "operator approved gh release create on 2026-05-17", note = "explicit publish approval before gh release create per SKILL.md publishing-without-approval rule" },
+  { kind = "checksum", ref = "SHA256SUMS", note = "combined checksum file covering all 4 archives; generated on macmini at ~/release-assets/2026-05-apex-anchor/ from linux archives transferred via scp from spark-2f6e and darwin archives built locally; `shasum -a 256 -c SHA256SUMS` passed all 4 lines" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/motlie-mmux-v0.1.0-linux-x64-musl.tar.gz", sha256 = "5e4ab4676d9a0f610f3bd24fe83ed808d3ebf8950b7fa787fee72de1058e4339", note = "2740053 bytes" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "2bd777528f0c197726a46b4b5d9f55d0a9efaca9cfba3ef3169114aff0bea3ea", note = "2564338 bytes" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/motlie-mmux-v0.1.0-darwin-x64.tar.gz", sha256 = "8dbe10743f6ec9589a6e069295e196210b91d8c0db100e92965f95bb9ea12212", note = "2572527 bytes" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/motlie-mmux-v0.1.0-darwin-arm64.tar.gz", sha256 = "9041f4e860294fe2873587abef29f9ca936ba00129ca71f1b502433e751df2e1", note = "2359691 bytes" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/SHA256SUMS", note = "424 bytes; combined checksum file" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh", note = "4657 bytes; v0 installer skeleton" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/manifest.toml", note = "5156 bytes; workspace release ledger snapshot at publication time" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/mmux.toml", note = "29125 bytes; per-binary release ledger snapshot at publication time" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/notes.md", note = "1729 bytes; workspace notes used as release body" },
+  { kind = "asset", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/mmux.md", note = "2129 bytes; per-binary notes" },
+]
 
 [[gate]]
 id = "post-release-ledger-committed"
