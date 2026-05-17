@@ -19,11 +19,13 @@ regenerates per-guest seed overlays without rebuilding the immutable image.
 `mbuild validate` validates manifests, can require execution evidence, and can
 delegate live guest conformance to the v1.5 harness. `mbuild oci export`
 converts an executed artifact's `assembled-rootfs.tar` into a local OCI image
-layout for issue #258 per-arch payload work. The VZ target consumes the
-CH-emitted tarball with `--rootfs-tarball` while the durable Apple VZ
-boot-container emitter is still transitional. v1.5 is greenfield for this
-product contract: pre-v1.5 VZ source VMs/cached disks are unsupported, and
-per-guest users are seed/runtime state rather than image content.
+layout for issue #258 per-arch payload work. Adapter-backed targets such as VZ
+can consume that local OCI layout with `--oci-layout`; `mbuild` validates the
+layout and passes the canonical rootfs layer through the current adapter rootfs
+handoff. The durable Apple VZ boot-container emitter is still transitional.
+v1.5 is greenfield for this product contract: pre-v1.5 VZ source VMs/cached
+disks are unsupported, and per-guest users are seed/runtime state rather than
+image content.
 
 ## Commands
 
@@ -63,8 +65,8 @@ guest platform. `mbuild` fails before OCI layer import if cross-arch package
 staging cannot execute guest rootfs binaries.
 
 Build VZ artifacts through the current VZ adapter on an Apple Silicon macOS
-host. The current VZ path consumes an assembled `linux/arm64` rootfs tarball
-as handoff input:
+host. The current VZ path consumes a local `linux/arm64` OCI layout and passes
+its validated rootfs layer through the adapter rootfs handoff:
 
 ```bash
 cargo run -p mbuild -- build \
@@ -72,16 +74,24 @@ cargo run -p mbuild -- build \
   --target ch \
   --out /tmp/mbuild/ch
 
+cargo run -p mbuild -- oci export \
+  --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --out /tmp/mbuild/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+
 cargo run -p mbuild -- build \
   --config libs/vmm/examples/v1.5/motlie-image.linux-arm64.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
-  --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
+  --oci-layout /tmp/mbuild/oci-arm64
 ```
 
 The first command may run on Linux/DGX to produce the arm64 common rootfs
-handoff. The second command must run on the macOS VZ builder until the VZ
-emitter consumes OCI layouts directly.
+handoff and OCI layout. The VZ build command must run on the macOS VZ builder.
+`--rootfs-tarball` remains available as an explicit low-level adapter handoff,
+but the issue #258 path should prefer `--oci-layout` so CH and VZ consume the
+same OCI payload contract.
 
 Plan without running backend adapters:
 

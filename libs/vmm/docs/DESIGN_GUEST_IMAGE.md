@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for the transitional phase: `mbuild build --target vz --oci-layout <layout>` validates the local OCI payload and feeds its rootfs layer through the current VZ adapter rootfs handoff |
 | 2026-05-16 | @vmm-cdx | Reprioritize issue #258 target sequencing: Apple Silicon VZ and DGX/aarch64 Linux CH consume/build `linux/arm64` first; Linux amd64/x86_64 CH follows on a coordinated native host; Darwin guest-image workflow must run on macOS VZ |
 | 2026-05-16 | @vmm-cdx | Align issue #258 with the Motlie release-branch model from `origin/main`: optional VM image artifact targets coordinate native per-platform builders through release manifests, master issue, sub-issues, and sub-PR evidence; qemu/binfmt is optional local convenience, not acceptance criteria |
 | 2026-05-16 | @vmm-cdx | Remove the CH builder host-native guest-platform assumption: requested OCI platform now selects the guest target, guest binaries are static musl payloads linked with `rust-lld`, and cross-arch package staging requires qemu-user/binfmt or a native builder |
@@ -1258,26 +1259,30 @@ config-driven builder running the full staged image flow.
 The current checked-in `motlie-image.yaml` uses `source.kind = external-oci`
 with pinned `docker.io/library/ubuntu:24.04` image-index and selected
 platform-manifest digests. The Linux/CH emitter consumes that native
-source/import/package/compatibility path. The VZ emitter still records its
-current `materialized_source` for the macOS source-VM adapter until VZ consumes
-the same assembled OCI rootfs path.
+source/import/package/compatibility path. The VZ emitter remains
+adapter-backed, still records its current `materialized_source`, and consumes
+the same assembled OCI rootfs through the adapter rootfs handoff.
 
 The VZ side of this transition must be explicit. The Linux/CH native OCI build
 emits a common `assembled-rootfs.tar` before CH-specific boot adaptations are
-applied. That tarball is the cross-backend immutable rootfs handoff. When
-`mbuild build --target vz --rootfs-tarball <tar>` is run on macOS, the builder
-passes the tarball through the configured VZ adapter environment as
-`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL` so VZ consumes the same logical rootfs
-contract as CH while still adapting it into Apple VZ's required disk/NVRAM boot
-shape. The emitted CH and VZ artifacts must include the canonical tarball path,
-byte size, and sha256 digest so validation evidence distinguishes
-"native-source VM only" from "assembled rootfs consumed by VZ emitter." Closing
-#271 requires VZ live harness validation from the `mbuild`-emitted tarball. The
-VZ bridge must also normalize OpenSSH StrictModes path ancestors after overlay
-extraction so CA auth remains a launch-time consumption of image state, not a
-reason to weaken sshd or rerun build work during guest startup. Guest demo
-identities are per-guest provisioning state; reusable VZ images must not bake
-`alice`, `bob`, or any later harness guest.
+applied. `mbuild oci export` wraps that tarball as the local per-platform OCI
+payload. When `mbuild build --target vz --oci-layout <layout>` is run on macOS,
+the builder validates the OCI descriptors, canonicalizes the rootfs layer blob,
+and passes that layer through the configured VZ adapter environment as
+`MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. VZ therefore consumes the same logical
+rootfs contract as CH while still adapting it into Apple VZ's required disk/NVRAM
+boot shape. `--rootfs-tarball <tar>` remains available as an explicit low-level
+adapter handoff for this phase, but the issue #258 path should prefer
+`--oci-layout` so backend evidence points at the same OCI payload contract. The
+emitted CH and VZ artifacts must include the canonical tarball/blob path, byte
+size, and sha256 digest so validation evidence distinguishes "native-source VM
+only" from "assembled OCI rootfs consumed by VZ emitter." Closing #271 requires
+VZ live harness validation from the `mbuild`-emitted tarball or its exported OCI
+layer. The VZ bridge must also normalize OpenSSH StrictModes path ancestors
+after overlay extraction so CA auth remains a launch-time consumption of image
+state, not a reason to weaken sshd or rerun build work during guest startup.
+Guest demo identities are per-guest provisioning state; reusable VZ images must
+not bake `alice`, `bob`, or any later harness guest.
 
 This is greenfield v1.5 product work. There is no migration or backward
 compatibility requirement for pre-v1.5 cached VZ disks, v1.35 source VMs, or

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for this phase: adapter-backed VZ builds now accept `mbuild build --target vz --oci-layout <layout>`, validate the local OCI payload, and pass its canonical rootfs layer through the current VZ rootfs handoff |
 | 2026-05-16 | @vmm-cdx | Reprioritize #258 acceptance targets: Apple Silicon VZ (`vz-darwin-arm64`) and DGX/aarch64 Linux CH (`ch-linux-arm64`) are first, while CH Linux amd64 (`ch-linux-amd64`, guest `linux/amd64`, Rust `x86_64`) is a coordinated follow-up host target |
 | 2026-05-16 | @vmm-cdx | Implement the next #258 mbuild slice: OCI layouts are validated by reading descriptors back, CH can consume a local OCI layout as emitter input, per-platform configs are checked in for linux/amd64 and linux/arm64, local multi-arch OCI indexes can be assembled, and release-manifest-ready VM image evidence can be emitted |
 | 2026-05-16 | @vmm-cdx | Align Phase 12 with the `origin/main` release process: VM guest images are optional release artifact targets, binary-only releases do not require image gates, native per-platform builders are the #258 acceptance path, and `native-ch-bootstrap` remains the outstanding CH package-engine improvement |
@@ -701,8 +702,8 @@ Tasks:
   - [x] switch the checked-in top-level source to `external-oci` with pinned
         Ubuntu `linux/arm64` image-index and selected platform-manifest digests
   - [x] record the remaining per-emitter source truth: VZ still has
-        `materialized_source` for the current macOS source-VM adapter until the
-        VZ emitter consumes the assembled OCI rootfs path
+        `materialized_source` for the current macOS adapter, while `--oci-layout`
+        feeds the validated OCI rootfs layer through the adapter rootfs handoff
   - [x] move seed topology into config templates for user home, SSH principal,
         and mount declarations so `mbuild seed` does not hardcode the v1.5
         example layout
@@ -894,6 +895,9 @@ Tasks:
         in-process assembled rootfs directory
   - [ ] CH emitter can import directly from a registry reference after publish
         support defines credentials/tag policy
+  - [x] VZ adapter-backed build can import from a local OCI image layout by
+        validating descriptors and passing the canonical rootfs layer to the
+        current VZ rootfs handoff
   - [ ] VZ emitter can import from the same OCI payload contract and produce
         Apple VZ disk/NVRAM artifacts without relying on a native source-VM
         substrate as the durable path

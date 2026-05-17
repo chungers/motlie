@@ -191,9 +191,11 @@ payload as the CH emitter input. `mbuild oci index` combines validated
 per-platform layouts into a local multi-arch OCI index; registry upload remains
 a release/operator step because it requires credentials and tag policy.
 
-The VZ target still records its current macOS adapter source until the VZ
-emitter consumes that `mbuild`-emitted rootfs tarball or OCI payload and
-produces fresh VZ validation evidence.
+The VZ target remains adapter-backed, but it can consume the same local OCI
+layout with `mbuild build --target vz --oci-layout <layout>`. `mbuild`
+validates the OCI payload and passes the canonical rootfs layer through the
+current VZ adapter rootfs handoff, so VZ validation evidence can distinguish
+OCI payload consumption from legacy source-VM-only emission.
 `mbuild seed` regenerates per-guest seed files from the config-driven seed
 topology without rebuilding the immutable image. `mbuild validate` checks the
 emitted manifest, can require execution evidence, and can delegate a live
@@ -212,7 +214,7 @@ pty-agent-validation.json
 pty-login.json
 ```
 
-VZ has an explicit issue #271 handoff for the common rootfs contract:
+VZ has an explicit issue #271/#258 handoff for the common OCI rootfs contract:
 
 ```bash
 cargo run -p mbuild -- \
@@ -221,23 +223,32 @@ cargo run -p mbuild -- \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- \
+  oci export --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --artifact /tmp/mbuild/ch \
+  --out /tmp/mbuild/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+
+cargo run -p mbuild -- \
   build --config libs/vmm/examples/v1.5/motlie-image.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
-  --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
+  --oci-layout /tmp/mbuild/oci-arm64
 ```
 
 The CH build writes `/tmp/mbuild/ch/assembled-rootfs.tar` plus
 `/tmp/mbuild/ch/mbuild-common-rootfs.json` before CH-specific boot adaptations.
-`mbuild` canonicalizes and digests that tarball, then passes it to the VZ
-adapter as `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is consumed
-during VZ image build only. The current VZ adapter still preserves a native
-Apple VZ EFI/NVRAM boot container, applies the assembled rootfs payload into
-that container, and records `rootfs_input` with canonical path, size, and
-sha256 in `build-result.json` and `guest-contract.json`. Guest launch and first
-SSH must not apply this tarball, install packages, or build binaries. Reusable
-VZ images do not intentionally bake demo guest users; `alice`, `bob`, and
-future harness guests are per-guest provisioning state.
+`mbuild oci export` wraps that rootfs as the local OCI payload. The VZ build
+validates the OCI descriptors, canonicalizes the rootfs layer blob, and passes
+it to the VZ adapter as `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. `--rootfs-tarball`
+remains available as an explicit low-level adapter handoff, but the issue #258
+path should prefer `--oci-layout`. The tarball is consumed during VZ image
+build only. The current VZ adapter still preserves a native Apple VZ EFI/NVRAM
+boot container, applies the assembled rootfs payload into that container, and
+records `rootfs_input` with canonical path, size, and sha256 in
+`build-result.json` and `guest-contract.json`. Guest launch and first SSH must
+not apply this tarball, install packages, or build binaries. Reusable VZ images
+do not intentionally bake demo guest users; `alice`, `bob`, and future harness
+guests are per-guest provisioning state.
 
 v1.5 is greenfield for the image-builder product contract. Do not reuse
 pre-v1.5/v1.35 source VMs or cached disks. If a launch finds a requested guest

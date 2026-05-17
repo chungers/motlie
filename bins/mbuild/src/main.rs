@@ -566,6 +566,34 @@ fn load_oci_export_manifest(layout: &Path) -> Result<OciExportManifest> {
         .with_context(|| format!("read OCI export manifest {}", manifest_path.display()))
 }
 
+#[derive(Debug, Clone)]
+struct ValidatedOciPayload {
+    export: OciExportManifest,
+    source: ExternalOciSource,
+    rootfs_tarball: RootfsTarballRecord,
+}
+
+fn load_validated_oci_payload(
+    oci_layout: &Path,
+    config: &ImageBuildConfig,
+) -> Result<ValidatedOciPayload> {
+    let export = load_oci_export_manifest(oci_layout)?;
+    let export = validate_oci_layout(oci_layout, &export, Some(config), None)?;
+    let source = external_source_from_manifest(&export.source)?;
+    let rootfs_blob = descriptor_path(oci_layout, &export.rootfs_layer)?;
+    let rootfs_tarball = RootfsTarballRecord {
+        canonical_path: fs::canonicalize(&rootfs_blob)?,
+        size_bytes: export.rootfs_layer.size_bytes,
+        sha256: digest_hex(&export.rootfs_layer.digest)?.to_string(),
+    };
+
+    Ok(ValidatedOciPayload {
+        export,
+        source,
+        rootfs_tarball,
+    })
+}
+
 fn resolve_repo_root(provided: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = provided {
         return validate_repo_root(path);
@@ -612,13 +640,15 @@ fn run_build_execution(
         if config.source.kind != SourceKind::ExternalOci {
             bail!("--oci-layout requires source.kind external-oci");
         }
-        if options.target.as_str() != "ch" {
-            bail!("--oci-layout is currently implemented for the CH emitter; target {} is not supported", options.target);
-        }
         if rootfs_tarball.is_some() {
             bail!("--oci-layout and --rootfs-tarball are mutually exclusive");
         }
-        return run_ch_oci_layout_build(repo_root, config, emitter, options, oci_layout);
+        if options.target.as_str() == "ch" {
+            return run_ch_oci_layout_build(repo_root, config, emitter, options, oci_layout);
+        }
+        return run_backend_adapter_oci_layout_build(
+            repo_root, config, emitter, options, oci_layout,
+        );
     }
     if config.source.kind == SourceKind::ExternalOci && options.target.as_str() == "ch" {
         return run_ch_external_oci_build(repo_root, config, emitter, options);
@@ -768,9 +798,9 @@ fn run_ch_oci_layout_build(
     fs::write(&log_path, b"")?;
     append_log(&log_path, "=== mbuild CH OCI-layout builder ===\n")?;
 
-    let export_manifest = load_oci_export_manifest(oci_layout)?;
-    let validation = validate_oci_layout(oci_layout, &export_manifest, Some(config), None)?;
-    let source = external_source_from_manifest(&validation.source)?;
+    let payload = load_validated_oci_payload(oci_layout, config)?;
+    let validation = &payload.export;
+    let source = payload.source.clone();
     let platform = parse_source_platform(&validation.platform)?;
     let host = HostPlatformTarget::detect()?;
     let guest = ChGuestTarget::from_platform(platform)?;
@@ -796,16 +826,12 @@ fn run_ch_oci_layout_build(
     let work_root = create_work_root("mbuild-ch-oci-rootfs")?;
     let rootfs_dir = work_root.join("rootfs");
     fs::create_dir_all(&rootfs_dir)?;
-    let rootfs_blob = descriptor_path(oci_layout, &validation.rootfs_layer)?;
-    extract_rootfs_tarball(&rootfs_blob, &rootfs_dir, &log_path)?;
+    let rootfs_blob = &payload.rootfs_tarball.canonical_path;
+    extract_rootfs_tarball(rootfs_blob, &rootfs_dir, &log_path)?;
 
     let base_dir = options.out.join("base");
     fs::create_dir_all(&base_dir)?;
-    let rootfs_record = RootfsTarballRecord {
-        canonical_path: fs::canonicalize(&rootfs_blob)?,
-        size_bytes: validation.rootfs_layer.size_bytes,
-        sha256: digest_hex(&validation.rootfs_layer.digest)?.to_string(),
-    };
+    let rootfs_record = payload.rootfs_tarball.clone();
     write_common_rootfs_record(&options.out, &source, &rootfs_record)?;
 
     let guest_binary = rootfs_dir.join(
@@ -869,6 +895,37 @@ fn run_ch_oci_layout_build(
         guest_target: Some(GuestTargetRecord::from(&guest)),
         rootfs_tarball: Some(rootfs_record),
     })
+}
+
+#[instrument(
+    skip(repo_root, config, emitter, options, oci_layout),
+    fields(target = %options.target, out = %options.out.display(), layout = %oci_layout.display())
+)]
+fn run_backend_adapter_oci_layout_build(
+    repo_root: &Path,
+    config: &ImageBuildConfig,
+    emitter: &BackendEmitterSpec,
+    options: &BuildOptions,
+    oci_layout: &Path,
+) -> Result<AdapterRecord> {
+    if emitter.adapter.env.rootfs_tarball.is_none() {
+        bail!(
+            "target {} cannot consume --oci-layout because it does not declare an adapter rootfs_tarball env",
+            options.target
+        );
+    }
+
+    let payload = load_validated_oci_payload(oci_layout, config)?;
+    let mut adapter = run_backend_adapter(
+        repo_root,
+        config,
+        emitter,
+        options,
+        Some(&payload.rootfs_tarball),
+    )?;
+    adapter.kind = format!("oci-payload-{}-adapter", options.target);
+    adapter.external_oci_source = Some(payload.source);
+    Ok(adapter)
 }
 
 #[instrument(
@@ -2233,17 +2290,15 @@ fn validate_oci_layout(
         require_manifest_match("oci.platform", &export.platform, &config.source.platform)?;
     }
     if let Some(build_manifest) = build_manifest {
-        require_manifest_match(
-            "oci.input_artifact_dir",
-            &export.input_artifact_dir,
-            &build_manifest.output_dir,
-        )?;
         require_manifest_match("oci.source", &export.source, &build_manifest.source)?;
         require_manifest_match(
             "oci.contract_version",
             &export.contract_version,
             &build_manifest.contract_version,
         )?;
+        if export.input_artifact_dir != build_manifest.output_dir {
+            require_artifact_consumed_oci_payload(build_manifest, export)?;
+        }
         if let Some(adapter) = &build_manifest.adapter {
             if let Some(rootfs) = &adapter.rootfs_tarball {
                 require_manifest_match(
@@ -2388,6 +2443,52 @@ fn validate_oci_layout(
     Ok(export.clone())
 }
 
+fn require_artifact_consumed_oci_payload(
+    build_manifest: &ImageBuildManifest,
+    export: &OciExportManifest,
+) -> Result<()> {
+    let adapter = build_manifest.adapter.as_ref().with_context(|| {
+        format!(
+            "OCI layout was exported from {}, but artifact {} has no adapter evidence",
+            export.input_artifact_dir.display(),
+            build_manifest.output_dir.display()
+        )
+    })?;
+    let adapter_source = adapter.external_oci_source.as_ref().with_context(|| {
+        format!(
+            "OCI layout was exported from {}, but artifact {} does not record an external OCI source",
+            export.input_artifact_dir.display(),
+            build_manifest.output_dir.display()
+        )
+    })?;
+    let export_source = external_source_from_manifest(&export.source)?;
+    require_manifest_match(
+        "adapter.external_oci_source",
+        adapter_source,
+        &export_source,
+    )?;
+
+    let rootfs = adapter.rootfs_tarball.as_ref().with_context(|| {
+        format!(
+            "OCI layout was exported from {}, but artifact {} does not record consumed rootfs evidence",
+            export.input_artifact_dir.display(),
+            build_manifest.output_dir.display()
+        )
+    })?;
+    let layer_sha256 = digest_hex(&export.rootfs_layer.digest)?.to_string();
+    require_manifest_match(
+        "adapter.rootfs_tarball.size_bytes",
+        &rootfs.size_bytes,
+        &export.rootfs_layer.size_bytes,
+    )?;
+    require_manifest_match(
+        "adapter.rootfs_tarball.sha256",
+        &rootfs.sha256,
+        &layer_sha256,
+    )?;
+    Ok(())
+}
+
 fn descriptor_path(layout: &Path, descriptor: &OciBlobDescriptor) -> Result<PathBuf> {
     if let Some(path) = &descriptor.path {
         if path.is_absolute() {
@@ -2451,7 +2552,8 @@ fn copy_oci_blob_to_layout(
 }
 
 fn extract_rootfs_tarball(tarball: &Path, rootfs_dir: &Path, log_path: &Path) -> Result<()> {
-    let script = "set -euo pipefail\nmkdir -p \"$2\"\ntar -C \"$2\" -xf \"$1\"\n";
+    let script =
+        "set -euo pipefail\nmkdir -p \"$2\"\ntar --preserve-permissions -C \"$2\" -xf \"$1\"\n";
     let mut command = Command::new("bash");
     command
         .arg("-c")
@@ -4418,11 +4520,11 @@ validation:
             "--config",
             "motlie-image.yaml",
             "--target",
-            "ch",
+            "vz",
             "--out",
-            "artifacts/ch",
+            "artifacts/vz",
             "--oci-layout",
-            "artifacts/oci-amd64",
+            "artifacts/oci-arm64",
         ])
         .unwrap();
 
@@ -4430,13 +4532,13 @@ validation:
             cli.command,
             Commands::Build {
                 config: PathBuf::from("motlie-image.yaml"),
-                target: "ch".parse().unwrap(),
-                out: PathBuf::from("artifacts/ch"),
+                target: "vz".parse().unwrap(),
+                out: PathBuf::from("artifacts/vz"),
                 repo_root: None,
                 plan_only: false,
                 adapter_arg: Vec::new(),
                 rootfs_tarball: None,
-                oci_layout: Some(PathBuf::from("artifacts/oci-amd64"))
+                oci_layout: Some(PathBuf::from("artifacts/oci-arm64"))
             }
         );
     }
@@ -4801,7 +4903,7 @@ validation:
                 completed_at_unix_seconds: 2,
                 package_include: config.package_stage.install.clone(),
                 materialized_source: None,
-                external_oci_source: Some(source),
+                external_oci_source: Some(source.clone()),
                 build_host: Some(BuildHostRecord {
                     platform: OciPlatform::linux_arm64().to_string(),
                     deb_arch: "arm64".to_string(),
@@ -4824,7 +4926,7 @@ validation:
         .unwrap();
 
         oci_export(OciExportOptions {
-            config_path,
+            config_path: config_path.clone(),
             artifact: artifact.clone(),
             out: out.clone(),
             tag: Some("motlie-guest:test".to_string()),
@@ -4843,6 +4945,74 @@ validation:
             export.rootfs_layer.digest,
             format!("sha256:{}", rootfs.sha256)
         );
+        let payload = load_validated_oci_payload(&out, &config).unwrap();
+        assert_eq!(payload.source.platform.to_string(), "linux/arm64");
+        assert_eq!(payload.rootfs_tarball.sha256, rootfs.sha256);
+        assert_eq!(payload.rootfs_tarball.size_bytes, rootfs.size_bytes);
+        let consumer_artifact = root.join("consumer-artifact");
+        let consumer_manifest = ImageBuildManifest::from_config(
+            &config_path,
+            BackendTargetId("ch".to_string()),
+            &consumer_artifact,
+            &config,
+            Some(AdapterRecord {
+                kind: "oci-payload-ch-emitter".to_string(),
+                command: vec!["mbuild".to_string(), "build".to_string()],
+                log_path: consumer_artifact.join(CH_EMITTER_LOG_NAME),
+                exit_status: 0,
+                started_at_unix_seconds: 3,
+                completed_at_unix_seconds: 4,
+                package_include: config.package_stage.install.clone(),
+                materialized_source: None,
+                external_oci_source: Some(source),
+                build_host: Some(BuildHostRecord {
+                    platform: OciPlatform::linux_arm64().to_string(),
+                    deb_arch: "arm64".to_string(),
+                }),
+                guest_target: Some(GuestTargetRecord {
+                    platform: OciPlatform::linux_arm64().to_string(),
+                    rust_target: "aarch64-unknown-linux-musl".to_string(),
+                    deb_arch: "arm64".to_string(),
+                    kernel_image: "Image".to_string(),
+                    kernel_asset: "Image-arm64".to_string(),
+                }),
+                rootfs_tarball: Some(rootfs),
+            }),
+            Vec::new(),
+        );
+        validate_oci_layout(&out, &export, Some(&config), Some(&consumer_manifest)).unwrap();
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rootfs_tarball_extract_preserves_setuid_mode() {
+        let root = temp_test_dir("extract-setuid");
+        let src = root.join("src");
+        let sudo = src.join("usr/bin/sudo");
+        fs::create_dir_all(sudo.parent().unwrap()).unwrap();
+        fs::write(&sudo, b"sudo").unwrap();
+        fs::set_permissions(&sudo, fs::Permissions::from_mode(0o4755)).unwrap();
+        let tarball = root.join("rootfs.tar");
+        let status = Command::new("tar")
+            .arg("-C")
+            .arg(&src)
+            .arg("-cf")
+            .arg(&tarball)
+            .arg(".")
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let out = root.join("out");
+        extract_rootfs_tarball(&tarball, &out, &root.join("extract.log")).unwrap();
+
+        let mode = fs::metadata(out.join("usr/bin/sudo"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o4755);
 
         fs::remove_dir_all(root).unwrap();
     }
