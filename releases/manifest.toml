@@ -27,6 +27,7 @@ sub_issues = [
   { id = 290, scope = "mmux: installer validation", url = "https://github.com/chungers/motlie/issues/290" },
   { id = 291, scope = "mmux: npm publication", url = "https://github.com/chungers/motlie/issues/291" },
   { id = 292, scope = "mmux: Homebrew formula + bottles", url = "https://github.com/chungers/motlie/issues/292" },
+  { id = 298, scope = "mmux: final Darwin artifacts from tag", url = "https://github.com/chungers/motlie/issues/298" },
 ]
 
 [release]
