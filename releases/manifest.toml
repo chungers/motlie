@@ -107,12 +107,15 @@ evidence = [
 
 [[gate]]
 id = "final-tag-created"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-17T05:59:35Z"
+completed_by = "@gpt55-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "tag", ref = "2026-05-apex-anchor", note = "Final source tag pushed to origin at 2e04a60d8ea57d9b03a81bc01b3210b13d17bedb." },
+  { kind = "tag-ref", ref = "refs/tags/2026-05-apex-anchor", note = "git ls-remote confirmed origin tag points to the release branch merge commit for PR #295." },
+]
 
 [[gate]]
 id = "github-release-published"
