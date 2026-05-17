@@ -152,14 +152,15 @@ requires_macos_signing = true
 
 [target.status]
 state = "staged"
-completed_at = "2026-05-17T03:59:36Z"
-completed_by = "@opus47-rel-eng"
+completed_at = "2026-05-17T05:10:00Z"
+completed_by = "@chungers"
 source_commit = "03997b45"
 evidence = [
   { kind = "host", ref = "macmini", note = "Darwin 24.5.0 arm64, macOS 15.5 (native build)" },
   { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08)", note = "rustc -Vv" },
   { kind = "toolchain", ref = "cargo 1.92.0 (344c4567c 2025-10-21)", note = "cargo -V" },
   { kind = "file", ref = "target/aarch64-apple-darwin/release/mmux", note = "Mach-O 64-bit executable arm64" },
+  { kind = "manual-smoke", ref = "operator interactive smoke on macmini (Darwin 24.5.0 arm64, macOS 15.5)", note = "@chungers manually launched the staged darwin-arm64 binary against a real tmux server; TUI rendered, Help modal showed the Version: 0.1.0 line, attach/detach and quit worked cleanly. Confirms the help_modal unit test result holds in a real terminal session." },
 ]
 
 # ----- gates: (id, target_id) keyed with rollups -----
