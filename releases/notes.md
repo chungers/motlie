@@ -40,7 +40,8 @@ codesign --verify --strict --verbose=2 <installed-path>
 
 ## Known Issues
 
-See per-binary notes.
+See per-binary notes. For this release, archive payloads contain `bin/mmux` only;
+`README.md` and `LICENSE` files are explicitly deferred.
 
 ## Assets
 

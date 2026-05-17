@@ -33,6 +33,7 @@ Requires `tmux` on the target host.
 ## Known Issues
 
 - SSH `ForceCommand` integration tests are env-gated, not yet in CI ([#232](https://github.com/chungers/motlie/issues/232)).
+- Archive payloads contain `bin/mmux` only; `README.md` and `LICENSE` files are explicitly deferred for this release.
 
 ## References
 
