@@ -2104,8 +2104,9 @@ pub(crate) fn modal_content(modal: &ModalState) -> ModalView {
         ModalState::Help => ModalView {
             title: " Help ",
             body: ModalBody::Text(format!(
-                "{}\n\nBuild date: {}\nGit SHA: {}\n\n{}",
+                "{}\n\nVersion: {}\nBuild date: {}\nGit SHA: {}\n\n{}",
                 MOTLIE_PLACEHOLDER,
+                env!("CARGO_PKG_VERSION"),
                 BUILD_DATE,
                 short_build_git_sha(),
                 HELP_KEY_FUNCTIONS
