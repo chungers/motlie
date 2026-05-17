@@ -502,12 +502,21 @@ evidence = []
 id = "installer-validated"
 target_id = "darwin-arm64"
 channel = "installer"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-17T06:56:53Z"
+completed_by = "@chungers"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "host", ref = "mac-mini-m4pro (Darwin 24.5.0 arm64, macOS 15.5)", note = "Apple Silicon macmini; matches darwin-arm64 target" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh | sh", note = "operator @chungers ran the release-pinned installer end-to-end; install completed successfully" },
+  { kind = "installer-url", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh", sha256 = "ef05504895e6e04e471eff1c88bd4472df46c1dcd3f4fb3ae87cd56693685970", note = "4657 bytes; matches the asset uploaded in github-release-published evidence" },
+  { kind = "install-path", ref = "/usr/local/bin/mmux", note = "-rwxr-xr-x root:wheel 5646032 bytes" },
+  { kind = "runtime", ref = "/usr/local/bin/mmux --version", note = "mmux 0.1.0" },
+  { kind = "codesign", ref = "codesign --verify --strict --verbose=2 /usr/local/bin/mmux", note = "valid on disk; satisfies its Designated Requirement" },
+  { kind = "codesign", ref = "Identifier=mmux-5555494489f2c9ec022a3f4db5a1cae51f6d1c00; Format=Mach-O thin (arm64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv on installed binary; identifier matches the final-tag darwin-arm64 build identifier from PR #300, confirming this is the genuine release artifact and not a substituted binary" },
+  { kind = "public-access", ref = "curl -sSL -o /dev/null -w %{http_code} https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh", note = "HTTP 200 after repo visibility flipped public; prior 404 was due to private-repo asset access requiring auth" },
+]
 
 # npm-published
 
