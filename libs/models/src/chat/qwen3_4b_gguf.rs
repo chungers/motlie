@@ -56,7 +56,7 @@ pub fn descriptor() -> BundleDescriptor {
         model_id: identity.id,
         display_name: "Qwen3 4B (GGUF/llama.cpp)".into(),
         family: identity.family,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        capabilities: motlie_model::Capabilities::chat_completion_and_tool_use(),
         backend: BackendKind::LlamaCpp,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
@@ -100,6 +100,7 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BundleFamily;
     use motlie_model::CapabilityDescriptor;
     use motlie_model::eval::EvalTrack;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -124,11 +125,17 @@ mod tests {
                 .capabilities
                 .supports(motlie_model::CapabilityKind::Completion)
         );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::ToolUse)
+        );
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
                 CapabilityDescriptor::chat(),
                 CapabilityDescriptor::completion(),
+                CapabilityDescriptor::tool_use(),
             ]
         );
 
@@ -157,7 +164,7 @@ mod tests {
     #[test]
     fn local_gguf_resolution_rejects_cache_without_gguf_files() {
         let root = unique_temp_dir();
-        let snapshot = create_fake_hf_gguf_cache(&root, "Qwen/Qwen3-4B-GGUF");
+        let _snapshot = create_fake_hf_gguf_cache(&root, "Qwen/Qwen3-4B-GGUF");
         // snapshot exists but has no .gguf files
 
         let error = resolve_local_gguf_root(&root).expect_err("cache without .gguf should fail");

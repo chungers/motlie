@@ -163,6 +163,8 @@ and their format-specific loading:
 
 ```rust
 pub trait BackendAdapter: Send + Sync {
+    type Handle: BundleHandle;
+
     /// Which checkpoint formats this adapter can load.
     fn supported_formats(&self) -> &[CheckpointFormat];
 
@@ -178,7 +180,7 @@ pub trait BackendAdapter: Send + Sync {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError>;
+    ) -> Result<Self::Handle, ModelError>;
 }
 ```
 

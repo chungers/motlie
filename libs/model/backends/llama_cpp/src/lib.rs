@@ -10,5 +10,6 @@ mod common;
 mod text;
 
 pub use text::{
-    LlamaCppTextAdapter, LlamaCppTextArch, LlamaCppTextBundle, LlamaCppTextHandle, LlamaCppTextSpec,
+    LlamaCppTextAdapter, LlamaCppTextArch, LlamaCppTextBundle, LlamaCppTextHandle,
+    LlamaCppTextSpec, ThinkingMode,
 };

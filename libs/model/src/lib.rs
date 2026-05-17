@@ -15,25 +15,31 @@ pub mod metrics;
 #[cfg(feature = "metrics-runtime")]
 pub mod metrics_runtime;
 pub mod speech;
+pub mod tool;
 pub mod transcription;
 pub mod typed;
 pub mod units;
 
-pub use chat::{ChatMessage, ChatRole, ContentPart};
+pub use chat::{ChatMessage, ChatMessageError, ChatRole, ContentPart};
 pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
 pub use eval::EvalTrack;
 pub use generation::{
-    ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
+    ChatFinishReason, ChatRequest, ChatResponse, CompletionRequest, CompletionResponse,
+    GenerationParams, GenerationUsage,
 };
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
 pub use speech::SpeechParams;
+pub use tool::{
+    Tool, ToolArgumentError, ToolArguments, ToolCall, ToolCallError, ToolCallId, ToolCallIdError,
+    ToolChoice, ToolInputSchema, ToolName, ToolNameError, ToolSchemaError, ToolSpec,
+};
 pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
 pub use typed::{
-    AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
+    stream_speech_into_asr, AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
     BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer, CloneReference, Compose,
     I16MonoResampler, I16ToF32, IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
     SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber, SynthesisRequest,
-    TranscriptionSession, VoiceCloneSynthesizer, stream_speech_into_asr,
+    TranscriptionSession, VoiceCloneSynthesizer,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
@@ -149,6 +155,7 @@ pub enum CapabilityKind {
     Embeddings,
     Ocr,
     Speech,
+    ToolUse,
     Transcription,
     Vision,
     VoiceClone,
@@ -265,6 +272,16 @@ impl CapabilityDescriptor {
             "Image content parts accepted on the chat surface.",
             vec![ContentKind::Image, ContentKind::Text],
             vec![ContentKind::Text],
+            InteractionStyle::MultiTurn,
+        )
+    }
+
+    pub fn tool_use() -> Self {
+        Self::new(
+            CapabilityKind::ToolUse,
+            "Tool definitions, assistant tool calls, and tool-result turns on the chat surface.",
+            vec![ContentKind::Text, ContentKind::StructuredJson],
+            vec![ContentKind::Text, ContentKind::StructuredJson],
             InteractionStyle::MultiTurn,
         )
     }
@@ -421,10 +438,33 @@ impl Capabilities {
         ])
     }
 
+    pub fn chat_completion_and_tool_use() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::chat(),
+            CapabilityDescriptor::completion(),
+            CapabilityDescriptor::tool_use(),
+        ])
+    }
+
     pub fn multimodal_chat_and_vision() -> Self {
         Self::new(vec![
             CapabilityDescriptor::multimodal_chat(),
             CapabilityDescriptor::vision(),
+        ])
+    }
+
+    pub fn multimodal_chat_vision_and_tool_use() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::multimodal_chat(),
+            CapabilityDescriptor::vision(),
+            CapabilityDescriptor::tool_use(),
+        ])
+    }
+
+    pub fn chat_with_tool_use() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::chat(),
+            CapabilityDescriptor::tool_use(),
         ])
     }
 
@@ -890,6 +930,50 @@ mod tests {
     }
 
     #[test]
+    fn tool_use_builtin_has_expected_shape() {
+        let descriptor = CapabilityDescriptor::tool_use();
+
+        assert_eq!(descriptor.kind, CapabilityKind::ToolUse);
+        assert_eq!(
+            descriptor.inputs,
+            vec![ContentKind::Text, ContentKind::StructuredJson]
+        );
+        assert_eq!(
+            descriptor.outputs,
+            vec![ContentKind::Text, ContentKind::StructuredJson]
+        );
+        assert_eq!(descriptor.interaction, InteractionStyle::MultiTurn);
+    }
+
+    #[test]
+    fn chat_with_tool_use_reports_tool_support() {
+        let capabilities = Capabilities::chat_with_tool_use();
+
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(capabilities.supports(CapabilityKind::ToolUse));
+        assert!(!capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
+    fn chat_completion_with_tool_use_reports_all_supported_capabilities() {
+        let capabilities = Capabilities::chat_completion_and_tool_use();
+
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(capabilities.supports(CapabilityKind::Completion));
+        assert!(capabilities.supports(CapabilityKind::ToolUse));
+    }
+
+    #[test]
+    fn multimodal_chat_vision_with_tool_use_reports_all_supported_capabilities() {
+        let capabilities = Capabilities::multimodal_chat_vision_and_tool_use();
+
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(capabilities.supports(CapabilityKind::Vision));
+        assert!(capabilities.supports(CapabilityKind::ToolUse));
+        assert!(!capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
     fn metadata_round_trips_clone_and_equality() {
         let metadata = BundleMetadata {
             id: BundleId::new("embeddinggemma_300m"),
@@ -991,11 +1075,9 @@ mod tests {
         let bundle_id = BundleId::new("test_bundle");
 
         let no_support = QuantizationSupport::none();
-        assert!(
-            no_support
-                .resolve(Some(QuantizationBits::Four), &bundle_id)
-                .is_err()
-        );
+        assert!(no_support
+            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .is_err());
         assert_eq!(no_support.resolve(None, &bundle_id).unwrap(), None);
 
         let q4_q8 = QuantizationSupport::with_recommended(
@@ -1021,11 +1103,9 @@ mod tests {
         );
 
         let q8_only = QuantizationSupport::without_recommended([QuantizationBits::Eight]);
-        assert!(
-            q8_only
-                .resolve(Some(QuantizationBits::Four), &bundle_id)
-                .is_err()
-        );
+        assert!(q8_only
+            .resolve(Some(QuantizationBits::Four), &bundle_id)
+            .is_err());
         assert_eq!(
             q8_only
                 .resolve(Some(QuantizationBits::Eight), &bundle_id)

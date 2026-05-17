@@ -50,12 +50,13 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 pub fn descriptor() -> BundleDescriptor {
     let identity = identity();
     let checkpoint = checkpoint();
+    let spec = MistralMultimodalSpec::gemma4_e2b();
     BundleDescriptor {
         id: BundleId::new("gemma4_e2b"),
         model_id: identity.id.clone(),
         display_name: identity.display_name.clone(),
         family: identity.family,
-        capabilities: identity.capabilities,
+        capabilities: spec.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
@@ -115,8 +116,8 @@ fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::{BundleFamily, Catalog};
-    use motlie_model::CapabilityKind;
     use motlie_model::eval::EvalTrack;
+    use motlie_model::{CapabilityDescriptor, CapabilityKind};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -129,6 +130,15 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
         assert!(descriptor.capabilities.supports(CapabilityKind::Vision));
+        assert!(descriptor.capabilities.supports(CapabilityKind::ToolUse));
+        assert_eq!(
+            descriptor.capability_descriptors(),
+            &[
+                CapabilityDescriptor::multimodal_chat(),
+                CapabilityDescriptor::vision(),
+                CapabilityDescriptor::tool_use(),
+            ]
+        );
         let artifacts = descriptor
             .artifacts
             .expect("descriptor should expose curated artifact control");
@@ -155,11 +165,9 @@ mod tests {
         #[cfg(feature = "model-gemma4-e2b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(
-                catalog
-                    .bundles_for_track(EvalTrack::Chat)
-                    .any(|b| b.id == bundle_id)
-            );
+            assert!(catalog
+                .bundles_for_track(EvalTrack::Chat)
+                .any(|b| b.id == bundle_id));
         }
     }
 

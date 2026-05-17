@@ -19,6 +19,9 @@
 | 2026-04-09 | @codex-researcher: Added handle-level metric snapshots and unit-safe wrappers. Runtime/request aggregates now live on `BundleHandle::metric_snapshot()` instead of individual responses. | Overview, Core Types, Bundle API Sketch, Notes |
 | 2026-04-09 | @codex-researcher: Documented the current cross-platform runtime-metrics implementation. `mistral` backends and examples use `sysinfo` for current RSS on macOS and Linux, with Motlie maintaining the observed peak in-handle rather than relying on an OS-native historical peak counter. | Handle-Level Metrics, Notes |
 | 2026-04-09 | @codex-researcher: Added the second embedding slice to the quantization examples. `QuantizationSupport::without_recommended([Q8])` is now concretely exercised by the Qwen3-Embedding-0.6B bundle, while EmbeddingGemma remains unquantized. | Core Types |
+| 2026-05-11 | @codex-tool-calling: Added the typed tool-calling chat vocabulary: `ToolSpec`, `ToolInputSchema`, `ToolArguments`, `ToolChoice`, `ToolCall`, `ChatRole::Tool`, tool-aware `ChatRequest`/`ChatResponse` fields, and descriptive `CapabilityKind::ToolUse`. Backend adapters still gate tool-bearing requests until concrete model paths are wired and tested. | Overview, Core Types, Request Envelopes |
+| 2026-05-13 | @codex-tool-calling: Added typed Rust tool binding helpers, `Capabilities` helpers for chat/completion/tool-use combinations, and the safetensors `mistral.rs` adapter path for Qwen3/Gemma 4 tool calls. Runtime tool execution stays outside the core `motlie-model` contract; examples use static `motlie_models::ToolList` tuples. GGUF tool-bearing requests remain gated by the llama.cpp adapter. | Overview, Core Types, Request Envelopes |
+| 2026-05-13 | @codex-tool-calling: Added the llama.cpp GGUF adapter path for tool-bearing chat through OpenAI-compatible chat templates. GGUF descriptor advertising remains gated pending local artifact smoke validation. | Overview |
 
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
@@ -34,7 +37,7 @@ The first concrete `libs/model` API now includes:
 - `ArtifactPolicy`
 - `ModelError`
 - `EmbeddingDistance`, `EmbeddingNormalization`, `EmbeddingSpec`, and `Embedding`
-- request/response envelopes for chat, completion, and embeddings
+- request/response envelopes for chat, tool-aware chat, completion, and embeddings
 - the `ModelBundle`, `BundleHandle`, `ChatModel`, `CompletionModel`, and `EmbeddingModel` traits
 - lightweight eval types in `model::eval`
 
@@ -44,7 +47,7 @@ Important scope note:
 
 - this API covers the embedding vertical slice, the first text-only chat slice (Qwen3-4B), and the first multimodal chat slice (Gemma 4 E2B-it)
 - `QuantizationBits` has been added to `StartOptions` for ISQ quantization of local chat models
-- remaining planned additive extensions are tracked in `DESIGN.md` / `PLAN.md`, including `ChatRole::Tool` and richer `ChatResponse` metadata
+- the core tool-calling chat vocabulary is present; safetensors Qwen3/Gemma 4 advertise `CapabilityKind::ToolUse` after `mistral.rs` adapter tests, while GGUF variants have adapter support but remain descriptor-gated until local chat-template smoke validation lands
 
 For the current vertical slice, this contract is intended to support an end-to-end flow of:
 
@@ -88,9 +91,18 @@ Primary capability request/response types:
 - `ChatRole`
 - `ContentPart`
 - `ChatMessage`
+- `ToolName`
+- `ToolCallId`
+- `ToolInputSchema`
+- `ToolSpec`
+- `ToolArguments`
+- `ToolChoice`
+- `ToolCall`
 - `GenerationParams`
 - `ChatRequest`
 - `ChatResponse`
+- `ChatFinishReason`
+- `GenerationUsage`
 - `CompletionRequest`
 - `CompletionResponse`
 - `EmbeddingRequest`
@@ -98,8 +110,9 @@ Primary capability request/response types:
 
 Known near-term additive follow-ups for chat-capable bundles:
 
-- `ChatRole::Tool`
-- richer `ChatResponse` metadata
+- live smoke validation for GGUF chat-template preservation before adding `CapabilityKind::ToolUse` to GGUF descriptors
+- curated descriptor gating for `CapabilityKind::ToolUse`
+- optional examples that demonstrate caller-owned tool execution loops
 
 Primary traits:
 
@@ -208,6 +221,11 @@ runtime behavior.
 
 `Capabilities::new(...)` canonicalizes descriptors by `CapabilityKind`: the first descriptor for a kind wins, later duplicates are dropped, and `supports(...)` always reflects exactly the descriptor set stored in the struct.
 
+Common helpers include `Capabilities::chat_and_completion()`,
+`Capabilities::chat_completion_and_tool_use()`,
+`Capabilities::multimodal_chat_and_vision()`, and
+`Capabilities::multimodal_chat_vision_and_tool_use()`.
+
 ### Request Envelopes
 
 ```rust
@@ -230,6 +248,7 @@ let chat = ChatRequest {
         max_tokens: Some(256),
         ..Default::default()
     },
+    ..Default::default()
 };
 
 let completion = CompletionRequest {
@@ -240,6 +259,89 @@ let completion = CompletionRequest {
 let embeddings = EmbeddingRequest {
     inputs: vec!["motlie model bundle".into(), "deterministic package bundle".into()],
 };
+```
+
+Tool-aware chat uses typed Rust argument structs and generated JSON Schema.
+Tool inputs are object-shaped; bind named argument structs rather than scalar
+or tuple payloads. Tool names are validated once through `ToolName`, and model
+tool-call correlation ids are carried as `ToolCallId` rather than plain strings.
+
+```rust
+use motlie_model::{ChatRequest, Tool, ToolChoice};
+use motlie_models::{tool_list, ToolList};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::future::Future;
+
+#[derive(Deserialize, JsonSchema)]
+struct AddArgs {
+    left: i64,
+    right: i64,
+}
+
+#[derive(Serialize)]
+struct AddOutput {
+    value: i64,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("add failed")]
+struct AddError;
+
+struct AddTool;
+
+impl Tool for AddTool {
+    type Args = AddArgs;
+    type Output = AddOutput;
+    type Error = AddError;
+
+    fn name(&self) -> &'static str { "add" }
+    fn description(&self) -> &'static str { "Add two signed integers." }
+    fn call(&self, args: Self::Args) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        async move {
+            Ok(AddOutput {
+                value: args.left + args.right,
+            })
+        }
+    }
+}
+
+let tools = tool_list!(AddTool);
+
+let chat = ChatRequest {
+    tools: tools.specs()?,
+    tool_choice: Some(ToolChoice::Auto),
+    ..Default::default()
+};
+```
+
+An inline closure uses the same typed path by storing the closure in a concrete
+tool struct:
+
+```rust
+struct MultiplyTool<F> { f: F }
+
+impl<F, Fut> Tool for MultiplyTool<F>
+where
+    F: Fn(AddArgs) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<AddOutput, AddError>> + Send,
+{
+    type Args = AddArgs;
+    type Output = AddOutput;
+    type Error = AddError;
+
+    fn name(&self) -> &'static str { "multiply" }
+    fn description(&self) -> &'static str { "Multiply two signed integers." }
+    fn call(&self, args: Self::Args) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        (self.f)(args)
+    }
+}
+
+let tools = tool_list!(MultiplyTool {
+    f: |args: AddArgs| async move {
+        Ok(AddOutput { value: args.left * args.right })
+    },
+});
 ```
 
 ### Trait Shapes
@@ -254,6 +356,8 @@ use motlie_model::{
 
 #[async_trait]
 impl ModelBundle for MyBundle {
+    type Handle = MyHandle;
+
     fn id(&self) -> &BundleId { todo!() }
     fn metadata(&self) -> &BundleMetadata { todo!() }
     fn capabilities(&self) -> &Capabilities { todo!() }
@@ -261,7 +365,7 @@ impl ModelBundle for MyBundle {
     async fn start(
         &self,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         todo!()
     }
 }

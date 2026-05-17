@@ -60,7 +60,7 @@ pub fn descriptor() -> BundleDescriptor {
         model_id: identity.id,
         display_name: "Gemma 4 E2B-it (GGUF/llama.cpp)".into(),
         family: identity.family,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        capabilities: motlie_model::Capabilities::chat_completion_and_tool_use(),
         backend: BackendKind::LlamaCpp,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
@@ -118,6 +118,7 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
         assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
         assert!(descriptor.capabilities.supports(CapabilityKind::Completion));
+        assert!(descriptor.capabilities.supports(CapabilityKind::ToolUse));
         let artifacts = descriptor
             .artifacts
             .expect("descriptor should expose curated artifact control");
@@ -127,6 +128,7 @@ mod tests {
         assert!(!artifacts.includes("README.md"));
     }
 
+    #[cfg(feature = "model-gemma4-e2b")]
     #[test]
     fn identity_matches_logical_gemma4_model() {
         assert_eq!(identity(), super::gemma4_e2b::identity());
