@@ -491,12 +491,15 @@ evidence = []
 id = "installer-validated"
 target_id = "darwin-x64"
 channel = "installer"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
-evidence = []
+state = "deferred"
+completed_at = "2026-05-17T07:15:00Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = "no Intel Mac available to operator; Rosetta-only validation on Apple Silicon does not exercise the native execution path that an Intel-Mac end user would hit. Defer rather than over-claim. Final-tag darwin-x64 artifact + codesign are already proven via PR #300 evidence (Mach-O thin x86_64, ad-hoc signed, executes mmux --version under Rosetta), so the installer-flow gap is the only thing not proven. Re-open this gate when an Intel-Mac operator can run `curl -fsSL https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh | sh && mmux --version` natively, or accept Rosetta as the v0 validation surrogate in a follow-up decision."
+evidence = [
+  { kind = "deferral", ref = "release-owner approved deferring darwin-x64 installer-validated for 2026-05-apex-anchor", note = "@chungers explicitly chose to defer rather than smoke under Rosetta" },
+  { kind = "alternate-evidence", ref = "[[gate]] id=darwin-archives-packaged target_id=darwin-x64", note = "final-tag darwin-x64 binary is built, codesigned, runs under Rosetta on Apple Silicon, identifier mmux-55554944dc47cc2258bf31eb840e07802f725391 — the binary itself is proven; only the installer-flow on a real Intel host is unproven" },
+]
 
 [[gate]]
 id = "installer-validated"
