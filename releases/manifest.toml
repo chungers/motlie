@@ -16,10 +16,18 @@ main_merge_policy = "never-merge-release-branch"
 main_fix_policy = "cherry-pick-source-fixes-only"
 
 [tracking]
-master_issue = ""
-master_issue_state = "planned"
+master_issue = "https://github.com/chungers/motlie/issues/287"
+master_issue_state = "open"
 master_issue_policy = "close-after-github-release-live-and-final-ledger-pushed"
 sub_issue_policy = "one-or-more-issues-per-platform-channel-or-binary-gate"
+label = "release:2026-05-apex-anchor"
+sub_issues = [
+  { id = 288, scope = "mmux: linux artifacts", url = "https://github.com/chungers/motlie/issues/288" },
+  { id = 289, scope = "mmux: darwin signing", url = "https://github.com/chungers/motlie/issues/289" },
+  { id = 290, scope = "mmux: installer validation", url = "https://github.com/chungers/motlie/issues/290" },
+  { id = 291, scope = "mmux: npm publication", url = "https://github.com/chungers/motlie/issues/291" },
+  { id = 292, scope = "mmux: Homebrew formula + bottles", url = "https://github.com/chungers/motlie/issues/292" },
+]
 
 [release]
 tag = "2026-05-apex-anchor"
@@ -48,30 +56,41 @@ published = false
 
 [[gate]]
 id = "release-branch-created"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-16T00:00:00Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "c774db18"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "branch", ref = "release/2026-05-apex-anchor", note = "pushed to origin, tracking set" },
+  { kind = "commit", ref = "c774db18", note = "bootstrap commit: manifests + notes + installer skeleton" },
+]
 
 [[gate]]
 id = "master-issue-created"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-16T00:00:00Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "c774db18"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/287", note = "master tracking issue created, label release:2026-05-apex-anchor" },
+]
 
 [[gate]]
 id = "sub-issues-created"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-16T00:00:00Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "c774db18"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/288", note = "mmux: linux artifacts" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/289", note = "mmux: darwin signing" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/290", note = "mmux: installer validation" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/291", note = "mmux: npm publication" },
+  { kind = "issue", ref = "https://github.com/chungers/motlie/issues/292", note = "mmux: Homebrew formula + bottles" },
+]
 
 [[gate]]
 id = "release-notes-approved"
