@@ -164,6 +164,7 @@ Release note rules:
 - Use discovered per-binary manifests as the source for binary names, versions, targets, package names, install commands, and asset names.
 - Ask the release owner for the user-visible summary, notable changes, breaking changes, known issues, and audience-specific install guidance.
 - Do not publish notes with placeholders, stale target/package names, or claims inferred only from commit subjects.
+- All Markdown links in `releases/notes.md` and per-binary `releases/<bin>.md` must be absolute URLs. GitHub does not rewrite relative links in the rendered release body, so `[mmux](mmux.md)` 404s. Use `https://github.com/<owner>/<repo>/blob/<release-tag>/releases/<bin>.md` for per-binary notes; full details in `references/release-notes.md`.
 - Before `gh release create`, confirm human approval and record final notes evidence in the workspace `github-release-published` gate.
 
 Operator prompt workflow:
