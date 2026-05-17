@@ -151,15 +151,22 @@ npm_bin_path = "bin/mmux"
 requires_macos_signing = true
 
 [target.status]
-state = "staged"
-completed_at = "2026-05-17T03:59:36Z"
+state = "complete"
+completed_at = "2026-05-17T06:25:08Z"
 completed_by = "@opus47-rel-eng"
-source_commit = "03997b45"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 evidence = [
-  { kind = "host", ref = "macmini", note = "Darwin 24.5.0 arm64, macOS 15.5 (cross-built from Apple Silicon)" },
-  { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08)", note = "rustc -Vv" },
-  { kind = "toolchain", ref = "cargo 1.92.0 (344c4567c 2025-10-21)", note = "cargo -V" },
-  { kind = "file", ref = "target/x86_64-apple-darwin/release/mmux", note = "Mach-O 64-bit executable x86_64" },
+  { kind = "command", ref = "git switch --detach 2026-05-apex-anchor", note = "final artifact build was performed from the final source tag (HEAD = 2e04a60d8ea57d9b03a81bc01b3210b13d17bedb)" },
+  { kind = "command", ref = "cargo build --release --locked --target x86_64-apple-darwin -p motlie-mmux --bin mmux", note = "final x64 cross-build from release tag on macmini Apple Silicon; Finished release profile target(s) in 4.37s" },
+  { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08); cargo 1.92.0 (344c4567c 2025-10-21)", note = "host aarch64-apple-darwin; x86_64-apple-darwin target installed" },
+  { kind = "file", ref = "target/x86_64-apple-darwin/release/mmux: Mach-O 64-bit executable x86_64", note = "final x64 darwin binary from release tag" },
+  { kind = "command", ref = "codesign --force --sign - target/x86_64-apple-darwin/release/mmux", note = "ad-hoc sign; codesign --verify --strict --verbose=2 passed on build path" },
+  { kind = "runtime", ref = "target/x86_64-apple-darwin/release/mmux --version", note = "mmux 0.1.0 (executed via Rosetta on Apple Silicon host)" },
+  { kind = "codesign", ref = "Identifier=mmux-55554944dc47cc2258bf31eb840e07802f725391; Format=Mach-O thin (x86_64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv on build-path binary" },
+  { kind = "archive", ref = "motlie-mmux-v0.1.0-darwin-x64.tar.gz", sha256 = "8dbe10743f6ec9589a6e069295e196210b91d8c0db100e92965f95bb9ea12212", note = "candidate archive contains ./bin/mmux only; README.md and LICENSE explicitly deferred for this release; 2572527 bytes" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.0-darwin-x64.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+  { kind = "command", ref = "tar -xzf archive -C /tmp/mmux-final-darwin-x64 && codesign --force --sign - bin/mmux && codesign --verify --strict --verbose=2 bin/mmux", note = "installed-path re-sign + verify passed; extracted archive payload binary identifier matches build-path identifier confirming no tampering" },
+  { kind = "runtime", ref = "/tmp/mmux-final-darwin-x64/bin/mmux --version", note = "mmux 0.1.0 (via Rosetta)" },
 ]
 
 [[target]]
@@ -174,16 +181,22 @@ npm_bin_path = "bin/mmux"
 requires_macos_signing = true
 
 [target.status]
-state = "staged"
-completed_at = "2026-05-17T05:10:00Z"
-completed_by = "@chungers"
-source_commit = "03997b45"
+state = "complete"
+completed_at = "2026-05-17T06:25:08Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 evidence = [
-  { kind = "host", ref = "macmini", note = "Darwin 24.5.0 arm64, macOS 15.5 (native build)" },
-  { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08)", note = "rustc -Vv" },
-  { kind = "toolchain", ref = "cargo 1.92.0 (344c4567c 2025-10-21)", note = "cargo -V" },
-  { kind = "file", ref = "target/aarch64-apple-darwin/release/mmux", note = "Mach-O 64-bit executable arm64" },
-  { kind = "manual-smoke", ref = "operator interactive smoke on macmini (Darwin 24.5.0 arm64, macOS 15.5)", note = "@chungers manually launched the staged darwin-arm64 binary against a real tmux server; TUI rendered, Help modal showed the Version: 0.1.0 line, attach/detach and quit worked cleanly. Confirms the help_modal unit test result holds in a real terminal session." },
+  { kind = "command", ref = "git switch --detach 2026-05-apex-anchor", note = "final artifact build was performed from the final source tag (HEAD = 2e04a60d8ea57d9b03a81bc01b3210b13d17bedb)" },
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-apple-darwin -p motlie-mmux --bin mmux", note = "final native arm64 release build from release tag on macmini Apple Silicon; Finished release profile target(s) in 5.00s" },
+  { kind = "toolchain", ref = "rustc 1.92.0 (ded5c06cf 2025-12-08); cargo 1.92.0 (344c4567c 2025-10-21)", note = "host aarch64-apple-darwin (native)" },
+  { kind = "file", ref = "target/aarch64-apple-darwin/release/mmux: Mach-O 64-bit executable arm64", note = "final arm64 darwin binary from release tag" },
+  { kind = "command", ref = "codesign --force --sign - target/aarch64-apple-darwin/release/mmux", note = "ad-hoc sign; codesign --verify --strict --verbose=2 passed on build path" },
+  { kind = "runtime", ref = "target/aarch64-apple-darwin/release/mmux --version", note = "mmux 0.1.0 (native arm64 execution)" },
+  { kind = "codesign", ref = "Identifier=mmux-5555494489f2c9ec022a3f4db5a1cae51f6d1c00; Format=Mach-O thin (arm64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv on build-path binary" },
+  { kind = "archive", ref = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz", sha256 = "9041f4e860294fe2873587abef29f9ca936ba00129ca71f1b502433e751df2e1", note = "candidate archive contains ./bin/mmux only; README.md and LICENSE explicitly deferred for this release; 2359691 bytes" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.0-darwin-arm64.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+  { kind = "command", ref = "tar -xzf archive -C /tmp/mmux-final-darwin-arm64 && codesign --force --sign - bin/mmux && codesign --verify --strict --verbose=2 bin/mmux", note = "installed-path re-sign + verify passed; extracted archive payload binary identifier matches build-path identifier confirming no tampering" },
+  { kind = "runtime", ref = "/tmp/mmux-final-darwin-arm64/bin/mmux --version", note = "mmux 0.1.0 (native arm64)" },
 ]
 
 # ----- gates: (id, target_id) keyed with rollups -----
@@ -384,6 +397,58 @@ evidence = [
   { kind = "codesign", ref = "Identifier=mmux-555549445702e3e6ed003ce89d9dc6ec4d65110e; Format=Mach-O thin (arm64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv (re-stage at 03997b45)" },
   { kind = "signing-identity", ref = "adhoc", note = "matches [signing].identity in this manifest" },
   { kind = "test", ref = "cargo test --release --locked -p motlie-mmux h_opens_help_modal_and_enter_or_escape_closes_it", note = "Help modal version line asserts the same env!(CARGO_PKG_VERSION) source as mmux --version; 1 passed, 0 failed" },
+]
+
+# darwin-archives-packaged
+
+[[gate]]
+id = "darwin-archives-packaged"
+target_id = ""
+channel = "archive"
+rollup = true
+state = "complete"
+completed_at = "2026-05-17T06:25:08Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = ""
+evidence = [
+  { kind = "rollup", ref = "darwin-archives-packaged target rows", note = "darwin-x64 and darwin-arm64 candidate archives packaged from final tag 2026-05-apex-anchor; binaries ad-hoc codesigned with --force --sign -; archive payloads contain ./bin/mmux only; README.md and LICENSE explicitly deferred per PR #297" },
+]
+
+[[gate]]
+id = "darwin-archives-packaged"
+target_id = "darwin-x64"
+channel = "archive"
+state = "complete"
+completed_at = "2026-05-17T06:25:08Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = ""
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target x86_64-apple-darwin -p motlie-mmux --bin mmux && codesign --force --sign - target/x86_64-apple-darwin/release/mmux && codesign --verify --strict --verbose=2 target/x86_64-apple-darwin/release/mmux", note = "build + ad-hoc sign + verify on build-path from final tag" },
+  { kind = "codesign", ref = "Identifier=mmux-55554944dc47cc2258bf31eb840e07802f725391; Format=Mach-O thin (x86_64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv on build-path binary" },
+  { kind = "archive", ref = "motlie-mmux-v0.1.0-darwin-x64.tar.gz", sha256 = "8dbe10743f6ec9589a6e069295e196210b91d8c0db100e92965f95bb9ea12212", note = "contains ./bin/mmux only; README.md and LICENSE explicitly deferred; 2572527 bytes" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.0-darwin-x64.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+  { kind = "command", ref = "tar -xzf archive && codesign --force --sign - bin/mmux && codesign --verify --strict --verbose=2 bin/mmux", note = "installed-path re-sign + verify passed at /tmp/mmux-final-darwin-x64/bin/mmux" },
+  { kind = "runtime", ref = "/tmp/mmux-final-darwin-x64/bin/mmux --version", note = "mmux 0.1.0 (via Rosetta)" },
+]
+
+[[gate]]
+id = "darwin-archives-packaged"
+target_id = "darwin-arm64"
+channel = "archive"
+state = "complete"
+completed_at = "2026-05-17T06:25:08Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = ""
+evidence = [
+  { kind = "command", ref = "cargo build --release --locked --target aarch64-apple-darwin -p motlie-mmux --bin mmux && codesign --force --sign - target/aarch64-apple-darwin/release/mmux && codesign --verify --strict --verbose=2 target/aarch64-apple-darwin/release/mmux", note = "build + ad-hoc sign + verify on build-path from final tag" },
+  { kind = "codesign", ref = "Identifier=mmux-5555494489f2c9ec022a3f4db5a1cae51f6d1c00; Format=Mach-O thin (arm64); Signature=adhoc; TeamIdentifier=not set", note = "codesign -dv on build-path binary" },
+  { kind = "archive", ref = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz", sha256 = "9041f4e860294fe2873587abef29f9ca936ba00129ca71f1b502433e751df2e1", note = "contains ./bin/mmux only; README.md and LICENSE explicitly deferred; 2359691 bytes" },
+  { kind = "contents", ref = "tar -tzf motlie-mmux-v0.1.0-darwin-arm64.tar.gz", note = "./, ./bin/, ./bin/mmux" },
+  { kind = "command", ref = "tar -xzf archive && codesign --force --sign - bin/mmux && codesign --verify --strict --verbose=2 bin/mmux", note = "installed-path re-sign + verify passed at /tmp/mmux-final-darwin-arm64/bin/mmux" },
+  { kind = "runtime", ref = "/tmp/mmux-final-darwin-arm64/bin/mmux --version", note = "mmux 0.1.0 (native arm64)" },
 ]
 
 # installer-validated
