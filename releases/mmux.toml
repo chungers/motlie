@@ -491,12 +491,15 @@ evidence = []
 id = "installer-validated"
 target_id = "darwin-x64"
 channel = "installer"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
-evidence = []
+state = "deferred"
+completed_at = "2026-05-17T07:15:00Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
+deferred_reason = "policy: Motlie supports only Apple Silicon Macs going forward. darwin-x64 is not an officially supported target; the archive + npm package are published for this release as bystander artifacts because the manifest still enables the channel, but no installer validation is required against Intel Macs. Future releases should evaluate dropping the darwin-x64 target from the manifest entirely. The darwin-x64 binary itself remains proven via PR #300 final-tag evidence (Mach-O thin x86_64, ad-hoc signed, mmux --version OK under Rosetta) — this deferral only covers the end-user-installer flow on a real Intel host, which is out of scope per policy."
+evidence = [
+  { kind = "policy", ref = "Motlie supports only Apple Silicon Macs", note = "@chungers set the project policy: Intel-Mac installer validation is out of scope and should not gate the release. Future release events should consider removing the darwin-x64 target from the per-binary manifest." },
+  { kind = "alternate-evidence", ref = "[[gate]] id=darwin-archives-packaged target_id=darwin-x64", note = "final-tag darwin-x64 binary is built, codesigned, runs under Rosetta on Apple Silicon, identifier mmux-55554944dc47cc2258bf31eb840e07802f725391 — bystander artifact only; not officially supported" },
+]
 
 [[gate]]
 id = "installer-validated"
