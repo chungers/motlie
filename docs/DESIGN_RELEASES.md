@@ -16,6 +16,7 @@
 - 2026-05-14, @gpt55-dgx: Added release notes workflow for workspace and per-binary notes, including operator prompts and publication gates.
 - 2026-05-14, @gpt55-dgx: Changed per-binary release manifests to stable `releases/<bin>.toml` files discovered by scanning `releases/`, with versions stored in manifest schema and aggregate GitHub notes generated from per-binary notes.
 - 2026-05-14, @gpt55-dgx: Added master tracking issue and sub-issue/sub-PR orchestration around the release branch manifest ledger.
+- 2026-05-17, @opus47-rel-eng: Documented that the ad-hoc signing default applies only to entitlement-free binaries; future binaries using Apple-framework entitlements (specifically `vmm` with Virtualization.framework) require Developer ID identity and a manual operator signing step to be designed when the first such binary enters release scope.
 
 ## Status
 
@@ -510,6 +511,24 @@ $(brew --prefix)/bin/mmux --version
 ```
 
 Future public distribution may add Developer ID signing and notarization. That is separate from the minimum ad-hoc signature needed for Apple Silicon execution and can be designed later if Gatekeeper/download UX requires it.
+
+### Per-binary signing policy
+
+The ad-hoc default applies only to binaries whose runtime needs no Apple-granted entitlements. `mmux` is the worked example: a TUI tmux selector that never calls a sandboxed Apple framework, so ad-hoc signing satisfies the kernel's Apple Silicon launch check and nothing else is required.
+
+Other Motlie binaries that depend on Apple frameworks gated by entitlements will require a real signing identity. The known case is `vmm` (planned hypervisor binary), which uses Apple's **Virtualization.framework** (`vz`). The framework refuses to instantiate VMs from binaries that do not carry the `com.apple.security.virtualization` entitlement, and entitlements are not honored on ad-hoc-signed binaries — they require a Developer ID Application identity (or App Store / personal team identity) to be embedded in the signature. `vmm`'s release manifest must therefore set fields like:
+
+```toml
+[signing]
+identity = "developer-id"
+required_entitlements = ["com.apple.security.virtualization"]
+entitlements_plist = "releases/vmm.entitlements.plist"
+notarization_required = true   # if the binary is distributed for browser download
+```
+
+The release skill and the per-binary manifest schema should treat `[signing].identity` as the dispatch point: `"adhoc"` runs the no-credential signing path documented above; `"developer-id"` (or other identity strings) requires the operator to have the corresponding private key in their login keychain and triggers an additional manual operator step at Phase 6.3 (final signing). That manual step is not yet specified — it should be designed when the first non-ad-hoc binary enters release scope, not earlier. Field names above are illustrative, not committed schema.
+
+CUDA-linked binaries (potential future `motlie-models` targets) also need entitlements (`com.apple.security.cs.allow-unsigned-executable-memory` etc.) if they JIT-compile kernels on macOS, but Motlie's current model surface uses ahead-of-time compiled artifacts so the entitlement requirement does not apply yet. Track this constraint as it materializes per binary.
 
 ## Artifact Naming
 
