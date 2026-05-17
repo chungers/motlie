@@ -6,19 +6,19 @@ First Motlie release event. Ships `mmux` 0.1.0.
 
 First Motlie release event. Ships `mmux` 0.1.0 — a TUI tmux session selector with
 live active-pane preview, multi-host SSH aggregation, and host-wide `ForceCommand`-safe
-operation. See [`mmux.md`](mmux.md) for capabilities, install, and references.
+operation. See [`mmux.md`](https://github.com/chungers/motlie/blob/2026-05-apex-anchor/releases/mmux.md) for capabilities, install, and references.
 
 ## Binaries
 
 | Binary | Version | Channels | Targets |
 |---|---|---|---|
-| [mmux](mmux.md) | 0.1.0 | archive, installer, npm, homebrew | linux-x64-musl, linux-arm64-musl, darwin-x64, darwin-arm64 |
+| [mmux](https://github.com/chungers/motlie/blob/2026-05-apex-anchor/releases/mmux.md) | 0.1.0 | archive, installer, npm, homebrew | linux-x64-musl, linux-arm64-musl, darwin-x64, darwin-arm64 |
 
 ## Install
 
 Each binary has its own install guidance. See per-binary notes:
 
-- [mmux 0.1.0](mmux.md) — TUI tmux session selector.
+- [mmux 0.1.0](https://github.com/chungers/motlie/blob/2026-05-apex-anchor/releases/mmux.md) — TUI tmux session selector.
 
 ## Changes
 
@@ -61,4 +61,4 @@ This release publishes the following assets at https://github.com/chungers/motli
 
 ### mmux 0.1.0
 
-See [`mmux.md`](mmux.md).
+See [`mmux.md`](https://github.com/chungers/motlie/blob/2026-05-apex-anchor/releases/mmux.md).
