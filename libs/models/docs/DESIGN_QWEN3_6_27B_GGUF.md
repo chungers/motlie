@@ -54,8 +54,9 @@ separate GGUF conversion artifact.
 - Do not add another backend crate.
 - Do not add a new core chat interface. The existing `ChatModel` /
   `ChatRequest` / `ContentPart` contract already models text and image content.
-- Do not route this model through `mistral.rs`; the `qwen35` GGUF path is a
-  llama.cpp-backed slice.
+- Do not route this model through `mistral.rs`; the Qwen3.6 GGUF path is a
+  llama.cpp-backed slice that reuses the Qwen3 template with
+  `ThinkingMode::Auto`.
 - Do not make arbitrary GGUF loading public. This remains a curated bundle with
   known artifacts.
 - Do not advertise image input unless a real llama.cpp multimodal path is
@@ -309,7 +310,8 @@ Backend tests:
 - Q5 default and Q4/Q8 override support
 - FP8 rejection until a curated FP8 GGUF artifact exists
 - CUDA default offload policy remains overrideable by env vars
-- text prompt formatting for Qwen3.6/Qwen35
+- text prompt formatting for Qwen3.6 through the Qwen3 template plus
+  `ThinkingMode::Auto`
 - image content rejection for text-only path
 - image content acceptance for multimodal path if implemented
 

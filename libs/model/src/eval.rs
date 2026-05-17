@@ -158,6 +158,14 @@ mod tests {
     }
 
     #[test]
+    fn tool_use_capability_does_not_claim_primary_eval_track() {
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&CapabilityDescriptor::tool_use()),
+            None
+        );
+    }
+
+    #[test]
     fn capabilities_project_to_embedding_track_without_duplicates() {
         let capabilities = Capabilities::new(vec![
             CapabilityDescriptor::embeddings(),

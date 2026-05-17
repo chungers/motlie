@@ -23,6 +23,7 @@ async-trait = "0.1.89"
 image = "0.25.8"
 motlie-model = { path = "../.." }
 mistralrs = "0.8.1"
+serde_json = "1.0.149"
 sysinfo = "0.36.1"
 tracing = "0.1"
 

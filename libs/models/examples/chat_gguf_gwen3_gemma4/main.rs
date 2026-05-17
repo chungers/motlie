@@ -1,26 +1,35 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
     QuantizationBits, StartOptions,
 };
 use motlie_models::{
-    ModelSelector, chat::ChatModels, default_artifact_root, quantization_label_gguf,
+    chat::ChatModels, default_artifact_root, quantization_label_gguf, ModelSelector,
 };
 use std::time::Instant;
 
 #[path = "../support.rs"]
 mod support;
+#[path = "../tool_demo_support.rs"]
+mod tool_demo_support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut chat_selector = None;
     let mut precision = None;
     let mut download_artifacts = false;
+    let mut tool_demo = false;
+    let mut tool_demo_only = false;
     let mut input_parts = Vec::new();
 
     for arg in std::env::args().skip(1) {
         if arg == "--download-artifacts" {
             download_artifacts = true;
+        } else if arg == "--tool-demo" {
+            tool_demo = true;
+        } else if arg == "--tool-demo-only" {
+            tool_demo = true;
+            tool_demo_only = true;
         } else if let Some(selector) = arg.strip_prefix("--chat=") {
             chat_selector = Some(selector.to_owned());
         } else if let Some(p) = arg.strip_prefix("--precision=") {
@@ -34,7 +43,7 @@ async fn main() -> Result<()> {
     if input.trim().is_empty() {
         bail!(
             "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- \
-             [--download-artifacts] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf] [--precision=q4|q8|f16] <prompt>\n\n\
+             [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b_gguf|google/gemma4_e2b_gguf] [--precision=q4|q8|f16] <prompt>\n\n\
              This example demonstrates chat generation via the llama.cpp backend using\n\
              GGUF-quantized weights. By default it loads Qwen3 4B (GGUF). Pass\n\
              --chat=google/gemma4_e2b_gguf to switch to Gemma 4 E2B-it (GGUF).\n\n\
@@ -139,6 +148,24 @@ async fn main() -> Result<()> {
         .chat()
         .context("llama.cpp bundle should expose chat")?;
 
+    if tool_demo_only {
+        tool_demo_support::run_tool_demo(chat).await?;
+        support::print_process_snapshot(
+            "process-after-tool-demo",
+            &support::current_process_snapshot(),
+        );
+        support::print_model_metrics("model-metrics-after-tool-demo", handle.metric_snapshot());
+        handle
+            .shutdown()
+            .await
+            .context("bundle shutdown should succeed")?;
+        support::print_process_snapshot(
+            "process-after-shutdown",
+            &support::current_process_snapshot(),
+        );
+        return Ok(());
+    }
+
     // Single-turn request.
     println!("\n--- single-turn ---");
     let started_at = Instant::now();
@@ -191,6 +218,15 @@ async fn main() -> Result<()> {
         &support::current_process_snapshot(),
     );
     support::print_model_metrics("model-metrics-after-follow-up", handle.metric_snapshot());
+
+    if tool_demo {
+        tool_demo_support::run_tool_demo(chat).await?;
+        support::print_process_snapshot(
+            "process-after-tool-demo",
+            &support::current_process_snapshot(),
+        );
+        support::print_model_metrics("model-metrics-after-tool-demo", handle.metric_snapshot());
+    }
 
     // Completion path.
     println!("\n--- completion ---");

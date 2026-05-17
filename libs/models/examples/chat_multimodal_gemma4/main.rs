@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
     QuantizationBits, StartOptions,
@@ -9,17 +9,26 @@ use std::time::Instant;
 
 #[path = "../support.rs"]
 mod support;
+#[path = "../tool_demo_support.rs"]
+mod tool_demo_support;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut precision = None;
     let mut image_path = None;
     let mut download_artifacts = false;
+    let mut tool_demo = false;
+    let mut tool_demo_only = false;
     let mut input_parts = Vec::new();
 
     for arg in std::env::args().skip(1) {
         if arg == "--download-artifacts" {
             download_artifacts = true;
+        } else if arg == "--tool-demo" {
+            tool_demo = true;
+        } else if arg == "--tool-demo-only" {
+            tool_demo = true;
+            tool_demo_only = true;
         } else if let Some(p) = arg.strip_prefix("--precision=") {
             precision = Some(p.to_owned());
         } else if let Some(path) = arg.strip_prefix("--image=") {
@@ -33,7 +42,7 @@ async fn main() -> Result<()> {
     if input.trim().is_empty() {
         bail!(
             "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- \
-             [--download-artifacts] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
+             [--download-artifacts] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
         );
     }
 
@@ -117,6 +126,24 @@ async fn main() -> Result<()> {
 
     let chat = handle.chat().context("gemma4 bundle should expose chat")?;
 
+    if tool_demo_only {
+        tool_demo_support::run_tool_demo(chat).await?;
+        support::print_process_snapshot(
+            "process-after-tool-demo",
+            &support::current_process_snapshot(),
+        );
+        support::print_model_metrics("model-metrics-after-tool-demo", handle.metric_snapshot());
+        handle
+            .shutdown()
+            .await
+            .context("bundle shutdown should succeed")?;
+        support::print_process_snapshot(
+            "process-after-shutdown",
+            &support::current_process_snapshot(),
+        );
+        return Ok(());
+    }
+
     println!("\n--- text-only chat ---");
     let started_at = Instant::now();
     let response = chat
@@ -182,6 +209,15 @@ async fn main() -> Result<()> {
     } else {
         println!("\n--- image + text chat ---");
         println!("skipped: pass --image=/path/to/image to exercise the multimodal path");
+    }
+
+    if tool_demo {
+        tool_demo_support::run_tool_demo(chat).await?;
+        support::print_process_snapshot(
+            "process-after-tool-demo",
+            &support::current_process_snapshot(),
+        );
+        support::print_model_metrics("model-metrics-after-tool-demo", handle.metric_snapshot());
     }
 
     handle
