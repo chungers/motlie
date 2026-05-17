@@ -4,7 +4,9 @@ First Motlie release event. Ships `mmux` 0.1.0.
 
 ## Summary
 
-(Draft — release owner to fill in user-visible summary of the release event before final tag.)
+First Motlie release event. Ships `mmux` 0.1.0 — a TUI tmux session selector with
+live active-pane preview, multi-host SSH aggregation, and host-wide `ForceCommand`-safe
+operation. See [`mmux.md`](mmux.md) for capabilities, install, and references.
 
 ## Binaries
 
