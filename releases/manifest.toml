@@ -1,0 +1,119 @@
+schema_version = 1
+kind = "motlie.workspace-release"
+state = "planned"
+
+[identity]
+release_name = "2026-05-apex-anchor"
+release_month = "2026-05"
+codename = "apex-anchor"
+
+[coordination]
+source_repo = "chungers/motlie"
+base_branch = "main"
+release_branch = "release/2026-05-apex-anchor"
+sub_prs_allowed = true
+main_merge_policy = "never-merge-release-branch"
+main_fix_policy = "cherry-pick-source-fixes-only"
+
+[tracking]
+master_issue = ""
+master_issue_state = "planned"
+master_issue_policy = "close-after-github-release-live-and-final-ledger-pushed"
+sub_issue_policy = "one-or-more-issues-per-platform-channel-or-binary-gate"
+
+[release]
+tag = "2026-05-apex-anchor"
+notes_path = "releases/notes.md"
+github_release = ""
+source_ref_policy = "final-artifacts-must-build-from-final-tag"
+
+[discovery]
+binary_manifest_glob = "releases/*.toml"
+exclude = ["releases/manifest.toml"]
+required_kind = "motlie.binary-release"
+filename_policy = "releases/<identity.binary>.toml"
+
+[defaults]
+linux_default_libc = "musl"
+linux_static_policy = "default-static-musl-when-feasible"
+
+[[binary_completion]]
+binary = "mmux"
+version = "0.1.0"
+manifest = "releases/mmux.toml"
+notes_path = "releases/mmux.md"
+state = "planned"
+final_artifacts_complete = false
+published = false
+
+[[gate]]
+id = "release-branch-created"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "master-issue-created"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "sub-issues-created"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "release-notes-approved"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "final-tag-created"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "github-release-published"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "post-release-ledger-committed"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
+
+[[gate]]
+id = "master-issue-closed"
+state = "planned"
+completed_at = ""
+completed_by = ""
+source_commit = ""
+deferred_reason = ""
+evidence = []
