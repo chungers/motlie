@@ -94,12 +94,16 @@ evidence = [
 
 [[gate]]
 id = "release-notes-approved"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-17T05:51:52Z"
+completed_by = "@gpt55-rel-eng"
+source_commit = "d6826ae912782315eb3ebbaf8fbc8526ba6c23ae"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "human-approval", ref = "chat approval: approved. continue", note = "Release owner approved continuing after reviewing release notes links for releases/notes.md and releases/mmux.md on release/2026-05-apex-anchor." },
+  { kind = "notes", ref = "releases/notes.md", note = "Aggregate GitHub Release notes reviewed on release branch." },
+  { kind = "notes", ref = "releases/mmux.md", note = "Per-binary mmux release notes reviewed on release branch." },
+]
 
 [[gate]]
 id = "final-tag-created"
