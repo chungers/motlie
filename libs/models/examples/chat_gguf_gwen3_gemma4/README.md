@@ -101,14 +101,32 @@ cargo run -p motlie-models --no-default-features \
 
 Switch to Gemma 4 E4B. With no `--precision` flag this uses the E4B spec's
 recommended Q8_0 GGUF artifact, `temperature=1.0`, `top_p=0.95`, and
-`thinking=Auto`:
+`thinking=Auto`. The example prints the recommended settings, the effective
+system prompt, the assistant priming turn, and any returned thinking trace:
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-gguf \
   --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_e4b_gguf \
   --system="You are Gemma, a helpful assistant." \
+  --assistant="I will keep the answer compact." \
   --thinking=auto \
   "Summarize ownership in one paragraph"
+```
+
+Representative prompt-control output:
+
+```text
+recommended-generation-params: GenerationParams { max_tokens: None, temperature: Some(1.0), top_p: Some(0.95), stop_sequences: [] }
+recommended-system-prompt: Some("You are Gemma, a helpful assistant.")
+recommended-quantization: GGUF Q8_0
+recommended-thinking: Auto
+effective-chat-params: GenerationParams { max_tokens: None, temperature: Some(1.0), top_p: Some(0.95), stop_sequences: [] }
+thinking: Auto
+system-prompt: enabled
+system-prompt-content: You are Gemma, a helpful assistant.
+assistant-priming: enabled
+assistant-priming-content: I will keep the answer compact.
+single-turn-thinking-trace: <reasoning trace when returned by the backend, otherwise none>
 ```
 
 Full precision (F16, no quantization):

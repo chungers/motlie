@@ -71,10 +71,18 @@ The current curated chat LLMs are model-capable for tool calling, but Motlie sho
 | Curated selector | Backend | Common capability stance | Convention behind the adapter |
 | --- | --- | --- | --- |
 | `google/gemma4_e2b` | `mistral.rs` multimodal | ToolUse advertised after adapter unit tests. | Gemma 4 chat template with `tools`, assistant `tool_calls`, tool-result turns, and Gemma tool-call/tool-response tokens. |
+| `google/gemma4_e4b` | `mistral.rs` multimodal | ToolUse advertised on the same generic adapter path as E2B. | Same Gemma 4 convention as E2B; the `mistral.rs` adapter is bundle-agnostic once the template and request fields are available. |
 | `google/gemma4_e2b_gguf` | `llama.cpp` text | Tool-capable if the GGUF template is preserved and routed through llama.cpp chat-template helpers. | Same Gemma 4 convention, exposed to Motlie through an OpenAI-compatible JSON bridge. |
+| `google/gemma4_e4b_gguf` | `llama.cpp` text | ToolUse advertised after model-specific GGUF template smoke. | Same Gemma 4 convention; GGUF bundles are validated per model because the embedded chat template owns the concrete tool markers. |
 | `qwen/qwen3_4b` | `mistral.rs` text | ToolUse advertised after adapter unit tests. | Qwen3/Hermes-style tools, `<tool_call>`, and `<tool_response>` through the model chat template. |
 | `qwen/qwen3_4b_gguf` | `llama.cpp` text | Tool-capable if the GGUF template is preserved and routed through llama.cpp chat-template helpers. | Same Qwen3/Hermes convention, exposed to Motlie through an OpenAI-compatible JSON bridge. |
 | `qwen/qwen3_6_27b_gguf` | `llama.cpp` text | Tool-capable after GGUF template validation and adapter support. | Qwen-family tool convention plus Qwen3.6 thinking-mode handling. |
+
+Capability gating policy: safetensors bundles on `mistral.rs` may advertise `ToolUse`
+when the shared adapter path is covered because the backend owns the generic tool
+request/response mapping. GGUF bundles on `llama.cpp` require model-specific
+chat-template smoke before advertising `ToolUse` because the artifact's embedded
+template defines the concrete tool and thinking markers.
 
 ## Design Principle
 

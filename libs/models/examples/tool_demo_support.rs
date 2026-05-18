@@ -241,6 +241,7 @@ pub async fn run_tool_demo_with_options(
 
         println!("tool-round: {round}");
         println!("tool-request-response: {}", response.content);
+        print_thinking_trace("tool-request", &response.reasoning);
         println!("tool-call-count: {}", response.tool_calls.len());
         println!(
             "tool-request-latency-ms: {:.2}",
@@ -319,6 +320,7 @@ pub async fn run_tool_demo_with_options(
     }
 
     println!("tool-final-response: {}", final_response.content);
+    print_thinking_trace("tool-final", &final_response.reasoning);
 
     Ok(())
 }
@@ -333,6 +335,16 @@ pub fn tool_demo_generation_params(defaults: &GenerationParams) -> GenerationPar
         params.temperature = Some(0.2);
     }
     params
+}
+
+fn print_thinking_trace(label: &str, reasoning: &Option<String>) {
+    match reasoning
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(trace) => println!("{label}-thinking-trace: {trace}"),
+        None => println!("{label}-thinking-trace: none"),
+    }
 }
 
 fn trim_float(mut value: String) -> String {
