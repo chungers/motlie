@@ -62,7 +62,7 @@ impl MistralMultimodalSpec {
             display_name: "Gemma 4 E4B-it",
             model_id: "google/gemma-4-E4B-it",
             arch: MistralMultimodalArch::Gemma4,
-            capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
+            capabilities: Capabilities::multimodal_chat_and_vision(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Eight,
@@ -258,7 +258,7 @@ mod tests {
         );
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Vision));
-        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+        assert!(!spec.capabilities.supports(CapabilityKind::ToolUse));
     }
 
     #[test]
