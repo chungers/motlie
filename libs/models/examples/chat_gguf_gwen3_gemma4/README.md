@@ -129,6 +129,12 @@ assistant-priming-content: I will keep the answer compact.
 single-turn-thinking-trace: <reasoning trace when returned by the backend, otherwise none>
 ```
 
+`--assistant` is intended as a priming turn alongside a system prompt. The
+example prints an `assistant-priming-warning` when `--assistant` is combined
+with `--no-system`, because some GGUF chat templates can return empty visible
+content for conversations that start with an assistant turn and no system
+anchor.
+
 Full precision (F16, no quantization):
 
 ```sh

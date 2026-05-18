@@ -1,23 +1,19 @@
+fn main() -> anyhow::Result<()> {
+    gguf_example::run()
+}
+
 #[cfg(not(any(
     feature = "model-qwen3-4b-gguf",
     feature = "model-qwen3-6-27b-gguf",
     feature = "model-gemma4-e2b-gguf",
     feature = "model-gemma4-e4b-gguf",
 )))]
-fn main() -> anyhow::Result<()> {
-    anyhow::bail!(
-        "enable at least one GGUF chat feature: model-qwen3-4b-gguf, model-qwen3-6-27b-gguf, model-gemma4-e2b-gguf, or model-gemma4-e4b-gguf"
-    )
-}
-
-#[cfg(any(
-    feature = "model-qwen3-4b-gguf",
-    feature = "model-qwen3-6-27b-gguf",
-    feature = "model-gemma4-e2b-gguf",
-    feature = "model-gemma4-e4b-gguf",
-))]
-fn main() -> anyhow::Result<()> {
-    gguf_example::run()
+mod gguf_example {
+    pub fn run() -> anyhow::Result<()> {
+        anyhow::bail!(
+            "enable at least one GGUF chat feature: model-qwen3-4b-gguf, model-qwen3-6-27b-gguf, model-gemma4-e2b-gguf, or model-gemma4-e4b-gguf"
+        )
+    }
 }
 
 #[cfg(any(
@@ -162,6 +158,11 @@ mod gguf_example {
         }
         if let Some(prompt) = &assistant_priming {
             println!("assistant-priming-content: {prompt}");
+        }
+        if no_system && assistant_priming.is_some() {
+            println!(
+                "assistant-priming-warning: assistant priming without a system prompt may produce empty content on some GGUF chat templates"
+            );
         }
 
         if download_artifacts {
