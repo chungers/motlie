@@ -24,12 +24,12 @@ Current example groups:
 
 | Example | Backend | Curated model(s) | Advertised capabilities | Tool-use demo status |
 |---------|---------|------------------|-------------------------|----------------------|
-| `chat_tool_binding` | none | API-only | typed Rust tool binding | Runs without loading an LLM; builds a static `ToolList` with `get_weather` and `evaluate_math_expression`. |
+| `chat_tool_binding` | none | API-only | typed Rust tool binding | Runs without loading an LLM; builds a static `ToolList` with `get_weather` and `evaluate_math_expression`, and exercises E4B recommended generation/system-prompt fields. |
 | `chat_mistral_qwen3` | `mistral.rs` | Qwen3 4B safetensors | `Chat` + `Completion` + `ToolUse` | `--tool-demo` / `--tool-demo-only` run a multi-round tool loop: weather for Seattle, Portland, and San Francisco, then math-expression average. |
 | `chat_multimodal_gemma4` | `mistral.rs` | Gemma 4 E2B-it safetensors | `Chat` + `Vision` + `ToolUse` | Same weather-plus-math tool loop; image+text chat remains a separate `--image=...` path. |
 | `chat_gguf_gwen3_gemma4` | `llama.cpp` | Qwen3 4B GGUF, Gemma 4 E2B-it GGUF | `Chat` + `Completion` + `ToolUse` | Same weather-plus-math tool loop through llama.cpp's OpenAI-compatible chat-template path. |
 | `chat_gguf_gwen3_gemma4` | `llama.cpp` | Gemma 4 E4B-it GGUF | `Chat` + `Completion` + `ToolUse` | Same weather-plus-math tool loop passed locally with the E4B Q8_0 GGUF artifact, Gemma recommended sampling params, and `thinking=Auto`. |
-| catalog only | `mistral.rs` | Gemma 4 E4B-it safetensors | `Chat` + `Vision` initially | Curated bundle is registered behind `model-gemma4-e4b` with Q8 default quantization and Gemma recommended sampling params. Tool calling is model-card capable but not advertised until backend smoke coverage is added. |
+| catalog only | `mistral.rs` | Gemma 4 E4B-it safetensors | `Chat` + `Vision` + `ToolUse` | Curated bundle is registered behind `model-gemma4-e4b` with Q8 default quantization and Gemma recommended sampling params. ToolUse follows the same generic `mistral.rs` adapter policy as E2B. |
 | `chat_multimodal_qwen3_6_27b` | `llama.cpp` | Qwen3.6 27B GGUF | `Chat` + `Completion` | Text chat/completion only. `Vision` and `ToolUse` are not advertised for this bundle yet. |
 
 The shared tool demo support lives in [`tool_demo_support.rs`](./tool_demo_support.rs).
@@ -55,9 +55,9 @@ Backend-native loader logs and timing noise are omitted.
 
 | Example | Scenario | Command | Captured output |
 |---------|----------|---------|-----------------|
-| `chat_tool_binding` | API-only typed binding without an LLM | `cargo run -p motlie-models --example chat_tool_binding --no-default-features` | Registers two tools, simulates three weather calls, then executes `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}` and returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`. |
+| `chat_tool_binding` | API-only typed binding without an LLM | `cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-gguf --example chat_tool_binding` | Registers two tools, exercises the real E4B GGUF spec's recommended params into an effective request shape, simulates three weather calls, then executes `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}` and returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`. |
 | `chat_gguf_gwen3_gemma4` | Qwen3 4B GGUF live LLM tool loop through `llama.cpp` | `cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- --tool-demo-only "What is Rust?"` | Advertises `ToolUse`, calls `get_weather` for Seattle, Portland, and San Francisco, then calls `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}`. The tool returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`, and the final model response is `The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68 degrees.` |
-| `chat_gguf_gwen3_gemma4` | Gemma 4 E4B-it GGUF live LLM tool loop through `llama.cpp` | `./target/release/examples/chat_gguf_gwen3_gemma4 --chat=google/gemma4_e4b_gguf --tool-demo-only "What is Rust? Then calculate the average temperature for Seattle, Portland, and San Francisco."` | From a cold curated download and release build, loads `GGUF Q8_0` with `temperature=1.0`, `top_p=0.95`, and `thinking=Auto`; calls `get_weather` for Seattle, Portland, and San Francisco, then calls `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}`. The tool returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`, and the final model response is `The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68.0°F.` |
+| `chat_gguf_gwen3_gemma4` | Gemma 4 E4B-it GGUF live LLM tool loop through `llama.cpp` | `./target/release/examples/chat_gguf_gwen3_gemma4 --chat=google/gemma4_e4b_gguf --tool-demo-only "What is Rust? Then calculate the average temperature for Seattle, Portland, and San Francisco."` | From a cold curated download and release build, loads `GGUF Q8_0` with Google settings `temperature=1.0`, `top_p=0.95`, system prompt `You are Gemma, a helpful assistant.`, and `thinking=Auto`; prints thinking-trace fields, calls `get_weather` for Seattle, Portland, and San Francisco, then calls `evaluate_math_expression` with `{"expression":"(72.0 + 68.0 + 64.0) / 3.0"}`. The tool returns `{"value":68.0,"formatted":"68","engine":"cel-cxx"}`, and the final model response is `The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68.0°F.` |
 | `chat_mistral_qwen3` | Qwen3 4B safetensors live LLM tool loop through `mistral.rs` | `cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --tool-demo-only "What is Rust?"` | Uses the same shared `tool_demo_support::run_tool_demo_with_options` path and emits the same `tool-round`, `tool-call-*`, `tool-result`, and `tool-final-response` fields when the safetensors bundle is available. |
 | `chat_multimodal_gemma4` | Gemma 4 E2B-it safetensors live LLM tool loop through `mistral.rs` | `cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --tool-demo-only "What is Rust?"` | Uses the same shared `tool_demo_support::run_tool_demo_with_options` path as the Qwen3 examples; image+text chat remains separate from this text-only tool loop. |
 
@@ -67,6 +67,10 @@ Representative API-only output:
 registered-tools: 2
 tool: get_weather
 tool: evaluate_math_expression
+spec-recommendation-source: motlie_model_llama_cpp::LlamaCppTextSpec::gemma4_e4b
+spec-recommended-temperature: Some(1.0)
+spec-recommended-top-p: Some(0.95)
+spec-recommended-system-prompt: Some("You are Gemma, a helpful assistant.")
 assistant-call-name: get_weather
 assistant-call-args: {"city":"Seattle","units":"fahrenheit"}
 tool-content: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}
@@ -111,12 +115,19 @@ Representative Gemma 4 E4B GGUF output:
 ```text
 quantization: GGUF Q8_0
 recommended-generation-params: GenerationParams { max_tokens: None, temperature: Some(1.0), top_p: Some(0.95), stop_sequences: [] }
+recommended-system-prompt: Some("You are Gemma, a helpful assistant.")
+recommended-quantization: GGUF Q8_0
+recommended-thinking: Auto
 thinking: Auto
+system-prompt: enabled
+system-prompt-content: You are Gemma, a helpful assistant.
 capabilities:
   - kind=ToolUse input=[Text, StructuredJson] output=[Text, StructuredJson] interaction=MultiTurn summary=Tool definitions, assistant tool calls, and tool-result turns on the chat surface.
 --- tool calling ---
 tool-demo-effective-params: GenerationParams { max_tokens: Some(192), temperature: Some(1.0), top_p: Some(0.95), stop_sequences: [] }
+tool-demo-thinking: Some(Auto)
 tool-round: 1
+tool-request-thinking-trace: The user wants to calculate the average current Fahrenheit temperature...
 tool-call-name: get_weather
 tool-call-args: {"city":"Seattle","units":"fahrenheit"}
 tool-result: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}
@@ -133,6 +144,23 @@ tool-call-name: evaluate_math_expression
 tool-call-args: {"expression":"(72.0 + 68.0 + 64.0) / 3.0"}
 tool-result: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted":"68","engine":"cel-cxx"}
 tool-final-response: The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68.0°F.
+tool-final-thinking-trace: none
+```
+
+Representative Gemma 4 E4B prompt/thinking controls:
+
+```text
+recommended-system-prompt: Some("You are Gemma, a helpful assistant.")
+recommended-quantization: GGUF Q8_0
+recommended-thinking: Auto
+effective-chat-params: GenerationParams { max_tokens: None, temperature: Some(1.0), top_p: Some(0.95), stop_sequences: [] }
+thinking: Auto
+system-prompt: enabled
+system-prompt-content: You are Gemma, a helpful assistant.
+assistant-priming: enabled
+assistant-priming-content: I will keep the answer compact.
+single-turn-thinking-trace: <reasoning trace when returned by the backend, otherwise none>
+follow-up-thinking-trace: <reasoning trace when returned by the backend, otherwise none>
 ```
 
 The detailed 2x3 TTS-to-ASR validation matrix lives in

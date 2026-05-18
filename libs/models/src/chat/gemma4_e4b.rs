@@ -130,12 +130,13 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
         assert!(descriptor.capabilities.supports(CapabilityKind::Vision));
-        assert!(!descriptor.capabilities.supports(CapabilityKind::ToolUse));
+        assert!(descriptor.capabilities.supports(CapabilityKind::ToolUse));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
                 CapabilityDescriptor::multimodal_chat(),
                 CapabilityDescriptor::vision(),
+                CapabilityDescriptor::tool_use(),
             ]
         );
         let artifacts = descriptor

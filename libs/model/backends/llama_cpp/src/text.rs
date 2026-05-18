@@ -412,10 +412,7 @@ unsafe impl Sync for LlamaCppRuntime {}
 impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
         let thinking = request.thinking.unwrap_or(self.thinking);
-        if request.requires_tool_use()
-            || request.thinking.is_some()
-            || thinking == ThinkingMode::Auto
-        {
+        if request.requires_tool_use() || thinking == ThinkingMode::Auto {
             let rendered = render_openai_compatible_chat(&self.model, thinking, &request)?;
             return self.generate_rendered_chat(rendered, &request.params).await;
         }
