@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
         assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
         assert!(descriptor.capabilities.supports(CapabilityKind::Completion));
-        assert!(!descriptor.capabilities.supports(CapabilityKind::ToolUse));
+        assert!(descriptor.capabilities.supports(CapabilityKind::ToolUse));
         let artifacts = descriptor
             .artifacts
             .expect("descriptor should expose curated artifact control");
