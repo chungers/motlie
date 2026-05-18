@@ -14,13 +14,16 @@ use std::time::Instant;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WeatherArgs {
     pub city: String,
+    /// Temperature unit. Prefer lowercase `fahrenheit` or `celsius`.
     pub units: TemperatureUnits,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TemperatureUnits {
+    #[serde(alias = "Celsius", alias = "C", alias = "c")]
     Celsius,
+    #[serde(alias = "Fahrenheit", alias = "F", alias = "f")]
     Fahrenheit,
 }
 
@@ -212,7 +215,7 @@ pub async fn run_tool_demo_with_options(
         system_prompt.push_str("\n\n");
     }
     system_prompt.push_str(
-        "Use tools when they are relevant. Make exactly one tool call per assistant turn. Start by calling get_weather for Seattle only. After each weather result, call get_weather for the next city until Seattle, Portland, and San Francisco are complete. Then call evaluate_math_expression for the average. Do not calculate averages mentally. CEL requires matching numeric types, so divide decimal temperature values by 3.0, not 3. After all tool results are available, answer in one concise sentence.",
+        "Use tools when they are relevant. Make exactly one tool call per assistant turn. Start by calling get_weather for Seattle only. For get_weather, pass units as the lowercase string `fahrenheit`. After each weather result, call get_weather for the next city until Seattle, Portland, and San Francisco are complete. Then call evaluate_math_expression for the average. Do not calculate averages mentally. CEL requires matching numeric types, so divide decimal temperature values by 3.0, not 3. After all tool results are available, answer in one concise sentence.",
     );
     let mut messages = vec![
         ChatMessage::new(ChatRole::System, system_prompt),

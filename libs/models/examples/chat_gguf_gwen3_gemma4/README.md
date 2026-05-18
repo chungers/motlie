@@ -199,7 +199,7 @@ Validated tool-use smoke:
 
 - `qwen3_4b_gguf` Q4_K_M passed locally on 2026-05-13.
 - `gemma4_e2b_gguf` Q4_K_M passed locally on 2026-05-13.
-- `gemma4_e4b_gguf` Q8_0 passed from a cold curated download and release build on 2026-05-18. It advertises `Chat` + `Completion` + `ToolUse` and produced this tool sequence:
+- `gemma4_e4b_gguf` Q8_0 passed from a cold curated download and release build on 2026-05-18, then passed again with `llama-cpp-2` 0.1.146 and cached artifacts. It advertises `Chat` + `Completion` + `ToolUse` and produced this tool sequence:
 
 ```text
 tool-call-name: get_weather
@@ -214,7 +214,7 @@ tool-result: {"city":"San Francisco","temperature":64.0,"units":"fahrenheit","su
 tool-call-name: evaluate_math_expression
 tool-call-args: {"expression":"(72.0 + 68.0 + 64.0) / 3.0"}
 tool-result: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted":"68","engine":"cel-cxx"}
-tool-final-response: The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68.0°F.
+tool-final-response: The average current temperature for Seattle, Portland, and San Francisco is 68.0 degrees Fahrenheit.
 ```
 
 ## Source
