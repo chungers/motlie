@@ -14,23 +14,25 @@ async fn main() -> Result<()> {
         tool_demo_support::WeatherTool,
         tool_demo_support::EvaluateMathExpressionTool,
     );
+    let recommended_params = exercise_spec_recommendations();
 
     let request = ChatRequest {
         messages: vec![ChatMessage::text(
             ChatRole::User,
             "What is Rust, and what is the average fahrenheit temperature across Seattle, Portland, and San Francisco?",
         )],
+        params: recommended_params,
         tools: tools.specs().context("collect tool specs")?,
         tool_choice: Some(ToolChoice::Auto),
-        ..Default::default()
+        thinking: None,
     };
 
     println!("registered-tools: {}", request.tools.len());
+    println!("request-generation-params: {:?}", request.params);
     for tool in &request.tools {
         println!("tool: {}", tool.name);
         println!("schema: {}", tool.input_schema.as_json_str());
     }
-    exercise_spec_recommendations();
 
     let model_calls = vec![
         ToolCall::from_serializable_args(
@@ -88,7 +90,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn exercise_spec_recommendations() {
+fn exercise_spec_recommendations() -> GenerationParams {
     let spec = DemoRecommendedChatSpec::gemma4_e4b();
     let effective = GenerationParams::default().with_defaults(&spec.recommended_generation_params);
 
@@ -106,6 +108,8 @@ fn exercise_spec_recommendations() {
         "spec-recommended-system-prompt: {:?}",
         spec.recommended_system_prompt
     );
+
+    effective
 }
 
 struct DemoRecommendedChatSpec {
