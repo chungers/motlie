@@ -112,7 +112,7 @@ impl LlamaCppTextSpec {
             model_prefix: "gemma-4-E4B-it",
             arch: LlamaCppTextArch::Gemma4,
             thinking: ThinkingMode::Auto,
-            capabilities: Capabilities::chat_and_completion(),
+            capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support_with_recommended(QuantizationBits::Eight),
             default_context_length: 32768,
             recommended_generation_params: GenerationParams {
@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_e4b_spec_uses_model_card_defaults_without_tool_use_advertised() {
+    fn gemma4_e4b_spec_uses_model_card_defaults_and_advertises_tool_use() {
         let spec = LlamaCppTextSpec::gemma4_e4b();
 
         assert_eq!(spec.id.as_str(), "gemma4_e4b_gguf");
@@ -1350,7 +1350,7 @@ mod tests {
         );
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
-        assert!(!spec.capabilities.supports(CapabilityKind::ToolUse));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
     }
 
     #[test]

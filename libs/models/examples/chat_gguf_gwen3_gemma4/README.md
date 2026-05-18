@@ -147,6 +147,18 @@ cargo run -p motlie-models --no-default-features \
   "What is Rust's ownership model?"
 ```
 
+Tool-calling loop (Gemma 4 E4B GGUF):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-gguf \
+  --bin motlie-models-download -- gemma4_e4b_gguf
+
+cargo run -p motlie-models --no-default-features \
+  --features model-gemma4-e4b-gguf \
+  --example chat_gguf_gwen3_gemma4 -- --chat=google/gemma4_e4b_gguf --tool-demo-only \
+  "What is Rust? Then calculate the average temperature for Seattle, Portland, and San Francisco."
+```
+
 The tool demo registers `get_weather` and `evaluate_math_expression`, sends
 their generated schemas through the llama.cpp OpenAI-compatible chat-template
 path, executes model-requested tool calls through static `ToolList` dispatch, appends each
@@ -163,7 +175,23 @@ Validated tool-use smoke:
 
 - `qwen3_4b_gguf` Q4_K_M passed locally on 2026-05-13.
 - `gemma4_e2b_gguf` Q4_K_M passed locally on 2026-05-13.
-- `gemma4_e4b_gguf` is wired and builds with E4B-only features. It intentionally advertises `Chat` + `Completion` only until a local tool-loop smoke passes.
+- `gemma4_e4b_gguf` Q8_0 passed from a cold curated download and release build on 2026-05-18. It advertises `Chat` + `Completion` + `ToolUse` and produced this tool sequence:
+
+```text
+tool-call-name: get_weather
+tool-call-args: {"city":"Seattle","units":"fahrenheit"}
+tool-result: {"city":"Seattle","temperature":72.0,"units":"fahrenheit","summary":"clear"}
+tool-call-name: get_weather
+tool-call-args: {"city":"Portland","units":"fahrenheit"}
+tool-result: {"city":"Portland","temperature":68.0,"units":"fahrenheit","summary":"clear"}
+tool-call-name: get_weather
+tool-call-args: {"city":"San Francisco","units":"fahrenheit"}
+tool-result: {"city":"San Francisco","temperature":64.0,"units":"fahrenheit","summary":"clear"}
+tool-call-name: evaluate_math_expression
+tool-call-args: {"expression":"(72.0 + 68.0 + 64.0) / 3.0"}
+tool-result: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted":"68","engine":"cel-cxx"}
+tool-final-response: The average current Fahrenheit temperature for Seattle, Portland, and San Francisco is 68.0°F.
+```
 
 ## Source
 
