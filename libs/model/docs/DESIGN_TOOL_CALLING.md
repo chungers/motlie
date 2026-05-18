@@ -70,18 +70,21 @@ The current curated chat LLMs are model-capable for tool calling, but Motlie sho
 
 | Curated selector | Backend | Common capability stance | Convention behind the adapter |
 | --- | --- | --- | --- |
-| `google/gemma4_e2b` | `mistral.rs` multimodal | ToolUse advertised after adapter unit tests. | Gemma 4 chat template with `tools`, assistant `tool_calls`, tool-result turns, and Gemma tool-call/tool-response tokens. |
-| `google/gemma4_e4b` | `mistral.rs` multimodal | ToolUse advertised on the same generic adapter path as E2B. | Same Gemma 4 convention as E2B; the `mistral.rs` adapter is bundle-agnostic once the template and request fields are available. |
+| `google/gemma4_e2b` | `mistral.rs` multimodal | `ToolUse` remains advertised from the existing descriptor, but live multi-round safetensors tool loops fail on Apple Silicon Metal (#310). | Gemma 4 chat template with `tools`, assistant `tool_calls`, tool-result turns, and Gemma tool-call/tool-response tokens. |
+| `google/gemma4_e4b` | `mistral.rs` multimodal | `ToolUse` not advertised until the safetensors tool-loop regression is fixed and smoke-validated. | Same Gemma 4 convention as E2B, but live Apple Silicon Metal validation exposed a broader `mistral.rs` safetensors tool-call regression tracked in #310. |
 | `google/gemma4_e2b_gguf` | `llama.cpp` text | Tool-capable if the GGUF template is preserved and routed through llama.cpp chat-template helpers. | Same Gemma 4 convention, exposed to Motlie through an OpenAI-compatible JSON bridge. |
 | `google/gemma4_e4b_gguf` | `llama.cpp` text | ToolUse advertised after model-specific GGUF template smoke. | Same Gemma 4 convention; GGUF bundles are validated per model because the embedded chat template owns the concrete tool markers. |
-| `qwen/qwen3_4b` | `mistral.rs` text | ToolUse advertised after adapter unit tests. | Qwen3/Hermes-style tools, `<tool_call>`, and `<tool_response>` through the model chat template. |
+| `qwen/qwen3_4b` | `mistral.rs` text | `ToolUse` remains advertised from the existing descriptor, but live multi-round safetensors tool loops fail on Apple Silicon Metal (#310). | Qwen3/Hermes-style tools, `<tool_call>`, and `<tool_response>` through the model chat template. |
 | `qwen/qwen3_4b_gguf` | `llama.cpp` text | Tool-capable if the GGUF template is preserved and routed through llama.cpp chat-template helpers. | Same Qwen3/Hermes convention, exposed to Motlie through an OpenAI-compatible JSON bridge. |
 | `qwen/qwen3_6_27b_gguf` | `llama.cpp` text | Tool-capable after GGUF template validation and adapter support. | Qwen-family tool convention plus Qwen3.6 thinking-mode handling. |
 
-Capability gating policy: safetensors bundles on `mistral.rs` may advertise `ToolUse`
-when the shared adapter path is covered because the backend owns the generic tool
-request/response mapping. GGUF bundles on `llama.cpp` require model-specific
-chat-template smoke before advertising `ToolUse` because the artifact's embedded
+Capability gating policy: curated bundles should advertise `ToolUse` only when
+that concrete backend/artifact path has smoke coverage for a multi-round tool
+loop. Apple Silicon Metal validation found that existing `mistral.rs`
+safetensors tool paths can fail despite plain chat working (#310), so newly
+curated safetensors bundles must stay conservative until the backend regression
+is fixed or the bundle passes the same smoke bar. GGUF bundles on `llama.cpp`
+also require model-specific chat-template smoke because the artifact's embedded
 template defines the concrete tool and thinking markers.
 
 ## Design Principle
@@ -533,7 +536,11 @@ The helper constructors should make this ergonomic, but the contract should keep
 
 ### `mistral.rs`
 
-Current implementation status: the Motlie `mistral.rs` wrappers now map the common tool contract into the native builder and response types for the safetensors Qwen3 text and Gemma 4 multimodal paths.
+Current implementation status: the Motlie `mistral.rs` wrappers map the common
+tool contract into the native builder and response types for safetensors Qwen3
+text and Gemma 4 multimodal paths, but live multi-round tool loops currently
+fail for affected safetensors bundles on Apple Silicon Metal (#310). Plain chat
+and non-tool multimodal flows are unaffected.
 
 Implemented adaptation:
 
@@ -620,8 +627,7 @@ Backend unit tests:
 
 Integration/smoke tests:
 
-- safetensors Qwen3 4B returns a structured tool call for a simple deterministic tool prompt
-- safetensors Gemma 4 E2B returns a structured tool call for the same prompt
+- safetensors Qwen3 4B and Gemma 4 E2B regain multi-round tool-loop smoke after #310 is fixed
 - GGUF Qwen3 4B and Gemma 4 E2B validate that the selected artifact has a usable chat template
 - Qwen3.6 GGUF validates template availability and thinking/tool-call separation before advertising `ToolUse`
 
