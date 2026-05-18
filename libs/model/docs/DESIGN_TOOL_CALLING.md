@@ -421,6 +421,7 @@ pub struct ChatRequest {
     pub params: GenerationParams,
     pub tools: Vec<ToolSpec>,
     pub tool_choice: Option<ToolChoice>,
+    pub thinking: Option<ThinkingMode>,
 }
 ```
 
@@ -429,6 +430,7 @@ Rules:
 - Empty `tools` means ordinary chat.
 - `tool_choice` without tools is invalid unless it is `None`.
 - Backends that do not support tools must reject requests with non-empty `tools` using `UnsupportedCapability(CapabilityKind::ToolUse)`.
+- `thinking` is an optional per-request override for model families with thinking/reasoning modes. Backends without a thinking control may accept and ignore it, but must document that behavior.
 
 ### Chat Response
 

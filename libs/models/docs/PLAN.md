@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-18 | @codex | Started issue #308 implementation: Gemma 4 E4B safetensors/GGUF bundle wiring, opt-in feature flags, per-spec recommended generation params, recommended system prompts, and GGUF example prompt/thinking overrides. |
 | 2026-04-24 | @codex-gpt55 | Started Phase 9 implementation: Qwen3.6 GGUF bundle/catalog wiring, Q4/Q5/Q8 quant support, and the dedicated example are in progress; FP8 remains blocked until a curated FP8 GGUF artifact exists. |
 | 2026-04-24 | @codex-gpt55 | Clarified Phase 9 after reviewing `libs/model/src/chat.rs`: the core chat contract already accepts image content, so Qwen3.6 needs llama.cpp mmproj/image backend support before advertising vision, not a new core interface. |
 | 2026-04-24 | @codex-gpt55 | Added Phase 9 for issue `#224`, covering Qwen3.6 27B GGUF via the existing llama.cpp backend, platform-aware GGUF quant defaults, optional multimodal support, feature-gated catalog wiring, and the dedicated example. |

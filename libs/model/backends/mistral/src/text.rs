@@ -3,8 +3,8 @@ use std::future::Future;
 use mistralrs::core::NormalLoaderType;
 use mistralrs::TextModelBuilder;
 use motlie_model::{
-    BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, ModelError,
-    QuantizationBits, QuantizationSupport, StartOptions, UnsupportedEmbeddings,
+    BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
+    ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
@@ -38,6 +38,8 @@ pub struct MistralTextSpec {
     pub arch: MistralTextArch,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
+    pub recommended_generation_params: GenerationParams,
+    pub recommended_system_prompt: Option<&'static str>,
 }
 
 impl MistralTextSpec {
@@ -59,6 +61,8 @@ impl MistralTextSpec {
                     QuantizationBits::Eight,
                 ])
             }),
+            recommended_generation_params: GenerationParams::default(),
+            recommended_system_prompt: None,
         }
     }
 }

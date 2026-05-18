@@ -19,8 +19,10 @@ model-google-gemma-300m = ["dep:motlie-model-mistral"]
 model-qwen3-embedding-06b = ["dep:motlie-model-mistral"]
 model-qwen3-4b = ["dep:motlie-model-mistral"]
 model-gemma4-e2b = ["dep:motlie-model-mistral"]
+model-gemma4-e4b = ["dep:motlie-model-mistral"]
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
+model-gemma4-e4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-qwen3-6-27b-gguf = ["dep:motlie-model-llama-cpp"]
 model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
 model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]
@@ -89,7 +91,6 @@ required-features = ["model-gemma4-e2b"]
 [[example]]
 name = "chat_gguf_gwen3_gemma4"
 path = "examples/chat_gguf_gwen3_gemma4/main.rs"
-required-features = ["model-qwen3-4b-gguf"]
 
 [[example]]
 name = "chat_multimodal_qwen3_6_27b"

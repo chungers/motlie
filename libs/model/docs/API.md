@@ -231,6 +231,7 @@ Common helpers include `Capabilities::chat_and_completion()`,
 ```rust
 use motlie_model::{
     ChatMessage, ChatRequest, ChatRole, CompletionRequest, EmbeddingRequest, GenerationParams,
+    ThinkingMode,
 };
 
 let chat = ChatRequest {
@@ -248,6 +249,7 @@ let chat = ChatRequest {
         max_tokens: Some(256),
         ..Default::default()
     },
+    thinking: Some(ThinkingMode::Disabled),
     ..Default::default()
 };
 
@@ -314,6 +316,13 @@ let chat = ChatRequest {
     ..Default::default()
 };
 ```
+
+`GenerationParams::with_defaults(&spec_defaults)` applies curated per-model
+recommendations without overriding caller-provided scalar fields. Empty caller
+stop sequences fall back to spec defaults. `ChatRequest::thinking` is a
+request-local override for backends that support thinking/reasoning modes; the
+current mistral.rs path accepts it as a no-op, while llama.cpp uses it to
+override the loaded bundle's default thinking mode.
 
 An inline closure uses the same typed path by storing the closure in a concrete
 tool struct:

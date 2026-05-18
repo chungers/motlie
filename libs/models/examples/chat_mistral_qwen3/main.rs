@@ -3,6 +3,7 @@ use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
     QuantizationBits, StartOptions,
 };
+use motlie_model_mistral::MistralTextSpec;
 use motlie_models::{
     chat::ChatModels, default_artifact_root, quantization_label_isq, ModelSelector,
 };
@@ -144,9 +145,18 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let chat = handle.chat().context("qwen3 bundle should expose chat")?;
+    let generation_defaults = MistralTextSpec::qwen3_4b().recommended_generation_params;
 
     if tool_demo_only {
-        tool_demo_support::run_tool_demo(chat).await?;
+        tool_demo_support::run_tool_demo_with_options(
+            chat,
+            tool_demo_support::ToolDemoOptions {
+                generation_defaults: &generation_defaults,
+                system_prompt: None,
+                thinking: None,
+            },
+        )
+        .await?;
         support::print_process_snapshot(
             "process-after-tool-demo",
             &support::current_process_snapshot(),
@@ -217,7 +227,15 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-follow-up", handle.metric_snapshot());
 
     if tool_demo {
-        tool_demo_support::run_tool_demo(chat).await?;
+        tool_demo_support::run_tool_demo_with_options(
+            chat,
+            tool_demo_support::ToolDemoOptions {
+                generation_defaults: &generation_defaults,
+                system_prompt: None,
+                thinking: None,
+            },
+        )
+        .await?;
         support::print_process_snapshot(
             "process-after-tool-demo",
             &support::current_process_snapshot(),
