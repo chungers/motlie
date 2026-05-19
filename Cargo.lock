@@ -5414,7 +5414,9 @@ name = "motlie-model-mistral"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "either",
  "image",
+ "indexmap 2.14.0",
  "mistralrs",
  "motlie-model",
  "serde_json",

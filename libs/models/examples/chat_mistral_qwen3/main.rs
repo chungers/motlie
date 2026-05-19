@@ -1,12 +1,13 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, CompletionModel,
     QuantizationBits, StartOptions,
 };
 use motlie_model_mistral::MistralTextSpec;
 use motlie_models::{
-    chat::ChatModels, default_artifact_root, quantization_label_isq, ModelSelector,
+    ModelSelector, chat::ChatModels, default_artifact_root, quantization_label_isq,
 };
+use std::path::PathBuf;
 use std::time::Instant;
 
 #[path = "../support.rs"]
@@ -18,12 +19,14 @@ mod tool_demo_support;
 async fn main() -> Result<()> {
     let mut chat_selector = None;
     let mut precision = None;
+    let mut artifact_root = None;
     let mut download_artifacts = false;
     let mut tool_demo = false;
     let mut tool_demo_only = false;
     let mut input_parts = Vec::new();
 
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         if arg == "--download-artifacts" {
             download_artifacts = true;
         } else if arg == "--tool-demo" {
@@ -31,6 +34,13 @@ async fn main() -> Result<()> {
         } else if arg == "--tool-demo-only" {
             tool_demo = true;
             tool_demo_only = true;
+        } else if arg == "--artifact-root" {
+            artifact_root = Some(PathBuf::from(
+                args.next()
+                    .context("--artifact-root requires a path argument")?,
+            ));
+        } else if let Some(path) = arg.strip_prefix("--artifact-root=") {
+            artifact_root = Some(PathBuf::from(path));
         } else if let Some(selector) = arg.strip_prefix("--chat=") {
             chat_selector = Some(selector.to_owned());
         } else if let Some(p) = arg.strip_prefix("--precision=") {
@@ -44,7 +54,7 @@ async fn main() -> Result<()> {
     if input.trim().is_empty() {
         bail!(
             "usage: cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- \
-             [--download-artifacts] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
+             [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--chat=qwen/qwen3_4b] [--precision=q4|q8|f32] <prompt>"
         );
     }
 
@@ -78,7 +88,7 @@ async fn main() -> Result<()> {
             )
         };
 
-    let artifact_root = default_artifact_root();
+    let artifact_root = artifact_root.unwrap_or_else(default_artifact_root);
     let catalog = motlie_models::Catalog::with_defaults();
 
     println!("catalog-entry-count: {}", catalog.len());

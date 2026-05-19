@@ -130,12 +130,13 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::MistralRs);
         assert!(descriptor.capabilities.supports(CapabilityKind::Chat));
         assert!(descriptor.capabilities.supports(CapabilityKind::Vision));
-        assert!(!descriptor.capabilities.supports(CapabilityKind::ToolUse));
+        assert!(descriptor.capabilities.supports(CapabilityKind::ToolUse));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
                 CapabilityDescriptor::multimodal_chat(),
                 CapabilityDescriptor::vision(),
+                CapabilityDescriptor::tool_use(),
             ]
         );
         let artifacts = descriptor
@@ -155,9 +156,11 @@ mod tests {
         #[cfg(feature = "model-gemma4-e4b")]
         {
             assert!(catalog.instantiate(&bundle_id).is_some());
-            assert!(catalog
-                .bundles_for_track(EvalTrack::Chat)
-                .any(|b| b.id == bundle_id));
+            assert!(
+                catalog
+                    .bundles_for_track(EvalTrack::Chat)
+                    .any(|b| b.id == bundle_id)
+            );
         }
     }
 

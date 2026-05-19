@@ -8,8 +8,8 @@ use motlie_model::{
 };
 
 use crate::common::{
-    configure_artifact_policy, map_quantization_bits, multimodal_message_parts,
-    paged_attn_context_size, should_force_cpu, MistralMessageParts,
+    MistralMessageParts, configure_artifact_policy, map_quantization_bits,
+    multimodal_message_parts, paged_attn_context_size, should_force_cpu,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 
@@ -39,6 +39,8 @@ impl MistralMultimodalSpec {
             display_name: "Gemma 4 E2B-it",
             model_id: "google/gemma-4-E2B-it",
             arch: MistralMultimodalArch::Gemma4,
+            // ToolUse relies on the shared template-compatible transcript
+            // adapter in common.rs, not mistralrs::RequestBuilder's tool replay.
             capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
@@ -62,7 +64,8 @@ impl MistralMultimodalSpec {
             display_name: "Gemma 4 E4B-it",
             model_id: "google/gemma-4-E4B-it",
             arch: MistralMultimodalArch::Gemma4,
-            capabilities: Capabilities::multimodal_chat_and_vision(),
+            // Same safetensors Gemma 4 template family and adapter path as E2B.
+            capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
                 QuantizationBits::Eight,
@@ -258,7 +261,7 @@ mod tests {
         );
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Vision));
-        assert!(!spec.capabilities.supports(CapabilityKind::ToolUse));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
     }
 
     #[test]

@@ -43,6 +43,12 @@ Pre-download artifacts:
 cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --download-artifacts "What is Rust?"
 ```
 
+Use an alternate curated artifact root:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- --artifact-root /path/to/hf-cache "What is Rust?"
+```
+
 Tool-calling loop:
 
 ```sh
@@ -62,7 +68,7 @@ combine a plain Rust explanation with a weather-derived average temperature.
 
 ## Preconditions
 
-- Pre-downloaded Qwen3-4B artifacts in the curated artifact root, OR use `--download-artifacts`
+- Pre-downloaded Qwen3-4B artifacts in the curated artifact root, `--artifact-root /path/to/hf-cache`, OR use `--download-artifacts`
 - The example expects a single-bundle build and prints `catalog-entry-count: 1`; use `--no-default-features --features model-qwen3-4b` as shown above
 - Sufficient memory: ~2.5GB for Q4, ~4.5GB for Q8, ~8GB for F32
 - For authenticated download: pre-download with the artifact utility:

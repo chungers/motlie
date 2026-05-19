@@ -44,6 +44,12 @@ Default path (direct enum, text-only, ISQ Q4, using existing local artifacts onl
 cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- "What is Rust's ownership model?"
 ```
 
+Alternate curated artifact root:
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --artifact-root /path/to/hf-cache "What is Rust's ownership model?"
+```
+
 Image + text:
 
 ```sh
@@ -69,7 +75,7 @@ combine a plain Rust explanation with a weather-derived average temperature.
 
 ## Preconditions
 
-- Either pre-downloaded Gemma 4 E2B-it artifacts in the curated artifact root, or `--download-artifacts` plus the required Hugging Face access in the current environment
+- Either pre-downloaded Gemma 4 E2B-it artifacts in the curated artifact root, `--artifact-root /path/to/hf-cache`, or `--download-artifacts` plus the required Hugging Face access in the current environment
 - Sufficient memory for the chosen precision
 - The example must be built with only the Gemma 4 bundle enabled, which is why the commands above use `--no-default-features --features model-gemma4-e2b`
 
