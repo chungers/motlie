@@ -1786,6 +1786,7 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     assert!(body.contains("  c toggle sort tag"));
     assert!(!body.contains("PgUp/PgDn page current pane"));
     assert!(!body.contains("Home/End jump current pane"));
+    assert!(body.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))));
     assert!(body.contains(BUILD_DATE));
     assert!(body.contains(&format!("Git SHA: {}", short_build_git_sha())));
     if BUILD_GIT_SHA.chars().count() > 8 {
@@ -1793,10 +1794,12 @@ async fn h_opens_help_modal_and_enter_or_escape_closes_it() {
     }
 
     let logo_pos = body.find(MOTLIE_PLACEHOLDER).unwrap();
+    let version_pos = body.find("Version: ").unwrap();
     let build_date_pos = body.find("Build date: ").unwrap();
     let git_sha_pos = body.find("Git SHA: ").unwrap();
     let keys_pos = body.find(HELP_KEY_FUNCTIONS).unwrap();
-    assert!(logo_pos < build_date_pos);
+    assert!(logo_pos < version_pos);
+    assert!(version_pos < build_date_pos);
     assert!(build_date_pos < git_sha_pos);
     assert!(git_sha_pos < keys_pos);
 
