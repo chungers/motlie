@@ -1,0 +1,124 @@
+version: v1.5
+source:
+  kind: external-oci
+  image: docker.io/library/alpine:3.22
+  profile: alpine-openrc
+  platform: linux/amd64
+  digest_policy: pinned
+  image_index_digest: sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+  platform_manifest_digest: sha256:2039be0c5ec6ce8566809626a252c930216a92109c043f282504accb5ee3c0c6
+package_stage:
+  manager: apk
+  update: true
+  install:
+    - bash
+    - bind-tools
+    - bubblewrap
+    - ca-certificates
+    - cloud-init
+    - coreutils
+    - curl
+    - dbus
+    - fuse3
+    - git
+    - iproute2
+    - iputils
+    - nodejs
+    - npm
+    - openrc
+    - openssh-server
+    - python3
+    - shadow
+    - socat
+    - strace
+    - sudo
+    - tmux
+    - util-linux
+    - vim
+    - wget
+  npm_global:
+    - package: "@openai/codex"
+      binaries:
+        - codex
+    - package: "@anthropic-ai/claude-code"
+      binaries:
+        - claude
+  clean: true
+immutable_payloads:
+  - label: motlie-vfs-guest
+    source: target/release/motlie-vfs-guest-v1_5
+    guest_path: /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
+    mode: "0755"
+    links:
+      - /usr/local/bin/motlie-vfs-guest
+  - label: motlie-vsock-ssh-bridge
+    source: target/release/motlie-vsock-ssh-bridge-v1_5
+    guest_path: /opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge
+    mode: "0755"
+    links:
+      - /usr/local/bin/motlie-vsock-ssh-bridge
+sshd_policy:
+  trusted_user_ca_keys: /etc/ssh/ca/user_ca.pub
+  authorized_principals_file: /etc/ssh/auth_principals/%u
+  force_command: null
+services:
+  - name: motlie-vfs-guest
+    enable: default
+  - name: motlie-agent-state
+    enable: default
+  - name: motlie-vmm-vsock-ssh
+    enable: default
+immutable_files:
+  - /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
+  - /usr/local/bin/motlie-vfs-guest
+  - /opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge
+  - /usr/local/bin/motlie-vsock-ssh-bridge
+  - /etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf
+  - /etc/init.d/motlie-vfs-guest
+  - /etc/init.d/motlie-agent-state
+  - /etc/init.d/motlie-vmm-vsock-ssh
+  - /etc/local.d/motlie-vmm.start
+seed_files:
+  - /var/lib/cloud/seed/nocloud/user-data
+  - /var/lib/cloud/seed/nocloud/meta-data
+  - /etc/motlie/v1.5/backend.env
+  - /etc/motlie-vfs/mounts.yaml
+  - /etc/ssh/ca/user_ca.pub
+  - /etc/ssh/auth_principals/<user>
+  - /home/<user>/.env
+seed:
+  user_home: /home/{guest}
+  ssh_principal: "{guest}"
+  mounts:
+    - tag: "{guest}-home"
+      guest_path: /home/{guest}
+    - tag: "{guest}-workspace"
+      guest_path: /workspace
+    - tag: "{guest}-agent-state"
+      guest_path: /agent-state
+emitters:
+  - id: ch
+    adapter:
+      program: bash
+      args:
+        - libs/vmm/examples/v1.5/build-image.sh
+        - --backend
+        - ch
+      env:
+        artifact_dir: MOTLIE_V15_ARTIFACTS_DIR
+        build_config: MOTLIE_V15_BUILD_CONFIG
+        package_manager: MOTLIE_V15_PACKAGE_MANAGER
+        package_update: MOTLIE_V15_PACKAGE_UPDATE
+        package_include: MOTLIE_V15_PACKAGE_INCLUDE
+        package_clean: MOTLIE_V15_PACKAGE_CLEAN
+    seed:
+      motlie_backend: ch
+      motlie_net_backend: ch-vhost-user
+    validation:
+      artifact_dir_env: MOTLIE_V15_CH_BASE_ARTIFACTS_DIR
+      artifact_dir_suffix: base
+validation:
+  - vfs_memfs
+  - internet_egress_package_update_apk
+  - codex_cli
+  - claude_cli

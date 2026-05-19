@@ -10,15 +10,16 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
-    v1_5, ExternalOciSource, GuestArchitecture, GuestImageProfile, OciContentCache, OciDigest,
-    OciImageReference, OciPlatform, OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed,
-    RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec,
-    RootfsMountSpec, RootfsPayloadFile, RootfsPendingRequirementPolicy, RootfsProfileSpec,
+    ALPINE_OPENRC_PROFILE, ALPINE_OPENRC_SOURCE_REF, ExternalOciSource, GuestArchitecture,
+    GuestImageProfile, OciContentCache, OciDigest, OciImageReference, OciPlatform,
+    OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed, RootfsCompatibilityAssembler,
+    RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec, RootfsMountSpec,
+    RootfsPayloadFile, RootfsPendingRequirementPolicy, RootfsProfileSpec,
     RootfsSeedOverlayAssembler, RootfsSeedOverlayManifest, RootfsSeedOverlaySpec, RootfsUserSeed,
-    UBUNTU_SYSTEMD_PROFILE,
+    UBUNTU_SYSTEMD_PROFILE, UBUNTU_SYSTEMD_SOURCE_REF, v1_5,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,7 +35,7 @@ const DEFAULT_RELEASE_EVIDENCE_NAME: &str = "mbuild-release-evidence.json";
 const ADAPTER_LOG_NAME: &str = "mbuild-adapter.log";
 const CH_EMITTER_LOG_NAME: &str = "mbuild-ch-emitter.log";
 const CH_PACKAGE_STAGE_LOG_NAME: &str = "mbuild-package-stage.log";
-const CH_PACKAGE_STAGE_SCRIPT_NAME: &str = "mbuild-apt-stage.sh";
+const CH_PACKAGE_STAGE_SCRIPT_NAME: &str = "mbuild-package-stage.sh";
 const CH_BUILD_RESULT_NAME: &str = "ch-build-result.json";
 const CH_GUEST_CONTRACT_NAME: &str = "guest-contract.json";
 const CH_ROOTFS_NAME: &str = "rootfs.squashfs";
@@ -709,7 +710,7 @@ fn run_ch_external_oci_build(
 
     let chroot_support = prepare_guest_chroot_execution(&rootfs_dir, &host, &guest, &log_path)?;
     let guest_binaries = build_guest_binaries(repo_root, &guest, &log_path)?;
-    run_apt_package_stage(&rootfs_dir, config, &options.out)?;
+    run_package_stage(&rootfs_dir, config, &options.out)?;
 
     let assembly_manifest =
         assemble_immutable_rootfs(&rootfs_dir, config, &source, &guest_binaries)?;
@@ -1083,12 +1084,18 @@ fn resolve_external_source(
     config: &ImageBuildConfig,
     platform: OciPlatform,
 ) -> Result<ExternalOciSource> {
-    if config.source.profile.as_str() != UBUNTU_SYSTEMD_PROFILE {
-        bail!(
-            "external-oci source.profile {:?} is not implemented; expected {}",
-            config.source.profile.as_str(),
-            UBUNTU_SYSTEMD_PROFILE
-        );
+    match config.source.profile.as_str() {
+        UBUNTU_SYSTEMD_PROFILE => require_eq(
+            "source.image for ubuntu-systemd",
+            &config.source.image,
+            UBUNTU_SYSTEMD_SOURCE_REF,
+        )?,
+        ALPINE_OPENRC_PROFILE => require_eq(
+            "source.image for alpine-openrc",
+            &config.source.image,
+            ALPINE_OPENRC_SOURCE_REF,
+        )?,
+        profile => bail!("unsupported source.profile {profile:?}"),
     }
     let image_ref = OciImageReference::from_str(&config.source.image)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1497,16 +1504,15 @@ fn rootless_unshare_command() -> Result<Command> {
     Ok(command)
 }
 
-fn run_apt_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -> Result<()> {
-    if config.package_stage.manager.as_str() != "apt" {
-        bail!(
-            "CH external-OCI package stage only implements apt, got {}",
-            config.package_stage.manager.as_str()
-        );
-    }
+fn run_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -> Result<()> {
     let script_path = out.join(CH_PACKAGE_STAGE_SCRIPT_NAME);
     let log_path = out.join(CH_PACKAGE_STAGE_LOG_NAME);
-    fs::write(&script_path, apt_stage_script())?;
+    let stage_script = match config.package_stage.manager.as_str() {
+        "apt" => apt_stage_script(),
+        "apk" => apk_stage_script(),
+        manager => bail!("CH external-OCI package stage does not implement {manager}"),
+    };
+    fs::write(&script_path, stage_script)?;
     set_mode(&script_path, 0o755)?;
 
     let mut command = rootless_unshare_command()?;
@@ -1530,7 +1536,14 @@ fn run_apt_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Pat
             command.arg(binary);
         }
     }
-    run_logged_command(&mut command, &log_path, "apt/npm package stage")
+    run_logged_command(
+        &mut command,
+        &log_path,
+        &format!(
+            "{}/npm package stage",
+            config.package_stage.manager.as_str()
+        ),
+    )
 }
 
 fn apt_stage_script() -> &'static str {
@@ -1560,6 +1573,7 @@ mount --bind /proc "$rootfs/proc"
 mount --rbind /sys "$rootfs/sys"
 mount --rbind /dev "$rootfs/dev"
 cleanup() {
+    rm -f "$rootfs/tmp/mbuild-host-ca-certificates.crt" >/dev/null 2>&1 || true
     umount -l "$rootfs/dev" >/dev/null 2>&1 || true
     umount -l "$rootfs/sys" >/dev/null 2>&1 || true
     umount -l "$rootfs/proc" >/dev/null 2>&1 || true
@@ -1580,7 +1594,13 @@ fi
 
 mkdir -p "$rootfs/opt/motlie/npm"
 if [[ ${#npm_packages[@]} -gt 0 ]]; then
-    chroot "$rootfs" env npm_config_update_notifier=false npm install -g --prefix /opt/motlie/npm "${npm_packages[@]}"
+    npm_env=(npm_config_update_notifier=false)
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        cp /etc/ssl/certs/ca-certificates.crt "$rootfs/tmp/mbuild-host-ca-certificates.crt"
+        npm_env+=(NODE_EXTRA_CA_CERTS=/tmp/mbuild-host-ca-certificates.crt npm_config_cafile=/tmp/mbuild-host-ca-certificates.crt)
+    fi
+    chroot "$rootfs" env "${npm_env[@]}" npm install -g --prefix /opt/motlie/npm "${npm_packages[@]}"
+    rm -f "$rootfs/tmp/mbuild-host-ca-certificates.crt"
     mkdir -p "$rootfs/usr/local/bin"
     for binary in "${npm_binaries[@]}"; do
         chroot "$rootfs" ln -sf "/opt/motlie/npm/bin/$binary" "/usr/local/bin/$binary"
@@ -1607,13 +1627,122 @@ truncate -s 0 "$rootfs/etc/machine-id"
 "#
 }
 
+fn apk_stage_script() -> &'static str {
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+rootfs="$(readlink -f "$1")"
+update="$2"
+clean="$3"
+shift 3
+
+apk_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    apk_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    npm_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_binaries=("$@")
+
+mkdir -p "$rootfs/proc" "$rootfs/sys" "$rootfs/dev" "$rootfs/etc" "$rootfs/tmp"
+mount --bind /proc "$rootfs/proc"
+mount --rbind /sys "$rootfs/sys"
+mount --rbind /dev "$rootfs/dev"
+cleanup() {
+    rm -f "$rootfs/tmp/mbuild-host-ca-certificates.crt" >/dev/null 2>&1 || true
+    umount -l "$rootfs/dev" >/dev/null 2>&1 || true
+    umount -l "$rootfs/sys" >/dev/null 2>&1 || true
+    umount -l "$rootfs/proc" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+if [[ -f /etc/resolv.conf ]]; then
+    cp /etc/resolv.conf "$rootfs/etc/resolv.conf"
+fi
+if [[ -f "$rootfs/etc/apk/repositories" ]]; then
+    sed -i 's#^https://dl-cdn.alpinelinux.org/#http://dl-cdn.alpinelinux.org/#' "$rootfs/etc/apk/repositories"
+fi
+
+bootstrap_packages=()
+remaining_packages=()
+for package in "${apk_packages[@]}"; do
+    case "$package" in
+        ca-certificates|ca-certificates-bundle) bootstrap_packages+=("$package") ;;
+        *) remaining_packages+=("$package") ;;
+    esac
+done
+
+if [[ ${#bootstrap_packages[@]} -gt 0 ]]; then
+    chroot "$rootfs" apk --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
+    chroot "$rootfs" update-ca-certificates >/dev/null 2>&1 || true
+fi
+if [[ "$update" == "1" ]]; then
+    chroot "$rootfs" apk update
+fi
+if [[ ${#remaining_packages[@]} -gt 0 ]]; then
+    chroot "$rootfs" apk add --no-cache "${remaining_packages[@]}"
+fi
+
+mkdir -p "$rootfs/opt/motlie/npm"
+if [[ ${#npm_packages[@]} -gt 0 ]]; then
+    npm_env=(npm_config_update_notifier=false)
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        cp /etc/ssl/certs/ca-certificates.crt "$rootfs/tmp/mbuild-host-ca-certificates.crt"
+        npm_env+=(NODE_EXTRA_CA_CERTS=/tmp/mbuild-host-ca-certificates.crt npm_config_cafile=/tmp/mbuild-host-ca-certificates.crt)
+    fi
+    chroot "$rootfs" env "${npm_env[@]}" npm install -g --prefix /opt/motlie/npm "${npm_packages[@]}"
+    rm -f "$rootfs/tmp/mbuild-host-ca-certificates.crt"
+    mkdir -p "$rootfs/usr/local/bin"
+    for binary in "${npm_binaries[@]}"; do
+        chroot "$rootfs" ln -sf "/opt/motlie/npm/bin/$binary" "/usr/local/bin/$binary"
+    done
+fi
+
+chroot "$rootfs" ssh-keygen -A
+sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' "$rootfs/etc/ssh/sshd_config" || true
+grep -qxF 'Include /etc/ssh/sshd_config.d/*.conf' "$rootfs/etc/ssh/sshd_config" 2>/dev/null || printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> "$rootfs/etc/ssh/sshd_config"
+if [[ -x "$rootfs/sbin/rc-update" ]]; then
+    grep -qxF 'rc_logger="YES"' "$rootfs/etc/rc.conf" 2>/dev/null || printf '\nrc_logger="YES"\n' >> "$rootfs/etc/rc.conf"
+    grep -qxF 'rc_verbose=yes' "$rootfs/etc/rc.conf" 2>/dev/null || printf 'rc_verbose=yes\n' >> "$rootfs/etc/rc.conf"
+    for entry in \
+        "devfs sysinit" \
+        "procfs sysinit" \
+        "sysfs sysinit" \
+        "hostname boot" \
+        "bootmisc boot" \
+        "localmount boot" \
+        "loopback boot"; do
+        service="${entry% *}"
+        runlevel="${entry#* }"
+        if [[ -f "$rootfs/etc/init.d/$service" ]]; then
+            chroot "$rootfs" rc-update add "$service" "$runlevel"
+        fi
+    done
+    for service in sshd dbus cloud-init-local cloud-init cloud-config cloud-final local; do
+        if [[ -f "$rootfs/etc/init.d/$service" ]]; then
+            chroot "$rootfs" rc-update add "$service" default
+        fi
+    done
+fi
+grep -qxF user_allow_other "$rootfs/etc/fuse.conf" 2>/dev/null || printf '%s\n' user_allow_other >> "$rootfs/etc/fuse.conf"
+if [[ "$clean" == "1" ]]; then
+    rm -rf "$rootfs/var/cache/apk"/* "$rootfs/root/.npm"
+fi
+"#
+}
+
 fn assemble_immutable_rootfs(
     rootfs_dir: &Path,
     config: &ImageBuildConfig,
     source: &ExternalOciSource,
     guest_binaries: &GuestBinaries,
 ) -> Result<motlie_vmm::image::RootfsCompatibilityAssemblyManifest> {
-    let mut profile = GuestImageProfile::ubuntu_systemd(source.clone());
+    let mut profile = guest_image_profile_from_config(config, source.clone())?;
     profile.required_packages = config.package_stage.install.clone();
     let profile_spec = RootfsProfileSpec::for_profile(profile);
     let mut spec = RootfsCompatibilityLayerSpec::new(profile_spec);
@@ -1635,6 +1764,17 @@ fn assemble_immutable_rootfs(
         spec.guest_binaries.push(file);
     }
     Ok(RootfsCompatibilityAssembler::new().assemble(rootfs_dir, &spec)?)
+}
+
+fn guest_image_profile_from_config(
+    config: &ImageBuildConfig,
+    source: ExternalOciSource,
+) -> Result<GuestImageProfile> {
+    match config.source.profile.as_str() {
+        UBUNTU_SYSTEMD_PROFILE => Ok(GuestImageProfile::ubuntu_systemd(source)),
+        ALPINE_OPENRC_PROFILE => Ok(GuestImageProfile::alpine_openrc(source)),
+        profile => bail!("unsupported source.profile {profile:?}"),
+    }
 }
 
 fn parse_octal_mode(value: &str) -> Result<u32> {
@@ -1780,7 +1920,7 @@ fn write_ch_guest_contract(
         },
         "launch_contract": {
             "builds_allowed": false,
-            "forbidden_first_contact_tools": ["apt", "apt-get", "cargo", "npm", "rustup"]
+            "forbidden_first_contact_tools": ["apk", "apt", "apt-get", "cargo", "npm", "rustup"]
         }
     });
     fs::write(path, serde_json::to_vec_pretty(&value)?)?;
@@ -2679,11 +2819,7 @@ fn git_source_commit() -> Result<String> {
 }
 
 fn bool_env(value: bool) -> &'static str {
-    if value {
-        "1"
-    } else {
-        "0"
-    }
+    if value { "1" } else { "0" }
 }
 
 #[derive(Debug, Parser)]
@@ -2942,18 +3078,24 @@ impl SourceStage {
         match self.kind {
             SourceKind::ExternalOci => {
                 if self.digest_policy == DigestPolicy::AdapterVerified {
-                    bail!("source.digest_policy adapter-verified is only valid for transitional-adapter sources");
+                    bail!(
+                        "source.digest_policy adapter-verified is only valid for transitional-adapter sources"
+                    );
                 }
                 if self.digest_policy == DigestPolicy::Pinned
                     && (self.image_index_digest.is_none()
                         || self.platform_manifest_digest.is_none())
                 {
-                    bail!("source.digest_policy pinned requires source.image_index_digest and source.platform_manifest_digest");
+                    bail!(
+                        "source.digest_policy pinned requires source.image_index_digest and source.platform_manifest_digest"
+                    );
                 }
             }
             SourceKind::TransitionalAdapter => {
                 if self.digest_policy != DigestPolicy::AdapterVerified {
-                    bail!("source.digest_policy for transitional-adapter sources must be adapter-verified");
+                    bail!(
+                        "source.digest_policy for transitional-adapter sources must be adapter-verified"
+                    );
                 }
                 if self.image_index_digest.is_some() || self.platform_manifest_digest.is_some() {
                     bail!("transitional-adapter sources must not declare OCI digest pins");
@@ -3189,10 +3331,7 @@ struct RenderedSeedStage {
 
 impl ServiceSpec {
     fn validate(&self) -> Result<()> {
-        require_non_empty("services.name", &self.name)?;
-        if !self.name.ends_with(".service") {
-            bail!("service name {:?} must end with .service", self.name);
-        }
+        require_token("services.name", &self.name)?;
         require_non_empty("services.enable", &self.enable)?;
         Ok(())
     }
@@ -3305,8 +3444,8 @@ const PACKAGE_MANAGER_STRATEGIES: &[PackageManagerStrategy] = &[
     },
     PackageManagerStrategy {
         id: "apk",
-        support: PackageManagerSupport::Reserved,
-        validate_package: validate_reserved_package_spec,
+        support: PackageManagerSupport::Implemented,
+        validate_package: validate_apk_package_spec,
     },
     PackageManagerStrategy {
         id: "dnf",
@@ -3335,6 +3474,35 @@ fn validate_reserved_package_spec(field: &str, value: &str) -> Result<()> {
     require_non_empty(field, value)
 }
 
+fn validate_apk_package_spec(field: &str, value: &str) -> Result<()> {
+    require_non_empty(field, value)?;
+    if value
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b',' | b'/' | b';'))
+    {
+        bail!("{field} contains unsupported apk package spec {value:?}");
+    }
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        bail!("{field} contains unsupported apk package spec {value:?}: empty package name");
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        bail!(
+            "{field} contains unsupported apk package spec {value:?}: package name must start with lowercase ASCII or digit"
+        );
+    }
+    if !bytes.all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'+' | b'-' | b'.' | b'_')
+    }) {
+        bail!(
+            "{field} contains unsupported apk package spec {value:?}: unsupported package name character"
+        );
+    }
+    Ok(())
+}
+
 fn validate_apt_package_spec(field: &str, value: &str) -> Result<()> {
     require_non_empty(field, value)?;
     if value
@@ -3358,7 +3526,9 @@ fn validate_apt_package_spec(field: &str, value: &str) -> Result<()> {
     let name = name_arch_parts.next().unwrap_or_default();
     let arch = name_arch_parts.next();
     if name_arch_parts.next().is_some() {
-        bail!("{field} contains unsupported apt package spec {value:?}: multiple ':' separators before version");
+        bail!(
+            "{field} contains unsupported apt package spec {value:?}: multiple ':' separators before version"
+        );
     }
     validate_apt_package_name(field, value, name)?;
     if let Some(arch) = arch {
@@ -3374,12 +3544,16 @@ fn validate_apt_package_name(field: &str, full: &str, name: &str) -> Result<()> 
         bail!("{field} contains unsupported apt package spec {full:?}: empty package name");
     };
     if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        bail!("{field} contains unsupported apt package spec {full:?}: package name must start with lowercase ASCII or digit");
+        bail!(
+            "{field} contains unsupported apt package spec {full:?}: package name must start with lowercase ASCII or digit"
+        );
     }
     if !bytes.all(|byte| {
         byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')
     }) {
-        bail!("{field} contains unsupported apt package spec {full:?}: unsupported package name character");
+        bail!(
+            "{field} contains unsupported apt package spec {full:?}: unsupported package name character"
+        );
     }
     Ok(())
 }
@@ -3393,10 +3567,14 @@ fn validate_apt_arch(field: &str, full: &str, arch: &str) -> Result<()> {
         );
     };
     if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        bail!("{field} contains unsupported apt package spec {full:?}: architecture must start with lowercase ASCII or digit");
+        bail!(
+            "{field} contains unsupported apt package spec {full:?}: architecture must start with lowercase ASCII or digit"
+        );
     }
     if !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
-        bail!("{field} contains unsupported apt package spec {full:?}: unsupported architecture character");
+        bail!(
+            "{field} contains unsupported apt package spec {full:?}: unsupported architecture character"
+        );
     }
     Ok(())
 }
@@ -4021,7 +4199,7 @@ fn executed_stages(adapter: &AdapterRecord) -> Vec<StageRecord> {
             ),
             StageRecord::executed(
                 "package",
-                "explicit apt/npm package stage executed before backend emit",
+                "explicit package-manager/npm package stage executed before backend emit",
                 adapter,
             ),
             StageRecord::executed(
@@ -4734,7 +4912,7 @@ validation:
     #[test]
     fn reserved_package_managers_are_not_executable() {
         let stage = PackageStage {
-            manager: PackageManagerId("apk".to_string()),
+            manager: PackageManagerId("dnf".to_string()),
             update: true,
             install: vec!["openssh".to_string()],
             npm_global: Vec::new(),
@@ -4743,9 +4921,29 @@ validation:
 
         let error = stage.validate().unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("reserved but not implemented by current mbuild adapters"));
+        assert!(
+            error
+                .to_string()
+                .contains("reserved but not implemented by current mbuild adapters")
+        );
+    }
+
+    #[test]
+    fn apk_package_specs_allow_common_apk_names() {
+        let stage = PackageStage {
+            manager: PackageManagerId("apk".to_string()),
+            update: true,
+            install: vec![
+                "openssh-server".to_string(),
+                "py3-cloud-init".to_string(),
+                "libstdc++".to_string(),
+                "foo_bar".to_string(),
+            ],
+            npm_global: Vec::new(),
+            clean: true,
+        };
+
+        stage.validate().unwrap();
     }
 
     #[test]
@@ -4825,9 +5023,11 @@ validation:
 
         let error = manifest.validate_against_config(&config).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("manifest package_stage does not match config"));
+        assert!(
+            error
+                .to_string()
+                .contains("manifest package_stage does not match config")
+        );
     }
 
     #[test]
@@ -4862,9 +5062,11 @@ validation:
 
         let error = manifest.validate_against_config(&config).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("manifest adapter.materialized_source does not match config"));
+        assert!(
+            error
+                .to_string()
+                .contains("manifest adapter.materialized_source does not match config")
+        );
     }
 
     #[test]

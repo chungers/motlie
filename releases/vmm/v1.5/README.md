@@ -6,18 +6,25 @@ harness logs are intentionally not checked in here.
 
 ## Configs
 
-The current worked example is Ubuntu 24.04 with the `ubuntu-systemd` rootfs
-profile:
+The worked examples currently cover Ubuntu 24.04 with the `ubuntu-systemd`
+rootfs profile and Alpine 3.22 with the `alpine-openrc` rootfs profile:
 
 ```text
 configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
 configs/motlie-image.ubuntu-24.04.linux-amd64.yaml
 configs/motlie-image.ubuntu-24.04.default-arm64.yaml
+configs/motlie-image.alpine-3.22.linux-arm64.yaml
+configs/motlie-image.alpine-3.22.linux-amd64.yaml
 ```
 
 The explicit per-platform files are the release-facing inputs. The
 `default-arm64` file preserves the former v1.5 example default for traceability;
 new build and release evidence should use the explicit platform config.
+
+Alpine uses the same v1.5 guest software surface as Ubuntu: OpenSSH, VFS/VNET
+guest support, Git, Codex, and Claude. Distro-specific differences live in the
+rootfs profile, package manager, init-service layer, and harness scenarios:
+Alpine uses `apk`/OpenRC checks where Ubuntu uses `apt`/systemd checks.
 
 To add another rootfs, add a config named:
 
@@ -96,6 +103,30 @@ cargo run -p mbuild -- build \
   --out /tmp/mbuild/v1.5-ubuntu-arm64/ch-src
 ```
 
+Arm64 CH source build from the pinned Alpine OCI rootfs:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-alpine-arm64/ch-src
+```
+
+Plan-only Alpine manifests can be generated for both release platforms without
+running a backend adapter:
+
+```bash
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-alpine-arm64/plan
+
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-amd64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-alpine-amd64/plan
+```
+
 Export the common rootfs to a local OCI layout:
 
 ```bash
@@ -134,4 +165,25 @@ cargo run -p mbuild -- validate \
   --artifact /tmp/mbuild/v1.5-ubuntu-arm64/ch-from-oci \
   --require-executed \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+```
+
+Alpine validation uses Alpine-specific scenarios that replace `apt-get update`
+with `apk update` while preserving the same VFS, VNET, SSH, sudo, multi-guest,
+and Codex/Claude agent checks:
+
+```bash
+MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
+cargo run -p motlie-vmm --example harness_v1_5 -- \
+  --backend ch \
+  scenario libs/vmm/examples/v1.5/scenarios/agent-bootstrap-alpine.json
+
+MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
+cargo run -p motlie-vmm --example harness_v1_5 -- \
+  --backend ch \
+  scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate-alpine.json
+
+MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
+cargo run -p motlie-vmm --example harness_v1_5 -- \
+  --backend ch \
+  scenario libs/vmm/examples/v1.5/scenarios/pty-agent-validation-alpine.json
 ```

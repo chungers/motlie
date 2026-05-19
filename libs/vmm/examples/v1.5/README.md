@@ -171,6 +171,8 @@ Explicit per-platform release configs are checked in for #258 acceptance:
 releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
 releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-amd64.yaml
 releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.default-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-amd64.yaml
 ```
 
 The explicit per-platform configs are the release-facing inputs. The
@@ -181,6 +183,18 @@ follow-up `ch-linux-amd64` target uses `linux/amd64` and should be coordinated
 on a separate x86_64/amd64 Linux host. Current Apple Silicon VZ acceptance uses
 the `linux/arm64` guest payload and must be built/validated on a macOS host
 with Virtualization.framework.
+
+Alpine 3.22 is the second checked-in rootfs profile. It uses the same Motlie
+guest software surface as Ubuntu but swaps the package/init contracts to
+`apk` and OpenRC. Current Alpine support is validated for CH; VZ Alpine should
+not be advertised until the VZ launch/validation path is generalized away from
+Ubuntu/systemd assumptions and validated on macOS. Alpine scenario files are:
+
+```text
+scenarios/agent-bootstrap-alpine.json
+scenarios/multiguest-validate-alpine.json
+scenarios/pty-agent-validation-alpine.json
+```
 
 `mbuild build --target ch` now consumes the checked-in `external-oci` source,
 resolves and fetches the pinned Ubuntu OCI platform, imports the rootfs, runs

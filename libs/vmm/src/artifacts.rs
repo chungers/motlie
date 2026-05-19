@@ -3,8 +3,8 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::backend::vz;
 use crate::backend::BackendKind;
+use crate::backend::vz;
 use crate::network::NetworkModes;
 use crate::network_alloc::GuestNetAssignment;
 use crate::spec::{GuestRuntimePaths, GuestSpec};
@@ -53,6 +53,7 @@ pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
     let mut out = String::from("#cloud-config\n");
     writeln!(&mut out, "apt:").expect("writing to String cannot fail");
     writeln!(&mut out, "  preserve_sources_list: true").expect("writing to String cannot fail");
+    writeln!(&mut out, "ssh_pwauth: false").expect("writing to String cannot fail");
     writeln!(&mut out, "users:").expect("writing to String cannot fail");
     writeln!(&mut out, "  - name: {}", guest.user.name).expect("writing to String cannot fail");
     writeln!(&mut out, "    uid: {}", guest.user.uid).expect("writing to String cannot fail");
@@ -62,7 +63,8 @@ pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
     writeln!(&mut out, "    shell: /bin/bash").expect("writing to String cannot fail");
     writeln!(&mut out, "    groups: [sudo]").expect("writing to String cannot fail");
     writeln!(&mut out, "    sudo: ALL=(ALL) NOPASSWD:ALL").expect("writing to String cannot fail");
-    writeln!(&mut out, "    lock_passwd: true").expect("writing to String cannot fail");
+    writeln!(&mut out, "    passwd: '*'").expect("writing to String cannot fail");
+    writeln!(&mut out, "    lock_passwd: false").expect("writing to String cannot fail");
 
     if !guest.software.packages.is_empty() {
         writeln!(&mut out, "packages:").expect("writing to String cannot fail");
@@ -567,8 +569,11 @@ mod tests {
         let guest = sample_guest();
         let rendered = render_cloud_init(&guest).unwrap();
         assert!(rendered.contains("preserve_sources_list: true"));
+        assert!(rendered.contains("ssh_pwauth: false"));
         assert!(rendered.contains("name: alice"));
         assert!(rendered.contains("sudo: ALL=(ALL) NOPASSWD:ALL"));
+        assert!(rendered.contains("passwd: '*'"));
+        assert!(rendered.contains("lock_passwd: false"));
         assert!(rendered.contains("packages:"));
         assert!(rendered.contains("  - vim"));
         assert!(rendered.contains("  - gh"));
@@ -596,7 +601,9 @@ mod tests {
         assert!(script.contains("GUEST_ID='alice'"));
         assert!(script.contains("SEED_DIR=\"${SEED_DIR:-/tmp/motlie-vmm-v14-cloud-init-alice}\""));
         assert!(script.contains("RUNTIME_ROOT=\"${RUNTIME_ROOT:-/tmp/motlie-vmm-v14-runtime}\""));
-        assert!(script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\""));
+        assert!(
+            script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\"")
+        );
         assert!(
             script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\"")
         );
@@ -660,10 +667,16 @@ mod tests {
         assert!(script.contains(
             "export MOTLIE_VZ_CONTROL_PORT_FILE='/tmp/motlie-vmm-v14-runtime/alice/control-port'"
         ));
-        assert!(script
-            .contains("export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"));
-        assert!(script
-            .contains("export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"));
+        assert!(
+            script.contains(
+                "export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"
+            )
+        );
+        assert!(
+            script.contains(
+                "export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"
+            )
+        );
         assert!(script.contains("export MOTLIE_VZ_EGRESS_GUEST_IP=\"$EGRESS_GUEST_IP\""));
         assert!(script.contains("VZ_VM_NAME='motlie-v1-45-motlie-vmm-v14-runtime-alice'"));
         assert!(script.contains("launch-vz.sh"));

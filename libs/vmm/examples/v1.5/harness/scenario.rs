@@ -12,8 +12,8 @@ use motlie_vmm::orchestrator::{OrchestratorError, ShutdownReport};
 use motlie_vmm::provisioning::{GuestProvisioner, ProvisioningError};
 use motlie_vmm::runtime::RuntimeError;
 use motlie_vmm::ssh::{
-    self, exec_via_proxy, new_guest_registry, ExecOutput, PtyRead, PtyRequest, SshProxyConfig,
-    SshProxyError,
+    self, ExecOutput, PtyRead, PtyRequest, SshProxyConfig, SshProxyError, exec_via_proxy,
+    new_guest_registry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,10 +23,10 @@ use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
+    AGENT_CLI_START_COMMAND, APK_UPDATE_COMMAND, APT_UPDATE_COMMAND, DynError, HarnessInstance,
+    PACKAGE_MANAGER_QUIESCENT_COMMAND, SSH_PROXY_READY_TIMEOUT, VFS_MEMFS_LAYER_COMMAND,
     build_guest_provisioner, persist_json, print_instance_details, wait_for_egress_ready,
-    wait_for_proxy_listener, DynError, HarnessInstance, AGENT_CLI_START_COMMAND,
-    APT_UPDATE_COMMAND, PACKAGE_MANAGER_QUIESCENT_COMMAND, SSH_PROXY_READY_TIMEOUT,
-    VFS_MEMFS_LAYER_COMMAND,
+    wait_for_proxy_listener,
 };
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +80,11 @@ pub enum ScenarioStep {
         timeout_ms: Option<u64>,
     },
     AptUpdate {
+        guest: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    ApkUpdate {
         guest: String,
         #[serde(default)]
         timeout_ms: Option<u64>,
@@ -701,6 +706,38 @@ impl ScenarioDriver {
                     shutdown: None,
                 })
             }
+            ScenarioStep::ApkUpdate { guest, timeout_ms } => {
+                let output = self
+                    .provisioner
+                    .exec(
+                        guest,
+                        APK_UPDATE_COMMAND,
+                        duration_or_default(*timeout_ms, 120_000),
+                    )
+                    .await
+                    .map_err(ScenarioDriverError::from)?;
+                check_exec_expectation(
+                    &ExecExpectation {
+                        exit_code: Some(0),
+                        stdout_contains: Some("APK_OK".to_string()),
+                        stderr_contains: None,
+                    },
+                    &output,
+                )?;
+                Ok(ScenarioStepResult {
+                    index,
+                    action: "apk_update",
+                    guest: Some(guest.clone()),
+                    session: None,
+                    detail: format!(
+                        "apk update succeeded over backend internet egress for {guest}"
+                    ),
+                    exec: Some(output),
+                    pty_read: None,
+                    screen: None,
+                    shutdown: None,
+                })
+            }
             ScenarioStep::CheckAgentCli { guest, timeout_ms } => {
                 let output = self
                     .provisioner
@@ -1039,6 +1076,7 @@ fn action_name(step: &ScenarioStep) -> &'static str {
         ScenarioStep::WaitEgressReady { .. } => "wait_egress_ready",
         ScenarioStep::CheckVfsMemfs { .. } => "check_vfs_memfs",
         ScenarioStep::AptUpdate { .. } => "apt_update",
+        ScenarioStep::ApkUpdate { .. } => "apk_update",
         ScenarioStep::CheckAgentCli { .. } => "check_agent_cli",
         ScenarioStep::PtyOpen { .. } => "pty_open",
         ScenarioStep::PtySend { .. } => "pty_send",

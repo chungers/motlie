@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-18 | @vmm-cdx | Add the Alpine 3.22/OpenRC worked-example profile: `mbuild` supports apk/npm package staging, OpenRC service emission, Alpine CH scenarios, and plan manifests for linux/arm64 and linux/amd64 while keeping VZ Alpine enablement explicit future work |
 | 2026-05-17 | @vmm-cdx | Move v1.5 worked-example image configs into `releases/vmm/v1.5/configs/` so release inputs are separated from example harness code and future rootfs configs can be added without changing the v1.5 harness tree |
 | 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for the transitional phase: `mbuild build --target vz --oci-layout <layout>` validates the local OCI payload and feeds its rootfs layer through the current VZ adapter rootfs handoff |
 | 2026-05-16 | @vmm-cdx | Reprioritize issue #258 target sequencing: Apple Silicon VZ and DGX/aarch64 Linux CH consume/build `linux/arm64` first; Linux amd64/x86_64 CH follows on a coordinated native host; Darwin guest-image workflow must run on macOS VZ |
@@ -1065,8 +1066,8 @@ not yet emit VM boot artifacts.
 - `RootfsCompatibilityAssembler` applies the immutable Motlie compatibility
   layer to a supported imported rootfs. It installs v1.5 guest payloads under
   `/opt/motlie/v1.5/guest/bin`, exposes compatibility symlinks under
-  `/usr/local/bin`, installs the `ubuntu-systemd` service graph, creates stable
-  directories, installs SSHD CA trust directives, and emits
+  `/usr/local/bin`, installs the selected init profile service graph, creates
+  stable directories, installs SSHD CA trust directives, and emits
   `RootfsCompatibilityAssemblyManifest` with installed paths and pending
   requirements. The native support file set includes the Rust guest
   vsock-to-SSH bridge and tmux auto-start profile used by PTY/TUI validation.
@@ -1079,11 +1080,14 @@ not yet emit VM boot artifacts.
   guest ownership for user-owned files such as `/home/<user>/.env`. The seed
   overlay writer does not call host `chown`; that would fail on macOS and
   non-root hosts and would make the seed command backend-host-specific.
-  Cloud-init preserves OCI-provided apt sources and uses scalar passwordless
-  sudo rules so Ubuntu guests keep valid release suites and `sudo -n` works.
-  Missing installable packages or missing systemd remain explicit manifest
-  evidence unless the caller runs a concrete package strategy; the supported apt
-  strategy is implemented for the v1.5 CH path.
+  Cloud-init disables SSH password authentication and renders users as
+  password-unusable but account-unlocked so OpenSSH CA public-key auth works on
+  both Ubuntu and Alpine. Cloud-init preserves OCI-provided apt sources and uses
+  scalar passwordless sudo rules so Ubuntu guests keep valid release suites and
+  `sudo -n` works. Missing installable packages or missing init/profile
+  requirements remain explicit manifest evidence unless the caller runs a
+  concrete package strategy; apt and apk strategies are implemented for the v1.5
+  CH path.
 
 ### Rootfs Classifier Requirements And Design
 
@@ -1132,11 +1136,17 @@ require `git`, `openssh-server`, and `/workspace`, while a production profile ma
 choose a different package set and mount layout. Both profiles still share the
 same VFS/VNET invariants and the same typed classification result.
 
-The current `ubuntu-systemd` profile validates against
-`docker.io/library/ubuntu:24.04` and `InitProfile::UbuntuSystemd`; validation
-must fail if a caller combines the Ubuntu profile name with a different source
-image or init profile. SHA-family OCI digests must be full-length digests, not
-short placeholders, because validation records are provenance artifacts.
+The current built-in profiles are:
+
+- `ubuntu-systemd`: validates against `docker.io/library/ubuntu:24.04`,
+  `PackageManagerRequirement::AptDpkg`, and `InitProfile::UbuntuSystemd`.
+- `alpine-openrc`: validates against `docker.io/library/alpine:3.22`,
+  `PackageManagerRequirement::Apk`, and `InitProfile::AlpineOpenRc`.
+
+Validation must fail if a caller combines a built-in profile name with a
+different source image or init profile. SHA-family OCI digests must be
+full-length digests, not short placeholders, because validation records are
+provenance artifacts.
 
 ### Rootfs Compatibility And Seed Overlay Requirements And Design
 
@@ -1179,10 +1189,19 @@ Functional requirements:
   VFS/FUSE support, networking/debugging tools, `socat` for the vsock SSH loop,
   and coding-agent CLI prerequisites such as `git` and `npm`. Production
   builders can supply a different package set through `RootfsProfileSpec`.
+- The built-in `alpine-openrc` package baseline mirrors the same v1.5 guest
+  capability surface with Alpine package names and OpenRC services:
+  cloud-init, OpenSSH/sudo, VFS/FUSE support, networking/debugging tools, Git,
+  Node/npm, Codex, and Claude. Alpine validation scenarios replace apt-specific
+  probes with `apk` probes but keep the same guest-visible VFS, VNET, SSH,
+  sudo, multi-guest, and PTY/Codex requirements.
 - SSH CA auto-provisioning is split: the common rootfs installs the OpenSSH
   drop-in at `/etc/ssh/sshd_config.d/90-motlie-vmm-ca.conf` and an empty
   `/etc/ssh/ca/user_ca.pub` placeholder, while the seed overlay supplies the
   per-guest CA key contents and `/etc/ssh/auth_principals/<user>`.
+  The assembler also ensures `/etc/ssh/sshd_config` includes
+  `/etc/ssh/sshd_config.d/*.conf`; Alpine's packaged config does not guarantee
+  that include.
 - The vsock SSH loop re-sources `/etc/motlie/v1.5/backend.env` inside its retry
   loop so seed/overlay refreshes are visible without relying on stale shell
   variables. The default remains port `2222`.
@@ -1235,8 +1254,8 @@ The manifest is the handoff contract for the next slices:
 
 - Package strategy consumes the selected profile/package stage and either
   installs the package/profile baseline or rejects the image before emit. The
-  first implemented strategy is apt plus configured npm globals for the Ubuntu
-  profile.
+  implemented CH strategies are apt plus configured npm globals for
+  `ubuntu-systemd`, and apk plus configured npm globals for `alpine-openrc`.
 - CH/VZ emitters consume the mutated rootfs plus installed-path metadata and add
   only backend artifact packaging, seed overlays, kernel/disk metadata, and
   backend-specific launch inputs.
@@ -1259,11 +1278,14 @@ config-driven builder running the full staged image flow.
 
 The current worked-example release configs live under
 `releases/vmm/v1.5/configs/` and use `source.kind = external-oci` with pinned
-`docker.io/library/ubuntu:24.04` image-index and selected platform-manifest
-digests. The Linux/CH emitter consumes that native
-source/import/package/compatibility path. The VZ emitter remains
-adapter-backed, still records its current `materialized_source`, and consumes
-the same assembled OCI rootfs through the adapter rootfs handoff.
+OCI image-index and selected platform-manifest digests. Ubuntu 24.04 and Alpine
+3.22 each have explicit `linux/arm64` and `linux/amd64` configs. The Linux/CH
+emitter consumes the native source/import/package/compatibility path for both
+profiles. The VZ emitter remains adapter-backed for the Ubuntu path, still
+records its current `materialized_source`, and consumes the same assembled OCI
+rootfs through the adapter rootfs handoff. Alpine is not declared as VZ-ready
+until the VZ launch/validation path is generalized away from Ubuntu/systemd
+assumptions and validated on macOS.
 
 The VZ side of this transition must be explicit. The Linux/CH native OCI build
 emits a common `assembled-rootfs.tar` before CH-specific boot adaptations are

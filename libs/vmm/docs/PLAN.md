@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-18 | @vmm-cdx | Add Alpine 3.22/OpenRC as the second v1.5 rootfs profile: checked-in arm64/amd64 configs, apk package strategy, OpenRC compatibility layer, Alpine harness scenarios, and live CH arm64 validation |
 | 2026-05-17 | @vmm-cdx | Move v1.5 worked-example image configs into `releases/vmm/v1.5/configs/` and document the release-input namespace for rootfs/platform-specific configs |
 | 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for this phase: adapter-backed VZ builds now accept `mbuild build --target vz --oci-layout <layout>`, validate the local OCI payload, and pass its canonical rootfs layer through the current VZ rootfs handoff |
 | 2026-05-16 | @vmm-cdx | Reprioritize #258 acceptance targets: Apple Silicon VZ (`vz-darwin-arm64`) and DGX/aarch64 Linux CH (`ch-linux-arm64`) are first, while CH Linux amd64 (`ch-linux-amd64`, guest `linux/amd64`, Rust `x86_64`) is a coordinated follow-up host target |
@@ -875,6 +876,14 @@ Tasks:
         and `linux/arm64` instead of using temporary floating configs
   - [x] move those config/digest inputs under `releases/vmm/v1.5/configs/`
         as rootfs/platform release inputs
+  - [x] add a second rootfs worked example using Alpine 3.22/OpenRC:
+        `motlie-image.alpine-3.22.linux-arm64.yaml` and
+        `motlie-image.alpine-3.22.linux-amd64.yaml`
+  - [x] generate and validate plan-only Alpine manifests for `linux/arm64` and
+        `linux/amd64`
+  - [x] live-validate Alpine `linux/arm64` on this CH host with:
+        `agent-bootstrap-alpine.json`, `multiguest-validate-alpine.json`, and
+        `pty-agent-validation-alpine.json`
   - [ ] run the VZ build/export/validation path on a native Apple Silicon Mac
         for `vz-darwin-arm64` using the `linux/arm64` guest payload
   - [ ] run the CH build/export/validation path on native DGX/aarch64 Linux

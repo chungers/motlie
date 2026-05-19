@@ -5,9 +5,10 @@ Dockerfile-like image contract used by the v1.5 examples, drives the current
 backend image adapters, regenerates per-guest seed artifacts, and emits
 machine-readable manifests for CI and harness consumption.
 
-Status as of 2026-05-17 (`@vmm-cdx`): `mbuild build --target ch` is the
+Status as of 2026-05-18 (`@vmm-cdx`): `mbuild build --target ch` is the
 durable Linux/CH image-builder entrypoint for the v1.5 demo. It resolves the
-pinned Ubuntu OCI source, imports rootfs layers, runs the apt/npm package stage,
+pinned Ubuntu or Alpine OCI source, imports rootfs layers, runs the selected
+apt/npm or apk/npm package stage,
 applies the native v1.5 Motlie compatibility layer, emits the common
 `assembled-rootfs.tar` handoff before CH-specific boot adaptations, and emits CH
 artifacts plus machine-readable manifests. The CH path no longer assumes the
@@ -102,6 +103,29 @@ cargo run -p mbuild -- build \
   --target ch \
   --out /tmp/mbuild/plan/ch \
   --plan-only
+```
+
+Plan Alpine configs without running backend adapters:
+
+```bash
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/plan/alpine-arm64
+
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-amd64.yaml \
+  --target ch \
+  --out /tmp/mbuild/plan/alpine-amd64
+```
+
+Build Alpine arm64 CH artifacts from the pinned Alpine OCI rootfs:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch-alpine-arm64
 ```
 
 Regenerate per-guest seed artifacts:

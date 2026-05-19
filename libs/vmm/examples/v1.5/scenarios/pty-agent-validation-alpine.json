@@ -1,0 +1,75 @@
+{
+  "name": "pty-agent-validation-alpine",
+  "description": "Boot alice, drive the interactive shell over PTY, validate apk refresh in-band, and capture the Codex TUI startup in the recorded terminal session.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    { "action": "wait_egress_ready", "guest": "alice", "timeout_ms": 30000 },
+    {
+      "action": "pty_open",
+      "guest": "alice",
+      "session": "alice-shell",
+      "term": "xterm-256color",
+      "cols": 100,
+      "rows": 30,
+      "timeout_ms": 10000
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "motlie-alice:~$",
+      "timeout_ms": 20000
+    },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "motlie-alice:~$",
+      "timeout_ms": 2000
+    },
+    {
+      "action": "wait_package_manager_quiescent",
+      "guest": "alice",
+      "timeout_ms": 65000
+    },
+    {
+      "action": "pty_send_line",
+      "session": "alice-shell",
+      "text": "sudo -n apk update; rc=$?; printf '\\n__MOTLIE_APK_DONE_%s__\\n' \"$rc\""
+    },
+    {
+      "action": "pty_expect",
+      "session": "alice-shell",
+      "contains": "__MOTLIE_APK_DONE_0__",
+      "timeout_ms": 120000
+    },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "__MOTLIE_APK_DONE_0__",
+      "timeout_ms": 2000
+    },
+    {
+      "action": "pty_snapshot",
+      "session": "alice-shell",
+      "name": "after-apk-update"
+    },
+    { "action": "pty_send_line", "session": "alice-shell", "text": "codex" },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "1. Sign in with ChatGPT",
+      "timeout_ms": 60000
+    },
+    {
+      "action": "pty_expect_screen",
+      "session": "alice-shell",
+      "contains": "or connect an API key",
+      "timeout_ms": 60000
+    },
+    {
+      "action": "pty_snapshot",
+      "session": "alice-shell",
+      "name": "codex-welcome"
+    }
+  ]
+}
