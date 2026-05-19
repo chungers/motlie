@@ -1,15 +1,15 @@
 use std::future::Future;
 
-use mistralrs::core::NormalLoaderType;
 use mistralrs::TextModelBuilder;
+use mistralrs::core::NormalLoaderType;
 use motlie_model::{
     BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
     ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    configure_artifact_policy, map_quantization_bits, paged_attn_context_size, should_force_cpu,
-    text_only_message_parts, MistralMessageParts,
+    MistralMessageParts, configure_artifact_policy, map_quantization_bits, paged_attn_context_size,
+    should_force_cpu, text_only_message_parts,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 
@@ -49,6 +49,8 @@ impl MistralTextSpec {
             display_name: "Qwen3 4B",
             model_id: "Qwen/Qwen3-4B",
             arch: MistralTextArch::Qwen3,
+            // ToolUse relies on the shared template-compatible transcript
+            // adapter in common.rs, not mistralrs::RequestBuilder's tool replay.
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],

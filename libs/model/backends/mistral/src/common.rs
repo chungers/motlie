@@ -1,13 +1,18 @@
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use either::Either;
 use image::DynamicImage;
+use indexmap::IndexMap;
 use mistralrs::core::{StopTokens, Usage};
 use mistralrs::{
-    CalledFunction, Function, IsqBits, RequestBuilder, ResponseMessage, SamplingParams, Tool,
-    ToolCallResponse, ToolCallType, ToolChoice as MistralToolChoice, ToolType,
+    AudioInput, Constraint, CustomLogitsProcessor, Function, IsqBits, MessageContent,
+    ModelCategory, RequestLike, RequestMessage, ResponseMessage, SamplingParams, Tool,
+    ToolCallResponse, ToolChoice as MistralToolChoice, ToolType, VideoInput, WebSearchOptions,
 };
+#[cfg(test)]
+use mistralrs::{CalledFunction, ToolCallType};
 use motlie_model::{
     ArtifactPolicy, ArtifactSource, Bytes, CapabilityKind, ChatFinishReason, ChatMessage,
     ChatRequest, ChatResponse, ChatRole, CheckpointFormat, ContentPart, EmbeddingMetrics,
@@ -106,10 +111,7 @@ pub(crate) fn map_chat_role(role: ChatRole) -> mistralrs::TextMessageRole {
     }
 }
 
-pub(crate) fn apply_generation_params(
-    builder: RequestBuilder,
-    params: &GenerationParams,
-) -> RequestBuilder {
+pub(crate) fn sampling_params_from_generation_params(params: &GenerationParams) -> SamplingParams {
     let mut sampling = SamplingParams::deterministic();
     if let Some(temperature) = params.temperature {
         sampling.temperature = Some(temperature as f64);
@@ -124,16 +126,17 @@ pub(crate) fn apply_generation_params(
     if !params.stop_sequences.is_empty() {
         sampling.stop_toks = Some(StopTokens::Seqs(params.stop_sequences.clone()));
     }
-    builder.set_sampling(sampling)
+    sampling
 }
 
-pub(crate) fn apply_tools(
-    builder: RequestBuilder,
+pub(crate) fn collect_tools(
     request: &motlie_model::ChatRequest,
-) -> Result<RequestBuilder, ModelError> {
+) -> Result<(Vec<Tool>, MistralToolChoice), ModelError> {
     if request.tools.is_empty() {
         return match &request.tool_choice {
-            None | Some(motlie_model::ToolChoice::None) => Ok(builder),
+            None | Some(motlie_model::ToolChoice::None) => {
+                Ok((Vec::new(), MistralToolChoice::Auto))
+            }
             Some(_) => Err(ModelError::InvalidConfiguration(
                 "`tool_choice` requires at least one tool".into(),
             )),
@@ -147,7 +150,280 @@ pub(crate) fn apply_tools(
         .collect::<Result<Vec<_>, _>>()?;
     let tool_choice = motlie_tool_choice_to_mistral(request.tool_choice.as_ref(), &request.tools)?;
 
-    Ok(builder.set_tools(tools).set_tool_choice(tool_choice))
+    Ok((tools, tool_choice))
+}
+
+#[derive(Clone, Debug)]
+struct PendingImagePrefix {
+    message_index: usize,
+    image_indices: Vec<usize>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MotlieMistralRequest {
+    messages: Vec<IndexMap<String, MessageContent>>,
+    images: Vec<DynamicImage>,
+    sampling_params: SamplingParams,
+    tools: Vec<Tool>,
+    tool_choice: MistralToolChoice,
+    enable_thinking: Option<bool>,
+    pending_image_prefixes: Vec<PendingImagePrefix>,
+}
+
+impl MotlieMistralRequest {
+    fn new(
+        sampling_params: SamplingParams,
+        tools: Vec<Tool>,
+        tool_choice: MistralToolChoice,
+        enable_thinking: Option<bool>,
+    ) -> Self {
+        Self {
+            messages: Vec::new(),
+            images: Vec::new(),
+            sampling_params,
+            tools,
+            tool_choice,
+            enable_thinking,
+            pending_image_prefixes: Vec::new(),
+        }
+    }
+
+    fn add_text_message(&mut self, role: ChatRole, text: String) {
+        self.messages.push(text_message(map_chat_role(role), text));
+    }
+
+    fn add_image_message(&mut self, role: ChatRole, text: String, images: Vec<DynamicImage>) {
+        if images.is_empty() {
+            self.add_text_message(role, text);
+            return;
+        }
+
+        let image_start = self.images.len();
+        let image_count = images.len();
+        self.images.extend(images);
+        let image_indices = (image_start..image_start + image_count).collect::<Vec<_>>();
+
+        let mut content = Vec::with_capacity(image_count + 1);
+        for _ in 0..image_count {
+            content.push(IndexMap::from([(
+                "type".to_string(),
+                Value::String("image".to_string()),
+            )]));
+        }
+        content.push(IndexMap::from([
+            ("type".to_string(), Value::String("text".to_string())),
+            ("text".to_string(), Value::String(text)),
+        ]));
+
+        let message_index = self.messages.len();
+        self.messages.push(IndexMap::from([
+            (
+                "role".to_string(),
+                Either::Left(map_chat_role(role).to_string()),
+            ),
+            ("content".to_string(), Either::Right(content)),
+        ]));
+        self.pending_image_prefixes.push(PendingImagePrefix {
+            message_index,
+            image_indices,
+        });
+    }
+
+    fn add_assistant_tool_calls(
+        &mut self,
+        text: String,
+        tool_calls: &[motlie_model::ToolCall],
+    ) -> Result<(), ModelError> {
+        let tool_calls = tool_calls
+            .iter()
+            .map(tool_call_message_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.messages.push(IndexMap::from([
+            (
+                "role".to_string(),
+                Either::Left(mistralrs::TextMessageRole::Assistant.to_string()),
+            ),
+            ("content".to_string(), Either::Left(text)),
+            ("tool_calls".to_string(), Either::Right(tool_calls)),
+        ]));
+        Ok(())
+    }
+
+    fn add_tool_result(
+        &mut self,
+        text: String,
+        tool_call_id: &motlie_model::ToolCallId,
+        name: Option<&motlie_model::ToolName>,
+    ) {
+        let mut message = IndexMap::from([
+            (
+                "role".to_string(),
+                Either::Left(mistralrs::TextMessageRole::Tool.to_string()),
+            ),
+            ("content".to_string(), Either::Left(text)),
+            (
+                "tool_call_id".to_string(),
+                Either::Left(tool_call_id.as_str().to_string()),
+            ),
+        ]);
+        if let Some(name) = name {
+            message.insert("name".to_string(), Either::Left(name.as_str().to_string()));
+        }
+        self.messages.push(message);
+    }
+}
+
+impl RequestLike for MotlieMistralRequest {
+    fn messages_ref(&self) -> &[IndexMap<String, MessageContent>] {
+        &self.messages
+    }
+
+    fn images_ref(&self) -> &[DynamicImage] {
+        &self.images
+    }
+
+    fn take_messages(&mut self) -> RequestMessage {
+        let mut messages = Vec::new();
+        std::mem::swap(&mut messages, &mut self.messages);
+
+        if self.images.is_empty() {
+            RequestMessage::Chat {
+                messages,
+                enable_thinking: self.enable_thinking,
+                reasoning_effort: None,
+            }
+        } else {
+            let mut images = Vec::new();
+            std::mem::swap(&mut images, &mut self.images);
+            RequestMessage::MultimodalChat {
+                images,
+                audios: Vec::<AudioInput>::new(),
+                videos: Vec::<VideoInput>::new(),
+                messages,
+                enable_thinking: self.enable_thinking,
+                reasoning_effort: None,
+            }
+        }
+    }
+
+    fn take_logits_processors(&mut self) -> Option<Vec<Arc<dyn CustomLogitsProcessor>>> {
+        None
+    }
+
+    fn take_adapters(&mut self) -> Option<Vec<String>> {
+        None
+    }
+
+    fn return_logprobs(&self) -> bool {
+        false
+    }
+
+    fn enable_search(&self) -> Option<bool> {
+        None
+    }
+
+    fn take_constraint(&mut self) -> Constraint {
+        Constraint::None
+    }
+
+    fn take_tools(&mut self) -> Option<(Vec<Tool>, MistralToolChoice)> {
+        if self.tools.is_empty() {
+            None
+        } else {
+            let mut tools = Vec::new();
+            std::mem::swap(&mut tools, &mut self.tools);
+            let mut tool_choice = MistralToolChoice::Auto;
+            std::mem::swap(&mut tool_choice, &mut self.tool_choice);
+            Some((tools, tool_choice))
+        }
+    }
+
+    fn take_sampling_params(&mut self) -> SamplingParams {
+        let mut sampling = SamplingParams::deterministic();
+        std::mem::swap(&mut sampling, &mut self.sampling_params);
+        sampling
+    }
+
+    fn take_web_search_options(&mut self) -> Option<WebSearchOptions> {
+        None
+    }
+
+    fn resolve_pending_prefixes(&mut self, category: &ModelCategory) {
+        let prefixer = match category {
+            ModelCategory::Multimodal { prefixer } => prefixer,
+            _ => {
+                self.pending_image_prefixes.clear();
+                return;
+            }
+        };
+
+        for pending in self.pending_image_prefixes.drain(..) {
+            let Some(message) = self.messages.get_mut(pending.message_index) else {
+                continue;
+            };
+            let Some(Either::Right(content)) = message.get_mut("content") else {
+                continue;
+            };
+            for part in content {
+                let is_text = part
+                    .get("type")
+                    .is_some_and(|kind| kind == &Value::String("text".to_string()));
+                if !is_text {
+                    continue;
+                }
+                if let Some(Value::String(text)) = part.get_mut("text") {
+                    *text = prefixer.prefix_image(pending.image_indices.clone(), text);
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn text_message(
+    role: mistralrs::TextMessageRole,
+    text: String,
+) -> IndexMap<String, MessageContent> {
+    IndexMap::from([
+        ("role".to_string(), Either::Left(role.to_string())),
+        ("content".to_string(), Either::Left(text)),
+    ])
+}
+
+fn tool_call_message_value(
+    call: &motlie_model::ToolCall,
+) -> Result<IndexMap<String, Value>, ModelError> {
+    let arguments = call
+        .arguments
+        .parse::<Value>()
+        .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
+    Ok(IndexMap::from([
+        (
+            "id".to_string(),
+            Value::String(call.id.as_str().to_string()),
+        ),
+        ("type".to_string(), Value::String("function".to_string())),
+        (
+            "function".to_string(),
+            serde_json::json!({
+                "name": call.name.as_str(),
+                "arguments": arguments,
+            }),
+        ),
+    ]))
+}
+
+fn enable_thinking_for_request(request: &ChatRequest) -> Option<bool> {
+    match request.thinking {
+        Some(motlie_model::ThinkingMode::Disabled) => Some(false),
+        Some(motlie_model::ThinkingMode::Auto) => Some(true),
+        // Qwen3/Gemma safetensors templates default to thinking when the
+        // variable is omitted. Tool loops need structured calls inside the
+        // request token budget, so default tool-bearing requests to no thinking
+        // unless the caller explicitly opts in.
+        None if request.requires_tool_use() => Some(false),
+        None => None,
+    }
 }
 
 #[derive(Debug)]
@@ -211,17 +487,23 @@ pub(crate) fn multimodal_message_parts(
 pub(crate) fn chat_request_to_builder<F>(
     request: &ChatRequest,
     collect_parts: F,
-) -> Result<RequestBuilder, ModelError>
+) -> Result<MotlieMistralRequest, ModelError>
 where
     F: Fn(&ChatMessage) -> Result<MistralMessageParts, ModelError>,
 {
-    let mut builder = RequestBuilder::new();
+    let (tools, tool_choice) = collect_tools(request)?;
+    let mut builder = MotlieMistralRequest::new(
+        sampling_params_from_generation_params(&request.params),
+        tools,
+        tool_choice,
+        enable_thinking_for_request(request),
+    );
     for message in &request.messages {
         message
             .validate_tool_metadata()
             .map_err(|err| ModelError::InvalidConfiguration(err.to_string()))?;
         let MistralMessageParts { text, images } = collect_parts(message)?;
-        builder = match message.role {
+        match message.role {
             ChatRole::Tool => {
                 if !images.is_empty() {
                     return Err(ModelError::InvalidConfiguration(
@@ -232,7 +514,7 @@ where
                     .tool_call_id
                     .as_ref()
                     .expect("validated tool messages carry a tool call id");
-                builder.add_tool_message(text, tool_call_id.as_str())
+                builder.add_tool_result(text, tool_call_id, message.name.as_ref());
             }
             ChatRole::Assistant if !message.tool_calls.is_empty() => {
                 if !images.is_empty() {
@@ -240,21 +522,14 @@ where
                         "assistant tool-call replay messages cannot carry image content".into(),
                     ));
                 }
-                let tool_calls = message
-                    .tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(index, call)| motlie_tool_call_to_mistral(index, call))
-                    .collect();
-                builder.add_message_with_tool_call(map_chat_role(message.role), text, tool_calls)
+                builder.add_assistant_tool_calls(text, &message.tool_calls)?;
             }
-            _ if images.is_empty() => builder.add_message(map_chat_role(message.role), text),
-            _ => builder.add_image_message(map_chat_role(message.role), text, images),
+            _ if images.is_empty() => builder.add_text_message(message.role, text),
+            _ => builder.add_image_message(message.role, text, images),
         };
     }
 
-    let builder = apply_tools(builder, request)?;
-    Ok(apply_generation_params(builder, &request.params))
+    Ok(builder)
 }
 
 pub(crate) fn motlie_tool_spec_to_mistral(
@@ -282,6 +557,7 @@ pub(crate) fn motlie_tool_spec_to_mistral(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn motlie_tool_call_to_mistral(
     index: usize,
     call: &motlie_model::ToolCall,
@@ -556,7 +832,7 @@ fn aggregate_tokens_per_second(tokens: u64, total_time_msec: u128) -> Option<u64
 }
 
 fn current_resident_memory_bytes() -> Option<u64> {
-    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
+    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
 
     let pid = get_current_pid().ok()?;
     let mut system = System::new();
@@ -631,6 +907,86 @@ mod tests {
         assert_eq!(mapped.id.as_str(), "call-1");
         assert_eq!(mapped.name.as_str(), "get_weather");
         assert_eq!(mapped.arguments.raw_json_str(), r#"{"city":"Seattle"}"#);
+    }
+
+    #[test]
+    fn chat_request_builder_uses_template_tool_call_transcript_shape() {
+        let call = motlie_model::ToolCall::from_json_args(
+            "call-1",
+            "get_weather",
+            r#"{"city":"Seattle"}"#,
+        )
+        .expect("tool call should be valid");
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::text(ChatRole::User, "weather?"),
+                ChatMessage::assistant_tool_calls(vec![call]),
+                ChatMessage::tool_result("call-1", "get_weather", r#"{"temp":72}"#)
+                    .expect("tool result should be valid"),
+            ],
+            tools: vec![motlie_model::ToolSpec::from_json_schema(
+                "get_weather",
+                "Get weather.",
+                r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#,
+            )
+            .expect("schema should be valid")],
+            tool_choice: Some(motlie_model::ToolChoice::Auto),
+            ..Default::default()
+        };
+
+        let builder =
+            chat_request_to_builder(&request, text_only_message_parts).expect("request should map");
+        let mut request_like = builder.clone();
+        let messages = builder.messages_ref();
+
+        assert_eq!(messages.len(), 3);
+        assert!(messages[1].contains_key("tool_calls"));
+        assert!(!messages[1].contains_key("function"));
+
+        let Some(Either::Right(tool_calls)) = messages[1].get("tool_calls") else {
+            panic!("assistant replay should carry structured tool_calls");
+        };
+        let function = tool_calls[0]
+            .get("function")
+            .and_then(Value::as_object)
+            .expect("tool call function should be an object");
+        assert_eq!(
+            function.get("name").and_then(Value::as_str),
+            Some("get_weather")
+        );
+        assert_eq!(
+            function
+                .get("arguments")
+                .and_then(|arguments| arguments.get("city"))
+                .and_then(Value::as_str),
+            Some("Seattle")
+        );
+
+        assert_eq!(
+            messages[2].get("tool_call_id"),
+            Some(&Either::Left("call-1".to_string()))
+        );
+        assert_eq!(
+            messages[2].get("name"),
+            Some(&Either::Left("get_weather".to_string()))
+        );
+        assert_eq!(enable_thinking_for_request(&request), Some(false));
+        let RequestMessage::Chat {
+            enable_thinking, ..
+        } = request_like.take_messages()
+        else {
+            panic!("text-only tool request should remain a chat request");
+        };
+        assert_eq!(enable_thinking, Some(false));
+
+        let explicit_thinking_request = ChatRequest {
+            thinking: Some(motlie_model::ThinkingMode::Auto),
+            ..request.clone()
+        };
+        assert_eq!(
+            enable_thinking_for_request(&explicit_thinking_request),
+            Some(true)
+        );
     }
 
     #[test]
