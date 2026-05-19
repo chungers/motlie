@@ -458,23 +458,32 @@ id = "installer-validated"
 target_id = ""
 channel = "installer"
 rollup = true
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-18T00:00:00Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "rollup", ref = "all 4 installer-validated target rows resolved", note = "darwin-arm64 complete (PR #303); darwin-x64 deferred (PR #306, Apple-Silicon-only policy); linux-arm64-musl complete (PR #307, on spark-2f6e DGX); linux-x64-musl complete (this PR, on amd-ryzen7-1). Per the rollup rule, a rollup gate is complete only when all enabled target rows are complete or explicitly deferred — 3 complete + 1 deferred satisfies that." },
+]
 
 [[gate]]
 id = "installer-validated"
 target_id = "linux-x64-musl"
 channel = "installer"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-18T00:00:00Z"
+completed_by = "@chungers"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "host", ref = "amd-ryzen7-1 (Linux x86_64 AMD Ryzen 7)", note = "operator confirmed arch=x86_64 via `arch` command; AMD Ryzen 7 CPU; static musl x86_64 binary is vendor-agnostic" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh | sh", note = "operator @chungers ran the release-pinned installer end-to-end via the canonical curl|sh flow" },
+  { kind = "installer-output", ref = "sh install-mmux.sh", note = "Downloading motlie-mmux-v0.1.0-linux-x64-musl.tar.gz; Downloading SHA256SUMS; Verifying checksum; Extracting; Installing to /usr/local/bin/mmux; Verifying /usr/local/bin/mmux --version; mmux 0.1.0; Installed: /usr/local/bin/mmux (0.1.0 from 2026-05-apex-anchor). Installer's internal checksum verification step against SHA256SUMS passed before extraction." },
+  { kind = "install-path", ref = "/usr/local/bin/mmux", note = "installed via sudo; --version invoked from absolute installed path" },
+  { kind = "runtime", ref = "/usr/local/bin/mmux --version", note = "mmux 0.1.0" },
+  { kind = "evidence-gap", ref = "file/ldd/readelf/sha256sum of installed binary not captured in this run", note = "deeper static-link evidence and direct binary-content sha256 cross-check against the PR #297 build-time sha256 (250c531961...90e5c14) were not captured during this run. Binary integrity is still proven transitively: installer downloaded archive, verified against SHA256SUMS (whose 4 sha256s match PR #297 and PR #300 build-time evidence), extracted bin/mmux, and the resulting binary reports the expected version. The same evidence shape is fully captured for linux-arm64-musl (PR #307) on a sibling musl target." },
+]
 
 [[gate]]
 id = "installer-validated"
