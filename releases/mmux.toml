@@ -480,12 +480,24 @@ evidence = []
 id = "installer-validated"
 target_id = "linux-arm64-musl"
 channel = "installer"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-17T07:11:00Z"
+completed_by = "@chungers"
+source_commit = "2e04a60d8ea57d9b03a81bc01b3210b13d17bedb"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "host", ref = "spark-2f6e (Linux 6.17.0-1008-nvidia aarch64; NVIDIA DGX)", note = "uname -srm output; matches linux-arm64-musl target" },
+  { kind = "command", ref = "curl -fsSL https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh -o install-mmux.sh && sh install-mmux.sh", note = "operator @chungers ran the release-pinned installer end-to-end via the audit-before-run pattern (download installer first, sha256 check, then sh-execute)" },
+  { kind = "installer-url", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh", sha256 = "ef05504895e6e04e471eff1c88bd4472df46c1dcd3f4fb3ae87cd56693685970", note = "operator-computed sha256 matches the asset uploaded in github-release-published evidence and the macmini-side run from PR #303" },
+  { kind = "installer-output", ref = "sh install-mmux.sh", note = "Downloading motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz; Downloading SHA256SUMS; Verifying checksum; Extracting; Installing to /usr/local/bin/mmux; Verifying /usr/local/bin/mmux --version; mmux 0.1.0; Installed: /usr/local/bin/mmux (0.1.0 from 2026-05-apex-anchor)" },
+  { kind = "install-path", ref = "/usr/local/bin/mmux", note = "-rwxr-xr-x 1 root root 6310952 bytes" },
+  { kind = "runtime", ref = "/usr/local/bin/mmux --version", note = "mmux 0.1.0" },
+  { kind = "file", ref = "/usr/local/bin/mmux", note = "ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, BuildID[sha1]=bb076f4f0dea575fa0123b72798d10c5530b97b1, not stripped" },
+  { kind = "ldd", ref = "ldd /usr/local/bin/mmux", note = "not a dynamic executable — confirms static musl link" },
+  { kind = "readelf", ref = "readelf -d /usr/local/bin/mmux", note = "There is no dynamic section in this file. — strongest static-link evidence" },
+  { kind = "binary-integrity", ref = "sha256sum /usr/local/bin/mmux", sha256 = "1691b93941404ee93d7d8bd048d67d3fb80398869299aedb23f28738a22b5c8a", note = "binary content sha256 matches [target.status linux-arm64-musl].evidence from PR #297 exactly, confirming the installer downloaded the genuine published binary and extracted it without alteration" },
+  { kind = "public-access", ref = "curl returned the 4657-byte installer over public HTTPS", note = "no auth required after repo visibility flipped public" },
+]
 
 [[gate]]
 id = "installer-validated"
