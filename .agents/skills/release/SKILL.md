@@ -82,7 +82,7 @@ Manual v0 release sequence:
 5. Create a master tracking issue and record it in the workspace manifest tracking metadata.
 6. Create scoped sub-issues for platform/channel/gate work; each should instruct the operator to open a sub-PR back to the release branch.
 7. Land platform/channel sub-PRs into the release branch; each sub-PR updates manifest status and closes its sub-issue.
-8. Cherry-pick reusable source, doc, skill, or tooling fixes to `main` through separate PRs when needed.
+8. Cherry-pick reusable source, doc, skill, or tooling fixes to `main` through separate PRs when needed. Use `git cherry-pick -x` so each commit carries the `(cherry picked from commit <release-branch-sha>)` lineage trailer; see the "Cherry-pick fixes from a release branch to `main`" section below for the full procedure.
 9. Generate final notes/ledger state from manifests plus issue/PR evidence after required gates complete or defer.
 10. Create the final source tag from the release branch after explicit approval.
 11. Build, sign, package, and publish final artifacts from the final tag.
@@ -103,6 +103,56 @@ Release branch source files:
 - `releases/npm/*`: npm native package templates, only when npm distribution is in scope.
 - `releases/homebrew/*`: source-side formula template or notes only; the live formula PR belongs in `motlie/homebrew-tap`.
 - `docs/*` and `.agents/skills/release/*`: update on `main` by cherry-picking through a normal PR when behavior or workflow changes.
+
+Cherry-pick fixes from a release branch to `main`:
+
+The release branch is the authoritative surface during a release event. Fixes (source code, docs, skill updates, tooling) discovered while working a release **always land on the release branch first**, via a sub-PR scoped to that fix. They land on `main` afterward by cherry-picking the resulting release-branch commit into a separate PR targeting `main`. **The release branch is never merged into `main`** — only specific commits are cherry-picked.
+
+Sequence:
+
+```
+fix needed during release event
+  └─ sub-PR against release/<release-name>  ─ merge ─►  release branch (fix is now in the release)
+                                                          └─ wait until merged on release branch
+                                                                └─ later: branch off main, cherry-pick -x from
+                                                                   the release-branch commit, PR to main
+```
+
+Required procedure for the cherry-pick step (after the fix has merged into the release branch):
+
+```sh
+# 1. Branch off main, not off the release branch — keeps the PR diff scoped to just the cherry-pick(s).
+git switch main
+git pull --ff-only
+git switch -c <your-identity>/<short-scope>          # e.g. @opus47-rel-eng/mmux-version-cli
+
+# 2. Cherry-pick with -x so each cherry-pick commit message carries the lineage trailer
+#    "(cherry picked from commit <release-branch-sha>)".
+#    The <release-branch-sha> is the post-merge commit on the release branch (the sub-PR's commit, or
+#    its post-merge form). Verify with `git log release/<release-name>` first.
+git cherry-pick -x <release-branch-sha> [<another-sha>...]
+
+# 3. Verify locally (build + relevant tests still pass on main + cherry-pick).
+cargo build --release --locked -p <cargo-package> --bin <cargo-bin>
+cargo test  --release --locked -p <cargo-package> [<test-filter>]
+
+# 4. Push and open a PR to main.
+git push -u origin <branch>
+gh pr create --base main --head <branch> \
+  --title '<scope summary>' --body '<links to release branch + original commits + master release issue>'
+```
+
+`-x` is required, not optional. Without it the cherry-pick commit message omits the `(cherry picked from commit ...)` trailer and `git log` on `main` can no longer trace the commit back to the release branch where it was first written. The trailer is what makes a cherry-pick PR provenanceably "from the release branch" even though the branch base is `main`.
+
+PR body conventions for cherry-pick PRs:
+
+- Title is the scope summary (e.g., `mmux: add --version flag and Help modal version line`), not "cherry-pick of X".
+- Body links to the release branch (`release/<release-name>`), the original release-branch commits, and the master release issue that flagged the deferred cherry-pick.
+- Body lists each cherry-picked commit with `cherry-pick SHA | original SHA | scope` so reviewers can audit.
+- Multiple related commits may be bundled in one PR if they're a logical unit (e.g., a CLI fix + its matching test).
+- Branch base is `main`. Branch ancestor is `main` (not the release branch tip), so the PR diff stays scoped to the cherry-pick.
+
+Timing: cherry-picks can be opened at any point after the fix has merged into the release branch. They don't have to wait for the release event to close, and they don't all have to land in one batch. Land them when ready, paced by review capacity.
 
 To stage macOS signing from another host, use a scoped sub-issue and sub-PR targeting the release branch. Read `references/macos-signing.md` and fill commands from the current per-binary manifest.
 
