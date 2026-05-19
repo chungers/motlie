@@ -25,8 +25,8 @@ Current example groups:
 | Example | Backend | Curated model(s) | Advertised capabilities | Tool-use demo status |
 |---------|---------|------------------|-------------------------|----------------------|
 | `chat_tool_binding` | none | API-only | typed Rust tool binding | Runs without loading an LLM; builds a static `ToolList` with `get_weather` and `evaluate_math_expression`, and exercises E4B recommended generation/system-prompt fields. |
-| `chat_mistral_qwen3` | `mistral.rs` | Qwen3 4B safetensors | `Chat` + `Completion` + `ToolUse` | Plain chat works; live multi-round safetensors tool loops currently fail on Apple Silicon Metal (#310). |
-| `chat_multimodal_gemma4` | `mistral.rs` | Gemma 4 E2B-it safetensors | `Chat` + `Vision` + `ToolUse` | Plain text chat works; live safetensors tool loops currently fail on Apple Silicon Metal (#310), and image+text chat remains a separate `--image=...` path. |
+| `chat_mistral_qwen3` | `mistral.rs` | Qwen3 4B safetensors | `Chat` + `Completion` + `ToolUse` | Plain chat works (~20 tps generation, ~8s startup with ISQ Q4 on Apple Silicon Metal); live multi-round safetensors tool loops currently fail on Apple Silicon Metal (#310). |
+| `chat_multimodal_gemma4` | `mistral.rs` | Gemma 4 E2B-it safetensors | `Chat` + `Vision` + `ToolUse` | Plain text chat works (~18 tps generation, ~22s startup with ISQ Q4 on Apple Silicon Metal); live safetensors tool loops currently fail on Apple Silicon Metal (#310), and image+text chat remains a separate `--image=...` path. |
 | `chat_gguf_gwen3_gemma4` | `llama.cpp` | Qwen3 4B GGUF, Gemma 4 E2B-it GGUF | `Chat` + `Completion` + `ToolUse` | Same weather-plus-math tool loop through llama.cpp's OpenAI-compatible chat-template path. |
 | `chat_gguf_gwen3_gemma4` | `llama.cpp` | Gemma 4 E4B-it GGUF | `Chat` + `Completion` + `ToolUse` | Same weather-plus-math tool loop passed locally on `llama-cpp-2` 0.1.146 with the E4B Q8_0 GGUF artifact, Gemma recommended sampling params, and `thinking=Auto`. |
 | catalog only | `mistral.rs` | Gemma 4 E4B-it safetensors | `Chat` + `Vision` | Curated bundle is registered behind `model-gemma4-e4b` with Q8 default quantization and Gemma recommended sampling params. ToolUse stays unadvertised while the broader `mistral.rs` safetensors tool-call regression is tracked in #310. |
@@ -155,6 +155,10 @@ tool-result: {"expression":"(72.0 + 68.0 + 64.0) / 3.0","value":68.0,"formatted"
 tool-final-response: The average current temperature for Seattle, Portland, and San Francisco is 68.0 degrees Fahrenheit.
 tool-final-thinking-trace: none
 ```
+
+Final phrasing varies across runs at the model-recommended `temperature=1.0`
+for E4B reasoning quality. The captured output above is one valid run; other
+runs produced `is 68.0.` or `is 68 degrees.` with the same arithmetic answer.
 
 Representative Gemma 4 E4B prompt/thinking controls:
 
