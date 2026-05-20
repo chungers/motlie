@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-20 | @codex | Added issue #317 host-label override design: `--alias` maps comma-separated display overrides to localhost plus SSH URI order, while empty entries preserve discovered labels. |
 | 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts so `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
 | 2026-05-04 | @codex | Matched attached tmux status-bar background to the selected host's list-pane palette color in multi-host mode. |
 | 2026-05-03 | @codex | Added the `s` Send Keys modal and moved main-view pane cycling to Tab. |
@@ -868,7 +869,7 @@ pub(crate) struct HostId(pub(crate) String);  // ssh URI or "localhost"
 
 pub(crate) struct HostEntry {
     pub(crate) id: HostId,
-    pub(crate) label: String,       // tmux #{host}, used for display
+    pub(crate) label: String,       // tmux #{host} or non-empty --alias override
     pub(crate) alias: String,       // SSH URI hostname, retained as operator alias
     pub(crate) ip_address: String,  // resolved from alias for SSH targets
     pub(crate) handle: motlie_tmux::HostHandle,
@@ -935,8 +936,11 @@ hostname into `HostEntry.alias`, connects the `HostHandle`, then asks tmux for
 `HostHandle::tmux_hostname()` and stores that value in `HostEntry.label`. The
 same tmux query is used for the local host. If the tmux query fails, mmux falls
 back to the local process hostname for localhost or the SSH URI alias for
-remote hosts. IP display/resolution remains based on the alias, because that is
-the operator-supplied routable name.
+remote hosts. A non-empty `--alias` entry overrides only this display label:
+position 0 maps to localhost and SSH URI `i` maps to position `i + 1`; empty
+comma entries preserve the discovered/default label. IP display/resolution
+remains based on the alias, because that is the operator-supplied routable
+name.
 
 `HostContext` is replaced by `HostFleet`; selection-by-id at the row level
 must compose `(host_id, session_id)` to remain stable across rename/reorder.
@@ -1040,8 +1044,9 @@ from `HostFleet::host_marker_width()`. The host-color column is omitted when
 - Single: `<hostname> | <ip>                                     <time>`
 - Multi:  `mmux ■ <host-a> ■ <host-b>                          <time>`
 
-Failed SSH targets remain in the multi-host legend using the URI hostname and
-are highlighted in red until a background retry connects successfully.
+Failed SSH targets remain in the multi-host legend using their non-empty
+`--alias` override when supplied, otherwise the URI hostname, and are
+highlighted in red until a background retry connects successfully.
 
 #### Scope and impact analysis
 
@@ -1057,9 +1062,9 @@ not required for v1.
 
 | File | Change |
 |---|---|
-| `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`). |
+| `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`); add optional raw comma-separated `--alias` display-label overrides. |
 | `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. |
-| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost is connected immediately; SSH URIs become configured host slots and retry specs for background retry. |
+| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost is connected immediately; SSH URIs become configured host slots and retry specs for background retry; non-empty `--alias` entries override display labels without changing routing identity. |
 | `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
 | `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. Landscape always renders session list left and detail right. Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |

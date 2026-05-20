@@ -4391,6 +4391,32 @@ fn ssh_host_entry(uri: &str, label: &str, ip: &str, handle: HostHandle) -> HostE
 }
 
 #[test]
+fn cli_accepts_alias_overrides_with_empty_entries() {
+    let aliases = Cli::try_parse_from([
+        "mmux",
+        "--alias=foo,,baz",
+        "ssh://a.example.com",
+        "ssh://b.example.com",
+    ])
+    .unwrap();
+
+    assert_eq!(aliases.alias.as_deref(), Some("foo,,baz"));
+    assert_eq!(aliases.host_alias_override(0), Some("foo"));
+    assert_eq!(aliases.host_alias_override(1), None);
+    assert_eq!(aliases.host_alias_override(2), Some("baz"));
+    assert_eq!(aliases.host_alias_override(3), None);
+
+    let leading_empty = Cli::try_parse_from([
+        "mmux",
+        "--alias=,bar",
+        "ssh://a.example.com",
+    ])
+    .unwrap();
+    assert_eq!(leading_empty.host_alias_override(0), None);
+    assert_eq!(leading_empty.host_alias_override(1), Some("bar"));
+}
+
+#[test]
 fn cli_accepts_multiple_ssh_uris() {
     let single = Cli::try_parse_from(["mmux", "ssh://a.example.com"]).unwrap();
     assert_eq!(single.ssh_uris, vec!["ssh://a.example.com".to_string()]);
@@ -4424,6 +4450,86 @@ async fn connect_initial_fleet_rejects_duplicate_ssh_uris() {
     assert!(
         msg.contains("duplicate SSH URI"),
         "expected duplicate-URI rejection, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn connect_initial_fleet_applies_alias_overrides_by_host_order() {
+    use crate::target_host::connect_initial_fleet;
+
+    let cli = Cli::try_parse_from([
+        "mmux",
+        "--alias=local-name,remote-a,,remote-c",
+        "ssh://a.example.com",
+        "ssh://b.example.com",
+        "ssh://c.example.com",
+    ])
+    .unwrap();
+
+    let initial_fleet = connect_initial_fleet(&cli).await.unwrap();
+    let fleet = initial_fleet.fleet;
+    let specs = initial_fleet.retry_specs;
+    let local_id = local_host_id();
+    let remote_a_id = ssh_host_id("ssh://a.example.com");
+    let remote_b_id = ssh_host_id("ssh://b.example.com");
+    let remote_c_id = ssh_host_id("ssh://c.example.com");
+
+    assert_eq!(fleet.entry(&local_id).unwrap().label, "local-name");
+    assert_eq!(
+        fleet.host_slot(&local_id).map(|slot| slot.label.as_str()),
+        Some("local-name")
+    );
+    assert_eq!(specs[0].label, "remote-a");
+    assert_eq!(specs[1].label, "b.example.com");
+    assert_eq!(specs[2].label, "remote-c");
+    assert_eq!(
+        fleet.host_slot(&remote_a_id).map(|slot| slot.label.as_str()),
+        Some("remote-a")
+    );
+    assert_eq!(
+        fleet.host_slot(&remote_b_id).map(|slot| slot.label.as_str()),
+        Some("b.example.com")
+    );
+    assert_eq!(
+        fleet.host_slot(&remote_c_id).map(|slot| slot.label.as_str()),
+        Some("remote-c")
+    );
+}
+
+#[tokio::test]
+async fn connect_initial_fleet_keeps_alias_override_when_ssh_host_later_connects() {
+    use crate::target_host::connect_initial_fleet;
+
+    let cli = Cli::try_parse_from([
+        "mmux",
+        "--alias=,remote-name",
+        "ssh://remote.example.com",
+    ])
+    .unwrap();
+
+    let initial_fleet = connect_initial_fleet(&cli).await.unwrap();
+    let mut fleet = initial_fleet.fleet;
+    let spec = initial_fleet.retry_specs.first().unwrap();
+    let remote_id = ssh_host_id("ssh://remote.example.com");
+
+    assert_eq!(
+        fleet.host_slot(&remote_id).map(|slot| slot.label.as_str()),
+        Some("remote-name")
+    );
+    assert_eq!(spec.label, "remote-name");
+
+    let remote = ssh_host_entry(
+        "ssh://remote.example.com",
+        &spec.label,
+        "10.0.0.8",
+        HostHandle::local(),
+    );
+    fleet.upsert_connected(remote);
+
+    assert_eq!(fleet.entry(&remote_id).unwrap().label, "remote-name");
+    assert_eq!(
+        fleet.host_slot(&remote_id).map(|slot| slot.label.as_str()),
+        Some("remote-name")
     );
 }
 
