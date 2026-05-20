@@ -671,6 +671,20 @@ EOF
 
 require_host_fixture_dirs() {
   mkdir -p "$HOST_HOME_DIR/.ssh" "$HOST_HOME_DIR/.config" "$HOST_AGENT_STATE_DIR" "$HOST_WORKSPACE_DIR"
+  mkdir -p \
+    "$HOST_AGENT_STATE_DIR/codex/sqlite" \
+    "$HOST_AGENT_STATE_DIR/claude" \
+    "$HOST_AGENT_STATE_DIR/claude-code"
+
+  # VZ convergence boundary:
+  # The first-contact SSH path must not create/remove files inside the
+  # FUSE-backed guest home while the VFS service is being restarted. Seed the
+  # agent-state indirections on the host side before boot so Codex/Claude state
+  # still lives under /agent-state without guest-side bind mounts or VFS writes.
+  rm -rf "$HOST_HOME_DIR/.codex" "$HOST_HOME_DIR/.claude" "$HOST_HOME_DIR/.config/claude-code"
+  ln -s /agent-state/codex "$HOST_HOME_DIR/.codex"
+  ln -s /agent-state/claude "$HOST_HOME_DIR/.claude"
+  ln -s /agent-state/claude-code "$HOST_HOME_DIR/.config/claude-code"
 }
 
 require_host_fixture_dirs
@@ -1303,6 +1317,12 @@ motlie_guest_phase guest-runtime-files-installed
 # The sshd policy is immutable image content, and OpenSSH reads the CA and
 # AuthorizedPrincipals files during auth. Restarting sshd here introduces a
 # control-port race before the Rust SSH bridge can register the guest.
+# Alpine/OpenRC on the transitional VZ disk uses the Ubuntu kernel/modules from
+# the native source VM. Unlike Ubuntu/systemd, it does not implicitly load the
+# virtio-vsock transport before the VMM-owned guest mounter starts. This is a
+# VZ-specific transport readiness step, not package/build provisioning; the
+# image's OpenRC service also owns it for boot-time convergence.
+printf '${CONTROL_PASSWORD}\n' | sudo -S modprobe vmw_vsock_virtio_transport >/dev/null 2>&1 || true
 case "\$motlie_init_profile" in
   systemd)
     printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
@@ -1320,8 +1340,13 @@ motlie_guest_phase vfs-service-restarted
 mounts_ready=0
 for _ in \$(seq 1 60); do
   if test -d /agent-state \
+    && grep -E '^[^ ]+ /agent-state fuse(\.| )' /proc/mounts >/dev/null \
     && ls /agent-state >/dev/null 2>&1 \
+    && test -d /workspace \
+    && grep -E '^[^ ]+ /workspace fuse(\.| )' /proc/mounts >/dev/null \
+    && ls /workspace >/dev/null 2>&1 \
     && test -d /home/${LOGIN_USER} \
+    && grep -E '^[^ ]+ /home/${LOGIN_USER} fuse(\.| )' /proc/mounts >/dev/null \
     && ls /home/${LOGIN_USER} >/dev/null 2>&1; then
     mounts_ready=1
     break
@@ -1329,17 +1354,31 @@ for _ in \$(seq 1 60); do
   sleep 1
 done
 if [[ "\$mounts_ready" -ne 1 ]]; then
-  echo "guest mounts did not become readable after motlie-vfs restart" >&2
+  echo "guest VFS/FUSE mounts did not become ready after motlie-vfs restart" >&2
+  echo "--- /proc/mounts VFS slice ---" >&2
+  grep -E '(/agent-state|/workspace|/home/${LOGIN_USER})' /proc/mounts >&2 || true
   if [[ "\$motlie_init_profile" == "systemd" ]]; then
     systemctl status motlie-vfs-guest.service --no-pager || true
+    journalctl -u motlie-vfs-guest.service -n 80 --no-pager || true
   elif [[ "\$motlie_init_profile" == "openrc" ]]; then
     rc-service motlie-vfs-guest status || true
     tail -n 80 /var/log/motlie-vfs-guest.log /var/log/motlie-vfs-guest.err 2>/dev/null || true
   fi
+  echo "--- motlie-vfs foreground probe ---" >&2
+  ls -l /dev/fuse /etc/motlie-vfs/mounts.yaml /etc/motlie/v1.5/backend.env >&2 || true
+  cat /etc/motlie/v1.5/backend.env >&2 || true
+  cat /etc/motlie-vfs/mounts.yaml >&2 || true
+  echo "--- guest vsock modules ---" >&2
+  lsmod | grep -E '(^vsock|vsock|virtio)' >&2 || true
+  MOTLIE_VFS_CONNECT_TIMEOUT_MS=3000 MOTLIE_VFS_CONNECT_RETRY_MS=250 \
+  timeout --signal=TERM --kill-after=2s 8s \
+    /usr/local/bin/motlie-vfs-guest \
+      --mounts /etc/motlie-vfs/mounts.yaml \
+      --backend-env /etc/motlie/v1.5/backend.env >&2 || true
   exit 1
 fi
 motlie_guest_phase mounts-readable
-printf '${CONTROL_PASSWORD}\n' | sudo -S /usr/local/bin/motlie-agent-state-setup || true
+echo "[v1.5 launch] agent-state links seeded by host runtime"
 motlie_guest_phase agent-state-setup-complete
 EOF
 mark_phase "provision-complete"

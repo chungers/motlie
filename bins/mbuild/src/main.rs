@@ -1661,6 +1661,8 @@ done
 [[ $# -gt 0 ]] && shift
 npm_binaries=("$@")
 
+chroot_env=(env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
+
 mkdir -p "$rootfs/proc" "$rootfs/sys" "$rootfs/dev" "$rootfs/etc" "$rootfs/tmp"
 mount --bind /proc "$rootfs/proc"
 mount --rbind /sys "$rootfs/sys"
@@ -1690,14 +1692,14 @@ for package in "${apk_packages[@]}"; do
 done
 
 if [[ ${#bootstrap_packages[@]} -gt 0 ]]; then
-    chroot "$rootfs" apk --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
-    chroot "$rootfs" update-ca-certificates >/dev/null 2>&1 || true
+    chroot "$rootfs" "${chroot_env[@]}" apk --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
+    chroot "$rootfs" "${chroot_env[@]}" update-ca-certificates >/dev/null 2>&1 || true
 fi
 if [[ "$update" == "1" ]]; then
-    chroot "$rootfs" apk update
+    chroot "$rootfs" "${chroot_env[@]}" apk update
 fi
 if [[ ${#remaining_packages[@]} -gt 0 ]]; then
-    chroot "$rootfs" apk add --no-cache "${remaining_packages[@]}"
+    chroot "$rootfs" "${chroot_env[@]}" apk add --no-cache "${remaining_packages[@]}"
 fi
 
 mkdir -p "$rootfs/opt/motlie/npm"
@@ -1707,18 +1709,19 @@ if [[ ${#npm_packages[@]} -gt 0 ]]; then
         cp /etc/ssl/certs/ca-certificates.crt "$rootfs/tmp/mbuild-host-ca-certificates.crt"
         npm_env+=(NODE_EXTRA_CA_CERTS=/tmp/mbuild-host-ca-certificates.crt npm_config_cafile=/tmp/mbuild-host-ca-certificates.crt)
     fi
-    chroot "$rootfs" env "${npm_env[@]}" npm install -g --prefix /opt/motlie/npm "${npm_packages[@]}"
+    chroot "$rootfs" "${chroot_env[@]}" "${npm_env[@]}" npm install -g --prefix /opt/motlie/npm "${npm_packages[@]}"
     rm -f "$rootfs/tmp/mbuild-host-ca-certificates.crt"
     mkdir -p "$rootfs/usr/local/bin"
     for binary in "${npm_binaries[@]}"; do
-        chroot "$rootfs" ln -sf "/opt/motlie/npm/bin/$binary" "/usr/local/bin/$binary"
+        chroot "$rootfs" "${chroot_env[@]}" ln -sf "/opt/motlie/npm/bin/$binary" "/usr/local/bin/$binary"
     done
 fi
 
-chroot "$rootfs" ssh-keygen -A
+chroot "$rootfs" "${chroot_env[@]}" ssh-keygen -A
 sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' "$rootfs/etc/ssh/sshd_config" || true
 grep -qxF 'Include /etc/ssh/sshd_config.d/*.conf' "$rootfs/etc/ssh/sshd_config" 2>/dev/null || printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> "$rootfs/etc/ssh/sshd_config"
 if [[ -x "$rootfs/sbin/rc-update" ]]; then
+    mkdir -p "$rootfs/etc/runlevels/sysinit" "$rootfs/etc/runlevels/boot" "$rootfs/etc/runlevels/default"
     grep -qxF 'rc_logger="YES"' "$rootfs/etc/rc.conf" 2>/dev/null || printf '\nrc_logger="YES"\n' >> "$rootfs/etc/rc.conf"
     grep -qxF 'rc_verbose=yes' "$rootfs/etc/rc.conf" 2>/dev/null || printf 'rc_verbose=yes\n' >> "$rootfs/etc/rc.conf"
     for entry in \
@@ -1727,17 +1730,20 @@ if [[ -x "$rootfs/sbin/rc-update" ]]; then
         "sysfs sysinit" \
         "hostname boot" \
         "bootmisc boot" \
+        "root boot" \
+        "fsck boot" \
         "localmount boot" \
-        "loopback boot"; do
+        "loopback boot" \
+        "networking boot"; do
         service="${entry% *}"
         runlevel="${entry#* }"
         if [[ -f "$rootfs/etc/init.d/$service" ]]; then
-            chroot "$rootfs" rc-update add "$service" "$runlevel"
+            chroot "$rootfs" "${chroot_env[@]}" rc-update add "$service" "$runlevel"
         fi
     done
     for service in sshd dbus cloud-init-local cloud-init cloud-config cloud-final local; do
         if [[ -f "$rootfs/etc/init.d/$service" ]]; then
-            chroot "$rootfs" rc-update add "$service" default
+            chroot "$rootfs" "${chroot_env[@]}" rc-update add "$service" default
         fi
     done
 fi
@@ -2167,6 +2173,9 @@ fn collect_artifacts_recursive(
                     )
                 })?
                 .to_path_buf();
+            if is_unhashed_vm_disk_artifact(&relative) {
+                continue;
+            }
             artifacts.push(ManifestArtifact {
                 label: artifact_label(&relative),
                 path: relative,
@@ -2176,6 +2185,19 @@ fn collect_artifacts_recursive(
         }
     }
     Ok(())
+}
+
+fn is_unhashed_vm_disk_artifact(relative: &Path) -> bool {
+    // VZ disk images are boot substrates, not immutable rootfs payloads. Hashing
+    // a 20+ GiB sparse disk during generic manifest collection makes successful
+    // builds appear hung; the build-result/guest-contract records the source VM
+    // and rootfs tarball digests that define reproducibility instead.
+    relative.file_name().and_then(|name| name.to_str()) == Some("disk.img")
+        && relative
+            .parent()
+            .and_then(|parent| parent.extension())
+            .and_then(|extension| extension.to_str())
+            == Some("vm")
 }
 
 fn artifact_label(path: &Path) -> String {
@@ -5033,6 +5055,37 @@ validation:
                 Some("MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL")
             );
         }
+    }
+
+    #[test]
+    fn apk_stage_uses_guest_sbin_path() {
+        let script = apk_stage_script();
+        assert!(script.contains(
+            "chroot_env=(env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)"
+        ));
+        assert!(script.contains("chroot \"$rootfs\" \"${chroot_env[@]}\" apk update"));
+        assert!(script.contains("chroot \"$rootfs\" \"${chroot_env[@]}\" rc-update add"));
+        assert!(script.contains("\"root boot\""));
+        assert!(script.contains("\"fsck boot\""));
+        assert!(script.contains("\"networking boot\""));
+    }
+
+    #[test]
+    fn artifact_collection_skips_vz_disk_image_hashes() {
+        let root = temp_test_dir("artifact-skip-vz-disk");
+        let vm_dir = root.join("motlie-v1-5-base-iter.vm");
+        fs::create_dir_all(&vm_dir).unwrap();
+        fs::write(vm_dir.join("disk.img"), b"large sparse disk placeholder").unwrap();
+        fs::write(vm_dir.join("nvram.bin"), b"nvram").unwrap();
+
+        let artifacts = collect_artifacts(&root, DEFAULT_MANIFEST_NAME).unwrap();
+
+        assert!(!artifacts
+            .iter()
+            .any(|artifact| artifact.path.ends_with("motlie-v1-5-base-iter.vm/disk.img")));
+        assert!(artifacts.iter().any(|artifact| artifact
+            .path
+            .ends_with("motlie-v1-5-base-iter.vm/nvram.bin")));
     }
 
     #[test]

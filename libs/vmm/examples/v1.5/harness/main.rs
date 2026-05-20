@@ -8,20 +8,20 @@ mod terminal;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use motlie_vmm::backend::BackendError;
 use motlie_vmm::backend::vz::egress::{
-    VzHostForward, VzUserspaceEgressConfig, run_vz_userspace_egress,
+    run_vz_userspace_egress, VzHostForward, VzUserspaceEgressConfig,
 };
+use motlie_vmm::backend::BackendError;
 use motlie_vmm::ca::SshCa;
 use motlie_vmm::guestfs::GuestFsError;
 use motlie_vmm::network_alloc::{GuestNetAllocator, GuestNetAllocatorConfig, Ipv4Subnet};
 use motlie_vmm::observability::VmObservability;
 use motlie_vmm::orchestrator::{
-    LifecycleServices, OrchestratorError, PrepareRequest, ShutdownReport, VmHandle, boot, prepare,
+    boot, prepare, LifecycleServices, OrchestratorError, PrepareRequest, ShutdownReport, VmHandle,
 };
 use motlie_vmm::provisioning::{
     GuestProvisioner, GuestProvisionerConfig, ProvisioningGuestRequest,
@@ -32,7 +32,7 @@ use motlie_vmm::spec::{
     RuntimeNamespace, SoftwareProfile,
 };
 use motlie_vmm::ssh::{
-    self, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError, new_guest_registry,
+    self, new_guest_registry, ExecOutput, PtyTranscriptEvent, SshProxyConfig, SshProxyError,
 };
 use pty::{PtyScenarioError, PtyScenarioResult};
 use scenario::{ScenarioRunResult, ScenarioRunStatus};

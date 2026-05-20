@@ -3,8 +3,8 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::backend::BackendKind;
 use crate::backend::vz;
+use crate::backend::BackendKind;
 use crate::network::NetworkModes;
 use crate::network_alloc::GuestNetAssignment;
 use crate::spec::{GuestRuntimePaths, GuestSpec};
@@ -601,9 +601,7 @@ mod tests {
         assert!(script.contains("GUEST_ID='alice'"));
         assert!(script.contains("SEED_DIR=\"${SEED_DIR:-/tmp/motlie-vmm-v14-cloud-init-alice}\""));
         assert!(script.contains("RUNTIME_ROOT=\"${RUNTIME_ROOT:-/tmp/motlie-vmm-v14-runtime}\""));
-        assert!(
-            script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\"")
-        );
+        assert!(script.contains("API_SOCKET=\"${API_SOCKET:-/tmp/motlie-vmm-v14-alice-api.sock}\""));
         assert!(
             script.contains("VSOCK_SOCKET=\"${VSOCK_SOCKET:-/tmp/motlie-vmm-v14-alice.vsock}\"")
         );
@@ -667,16 +665,10 @@ mod tests {
         assert!(script.contains(
             "export MOTLIE_VZ_CONTROL_PORT_FILE='/tmp/motlie-vmm-v14-runtime/alice/control-port'"
         ));
-        assert!(
-            script.contains(
-                "export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"
-            )
-        );
-        assert!(
-            script.contains(
-                "export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"
-            )
-        );
+        assert!(script
+            .contains("export MOTLIE_VZ_VFS_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_5000'"));
+        assert!(script
+            .contains("export MOTLIE_VZ_SSH_VSOCK_SOCKET='/tmp/motlie-vmm-v14-alice.vsock_2222'"));
         assert!(script.contains("export MOTLIE_VZ_EGRESS_GUEST_IP=\"$EGRESS_GUEST_IP\""));
         assert!(script.contains("VZ_VM_NAME='motlie-v1-45-motlie-vmm-v14-runtime-alice'"));
         assert!(script.contains("launch-vz.sh"));

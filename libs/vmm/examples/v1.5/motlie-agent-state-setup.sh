@@ -2,7 +2,7 @@
 set -eu
 
 # MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V4
-# This script is immutable base-image content for v1.5 Vz. It must not chown
+# This script is immutable base-image content for v1.5 CH/VZ. It must not chown
 # VFS-backed `/agent-state/*` or `/home/*` paths: ownership is presented by the
 # VFS layer for the active guest uid/gid, and chown is not a valid readiness
 # operation for first-contact SSH. Use symlinks instead of nested bind mounts so
@@ -34,6 +34,9 @@ setup_user() {
     claude_code_dst="$config_dir/claude-code"
 
     [ -d "$home_dir" ] || return 0
+    # CH systemd and VZ OpenRC can start this helper after the VFS guest process
+    # is running but before FUSE has mounted each path. Wait here so agent state
+    # is never written under a future mount point and hidden by the VFS layer.
     wait_for_mount /agent-state
     wait_for_mount "$home_dir"
 

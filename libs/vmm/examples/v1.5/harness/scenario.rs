@@ -12,8 +12,8 @@ use motlie_vmm::orchestrator::{OrchestratorError, ShutdownReport};
 use motlie_vmm::provisioning::{GuestProvisioner, ProvisioningError};
 use motlie_vmm::runtime::RuntimeError;
 use motlie_vmm::ssh::{
-    self, ExecOutput, PtyRead, PtyRequest, SshProxyConfig, SshProxyError, exec_via_proxy,
-    new_guest_registry,
+    self, exec_via_proxy, new_guest_registry, ExecOutput, PtyRead, PtyRequest, SshProxyConfig,
+    SshProxyError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,10 +23,10 @@ use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
-    AGENT_CLI_START_COMMAND, APK_UPDATE_COMMAND, APT_UPDATE_COMMAND, DynError, HarnessInstance,
-    PACKAGE_MANAGER_QUIESCENT_COMMAND, SSH_PROXY_READY_TIMEOUT, VFS_MEMFS_LAYER_COMMAND,
     build_guest_provisioner, persist_json, print_instance_details, wait_for_egress_ready,
-    wait_for_proxy_listener,
+    wait_for_proxy_listener, DynError, HarnessInstance, AGENT_CLI_START_COMMAND,
+    APK_UPDATE_COMMAND, APT_UPDATE_COMMAND, PACKAGE_MANAGER_QUIESCENT_COMMAND,
+    SSH_PROXY_READY_TIMEOUT, VFS_MEMFS_LAYER_COMMAND,
 };
 
 #[derive(Debug, Deserialize)]

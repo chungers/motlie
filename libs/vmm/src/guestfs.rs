@@ -127,6 +127,7 @@ impl GuestFsHandle {
 
     pub async fn wait_until_ready(&self, timeout: Duration) -> Result<(), GuestFsError> {
         let deadline = Instant::now() + timeout;
+        let trace_ready = std::env::var_os("MOTLIE_VMM_READY_TRACE").is_some();
         loop {
             {
                 let connected = self.connected_mount_tags.lock().await;
@@ -140,6 +141,19 @@ impl GuestFsHandle {
             }
 
             if Instant::now() >= deadline {
+                if trace_ready {
+                    let connected = self.connected_mount_tags.lock().await;
+                    let missing = self
+                        .required_mount_tags
+                        .iter()
+                        .filter(|tag| !connected.contains(*tag))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "motlie-vmm-ready[{}]: guestfs timeout missing={missing:?} connected={connected:?}",
+                        self.guest_id
+                    );
+                }
                 return Err(GuestFsError::WaitForMounts {
                     guest_id: self.guest_id.clone(),
                 });
@@ -198,17 +212,29 @@ fn spawn_guest_listener(
     connected_mount_tags: Arc<tokio::sync::Mutex<HashSet<String>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let trace_ready = std::env::var_os("MOTLIE_VMM_READY_TRACE").is_some();
         loop {
             match listener.accept().await {
                 Ok((mut stream, _addr)) => {
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{guest_id}]: guestfs unix accepted");
+                    }
                     let tag = match motlie_vfs::vsock::read_tag_handshake(&mut stream).await {
                         Ok(tag) => tag,
                         Err(e) => {
+                            if trace_ready {
+                                eprintln!(
+                                    "motlie-vmm-ready[{guest_id}]: guestfs handshake error: {e}"
+                                );
+                            }
                             tracing::warn!("guestfs handshake error for {guest_id}: {e}");
                             continue;
                         }
                     };
                     if !server.has_mount(&tag) {
+                        if trace_ready {
+                            eprintln!("motlie-vmm-ready[{guest_id}]: guestfs unknown tag: {tag}");
+                        }
                         tracing::warn!("guestfs unknown tag for {guest_id}: {tag}");
                         continue;
                     }
@@ -227,6 +253,9 @@ fn spawn_guest_listener(
                         }
                     });
                     tracing::info!("accepted guestfs connection guest={guest_id} tag={tag}");
+                    if trace_ready {
+                        eprintln!("motlie-vmm-ready[{guest_id}]: accepted guestfs tag={tag}");
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("guestfs accept error for {guest_id}: {e}");
