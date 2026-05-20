@@ -186,9 +186,13 @@ with Virtualization.framework.
 
 Alpine 3.22 is the second checked-in rootfs profile. It uses the same Motlie
 guest software surface as Ubuntu but swaps the package/init contracts to
-`apk` and OpenRC. Current Alpine support is validated for CH; VZ Alpine should
-not be advertised until the VZ launch/validation path is generalized away from
-Ubuntu/systemd assumptions and validated on macOS. Alpine scenario files are:
+`apk` and OpenRC. Current Alpine support is validated for CH. The Alpine
+release configs also declare a VZ adapter target so Apple Silicon VZ can
+consume a Linux-produced `linux/arm64` Alpine OCI/rootfs payload through
+`--oci-layout` or `--rootfs-tarball`; direct Alpine VZ adapter builds without
+such a payload are rejected so the native Ubuntu/systemd source VM cannot be
+mistaken for Alpine evidence. Alpine VZ is not green until the VZ build and
+live harness matrix below pass on macOS. Alpine scenario files are:
 
 ```text
 scenarios/agent-bootstrap-alpine.json

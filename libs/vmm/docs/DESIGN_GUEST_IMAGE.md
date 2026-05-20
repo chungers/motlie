@@ -1283,9 +1283,13 @@ OCI image-index and selected platform-manifest digests. Ubuntu 24.04 and Alpine
 emitter consumes the native source/import/package/compatibility path for both
 profiles. The VZ emitter remains adapter-backed for the Ubuntu path, still
 records its current `materialized_source`, and consumes the same assembled OCI
-rootfs through the adapter rootfs handoff. Alpine is not declared as VZ-ready
-until the VZ launch/validation path is generalized away from Ubuntu/systemd
-assumptions and validated on macOS.
+rootfs through the adapter rootfs handoff. Alpine declares the same VZ adapter
+handoff only for payload-backed builds: `mbuild` must receive `--oci-layout` or
+`--rootfs-tarball` so an assembled Alpine/OpenRC rootfs is consumed explicitly.
+Direct Alpine VZ adapter execution without that payload is rejected because the
+native Apple VZ source VM is not an Alpine materializer. Alpine is not declared
+VZ-ready until the payload-backed VZ build and live harness matrix are validated
+on macOS.
 
 The VZ side of this transition must be explicit. The Linux/CH native OCI build
 emits a common `assembled-rootfs.tar` before CH-specific boot adaptations are

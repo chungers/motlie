@@ -10,16 +10,16 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
-    ALPINE_OPENRC_PROFILE, ALPINE_OPENRC_SOURCE_REF, ExternalOciSource, GuestArchitecture,
-    GuestImageProfile, OciContentCache, OciDigest, OciImageReference, OciPlatform,
-    OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed, RootfsCompatibilityAssembler,
-    RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec, RootfsMountSpec,
-    RootfsPayloadFile, RootfsPendingRequirementPolicy, RootfsProfileSpec,
+    v1_5, ExternalOciSource, GuestArchitecture, GuestImageProfile, OciContentCache, OciDigest,
+    OciImageReference, OciPlatform, OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed,
+    RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec,
+    RootfsMountSpec, RootfsPayloadFile, RootfsPendingRequirementPolicy, RootfsProfileSpec,
     RootfsSeedOverlayAssembler, RootfsSeedOverlayManifest, RootfsSeedOverlaySpec, RootfsUserSeed,
-    UBUNTU_SYSTEMD_PROFILE, UBUNTU_SYSTEMD_SOURCE_REF, v1_5,
+    ALPINE_OPENRC_PROFILE, ALPINE_OPENRC_SOURCE_REF, UBUNTU_SYSTEMD_PROFILE,
+    UBUNTU_SYSTEMD_SOURCE_REF,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -653,6 +653,18 @@ fn run_build_execution(
     }
     if config.source.kind == SourceKind::ExternalOci && options.target.as_str() == "ch" {
         return run_ch_external_oci_build(repo_root, config, emitter, options);
+    }
+    if config.source.kind == SourceKind::ExternalOci
+        && config.source.profile.as_str() == ALPINE_OPENRC_PROFILE
+        && emitter.adapter.env.rootfs_tarball.is_some()
+        && rootfs_tarball.is_none()
+    {
+        bail!(
+            "external-oci Alpine target {} requires --oci-layout or --rootfs-tarball; \
+             the VZ adapter cannot synthesize an Alpine/OpenRC rootfs from the native \
+             source VM without an assembled payload",
+            options.target
+        );
     }
     run_backend_adapter(repo_root, config, emitter, options, rootfs_tarball)
 }
@@ -2819,7 +2831,11 @@ fn git_source_commit() -> Result<String> {
 }
 
 fn bool_env(value: bool) -> &'static str {
-    if value { "1" } else { "0" }
+    if value {
+        "1"
+    } else {
+        "0"
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -4630,6 +4646,20 @@ validation:
         path
     }
 
+    fn repo_root_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("mbuild crate should live under repo/bins/mbuild")
+            .to_path_buf()
+    }
+
+    fn release_config_path(name: &str) -> PathBuf {
+        repo_root_fixture()
+            .join("releases/vmm/v1.5/configs")
+            .join(name)
+    }
+
     #[test]
     fn parses_build_command() {
         let cli = Cli::try_parse_from([
@@ -4921,11 +4951,9 @@ validation:
 
         let error = stage.validate().unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("reserved but not implemented by current mbuild adapters")
-        );
+        assert!(error
+            .to_string()
+            .contains("reserved but not implemented by current mbuild adapters"));
     }
 
     #[test]
@@ -4989,6 +5017,50 @@ validation:
     }
 
     #[test]
+    fn alpine_release_configs_declare_vz_emitters() {
+        for config_name in [
+            "motlie-image.alpine-3.22.linux-arm64.yaml",
+            "motlie-image.alpine-3.22.linux-amd64.yaml",
+        ] {
+            let config = load_config(&release_config_path(config_name)).unwrap();
+            let target = BackendTargetId("vz".to_string());
+            let emitter = config.validate_for_target(&target).unwrap();
+
+            assert_eq!(emitter.seed.motlie_backend, "vz");
+            assert_eq!(emitter.seed.motlie_net_backend, "vz-userspace");
+            assert_eq!(
+                emitter.adapter.env.rootfs_tarball.as_deref(),
+                Some("MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL")
+            );
+        }
+    }
+
+    #[test]
+    fn alpine_vz_external_oci_requires_payload() {
+        let config_path = release_config_path("motlie-image.alpine-3.22.linux-arm64.yaml");
+        let config = load_config(&config_path).unwrap();
+        let target = BackendTargetId("vz".to_string());
+        let emitter = config.validate_for_target(&target).unwrap();
+        let options = BuildOptions {
+            config_path,
+            target,
+            out: temp_test_dir("alpine-vz-no-payload"),
+            repo_root: None,
+            plan_only: false,
+            adapter_args: Vec::new(),
+            rootfs_tarball: None,
+            oci_layout: None,
+        };
+
+        let error = run_build_execution(Path::new("."), &config, emitter, &options, None)
+            .expect_err("Alpine VZ must not silently fall back to the native source VM");
+
+        assert!(error
+            .to_string()
+            .contains("requires --oci-layout or --rootfs-tarball"));
+    }
+
+    #[test]
     fn config_rejects_unknown_top_level_fields() {
         let error =
             serde_yaml::from_str::<ImageBuildConfig>(&image_config_yaml("unexpected: true\n", ""))
@@ -5023,11 +5095,9 @@ validation:
 
         let error = manifest.validate_against_config(&config).unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("manifest package_stage does not match config")
-        );
+        assert!(error
+            .to_string()
+            .contains("manifest package_stage does not match config"));
     }
 
     #[test]
@@ -5062,11 +5132,9 @@ validation:
 
         let error = manifest.validate_against_config(&config).unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("manifest adapter.materialized_source does not match config")
-        );
+        assert!(error
+            .to_string()
+            .contains("manifest adapter.materialized_source does not match config"));
     }
 
     #[test]
