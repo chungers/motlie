@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-20 | @codex | Add CH-side pre-merge compatibility work for PR #319: keep V4 agent-state symlinks while waiting for CH/VZ FUSE mounts before linking state directories |
 | 2026-05-18 | @vmm-cdx | Add Alpine 3.22/OpenRC as the second v1.5 rootfs profile: checked-in arm64/amd64 configs, apk package strategy, OpenRC compatibility layer, Alpine harness scenarios, and live CH arm64 validation |
 | 2026-05-17 | @vmm-cdx | Move v1.5 worked-example image configs into `releases/vmm/v1.5/configs/` and document the release-input namespace for rootfs/platform-specific configs |
 | 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for this phase: adapter-backed VZ builds now accept `mbuild build --target vz --oci-layout <layout>`, validate the local OCI payload, and pass its canonical rootfs layer through the current VZ rootfs handoff |
@@ -884,6 +885,10 @@ Tasks:
   - [x] live-validate Alpine `linux/arm64` on this CH host with:
         `agent-bootstrap-alpine.json`, `multiguest-validate-alpine.json`, and
         `pty-agent-validation-alpine.json`
+  - [x] add CH-side PR #319 pre-merge compatibility guard: the shared
+        `motlie-agent-state-setup.sh` keeps the V4 symlink contract and waits
+        for `/agent-state` plus each FUSE-backed guest home before linking
+        Codex/Claude state directories
   - [ ] run the VZ build/export/validation path on a native Apple Silicon Mac
         for `vz-darwin-arm64` using the `linux/arm64` guest payload
   - [ ] run the CH build/export/validation path on native DGX/aarch64 Linux

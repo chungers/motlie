@@ -1184,7 +1184,7 @@ if [[ ! -s /etc/motlie/v1.5/backend.env ]]; then
 fi
 if [[ ! -s /usr/local/bin/motlie-agent-state-setup || ! -x /usr/local/bin/motlie-agent-state-setup ]]; then
   contract_missing+=("/usr/local/bin/motlie-agent-state-setup executable from the base image")
-elif ! grep -q 'MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3' /usr/local/bin/motlie-agent-state-setup; then
+elif ! grep -q 'MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V4' /usr/local/bin/motlie-agent-state-setup; then
   contract_missing+=("/usr/local/bin/motlie-agent-state-setup is stale; rebuild the base image with the converged VFS-backed agent-state setup")
 fi
 if [[ ! -s /usr/local/bin/motlie-vmm-vsock-ssh-loop || ! -x /usr/local/bin/motlie-vmm-vsock-ssh-loop ]]; then
