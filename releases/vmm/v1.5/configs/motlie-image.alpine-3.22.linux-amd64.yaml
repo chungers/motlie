@@ -117,6 +117,36 @@ emitters:
     validation:
       artifact_dir_env: MOTLIE_V15_CH_BASE_ARTIFACTS_DIR
       artifact_dir_suffix: base
+  - id: vz
+    materialized_source:
+      image: local://libs/vmm/examples/v1.5/artifacts/source-base.vm
+      profile: vz-native-openrc
+      platform: host-native-macos
+      materializer: apple-virtualization-source-vm
+    adapter:
+      program: bash
+      args:
+        - libs/vmm/examples/v1.5/build-image.sh
+        - --backend
+        - vz
+      env:
+        artifact_dir: MOTLIE_V15_ARTIFACTS_DIR
+        build_config: MOTLIE_V15_BUILD_CONFIG
+        package_manager: MOTLIE_V15_PACKAGE_MANAGER
+        package_update: MOTLIE_V15_PACKAGE_UPDATE
+        package_include: MOTLIE_V15_PACKAGE_INCLUDE
+        package_clean: MOTLIE_V15_PACKAGE_CLEAN
+        rootfs_tarball: MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL
+    seed:
+      motlie_backend: vz
+      motlie_net_backend: vz-userspace
+    validation:
+      artifact_dir_env: MOTLIE_VZ_ARTIFACTS_DIR
+      base_vm_dir_env: MOTLIE_VZ_BASE_VM_DIR
+      base_vm_dir_suffix: motlie-v1-5-base-iter.vm
+      base_vm_dir_required_files:
+        - disk.img
+        - nvram.bin
 validation:
   - vfs_memfs
   - internet_egress_package_update_apk
