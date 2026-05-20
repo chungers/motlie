@@ -270,6 +270,22 @@ not apply this tarball, install packages, or build binaries. Reusable VZ images
 do not intentionally bake demo guest users; `alice`, `bob`, and future harness
 guests are per-guest provisioning state.
 
+For Alpine/OpenRC payloads, the VZ adapter starts the privileged finalization
+shell before replacing the native source rootfs, then extracts the assembled
+payload, writes the VZ backend defaults, enables OpenRC services, verifies the
+v1.5 guest binaries and init scripts, and powers off. It must not fall through
+to the Ubuntu/systemd cargo/npm build path.
+
+macOS-hosted builders cross-compile the Linux guest binaries before rootfs
+injection. The workspace patches `fuser` 0.15.1 through
+`third_party/fuser-0.15.1` so the pure-rust Linux mount path is selected from
+Cargo's target OS rather than the macOS build host.
+
+Until the durable VZ emitter builds a bootable disk directly from the assembled
+rootfs, launch-time init detection intentionally prefers OpenRC when present.
+That prevents leftover source-VM systemd files in the transitional VZ overlay
+from misclassifying Alpine payloads.
+
 v1.5 is greenfield for the image-builder product contract. Do not reuse
 pre-v1.5/v1.35 source VMs or cached disks. If a launch finds a requested guest
 already baked into the image with the wrong UID/GID, the run fails closed so the

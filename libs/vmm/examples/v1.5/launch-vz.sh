@@ -1094,7 +1094,12 @@ MOTLIE_MOUNTS_B64
   rm -f /tmp/mounts.${GUEST_NAME}.yaml.b64
 fi
 motlie_guest_phase mounts-config-staged
-printf '${CONTROL_PASSWORD}\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
+if command -v hostnamectl >/dev/null 2>&1; then
+  printf '${CONTROL_PASSWORD}\n' | sudo -S hostnamectl set-hostname '$GUEST_HOSTNAME' || true
+else
+  printf '${CONTROL_PASSWORD}\n' | sudo -S hostname '$GUEST_HOSTNAME' || true
+  printf '${CONTROL_PASSWORD}\n' | sudo -S sh -c "printf '%s\n' '$GUEST_HOSTNAME' > /etc/hostname" || true
+fi
 printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /workspace >/dev/null 2>&1 || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /agent-state >/dev/null 2>&1 || true
 printf '${CONTROL_PASSWORD}\n' | sudo -S umount -lf /home/$LOGIN_USER >/dev/null 2>&1 || true
@@ -1149,14 +1154,9 @@ motlie_guest_phase user-and-base-dirs-ready
 # fails, rebuild the v1.5 base image instead of hiding the long pole here.
 typeset -a contract_missing=()
 for cmd_pkg in \
-  "cargo:cargo" \
-  "rustc:rustc" \
-  "cc:build-essential" \
-  "pkg-config:pkg-config" \
   "curl:curl" \
   "tar:tar" \
   "gzip:gzip" \
-  "npm:npm" \
   "codex:@openai/codex" \
   "claude:@anthropic-ai/claude-code"
 do
@@ -1166,9 +1166,6 @@ do
     contract_missing+=("command '\$required_cmd' from base package '\$required_pkg'")
   fi
 done
-if ! pkg-config --exists fuse3 >/dev/null 2>&1; then
-  contract_missing+=("pkg-config fuse3 metadata from base package 'libfuse3-dev'")
-fi
 if [[ ! -s /usr/local/bin/motlie-vfs-guest || ! -x /usr/local/bin/motlie-vfs-guest ]]; then
   contract_missing+=("/usr/local/bin/motlie-vfs-guest executable from the base image")
 elif [[ "\$(/usr/local/bin/motlie-vfs-guest --contract 2>/dev/null || true)" != "MOTLIE_VMM_GUEST_MOUNTER_V1_5" ]]; then
@@ -1190,15 +1187,42 @@ fi
 if [[ ! -s /usr/local/bin/motlie-vmm-vsock-ssh-loop || ! -x /usr/local/bin/motlie-vmm-vsock-ssh-loop ]]; then
   contract_missing+=("/usr/local/bin/motlie-vmm-vsock-ssh-loop executable from the base image")
 fi
-if [[ ! -s /etc/systemd/system/motlie-vfs-guest.service ]]; then
-  contract_missing+=("/etc/systemd/system/motlie-vfs-guest.service from the base image")
+motlie_init_profile=unknown
+# Prefer OpenRC when present. The transitional VZ OCI/rootfs bridge overlays a
+# common payload into a bootable source disk, so source-VM systemd files can
+# remain until the durable VZ disk emitter replaces live overlays completely.
+if command -v rc-service >/dev/null 2>&1 && [[ -d /etc/init.d ]]; then
+  motlie_init_profile=openrc
+elif command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
+  motlie_init_profile=systemd
 fi
-if [[ ! -s /etc/systemd/system/motlie-agent-state.service ]]; then
-  contract_missing+=("/etc/systemd/system/motlie-agent-state.service from the base image")
-fi
-if [[ ! -s /etc/systemd/system/motlie-vmm-vsock-ssh.service ]]; then
-  contract_missing+=("/etc/systemd/system/motlie-vmm-vsock-ssh.service from the base image")
-fi
+case "\$motlie_init_profile" in
+  systemd)
+    if [[ ! -s /etc/systemd/system/motlie-vfs-guest.service ]]; then
+      contract_missing+=("/etc/systemd/system/motlie-vfs-guest.service from the base image")
+    fi
+    if [[ ! -s /etc/systemd/system/motlie-agent-state.service ]]; then
+      contract_missing+=("/etc/systemd/system/motlie-agent-state.service from the base image")
+    fi
+    if [[ ! -s /etc/systemd/system/motlie-vmm-vsock-ssh.service ]]; then
+      contract_missing+=("/etc/systemd/system/motlie-vmm-vsock-ssh.service from the base image")
+    fi
+    ;;
+  openrc)
+    if [[ ! -s /etc/init.d/motlie-vfs-guest ]]; then
+      contract_missing+=("/etc/init.d/motlie-vfs-guest from the Alpine/OpenRC base image")
+    fi
+    if [[ ! -s /etc/init.d/motlie-agent-state ]]; then
+      contract_missing+=("/etc/init.d/motlie-agent-state from the Alpine/OpenRC base image")
+    fi
+    if [[ ! -s /etc/init.d/motlie-vmm-vsock-ssh ]]; then
+      contract_missing+=("/etc/init.d/motlie-vmm-vsock-ssh from the Alpine/OpenRC base image")
+    fi
+    ;;
+  *)
+    contract_missing+=("supported init profile: systemd service units or Alpine/OpenRC init scripts")
+    ;;
+esac
 if [[ ! -s /etc/profile.d/tmux-auto.sh ]]; then
   contract_missing+=("/etc/profile.d/tmux-auto.sh from the base image")
 fi
@@ -1279,7 +1303,19 @@ motlie_guest_phase guest-runtime-files-installed
 # The sshd policy is immutable image content, and OpenSSH reads the CA and
 # AuthorizedPrincipals files during auth. Restarting sshd here introduces a
 # control-port race before the Rust SSH bridge can register the guest.
-printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
+case "\$motlie_init_profile" in
+  systemd)
+    printf '${CONTROL_PASSWORD}\n' | sudo -S systemctl restart motlie-vfs-guest.service
+    ;;
+  openrc)
+    printf '${CONTROL_PASSWORD}\n' | sudo -S rc-service motlie-vfs-guest restart \
+      || printf '${CONTROL_PASSWORD}\n' | sudo -S rc-service motlie-vfs-guest start
+    ;;
+  *)
+    echo "cannot restart motlie-vfs-guest for unsupported init profile: \$motlie_init_profile" >&2
+    exit 1
+    ;;
+esac
 motlie_guest_phase vfs-service-restarted
 mounts_ready=0
 for _ in \$(seq 1 60); do
@@ -1294,7 +1330,12 @@ for _ in \$(seq 1 60); do
 done
 if [[ "\$mounts_ready" -ne 1 ]]; then
   echo "guest mounts did not become readable after motlie-vfs restart" >&2
-  systemctl status motlie-vfs-guest.service --no-pager || true
+  if [[ "\$motlie_init_profile" == "systemd" ]]; then
+    systemctl status motlie-vfs-guest.service --no-pager || true
+  elif [[ "\$motlie_init_profile" == "openrc" ]]; then
+    rc-service motlie-vfs-guest status || true
+    tail -n 80 /var/log/motlie-vfs-guest.log /var/log/motlie-vfs-guest.err 2>/dev/null || true
+  fi
   exit 1
 fi
 motlie_guest_phase mounts-readable
@@ -1334,8 +1375,14 @@ from pathlib import Path
 payload = {
     "mounts_yaml": Path("/etc/motlie-vfs/mounts.yaml").exists(),
     "guest_bin": Path("/usr/local/bin/motlie-vfs-guest").exists(),
-    "service_unit": Path("/etc/systemd/system/motlie-vfs-guest.service").exists(),
-    "agent_state_service_unit": Path("/etc/systemd/system/motlie-agent-state.service").exists(),
+    "service_unit": (
+        Path("/etc/systemd/system/motlie-vfs-guest.service").exists()
+        or Path("/etc/init.d/motlie-vfs-guest").exists()
+    ),
+    "agent_state_service_unit": (
+        Path("/etc/systemd/system/motlie-agent-state.service").exists()
+        or Path("/etc/init.d/motlie-agent-state").exists()
+    ),
 }
 Path("$POST_PROVISION_REMOTE_JSON").write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 PY2
@@ -1520,6 +1567,7 @@ idle=0
 for _ in $(seq 1 120); do
   if ! pgrep -x apt >/dev/null 2>&1 \
     && ! pgrep -x apt-get >/dev/null 2>&1 \
+    && ! pgrep -x apk >/dev/null 2>&1 \
     && ! pgrep -x dpkg >/dev/null 2>&1 \
     && ! pgrep -x unattended-upgr >/dev/null 2>&1 \
     && ! pgrep -x unattended-upgrade >/dev/null 2>&1; then

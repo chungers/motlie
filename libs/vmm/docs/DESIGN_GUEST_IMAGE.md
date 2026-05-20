@@ -888,6 +888,21 @@ Implications for VZ:
   contract, the adapter still preserves EFI, NVRAM, and boot partition content
   from a native source VM and overlays the assembled rootfs payload into that
   container.
+- Alpine/OpenRC payloads are a separate init-profile adaptation inside that
+  bridge. The VZ adapter must enter a privileged root shell before extraction,
+  apply the common payload, write VZ backend defaults, enable OpenRC services,
+  verify the v1.5 guest binaries/init scripts, and power off without entering
+  the Ubuntu/systemd cargo/npm build path.
+- Because this bridge overlays into a native source disk instead of synthesizing
+  the durable VZ boot container directly, source-VM files can remain. Launch
+  must therefore prefer OpenRC when `rc-service` is present so Alpine payloads
+  are not misclassified by leftover systemd files.
+- macOS-hosted v1.5 image assembly cross-compiles Linux guest binaries before
+  injecting them into the common rootfs. The workspace currently patches
+  `fuser` 0.15.1 from `third_party/fuser-0.15.1` because the published build
+  script checks the build host instead of Cargo's target OS for the pure-rust
+  Linux mount implementation. This is a dependency bug workaround, not a VFS
+  API change; remove it when upstream supports this cross-compile path.
 
 Implications for CH:
 
