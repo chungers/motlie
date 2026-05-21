@@ -178,6 +178,8 @@ follow-up-thinking-trace: <reasoning trace when returned by the backend, otherwi
 
 The detailed 2x3 TTS-to-ASR validation matrix lives in
 [`../docs/VALIDATION_TTS_ASR_PIPELINES.md`](../docs/VALIDATION_TTS_ASR_PIPELINES.md).
+The end-to-end chat and tool-calling validation matrix lives in
+[`../docs/VALIDATION_CHAT_TOOL_CALLING.md`](../docs/VALIDATION_CHAT_TOOL_CALLING.md).
 
 Regression-smoke note:
 
