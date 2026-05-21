@@ -31,8 +31,9 @@ Public identity:
 | Capabilities | `Chat` + `Completion` + `ToolUse` | `Chat` + `Vision` + `ToolUse` |
 
 Both bundles are **opt-in only** — neither is in the `motlie-models` default
-feature set, consistent with the size-based policy (E4B Q8_0 GGUF is ~8 GB;
-safetensors is larger). E2B remains the default-feature Gemma 4 bundle.
+feature set, consistent with the size-based policy: E4B is the larger sibling
+of E2B (the curated E4B Q8_0 GGUF artifact is ~7.6 GB), so it is not pulled
+into a default build. E2B remains the default-feature Gemma 4 bundle.
 
 ## Goals
 
