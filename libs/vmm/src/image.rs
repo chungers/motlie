@@ -42,8 +42,8 @@ pub mod v1_5 {
 use v1_5::{
     MOTLIE_V15_BACKEND_ENV_PATH, MOTLIE_V15_CLOUD_INIT_META_DATA_PATH,
     MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH, MOTLIE_V15_CONTRACT_VERSION, MOTLIE_V15_GUEST_BIN_COMPAT,
-    MOTLIE_V15_GUEST_BIN_OPT, MOTLIE_V15_MOUNTS_PATH, MOTLIE_V15_SSH_VSOCK_PORT,
-    MOTLIE_V15_SSHD_CA_CONFIG_PATH, MOTLIE_V15_VFS_HOST_CID, MOTLIE_V15_VFS_PORT,
+    MOTLIE_V15_GUEST_BIN_OPT, MOTLIE_V15_MOUNTS_PATH, MOTLIE_V15_SSHD_CA_CONFIG_PATH,
+    MOTLIE_V15_SSH_VSOCK_PORT, MOTLIE_V15_VFS_HOST_CID, MOTLIE_V15_VFS_PORT,
 };
 
 /// Guest CPU architecture as named by OCI platform descriptors.
@@ -893,14 +893,12 @@ impl RootfsClassifier {
             });
         }
 
-        let mut findings = vec![
-            RootfsRequirementFinding::new(
-                RootfsRequirementKind::RootDirectory,
-                RootfsRequirementStatus::Present,
-                "rootfs assembly root is a directory",
-            )
-            .with_path("/"),
-        ];
+        let mut findings = vec![RootfsRequirementFinding::new(
+            RootfsRequirementKind::RootDirectory,
+            RootfsRequirementStatus::Present,
+            "rootfs assembly root is a directory",
+        )
+        .with_path("/")];
 
         let os_release = read_rootfs_os_release(root)?;
         findings.push(classify_os_release(&spec.os, os_release.as_ref()));
@@ -2320,18 +2318,25 @@ WantedBy=multi-user.target
 const MOTLIE_OPENRC_VFS_GUEST_SERVICE: &str = r#"#!/sbin/openrc-run
 description="motlie-vmm v1.5 guest filesystem mounter"
 pidfile="/run/${RC_SVCNAME}.pid"
+command="/usr/local/bin/motlie-vfs-guest"
+command_args="--mounts /etc/motlie-vfs/mounts.yaml --backend-env /etc/motlie/v1.5/backend.env"
+command_background=true
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.err"
 
 depend() {
     need localmount
     after cloud-init cloud-config cloud-final
 }
 
-start() {
-    ebegin "Starting ${RC_SVCNAME}"
-    start-stop-daemon --start --background --make-pidfile --pidfile "$pidfile" \
-        --exec /bin/sh -- -c \
-        "exec /usr/local/bin/motlie-vfs-guest --mounts /etc/motlie-vfs/mounts.yaml --backend-env /etc/motlie/v1.5/backend.env >>/var/log/${RC_SVCNAME}.log 2>>/var/log/${RC_SVCNAME}.err"
-    eend $?
+start_pre() {
+    # Apple VZ presents virtio-vsock through the Ubuntu kernel preserved by the
+    # VZ disk adapter. Alpine/OpenRC does not load that transport implicitly,
+    # so the VMM-owned VFS service owns this platform-specific kernel module
+    # readiness before the common guest mounter connects to host CID 2.
+    modprobe fuse >/dev/null 2>&1 || true
+    modprobe vmw_vsock_virtio_transport >/dev/null 2>&1 || true
+    checkpath -d -m 0755 /etc/motlie /etc/motlie/v1.5 /etc/motlie-vfs /var/log
 }
 "#;
 const MOTLIE_OPENRC_AGENT_STATE_SERVICE: &str = r#"#!/sbin/openrc-run
@@ -2406,10 +2411,12 @@ echo "motlie OpenRC local starter: complete"
 const MOTLIE_AGENT_STATE_SETUP_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 
-# MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3
-# This script is immutable base-image content. It must not chown VFS-backed
+# MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V4
+# This script is immutable base-image content for v1.5 CH/VZ. It must not chown VFS-backed
 # /agent-state or /home paths because ownership is presented by the active VFS
-# layer for the guest uid/gid.
+# layer for the guest uid/gid. Keep Codex/Claude state on /agent-state without
+# nested bind mounts; bind-mounting back into FUSE-backed home directories is
+# not a portable CH/VZ convergence contract.
 
 is_mounted() {
     mount_path="$1"
@@ -2437,22 +2444,19 @@ setup_user() {
     claude_code_dst="$config_dir/claude-code"
 
     [ -d "$home_dir" ] || return 0
+    # CH systemd and VZ OpenRC can start this helper after the VFS guest process
+    # is running but before FUSE has mounted each path. Wait here so agent state
+    # is never written under a future mount point and hidden by the VFS layer.
     wait_for_mount /agent-state
     wait_for_mount "$home_dir"
-
-    for mount_path in "$codex_dst" "$claude_dst" "$claude_code_dst"; do
-        umount "$mount_path" >/dev/null 2>&1 || true
-    done
 
     install -d -m 0755 "$config_dir"
     install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
 
     rm -rf "$codex_dst" "$claude_dst" "$claude_code_dst"
-    install -d -m 0700 "$codex_dst" "$claude_dst" "$claude_code_dst"
-
-    mount --bind /agent-state/codex "$codex_dst"
-    mount --bind /agent-state/claude "$claude_dst"
-    mount --bind /agent-state/claude-code "$claude_code_dst"
+    ln -s /agent-state/codex "$codex_dst"
+    ln -s /agent-state/claude "$claude_dst"
+    ln -s /agent-state/claude-code "$claude_code_dst"
 }
 
 for home_dir in /home/*; do
@@ -6193,11 +6197,9 @@ mod tests {
                 .contains("alice ALL=(ALL) NOPASSWD:ALL")
         );
         let env_path = rootfs_path(&overlay, "/home/alice/.env");
-        assert!(
-            fs::read_to_string(&env_path)
-                .unwrap()
-                .contains("MOTLIE_GUEST='alice'")
-        );
+        assert!(fs::read_to_string(&env_path)
+            .unwrap()
+            .contains("MOTLIE_GUEST='alice'"));
         let env_record = manifest
             .installed
             .iter()
@@ -6538,12 +6540,10 @@ mod tests {
             assert_eq!(source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
             assert_eq!(source.platform, platform);
             assert!(source.image_index_digest.as_ref().starts_with("sha256:"));
-            assert!(
-                source
-                    .platform_manifest_digest
-                    .as_ref()
-                    .starts_with("sha256:")
-            );
+            assert!(source
+                .platform_manifest_digest
+                .as_ref()
+                .starts_with("sha256:"));
             source.validate().unwrap();
         }
     }
@@ -6636,18 +6636,14 @@ mod tests {
         assert_eq!(profile.name, UBUNTU_SYSTEMD_PROFILE);
         assert_eq!(profile.source.image_ref, UBUNTU_SYSTEMD_SOURCE_REF);
         assert_eq!(profile.source.platform.to_string(), "linux/amd64");
-        assert!(
-            profile
-                .required_packages
-                .iter()
-                .any(|pkg| pkg == "openssh-server")
-        );
-        assert!(
-            profile
-                .required_mount_points
-                .iter()
-                .any(|path| path == &PathBuf::from("/workspace"))
-        );
+        assert!(profile
+            .required_packages
+            .iter()
+            .any(|pkg| pkg == "openssh-server"));
+        assert!(profile
+            .required_mount_points
+            .iter()
+            .any(|path| path == &PathBuf::from("/workspace")));
         profile.validate().unwrap();
     }
 

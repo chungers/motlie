@@ -4,16 +4,18 @@
 //! virtio-vsock, sends the same `TAG <name>\n` handshake used by the CH demo,
 //! and mounts FUSE filesystems at the configured guest paths.
 
-use std::time::Duration;
-
 use anyhow::Result;
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
+use std::time::Duration;
 
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const CONNECT_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const HOST_CID: u32 = 2;
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const VMM_PORT: u32 = 5000;
 
 #[derive(serde::Deserialize)]
@@ -45,7 +47,10 @@ fn main() -> Result<()> {
         .map(|m| GuestMountSpec::new(m.tag, m.guest_path).read_only(m.read_only))
         .collect();
 
-    eprintln!("motlie-vfs-guest-v1_15: mounting {} filesystem(s)", specs.len());
+    eprintln!(
+        "motlie-vfs-guest-v1_15: mounting {} filesystem(s)",
+        specs.len()
+    );
     for spec in &specs {
         eprintln!(
             "  tag={} path={} ro={}",
@@ -55,7 +60,7 @@ fn main() -> Result<()> {
 
     let runner = GuestMountRunner::new(specs);
 
-    #[cfg(all(feature = "vsock", feature = "client"))]
+    #[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
     let handles = {
         use motlie_vfs::vsock::client::VsockClientTransport;
 
@@ -95,7 +100,7 @@ fn main() -> Result<()> {
         })?
     };
 
-    #[cfg(not(all(feature = "vsock", feature = "client")))]
+    #[cfg(not(all(feature = "vsock", feature = "client", target_os = "linux")))]
     let handles = {
         eprintln!("motlie-vfs-guest-v1_15: vsock+client features not enabled, using stub mounts");
         runner.mount_all_stub()?

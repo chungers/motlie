@@ -880,6 +880,10 @@ Tasks:
   - [x] add a second rootfs worked example using Alpine 3.22/OpenRC:
         `motlie-image.alpine-3.22.linux-arm64.yaml` and
         `motlie-image.alpine-3.22.linux-amd64.yaml`
+  - [x] declare payload-backed VZ emitters for the Alpine release configs and
+        reject direct Alpine VZ adapter execution without `--oci-layout` or
+        `--rootfs-tarball`, so the native Ubuntu/systemd VZ source VM cannot be
+        mistaken for Alpine/OpenRC evidence
   - [x] generate and validate plan-only Alpine manifests for `linux/arm64` and
         `linux/amd64`
   - [x] live-validate Alpine `linux/arm64` on this CH host with:

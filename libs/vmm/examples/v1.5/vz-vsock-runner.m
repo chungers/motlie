@@ -224,6 +224,7 @@ bridge_done:
 @interface VzVsockRunner : NSObject
 @property(nonatomic, strong) VZVirtualMachine *vm;
 @property(nonatomic, strong) SocketListenerDelegate *socketDelegate;
+@property(nonatomic, strong) NSMutableArray<VZVirtioSocketListener *> *socketListeners;
 @property(nonatomic, strong) VmDelegate *vmDelegate;
 @property(nonatomic, strong) NSMutableSet<BridgeSession *> *sessions;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *socketForwardPaths;
@@ -384,6 +385,7 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
         _sessions = [NSMutableSet set];
         _vmQueue = dispatch_queue_create("motlie.vmm.v1_45.vz_runner", DISPATCH_QUEUE_SERIAL);
         _networkBridgeFDs = [NSMutableArray array];
+        _socketListeners = [NSMutableArray array];
     }
     return self;
 }
@@ -627,6 +629,11 @@ shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection
             VZVirtioSocketListener *listener = [[VZVirtioSocketListener alloc] init];
             listener.delegate = self.socketDelegate;
             [socketDevice setSocketListener:listener forPort:portNumber.unsignedIntValue];
+            // Keep listener objects alive for the VM lifetime. The VZ API does
+            // not document this as a durable ownership transfer, and losing the
+            // listener manifests as guest connect(2) ECONNRESET before the
+            // host Unix socket bridge is reached.
+            [self.socketListeners addObject:listener];
         }
 
         [self.vm startWithCompletionHandler:^(NSError * _Nullable errorOrNil) {

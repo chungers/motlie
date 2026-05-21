@@ -35,16 +35,17 @@ tokio = { workspace = true, features = ["sync", "rt", "net", "time", "io-util"] 
 tokio-vsock = { version = "0.7", optional = true }
 bincode = { version = "2", optional = true, features = ["serde"] }
 
-# FUSE client (optional). Keep libfuse/pkg-config out of guest binary builds so
-# mbuild can cross-compile guest targets without a target-arch libfuse sysroot.
-fuser = { version = "0.15", optional = true, default-features = false }
-
 # Snapshot / concurrency helpers
 arc-swap = "1"
 parking_lot = "0.12"
 
 # Binary dependencies (used by bins/v1*/motlie-vfs-guest.rs)
 serde_yaml = "0.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# FUSE client (optional). Keep libfuse/pkg-config out of guest binary builds so
+# mbuild can cross-compile guest targets without a target-arch libfuse sysroot.
+fuser = { version = "0.15", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

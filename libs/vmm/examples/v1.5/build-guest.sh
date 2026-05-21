@@ -24,6 +24,7 @@ ROOTFS_TARBALL_SHA256=""
 ROOTFS_TARBALL_SEED_NAME="motlie-assembled-rootfs.tar"
 ROOTFS_TARBALL_GUEST_PATH="/tmp/motlie-assembled-rootfs.tar"
 ROOTFS_INPUT_KIND="v1.5-native-source-vm"
+PACKAGE_MANAGER="${MOTLIE_V15_PACKAGE_MANAGER:-apt}"
 TIMEOUT_SECONDS="${MOTLIE_VZ_TIMEOUT_SECONDS:-300}"
 GUEST_SRC_DIR="/home/admin/motlie-src"
 BOOTSTRAP_USER="${MOTLIE_VZ_BOOTSTRAP_USER:-admin}"
@@ -113,8 +114,12 @@ def assert_safe_member_name(name: str) -> None:
 def assert_safe_linkname(name: str, linkname: str) -> None:
     if not linkname:
         raise SystemExit(f"unsafe empty rootfs tar link target: {name}")
-    normalized = normalize_name(linkname)
-    if normalized == ".." or normalized.startswith("../") or "/../" in normalized:
+    if os.path.isabs(linkname):
+        normalized = os.path.normpath(linkname).lstrip("/")
+    else:
+        parent = os.path.dirname(normalize_name(name))
+        normalized = os.path.normpath(os.path.join(parent, linkname))
+    if normalized == ".." or normalized.startswith("../") or os.path.isabs(normalized):
         raise SystemExit(f"unsafe rootfs tar link target escapes guest root: {name} -> {linkname}")
 
 try:
@@ -187,6 +192,7 @@ echo "Base VM:      $BASE_VM_NAME"
 echo "Source disk:  $SOURCE_DISK_PATH"
 echo "Native cache: $NATIVE_SOURCE_VM_DIR"
 echo "Rootfs input: $ROOTFS_INPUT_KIND"
+echo "Package mgr:  $PACKAGE_MANAGER"
 if [[ -n "$ROOTFS_TARBALL_SOURCE" ]]; then
   echo "Rootfs tar:   $ROOTFS_TARBALL_SOURCE"
   echo "Rootfs size:  $ROOTFS_TARBALL_SIZE_BYTES"
@@ -791,8 +797,11 @@ if {\$exit_code != 0} {
 EOF
 }
 
-echo "--- installing guest prerequisites ---"
-guest_bash <<'EOF'
+if [[ -n "$ROOTFS_TARBALL_SOURCE" && "$PACKAGE_MANAGER" == "apk" ]]; then
+  echo "--- skipping Ubuntu guest prerequisites for payload-backed Alpine/OpenRC image ---"
+else
+  echo "--- installing guest prerequisites ---"
+  guest_bash <<'EOF'
 sudo systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
 sudo systemctl kill apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
 if ! locale -a 2>/dev/null | grep -Eqi '^en_US\.utf-?8$'; then
@@ -838,6 +847,7 @@ if (( ${#missing_pkgs[@]} > 0 )); then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${unique_pkgs[@]}"
 fi
 EOF
+fi
 
 echo "--- staging Motlie source tree from seed disk into guest ---"
 guest_bash <<EOF
@@ -897,18 +907,182 @@ PY
       exit 1
     fi
   fi
+  if [[ '$PACKAGE_MANAGER' == 'apk' ]]; then
+    echo "[v1.5 build] finalizing payload-backed Alpine/OpenRC VZ disk"
+    # The Alpine/OpenRC payload is already assembled by the common rootfs
+    # builder. Do not run Ubuntu/systemd package, cargo, or npm steps after the
+    # overlay. Only install VZ bootstrap defaults that are specific to the
+    # current Apple VZ adapter and then power off. Start sudo before replacing
+    # the rootfs so this path does not depend on the payload preserving the
+    # source VM's sudoers/passwd state.
+    printf '$BOOTSTRAP_PASS\n' | sudo -S /bin/bash -euo pipefail <<'ROOTEOF'
+tar --numeric-owner --preserve-permissions \
+  --exclude='./dev' --exclude='./dev/*' \
+  --exclude='./proc' --exclude='./proc/*' \
+  --exclude='./sys' --exclude='./sys/*' \
+  --exclude='./run' --exclude='./run/*' \
+  --exclude='./tmp' --exclude='./tmp/*' \
+  --exclude='./boot' --exclude='./boot/*' \
+  --exclude='./efi' --exclude='./efi/*' \
+  -xpf "$ROOTFS_TARBALL_GUEST_PATH" -C /
+# Transitional VZ overlay hygiene:
+# tar overlay replaces files that exist in the Alpine payload but does not
+# remove Ubuntu source files that Alpine does not own. Those stale glibc-linked
+# executables can remain earlier in PATH (for example /usr/bin/date and
+# /usr/bin/cat) and fail under the musl rootfs. Prune executable directories
+# that are owned by the common rootfs, then re-extract those paths from the
+# payload before switching to the Alpine shell.
+/bin/rm -rf /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin
+/bin/tar -xpf "$ROOTFS_TARBALL_GUEST_PATH" -C / ./usr/bin ./usr/sbin ./usr/local
+# Profile snippets are common-image content. Prune the source Ubuntu profile
+# directory as well, otherwise stale glibc-era hooks such as 01-locale-fix.sh
+# leak into Alpine login shells and make every SSH exec noisy.
+/bin/rm -rf /etc/profile.d
+/bin/tar -xpf "$ROOTFS_TARBALL_GUEST_PATH" -C / ./etc/profile.d
+exec /bin/busybox sh <<'ALPINEEOF'
+set -eu
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Apple VZ still boots the source VM kernel/EFI/NVRAM in this transitional
+# emitter. Alpine replaces /lib with the musl loader directory, so re-expose
+# the source kernel module tree after overlay or virtio devices can disappear
+# on the first cold boot of the finalized VM.
+if [ -d /usr/lib/modules ] && [ ! -e /lib/modules ]; then
+  ln -s /usr/lib/modules /lib/modules
+fi
+if [ -d /usr/lib/firmware ] && [ ! -e /lib/firmware ]; then
+  ln -s /usr/lib/firmware /lib/firmware
+fi
+# The transitional VZ emitter overlays Alpine onto a bootable Ubuntu disk
+# instead of creating a fresh filesystem. Remove stale Ubuntu/glibc bash from
+# /usr/bin so SSH remote commands resolve to Alpine's musl-linked shell.
+if [ -x /bin/bash ]; then
+  rm -f /usr/bin/bash
+  ln -s /bin/bash /usr/bin/bash
+fi
+install -d -m 0755 /etc/motlie/v1.5 /etc/motlie-vfs /etc/ssh /etc/ssh/ca /etc/ssh/auth_principals /etc/network /etc/cloud/cloud.cfg.d
+cat >/etc/motlie/v1.5/backend.env <<'BACKENDEOF'
+MOTLIE_BACKEND=vz
+MOTLIE_VFS_TRANSPORT=vsock
+MOTLIE_VFS_HOST_CID=2
+MOTLIE_VFS_PORT=5000
+MOTLIE_VFS_CONNECT_TIMEOUT_MS=60000
+MOTLIE_VFS_CONNECT_RETRY_MS=250
+MOTLIE_NET_BACKEND=vz-userspace
+MOTLIE_SSH_VSOCK_PORT=2222
+BACKENDEOF
+# VZ-specific networking adaptation:
+# The transitional Apple VZ disk emitter preserves the native Ubuntu kernel and
+# udev naming policy while overlaying the common Alpine/OpenRC rootfs. That
+# kernel exposes the VZ virtio network device as enp0s1, not CH's eth0. First
+# SSH reaches the guest through the VMM-owned userspace egress host-forward, so
+# this interface must be up before any SSH provisioning can run. Keep this
+# isolated here; CH keeps its eth0 contract in launch-ch.sh.
+cat >/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg <<'CINETEOF'
+network: {config: disabled}
+CINETEOF
+cat >/etc/network/interfaces <<'NETEOF'
+auto lo
+iface lo inet loopback
+
+auto enp0s1
+iface enp0s1 inet dhcp
+NETEOF
+if command -v rc-update >/dev/null 2>&1; then
+  mkdir -p /etc/runlevels/sysinit /etc/runlevels/boot /etc/runlevels/default
+  # Convergence contract: Alpine/OpenRC guests must remount root and run fsck
+  # before cloud-init, sshd, VFS, or VZ bridge services start. CH and VZ share
+  # this boot baseline; only the transport services below are VZ-specific.
+  for entry in "devfs sysinit" "procfs sysinit" "sysfs sysinit" "hostname boot" "bootmisc boot" "root boot" "fsck boot" "localmount boot" "loopback boot" "networking boot"; do
+    service="\${entry% *}"
+    runlevel="\${entry#* }"
+    if [ -f "/etc/init.d/\$service" ]; then
+      rc-update add "\$service" "\$runlevel" >/dev/null 2>&1 || true
+    fi
+  done
+  for service in sshd dbus cloud-init-local cloud-init cloud-config cloud-final local motlie-vfs-guest motlie-vmm-vsock-ssh; do
+    if [ -f "/etc/init.d/\$service" ]; then
+      rc-update add "\$service" default >/dev/null 2>&1 || true
+    fi
+  done
+  # VZ dynamic identity/mounts are installed during first-contact SSH, so
+  # agent-state setup must not run at boot against stale/no per-guest state.
+  rc-update del motlie-agent-state default >/dev/null 2>&1 || true
+fi
+cat >/etc/local.d/motlie-vmm.start <<'LOCALSTARTEOF'
+#!/bin/sh
+set -eu
+
+log=/var/log/motlie-openrc-start.log
+exec >>"\$log" 2>&1
+
+echo "motlie OpenRC local starter: begin"
+
+if rc-service --exists sshd >/dev/null 2>&1; then
+    rc-service sshd start || rc-service sshd restart || true
+fi
+
+for service in \
+    motlie-vfs-guest \
+    motlie-vmm-vsock-ssh; do
+    if rc-service --exists "\$service" >/dev/null 2>&1; then
+        rc-service "\$service" start || rc-service "\$service" restart
+    fi
+done
+
+echo "motlie OpenRC local starter: complete"
+LOCALSTARTEOF
+chmod 0755 /etc/local.d/motlie-vmm.start
+if ! getent group admin >/dev/null 2>&1; then
+  groupadd -g 2000 admin >/dev/null 2>&1 || addgroup -g 2000 admin
+fi
+if ! id -u admin >/dev/null 2>&1; then
+  useradd -m -u 2000 -g admin -s /bin/bash admin >/dev/null 2>&1 || adduser -D -u 2000 -G admin -s /bin/bash admin
+fi
+printf '%s:%s\n' admin admin | chpasswd
+install -d -m 0755 /etc/sudoers.d
+cat >/etc/sudoers.d/90-motlie-admin <<'SUDOEOF'
+admin ALL=(ALL) NOPASSWD:ALL
+SUDOEOF
+chown root:root /etc/sudoers.d/90-motlie-admin
+chmod 0440 /etc/sudoers.d/90-motlie-admin
+if [ ! -x /usr/local/bin/motlie-vfs-guest ]; then
+  echo "missing Alpine payload /usr/local/bin/motlie-vfs-guest" >&2
+  exit 1
+fi
+if [ "\$(/usr/local/bin/motlie-vfs-guest --contract 2>/dev/null || true)" != "MOTLIE_VMM_GUEST_MOUNTER_V1_5" ]; then
+  echo "Alpine payload motlie-vfs-guest contract marker mismatch" >&2
+  exit 1
+fi
+if [ ! -x /usr/local/bin/motlie-vmm-vsock-ssh-loop ]; then
+  echo "missing Alpine payload /usr/local/bin/motlie-vmm-vsock-ssh-loop" >&2
+  exit 1
+fi
+if [ ! -f /etc/init.d/motlie-vfs-guest ] || [ ! -f /etc/init.d/motlie-agent-state ]; then
+  echo "missing Alpine/OpenRC Motlie init scripts" >&2
+  exit 1
+fi
+# Build-seed files copied through the native source VM are image-build inputs,
+# not guest runtime state. Leave /tmp clean so first-contact dynamic seed writes
+# can create per-guest files without root-owned leftovers from image assembly.
+rm -rf /tmp/* /tmp/.[!.]* /tmp/..?*
+sync
+(sleep 1; /sbin/poweroff -f || /sbin/halt -f || /sbin/reboot -f || poweroff -f || halt -f || reboot -f) >/dev/null 2>&1 &
+ALPINEEOF
+ROOTEOF
+    exit 0
+  fi
   # VZ currently boots through an EFI disk plus NVRAM. Until the durable VZ
   # emitter can synthesize that boot container directly from OCI, preserve
   # firmware/boot/runtime pseudo-filesystems and apply only the rootfs payload
   # during image assembly. Launch and first SSH must never perform this work.
   sudo tar --numeric-owner --preserve-permissions \
-    --exclude='dev' --exclude='./dev' --exclude='dev/*' --exclude='./dev/*' \
-    --exclude='proc' --exclude='./proc' --exclude='proc/*' --exclude='./proc/*' \
-    --exclude='sys' --exclude='./sys' --exclude='sys/*' --exclude='./sys/*' \
-    --exclude='run' --exclude='./run' --exclude='run/*' --exclude='./run/*' \
-    --exclude='tmp' --exclude='./tmp' --exclude='tmp/*' --exclude='./tmp/*' \
-    --exclude='boot' --exclude='./boot' --exclude='boot/*' --exclude='./boot/*' \
-    --exclude='efi' --exclude='./efi' --exclude='efi/*' --exclude='./efi/*' \
+    --exclude='./dev' --exclude='./dev/*' \
+    --exclude='./proc' --exclude='./proc/*' \
+    --exclude='./sys' --exclude='./sys/*' \
+    --exclude='./run' --exclude='./run/*' \
+    --exclude='./tmp' --exclude='./tmp/*' \
+    --exclude='./boot' --exclude='./boot/*' \
+    --exclude='./efi' --exclude='./efi/*' \
     -xpf "$ROOTFS_TARBALL_GUEST_PATH" -C /
   # VZ tarball-overlay bridge:
   # The common rootfs payload is assembled outside the native Apple VZ disk. Do
@@ -923,6 +1097,122 @@ mkdir -p '$GUEST_SRC_DIR'
 tar -xzf /tmp/motlie-src.tar.gz -C '$GUEST_SRC_DIR'
 echo "[v1.5 build] source staging complete"
 EOF
+
+if [[ -n "$ROOTFS_TARBALL_SOURCE" && "$PACKAGE_MANAGER" == "apk" ]]; then
+  echo "--- payload-backed Alpine/OpenRC image finalized; waiting for guest poweroff ---"
+  for _ in {1..80}; do
+    if [[ ! -f "$RUNNER_PID_FILE" ]]; then
+      break
+    fi
+    if ! kill -0 "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1; then
+      rm -f "$RUNNER_PID_FILE"
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ -f "$RUNNER_PID_FILE" ]]; then
+    kill "$(cat "$RUNNER_PID_FILE")" >/dev/null 2>&1 || true
+    rm -f "$RUNNER_PID_FILE"
+  fi
+
+  python3 - "$RESULT_JSON" "$CONTRACT_JSON" "$BASE_VM_NAME" "$IP_ADDR" "$BOOT_SECONDS" "$ROOTFS_INPUT_KIND" "$NATIVE_SOURCE_VM_DIR" "$ROOTFS_TARBALL_SOURCE" "$ROOTFS_TARBALL_SIZE_BYTES" "$ROOTFS_TARBALL_SHA256" <<'PY'
+import json
+import sys
+
+(
+    path,
+    contract_path,
+    vm_name,
+    ip_addr,
+    boot_seconds,
+    rootfs_input_kind,
+    native_source_vm_dir,
+    rootfs_tarball_source,
+    rootfs_tarball_size_bytes,
+    rootfs_tarball_sha256,
+) = sys.argv[1:]
+
+rootfs_input = {
+    "kind": rootfs_input_kind,
+    "native_source_vm_dir": native_source_vm_dir,
+    "apple_vz_constraints": {
+        "requires_bootable_efi_disk": True,
+        "requires_nvram": True,
+        "assembled_rootfs_tarball_applied_during_image_build": True,
+        "preserves_boot_artifacts_from_native_source_vm": True,
+    },
+    "assembled_rootfs_tarball": rootfs_tarball_source,
+    "assembled_rootfs_tarball_size_bytes": int(rootfs_tarball_size_bytes),
+    "assembled_rootfs_tarball_sha256": rootfs_tarball_sha256,
+}
+
+guest_contract = {
+    "motlie_vfs_guest_path": "/usr/local/bin/motlie-vfs-guest",
+    "motlie_vfs_guest_marker": "MOTLIE_VMM_GUEST_MOUNTER_V1_5",
+    "motlie_vfs_guest_build_features": "built by common rootfs assembly before VZ image adaptation",
+    "guest_identity": "admin is a VZ control-plane bootstrap user; alice/bob and future harness guests are per-guest provisioning state",
+    "agent_state": "/agent-state",
+    "rootfs_input": rootfs_input,
+    "init_profile": "alpine-openrc",
+}
+
+identity_payload = {
+    "passwd": {
+        "admin": {
+            "name": "admin",
+            "uid": 2000,
+            "gid": 2000,
+            "home": "/home/admin",
+        },
+        "alice": None,
+        "bob": None,
+        "motlie-build": None,
+    },
+    "group": {
+        "admin": {
+            "name": "admin",
+            "gid": 2000,
+        },
+        "alice": None,
+        "bob": None,
+        "motlie-build": None,
+    },
+}
+
+payload = {
+    "backend": "vz-native",
+    "vm_name": vm_name,
+    "ip_addr": ip_addr,
+    "boot_to_ip_seconds": float(boot_seconds),
+    "guest_contract": guest_contract,
+    "identity_probe": identity_payload,
+    "rootfs_input": rootfs_input,
+}
+
+contract_payload = {
+    "contract_version": "v1.5",
+    "packaging_backend": "vz-native",
+    "guest_contract": guest_contract,
+    "rootfs_input": rootfs_input,
+}
+
+for output_path, output_payload in (
+    (path, payload),
+    (contract_path, contract_payload),
+):
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(output_payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+PY
+
+  echo "--- result written ---"
+  cat "$RESULT_JSON"
+
+  echo "--- leaving native source artifacts unchanged for payload-backed Alpine/OpenRC build ---"
+
+  echo "=== success ==="
+  exit 0
+fi
 
 echo "--- building guest binaries and CLIs in guest ---"
 guest_bash <<EOF
@@ -1345,10 +1635,13 @@ if [[ -f "$RUNNER_PID_FILE" ]]; then
   rm -f "$RUNNER_PID_FILE"
 fi
 
-echo "--- caching native source artifacts ---"
-rm -rf "$NATIVE_SOURCE_VM_DIR"
-mkdir -p "$NATIVE_SOURCE_VM_DIR"
-python3 - "$WORK_VM_DIR" "$NATIVE_SOURCE_VM_DIR" <<'PY'
+if [[ -n "${MOTLIE_VZ_NATIVE_SOURCE_VM_DIR:-}" ]]; then
+  echo "--- leaving external native source artifacts unchanged ---"
+else
+  echo "--- caching native source artifacts ---"
+  rm -rf "$NATIVE_SOURCE_VM_DIR"
+  mkdir -p "$NATIVE_SOURCE_VM_DIR"
+  python3 - "$WORK_VM_DIR" "$NATIVE_SOURCE_VM_DIR" <<'PY'
 import os
 import shutil
 import sys
@@ -1366,5 +1659,6 @@ for name in ("disk.img", "nvram.bin", "machine-id.bin"):
         shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
     os.replace(tmp, dst)
 PY
+fi
 
 echo "=== success ==="

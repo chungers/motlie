@@ -888,6 +888,21 @@ Implications for VZ:
   contract, the adapter still preserves EFI, NVRAM, and boot partition content
   from a native source VM and overlays the assembled rootfs payload into that
   container.
+- Alpine/OpenRC payloads are a separate init-profile adaptation inside that
+  bridge. The VZ adapter must enter a privileged root shell before extraction,
+  apply the common payload, write VZ backend defaults, enable OpenRC services,
+  verify the v1.5 guest binaries/init scripts, and power off without entering
+  the Ubuntu/systemd cargo/npm build path.
+- Because this bridge overlays into a native source disk instead of synthesizing
+  the durable VZ boot container directly, source-VM files can remain. Launch
+  must therefore prefer OpenRC when `rc-service` is present so Alpine payloads
+  are not misclassified by leftover systemd files.
+- macOS-hosted v1.5 image assembly cross-compiles Linux guest binaries before
+  injecting them into the common rootfs. The workspace currently patches
+  `fuser` 0.15.1 from `third_party/fuser-0.15.1` because the published build
+  script checks the build host instead of Cargo's target OS for the pure-rust
+  Linux mount implementation. This is a dependency bug workaround, not a VFS
+  API change; remove it when upstream supports this cross-compile path.
 
 Implications for CH:
 
@@ -1283,9 +1298,13 @@ OCI image-index and selected platform-manifest digests. Ubuntu 24.04 and Alpine
 emitter consumes the native source/import/package/compatibility path for both
 profiles. The VZ emitter remains adapter-backed for the Ubuntu path, still
 records its current `materialized_source`, and consumes the same assembled OCI
-rootfs through the adapter rootfs handoff. Alpine is not declared as VZ-ready
-until the VZ launch/validation path is generalized away from Ubuntu/systemd
-assumptions and validated on macOS.
+rootfs through the adapter rootfs handoff. Alpine declares the same VZ adapter
+handoff only for payload-backed builds: `mbuild` must receive `--oci-layout` or
+`--rootfs-tarball` so an assembled Alpine/OpenRC rootfs is consumed explicitly.
+Direct Alpine VZ adapter execution without that payload is rejected because the
+native Apple VZ source VM is not an Alpine materializer. Alpine is not declared
+VZ-ready until the payload-backed VZ build and live harness matrix are validated
+on macOS.
 
 The VZ side of this transition must be explicit. The Linux/CH native OCI build
 emits a common `assembled-rootfs.tar` before CH-specific boot adaptations are

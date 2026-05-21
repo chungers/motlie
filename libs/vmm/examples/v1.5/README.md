@@ -186,9 +186,13 @@ with Virtualization.framework.
 
 Alpine 3.22 is the second checked-in rootfs profile. It uses the same Motlie
 guest software surface as Ubuntu but swaps the package/init contracts to
-`apk` and OpenRC. Current Alpine support is validated for CH; VZ Alpine should
-not be advertised until the VZ launch/validation path is generalized away from
-Ubuntu/systemd assumptions and validated on macOS. Alpine scenario files are:
+`apk` and OpenRC. Current Alpine support is validated for CH. The Alpine
+release configs also declare a VZ adapter target so Apple Silicon VZ can
+consume a Linux-produced `linux/arm64` Alpine OCI/rootfs payload through
+`--oci-layout` or `--rootfs-tarball`; direct Alpine VZ adapter builds without
+such a payload are rejected so the native Ubuntu/systemd source VM cannot be
+mistaken for Alpine evidence. Alpine VZ is not green until the VZ build and
+live harness matrix below pass on macOS. Alpine scenario files are:
 
 ```text
 scenarios/agent-bootstrap-alpine.json
@@ -265,6 +269,22 @@ records `rootfs_input` with canonical path, size, and sha256 in
 not apply this tarball, install packages, or build binaries. Reusable VZ images
 do not intentionally bake demo guest users; `alice`, `bob`, and future harness
 guests are per-guest provisioning state.
+
+For Alpine/OpenRC payloads, the VZ adapter starts the privileged finalization
+shell before replacing the native source rootfs, then extracts the assembled
+payload, writes the VZ backend defaults, enables OpenRC services, verifies the
+v1.5 guest binaries and init scripts, and powers off. It must not fall through
+to the Ubuntu/systemd cargo/npm build path.
+
+macOS-hosted builders cross-compile the Linux guest binaries before rootfs
+injection. The workspace patches `fuser` 0.15.1 through
+`third_party/fuser-0.15.1` so the pure-rust Linux mount path is selected from
+Cargo's target OS rather than the macOS build host.
+
+Until the durable VZ emitter builds a bootable disk directly from the assembled
+rootfs, launch-time init detection intentionally prefers OpenRC when present.
+That prevents leftover source-VM systemd files in the transitional VZ overlay
+from misclassifying Alpine payloads.
 
 v1.5 is greenfield for the image-builder product contract. Do not reuse
 pre-v1.5/v1.35 source VMs or cached disks. If a launch finds a requested guest
