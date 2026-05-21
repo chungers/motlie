@@ -13,6 +13,7 @@ pub(crate) struct HostConnectSpec {
     pub(crate) uri: String,
     pub(crate) label: String,
     pub(crate) alias: String,
+    label_override: Option<String>,
     config: SshConfig,
 }
 
@@ -42,7 +43,8 @@ enum IpAddressSource {
 /// each other. Reject explicitly rather than silently degrade.
 pub(crate) async fn connect_initial_fleet(cli: &Cli) -> Result<InitialHostFleet> {
     let specs = ssh_connect_specs(cli)?;
-    let local = connect_local_entry().await;
+    let mut local = connect_local_entry().await;
+    apply_label_override(&mut local, cli.host_alias_override(0));
     if specs.is_empty() {
         return Ok(InitialHostFleet {
             fleet: HostFleet::from_entries(vec![local]),
@@ -67,7 +69,8 @@ fn ssh_connect_specs(cli: &Cli) -> Result<Vec<HostConnectSpec>> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     cli.ssh_uris
         .iter()
-        .map(|uri| {
+        .enumerate()
+        .map(|(index, uri)| {
             if !seen.insert(uri.as_str()) {
                 return Err(anyhow!(
                     "duplicate SSH URI '{uri}' on the command line; each host must appear once"
@@ -75,11 +78,14 @@ fn ssh_connect_specs(cli: &Cli) -> Result<Vec<HostConnectSpec>> {
             }
             let config = SshConfig::parse(uri).context("parse ssh target")?;
             let alias = config.host().to_string();
+            let label_override = cli.host_alias_override(index + 1).map(str::to_string);
+            let label = label_override.clone().unwrap_or_else(|| alias.clone());
             Ok(HostConnectSpec {
                 id: HostId::from_ssh_uri(uri),
                 uri: uri.clone(),
-                label: alias.clone(),
+                label,
                 alias,
+                label_override,
                 config,
             })
         })
@@ -101,7 +107,9 @@ pub(crate) async fn connect_local_entry() -> HostEntry {
 }
 
 pub(crate) async fn connect_ssh_spec(spec: &HostConnectSpec) -> Result<HostEntry> {
-    connect_ssh_config(spec.id.clone(), spec.config.clone()).await
+    let mut entry = connect_ssh_config(spec.id.clone(), spec.config.clone()).await?;
+    apply_label_override(&mut entry, spec.label_override.as_deref());
+    Ok(entry)
 }
 
 async fn connect_ssh_config(id: HostId, config: SshConfig) -> Result<HostEntry> {
@@ -143,6 +151,12 @@ async fn build_host_entry(
         alias,
         ip_address,
         handle,
+    }
+}
+
+fn apply_label_override(entry: &mut HostEntry, override_label: Option<&str>) {
+    if let Some(label) = override_label {
+        entry.label = label.to_string();
     }
 }
 

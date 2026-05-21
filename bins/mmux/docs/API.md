@@ -10,6 +10,7 @@ Implemented API contract for the initial `mmux` selector and the
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-20 | @codex | Added `Cli.alias` and host-label override behavior so mmux can display operator-provided labels without changing host routing identity. |
 | 2026-05-16 | @codex-tmux-tl | Added insertion-point cursor state for mmux modal text fields so focused Left/Right edit inside the field, with single-line and wrapped Send Keys rendering keeping the terminal cursor aligned. |
 | 2026-05-03 | @codex | Added `SendKeys` modal state and documented the `s` send-keys flow through `Target::send_keys`. |
 | 2026-05-02 | @codex | Changed Session Tags modal add/update/delete/check operations to stage in modal state and flush as a diff only on Ok; Cancel/Esc discard the draft. |
@@ -544,10 +545,11 @@ The API layer should expose parsed CLI config to the application loop:
 
 ```rust
 struct Cli {
-    ssh_uri: Option<String>,
+    ssh_uris: Vec<String>,
     portrait: bool,
     landscape: bool,
     script: bool,
+    alias: Option<String>,
 }
 ```
 
@@ -555,6 +557,10 @@ Validation rules:
 
 - `--script` prints the selected session name to stdout and exits without
   attaching
+- `--alias=<list>` is an optional comma-separated display-label override list;
+  position 0 maps to localhost and position `i + 1` maps to SSH URI `i`
+- empty `--alias` entries, such as the middle entry in `--alias=foo,,baz`, do
+  not override the corresponding host's discovered/default label
 - without `--script`, the selector attaches and re-enters after detach when the
   attach child succeeds or the selected session still exists
 - default attach/re-entry keeps selected session/list index, layout mode, pane
