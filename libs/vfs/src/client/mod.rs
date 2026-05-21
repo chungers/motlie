@@ -4,9 +4,10 @@
 //! are transport-independent and compile on any platform.
 //!
 //! The `fuse` module provides `FuseClient` which implements `fuser::Filesystem`
-//! and requires the `fuser` crate (Linux only in v1).
+//! and requires the `fuser` crate. In v1 this real mount path is Linux-only;
+//! macOS host tests exercise the transport-independent guest runner instead.
 
 pub mod guest;
 
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", target_os = "linux"))]
 pub mod fuse;

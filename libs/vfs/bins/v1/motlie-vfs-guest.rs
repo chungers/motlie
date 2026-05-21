@@ -14,11 +14,11 @@ use anyhow::Result;
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
 
 /// Host CID for vsock (always 2 in the guest→host direction).
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const HOST_CID: u32 = 2;
 
 /// Port the host FsServer listens on via the vsock socket.
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const VMM_PORT: u32 = 5000;
 
 #[derive(serde::Deserialize)]
@@ -52,7 +52,10 @@ fn main() -> Result<()> {
 
     eprintln!("motlie-vfs-guest: mounting {} filesystem(s)", specs.len());
     for spec in &specs {
-        eprintln!("  tag={} path={} ro={}", spec.tag, spec.guest_path, spec.read_only);
+        eprintln!(
+            "  tag={} path={} ro={}",
+            spec.tag, spec.guest_path, spec.read_only
+        );
     }
 
     let runner = GuestMountRunner::new(specs);
@@ -65,7 +68,7 @@ fn main() -> Result<()> {
     // Note: the v1 guest does not send a per-tag handshake. The host binds
     // the single configured v1 tag on accept, and the transport starts
     // immediately with framed FsOp/FsResult traffic on vsock port 5000.
-    #[cfg(all(feature = "vsock", feature = "client"))]
+    #[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
     let handles = {
         use motlie_vfs::vsock::client::VsockClientTransport;
 
@@ -80,7 +83,7 @@ fn main() -> Result<()> {
         })?
     };
 
-    #[cfg(not(all(feature = "vsock", feature = "client")))]
+    #[cfg(not(all(feature = "vsock", feature = "client", target_os = "linux")))]
     let handles = {
         eprintln!("motlie-vfs-guest: vsock+client features not enabled, using stub mounts");
         runner.mount_all_stub()?
