@@ -1,0 +1,1771 @@
+You are reviewing a study of CPU vs CUDA inference on the NVIDIA DGX Spark (GB10). Here is the context:
+
+The project is called Motlie — a Rust workspace with a three-layer model system. libs/model defines contracts (ModelBundle, BundleHandle, ChatModel, CompletionModel, EmbeddingModel), libs/model/backends/mistral implements those contracts using the mistralrs crate, and libs/models is the curated bundle catalog with feature-gated bundles and artifact management.
+
+There are four curated bundles: embeddinggemma_300m (Google EmbeddingGemma 300M, embedding, MistralRs backend), qwen3_embedding_06b (Qwen3 Embedding 0.6B, embedding, Q8 quantization support), qwen3_4b (Qwen3 4B, chat + completion, Q4/Q8 quantization, Q4 recommended), and gemma4_e2b (Gemma 4 E2B-it, multimodal chat + vision, Q4/Q8 quantization).
+
+The DGX Spark uses the NVIDIA GB10 SoC with Blackwell architecture. The CPU is ARM Grace (aarch64) with fp, asimd, fphp, asimdhp, sve, sve2 extensions. The system has 128 GiB unified LPDDR5X shared between CPU and GPU. CUDA 13.0 with driver 580.126.09. The GPU has no dedicated framebuffer — nvidia-smi reports FB Memory as N/A. SM Max Clock is 3003 MHz.
+
+Initial testing showed that CUDA without flash-attention was catastrophically slow: Qwen3-4B at ~1 tok/s on CUDA vs 15 tok/s on CPU (14x slower). EmbeddingGemma 300M showed 8x slower CUDA. The root cause was identified as the default candle CUDA attention kernels materializing full N×N attention matrices through shared LPDDR5X memory, which only provides ~270 GB/s bandwidth vs the 1.5-3.3 TB/s HBM that discrete GPUs offer.
+
+Flash-attention (candle-flash-attn v0.10.2) was then enabled, which uses tiled SRAM-resident attention kernels. This transformed CUDA performance: Qwen3-4B went from ~1 tok/s to 56 tok/s generation (3.7x faster than CPU), with prompt throughput jumping from 23 tok/s to 561 tok/s. Memory usage also improved — settled RSS dropped from 3,791 MiB (CPU) to 1,375 MiB (CUDA+FA).
+
+PagedAttention was also tested as an alternative. It achieved the same 56 tok/s generation throughput but with lower prompt throughput (19 tok/s vs 561 tok/s). The combination of flash-attn + PagedAttention gave 57 tok/s gen with 422 tok/s prompt.
+
+However, a critical bug was discovered: Gemma 4 E2B-it with flash-attn produces NaN logits when generating more than approximately 500 tokens. This was isolated through systematic testing — it occurs at Q4, Q8, and F32 (not quantization-dependent), only affects Gemma 4 (Qwen3-4B works fine), and only occurs with flash-attn (PagedAttention without flash-attn works correctly at all lengths). The workaround for Gemma 4 is to use CUDA + PagedAttention without flash-attn.
+
+The bundle catalog uses feature-gated builds. Each bundle has its own Cargo feature (model-google-gemma-300m, model-qwen3-embedding-06b, model-qwen3-4b, model-gemma4-e2b). The CUDA and flash-attn features are wired through: motlie-models -> motlie-model-mistral -> mistralrs -> candle-core. PagedAttention is controlled at runtime via the MOTLIE_PAGED_ATTN=1 environment variable.
+
+The design follows a curated sustainability principle: Motlie maintains opinionated bundles for concrete ecosystem use cases, and the contract exists to let those bundles evolve as the model market changes without forcing downstream code to absorb constant churn. Bundle definitions include vetted weights, selected backend, packaging metadata, and stable capability surface.
+
+Each bundle implements the ModelBundle trait with id(), metadata(), capabilities(), and start(). The loaded BundleHandle exposes chat(), completion(), and embeddings() capability accessors. The embedding contract includes EmbeddingSpec with dimensions, distance metric, and normalization metadata for downstream vector store integration.
+
+The mistral backend has three execution paths: MistralEmbeddingBundle (for embedding models using EmbeddingModelBuilder), MistralTextBundle (for text chat/completion using TextModelBuilder), and MistralMultimodalBundle (for multimodal vision+chat using ModelBuilder). Each maps Motlie's QuantizationBits to mistralrs IsqBits and handles artifact policy resolution.
+
+Given all this context, summarize the key performance findings and the recommended configuration for each bundle on the DGX Spark.
+
+Here is the full DGX Spark study document for additional context:
+# DGX Spark (GB10) — mistral.rs CUDA Tuning Study
+
+## Change Log
+
+| Date | Who | Summary |
+|------|-----|---------|
+| 2026-04-10 | @cld-mistral | Initial study: CPU vs CUDA (no flash-attn) across all four curated bundles. CUDA was 5–17x slower. |
+| 2026-04-10 | @cld-mistral | Extended study: tested `flash-attn`, `PagedAttention`, and `MISTRALRS_IGPU_MEMORY_FRACTION`. Flash-attention is the critical enabler — CUDA goes from 16x slower to **4x faster** than CPU with it. Revised conclusions. |
+| 2026-04-11 | @cld-mistral | Added Gemma 4 E2B-it CUDA + flash-attn results (56 tok/s, 5.6x faster than CPU). Added full RSS comparison tables for all models and configurations. |
+| 2026-04-11 | @cld-mistral | Documented `candle-flash-attn` NaN bug for Gemma 4 at >500 generated tokens on Blackwell. Isolated to flash-attn kernel (not quantization, not model weights). Revised Gemma 4 recommendation to CUDA + PagedAttention (no flash-attn). |
+
+---
+
+## Hardware
+
+| Component | Detail |
+|-----------|--------|
+| System | NVIDIA DGX Spark (Project DIGITS) |
+| SoC | NVIDIA GB10 (Blackwell architecture) |
+| CPU | ARM Grace (aarch64), `fp asimd fphp asimdhp sve sve2` |
+| GPU | Blackwell GPU integrated in GB10 SoC |
+| Memory | 128 GiB unified LPDDR5X (shared between CPU and GPU) |
+| CUDA | 13.0, driver 580.126.09 |
+| GPU FB Memory | N/A (unified memory — no dedicated framebuffer) |
+| SM Max Clock | 3003 MHz |
+
+Key architectural note: the GB10 uses **unified memory**. There is no dedicated GPU
+framebuffer. `nvidia-smi` reports `FB Memory: N/A`. Both CPU and GPU access the same
+128 GiB LPDDR5X pool.
+
+## Software
+
+| Component | Version |
+|-----------|---------|
+| Rust | 1.94.0 (aarch64-unknown-linux-gnu) |
+| mistralrs | 0.8.1 |
+| candle-core | 0.10.2 |
+| candle-flash-attn | 0.10.2 |
+| RUSTFLAGS | `-C target-cpu=native` |
+| Build profile | `--release` |
+
+---
+
+## Part 1: CUDA Feature Configurations
+
+### Method
+
+A focused `bench_chat` benchmark was written to measure Qwen3-4B (ISQ Q4) with a
+short deterministic prompt (`"Answer in exactly one sentence: what is 2+2?"`), 1 warmup
+run, then N measured iterations. The benchmark reports:
+- **First-run latency** (warmup, includes any JIT/cache warmup)
+- **Steady-state latency** (average over measured iterations)
+- **mistralrs-reported tok/s** (prompt and generation, from internal `Usage` metrics)
+
+Five build/runtime configurations were tested:
+
+| Config | Build features | Env vars | Description |
+|--------|---------------|----------|-------------|
+| **A. CPU** | `model-qwen3-4b` | — | No CUDA at all |
+| **B. CUDA** | `model-qwen3-4b,cuda` | — | CUDA without flash-attention |
+| **C. CUDA+FA** | `model-qwen3-4b,cuda,flash-attn` | — | CUDA with flash-attention |
+| **D. CUDA+PA** | `model-qwen3-4b,cuda` | `MOTLIE_PAGED_ATTN=1` | CUDA with PagedAttention, no flash-attn |
+| **E. CUDA+FA+PA** | `model-qwen3-4b,cuda,flash-attn` | `MOTLIE_PAGED_ATTN=1` | Both flash-attention and PagedAttention |
+
+Feature verification via `cargo tree` confirmed for each build:
+- Config A: `candle-core [default]`, `mistralrs []`
+- Config B: `candle-core [cuda,cudarc,default]`, `mistralrs [cuda]`
+- Config C: `candle-core [cuda,cudarc,default]`, `candle-flash-attn`, `mistralrs [cuda,flash-attn]`
+
+PagedAttention is **not** enabled by default in the `mistralrs` library API. It
+requires an explicit `with_paged_attn()` call on the builder. A `MOTLIE_PAGED_ATTN=1`
+env var was added to the backend to toggle this at runtime.
+
+### Results: Qwen3-4B (ISQ Q4, 5 measured iterations)
+
+| Config | Startup | Warmup | Steady-State | Gen tok/s | Prompt tok/s | RSS |
+|--------|---------|--------|--------------|-----------|--------------|-----|
+| **A. CPU** | 11.5s | 13.2s | 13.0s | **15** | 23 | 3,595 MiB |
+| **B. CUDA** | 10.5s | 199s | 210s | **~1** | 22 | 1,361 MiB |
+| **C. CUDA+FA** | 11.0s | 3.0s | **3.0s** | **56** | **561** | 1,375 MiB |
+| **D. CUDA+PA** | 10.9s | 4.3s | 4.2s | **56** | 19 | 1,368 MiB |
+| **E. CUDA+FA+PA** | 11.1s | 3.1s | **3.0s** | **57** | **422** | 1,352 MiB |
+
+### Key Observations
+
+1. **Flash-attention is the critical enabler.** Without it, CUDA is 16x slower than
+   CPU. With it, CUDA is **4.3x faster**.
+
+2. **Generation throughput jumps from ~1 tok/s to 56 tok/s** when flash-attention is
+   enabled. This is a **56x improvement** from the same GPU, same model, same weights.
+
+3. **PagedAttention without flash-attn also unlocks GPU performance** (56 tok/s gen),
+   but with much slower prompt processing (19 tok/s vs 561 tok/s). This suggests that
+   both PA and flash-attn fix the same underlying decode bottleneck through different
+   attention kernel paths, but flash-attn also brings a superior prefill kernel.
+
+4. **Combining flash-attn + PagedAttention** yields the best overall result: 57 tok/s
+   generation with 422 tok/s prompt processing, and the lowest RSS (1,352 MiB).
+
+5. **Without either flash-attn or PagedAttention**, the default `candle` CUDA attention
+   kernels are catastrophically slow on the GB10's unified memory — ~1 tok/s generation,
+   making the GPU effectively unusable for autoregressive decoding.
+
+6. **Startup time is consistent** (~11s) across all configurations. ISQ Q4 quantization
+   dominates startup regardless of attention kernel choice.
+
+7. **Steady-state latency is stable.** Standard deviation across measured iterations
+   is <2% for all configurations, confirming no thermal throttling or contention effects.
+
+---
+
+## Part 2: Embedding Models (CPU vs CUDA, no flash-attn)
+
+Embedding models do not use flash-attention or PagedAttention (batch inference, no
+autoregressive decode). They were tested with CPU vs plain CUDA only.
+
+### EmbeddingGemma 300M (F32)
+
+| Metric | CPU | CUDA | Ratio |
+|--------|-----|------|-------|
+| Startup latency | 1.8s | 5.2s | 2.9x slower |
+| Settled RSS | 1,616 MiB | 888 MiB | 0.5x |
+| Embed latency (1 input) | 96 ms | 811 ms | **8.4x slower** |
+| Avg latency (3 requests) | 126 ms | 1,017 ms | **8.1x slower** |
+| Cosine (similar pair) | 0.8794 | 0.8794 | identical |
+
+### Qwen3 Embedding 0.6B (F32)
+
+| Metric | CPU | CUDA | Ratio |
+|--------|-----|------|-------|
+| Startup latency | 1.9s | 1.7s | comparable |
+| Settled RSS | 2,516 MiB | 680 MiB | 0.3x |
+| Embed latency (1 input) | 167 ms | 849 ms | **5.1x slower** |
+| Avg latency (3 requests) | 219 ms | 1,090 ms | **5.0x slower** |
+| Cosine (similar pair) | 0.8495 | 0.8495 | identical |
+
+Embedding models remain faster on CPU. The CUDA overhead for small batch inference
+on unified memory outweighs any GPU parallelism benefit for these model sizes.
+
+---
+
+## Part 3: Chat Models — Full Runs (CPU vs CUDA, no flash-attn)
+
+These results use the original `v0.2` and `v0.3` examples with longer prompts before
+flash-attention was identified as the fix. They remain useful for characterizing how
+badly the default CUDA attention kernels perform on the GB10.
+
+### Qwen3-4B Chat (ISQ Q4)
+
+| Metric | CPU | CUDA (no FA) | Ratio |
+|--------|-----|--------------|-------|
+| Single-turn (311 tok) | 20.9s | 362s | **17x slower** |
+| Multi-turn (443 tok) | 30.0s | 495s | **16x slower** |
+| Completion (925 tok) | 67.0s | 1,025s | **15x slower** |
+| Generation throughput | 14 tok/s | ~1 tok/s | 14x slower |
+
+### Gemma 4 E2B-it (ISQ Q4)
+
+| Metric | CPU | CUDA (no FA) | Ratio |
+|--------|-----|--------------|-------|
+| Text chat (473 tok) | 47.4s | 475s | **10x slower** |
+| Generation throughput | 10 tok/s | ~1 tok/s | 10x slower |
+
+---
+
+## Analysis
+
+### Why CUDA without flash-attention is catastrophically slow
+
+The default `candle` CUDA attention kernels in `mistralrs` 0.8.1 perform poorly on
+the GB10's unified memory for autoregressive decoding. The root cause is a combination
+of:
+
+1. **Naive attention kernel memory access patterns.** Without flash-attention, the
+   attention computation materializes full Q*K^T matrices in GPU memory. On unified
+   LPDDR5X (~270 GB/s shared bandwidth), this creates severe memory pressure that
+   discrete GPU HBM (1.5–3.3 TB/s) would absorb easily.
+
+2. **Per-token kernel launch overhead.** Each autoregressive decode step launches
+   multiple CUDA kernels. Without fused attention kernels, the number of kernel
+   launches per token is higher, and each launch incurs synchronization overhead
+   through the unified memory controller.
+
+3. **GPU utilization confirms bandwidth starvation.** `nvidia-smi` showed only 1–2%
+   GPU utilization during CUDA-only runs, confirming the SMs are idle waiting for
+   memory rather than compute-bound.
+
+### Why flash-attention fixes it
+
+Flash-attention (`candle-flash-attn`) provides fused, tiled attention kernels that:
+
+1. **Minimize memory materialization.** Flash-attention never materializes the full
+   N×N attention matrix. It processes attention in tiles that fit in SM shared memory
+   (SRAM), dramatically reducing LPDDR5X bandwidth pressure.
+
+2. **Reduce kernel launch count.** The fused kernel replaces multiple separate
+   matrix multiply + softmax + multiply kernels with a single kernel launch per
+   attention layer per token.
+
+3. **Exploit SM-local memory.** The tiled algorithm keeps working data in fast
+   on-chip SRAM rather than round-tripping through the unified LPDDR5X pool.
+
+This makes flash-attention disproportionately important on unified-memory systems
+where main memory bandwidth is the bottleneck. On discrete GPUs with fast HBM, the
+naive kernels are slow but tolerable. On the GB10, they are unusable.
+
+### PagedAttention as an alternative
+
+PagedAttention also fixes the decode throughput (56 tok/s, same as flash-attn), but
+through a different mechanism: it reorganizes the KV cache into fixed-size pages with
+contiguous GPU memory access patterns. This achieves similar decode performance but
+does not optimize the prefill/prompt path (19 tok/s prompt vs 561 tok/s with flash-attn).
+
+The best combination is **flash-attn + PagedAttention**: 57 tok/s generation with
+422 tok/s prompt and the lowest memory footprint.
+
+### `MISTRALRS_IGPU_MEMORY_FRACTION`
+
+`mistralrs` exposes `MISTRALRS_IGPU_MEMORY_FRACTION` specifically for integrated/
+unified-memory CUDA GPUs like the GB10 and Jetson. This controls what fraction of
+system memory is reported as available for KV cache allocation (default: 0.75).
+
+This env var affects memory accounting only, not the attention kernel path. It does
+not fix the fundamental performance problem — that requires flash-attention or
+PagedAttention to change the kernel execution pattern.
+
+---
+
+## Conclusion
+
+### The `flash-attn` feature is mandatory for CUDA on DGX Spark
+
+Without `flash-attn`, CUDA inference on the GB10 is **10–17x slower** than CPU due
+to the default attention kernels' incompatibility with unified memory bandwidth
+constraints. With `flash-attn`, CUDA is **~4x faster** than CPU.
+
+### Recommended build configuration for DGX Spark
+
+```toml
+# motlie-model-mistral/Cargo.toml
+[features]
+cuda = ["mistralrs/cuda"]
+flash-attn = ["mistralrs/flash-attn"]
+```
+
+```bash
+# Build with CUDA + flash-attention + native ARM optimizations
+RUSTFLAGS="-C target-cpu=native" cargo build --release \
+  -p motlie-models \
+  --features 'cuda,flash-attn'
+```
+
+Optionally enable PagedAttention at runtime for additional memory efficiency:
+
+```bash
+MOTLIE_PAGED_ATTN=1 ./target/release/examples/models_v0_2 ...
+```
+
+### Performance summary (recommended CUDA + flash-attn configuration)
+
+#### Qwen3-4B (ISQ Q4) — all configurations
+
+| Config | Gen tok/s | Prompt tok/s | Latency | Startup RSS | Peak RSS | Settled RSS |
+|--------|-----------|--------------|---------|-------------|----------|-------------|
+| CPU | 15 | 23 | 13.0s | 3,595 MiB | 3,810 MiB | 3,791 MiB |
+| CUDA | ~1 | 22 | 210s | 1,361 MiB | 1,379 MiB | 1,379 MiB |
+| **CUDA + FA** | **56** | **561** | **3.0s** | 1,964 MiB | 1,964 MiB | **1,375 MiB** |
+| CUDA + PA | 56 | 19 | 4.2s | 2,026 MiB | 2,026 MiB | 1,368 MiB |
+| **CUDA + FA + PA** | **57** | **422** | **3.0s** | 2,007 MiB | 2,040 MiB | **1,352 MiB** |
+
+#### Gemma 4 E2B-it (ISQ Q4)
+
+| Config | Gen tok/s | Prompt tok/s | Latency (~470 tok) | Startup | Settled RSS |
+|--------|-----------|--------------|--------------------|---------|-----------  |
+| CPU | 10 | 26 | 47.4s | 10.2s | 9,081 MiB |
+| CUDA (no FA) | ~1 | 31 | 475s | 26.0s | 1,832 MiB |
+| **CUDA + FA** | **56** | **772** | **8.4s** | 26.1s | **1,761 MiB** |
+
+#### LLM comparison: CPU vs CUDA + flash-attn
+
+| Metric | Qwen3-4B | | Gemma 4 E2B-it | |
+|--------|----------|-|----------------|-|
+| | CPU | CUDA+FA | CPU | CUDA+FA |
+| Gen tok/s | 15 | **56** | 10 | **56** |
+| Prompt tok/s | 23 | **561** | 26 | **772** |
+| Settled RSS | 3,791 MiB | **1,375 MiB** | 9,081 MiB | **1,761 MiB** |
+| Speedup | — | **3.7x** | — | **5.6x** |
+| RSS reduction | — | **2.8x** | — | **5.2x** |
+
+Both models converge to the same **56 tok/s** generation throughput with flash-attn.
+Gemma 4 benefits even more: 5.6x faster and 5.2x less host memory than CPU.
+
+**Important caveat**: Gemma 4 + flash-attn has a NaN stability bug at longer sequence
+lengths. See [Part 4](#part-4-gemma-4--flash-attn-nan-stability-bug) below.
+
+### Embedding models: CPU remains preferred
+
+For embedding-only bundles (EmbeddingGemma 300M, Qwen3 Embedding 0.6B), CPU inference
+is still faster (5–8x) than CUDA. These models use batch matrix operations without
+autoregressive decode, so flash-attention does not apply. The CUDA overhead for small
+batch inference on unified memory exceeds any GPU benefit at these model sizes.
+
+#### Embedding models (F32, no quantization)
+
+| Model | | CPU | | CUDA | |
+|-------|-|-----|-|------|-|
+| | Latency | RSS | Latency | RSS |
+| EmbeddingGemma 300M | 126 ms | 1,616 MiB | 1,017 ms | 888 MiB |
+| Qwen3 Embedding 0.6B | 219 ms | 2,516 MiB | 1,090 ms | 680 MiB |
+
+### Configuration matrix for DGX Spark bundles
+
+| Bundle | Recommended Config | Gen tok/s | Settled RSS | Notes |
+|--------|--------------------|-----------|-------------|-------|
+| EmbeddingGemma 300M | CPU | ~10 embed/s | 1,616 MiB | CUDA 5–8x slower |
+| Qwen3 Embedding 0.6B | CPU | ~5 embed/s | 2,516 MiB | CUDA 5x slower |
+| Qwen3-4B | **CUDA + flash-attn** | **56 tok/s** | **1,375 MiB** | 3.7x faster, 2.8x less memory than CPU |
+| Gemma 4 E2B-it | **CUDA + PagedAttn** | **56 tok/s** | **~1,800 MiB** | flash-attn has NaN bug at long sequences; use PA instead |
+
+---
+
+## Part 4: Gemma 4 + flash-attn NaN Stability Bug
+
+### Discovery
+
+During the CUDA + flash-attn benchmarks, Gemma 4 E2B-it produced NaN logits on
+prompts that request longer outputs (>~500 generated tokens). The error from
+`mistralrs`:
+
+```
+inference error: Invalid sampling probability at index 0: NaN.
+The model likely produced NaN/Inf logits.
+```
+
+### Isolation
+
+Systematic testing isolated the bug to the intersection of **Gemma 4 multimodal**
+and **`candle-flash-attn`** on **Blackwell CUDA**:
+
+| Prompt length | CUDA + flash-attn | CUDA + PA (no FA) | CPU |
+|---------------|-------------------|-------------------|-----|
+| ~120 tokens | OK | OK | OK |
+| ~185 tokens | OK | OK | OK |
+| ~400 tokens (2 paragraphs) | OK | OK | OK |
+| ~500+ tokens (3+ paragraphs) | **NaN** | OK | OK |
+
+Controlling for other variables:
+
+| Variable | Tested values | NaN? |
+|----------|---------------|------|
+| Quantization | Q4, Q8, F32 | NaN at all three |
+| Model | Qwen3-4B vs Gemma 4 | Only Gemma 4 — Qwen3-4B is fine |
+| Attention path | flash-attn vs PagedAttn vs default | Only flash-attn |
+| Prompt content | Multiple different prompts | Deterministic per prompt length |
+
+### Root Cause
+
+The `candle-flash-attn` v0.10.2 flash-attention kernel produces NaN logits for the
+Gemma 4 multimodal architecture at longer sequence lengths on the Blackwell (GB10) GPU.
+
+Contributing factors:
+- **Architecture-specific**: Gemma 4 uses a different attention head configuration
+  (multi-query attention with distinct head counts) than Qwen3. The flash-attn tiling
+  strategy may interact differently with this layout.
+- **Sequence-length-dependent**: The NaN appears at a threshold around 500+ generated
+  tokens, suggesting a breakpoint in the flash-attention tiling or accumulation logic.
+- **Not a precision issue**: NaN occurs at F32, Q8, and Q4, ruling out quantization
+  as the cause.
+- **Blackwell-specific**: The `candle-flash-attn` kernel codegen for Blackwell
+  (compute capability 10.0+) may have a different code path than Hopper (9.0) or
+  Ampere (8.0). `mistralrs` does not currently use FlashAttention v3 for Blackwell.
+
+### Process Exit Segfault
+
+A separate, non-deterministic segfault was observed during process exit cleanup after
+successful inference + shutdown on some Gemma 4 CUDA runs. This is a CUDA driver
+teardown race condition, not a correctness issue — all generated output completes and
+`shutdown()` succeeds before the crash.
+
+### Workaround
+
+For Gemma 4 E2B-it on DGX Spark, use **CUDA + PagedAttention** without `flash-attn`:
+
+```bash
+# Build without flash-attn
+RUSTFLAGS="-C target-cpu=native" cargo build --release \
+  -p motlie-models --features 'cuda'
+
+# Run with PagedAttention enabled
+MOTLIE_PAGED_ATTN=1 ./target/release/examples/models_v0_3 -- "..."
+```
+
+This gives the same 56 tok/s generation throughput with correct output at all
+sequence lengths. Prompt throughput is lower (19 tok/s vs 772 tok/s with flash-attn)
+but decode performance — the bottleneck for interactive use — is identical.
+
+### Per-Model Recommended Configuration
+
+| Model | Config | Gen tok/s | Prompt tok/s | Notes |
+|-------|--------|-----------|--------------|-------|
+| Qwen3-4B | `cuda,flash-attn` | 56 | 561 | flash-attn works correctly |
+| Gemma 4 E2B-it | `cuda` + `MOTLIE_PAGED_ATTN=1` | 56 | 19 | flash-attn has NaN bug |
+| Embeddings | CPU (no cuda) | — | — | CUDA slower for batch embeddings |
+
+Here is the model contract design document:
+# Model Contract Library Design
+
+## Status: Draft
+
+## Change Log
+
+| Date | Change | Sections |
+|------|--------|----------|
+| 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/model` as the stable contract/lifecycle crate for packaged model bundles. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
+| 2026-04-07 | @codex-researcher: Clarified that curated artifact download is explicit in `libs/models`, while backends consume artifact roots through `StartOptions` and artifact contracts. | Overview, Architecture, Artifact and Packaging Contracts |
+| 2026-04-07 | @codex-researcher: Added `ArtifactPolicy` to the startup contract so regulated local-only deployments can fail closed while permissive deployments may still allow runtime fetch. | Core Abstractions, Lifecycle, Artifact and Packaging Contracts |
+| 2026-04-08 | @codex-researcher: Locked down the error-handling rule for the framework: library crates expose typed `thiserror` errors, while binaries/examples may use `anyhow` for propagation and CLI context. Also clarified that non-test runtime code should not panic. | Solution, Framework Principles, Core Abstractions |
+| 2026-04-08 | @codex-researcher: Tightened the design to match the current implemented contract exactly: removed unstaged future type names from the core abstraction list, corrected trait signatures, and clarified that richer artifact manifests currently live in `libs/models` while `libs/model` only standardizes startup artifact policy. | Core Abstractions, Capability Surfaces, Artifact and Packaging Contracts |
+| 2026-04-08 | @codex-researcher: Added the proposed bundle-level embedding metadata contract so curated embedding bundles can expose retrieval-relevant semantics such as preferred distance metric and normalization. This shape is intended to align cleanly with future `libs/db/vector::EmbeddingSpec` integration without creating a reverse dependency today. | Core Abstractions, Capability Surfaces, API Sketch |
+| 2026-04-08 | @codex-researcher: Referenced the `libs/models` bundle-build convention so the contract layer is explicit that bundle availability is build-dependent and selector/catalog surfaces may vary by curated feature set. | Architecture, Framework Principles |
+| 2026-04-08 | @codex-researcher: Added explicit future-model follow-up notes for multimodal chat, tool-calling, richer startup controls, and capability-role semantics so the current embedding-first contract can merge with the next required extensions already tracked in-design. | Goals and Non-Goals, Loaded Handle, Capability Model, Capability Surfaces, Open Concerns |
+| 2026-04-08 | @codex-researcher: Clarified the reviewed responsibility split: curated bundles in `libs/models` resolve and validate artifact-layout details, while generic backends consume a plain resolved local model path or fetch-enabled cache root. Also clarified that `LoadedBundleDescriptor` is intentionally the loaded-instance alias of `BundleMetadata` in v0.1 and that `ModelError` now distinguishes backend initialization from backend execution failures. | Architecture, Core Abstractions, Artifact and Packaging Contracts |
+| 2026-04-08 | @codex-researcher: The first vision-capable bundle now exists via Gemma 4 E2B-it (#142). `ChatMessage` has been extended to multimodal content parts, and `Vision` remains a descriptive capability on the existing `ChatModel` surface instead of forcing a parallel `VisionModel` trait. | Capability Model, Capability Surfaces, Open Concerns |
+| 2026-04-08 | @codex-researcher: Removed the stale pre-#142 open concern about upgrading `ChatMessage.content` before the first vision-capable bundle ships. That contract change is now implemented; the remaining concerns are additive chat metadata and tool-calling work. | Open Concerns |
+| 2026-04-08 | @claude: Added `QuantizationBits` to `StartOptions` as the first chat/local-model startup extension (Phase 6.3 item). ISQ quantization is a deployment concern mapped by backends to their native mechanism. | Core Abstractions, Lifecycle |
+
+This document defines the design for `libs/model`, the contract crate for Motlie's packaged model system. The crate does not ship concrete model bundles or runtime implementations. Instead, it defines the stable public vocabulary, lifecycle, request/response types, capability adapters, composability boundaries, and artifact contracts that higher-level crates build on.
+
+The target product shape is not "generic inference over arbitrary checkpoints." The target shape is a system of opinionated model bundles where a bundle includes vetted weights, a selected backend or transport, packaging metadata when applicable, and a stable capability surface. `libs/model` provides the uniform interface that those bundles implement.
+
+The governing framework principle is curated sustainability: Motlie maintains opinionated bundles for concrete ecosystem use cases, and the contract exists to let those bundles evolve as the model market changes without forcing downstream code to absorb constant churn.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Goals and Non-Goals](#goals-and-non-goals)
+- [Architecture](#architecture)
+- [Framework Principles](#framework-principles)
+- [Core Abstractions](#core-abstractions)
+- [Lifecycle](#lifecycle)
+- [Capability Surfaces](#capability-surfaces)
+- [Evaluation Harness Support](#evaluation-harness-support)
+- [API Sketch](#api-sketch)
+- [Artifact and Packaging Contracts](#artifact-and-packaging-contracts)
+- [Alternatives Considered](#alternatives-considered)
+- [Testing Scope for PLAN](#testing-scope-for-plan)
+- [Open Concerns](#open-concerns)
+
+---
+
+## Overview
+
+### Problem Statement
+
+Motlie wants to treat models as deployable product blocks rather than as loose combinations of checkpoint files and inference runtimes. Different model families have different runtime maturity, artifact formats, and operational constraints. The application integration surface should not expose those differences directly.
+
+Some bundles may execute locally with packaged weights and a native backend, while others may be remote-backed bundles that satisfy the same contract over HTTP. The top-level lifecycle and capability API should remain stable across both cases.
+
+For local bundles, `libs/model` does not own download policy. The contract only needs to carry enough artifact and startup information for higher-level curated tooling to stage artifacts explicitly and for backend implementations to consume the resulting artifact root predictably.
+
+Without a dedicated contract crate, concrete bundle implementations would either:
+
+1. expose backend-specific APIs and leak runtime details into callers, or
+2. invent local abstractions independently, leading to incompatible lifecycle and request/response semantics across bundles.
+
+The core product value is not only hiding backends. It is preserving a common abstraction so bundles compose cleanly inside higher-level Motlie systems regardless of whether they are local, embedded, or remote-backed.
+
+### Solution
+
+`libs/model` defines the shared contract for all packaged model bundles:
+
+1. Stable bundle identity and metadata
+2. Uniform load/start/stop lifecycle
+3. Shared request/response types for chat, text completion, and embeddings
+4. Capability discovery, introspection, and capability-specific adapters
+5. Composable contracts so bundles can be selected, loaded, and invoked uniformly
+6. Artifact descriptors for packaged weights and auxiliary assets
+7. Common errors and unsupported-capability behavior
+8. Startup artifact policy that backends must honor
+9. Typed library errors suitable for downstream matching and policy handling
+
+The crate is intentionally small, dependency-light, and backend-agnostic.
+
+## Goals and Non-Goals
+
+### Goals
+
+- Define a stable contract for packaged model bundles
+- Make common abstraction and contract consistency the primary integration surface
+- Keep runtime/backend details out of the primary public API
+- Support multiple capability classes without forcing every bundle to implement every API
+- Preserve composability so application code can swap bundles without changing lifecycle logic
+- Support sustainable curated-bundle evolution as models enter or leave the Motlie catalog
+- Support evaluation harnesses used to assess model quality as part of the curation process
+- Support simple introspection of capability input/output/interaction shape for catalogs and harnesses
+- Support static or embedded deployment artifacts, including future encrypted bundle formats
+- Allow higher-level crates to register and load curated bundles consistently
+- Provide ergonomic Rust APIs suitable for application integration
+- Preserve a clear additive path for the planned chat, multimodal, and tool-calling bundles that follow this embedding slice
+
+### Non-Goals
+
+- Shipping actual model bundles
+- Selecting or orchestrating inference backends directly
+- Supporting arbitrary user-supplied checkpoints in the first cut
+- Modeling training, fine-tuning, or evaluation workflows
+- Migration or backward-compatibility strategy for prior Motlie APIs
+
+## Architecture
+
+`libs/model` is the contract layer in a three-layer system:
+
+1. `libs/model`
+   Public contracts, lifecycle, metadata, capability types, lightweight `model::eval` abstractions, artifact descriptors, and errors
+2. `libs/model/backends/*`
+   Generic backend implementations such as `mistral`, `ort`, `llamacpp`, or later HTTP-backed providers that satisfy the `libs/model` contracts
+3. `libs/model-eval`
+   Substantial evaluation tooling such as harness runners, suite loading, scoring, reporting, and CLI-oriented support built on `model::eval`
+4. `libs/models`
+   Curated bundle catalog, bundle registration, bundle artifacts, packaging policy, and bundle-specific adaptations layered on top of `libs/model`
+
+Dependency direction:
+
+- applications depend on `libs/models` and may also use `libs/model` types directly
+- `libs/model/backends/*` depend on `libs/model`
+- `libs/model-eval` depends on `libs/model` and may optionally integrate with `libs/models` for catalog-driven runs
+- `libs/models` depends on `libs/model` and the relevant `libs/model/backends/*` implementations
+- `libs/model` does not depend on bundle catalogs, harness tooling, or backend implementations
+
+Build note:
+
+- `libs/model` defines stable contracts
+- `libs/models` may expose only a subset of curated bundles in a given build, based on per-bundle feature flags and higher-level profile features
+- callers should therefore treat curated selector/catalog surfaces as build-dependent, while still relying on the stable trait contracts defined here
+
+### High-Level Data Flow
+
+1. Caller selects a `BundleId` or receives one from configuration
+2. A higher-level catalog loads a concrete bundle
+3. The loaded bundle reports its metadata and capabilities
+4. The caller requests a capability adapter such as chat or embeddings
+5. The adapter executes requests through the bundle's selected backend implementation under `libs/model/backends/*`
+6. Responses return through shared request/response types defined in `libs/model`
+
+Curated artifact staging and artifact-layout validation happen outside this flow in `libs/models`. Backend startup receives either a resolved local model path (`ArtifactPolicy::LocalOnly`) or an optional fetch-enabled cache root (`ArtifactPolicy::AllowFetch`) through `StartOptions` rather than initiating curated downloads or understanding provider-specific cache layout itself.
+
+## Framework Principles
+
+### Curated Sustainability
+
+The framework exists to support a curated catalog of models that work well for Motlie use cases, not to expose an open-ended inference substrate.
+
+Implications:
+
+- the public contract should remain stable even as curated bundles change over time
+- model-market churn should be absorbed inside bundle curation and validation workflows
+- bundle inclusion is a product decision based on quality, operability, and fit for Motlie scenarios
+- the framework should make replacing or retiring bundles cheaper than changing downstream product code
+
+### Evaluability as a First-Class Concern
+
+Curation requires repeatable evaluation. The contract must therefore support building harnesses that assess bundles across different task categories without bespoke per-bundle glue.
+
+Implications:
+
+- capability request/response types must be regular enough for harness execution
+- outputs should be structured enough to support scoring, comparison, and regression checks
+- the contract should avoid bundle-specific response shapes as the primary integration path
+- lifecycle and configuration should permit deterministic harness runs where practical
+- bundles should be able to describe input/output content kinds and interaction style without backend-specific probing
+
+### Layered Evaluation Boundary
+
+Evaluation support is intentionally split across two layers:
+
+- `libs/model::eval`
+  Small, stable eval-facing types and contracts that belong next to the model API
+- `libs/model-eval`
+  Substantial tooling that operates on those abstractions, such as harness runners, suite loading, scoring, and reports
+
+This split keeps the core contract crate small while still giving evaluation tooling a clear place to grow.
+
+### Library Error Discipline
+
+Library crates in this framework must expose typed errors defined with `thiserror`. Application-facing binaries, examples, and CLIs may use `anyhow` to propagate and annotate those library errors at the boundary.
+
+Implications:
+
+- `libs/model` and `libs/models` should return explicit error enums from public fallible APIs
+- error variants should carry enough context for operators and callers to distinguish configuration problems from capability mismatches and internal failures
+- non-test runtime code should not use `panic!`, `unwrap()`, or `expect()` as normal control flow
+- examples and downloader binaries may use `anyhow` to attach CLI context without weakening the library API surface
+
+## Core Abstractions
+
+### Bundle Identity
+
+The public identity unit is a packaged model bundle, not a raw model family or runtime.
+
+Recommended types:
+
+- `BundleId`
+- `BundleMetadata`
+- `CapabilityKind`
+- `ContentKind`
+- `InteractionStyle`
+- `CapabilityDescriptor`
+- `EmbeddingSpec`
+- `EmbeddingDistance`
+- `EmbeddingNormalization`
+
+`BundleId` is a stable product-facing identifier such as:
+
+- `Qwen3_5Instruct`
+- `Hermes3Chat`
+- `BgeSmallEn`
+
+### Bundle Contract
+
+Primary contract:
+
+```rust
+pub trait ModelBundle: Send + Sync {
+    fn id(&self) -> &BundleId;
+    fn metadata(&self) -> &BundleMetadata;
+    fn capabilities(&self) -> &Capabilities;
+    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
+}
+```
+
+The bundle itself is metadata plus load entry point. Runtime state lives in a `BundleHandle`.
+
+### Error Model
+
+`libs/model` owns the stable cross-bundle error surface for lifecycle and capability use through `ModelError`. Higher-level crates such as `libs/models` may define their own typed errors for catalog lookup, artifact staging, or release assembly, but those errors should remain additive rather than replacing `ModelError` inside capability contracts.
+
+### Loaded Handle
+
+```rust
+pub trait BundleHandle: Send + Sync {
+    fn descriptor(&self) -> &LoadedBundleDescriptor;
+    fn capabilities(&self) -> &Capabilities;
+    fn supports(&self, capability: CapabilityKind) -> bool;
+
+    fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
+    fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
+    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
+
+    async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
+}
+```
+
+This keeps lifecycle explicit:
+
+- bundle definition is durable and lightweight
+- bundle handle is loaded state
+- capability access happens from the loaded handle
+
+Design note:
+
+- the current per-capability accessor pattern is intentionally small and acceptable for the first three executable surfaces
+- if the count of executable capability adapters grows substantially, revisit whether `BundleHandle` should continue to grow one accessor per capability or whether a more generic capability-adapter registry becomes justified
+
+### Capability Model
+
+Capabilities are first-class and discoverable. Not every bundle supports every capability.
+
+```rust
+pub enum CapabilityKind {
+    Chat,
+    Completion,
+    Embeddings,
+    Vision,
+    Ocr,
+}
+```
+
+```rust
+pub struct CapabilityDescriptor {
+    pub kind: CapabilityKind,
+    pub summary: &'static str,
+    pub inputs: Vec<ContentKind>,
+    pub outputs: Vec<ContentKind>,
+    pub interaction: InteractionStyle,
+}
+```
+
+For embedding bundles, Motlie also needs a bundle-level metadata contract that describes how the vectors should be interpreted by downstream systems such as `libs/db/vector`.
+
+Proposed stable shape:
+
+```rust
+pub enum EmbeddingDistance {
+    Cosine,
+    Dot,
+    SquaredL2,
+}
+
+pub enum EmbeddingNormalization {
+    None,
+    L2,
+}
+
+pub struct EmbeddingSpec {
+    pub dimensions: Option<usize>,
+    pub distance: EmbeddingDistance,
+    pub normalization: EmbeddingNormalization,
+    pub input: ContentKind,
+    pub output: ContentKind,
+    pub summary: &'static str,
+}
+
+pub trait Embedding: ModelBundle {
+    fn embedding_spec(&self) -> &EmbeddingSpec;
+}
+```
+
+Design notes:
+
+- this trait is about the curated bundle definition, not the loaded runtime handle
+- `EmbeddingModel` remains the execution-time trait used to actually generate vectors
+- `Embedding` is the bundle-level descriptive contract used for catalog display, evaluation selection, and future vector-store integration
+- naming is intentionally close to a future `libs/db/vector::EmbeddingSpec`, but `libs/model` must not depend on `libs/db`
+- conversion between the two specs should be straightforward later because both are intended to describe the same semantics rather than different layers of behavior
+
+For `google_gemma_300m`, the intended first implementation would be roughly:
+
+```rust
+EmbeddingSpec {
+    dimensions: Some(768),
+    distance: EmbeddingDistance::Cosine,
+    normalization: EmbeddingNormalization::L2,
+    input: ContentKind::Text,
+    output: ContentKind::EmbeddingVector,
+    summary: "Normalized text embeddings for semantic similarity and retrieval.",
+}
+```
+
+```rust
+pub struct Capabilities {
+    descriptors: Vec<CapabilityDescriptor>,
+}
+```
+
+The curated model favors a closed enum for capability kinds rather than an open-ended registry. New capability kinds are expected to arrive through code review as part of the curation process. The descriptor layer makes capabilities introspectable for catalogs, harnesses, and operators without exposing backend-specific probing logic.
+
+Important semantic rule:
+
+- some `CapabilityKind` values correspond directly to executable capability traits today (`Chat`, `Completion`, `Embeddings`)
+- some future values may begin as descriptive flags on top of an existing executable surface rather than introducing a new trait immediately
+- for the planned Gemma 4 path, `Vision` is expected to first mean "this chat surface accepts image content parts" rather than forcing a separate `VisionModel` trait on day one
+
+## Lifecycle
+
+The lifecycle must be consistent across all bundles even when internal backends vary.
+
+### Lifecycle States
+
+1. `Bundle` defined but not loaded
+2. `BundleHandle` loaded and ready
+3. Zero or more capability requests executed
+4. `shutdown()` releases runtime state, caches, device allocations, and temporary unpacked artifacts
+
+### Lifecycle Rules
+
+- `start()` is the only public entry point that may allocate heavyweight runtime state
+- `shutdown()` is explicit; dropping without shutdown may be allowed but must not be the only cleanup strategy
+- capability adapters must not be accessible before a bundle is loaded
+- capability accessors return `UnsupportedCapability` when the bundle does not implement that surface
+
+### Concurrency Expectations
+
+The contract should allow a loaded bundle handle to serve multiple requests concurrently when the implementation supports it, but the trait contract must not promise unbounded concurrency. Concrete bundles may serialize internally.
+
+`StartOptions` should leave room for deployment-specific tuning such as:
+
+- device selection
+- cache directories
+- unpack roots
+- max concurrency hints
+- per-bundle runtime knobs
+
+Known additive follow-ups for the next local/chat bundles include:
+
+- ~~quantization selection~~ — `QuantizationBits` now implemented in `StartOptions`
+- explicit device selection policy
+- context-length override or budget
+
+## Capability Surfaces
+
+The capability APIs should expose a stable user-facing interaction surface while hiding backend-specific request plumbing.
+
+They should also expose enough introspection for tooling to understand:
+
+- what normalized content kinds a capability accepts
+- what normalized content kinds it produces
+- whether it is request/response, multi-turn, batch-oriented, or later streaming
+
+This allows catalogs and harnesses to select the right interaction driver without having to infer semantics from bundle naming or backend choice.
+
+### Chat
+
+```rust
+pub trait ChatModel: Send + Sync {
+    async fn generate(&self, request: ChatRequest) -> Result<ChatResponse, ModelError>;
+}
+```
+
+The first text-only chat bundle (Qwen3-4B) shipped with a minimal text-only chat surface. Issue #142 extends that same `ChatModel` contract to multimodal requests by changing `ChatMessage.content` into normalized content parts while leaving `ChatResponse { content: String }` intentionally simple for now.
+
+Planned additive extensions after the first multimodal and tool-calling bundles land:
+
+- add `ChatRole::Tool`
+- extend `ChatMessage` with optional tool-call correlation fields
+- extend `ChatResponse` with finish reason, usage metadata, and tool-call output
+
+### Text Completion
+
+```rust
+pub trait CompletionModel: Send + Sync {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ModelError>;
+}
+```
+
+### Embeddings
+
+```rust
+pub trait EmbeddingModel: Send + Sync {
+    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError>;
+}
+```
+
+### Shared Request/Response Types
+
+Shared types should cover:
+
+- input payloads
+- generation parameters such as max tokens, temperature, top-p, stop sequences
+- response content
+- token usage and timing metadata when available
+- normalized warnings for partial support
+
+The contract should allow bundles to ignore unsupported tuning fields only when this behavior is explicit and inspectable. Silent best-effort drift across backends will make behavior impossible to reason about.
+
+The contract should prefer shared normalized types even when concrete backends have richer or stranger option sets. Backend-specific extension points may exist, but they must not replace the common contract as the primary integration path.
+
+## Evaluation Harness Support
+
+The model contract should make it straightforward to build evaluation harnesses with canned inputs and expected outputs or scoring rules.
+
+Target evaluation areas include:
+
+- embedding generation
+- reasoning-oriented tasks
+- summarization
+- classification
+- chat or instruction following where relevant
+
+The harness system itself may live outside `libs/model`, but the API in `libs/model` must support it cleanly.
+
+Inside `libs/model`, evaluation support should remain lightweight and declarative. A small `model::eval` module is the right home for:
+
+- eval task and track identifiers
+- eval case and result envelope types
+- capability-to-eval compatibility metadata
+- minimal traits that are genuinely foundational to all harness tooling
+
+Executable harness logic, reporting, and suite orchestration belong in `libs/model-eval`, not in the core contract crate.
+
+Contract requirements that enable harnesses:
+
+- stable request/response envelopes across bundles within a capability
+- explicit capability discovery so harnesses can select only applicable tests
+- introspective capability descriptors so harnesses can choose the right interaction driver
+- inspectable execution metadata when available, such as token counts, timings, or warnings
+- deterministic configuration surfaces where practical for reproducible comparisons
+- normalized error handling so harnesses can distinguish unsupported tasks from execution failures
+
+The design should assume that evaluation is part of the bundle curation lifecycle, not merely post hoc testing.
+
+## API Sketch
+
+Example ergonomic usage for downstream callers:
+
+```rust
+use motlie_model::{BundleId, ChatMessage, ChatRequest, ChatRole};
+use motlie_models::Catalog;
+
+let catalog = Catalog::new();
+let bundle = catalog.instantiate(&BundleId::new("qwen3_5_instruct"))?;
+let handle = bundle.start(Default::default()).await?;
+let chat = handle.chat()?;
+
+let response = chat.generate(ChatRequest {
+    messages: vec![
+        ChatMessage::new(ChatRole::System, "Be concise."),
+        ChatMessage::new(ChatRole::User, "Summarize the deployment model."),
+    ],
+    ..Default::default()
+}).await?;
+```
+
+Embedding flow:
+
+```rust
+use motlie_model::{EmbeddingRequest, BundleId};
+
+let bundle = catalog.instantiate(&BundleId::new("bge_small_en"))?;
+let handle = bundle.start(Default::default()).await?;
+let embeddings = handle.embeddings()?;
+
+let response = embeddings.embed(EmbeddingRequest {
+    inputs: vec![
+        "motlie bundles models with their runtime".into(),
+        "embeddings do not expose chat".into(),
+    ],
+}).await?;
+```
+
+### API Design Notes
+
+- `BundleId` is the stable selection mechanism
+- callers ask for capabilities from a loaded handle rather than pattern-matching on bundle family
+- runtime choice is not part of the public call path
+- the concrete curated catalog belongs in `libs/models`, with the primary public path exposed as `motlie_models::Catalog`
+
+## Artifact and Packaging Contracts
+
+`libs/model` should define enough artifact vocabulary for `libs/models` to implement packaging and deployment without forcing the core contract crate to understand specific bundle layouts.
+
+In the current implemented contract, that vocabulary is intentionally small:
+
+- `ArtifactPolicy::LocalOnly { root }`
+- `ArtifactPolicy::AllowFetch { root }`
+- `StartOptions::artifact_policy`
+
+Richer curated artifact manifests, inclusion rules, and provenance controls currently live in `libs/models`, not `libs/model`.
+
+Potential future extensions, if they become necessary, include:
+
+- `ArtifactKind`
+- `ArtifactIntegrity`
+- `ArtifactLocator`
+
+Example concerns the contract should represent:
+
+- embedded artifact versus sidecar file
+- local packaged artifact versus remote-served bundle
+- readonly packaged resource versus unpack-on-start cache
+- integrity metadata such as digest or signed manifest reference
+- optional encryption envelope metadata for future protected bundles
+
+The contract should not encode `ELF`, `rodata`, backend-specific weight formats, or HTTP provider protocol details directly. Those are implementation details owned by bundle implementations and deployment tooling.
+
+## Alternatives Considered
+
+### Alternative A: Single `libs/models` crate with contracts and bundles together
+
+Pros:
+
+- fastest initial delivery
+- fewer crates and fewer dependency edges
+- simpler workspace wiring on day one
+
+Cons:
+
+- core API stability gets tangled with backend dependencies
+- feature-gating and compile-time footprint grow quickly
+- bundle catalog and lifecycle contracts become harder to evolve independently
+
+Decision:
+
+Rejected as the primary architecture. The product benefits from a small stable contract crate.
+
+### Alternative B: `libs/model` as contract crate, `libs/models` as curated bundle crate
+
+Pros:
+
+- clear contract/composition split
+- lower dependency surface for the stable API
+- supports multiple bundle catalogs or backend integration crates later
+- easier to feature-gate heavy bundles
+
+Cons:
+
+- adds one more workspace crate
+- requires discipline to keep backend details out of `libs/model`
+
+Decision:
+
+Accepted.
+
+### Alternative C: Backend-first API with `Backend`, `Checkpoint`, and `Session` as the public model
+
+Pros:
+
+- maps directly to inference infrastructure
+- may help internal experimentation with arbitrary checkpoints
+
+Cons:
+
+- exposes the wrong abstraction to product consumers
+- forces callers to reason about runtime compatibility
+- conflicts with the curated "bundles as lego blocks" deployment model
+
+Decision:
+
+Rejected. Backend is an implementation concern, not the top-level product abstraction.
+
+### Alternative D: Split local-bundle and remote-model APIs into separate contract systems
+
+Pros:
+
+- can optimize local packaging and remote HTTP semantics independently
+- may reduce abstraction tension in the short term
+
+Cons:
+
+- duplicates lifecycle and capability interfaces
+- prevents "bundle as lego block" from spanning both local and remote execution
+- makes application integration less uniform
+
+Decision:
+
+Rejected. Remote-served models such as a GPT-4.5 HTTP bundle should still implement the same top-level contracts.
+
+### Alternative E: Keep the lifecycle contract minimal and let bundles define richer local APIs
+
+Pros:
+
+- gives each bundle maximum freedom
+- may expose backend strengths more directly
+
+Cons:
+
+- undermines composability across bundles
+- pushes bundle-specific branching into application code
+- weakens the main reason to have a contract crate at all
+
+Decision:
+
+Rejected. The shared contract and composable lifecycle are primary design goals, not secondary conveniences.
+
+### Alternative F: Put all evaluation vocabulary and tooling directly into `libs/model`
+
+Pros:
+
+- fewer crates
+- all model-related concepts live in one place
+
+Cons:
+
+- mixes stable API contracts with heavier harness machinery
+- increases pressure to add nontrivial dependencies to the core crate
+- makes the boundary between declarative eval contracts and executable tooling harder to maintain
+
+Decision:
+
+Rejected. `libs/model` should own only lightweight `model::eval` abstractions, while substantial harness tooling belongs in `libs/model-eval`.
+
+## Testing Scope for PLAN
+
+PLAN must specify concrete tests for:
+
+- bundle lifecycle transitions
+- unsupported-capability behavior
+- request/response type normalization
+- evaluation-harness-facing request/response stability
+- artifact descriptor parsing and validation
+- cleanup behavior during shutdown
+- concurrency and reentrancy expectations for loaded handles
+
+`DESIGN` intentionally leaves backend-specific and bundle-specific validation details to `libs/models` and later PLAN work.
+
+## Open Concerns
+
+- Whether any catalog trait should live in `libs/model` or remain only in `libs/models`
+- Whether the first introspection vocabulary should stop at normalized content kinds or include richer transport/file-format annotations later
+- How much generation-parameter normalization to promise across heterogeneous backends
+- Whether streaming output should be part of the initial contract or deferred until the non-streaming API is stable
+- Add `ChatRole::Tool` before tool-calling support lands
+- Consider a `ChatSpec` bundle-level metadata trait parallel to `EmbeddingSpec` once the first curated chat bundle is introduced
+
+Here is the curated models design document:
+# Curated Model Bundle Library Design
+
+## Status: Draft
+
+## Change Log
+
+| Date | Change | Sections |
+|------|--------|----------|
+| 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/models` as the curated bundle catalog and composition crate over `libs/model`. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
+| 2026-04-07 | @codex-researcher: Clarified that curated local model download is an explicit `libs/models` control, separate from backend cache-miss behavior. | Packaging and Deployment Model, Release Assembly Utility |
+| 2026-04-08 | @codex-researcher: Clarified that `libs/models` public fallible APIs should use typed library errors rather than `anyhow`, and specified the first vertical-slice artifact contract for `embeddinggemma_300m`. | Solution, Bundle Catalog Model, Packaging and Deployment Model |
+| 2026-04-08 | @codex-researcher: Locked down the crate hierarchy and direct bundle namespace so future work does not drift. Also removed over-modeled public metadata from the recommended surface and documented the preferred direct bundle API next to `Catalog`. | Architecture, Bundle Catalog Model, API Sketch |
+| 2026-04-08 | @codex-researcher: Added the bundle-build convention: curated bundles are feature-gated individually, the direct enum and `ModelSelector` only expose compiled-in bundles, and known-but-disabled bundles should report `ModelUnavailable`. | Architecture, Bundle Catalog Model, Packaging and Deployment Model |
+| 2026-04-08 | @codex-researcher: Clarified the reviewed backend/artifact boundary. Provider-specific cache layout resolution and local artifact validation belong in curated bundle modules under `libs/models`, while generic backends under `libs/model/backends/*` consume only resolved local model paths or fetch-enabled cache roots. | Architecture, Packaging and Deployment Model, Backend Composition |
+| 2026-04-08 | @codex-researcher: Added the Gemma 4 E2B-it multimodal chat slice (#142) as the third curated vertical slice. The direct module path, `ChatModels` / `ModelSelector` selector path, per-bundle feature gate, and `examples/v0.3` now extend the established curator conventions beyond embeddings (`v0.1`) and text-only chat (`v0.2`). | Architecture, Bundle Catalog Model, API Sketch |
+| 2026-04-09 | @codex-researcher: Added the Qwen3-Embedding-0.6B curated bundle (#147) as the second embedding slice. The embedding family now uses `v0.1` as the explicit two-bundle comparison example, so one binary can expose both curated embedders while the caller selects the target bundle via `--embedding=...`. | Architecture, Bundle Build Convention, API Sketch |
+| 2026-04-09 | @codex-researcher: Reaffirmed the one-model-per-example convention. The Gemma 4 operator and convenience paths are now collapsed into `examples/v0.3`, controlled by flags instead of separate versioned examples. | Architecture, API Sketch |
+
+This document defines the design for `libs/models`, the curated bundle library that exposes opinionated model stacks as deployable product modules. A bundle in this crate includes vetted weights when applicable, a chosen backend or transport, packaging policy when applicable, capability wiring, and consistent lifecycle behavior through the contracts defined in `libs/model`.
+
+The design goal is not to provide generic access to arbitrary checkpoints and runtimes. The goal is to expose stable integration modules that behave like composable product building blocks.
+
+The governing principle is curated sustainability: Motlie should be able to admit, evaluate, promote, and retire bundles as the model market changes while preserving a stable integration surface for the rest of the ecosystem.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Goals and Non-Goals](#goals-and-non-goals)
+- [Architecture](#architecture)
+- [Framework Principles](#framework-principles)
+- [Bundle Catalog Model](#bundle-catalog-model)
+- [Packaging and Deployment Model](#packaging-and-deployment-model)
+- [Backend Composition](#backend-composition)
+- [Evaluation and Curation Harnesses](#evaluation-and-curation-harnesses)
+- [API Sketch](#api-sketch)
+- [Alternatives Considered](#alternatives-considered)
+- [Testing Scope for PLAN](#testing-scope-for-plan)
+- [Open Concerns](#open-concerns)
+
+---
+
+## Overview
+
+### Problem Statement
+
+Different model families and checkpoints are not equally well supported across execution substrates. Some run best on `mistral.rs`, others on `llama.cpp`, others on `ONNX Runtime`, some are packaging- or platform-specific, and some may be served remotely over HTTP. Exposing this matrix directly to callers would make integration brittle and operationally expensive.
+
+Motlie instead wants a curated system where each supported model bundle is a vetted unit:
+
+- a specific checkpoint family or variant
+- a specific backend selection
+- a known artifact packaging or transport strategy
+- a known capability surface
+- a stable lifecycle and interaction contract
+
+### Solution
+
+`libs/models` owns:
+
+1. the bundle catalog
+2. bundle registration and discovery
+3. curated binding from bundle to backend implementation
+4. artifact packaging and/or transport policy
+5. bundle-local build and distribution customization
+6. concrete implementations of `libs/model` contracts
+7. typed catalog and artifact errors for operator-facing bundle control
+
+Callers integrate with curated bundle IDs and capability APIs. They do not choose runtimes directly.
+
+Library-level fallible APIs in this crate should return typed errors defined with `thiserror`. CLI tools and examples layered on top of the crate may use `anyhow` for propagation and user-facing context.
+
+## Goals and Non-Goals
+
+### Goals
+
+- Expose supported model bundles as stable product modules
+- Preserve a common abstraction and contract across all bundles
+- Hide runtime/backend selection behind bundle implementations
+- Support capability-specific access without runtime-specific code in applications
+- Keep bundles composable so they can be selected and substituted by catalog-driven code
+- Provide a sustainable framework for admitting and evolving curated bundles as the market changes
+- Support evaluation harnesses used to compare and validate bundles during curation
+- Support deployment modes where weights are packaged with the binary or shipped as tightly controlled artifacts
+- Allow per-bundle build customization for backend features, platform gates, CUDA enablement, and distribution constraints
+- Make build feature flags and platform gating easy to reason about for distro-specific outputs such as DGX, Debian, or macOS bundles
+- Allow gradual expansion of the curated bundle catalog
+- Keep future room for protected artifact formats such as encrypted embedded sections
+
+### Non-Goals
+
+- Generic user-supplied checkpoint loading in the first cut
+- Public backend/plugin APIs for third parties in the first cut
+- Treating all backends as interchangeable at runtime
+- Cross-bundle behavioral equivalence beyond the shared contract surface
+- Migration from any prior Motlie model library, since this is greenfield product work
+
+## Architecture
+
+`libs/models` sits above `libs/model` and below application code.
+
+Primary subsystems:
+
+1. `lib.rs`
+   Shared catalog, descriptor, artifact-control, and crate-level infrastructure only
+2. capability-family namespaces such as `embeddings/`
+   One directory per major capability family when more than one curated bundle is expected
+3. bundle module files such as `embeddings/google_gemma_300m.rs`
+   One curated bundle per file, with direct `descriptor()` and `bundle()` functions
+4. `src/bin/`
+   Small operational entrypoints such as artifact download helpers
+
+Concrete hierarchy rule:
+
+```text
+libs/models/
+  src/
+    lib.rs
+    chat/
+      mod.rs
+      qwen3_4b.rs
+      gemma4_e2b.rs
+    embeddings/
+      mod.rs
+      google_gemma_300m.rs
+    bin/
+      download_artifacts.rs
+```
+
+Public namespace rule:
+
+```rust
+motlie_models::Catalog
+motlie_models::chat::qwen3_4b::descriptor()
+motlie_models::chat::gemma4_e2b::bundle()
+motlie_models::embeddings::google_gemma_300m::descriptor()
+motlie_models::embeddings::google_gemma_300m::bundle()
+```
+
+This split is intentional:
+
+- `lib.rs` owns shared crate infrastructure
+- capability-family directories keep related bundles grouped together
+- each bundle file maps 1:1 to a curated bundle
+- callers may use either direct bundle modules or the dynamic `Catalog`
+- bundle modules may be compiled conditionally behind per-bundle features
+
+### High-Level Data Flow
+
+1. Caller selects `BundleId`
+2. Catalog resolves a bundle descriptor and constructor
+3. Loader resolves artifact or transport requirements
+4. Bundle constructor binds the bundle to its selected backend implementation under `libs/model/backends/*`
+5. The selected backend creates a loaded runtime handle
+6. The loaded handle exposes capability adapters through `libs/model` traits
+
+This keeps runtime-specific and packaging-specific logic behind the bundle constructor path while preserving a common contract for callers.
+
+## Framework Principles
+
+### Curated Sustainability
+
+`libs/models` is the operational layer that lets Motlie track a changing model ecosystem without turning application code into a moving target.
+
+Implications:
+
+- the catalog should focus on specific Motlie use cases, not generic model availability
+- admitting a new bundle should be a curation workflow, not merely a code import
+- retiring a weak or stale bundle should be operationally straightforward
+- backend churn should be isolated inside bundle implementations and release tooling
+
+### Evaluation-Driven Curation
+
+Bundle curation requires repeatable assessment of model quality. `libs/models` therefore must contribute to, and depend on, evaluation harnesses that can exercise curated bundles consistently.
+
+Implications:
+
+- bundle descriptors should expose enough metadata for harness selection
+- bundle capability implementations should be runnable by shared harness drivers
+- curation decisions should be informed by structured evaluation runs, not only ad hoc manual testing
+
+## Bundle Catalog Model
+
+The catalog is the product-facing index of supported bundles.
+
+Recommended public concepts:
+
+- `BundleId`
+- `BundleDescriptor`
+- `Catalog`
+- `BundleFamily`
+- direct bundle namespaces such as `motlie_models::embeddings::google_gemma_300m`
+
+`BundleDescriptor` should describe:
+
+- stable ID
+- display name
+- family
+- supported capabilities
+- selected backend
+- artifact or transport requirements
+- optional platform constraints
+- optional build/distribution constraints
+- optional evaluation tags or supported harness groups
+- artifact requirements precise enough for deterministic local-only startup where applicable
+
+`SupportTier` and `PackagingMode` are not required as first-class public catalog concepts in v1. If those ideas become operationally useful later, they can be added back with a clearer consumer and a narrower meaning.
+
+### Bundle Build Convention
+
+Curated bundles are not all expected to be linked into every build of `libs/models`.
+
+The intended convention is:
+
+- one Cargo feature per curated bundle
+- direct bundle module, enum variant, parser support, and catalog registration are all gated together
+- the default feature set may include a small recommended slice, but distro/profile builds should compose the exact curated set explicitly
+
+For example:
+
+```toml
+[features]
+default = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b", "model-gemma4-e2b"]
+
+model-google-gemma-300m = []
+model-qwen3-embedding-06b = []
+model-qwen3-4b = []
+model-gemma4-e2b = []
+profile-macos = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b"]
+profile-dgx = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b", "model-gemma4-e2b"]
+```
+
+This means:
+
+- `EmbeddingModels::GoogleGemma300m` only exists when `model-google-gemma-300m` is enabled
+- `EmbeddingModels::Qwen3Embedding06B` only exists when `model-qwen3-embedding-06b` is enabled
+- `Catalog::with_defaults()` only registers bundles that are actually compiled in
+- string parsing through `ModelSelector` should distinguish:
+  - unknown selector
+  - known selector that is unavailable in the current build
+
+Recommended typed error for the second case:
+
+- `ModelUnavailable { selector: String }`
+
+Example internal organization:
+
+```text
+libs/models/
+  src/
+    lib.rs
+    embeddings/
+      mod.rs
+      google_gemma_300m.rs
+      qwen3_embedding_06b.rs
+    chat/
+      mod.rs
+      qwen3_4b.rs
+      gemma4_e2b.rs
+    bin/
+      download_artifacts.rs
+```
+
+### Bundle Family versus Bundle Identity
+
+The public selection unit is still `BundleId`, not `BundleFamily`.
+
+Examples:
+
+- `Qwen3_5Instruct`
+- `Hermes3LlamaChat`
+- `BgeSmallEn`
+
+`BundleFamily` is metadata for organization, docs, and feature flags, not the primary runtime lookup key.
+
+### Direct Bundle Access
+
+`Catalog` remains useful for configuration-driven or dynamically selected bundle loading. It is not the only intended entrypoint.
+
+For application code that wants a specific curated bundle directly, the preferred API is the bundle module path itself:
+
+```rust
+let descriptor = motlie_models::embeddings::google_gemma_300m::descriptor();
+let bundle = motlie_models::embeddings::google_gemma_300m::bundle();
+```
+
+This avoids unnecessary catalog lookup in the common case while preserving catalog-driven selection for higher-level orchestration.
+
+When the underlying bundle is an embedding bundle, the concrete bundle type should also implement the `motlie_model::Embedding` trait so callers can access embedding-specific metadata without loading the runtime handle first.
+
+### First Vertical Slice Specificity
+
+The first concrete local bundle, `embeddinggemma_300m`, is intentionally part of the framework specification because it validates the layering. Its curated artifact contract must include:
+
+- root model config and tokenizer files
+- `modules.json`
+- sentence-transformers module configs for pooling and dense stages
+- dense module safetensors files
+
+That requirement is part of the bundle definition, not an implementation detail left to backend cache discovery.
+
+### Capability Exposure
+
+A bundle may support one or more capabilities:
+
+- chat
+- text completion
+- embeddings
+
+Capability checks happen at descriptor time and again at loaded-handle access time. This avoids late surprises and keeps unsupported-capability errors precise.
+
+The common contract remains the primary integration surface even when individual bundles have very different build or runtime requirements.
+
+Catalog metadata should also make it easy to identify which bundles participate in which evaluation tracks.
+
+## Packaging and Deployment Model
+
+The crate assumes a curated artifact supply chain. Bundle weights are sourced from vetted providers and packaged in controlled forms rather than being fetched ad hoc at runtime.
+
+Supported design directions:
+
+1. Sidecar artifacts packaged with the application bundle
+2. Embedded artifacts linked into the binary for small models
+3. Remote-served bundles over controlled HTTP integrations
+4. Future protected artifact formats, including encrypted embedded data or custom bundle containers
+
+The public crate does not need a first-class `PackagingMode` enum for v1. Artifact policy and startup behavior are the important public concerns; exact release packaging remains an internal concern of release tooling and curated bundle implementation.
+
+For local curated bundles, model download should be an explicit control owned by `libs/models` rather than an implicit side effect of backend startup. A backend such as `mistral.rs` may still populate or consult its own cache layout, but curated provenance and download policy remain the responsibility of the curated bundle layer.
+
+As part of the roadmap, Motlie should provide a utility that controls:
+
+- which bundles are included
+- which features are enabled
+- which target operating system or distribution profile is selected
+- whether release output is a large binary with embedded weights or a package bundle with deterministic extraction
+
+The deployment goal is for either mode to feel operationally close to a single-binary deployment.
+
+### Packaging Rules
+
+- Artifact provenance must be explicit in bundle descriptors or manifests
+- Curated local model download must be invokable explicitly, independent of backend cache-miss behavior
+- Bundle loading must validate artifact integrity before runtime initialization when local artifacts are used
+- Unpack-on-start must use deterministic cache paths and cleanup rules
+- Backend-specific file layout transformations must remain internal to the bundle
+- Remote-served bundles must validate endpoint configuration and credentials before capability use
+
+### Bundle-Local Build Customization
+
+Each bundle directory may carry build customization that reflects the reality of that bundle's execution substrate.
+
+Examples:
+
+- enable CUDA support only for selected bundles or targets
+- gate a bundle by operating system, CPU architecture, or libc/distribution requirement
+- opt into backend-specific compile flags or linked native libraries
+- reject unsupported packaging modes at build time rather than at runtime
+- expose explicit distro or build-profile selections such as DGX, Debian, or macOS
+
+The important boundary is that build customization stays bundle-local or backend-local. It must not leak upward into the stable `libs/model` contract.
+
+### Build Reasoning and Profile Clarity
+
+Build gating must be easy for operators and release tooling to reason about. The system should favor explicit, inspectable configuration over scattered conditional logic.
+
+Requirements:
+
+- feature flags should map to understandable product or backend choices rather than opaque internal toggles
+- platform and distribution gates should be declared close to the affected bundle
+- profile selection should be explicit for targets such as DGX, Debian, and macOS
+- unsupported combinations should fail clearly at build time
+- documentation and descriptor metadata should make the active constraints visible
+
+The design should support custom build profiles that combine platform, accelerator, and bundle-family choices into repeatable outputs. For example:
+
+- a DGX-oriented profile may enable CUDA-capable bundles and exclude CPU-only fallback bundles
+- a Debian distribution profile may select portable CPU-compatible bundles and approved sidecar packaging
+- a macOS profile may exclude Linux-only backends and expose only supported local or remote-backed bundles
+
+## Evaluation and Curation Harnesses
+
+The roadmap should include shared harness runners that operate on curated bundles using canned inputs, expected outputs, and scoring rules.
+
+Representative evaluation tracks include:
+
+- embedding generation
+- reasoning-oriented tasks
+- summarization
+- classification
+- chat/instruction quality where relevant
+
+The goal is not only test coverage. The goal is to make model curation sustainable by making bundle quality easier to compare across revisions and across candidate bundles.
+
+### Harness Design Direction
+
+The harness runner should:
+
+- discover eligible bundles from catalog metadata and capabilities
+- run canned evaluations against the common capability contracts
+- emit structured results that support comparison, regression detection, and promotion decisions
+- support bundle-specific setup where necessary without breaking the common runner model
+
+This means `libs/models` should eventually provide enough descriptor metadata and helper surfaces for harness tooling to target bundles predictably.
+
+## Release Assembly Utility
+
+The roadmap should include a dedicated utility for producing curated release artifacts from the bundle catalog.
+
+Responsibilities:
+
+- select model bundles for inclusion
+- select build features and backend options
+- select target OS, distribution, and accelerator profile
+- prefetch curated artifacts into deterministic artifact roots when local bundles are selected
+- validate that the requested bundle set is compatible with the chosen target
+- assemble either embedded-binary releases or package-bundle releases
+- emit deterministic manifests so extraction and startup behavior are predictable and auditable
+
+### Release Modes
+
+1. Embedded image mode
+   Large release binaries may include model weights directly in the produced image when the selected bundles and target constraints allow it.
+2. Package bundle mode
+   Release output may ship as an application binary plus a tightly controlled package bundle whose extraction path and unpack behavior are deterministic.
+
+Both modes should preserve the product experience that deployment feels like "one thing to ship," even if the package-bundle mode expands into controlled local files on first start.
+
+### Deterministic Extraction
+
+When package bundles are used, extraction behavior should be deterministic across runs and environments.
+
+Requirements:
+
+- stable extraction paths derived from bundle identity, version, and integrity metadata
+- explicit cleanup and replacement rules
+- no ad hoc runtime downloads for curated local bundles
+- predictable startup failure when required artifacts are missing or invalid
+
+This keeps package-bundle deployment operationally close to a single-binary release while avoiding opaque filesystem side effects.
+
+### Deployment Notes
+
+The design supports small bundles embedded directly in the executable, including future custom-ELF strategies, but `libs/models` should not hard-code binary-format assumptions into the public API. The right abstraction is "embedded artifact" or "packaged artifact," not "ELF section."
+
+Remote-served bundles should be described as transport-backed bundles rather than as a separate product category. For example, a `GPT4_5` bundle may satisfy the same contracts through HTTP while still appearing in the catalog as just another curated bundle.
+
+## Backend Composition
+
+Backend selection is opinionated per bundle. The bundle chooses the backend; the caller does not.
+
+Examples:
+
+- a Qwen bundle may use `mistral.rs`
+- a Hermes bundle may use `llama.cpp`
+- an embedding bundle may use `ONNX Runtime`
+- a GPT-4.5 bundle may use HTTP
+
+This selection is part of the bundle definition because backend maturity, correctness, performance, and packaging constraints differ across bundles.
+
+Backend composition also includes build-time composition. A bundle may depend on different backend features, native toolchains, or platform rules than another bundle in the same catalog.
+
+### Internal Backend Boundary
+
+Generic backend implementations should live under `libs/model/backends/*`, not inside `libs/models`. This keeps reusable runtime machinery close to the contract layer while keeping `libs/models` focused on curated bundle stacks, artifacts, and bundle-specific adaptations.
+
+`libs/models` may expose backend choice in descriptor metadata for observability, but applications should not instantiate backend adapters directly.
+
+Recommended internal trait:
+
+```rust
+trait BackendFactory {
+    async fn start_bundle(
+        &self,
+        descriptor: &BundleDescriptor,
+        artifacts: &ResolvedArtifacts,
+        options: &StartOptions,
+    ) -> Result<Box<dyn BundleHandle>, ModelError>;
+}
+```
+
+This trait is not required to be public in v1. The important boundary is structural:
+
+- `libs/model/backends/mistral` owns generic `mistral.rs` contract implementations
+- `libs/model/backends/ort` owns generic ORT contract implementations
+- `libs/models` owns which curated bundle uses which backend implementation and with what artifacts or bundle-specific glue
+
+## API Sketch
+
+The application experience should feel like selecting and loading product modules.
+
+```rust
+use motlie_model::{BundleId, EmbeddingRequest};
+use motlie_models::Catalog;
+
+let catalog = Catalog::with_defaults();
+let bundle = catalog
+    .instantiate(&BundleId::new("embeddinggemma_300m"))?;
+let handle = bundle.start(Default::default()).await?;
+let embeddings = handle.embeddings()?;
+let response = embeddings.embed(EmbeddingRequest {
+    inputs: vec![
+    "curated bundle catalog",
+    "mistral embedding vertical slice",
+    ],
+}).await?;
+```
+
+### Feature-Gating Direction
+
+The crate should support Cargo features for optional bundle families or heavyweight backend integrations, for example:
+
+- `qwen`
+- `hermes`
+- `embeddings`
+- `backend-mistral`
+- `backend-llamacpp`
+- `backend-ort`
+
+Bundle-family features are the primary user-facing toggles. Backend features are mostly implementation plumbing and should be kept as implicit as practical.
+
+Where a bundle has materially different build requirements, the bundle itself may also need feature flags or build-script enforcement. The catalog should make these constraints visible in descriptor metadata and documentation.
+
+The same rule applies to build profiles: they should be comprehensible from the bundle and catalog metadata rather than inferred from hidden `cfg` interactions.
+
+## Alternatives Considered
+
+### Alternative A: Treat runtime/backend as the primary public abstraction
+
+Pros:
+
+- explicit about the true execution substrate
+- may simplify low-level experimentation
+
+Cons:
+
+- wrong abstraction for application developers
+- forces callers to understand backend compatibility
+- does not match the curated bundle product model
+
+Decision:
+
+Rejected.
+
+### Alternative B: Curated bundle catalog in `libs/models`, contracts in `libs/model`
+
+Pros:
+
+- matches the agreed architecture cleanly
+- separates stable API from backend-heavy implementation
+- supports feature-gated bundle families and deployment-specific packaging
+
+Cons:
+
+- requires one more crate and one more design boundary
+- demands discipline around descriptor versus implementation concerns
+
+Decision:
+
+Accepted.
+
+### Alternative C: One crate per concrete bundle from day one
+
+Pros:
+
+- maximum modularity
+- very explicit ownership and dependency control
+
+Cons:
+
+- high workspace overhead too early
+- repeated boilerplate for closely related bundles
+- catalog ergonomics become fragmented before the abstraction is stable
+
+Decision:
+
+Rejected for the first cut. Keep concrete bundles inside `libs/models` until scale justifies further splitting.
+
+### Alternative D: Separate local-bundle catalog and remote-provider catalog
+
+Pros:
+
+- clearer separation between packaged assets and hosted APIs
+- different operational concerns can evolve independently
+
+Cons:
+
+- splits one user-facing concept into two parallel product systems
+- weakens the "models are lego blocks" abstraction
+- duplicates capability and lifecycle wiring
+
+Decision:
+
+Rejected. Remote-served models should still appear as curated bundles inside the same catalog.
+
+### Alternative E: Centralize all build and distribution policy at the crate root
+
+Pros:
+
+- one place to inspect build logic
+- fewer per-bundle build entry points
+
+Cons:
+
+- scales poorly as bundles diverge
+- makes platform or CUDA exceptions harder to isolate
+- makes distro-specific outputs harder to audit
+- weakens the "bundle as product module" boundary
+
+Decision:
+
+Rejected. Bundle-local build customization is a feature, not a smell, as long as the top-level contract stays uniform.
+
+### Alternative F: Require all deployments to use sidecar package bundles only
+
+Pros:
+
+- simpler build pipeline for very large models
+- avoids oversized executable images
+
+Cons:
+
+- removes the option for true embedded single-artifact releases where they are practical
+- weakens deployment ergonomics for smaller curated bundles
+- does not fit the roadmap requirement for flexible release assembly
+
+Decision:
+
+Rejected. The system should support both embedded-image and deterministic package-bundle release modes.
+
+## Testing Scope for PLAN
+
+PLAN must specify concrete tests for:
+
+- catalog registration and lookup
+- descriptor correctness and capability advertisement
+- bundle load and shutdown behavior
+- backend binding per bundle
+- artifact integrity and unpack flows
+- embedded-artifact and sidecar-artifact startup paths
+- remote transport startup and credential/config validation paths
+- bundle-local build gating and platform restriction behavior
+- backend feature selection such as CUDA-enabled versus CPU-only bundle builds
+- distro/profile-specific build outputs for targets such as DGX, Debian, and macOS
+- release-assembly utility behavior for embedded-image versus package-bundle outputs
+- deterministic extraction paths, cleanup rules, and startup validation for package bundles
+- shared harness-runner behavior across evaluation categories such as embeddings, reasoning, summarization, and classification
+- catalog metadata used to select bundles for evaluation tracks
+- unsupported-capability behavior for embedding-only or chat-only bundles
+- feature-gated build surfaces
+
+If protected or encrypted bundle packaging enters scope, PLAN must add explicit verification for key handling, integrity checks, and failure behavior.
+
+## Open Concerns
+
+- Whether bundle IDs should include provider or packaging suffixes when multiple vetted variants exist
+- Whether `Catalog` should be fully static in v1 or support external registration hooks
+- How much backend choice should be exposed in descriptor metadata for observability and support diagnostics
+- Whether bundle manifests should live in Rust code, generated tables, or external metadata files
+
+Based on all of the above, give a one-paragraph summary of the recommended DGX Spark deployment strategy.

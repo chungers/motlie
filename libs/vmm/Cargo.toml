@@ -1,0 +1,55 @@
+[package]
+name = "motlie-vmm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Reusable VM orchestration: guest lifecycle, SSH proxy, and programmatic control plane"
+build = "build.rs"
+
+[features]
+default = []
+debug-trace = []
+
+[dependencies]
+# SSH proxy + CA
+russh = { version = "0.60", features = ["aws-lc-rs"] }
+rand = "0.10"
+motlie-vfs = { path = "../vfs", features = ["vsock"] }
+motlie-vnet = { path = "../vnet" }
+
+bytes = "1"
+
+# Async
+futures = "0.3"
+
+# Core
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "time", "process"] }
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+shadow-terminal = "0.2.3"
+vt100 = "0.16.2"
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+bytes = { version = "1", features = ["serde"] }
+rustyline = "18"
+atty = "0.2"
+ctrlc = "3"
+
+[[example]]
+name = "repl_host_v1_3"
+path = "examples/v1.3/repl_host.rs"
+
+[[example]]
+name = "repl_host_v1_4"
+path = "examples/v1.4/repl_host.rs"
+
+[[example]]
+name = "harness_v1_4"
+path = "examples/v1.4/harness/main.rs"

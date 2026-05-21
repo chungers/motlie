@@ -26,8 +26,26 @@ They must be targeted, actionable, and contain context / links / references so c
 ALWAYS create a local branch to track work, named in this format: {your_identity}/{summary-up-to-40-chars}.
 Push frequently to checkpoint your work.  Tell the user at every turn if you have local uncommitted changes.
 User will give instructions on when to create a PR or issue.
+When creating git worktrees, place them as siblings of the main repo checkout, not inside the repo directory.
+For example, if the main checkout is `/path/to/motlie`, create worktrees like `/path/to/<worktree-name>`,
+not `/path/to/motlie/worktrees/<worktree-name>`. This avoids accidentally checking full worktree directories
+into the repo or mixing worktree paths with tracked project content.
 NEVER stage any commits of harness files (:= CLAUDE.md, AGENTS.md, or SKILL.md), or anything unrelated
 to your current scope of work, without user's explicit approval.
+
+## Skills
+
+Skills are organized by namespace in `.agents/skills/`.
+Read the relevant `SKILL.md` before creating any file.
+
+### Voice
+
+| Skill | Path | When to use |
+|---|---|---|
+| `voice` | `.agents/skills/voice/README.md` | Voice skill namespace entrypoint and playbook |
+| `speak` | `.agents/skills/voice/speak/` | Speak text aloud with Piper or qwen3-tts.cpp |
+| `listen` | `.agents/skills/voice/listen/` | Capture and transcribe speech with Whisper, Sherpa, or Moonshine |
+| `turn` | `.agents/skills/voice/turn/` | Run one spoken turn: speak a prompt, then listen for a reply |
 
 ## Development Stages
 

@@ -1,0 +1,42 @@
+[package]
+name = "motlie-vnet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Embeddable user-mode networking for virtual machines (vhost-user-net + libslirp)"
+build = "build.rs"
+
+[features]
+default = []
+debug-trace = []
+
+[dependencies]
+libslirp = "4"
+libslirp-sys = "4"
+libc = "0.2"
+anyhow.workspace = true
+tracing = "0.1"
+thiserror.workspace = true
+vhost = { version = "0.16", features = ["vhost-user-backend"] }
+vhost-user-backend = "0.22"
+virtio-queue = { version = "0.17", features = ["test-utils"] }
+virtio-bindings = "0.2"
+vm-memory = { version = "0.17", features = ["backend-mmap"] }
+vmm-sys-util = "0.15"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+motlie-vfs = { path = "../vfs", features = ["vsock"] }
+bytes = "1"
+tokio = { workspace = true, features = ["full"] }
+rustyline = "15"
+atty = "0.2"
+ctrlc = "3"
+serde_yaml = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+
+[[example]]
+name = "repl_host_v1_2"
+path = "examples/v1.2/repl_host.rs"

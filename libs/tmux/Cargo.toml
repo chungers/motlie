@@ -1,0 +1,31 @@
+[package]
+name = "motlie-tmux"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Async multi-target tmux automator"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+regex = "1.10"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+russh = "0.46"
+russh-keys = "0.46"
+russh-sftp = "2.1"
+async-trait = "0.1"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+# Examples/tests are binaries; the library code remains anyhow-free.
+anyhow = { workspace = true }
+tempfile = "3"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+rustyline = "18"
+ansi-to-tui = "8"

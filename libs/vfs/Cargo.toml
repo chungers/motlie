@@ -1,0 +1,73 @@
+[package]
+name = "motlie-vfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Layered guest filesystem composition: transport-agnostic FUSE server with in-memory overlay"
+build = "build.rs"
+
+[features]
+default = ["server-core", "bincode-codec"]
+
+# Always available -- core types, FsServer, MemOverlay
+server-core = []
+
+# v1 VM transport
+vsock = ["server-core", "bincode-codec", "dep:tokio-vsock"]
+
+# FUSE client for the v1 guest path
+client = ["dep:fuser"]
+
+# Wire encodings
+bincode-codec = ["dep:bincode"]
+
+[dependencies]
+# Core (always)
+bytes = { version = "1", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+anyhow.workspace = true
+libc = "0.2"
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+# vsock transport (optional)
+tokio-vsock = { version = "0.7", optional = true }
+bincode = { version = "2", optional = true, features = ["serde"] }
+
+# FUSE client (optional)
+fuser = { version = "0.15", optional = true }
+
+# Snapshot / concurrency helpers
+arc-swap = "1"
+parking_lot = "0.12"
+
+# Binary dependencies (used by bins/v1*/motlie-vfs-guest.rs)
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
+serde_json = "1"
+rustyline = "15"
+atty = "0.2"
+ctrlc = "3"
+
+[[bin]]
+name = "motlie-vfs-guest"
+path = "bins/v1/motlie-vfs-guest.rs"
+
+[[bin]]
+name = "motlie-vfs-guest-v1_1"
+path = "bins/v1.1/motlie-vfs-guest.rs"
+
+[[example]]
+name = "repl_host"
+path = "examples/v1/repl_host.rs"
+required-features = ["vsock"]
+
+[[example]]
+name = "repl_host_v1_1"
+path = "examples/v1.1/repl_host.rs"
+required-features = ["vsock"]
+

@@ -1,0 +1,16 @@
+# Guest mount config for motlie-vfs-guest.
+# Placed at /etc/motlie-vfs/mounts.yaml inside the guest ext4 overlay.
+#
+# Each entry tells the guest binary which tag to request from the host
+# FsServer and where to mount it inside the guest.
+#
+# This default config matches the documented single-tag host setup:
+#   cargo run --example repl_host --features vsock -- --tag alice-home --dir ~/alice
+#
+# uid/gid 1000:1000 = alice (created in the guest image by build-guest.sh).
+# The host repl_host injects overlay files with matching ownership via putattr.
+
+mounts:
+  - tag: alice-home
+    guest_path: /home/alice
+    read_only: false
