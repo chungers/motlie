@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-20 | @codex | Added Phase 14 for issue #317 host alias overrides, covering CLI parsing, host setup threading, docs, and focused tests. |
 | 2026-05-16 | @codex-tmux-tl | Tracked issue #282 and fixed modal text inputs so focused Left/Right move the insertion point inside New Session, Rename Session, Send Keys, and Session Tags fields instead of jumping to modal buttons. |
 | 2026-05-06 | @codex-tts | Added list-only `$` direct-send follow-ons for Send Keys: `$0`..`$9` dispatch digits immediately and `$!` dispatches `{Esc}` to the highlighted session. |
 | 2026-05-03 | @codex | Added Phase 13 for the `s` Send Keys modal and moved pane cycling to Tab. |
@@ -125,6 +126,23 @@ require an SSH daemon:
 export MOTLIE_MMUX_SSH_URI='ssh://user@host?identity-file=/path/to/key'
 cargo test -p motlie-mmux --test ssh_integration -- --ignored
 ```
+
+
+## Phase 14: Host Alias Overrides (issue #317)
+
+References: [Internal data model](./DESIGN.md#internal-data-model),
+[Scope and impact analysis](./DESIGN.md#scope-and-impact-analysis),
+[CLI Boundary](./API.md#cli-boundary).
+
+- [x] 14.1 Add optional `--alias=<list>` CLI parsing that preserves empty
+  comma-separated entries as fallback markers.
+- [x] 14.2 Map alias position 0 to localhost and position `i + 1` to SSH URI
+  `i`, applying only non-empty entries as display-label overrides.
+- [x] 14.3 Thread overrides through local entry construction, pending SSH
+  `HostSlot`s, and retry-connected SSH entries without changing `HostId`,
+  `HostEntry.alias`, URI parsing, or IP resolution.
+- [x] 14.4 Update CLI/API/DESIGN docs and add tests for parsing, empty-entry
+  fallback, initial fleet labels, and pending-to-connected SSH label behavior.
 
 ## Phase 1: motlie-tmux Library Gaps
 
