@@ -289,6 +289,10 @@ pub struct TimelineRenderPage {
     pub omitted_entries: usize,
 }
 
+fn timeline_lock_error() -> Error {
+    Error::State("timeline lock poisoned".to_string())
+}
+
 /// Source-routing filter (routing only, no content matching — DC24).
 #[derive(Debug, Clone, Default)]
 pub struct SinkFilter {
@@ -1895,8 +1899,10 @@ impl TimelineState {
             entries.truncate(limit);
         }
         let next_sequence = entries
-            .last()
-            .map(|entry| entry.sequence + 1)
+            .iter()
+            .map(|entry| entry.sequence)
+            .max()
+            .map(|sequence| sequence + 1)
             .unwrap_or(cursor.next_sequence);
         TimelinePage {
             entries,
@@ -1914,14 +1920,66 @@ impl TimelineState {
         };
         let entries: Vec<TimelineEntry> = self.entries.iter().skip(start).cloned().collect();
         let next_sequence = entries
-            .last()
-            .map(|entry| entry.sequence + 1)
+            .iter()
+            .map(|entry| entry.sequence)
+            .max()
+            .map(|sequence| sequence + 1)
             .unwrap_or(self.next_sequence);
         TimelinePage {
             entries,
             cursor: TimelineCursor { next_sequence },
             omitted_entries: self.omitted_entries,
         }
+    }
+
+    fn rendered_entries_after(
+        &self,
+        cursor: TimelineCursor,
+        opts: RenderOptions,
+    ) -> (Vec<TimelineEntry>, TimelineCursor) {
+        let entries: Vec<TimelineEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.sequence >= cursor.next_sequence)
+            .cloned()
+            .collect();
+        let cap = self.render_cap(opts);
+        if cap == 0 {
+            let next_sequence = entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .max()
+                .map(|sequence| sequence + 1)
+                .unwrap_or(cursor.next_sequence);
+            return (entries, TimelineCursor { next_sequence });
+        }
+
+        let mut selected = Vec::new();
+        for entry in entries {
+            let mut candidate = selected.clone();
+            candidate.push(entry);
+            let candidate_text = self.render_entries(
+                &candidate,
+                RenderOptions {
+                    max_chars: usize::MAX,
+                },
+            );
+            if candidate_text.len() > cap && !selected.is_empty() {
+                break;
+            }
+            selected = candidate;
+            if candidate_text.len() >= cap {
+                break;
+            }
+        }
+
+        let next_sequence = selected
+            .iter()
+            .map(|entry| entry.sequence)
+            .max()
+            .map(|sequence| sequence + 1)
+            .unwrap_or(cursor.next_sequence);
+        (selected, TimelineCursor { next_sequence })
     }
 
     fn render_entries(&self, entries: &[TimelineEntry], opts: RenderOptions) -> String {
@@ -1981,12 +2039,16 @@ impl TimelineState {
         text
     }
 
-    fn enforce_render_cap(&self, text: &mut String, opts: RenderOptions) {
-        let cap = if opts.max_chars > 0 {
+    fn render_cap(&self, opts: RenderOptions) -> usize {
+        if opts.max_chars > 0 {
             opts.max_chars
         } else {
             self.options.max_render_chars
-        };
+        }
+    }
+
+    fn enforce_render_cap(&self, text: &mut String, opts: RenderOptions) {
+        let cap = self.render_cap(opts);
         if cap > 0 && text.len() > cap {
             text.truncate(cap);
         }
@@ -2007,19 +2069,25 @@ impl TimelineHandle {
     }
 
     /// Fetch entries after a cursor. `limit == 0` returns all retained matches.
-    pub async fn entries_after(&self, cursor: TimelineCursor, limit: usize) -> TimelinePage {
-        self.state
+    pub async fn entries_after(
+        &self,
+        cursor: TimelineCursor,
+        limit: usize,
+    ) -> Result<TimelinePage> {
+        Ok(self
+            .state
             .lock()
-            .expect("timeline lock poisoned")
-            .entries_after(cursor, limit)
+            .map_err(|_| timeline_lock_error())?
+            .entries_after(cursor, limit))
     }
 
     /// Fetch the latest retained entries. `limit == 0` returns all retained entries.
-    pub async fn latest(&self, limit: usize) -> TimelinePage {
-        self.state
+    pub async fn latest(&self, limit: usize) -> Result<TimelinePage> {
+        Ok(self
+            .state
             .lock()
-            .expect("timeline lock poisoned")
-            .latest(limit)
+            .map_err(|_| timeline_lock_error())?
+            .latest(limit))
     }
 
     /// Render a prompt-ready window after a cursor.
@@ -2027,15 +2095,15 @@ impl TimelineHandle {
         &self,
         cursor: TimelineCursor,
         opts: RenderOptions,
-    ) -> TimelineRenderPage {
-        let state = self.state.lock().expect("timeline lock poisoned");
-        let page = state.entries_after(cursor, 0);
-        let text = state.render_entries(&page.entries, opts);
-        TimelineRenderPage {
+    ) -> Result<TimelineRenderPage> {
+        let state = self.state.lock().map_err(|_| timeline_lock_error())?;
+        let (entries, next_cursor) = state.rendered_entries_after(cursor, opts);
+        let text = state.render_entries(&entries, opts);
+        Ok(TimelineRenderPage {
             text,
-            cursor: page.cursor,
-            omitted_entries: page.omitted_entries,
-        }
+            cursor: next_cursor,
+            omitted_entries: state.omitted_entries,
+        })
     }
 }
 
@@ -2086,7 +2154,7 @@ impl OutputBus {
     ) -> Result<TimelineHandle> {
         let name = name.into();
         let state = Arc::new(std::sync::Mutex::new(TimelineState::new(opts)?));
-        let mut timelines = self.timelines.lock().expect("timeline lock poisoned");
+        let mut timelines = self.timelines.lock().map_err(|_| timeline_lock_error())?;
         if timelines.contains_key(&name) {
             return Err(Error::AlreadyExists(format!(
                 "timeline '{}' already exists",
@@ -2098,21 +2166,22 @@ impl OutputBus {
     }
 
     /// Look up a named timeline.
-    pub fn timeline(&self, name: &str) -> Option<TimelineHandle> {
-        self.timelines
+    pub fn timeline(&self, name: &str) -> Result<Option<TimelineHandle>> {
+        Ok(self
+            .timelines
             .lock()
-            .expect("timeline lock poisoned")
+            .map_err(|_| timeline_lock_error())?
             .get(name)
             .cloned()
             .map(|state| TimelineHandle {
                 name: name.to_string(),
                 state,
-            })
+            }))
     }
 
     /// Remove a named timeline.
     pub fn remove_timeline(&self, name: &str) -> Result<()> {
-        let mut timelines = self.timelines.lock().expect("timeline lock poisoned");
+        let mut timelines = self.timelines.lock().map_err(|_| timeline_lock_error())?;
         if timelines.remove(name).is_none() {
             return Err(Error::NotFound(format!("timeline '{}' not found", name)));
         }
@@ -2120,16 +2189,16 @@ impl OutputBus {
     }
 
     /// List timeline names.
-    pub fn timelines(&self) -> Vec<String> {
+    pub fn timelines(&self) -> Result<Vec<String>> {
         let mut names: Vec<String> = self
             .timelines
             .lock()
-            .expect("timeline lock poisoned")
+            .map_err(|_| timeline_lock_error())?
             .keys()
             .cloned()
             .collect();
         names.sort();
-        names
+        Ok(names)
     }
 
     /// Subscribe with source-routing filters. Returns a Subscription.
@@ -2183,18 +2252,14 @@ impl OutputBus {
     /// Fan out to all matching subscribers. Non-blocking (try_send).
     pub fn publish(&self, output: TargetOutput) {
         let ingested_at = Instant::now();
-        let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> = self
-            .timelines
-            .lock()
-            .expect("timeline lock poisoned")
-            .values()
-            .cloned()
-            .collect();
-        for state in timeline_states {
-            state
-                .lock()
-                .expect("timeline lock poisoned")
-                .push_output(&output, ingested_at);
+        if let Ok(timelines) = self.timelines.lock() {
+            let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> =
+                timelines.values().cloned().collect();
+            for state in timeline_states {
+                if let Ok(mut state) = state.lock() {
+                    state.push_output(&output, ingested_at);
+                }
+            }
         }
 
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
@@ -2263,18 +2328,14 @@ impl OutputBus {
     /// method is for callers that need a bus-level retained gap marker.
     pub fn publish_gap(&self, dropped_events: usize) {
         let ingested_at = Instant::now();
-        let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> = self
-            .timelines
-            .lock()
-            .expect("timeline lock poisoned")
-            .values()
-            .cloned()
-            .collect();
-        for state in timeline_states {
-            state
-                .lock()
-                .expect("timeline lock poisoned")
-                .push_gap(dropped_events, ingested_at);
+        if let Ok(timelines) = self.timelines.lock() {
+            let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> =
+                timelines.values().cloned().collect();
+            for state in timeline_states {
+                if let Ok(mut state) = state.lock() {
+                    state.push_gap(dropped_events, ingested_at);
+                }
+            }
         }
     }
 
@@ -2288,18 +2349,14 @@ impl OutputBus {
     /// continuity was broken, even under severe backpressure.
     pub fn publish_discontinuity(&self, reason: &str) {
         let ingested_at = Instant::now();
-        let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> = self
-            .timelines
-            .lock()
-            .expect("timeline lock poisoned")
-            .values()
-            .cloned()
-            .collect();
-        for state in timeline_states {
-            state
-                .lock()
-                .expect("timeline lock poisoned")
-                .push_discontinuity(reason, ingested_at);
+        if let Ok(timelines) = self.timelines.lock() {
+            let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> =
+                timelines.values().cloned().collect();
+            for state in timeline_states {
+                if let Ok(mut state) = state.lock() {
+                    state.push_discontinuity(reason, ingested_at);
+                }
+            }
         }
 
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
@@ -2656,22 +2713,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            bus.timelines(),
+            bus.timelines().unwrap(),
             vec!["all".to_string(), "build".to_string()]
         );
         bus.publish(make_output("h", "build", "%1", "compile", 1));
         bus.publish(make_output("h", "review", "%2", "check", 1));
 
-        let all_page = all.entries_after(TimelineCursor::default(), 0).await;
+        let all_page = all
+            .entries_after(TimelineCursor::default(), 0)
+            .await
+            .unwrap();
         assert_eq!(all_page.entries.len(), 2);
         assert_eq!(all_page.cursor.next_sequence, 3);
 
-        let build_page = build.entries_after(TimelineCursor::default(), 0).await;
+        let build_page = build
+            .entries_after(TimelineCursor::default(), 0)
+            .await
+            .unwrap();
         assert_eq!(build_page.entries.len(), 1);
         assert_eq!(build_page.entries[0].session.as_deref(), Some("build"));
         assert_eq!(build_page.entries[0].content.as_deref(), Some("compile"));
 
-        let none = build.entries_after(build_page.cursor, 0).await;
+        let none = build.entries_after(build_page.cursor, 0).await.unwrap();
         assert!(none.entries.is_empty());
     }
 
@@ -2704,7 +2767,7 @@ mod tests {
         bus.publish(a);
         bus.publish(late);
 
-        let page = timeline.latest(0).await;
+        let page = timeline.latest(0).await.unwrap();
         let contents: Vec<&str> = page
             .entries
             .iter()
@@ -2715,8 +2778,118 @@ mod tests {
 
         let rendered = timeline
             .render_after(TimelineCursor::default(), RenderOptions { max_chars: 0 })
-            .await;
+            .await
+            .unwrap();
         assert!(rendered.text.contains("[late]"));
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_timestamp_merge_cursor_uses_max_sequence() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "cursor",
+                TimelineOptions {
+                    ordering: TimelineOrdering::TimestampMerge {
+                        reorder_window: Duration::from_millis(100),
+                        late_event_policy: LateEventPolicy::AppendWithMarker,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let base = Instant::now();
+        let mut b = make_output("h", "b", "%2", "second", 1);
+        b.timestamp = base + Duration::from_millis(20);
+        let mut a = make_output("h", "a", "%1", "first", 1);
+        a.timestamp = base + Duration::from_millis(10);
+
+        bus.publish(b);
+        bus.publish(a);
+
+        let page = timeline
+            .entries_after(TimelineCursor::default(), 0)
+            .await
+            .unwrap();
+        let sequences: Vec<u64> = page.entries.iter().map(|entry| entry.sequence).collect();
+        assert_eq!(sequences, vec![2, 1]);
+        assert_eq!(page.cursor.next_sequence, 3);
+
+        let next = timeline.entries_after(page.cursor, 0).await.unwrap();
+        assert!(next.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_latest_cursor_uses_max_sequence() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "latest-cursor",
+                TimelineOptions {
+                    ordering: TimelineOrdering::TimestampMerge {
+                        reorder_window: Duration::from_millis(100),
+                        late_event_policy: LateEventPolicy::AppendWithMarker,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let base = Instant::now();
+        let mut b = make_output("h", "b", "%2", "second", 1);
+        b.timestamp = base + Duration::from_millis(20);
+        let mut a = make_output("h", "a", "%1", "first", 1);
+        a.timestamp = base + Duration::from_millis(10);
+
+        bus.publish(b);
+        bus.publish(a);
+
+        let page = timeline.latest(0).await.unwrap();
+        let sequences: Vec<u64> = page.entries.iter().map(|entry| entry.sequence).collect();
+        assert_eq!(sequences, vec![2, 1]);
+        assert_eq!(page.cursor.next_sequence, 3);
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_render_after_cursor_stops_at_rendered_entries() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "render-cursor",
+                TimelineOptions {
+                    label_format: LabelFormat::Prompt,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        bus.publish(make_output("h", "s", "%1", "one", 1));
+        bus.publish(make_output("h", "s", "%1", "two", 2));
+        bus.publish(make_output("h", "s", "%1", "three", 3));
+
+        let first_entry_chars =
+            timeline.latest(0).await.unwrap().entries[0].rendered_chars(&LabelFormat::Prompt);
+        let page = timeline
+            .render_after(
+                TimelineCursor::default(),
+                RenderOptions {
+                    max_chars: first_entry_chars,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(page.text.contains("one"));
+        assert!(!page.text.contains("two"));
+        assert_eq!(page.cursor.next_sequence, 2);
+
+        let next = timeline
+            .render_after(page.cursor, RenderOptions::default())
+            .await
+            .unwrap();
+        assert!(next.text.contains("two"));
+        assert!(next.text.contains("three"));
+        assert_eq!(next.cursor.next_sequence, 4);
     }
 
     #[tokio::test]
@@ -2736,7 +2909,7 @@ mod tests {
         bus.publish_discontinuity("stream resumed");
         bus.publish(make_output("h", "s", "%1", "two", 2));
 
-        let page = timeline.latest(0).await;
+        let page = timeline.latest(0).await.unwrap();
         assert_eq!(page.entries.len(), 2);
         assert_eq!(page.omitted_entries, 1);
         assert!(matches!(

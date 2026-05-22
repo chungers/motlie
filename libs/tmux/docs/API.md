@@ -2278,19 +2278,19 @@ let timeline = bus.create_timeline(
 )?;
 
 let mut cursor = TimelineCursor::default();
-let page = timeline.entries_after(cursor, 200).await;
+let page = timeline.entries_after(cursor, 200).await?;
 cursor = page.cursor;
 
 let rendered = timeline
     .render_after(cursor, RenderOptions { max_chars: 20_000 })
-    .await;
+    .await?;
 ```
 
 Timeline management lives on the bus:
 
 ```rust
-let handle = bus.timeline("review-round-17");
-let names = bus.timelines();
+let handle = bus.timeline("review-round-17")?;
+let names = bus.timelines()?;
 bus.remove_timeline("review-round-17")?;
 ```
 
@@ -2298,7 +2298,7 @@ bus.remove_timeline("review-round-17")?;
 
 ```rust
 let timeline = fleet.create_timeline("all-agents", TimelineOptions::default())?;
-let same = fleet.timeline("all-agents");
+let same = fleet.timeline("all-agents")?;
 fleet.remove_timeline("all-agents")?;
 ```
 
@@ -2318,10 +2318,13 @@ Ordering modes:
 
 Queries return stable cursors for incremental polling. `entries_after(cursor,
 limit)` fetches retained entries with `sequence >= cursor.next_sequence` and
-returns the next cursor. `latest(limit)` returns the newest retained entries.
-`render_after(cursor, opts)` returns prompt-ready text in `Interleaved` or
-`PerSource` mode. Pages include `omitted_entries` so callers can detect when
-ring retention has dropped older entries.
+returns the next cursor based on the highest sequence actually returned, even
+when timestamp ordering displays entries out of sequence-number order.
+`latest(limit)` returns the newest retained entries. `render_after(cursor,
+opts)` returns prompt-ready text in `Interleaved` or `PerSource` mode and only
+advances the cursor through entries represented in the rendered text, so a
+character cap cannot skip unrendered entries. Pages include `omitted_entries`
+so callers can detect when ring retention has dropped older entries.
 
 `OutputBus::publish_discontinuity()` records discontinuity markers in every
 registered timeline. `OutputBus::publish_gap(dropped_events)` records a
@@ -2605,7 +2608,7 @@ assert!(issues.is_empty());
 | `MonitorExitReason` | Enum: `Stopped`, `ConnectionLost` — returned by `SessionMonitor::run()` |
 | `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, timeline management, `unsubscribe()`, `shutdown()` |
 | `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()`, `.filter_fn()`, `.history()` |
-| `TimelineHandle` | Bus-owned retained timeline — `entries_after()`, `latest()`, `render_after()` |
+| `TimelineHandle` | Bus-owned retained timeline — fallible `entries_after()`, `latest()`, `render_after()` |
 | `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
 | `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }`, `Discontinuity { reason }` |
