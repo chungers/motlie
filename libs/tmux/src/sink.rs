@@ -239,7 +239,7 @@ pub struct TimelineEntry {
 
 impl TimelineEntry {
     fn rendered_chars(&self, label_format: &LabelFormat) -> usize {
-        self.render(label_format).len()
+        self.render(label_format).chars().count()
     }
 
     fn render(&self, label_format: &LabelFormat) -> String {
@@ -291,6 +291,19 @@ pub struct TimelineRenderPage {
 
 fn timeline_lock_error() -> Error {
     Error::State("timeline lock poisoned".to_string())
+}
+
+fn char_count(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn truncate_to_chars(text: &mut String, max_chars: usize) {
+    if max_chars == 0 {
+        return;
+    }
+    if let Some((byte_idx, _)) = text.char_indices().nth(max_chars) {
+        text.truncate(byte_idx);
+    }
 }
 
 /// Source-routing filter (routing only, no content matching — DC24).
@@ -1964,11 +1977,12 @@ impl TimelineState {
                     max_chars: usize::MAX,
                 },
             );
-            if candidate_text.len() > cap && !selected.is_empty() {
+            let candidate_chars = char_count(&candidate_text);
+            if candidate_chars > cap && !selected.is_empty() {
                 break;
             }
             selected = candidate;
-            if candidate_text.len() >= cap {
+            if candidate_chars >= cap {
                 break;
             }
         }
@@ -2049,8 +2063,8 @@ impl TimelineState {
 
     fn enforce_render_cap(&self, text: &mut String, opts: RenderOptions) {
         let cap = self.render_cap(opts);
-        if cap > 0 && text.len() > cap {
-            text.truncate(cap);
+        if cap > 0 && char_count(text) > cap {
+            truncate_to_chars(text, cap);
         }
     }
 }
@@ -2890,6 +2904,41 @@ mod tests {
         assert!(next.text.contains("two"));
         assert!(next.text.contains("three"));
         assert_eq!(next.cursor.next_sequence, 4);
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_render_cap_handles_non_ascii_without_panic() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "unicode-render",
+                TimelineOptions {
+                    label_format: LabelFormat::Prompt,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        bus.publish(make_output("h", "s", "%1", "éé", 1));
+
+        let full = timeline
+            .render_after(TimelineCursor::default(), RenderOptions::default())
+            .await
+            .unwrap();
+        let cap = full
+            .text
+            .chars()
+            .position(|ch| ch == 'é')
+            .map(|idx| idx + 1)
+            .unwrap();
+
+        let capped = timeline
+            .render_after(TimelineCursor::default(), RenderOptions { max_chars: cap })
+            .await
+            .unwrap();
+        assert_eq!(char_count(&capped.text), cap);
+        assert!(capped.text.ends_with('é'));
+        assert!(!capped.text.ends_with("éé"));
     }
 
     #[tokio::test]
