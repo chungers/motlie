@@ -1,10 +1,10 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use cel_cxx::{Activation, Env, Value};
 use motlie_model::{
-    ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart, GenerationParams, Tool, ToolChoice,
-    ToolName,
+    ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart, GenerationParams, ThinkingMode,
+    Tool, ToolChoice, ToolName,
 };
-use motlie_models::{tool_list, ToolDispatch, ToolList};
+use motlie_models::{ToolDispatch, ToolList, tool_list};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -14,13 +14,16 @@ use std::time::Instant;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WeatherArgs {
     pub city: String,
+    /// Temperature unit. Prefer lowercase `fahrenheit` or `celsius`.
     pub units: TemperatureUnits,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TemperatureUnits {
+    #[serde(alias = "Celsius", alias = "C", alias = "c")]
     Celsius,
+    #[serde(alias = "Fahrenheit", alias = "F", alias = "f")]
     Fahrenheit,
 }
 
@@ -187,16 +190,35 @@ pub fn demo_tools() -> impl ToolList {
     tool_list!(WeatherTool, EvaluateMathExpressionTool)
 }
 
-pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
+#[derive(Clone, Copy, Debug)]
+pub struct ToolDemoOptions<'a> {
+    pub generation_defaults: &'a GenerationParams,
+    pub system_prompt: Option<&'a str>,
+    pub thinking: Option<ThinkingMode>,
+}
+
+pub async fn run_tool_demo_with_options(
+    chat: &impl ChatModel,
+    options: ToolDemoOptions<'_>,
+) -> Result<()> {
     println!("\n--- tool calling ---");
 
     let tools = demo_tools();
     let tool_specs = tools.specs().context("collect demo tool specs")?;
+    let generation_params = tool_demo_generation_params(options.generation_defaults);
+    println!("tool-demo-effective-params: {generation_params:?}");
+    println!("tool-demo-thinking: {:?}", options.thinking);
+
+    let mut system_prompt = String::new();
+    if let Some(prompt) = options.system_prompt {
+        system_prompt.push_str(prompt);
+        system_prompt.push_str("\n\n");
+    }
+    system_prompt.push_str(
+        "Use tools when they are relevant. Make exactly one tool call per assistant turn. Start by calling get_weather for Seattle only. For get_weather, pass units as the lowercase string `fahrenheit`. After each weather result, call get_weather for the next city until Seattle, Portland, and San Francisco are complete. Then call evaluate_math_expression for the average. Do not calculate averages mentally. CEL requires matching numeric types, so divide decimal temperature values by 3.0, not 3. After all tool results are available, answer in one concise sentence.",
+    );
     let mut messages = vec![
-        ChatMessage::new(
-            ChatRole::System,
-            "Use tools when they are relevant. Make exactly one tool call per assistant turn. Start by calling get_weather for Seattle only. After each weather result, call get_weather for the next city until Seattle, Portland, and San Francisco are complete. Then call evaluate_math_expression for the average. Do not calculate averages mentally. CEL requires matching numeric types, so divide decimal temperature values by 3.0, not 3. After all tool results are available, answer in one concise sentence.",
-        ),
+        ChatMessage::new(ChatRole::System, system_prompt),
         ChatMessage::new(
             ChatRole::User,
             "Calculate the average current fahrenheit temperature for Seattle, Portland, and San Francisco. Use get_weather once for each city. After the weather results are available, call evaluate_math_expression to calculate the average with a CEL expression that uses 3.0 as the divisor.",
@@ -211,10 +233,10 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
         let response = chat
             .generate(ChatRequest {
                 messages: messages.clone(),
-                params: tool_demo_generation_params(),
+                params: generation_params.clone(),
                 tools: tool_specs.clone(),
                 tool_choice: Some(ToolChoice::Auto),
-                ..Default::default()
+                thinking: options.thinking,
             })
             .await
             .with_context(|| format!("tool-call round {round} generation should succeed"))?;
@@ -222,6 +244,7 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
 
         println!("tool-round: {round}");
         println!("tool-request-response: {}", response.content);
+        print_thinking_trace("tool-request", &response.reasoning);
         println!("tool-call-count: {}", response.tool_calls.len());
         println!(
             "tool-request-latency-ms: {:.2}",
@@ -279,10 +302,10 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
             let response = chat
                 .generate(ChatRequest {
                     messages,
-                    params: tool_demo_generation_params(),
+                    params: generation_params,
                     tools: tool_specs,
                     tool_choice: Some(ToolChoice::None),
-                    ..Default::default()
+                    thinking: options.thinking,
                 })
                 .await
                 .context("final answer after tool results should succeed")?;
@@ -300,15 +323,30 @@ pub async fn run_tool_demo(chat: &impl ChatModel) -> Result<()> {
     }
 
     println!("tool-final-response: {}", final_response.content);
+    print_thinking_trace("tool-final", &final_response.reasoning);
 
     Ok(())
 }
 
-pub fn tool_demo_generation_params() -> GenerationParams {
-    GenerationParams {
+pub fn tool_demo_generation_params(defaults: &GenerationParams) -> GenerationParams {
+    let mut params = GenerationParams {
         max_tokens: Some(192),
-        temperature: Some(0.2),
         ..Default::default()
+    }
+    .with_defaults(defaults);
+    if params.temperature.is_none() {
+        params.temperature = Some(0.2);
+    }
+    params
+}
+
+fn print_thinking_trace(label: &str, reasoning: &Option<String>) {
+    match reasoning
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(trace) => println!("{label}-thinking-trace: {trace}"),
+        None => println!("{label}-thinking-trace: none"),
     }
 }
 
