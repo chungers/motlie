@@ -146,7 +146,7 @@ impl Fleet {
     }
 
     /// Look up a named timeline on the shared `OutputBus`.
-    pub fn timeline(&self, name: &str) -> Option<TimelineHandle> {
+    pub fn timeline(&self, name: &str) -> Result<Option<TimelineHandle>> {
         self.bus.timeline(name)
     }
 
