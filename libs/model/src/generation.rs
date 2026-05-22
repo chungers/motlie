@@ -10,6 +10,31 @@ pub struct GenerationParams {
     pub stop_sequences: Vec<String>,
 }
 
+impl GenerationParams {
+    /// Fill unset fields from `defaults`.
+    ///
+    /// Scalar options keep the caller-provided value when present. Stop
+    /// sequences use the caller list when non-empty and fall back to defaults
+    /// only when the caller list is empty.
+    pub fn with_defaults(mut self, defaults: &Self) -> Self {
+        self.max_tokens = self.max_tokens.or(defaults.max_tokens);
+        self.temperature = self.temperature.or(defaults.temperature);
+        self.top_p = self.top_p.or(defaults.top_p);
+        if self.stop_sequences.is_empty() {
+            self.stop_sequences = defaults.stop_sequences.clone();
+        }
+        self
+    }
+}
+
+/// Backend hint for models that support optional thinking/reasoning tokens.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ThinkingMode {
+    #[default]
+    Disabled,
+    Auto,
+}
+
 /// Request for chat-style generation.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChatRequest {
@@ -17,6 +42,7 @@ pub struct ChatRequest {
     pub params: GenerationParams,
     pub tools: Vec<ToolSpec>,
     pub tool_choice: Option<ToolChoice>,
+    pub thinking: Option<ThinkingMode>,
 }
 
 impl ChatRequest {
@@ -126,6 +152,45 @@ mod tests {
         let request = ChatRequest::new(vec![ChatMessage::assistant_tool_calls(vec![call])]);
 
         assert!(request.requires_tool_use());
+    }
+
+    #[test]
+    fn generation_params_keep_explicit_values_over_defaults() {
+        let params = GenerationParams {
+            max_tokens: Some(64),
+            temperature: Some(0.2),
+            stop_sequences: vec!["caller-stop".to_string()],
+            ..Default::default()
+        };
+        let defaults = GenerationParams {
+            max_tokens: Some(128),
+            temperature: Some(1.0),
+            top_p: Some(0.95),
+            stop_sequences: vec!["default-stop".to_string()],
+        };
+
+        let merged = params.with_defaults(&defaults);
+
+        assert_eq!(merged.max_tokens, Some(64));
+        assert_eq!(merged.temperature, Some(0.2));
+        assert_eq!(merged.top_p, Some(0.95));
+        assert_eq!(merged.stop_sequences, ["caller-stop"]);
+    }
+
+    #[test]
+    fn generation_params_use_default_stop_sequences_when_caller_has_none() {
+        let merged = GenerationParams {
+            max_tokens: Some(64),
+            ..Default::default()
+        }
+        .with_defaults(&GenerationParams {
+            max_tokens: Some(128),
+            stop_sequences: vec!["<end>".to_string()],
+            ..Default::default()
+        });
+
+        assert_eq!(merged.max_tokens, Some(64));
+        assert_eq!(merged.stop_sequences, ["<end>"]);
     }
 
     #[test]
