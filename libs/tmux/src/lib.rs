@@ -35,9 +35,10 @@ pub use keys::{KeySequence, SpecialKey};
 pub use monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitorHandle};
 pub use sink::{
     CallbackSink, FlushPolicy, HistoryEntry, HistoryHandle, HistoryOptions, HistorySnapshot,
-    JoinedStream, LabelFormat, OutputBus, PipeHandle, PollHistory, RenderMode, SinkEvent,
-    SinkFilter, SinkId, SinkKind, SourceAccumulator, SourceLabel, StreamChunk, Subscription,
-    TargetOutput,
+    JoinedStream, LabelFormat, LateEventPolicy, OutputBus, PipeHandle, PollHistory, RenderMode,
+    RenderOptions, SinkEvent, SinkFilter, SinkId, SinkKind, SourceAccumulator, SourceLabel,
+    StreamChunk, Subscription, TargetOutput, TimelineCursor, TimelineEntry, TimelineEntryKind,
+    TimelineHandle, TimelineOptions, TimelineOrdering, TimelinePage, TimelineRenderPage,
 };
 pub use sinks::stdio::{StdioFormat, StdioSink};
 pub use transport::{

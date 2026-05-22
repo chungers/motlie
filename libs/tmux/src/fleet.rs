@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::host::{HostHandle, Target};
 use crate::keys::KeySequence;
 use crate::monitor::{MonitorHandle, MonitorHealth, SessionMonitorHandle};
-use crate::sink::OutputBus;
+use crate::sink::{OutputBus, TimelineHandle, TimelineOptions};
 use crate::types::TargetSpec;
 
 // ---------------------------------------------------------------------------
@@ -134,6 +134,25 @@ impl Fleet {
     /// The shared `OutputBus` aggregating output from all hosts.
     pub fn output_bus(&self) -> Arc<OutputBus> {
         self.bus.clone()
+    }
+
+    /// Create a named timeline on the shared `OutputBus`.
+    pub fn create_timeline(
+        &self,
+        name: impl Into<String>,
+        opts: TimelineOptions,
+    ) -> Result<TimelineHandle> {
+        self.bus.create_timeline(name, opts)
+    }
+
+    /// Look up a named timeline on the shared `OutputBus`.
+    pub fn timeline(&self, name: &str) -> Option<TimelineHandle> {
+        self.bus.timeline(name)
+    }
+
+    /// Remove a named timeline from the shared `OutputBus`.
+    pub fn remove_timeline(&self, name: &str) -> Result<()> {
+        self.bus.remove_timeline(name)
     }
 
     /// Status of a registered host with per-session health (DC29, 4.2d).
