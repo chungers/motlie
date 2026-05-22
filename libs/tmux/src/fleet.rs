@@ -145,6 +145,15 @@ impl Fleet {
         self.bus.create_timeline(name, opts)
     }
 
+    /// Return an existing timeline or create it on the shared `OutputBus`.
+    pub fn create_or_get_timeline(
+        &self,
+        name: impl Into<String>,
+        opts: TimelineOptions,
+    ) -> Result<TimelineHandle> {
+        self.bus.create_or_get_timeline(name, opts)
+    }
+
     /// Look up a named timeline on the shared `OutputBus`.
     pub fn timeline(&self, name: &str) -> Result<Option<TimelineHandle>> {
         self.bus.timeline(name)
@@ -153,6 +162,11 @@ impl Fleet {
     /// Remove a named timeline from the shared `OutputBus`.
     pub fn remove_timeline(&self, name: &str) -> Result<()> {
         self.bus.remove_timeline(name)
+    }
+
+    /// Remove idle timelines from the shared `OutputBus`.
+    pub fn remove_idle_timelines(&self, idle_for: std::time::Duration) -> Result<Vec<String>> {
+        self.bus.remove_idle_timelines(idle_for)
     }
 
     /// Status of a registered host with per-session health (DC29, 4.2d).

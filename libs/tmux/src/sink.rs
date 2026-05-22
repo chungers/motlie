@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::{Error, Result};
 use tokio::sync::{mpsc, Mutex};
@@ -47,7 +47,7 @@ pub struct TargetOutput {
     pub sequence: u64,
     /// Fidelity metadata.
     pub fidelity: OutputFidelity,
-    /// Timestamp of emission.
+    /// Daemon-side receipt timestamp for this output frame.
     pub timestamp: Instant,
 }
 
@@ -127,9 +127,9 @@ pub enum TimelineOrdering {
     /// Preserve bus ingest order.
     #[default]
     Arrival,
-    /// Insert output by emission timestamp within a bounded reorder window.
+    /// Insert output by daemon-side receipt timestamp within a bounded reorder window.
     TimestampMerge {
-        /// Maximum age behind the newest observed emission timestamp before an
+        /// Maximum age behind the newest observed receipt timestamp before an
         /// event is considered late.
         reorder_window: Duration,
         /// How late arrivals are represented.
@@ -166,6 +166,62 @@ impl Default for TimelineOptions {
             render_mode: RenderMode::Interleaved,
             label_format: LabelFormat::Bracketed,
             include_omission_marker: true,
+        }
+    }
+}
+
+/// Source identity for timeline gap and discontinuity markers.
+///
+/// Empty scope is a global marker and only matches unfiltered timelines. Scoped
+/// markers match timelines using the same [`SinkFilter`] rules as output data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimelineMarkerScope {
+    /// Host alias associated with the marker.
+    pub host: Option<String>,
+    /// Session name associated with the marker.
+    pub session: Option<String>,
+    /// Window target string associated with the marker.
+    pub window: Option<String>,
+    /// Pane id or target string associated with the marker.
+    pub pane: Option<String>,
+}
+
+impl TimelineMarkerScope {
+    /// Global marker for unfiltered timelines.
+    pub fn global() -> Self {
+        Self::default()
+    }
+
+    /// Marker scoped to a host alias.
+    pub fn for_host(host: &str) -> Self {
+        Self {
+            host: Some(host.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a session on any host.
+    pub fn for_session(session: &str) -> Self {
+        Self {
+            session: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a host/session pair.
+    pub fn for_host_session(host: &str, session: &str) -> Self {
+        Self {
+            host: Some(host.to_string()),
+            session: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a pane id or target string.
+    pub fn for_pane(pane: &str) -> Self {
+        Self {
+            pane: Some(pane.to_string()),
+            ..Default::default()
         }
     }
 }
@@ -231,10 +287,14 @@ pub struct TimelineEntry {
     pub content: Option<String>,
     /// Per-source output sequence for data entries.
     pub output_sequence: Option<u64>,
-    /// Emission timestamp from `TargetOutput`.
-    pub emitted_at: Option<Instant>,
+    /// Daemon-side receipt timestamp from `TargetOutput`.
+    pub received_at: Option<Instant>,
+    /// Wall-clock time captured when this timeline observed the output.
+    pub received_at_wall: Option<SystemTime>,
     /// Bus ingest timestamp.
     pub ingested_at: Instant,
+    /// Wall-clock bus ingest timestamp for JSONL-friendly consumers.
+    pub ingested_at_wall: SystemTime,
     /// True when timestamp ordering observed this entry outside the reorder window.
     pub late: bool,
 }
@@ -242,6 +302,13 @@ pub struct TimelineEntry {
 impl TimelineEntry {
     fn rendered_chars(&self, label_format: &LabelFormat) -> usize {
         self.render(label_format).chars().count()
+    }
+
+    fn render_source_key(&self) -> String {
+        self.source
+            .as_ref()
+            .map(SourceLabel::short)
+            .unwrap_or_else(|| "__system__".to_string())
     }
 
     fn render(&self, label_format: &LabelFormat) -> String {
@@ -291,8 +358,26 @@ pub struct TimelineRenderPage {
     pub omitted_entries: usize,
 }
 
+type TimelineStateHandle = Arc<std::sync::Mutex<TimelineState>>;
+type TimelineRegistry = Arc<std::sync::Mutex<HashMap<String, TimelineStateHandle>>>;
+type WeakTimelineRegistry = Weak<std::sync::Mutex<HashMap<String, TimelineStateHandle>>>;
+
 fn timeline_lock_error() -> Error {
     Error::State("timeline lock poisoned".to_string())
+}
+
+fn timeline_stale_error(name: &str, generation: u64) -> Error {
+    Error::State(format!(
+        "timeline '{}' generation {} is detached",
+        name, generation
+    ))
+}
+
+fn compile_timeline_filters(filters: &[SinkFilter]) -> Result<Vec<CompiledSinkFilter>> {
+    filters
+        .iter()
+        .map(CompiledSinkFilter::compile)
+        .collect::<Result<Vec<_>>>()
 }
 
 fn char_count(text: &str) -> usize {
@@ -419,6 +504,40 @@ impl CompiledSinkFilter {
             };
             if !matched {
                 return false;
+            }
+        }
+        true
+    }
+
+    fn matches_marker_scope(&self, scope: &TimelineMarkerScope) -> bool {
+        if let Some(ref re) = self.host {
+            match scope.host.as_deref() {
+                Some(host) if re.is_match(host) => {}
+                _ => return false,
+            }
+        }
+        if let Some(ref re) = self.session {
+            match scope.session.as_deref() {
+                Some(session) if re.is_match(session) => {}
+                _ => return false,
+            }
+        }
+        if let Some(ref re) = self.window {
+            let value = scope.window.as_deref().or(scope.session.as_deref());
+            match value {
+                Some(window) if re.is_match(window) => {}
+                _ => return false,
+            }
+        }
+        if let Some(ref re) = self.pane {
+            let value = scope
+                .pane
+                .as_deref()
+                .or(scope.window.as_deref())
+                .or(scope.session.as_deref());
+            match value {
+                Some(pane) if re.is_match(pane) => {}
+                _ => return false,
             }
         }
         true
@@ -1746,16 +1865,15 @@ struct TimelineState {
     omitted_entries: usize,
     next_sequence: u64,
     discontinuity_epoch: u64,
-    newest_emitted_at: Option<Instant>,
+    newest_received_at: Option<Instant>,
+    generation: u64,
+    detached: bool,
+    last_accessed_at: Instant,
 }
 
 impl TimelineState {
-    fn new(options: TimelineOptions) -> Result<Self> {
-        let filters = options
-            .filters
-            .iter()
-            .map(CompiledSinkFilter::compile)
-            .collect::<Result<Vec<_>>>()?;
+    fn new(options: TimelineOptions, generation: u64) -> Result<Self> {
+        let filters = compile_timeline_filters(&options.filters)?;
         Ok(TimelineState {
             entries: VecDeque::new(),
             filters,
@@ -1764,12 +1882,43 @@ impl TimelineState {
             omitted_entries: 0,
             next_sequence: 1,
             discontinuity_epoch: 0,
-            newest_emitted_at: None,
+            newest_received_at: None,
+            generation,
+            detached: false,
+            last_accessed_at: Instant::now(),
         })
+    }
+
+    fn touch(&mut self) {
+        self.last_accessed_at = Instant::now();
+    }
+
+    fn detach(&mut self) {
+        self.detached = true;
     }
 
     fn matches(&self, output: &TargetOutput) -> bool {
         self.filters.is_empty() || self.filters.iter().any(|f| f.matches(output))
+    }
+
+    fn matches_marker_scope(&self, scope: &TimelineMarkerScope) -> bool {
+        self.filters.is_empty() || self.filters.iter().any(|f| f.matches_marker_scope(scope))
+    }
+
+    fn set_filters(&mut self, filters: Vec<SinkFilter>) -> Result<()> {
+        let compiled = compile_timeline_filters(&filters)?;
+        self.options.filters = filters;
+        self.filters = compiled;
+        self.touch();
+        Ok(())
+    }
+
+    fn add_filter(&mut self, filter: SinkFilter) -> Result<()> {
+        let compiled = CompiledSinkFilter::compile(&filter)?;
+        self.options.filters.push(filter);
+        self.filters.push(compiled);
+        self.touch();
+        Ok(())
     }
 
     fn push_output(&mut self, output: &TargetOutput, ingested_at: Instant) {
@@ -1777,20 +1926,21 @@ impl TimelineState {
             return;
         }
 
-        let emitted_at = output.timestamp;
+        let received_at = output.timestamp;
+        let ingested_at_wall = SystemTime::now();
         let mut late = false;
-        if let Some(newest) = self.newest_emitted_at {
-            if emitted_at > newest {
-                self.newest_emitted_at = Some(emitted_at);
+        if let Some(newest) = self.newest_received_at {
+            if received_at > newest {
+                self.newest_received_at = Some(received_at);
             } else if let TimelineOrdering::TimestampMerge { reorder_window, .. } =
                 self.options.ordering
             {
                 late = newest
-                    .checked_duration_since(emitted_at)
+                    .checked_duration_since(received_at)
                     .is_some_and(|age| age > reorder_window);
             }
         } else {
-            self.newest_emitted_at = Some(emitted_at);
+            self.newest_received_at = Some(received_at);
         }
 
         let entry = TimelineEntry {
@@ -1804,8 +1954,10 @@ impl TimelineState {
             pane_id: output.pane_id().map(str::to_string),
             content: Some(output.content.clone()),
             output_sequence: Some(output.sequence),
-            emitted_at: Some(emitted_at),
+            received_at: Some(received_at),
+            received_at_wall: Some(ingested_at_wall),
             ingested_at,
+            ingested_at_wall,
             late,
         };
         self.next_sequence += 1;
@@ -1813,6 +1965,7 @@ impl TimelineState {
     }
 
     fn push_gap(&mut self, dropped_events: usize, ingested_at: Instant) {
+        let ingested_at_wall = SystemTime::now();
         let entry = TimelineEntry {
             sequence: self.next_sequence,
             discontinuity_epoch: self.discontinuity_epoch,
@@ -1824,8 +1977,10 @@ impl TimelineState {
             pane_id: None,
             content: None,
             output_sequence: None,
-            emitted_at: None,
+            received_at: None,
+            received_at_wall: None,
             ingested_at,
+            ingested_at_wall,
             late: false,
         };
         self.next_sequence += 1;
@@ -1833,6 +1988,7 @@ impl TimelineState {
     }
 
     fn push_discontinuity(&mut self, reason: &str, ingested_at: Instant) {
+        let ingested_at_wall = SystemTime::now();
         let entry = TimelineEntry {
             sequence: self.next_sequence,
             discontinuity_epoch: self.discontinuity_epoch,
@@ -1846,13 +2002,48 @@ impl TimelineState {
             pane_id: None,
             content: None,
             output_sequence: None,
-            emitted_at: None,
+            received_at: None,
+            received_at_wall: None,
             ingested_at,
+            ingested_at_wall,
             late: false,
         };
         self.next_sequence += 1;
         self.discontinuity_epoch += 1;
         self.insert_entry(entry);
+    }
+
+    fn ingest_historical(&mut self, entries: Vec<TimelineEntry>) -> TimelinePage {
+        let cursor = TimelineCursor {
+            next_sequence: self.next_sequence,
+            seen_sequences: Vec::new(),
+        };
+        let mut accepted = Vec::new();
+        for mut entry in entries {
+            entry.sequence = self.next_sequence;
+            entry.discontinuity_epoch = self.discontinuity_epoch;
+            self.next_sequence += 1;
+            if let Some(received_at) = entry.received_at {
+                if self
+                    .newest_received_at
+                    .is_none_or(|newest| received_at > newest)
+                {
+                    self.newest_received_at = Some(received_at);
+                }
+            }
+            if matches!(entry.kind, TimelineEntryKind::Discontinuity { .. }) {
+                self.discontinuity_epoch += 1;
+            }
+            self.insert_entry(entry.clone());
+            accepted.push(entry);
+        }
+        self.touch();
+        let cursor = self.advance_cursor(&cursor, &accepted);
+        TimelinePage {
+            entries: accepted,
+            cursor,
+            omitted_entries: self.omitted_entries,
+        }
     }
 
     fn insert_entry(&mut self, entry: TimelineEntry) {
@@ -1862,16 +2053,12 @@ impl TimelineState {
             TimelineOrdering::TimestampMerge { .. } => {
                 if entry.late || !matches!(entry.kind, TimelineEntryKind::Output) {
                     self.entries.push_back(entry);
-                } else if let Some(emitted_at) = entry.emitted_at {
-                    let pos = self.entries.iter().position(|existing| {
-                        existing
-                            .emitted_at
-                            .is_some_and(|existing_ts| existing_ts > emitted_at)
-                    });
-                    if let Some(pos) = pos {
-                        self.entries.insert(pos, entry);
-                    } else {
+                } else if let Some(received_at) = entry.received_at {
+                    let pos = self.timestamp_insert_position(received_at);
+                    if pos == self.entries.len() {
                         self.entries.push_back(entry);
+                    } else {
+                        self.entries.insert(pos, entry);
                     }
                 } else {
                     self.entries.push_back(entry);
@@ -1880,6 +2067,25 @@ impl TimelineState {
         }
         self.rendered_chars += chars;
         self.trim();
+    }
+
+    fn timestamp_insert_position(&self, received_at: Instant) -> usize {
+        if let Some(back) = self.entries.back() {
+            if back.received_at.is_none_or(|ts| ts <= received_at) {
+                return self.entries.len();
+            }
+        }
+
+        for (idx, existing) in self.entries.iter().enumerate().rev() {
+            if existing.received_at.is_some_and(|ts| ts <= received_at) {
+                return idx + 1;
+            }
+        }
+
+        self.entries
+            .iter()
+            .position(|entry| entry.received_at.is_some())
+            .unwrap_or(self.entries.len())
     }
 
     fn trim(&mut self) {
@@ -2007,28 +2213,79 @@ impl TimelineState {
             return (entries, next_cursor);
         }
 
+        let selected = match self.options.render_mode {
+            RenderMode::Interleaved => self.select_interleaved_entries(entries, cap),
+            RenderMode::PerSource => self.select_per_source_entries(entries, cap),
+        };
+        let next_cursor = self.advance_cursor(&cursor, &selected);
+        (selected, next_cursor)
+    }
+
+    fn select_interleaved_entries(
+        &self,
+        entries: Vec<TimelineEntry>,
+        cap: usize,
+    ) -> Vec<TimelineEntry> {
         let mut selected = Vec::new();
+        let mut rendered_chars = self.omission_marker_chars();
         for entry in entries {
-            let mut candidate = selected.clone();
-            candidate.push(entry);
-            let candidate_text = self.render_entries(
-                &candidate,
-                RenderOptions {
-                    max_chars: usize::MAX,
-                },
-            );
-            let candidate_chars = char_count(&candidate_text);
+            let entry_chars = entry.rendered_chars(&self.options.label_format);
+            let candidate_chars = rendered_chars.saturating_add(entry_chars);
             if candidate_chars > cap && !selected.is_empty() {
                 break;
             }
-            selected = candidate;
-            if candidate_chars >= cap {
+            selected.push(entry);
+            rendered_chars = candidate_chars;
+            if rendered_chars >= cap {
                 break;
             }
         }
+        selected
+    }
 
-        let next_cursor = self.advance_cursor(&cursor, &selected);
-        (selected, next_cursor)
+    fn select_per_source_entries(
+        &self,
+        entries: Vec<TimelineEntry>,
+        cap: usize,
+    ) -> Vec<TimelineEntry> {
+        let mut selected = Vec::new();
+        let mut rendered_chars = self.omission_marker_chars();
+        let mut seen_sources = HashSet::new();
+        for entry in entries {
+            let source = entry.render_source_key();
+            let source_overhead = if seen_sources.contains(&source) {
+                0
+            } else {
+                format!("=== {} ===\n", source).chars().count() + 1
+            };
+            let entry_chars = entry.rendered_chars(&self.options.label_format);
+            let candidate_chars = rendered_chars
+                .saturating_add(source_overhead)
+                .saturating_add(entry_chars);
+            if candidate_chars > cap && !selected.is_empty() {
+                break;
+            }
+            seen_sources.insert(source);
+            selected.push(entry);
+            rendered_chars = candidate_chars;
+            if rendered_chars >= cap {
+                break;
+            }
+        }
+        selected
+    }
+
+    fn omission_marker_chars(&self) -> usize {
+        if self.options.include_omission_marker && self.omitted_entries > 0 {
+            format!(
+                "[... {} earlier entries omitted ...]\n",
+                self.omitted_entries
+            )
+            .chars()
+            .count()
+        } else {
+            0
+        }
     }
 
     fn render_entries(&self, entries: &[TimelineEntry], opts: RenderOptions) -> String {
@@ -2057,11 +2314,7 @@ impl TimelineState {
         let mut sections: Vec<(String, Vec<&TimelineEntry>)> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
         for entry in entries {
-            let key = entry
-                .source
-                .as_ref()
-                .map(SourceLabel::short)
-                .unwrap_or_else(|| "__system__".to_string());
+            let key = entry.render_source_key();
             if let Some(idx) = index.get(&key).copied() {
                 sections[idx].1.push(entry);
             } else {
@@ -2108,7 +2361,9 @@ impl TimelineState {
 #[derive(Clone)]
 pub struct TimelineHandle {
     name: String,
-    state: Arc<std::sync::Mutex<TimelineState>>,
+    generation: u64,
+    state: TimelineStateHandle,
+    registry: WeakTimelineRegistry,
 }
 
 impl TimelineHandle {
@@ -2117,26 +2372,72 @@ impl TimelineHandle {
         &self.name
     }
 
+    /// Timeline generation assigned by the owning bus.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, TimelineState>> {
+        let state = self.state.lock().map_err(|_| timeline_lock_error())?;
+        if state.detached || state.generation != self.generation {
+            return Err(timeline_stale_error(&self.name, self.generation));
+        }
+        Ok(state)
+    }
+
+    /// Replace source-routing filters without dropping retained entries.
+    pub async fn set_filters(&self, filters: Vec<SinkFilter>) -> Result<()> {
+        let mut state = self.lock_state()?;
+        state.set_filters(filters)
+    }
+
+    /// Add one source-routing filter without dropping retained entries.
+    pub async fn add_filter(&self, filter: SinkFilter) -> Result<()> {
+        let mut state = self.lock_state()?;
+        state.add_filter(filter)
+    }
+
+    /// Ingest already reconstructed history into this timeline.
+    ///
+    /// Supplied entries are accepted into this timeline with fresh timeline
+    /// sequence numbers so subsequent live output continues after the backfill.
+    pub async fn ingest_historical(&self, entries: Vec<TimelineEntry>) -> Result<TimelinePage> {
+        let mut state = self.lock_state()?;
+        Ok(state.ingest_historical(entries))
+    }
+
+    /// Detach this timeline from its owning bus and mark this handle stale.
+    pub fn detach(&self) -> Result<()> {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut timelines = registry.lock().map_err(|_| timeline_lock_error())?;
+            if timelines
+                .get(&self.name)
+                .is_some_and(|state| Arc::ptr_eq(state, &self.state))
+            {
+                timelines.remove(&self.name);
+            }
+        }
+        let mut state = self.state.lock().map_err(|_| timeline_lock_error())?;
+        state.detach();
+        Ok(())
+    }
+
     /// Fetch entries after a cursor. `limit == 0` returns all retained matches.
     pub async fn entries_after(
         &self,
         cursor: TimelineCursor,
         limit: usize,
     ) -> Result<TimelinePage> {
-        Ok(self
-            .state
-            .lock()
-            .map_err(|_| timeline_lock_error())?
-            .entries_after(cursor, limit))
+        let mut state = self.lock_state()?;
+        state.touch();
+        Ok(state.entries_after(cursor, limit))
     }
 
     /// Fetch the latest retained entries. `limit == 0` returns all retained entries.
     pub async fn latest(&self, limit: usize) -> Result<TimelinePage> {
-        Ok(self
-            .state
-            .lock()
-            .map_err(|_| timeline_lock_error())?
-            .latest(limit))
+        let mut state = self.lock_state()?;
+        state.touch();
+        Ok(state.latest(limit))
     }
 
     /// Render a prompt-ready window after a cursor.
@@ -2145,7 +2446,8 @@ impl TimelineHandle {
         cursor: TimelineCursor,
         opts: RenderOptions,
     ) -> Result<TimelineRenderPage> {
-        let state = self.state.lock().map_err(|_| timeline_lock_error())?;
+        let mut state = self.lock_state()?;
+        state.touch();
         let (entries, next_cursor) = state.rendered_entries_after(cursor, opts);
         let text = state.render_entries(&entries, opts);
         Ok(TimelineRenderPage {
@@ -2182,17 +2484,33 @@ struct SubEntry {
 /// All methods take `&self`.
 pub struct OutputBus {
     subscribers: std::sync::Mutex<Vec<SubEntry>>,
-    timelines: std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<TimelineState>>>>,
+    timelines: TimelineRegistry,
     next_id: AtomicU64,
+    next_timeline_generation: AtomicU64,
 }
 
 impl OutputBus {
     pub fn new() -> Self {
         OutputBus {
             subscribers: std::sync::Mutex::new(Vec::new()),
-            timelines: std::sync::Mutex::new(HashMap::new()),
+            timelines: Arc::new(std::sync::Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
+            next_timeline_generation: AtomicU64::new(1),
         }
+    }
+
+    fn make_timeline_handle(
+        &self,
+        name: String,
+        state: TimelineStateHandle,
+    ) -> Result<TimelineHandle> {
+        let generation = state.lock().map_err(|_| timeline_lock_error())?.generation;
+        Ok(TimelineHandle {
+            name,
+            generation,
+            state,
+            registry: Arc::downgrade(&self.timelines),
+        })
     }
 
     /// Create a named bus-owned timeline.
@@ -2202,7 +2520,10 @@ impl OutputBus {
         opts: TimelineOptions,
     ) -> Result<TimelineHandle> {
         let name = name.into();
-        let state = Arc::new(std::sync::Mutex::new(TimelineState::new(opts)?));
+        let generation = self
+            .next_timeline_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let state = Arc::new(std::sync::Mutex::new(TimelineState::new(opts, generation)?));
         let mut timelines = self.timelines.lock().map_err(|_| timeline_lock_error())?;
         if timelines.contains_key(&name) {
             return Err(Error::AlreadyExists(format!(
@@ -2211,30 +2532,78 @@ impl OutputBus {
             )));
         }
         timelines.insert(name.clone(), state.clone());
-        Ok(TimelineHandle { name, state })
+        self.make_timeline_handle(name, state)
+    }
+
+    /// Return an existing timeline or create it if missing.
+    pub fn create_or_get_timeline(
+        &self,
+        name: impl Into<String>,
+        opts: TimelineOptions,
+    ) -> Result<TimelineHandle> {
+        let name = name.into();
+        if let Some(handle) = self.timeline(&name)? {
+            return Ok(handle);
+        }
+
+        let generation = self
+            .next_timeline_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let state = Arc::new(std::sync::Mutex::new(TimelineState::new(opts, generation)?));
+        let mut timelines = self.timelines.lock().map_err(|_| timeline_lock_error())?;
+        if let Some(existing) = timelines.get(&name).cloned() {
+            drop(timelines);
+            return self.make_timeline_handle(name, existing);
+        }
+        timelines.insert(name.clone(), state.clone());
+        self.make_timeline_handle(name, state)
     }
 
     /// Look up a named timeline.
     pub fn timeline(&self, name: &str) -> Result<Option<TimelineHandle>> {
-        Ok(self
+        let state = self
             .timelines
             .lock()
             .map_err(|_| timeline_lock_error())?
             .get(name)
-            .cloned()
-            .map(|state| TimelineHandle {
-                name: name.to_string(),
-                state,
-            }))
+            .cloned();
+        state
+            .map(|state| self.make_timeline_handle(name.to_string(), state))
+            .transpose()
     }
 
-    /// Remove a named timeline.
+    /// Remove a named timeline and mark outstanding handles stale.
     pub fn remove_timeline(&self, name: &str) -> Result<()> {
-        let mut timelines = self.timelines.lock().map_err(|_| timeline_lock_error())?;
-        if timelines.remove(name).is_none() {
-            return Err(Error::NotFound(format!("timeline '{}' not found", name)));
-        }
+        let state = self
+            .timelines
+            .lock()
+            .map_err(|_| timeline_lock_error())?
+            .remove(name)
+            .ok_or_else(|| Error::NotFound(format!("timeline '{}' not found", name)))?;
+        state.lock().map_err(|_| timeline_lock_error())?.detach();
         Ok(())
+    }
+
+    /// Remove timelines that have not been accessed for at least `idle_for`.
+    pub fn remove_idle_timelines(&self, idle_for: Duration) -> Result<Vec<String>> {
+        let now = Instant::now();
+        let mut timelines = self.timelines.lock().map_err(|_| timeline_lock_error())?;
+        let mut removed = Vec::new();
+        let mut names = Vec::new();
+        for (name, state) in timelines.iter() {
+            let state = state.lock().map_err(|_| timeline_lock_error())?;
+            if now.duration_since(state.last_accessed_at) >= idle_for {
+                names.push(name.clone());
+            }
+        }
+        for name in names {
+            if let Some(state) = timelines.remove(&name) {
+                state.lock().map_err(|_| timeline_lock_error())?.detach();
+                removed.push(name);
+            }
+        }
+        removed.sort();
+        Ok(removed)
     }
 
     /// List timeline names.
@@ -2298,7 +2667,7 @@ impl OutputBus {
         Ok(())
     }
 
-    fn timeline_states(&self) -> Vec<Arc<std::sync::Mutex<TimelineState>>> {
+    fn timeline_states(&self) -> Vec<TimelineStateHandle> {
         self.timelines
             .lock()
             .map(|timelines| timelines.values().cloned().collect())
@@ -2374,34 +2743,55 @@ impl OutputBus {
         }
     }
 
-    /// Record a gap marker in all timelines.
-    ///
-    /// Subscriber-local backpressure still flows through `SinkEvent::Gap`; this
-    /// method is for callers that need a bus-level retained gap marker.
-    pub fn publish_gap(&self, dropped_events: usize) {
+    fn publish_timeline_gap(&self, scope: &TimelineMarkerScope, dropped_events: usize) {
         let ingested_at = Instant::now();
         for state in self.timeline_states() {
             if let Ok(mut state) = state.lock() {
-                state.push_gap(dropped_events, ingested_at);
+                if state.matches_marker_scope(scope) {
+                    state.push_gap(dropped_events, ingested_at);
+                }
             }
         }
     }
 
-    /// Broadcast a discontinuity event to all subscribers (DC29).
-    ///
-    /// Unlike `publish()`, discontinuity events bypass source-routing filters
-    /// because they are system-level signals, not content. Uses `try_send` to
-    /// avoid blocking; if a subscriber's channel is full, the miss is tracked
-    /// via `missed_discontinuities`. The next successful `publish()` delivery
-    /// will synthesize a `Discontinuity` event so that consumers always learn
-    /// continuity was broken, even under severe backpressure.
-    pub fn publish_discontinuity(&self, reason: &str) {
+    fn publish_timeline_discontinuity(&self, scope: &TimelineMarkerScope, reason: &str) {
         let ingested_at = Instant::now();
         for state in self.timeline_states() {
             if let Ok(mut state) = state.lock() {
-                state.push_discontinuity(reason, ingested_at);
+                if state.matches_marker_scope(scope) {
+                    state.push_discontinuity(reason, ingested_at);
+                }
             }
         }
+    }
+
+    /// Record a global gap marker in unfiltered timelines.
+    ///
+    /// Subscriber-local backpressure still flows through `SinkEvent::Gap`; this
+    /// method is for callers that need a bus-level retained gap marker.
+    pub fn publish_gap(&self, dropped_events: usize) {
+        self.publish_gap_for(TimelineMarkerScope::global(), dropped_events);
+    }
+
+    /// Record a scoped gap marker in timelines whose filters match the scope.
+    pub fn publish_gap_for(&self, scope: TimelineMarkerScope, dropped_events: usize) {
+        self.publish_timeline_gap(&scope, dropped_events);
+    }
+
+    /// Broadcast a global discontinuity event to all subscribers (DC29) and to
+    /// unfiltered retained timelines.
+    ///
+    /// Unlike `publish()`, subscriber discontinuity events bypass source-routing
+    /// filters because they are system-level signals, not content. Scoped
+    /// timeline markers should use [`OutputBus::publish_discontinuity_for`].
+    pub fn publish_discontinuity(&self, reason: &str) {
+        self.publish_discontinuity_for(TimelineMarkerScope::global(), reason);
+    }
+
+    /// Broadcast a discontinuity event and retain it in timelines whose filters
+    /// match the supplied scope.
+    pub fn publish_discontinuity_for(&self, scope: TimelineMarkerScope, reason: &str) {
+        self.publish_timeline_discontinuity(&scope, reason);
 
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
         for sub in subs.iter_mut() {
@@ -2493,6 +2883,33 @@ mod tests {
             sequence: 1,
             fidelity: OutputFidelity::clean(),
             timestamp: Instant::now(),
+        }
+    }
+
+    fn make_timeline_entry(
+        host: &str,
+        session: &str,
+        pane_id: &str,
+        content: &str,
+    ) -> TimelineEntry {
+        let output = make_output(host, session, pane_id, content, 1);
+        let wall = SystemTime::now();
+        TimelineEntry {
+            sequence: 999,
+            discontinuity_epoch: 0,
+            kind: TimelineEntryKind::Output,
+            source: Some(SourceLabel::from_output(&output)),
+            target: Some(output.source.clone()),
+            host: Some(output.host.clone()),
+            session: Some(output.session_name().to_string()),
+            pane_id: output.pane_id().map(str::to_string),
+            content: Some(output.content.clone()),
+            output_sequence: Some(output.sequence),
+            received_at: Some(output.timestamp),
+            received_at_wall: Some(wall),
+            ingested_at: Instant::now(),
+            ingested_at_wall: wall,
+            late: false,
         }
     }
 
@@ -3093,6 +3510,173 @@ mod tests {
             TimelineEntryKind::Discontinuity { .. }
         ));
         assert_eq!(page.entries[1].discontinuity_epoch, 1);
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_filters_are_mutable_without_dropping_buffer() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "mutable",
+                TimelineOptions {
+                    filters: vec![SinkFilter::for_session("build")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        bus.publish(make_output("h", "build", "%1", "compile", 1));
+        timeline
+            .set_filters(vec![SinkFilter::for_session("test")])
+            .await
+            .unwrap();
+        bus.publish(make_output("h", "test", "%2", "pass", 2));
+
+        let page = timeline
+            .entries_after(TimelineCursor::default(), 0)
+            .await
+            .unwrap();
+        let contents: Vec<&str> = page
+            .entries
+            .iter()
+            .filter_map(|entry| entry.content.as_deref())
+            .collect();
+        assert_eq!(contents, vec!["compile", "pass"]);
+
+        timeline
+            .add_filter(SinkFilter::for_session("deploy"))
+            .await
+            .unwrap();
+        bus.publish(make_output("h", "deploy", "%3", "ship", 3));
+        let page = timeline.entries_after(page.cursor, 0).await.unwrap();
+        assert_eq!(page.entries[0].content.as_deref(), Some("ship"));
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_scoped_markers_respect_filters() {
+        let bus = OutputBus::new();
+        let build = bus
+            .create_timeline(
+                "build",
+                TimelineOptions {
+                    filters: vec![SinkFilter::for_host_session("h1", "build")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let test = bus
+            .create_timeline(
+                "test",
+                TimelineOptions {
+                    filters: vec![SinkFilter::for_host_session("h1", "test")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let all = bus
+            .create_timeline("all", TimelineOptions::default())
+            .unwrap();
+
+        bus.publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session("h1", "build"),
+            "build reconnect",
+        );
+
+        assert!(matches!(
+            build.latest(0).await.unwrap().entries[0].kind,
+            TimelineEntryKind::Discontinuity { .. }
+        ));
+        assert!(test.latest(0).await.unwrap().entries.is_empty());
+        assert_eq!(all.latest(0).await.unwrap().entries.len(), 1);
+
+        bus.publish_discontinuity("global reconnect");
+        assert_eq!(build.latest(0).await.unwrap().entries.len(), 1);
+        assert!(test.latest(0).await.unwrap().entries.is_empty());
+        assert_eq!(all.latest(0).await.unwrap().entries.len(), 2);
+
+        bus.publish_gap_for(TimelineMarkerScope::for_host_session("h1", "build"), 3);
+        let build_page = build.latest(0).await.unwrap();
+        assert_eq!(build_page.entries.len(), 2);
+        assert!(matches!(
+            build_page.entries[1].kind,
+            TimelineEntryKind::Gap { dropped_events: 3 }
+        ));
+        assert!(test.latest(0).await.unwrap().entries.is_empty());
+        assert_eq!(all.latest(0).await.unwrap().entries.len(), 3);
+
+        bus.publish_gap(2);
+        assert_eq!(build.latest(0).await.unwrap().entries.len(), 2);
+        assert!(test.latest(0).await.unwrap().entries.is_empty());
+        assert_eq!(all.latest(0).await.unwrap().entries.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_create_or_get_detach_and_stale_handles() {
+        let bus = OutputBus::new();
+        let first = bus
+            .create_or_get_timeline("workstream", TimelineOptions::default())
+            .unwrap();
+        let same = bus
+            .create_or_get_timeline(
+                "workstream",
+                TimelineOptions {
+                    max_entries: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(first.generation(), same.generation());
+
+        first.detach().unwrap();
+        assert!(bus.timeline("workstream").unwrap().is_none());
+        assert!(first.latest(0).await.is_err());
+
+        let replacement = bus
+            .create_or_get_timeline("workstream", TimelineOptions::default())
+            .unwrap();
+        assert_ne!(first.generation(), replacement.generation());
+        assert!(first.latest(0).await.is_err());
+
+        bus.remove_timeline("workstream").unwrap();
+        assert!(replacement.latest(0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_idle_cleanup_detaches_handles() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline("idle", TimelineOptions::default())
+            .unwrap();
+
+        let removed = bus.remove_idle_timelines(Duration::ZERO).unwrap();
+        assert_eq!(removed, vec!["idle"]);
+        assert!(timeline.latest(0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_ingests_historical_entries_before_live_output() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline("history", TimelineOptions::default())
+            .unwrap();
+
+        let page = timeline
+            .ingest_historical(vec![make_timeline_entry("h", "s", "%1", "backfill")])
+            .await
+            .unwrap();
+        assert_eq!(page.entries[0].sequence, 1);
+        assert_eq!(page.entries[0].content.as_deref(), Some("backfill"));
+        assert!(page.entries[0].received_at_wall.is_some());
+
+        bus.publish(make_output("h", "s", "%1", "live", 2));
+        let page = timeline.latest(0).await.unwrap();
+        let sequences: Vec<u64> = page.entries.iter().map(|entry| entry.sequence).collect();
+        assert_eq!(sequences, vec![1, 2]);
+        assert!(page.entries[1].received_at_wall.is_some());
+        assert!(page.entries[1]
+            .ingested_at_wall
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .is_ok());
     }
 
     // --- JoinedStream tests ---
