@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-22 | @codex | Aligned timeline dependency language with PR #326's concrete OutputBus timeline APIs: create-or-get, mutable filters, scoped markers, history ingest, stale handles, cleanup, and latest-cursor semantics. |
 | 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff, explicit completion/state ownership, OutputBus timeline dependency gates, cursor/time ownership, and timeline cleanup rules. |
 | 2026-05-22 | @codex | Addressed issue #323 feedback: renamed workstream creation to `open`, defined `close` as conclusion that frees agents, and added domain/context tags plus `recruit --goal` matching. |
 | 2026-05-21 | @codex | Initial design for issue #323: stateless `bins/mstream` daemon/client, tmux-tag hydration, host reconnect flow, workstream CLI, recruiting, and JSONL observation. |
@@ -631,16 +632,23 @@ source labels. After #322, `mstream` should delegate timestamp-aware merge-sort
 and bounded buffering to the `libs/tmux` OutputBus-backed timeline API rather
 than implementing its own reorder buffer.
 
-Delegation to `libs/tmux` is gated on API details needed by workstreams:
+Delegation to `libs/tmux` is gated on the OutputBus timeline APIs needed by
+workstreams:
 
-- mutable timeline filters or equivalent get-or-create behavior when a
-  workstream gains or loses sessions mid-round
-- continuity/gap markers that respect timeline filters, so unrelated sessions
-  do not pollute a workstream timeline
-- cursor behavior that cannot skip retained entries when timestamp ordering and
-  bounded reads are combined
-- enough metadata for `mstream` to encode opaque cursors and derive its own
-  wall-clock status fields
+- idempotent timeline hydration through `create_or_get_timeline`
+- mutable `TimelineHandle::set_filters` / `add_filter` when a workstream gains
+  or loses sessions mid-round
+- scoped continuity/gap markers such as `publish_discontinuity_for` and
+  `publish_gap_for`, so unrelated sessions do not pollute a workstream
+  timeline
+- `TimelineHandle::ingest_historical` for post-restart backfill from tmux
+  history before live output resumes
+- stale-handle errors plus explicit `detach`, `remove_timeline`, or idle
+  cleanup so closed workstreams do not keep collecting output
+- cursor behavior that cannot skip or replay retained entries when timestamp
+  ordering, bounded reads, `render_after`, and bounded `latest` are combined
+- wall-clock receipt/ingest metadata sufficient for `mstream` to derive JSONL
+  fields while keeping public cursors opaque
 
 Until those are present, `mstream` should keep a local daemon-memory timeline
 layer over the `OutputBus` subscription stream.
@@ -651,11 +659,14 @@ implementation. Cursors are opaque strings.
 Timeline lifecycle:
 
 - `open` performs get-or-create for the daemon-memory workstream timeline.
-- `join`/`new` adds the target to the workstream timeline filter set.
-- `leave` removes the target from the filter set and removes the timeline when
-  the last session leaves an otherwise closed/empty workstream.
-- `close` removes the active workstream timeline after final status/summary
-  output is emitted.
+- `join`/`new` adds the target to the workstream timeline filter set without
+  dropping retained output.
+- `scan` after restart creates or gets the timeline, backfills from bounded tmux
+  history, then resumes live monitoring.
+- `leave` removes the target from the filter set and detaches or removes the
+  timeline when the last session leaves an otherwise closed/empty workstream.
+- `close` removes or detaches the active workstream timeline after final
+  status/summary output is emitted.
 - re-`open` after close creates a fresh timeline and must not reuse stale
   cursors.
 
