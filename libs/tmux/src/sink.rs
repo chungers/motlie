@@ -2404,7 +2404,7 @@ impl TimelineHandle {
     }
 
     /// Detach this timeline from its owning bus and mark this handle stale.
-    pub fn detach(&self) -> Result<()> {
+    pub async fn detach(&self) -> Result<()> {
         if let Some(registry) = self.registry.upgrade() {
             let mut timelines = registry.lock().map_err(|_| timeline_lock_error())?;
             if timelines
@@ -3673,7 +3673,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.generation(), same.generation());
 
-        first.detach().unwrap();
+        first.detach().await.unwrap();
         assert!(bus.timeline("workstream").unwrap().is_none());
         assert!(first.latest(0).await.is_err());
 
