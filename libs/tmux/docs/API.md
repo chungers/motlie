@@ -77,6 +77,7 @@ in [`examples/README.md`](../examples/README.md).
 **Part II-c — External-Agent Substrate (Track B)**
 21. [Predicate Filtering — filter_fn](#21-predicate-filtering--filter_fn)
 22. [Rolling Transcript / History (DC28)](#22-rolling-transcript--history-dc28)
+22b. [OutputBus Timelines](#22b-outputbus-timelines)
 23. [Fleet — Multi-Host Coordination (DC27)](#23-fleet--multi-host-coordination-dc27)
 
 **Part II-d — TUI (DC32)**
@@ -1870,7 +1871,7 @@ output.raw_content       // Some(...) when normalization changed content
 output.sequence          // Per-source sequence number (monotonic within a
                          // continuous stream segment; resets on Discontinuity)
 output.fidelity          // OutputFidelity (clean for control mode)
-output.timestamp         // std::time::Instant of emission
+output.timestamp         // std::time::Instant of daemon-side receipt
 
 // Accessors:
 output.session_name()    // Session name at any source level
@@ -2242,6 +2243,133 @@ bus.unsubscribe(history.id())?;
 let snapshot = history.join().await?;
 ```
 
+
+## 22b. OutputBus Timelines
+
+`OutputBus` can retain named, bus-owned timelines for supervisor loops that
+need durable-enough multi-agent context without creating their own local event
+store. A bus can host multiple timelines at once; each timeline has independent
+filters, retention, rendering, and ordering policy.
+
+```rust
+use std::time::Duration;
+use motlie_tmux::{
+    LabelFormat, LateEventPolicy, RenderMode, RenderOptions, SinkFilter,
+    TimelineCursor, TimelineMarkerScope, TimelineOptions, TimelineOrdering,
+};
+
+let timeline = bus.create_or_get_timeline(
+    "review-round-17",
+    TimelineOptions {
+        filters: vec![
+            SinkFilter::for_host_session("amd1", "codex-submit"),
+            SinkFilter::for_host_session("amd1", "claude-review"),
+        ],
+        max_entries: 10_000,
+        max_render_chars: 200_000,
+        ordering: TimelineOrdering::TimestampMerge {
+            reorder_window: Duration::from_millis(500),
+            late_event_policy: LateEventPolicy::AppendWithMarker,
+        },
+        render_mode: RenderMode::Interleaved,
+        label_format: LabelFormat::Prompt,
+        ..Default::default()
+    },
+)?;
+
+let mut cursor = TimelineCursor::default();
+let page = timeline.entries_after(cursor, 200).await?;
+cursor = page.cursor;
+
+let rendered = timeline
+    .render_after(cursor, RenderOptions { max_chars: 20_000 })
+    .await?;
+```
+
+Timeline management lives on the bus:
+
+```rust
+let handle = bus.timeline("review-round-17")?.expect("timeline exists");
+let same = bus.create_or_get_timeline("review-round-17", TimelineOptions::default())?;
+// Existing timelines are returned unchanged; create_or_get opts apply only on create.
+let names = bus.timelines()?;
+let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
+bus.remove_timeline("review-round-17")?;
+```
+
+`TimelineHandle` supports dynamic workstreams without dropping buffered output:
+
+```rust
+handle.add_filter(SinkFilter::for_host_session("amd1", "new-agent")).await?;
+handle.set_filters(vec![SinkFilter::for_host_session("amd1", "codex-submit")]).await?;
+handle.ingest_historical(rebuilt_entries).await?;
+handle.detach().await?;
+```
+
+Historical entries are appended in caller order even when the timeline uses
+`TimestampMerge`; their process-local `received_at` instants are cleared during
+backfill, so persisted history should use wall-clock metadata instead.
+
+Removing or detaching a timeline marks outstanding handles stale; subsequent
+`entries_after`, `latest`, `render_after`, filter mutation, or backfill calls on
+that old generation return an error instead of silently polling a frozen buffer.
+
+`Fleet` exposes convenience methods that delegate to its shared bus:
+
+```rust
+let timeline = fleet.create_or_get_timeline("all-agents", TimelineOptions::default())?;
+let same = fleet.timeline("all-agents")?;
+let detached = fleet.remove_idle_timelines(Duration::from_secs(300))?;
+fleet.remove_timeline("all-agents")?;
+```
+
+`TimelineEntry` preserves source metadata for prompt summaries and handoff
+detection: host alias, session name, pane id/target identity, `SourceLabel`,
+content, per-source output sequence, the `TargetOutput` daemon-side receipt
+`Instant`, estimated wall-clock receipt time and ingest wall-clock time for
+JSONL-friendly consumers, timeline sequence, discontinuity epoch, and a `late`
+flag. `TimelineEntryKind`
+distinguishes normal output, gap markers, and upstream monitor discontinuities.
+
+Ordering modes:
+
+| Mode | Behavior |
+|------|----------|
+| `TimelineOrdering::Arrival` | Preserve bus ingest order. This matches existing subscription behavior. |
+| `TimelineOrdering::TimestampMerge` | Insert output by daemon-side receipt `TargetOutput.timestamp` within a bounded reorder window. Events older than the newest observed receipt timestamp by more than the window are appended and marked `late`. |
+
+Queries return stable cursors for incremental polling. `TimelineCursor` carries
+`next_sequence` plus out-of-order `seen_sequences`, so bounded pages over
+timestamp-merged timelines can return timestamp-sorted entries without skipping
+lower sequence numbers that sort after a higher sequence. `entries_after(cursor,
+limit)` fetches retained entries at or after the cursor that have not already
+been seen by that cursor. `latest(limit)` returns the newest retained entries
+and returns a cursor positioned after the full snapshot watermark, so the next
+`entries_after()` poll only returns future entries. `render_after(cursor, opts)`
+returns prompt-ready text in `Interleaved` or
+`PerSource` mode and only advances the cursor through entries represented in
+the rendered text, so a character cap cannot skip unrendered entries. Pages
+include `omitted_entries` so callers can detect when ring retention has dropped
+older entries.
+
+`OutputBus::publish_discontinuity()` and `publish_gap()` record global markers
+only in unfiltered timelines. Use scoped marker APIs for per-workstream
+continuity so unrelated timelines do not receive reconnect or gap markers:
+
+```rust
+bus.publish_discontinuity_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    "stream resumed after reconnect",
+);
+bus.publish_gap_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    12,
+);
+```
+
+Subscriber-local backpressure still uses `SinkEvent::Gap` on the subscription
+channel.
+
 ## 23. Fleet — Multi-Host Coordination (DC27)
 
 `Fleet` is a programmatic registry of `HostHandle`s with a shared `OutputBus`,
@@ -2516,8 +2644,9 @@ assert!(issues.is_empty());
 | `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()`, `all_sessions()` |
 | `MonitorHealth` | Enum: `Streaming`, `Reconnecting`, `Failed`, `Stopped` — per-session ground truth (DC29) |
 | `MonitorExitReason` | Enum: `Stopped`, `ConnectionLost` — returned by `SessionMonitor::run()` |
-| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, `unsubscribe()`, `shutdown()` |
+| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, timeline management, `unsubscribe()`, `shutdown()` |
 | `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()`, `.filter_fn()`, `.history()` |
+| `TimelineHandle` | Bus-owned retained timeline — fallible `entries_after()`, `latest()`, `render_after()` |
 | `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
 | `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }`, `Discontinuity { reason }` |

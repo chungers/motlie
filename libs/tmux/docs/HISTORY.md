@@ -3,6 +3,7 @@
 <!-- Changelog
 | Date       | Who     | Summary |
 |------------|---------|---------|
+| 2026-05-22 | @codex | Add OutputBus-owned timelines with named ring buffers, timestamp-aware merge ordering, cursors, rendered windows, and Fleet delegating helpers. |
 | 2026-03-25 | @claude | Initial design: coalescing, per-source rendering, per-source budgets |
 -->
 
@@ -241,12 +242,33 @@ For the common case where all sources use the same filter, the CLI flag
 applies globally. For advanced use, per-source assignment could be added
 later (e.g. `--filter-tmux-claude=agent --filter-tmux=shell`).
 
-## Non-goals
+## OutputBus timeline support
 
-- Timestamp-based ordering or merge-sort across sources. Arrival order within
-  each source is sufficient.
-- Cross-source correlation (e.g. "pane A's build finished, then pane B's
-  tests started"). This is the agent's job, not the library's.
+Timestamp-aware merge ordering is now supported by bus-owned timelines rather
+than by `Subscription::history()`. Use `OutputBus::create_timeline()` when a
+supervisor needs a named retained ring buffer, incremental cursors, rendered
+prompt windows, or receipt-time merge ordering across multiple monitored sources.
+
+`TimelineOrdering::Arrival` keeps existing arrival-order behavior.
+`TimelineOrdering::TimestampMerge` inserts output by daemon-side receipt
+`TargetOutput.timestamp` within a bounded reorder window; events that arrive
+older than the window are appended and marked late. Timelines also retain
+scoped discontinuity and bus-level gap markers so supervisors can distinguish
+output from continuity loss without injecting unrelated reconnect markers into
+filtered workstream timelines.
+
+Timeline handles now support dynamic workstreams: `create_or_get_timeline`
+(existing options are ignored on the get path), `set_filters`, `add_filter`,
+`ingest_historical`, explicit `detach`, stale-handle errors after
+removal/recreate, and `remove_idle_timelines` for TTL-style cleanup. Writes
+refresh the idle deadline so actively filling timelines are not evicted between
+polls. Historical ingest appends in caller order and clears process-local
+`received_at` instants. Timeline entries include estimated wall-clock receipt
+and ingest times alongside `Instant` values for JSONL-friendly consumers.
+
+Cross-source semantic correlation (e.g. "pane A's build finished, then pane B's
+tests started") remains the agent's job. The library provides ordered,
+source-labeled events and metadata; it does not infer workflow state.
 
 ## Testing
 
