@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use motlie_vmm::image::{
     v1_5, ExternalOciSource, GuestArchitecture, GuestImageProfile, OciContentCache, OciDigest,
     OciImageReference, OciPlatform, OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed,
@@ -44,6 +44,7 @@ const COMMON_ROOTFS_RECORD_NAME: &str = "mbuild-common-rootfs.json";
 const VALIDATION_LOG_NAME: &str = "mbuild-validation.log";
 const OCI_CACHE_DIR_ENV: &str = "MOTLIE_MBUILD_OCI_CACHE_DIR";
 const CROSS_ARCH_CHROOT_ENV: &str = "MOTLIE_MBUILD_ALLOW_CROSS_ARCH_CHROOT";
+const PACKAGE_STAGE_MODE_ENV: &str = "MOTLIE_MBUILD_PACKAGE_STAGE_MODE";
 const CH_KERNEL_RELEASE_DEFAULT: &str = "ch-release-v6.16.9-20251112";
 const OCI_LAYOUT_VERSION: &str = "1.0.0";
 const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -80,6 +81,7 @@ fn run() -> Result<()> {
             adapter_arg,
             rootfs_tarball,
             oci_layout,
+            package_stage_mode,
         } => build(BuildOptions {
             config_path: config,
             target,
@@ -89,6 +91,7 @@ fn run() -> Result<()> {
             adapter_args: adapter_arg,
             rootfs_tarball,
             oci_layout,
+            package_stage_mode,
         }),
         Commands::Seed {
             config,
@@ -178,6 +181,49 @@ struct BuildOptions {
     adapter_args: Vec<String>,
     rootfs_tarball: Option<PathBuf>,
     oci_layout: Option<PathBuf>,
+    package_stage_mode: Option<PackageStageMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PackageStageMode {
+    /// Probe rootless package staging and fail with guidance if unsupported.
+    Auto,
+    /// Run package staging in an unprivileged user and mount namespace.
+    Rootless,
+    /// Run only privileged rootfs mutation steps through sudo -n.
+    Sudo,
+    /// Require mbuild itself to already be running as uid 0.
+    Root,
+}
+
+impl PackageStageMode {
+    fn resolve(requested: Option<Self>) -> Result<Self> {
+        if let Some(mode) = requested {
+            return Ok(mode);
+        }
+        if let Some(value) = env::var_os(PACKAGE_STAGE_MODE_ENV) {
+            let value = value.to_string_lossy();
+            return Self::from_str(&value, true).map_err(|message| {
+                anyhow::anyhow!("invalid {PACKAGE_STAGE_MODE_ENV}={value:?}: {message}")
+            });
+        }
+        Ok(Self::Auto)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Rootless => "rootless",
+            Self::Sudo => "sudo",
+            Self::Root => "root",
+        }
+    }
+}
+
+impl std::fmt::Display for PackageStageMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[instrument(skip(options), fields(target = %options.target, config = %options.config_path.display()))]
@@ -721,8 +767,16 @@ fn run_ch_external_oci_build(
     )?;
 
     let chroot_support = prepare_guest_chroot_execution(&rootfs_dir, &host, &guest, &log_path)?;
+    let package_log_path = options.out.join(CH_PACKAGE_STAGE_LOG_NAME);
+    let package_runner =
+        PackageStageRunner::resolve(options.package_stage_mode, &rootfs_dir, &package_log_path)?;
+    append_log(
+        &log_path,
+        &format!("package_stage_mode={}\n", package_runner.mode().as_str()),
+    )?;
     let guest_binaries = build_guest_binaries(repo_root, &guest, &log_path)?;
-    run_package_stage(&rootfs_dir, config, &options.out)?;
+    run_package_stage(&rootfs_dir, config, &options.out, &package_runner)?;
+    prepare_rootfs_host_write_access(&rootfs_dir, config, &package_runner, &log_path)?;
 
     let assembly_manifest =
         assemble_immutable_rootfs(&rootfs_dir, config, &source, &guest_binaries)?;
@@ -730,12 +784,13 @@ fn run_ch_external_oci_build(
         options.out.join("mbuild-rootfs-assembly.json"),
         serde_json::to_vec_pretty(&assembly_manifest)?,
     )?;
-    verify_guest_binary_contract_marker(&rootfs_dir, &log_path)?;
+    verify_guest_binary_contract_marker(&rootfs_dir, &log_path, &package_runner)?;
     cleanup_guest_chroot_execution(&rootfs_dir, chroot_support.as_ref(), &log_path)?;
     let common_rootfs_tarball = emit_rootfs_tarball(
         &rootfs_dir,
         &options.out.join(COMMON_ROOTFS_TARBALL_NAME),
         &log_path,
+        &package_runner,
     )?;
     write_common_rootfs_record(&options.out, &source, &common_rootfs_tarball)?;
 
@@ -752,6 +807,7 @@ fn run_ch_external_oci_build(
         &rootfs_dir,
         &rootfs_path,
         &options.out.join(CH_EMITTER_LOG_NAME),
+        Some(&package_runner),
     )?;
     let kernel_path = emit_ch_kernel(&base_dir, &guest, &log_path)?;
     let contract_path = base_dir.join(CH_GUEST_CONTRACT_NAME);
@@ -781,6 +837,8 @@ fn run_ch_external_oci_build(
             "build".to_string(),
             "--target".to_string(),
             options.target.to_string(),
+            "--package-stage-mode".to_string(),
+            package_runner.mode().as_str().to_string(),
         ],
         log_path,
         exit_status: 0,
@@ -871,6 +929,7 @@ fn run_ch_oci_layout_build(
         &rootfs_dir,
         &rootfs_path,
         &options.out.join(CH_EMITTER_LOG_NAME),
+        None,
     )?;
     let kernel_path = emit_ch_kernel(&base_dir, &guest, &log_path)?;
     let contract_path = base_dir.join(CH_GUEST_CONTRACT_NAME);
@@ -1456,10 +1515,13 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     })
 }
 
-fn verify_guest_binary_contract_marker(rootfs_dir: &Path, log_path: &Path) -> Result<()> {
-    let mut command = rootless_unshare_command()?;
+fn verify_guest_binary_contract_marker(
+    rootfs_dir: &Path,
+    log_path: &Path,
+    runner: &PackageStageRunner,
+) -> Result<()> {
+    let mut command = runner.chroot_command()?;
     command
-        .arg("chroot")
         .arg(rootfs_dir)
         .arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT)
         .arg("--contract");
@@ -1497,9 +1559,110 @@ fn verify_guest_binary_contract_marker(rootfs_dir: &Path, log_path: &Path) -> Re
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PackageStageRunner {
+    mode: PackageStageMode,
+}
+
+impl PackageStageRunner {
+    fn resolve(
+        requested: Option<PackageStageMode>,
+        rootfs_dir: &Path,
+        log_path: &Path,
+    ) -> Result<Self> {
+        let mode = PackageStageMode::resolve(requested)?;
+        match mode {
+            PackageStageMode::Auto => {
+                match preflight_rootless_package_stage(rootfs_dir, log_path) {
+                    Ok(()) => Ok(Self {
+                        mode: PackageStageMode::Rootless,
+                    }),
+                    Err(error) => bail!(
+                        "rootless package staging is unsupported on this host: {error:#}. \
+                     Re-run with --package-stage-mode sudo after operator-approved sudo policy, \
+                     run mbuild as root with --package-stage-mode root in a controlled builder, \
+                     or use a host that permits rootless user/mount namespace chroot staging"
+                    ),
+                }
+            }
+            PackageStageMode::Rootless => {
+                preflight_rootless_package_stage(rootfs_dir, log_path).with_context(|| {
+                    "rootless package staging preflight failed; use --package-stage-mode sudo/root or a compatible rootless builder host"
+                })?;
+                Ok(Self { mode })
+            }
+            PackageStageMode::Sudo => {
+                preflight_sudo_package_stage(log_path)?;
+                Ok(Self { mode })
+            }
+            PackageStageMode::Root => {
+                preflight_root_package_stage()?;
+                Ok(Self { mode })
+            }
+        }
+    }
+
+    fn mode(self) -> PackageStageMode {
+        self.mode
+    }
+
+    fn package_stage_command(self, script_path: &Path) -> Result<Command> {
+        let mut command = match self.mode {
+            PackageStageMode::Rootless => rootless_unshare_command()?,
+            PackageStageMode::Sudo => sudo_command("bash"),
+            PackageStageMode::Root => Command::new("bash"),
+            PackageStageMode::Auto => unreachable!("auto is resolved before command construction"),
+        };
+        command.arg(script_path);
+        Ok(command)
+    }
+
+    fn chroot_command(self) -> Result<Command> {
+        let command = match self.mode {
+            PackageStageMode::Rootless => {
+                let mut command = rootless_unshare_command()?;
+                command.arg("chroot");
+                command
+            }
+            PackageStageMode::Sudo => sudo_command("chroot"),
+            PackageStageMode::Root => Command::new("chroot"),
+            PackageStageMode::Auto => unreachable!("auto is resolved before command construction"),
+        };
+        Ok(command)
+    }
+
+    fn needs_sudo_host_write_grants(self) -> bool {
+        self.mode == PackageStageMode::Sudo
+    }
+
+    fn uses_sudo(self) -> bool {
+        self.mode == PackageStageMode::Sudo
+    }
+}
+
+fn sudo_command(program: &str) -> Command {
+    let mut command = Command::new("sudo");
+    command.arg("-n").arg(program);
+    command
+}
+
 fn rootless_unshare_command() -> Result<Command> {
     let (subuid_start, subuid_count) = subordinate_id_range("/etc/subuid")?;
     let (subgid_start, subgid_count) = subordinate_id_range("/etc/subgid")?;
+    Ok(rootless_unshare_command_for_ranges(
+        subuid_start,
+        subuid_count,
+        subgid_start,
+        subgid_count,
+    ))
+}
+
+fn rootless_unshare_command_for_ranges(
+    subuid_start: u32,
+    subuid_count: u32,
+    subgid_start: u32,
+    subgid_count: u32,
+) -> Command {
     let uid_count = subuid_count.min(65_535);
     let gid_count = subgid_count.min(65_535);
     let mut command = Command::new("unshare");
@@ -1508,15 +1671,105 @@ fn rootless_unshare_command() -> Result<Command> {
         .arg("--map-root-user")
         .arg(format!("--map-users=1:{subuid_start}:{uid_count}"))
         .arg(format!("--map-groups=1:{subgid_start}:{gid_count}"))
-        .arg("--setgroups")
-        .arg("allow")
         .arg("--mount")
+        .arg("--propagation")
+        .arg("unchanged")
         .arg("--pid")
         .arg("--fork");
-    Ok(command)
+    command
 }
 
-fn run_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -> Result<()> {
+fn preflight_rootless_package_stage(rootfs_dir: &Path, log_path: &Path) -> Result<()> {
+    let mut command = rootless_unshare_command()?;
+    command
+        .arg("bash")
+        .arg("-c")
+        .arg(rootless_preflight_script())
+        .arg("mbuild-rootless-preflight")
+        .arg(rootfs_dir);
+    run_preflight_command(command, log_path, "rootless package-stage preflight")
+}
+
+fn rootless_preflight_script() -> &'static str {
+    r#"set -euo pipefail
+rootfs="$(readlink -f "$1")"
+mkdir -p "$rootfs/proc" "$rootfs/sys" "$rootfs/dev"
+mount --bind /proc "$rootfs/proc"
+mount --rbind /sys "$rootfs/sys"
+mount --rbind /dev "$rootfs/dev"
+cleanup() {
+    umount -l "$rootfs/dev" >/dev/null 2>&1 || true
+    umount -l "$rootfs/sys" >/dev/null 2>&1 || true
+    umount -l "$rootfs/proc" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+chroot "$rootfs" /bin/sh -c true
+"#
+}
+
+fn preflight_sudo_package_stage(log_path: &Path) -> Result<()> {
+    run_preflight_command(sudo_command("true"), log_path, "sudo package-stage preflight")
+        .with_context(|| {
+            "package stage mode sudo requested, but sudo -n is unavailable; configure operator-approved passwordless sudo for the package stage or choose rootless/root mode"
+        })
+}
+
+fn preflight_root_package_stage() -> Result<()> {
+    let uid = current_numeric_id("-u")?;
+    if uid != 0 {
+        bail!("package stage mode root requires mbuild to already be running as uid 0, current uid is {uid}");
+    }
+    Ok(())
+}
+
+fn run_preflight_command(mut command: Command, log_path: &Path, label: &str) -> Result<()> {
+    append_log(
+        log_path,
+        &format!("\n--- {label} ---\ncommand={command:?}\n"),
+    )?;
+    let output = command.output().with_context(|| format!("run {label}"))?;
+    append_log(
+        log_path,
+        &format!(
+            "stdout={}\nstderr={}\n",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "{label} failed with status {}; see {}",
+            output.status.code().unwrap_or(-1),
+            log_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn current_numeric_id(flag: &str) -> Result<u32> {
+    let output = Command::new("id")
+        .arg(flag)
+        .output()
+        .with_context(|| format!("run id {flag}"))?;
+    if !output.status.success() {
+        bail!(
+            "id {flag} failed with status {}",
+            output.status.code().unwrap_or(-1)
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("id output is not UTF-8")?;
+    stdout
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("parse id {flag} output {stdout:?}"))
+}
+
+fn run_package_stage(
+    rootfs_dir: &Path,
+    config: &ImageBuildConfig,
+    out: &Path,
+    runner: &PackageStageRunner,
+) -> Result<()> {
     let script_path = out.join(CH_PACKAGE_STAGE_SCRIPT_NAME);
     let log_path = out.join(CH_PACKAGE_STAGE_LOG_NAME);
     let stage_script = match config.package_stage.manager.as_str() {
@@ -1527,11 +1780,8 @@ fn run_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -
     fs::write(&script_path, stage_script)?;
     set_mode(&script_path, 0o755)?;
 
-    let mut command = rootless_unshare_command()?;
+    let mut command = runner.package_stage_command(&script_path)?;
     command
-        .arg("--mount-proc")
-        .arg("bash")
-        .arg(&script_path)
         .arg(rootfs_dir)
         .arg(bool_env(config.package_stage.update))
         .arg(bool_env(config.package_stage.clean));
@@ -1552,10 +1802,109 @@ fn run_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -
         &mut command,
         &log_path,
         &format!(
-            "{}/npm package stage",
-            config.package_stage.manager.as_str()
+            "{}/npm package stage ({})",
+            config.package_stage.manager.as_str(),
+            runner.mode()
         ),
     )
+}
+
+fn prepare_rootfs_host_write_access(
+    rootfs_dir: &Path,
+    config: &ImageBuildConfig,
+    runner: &PackageStageRunner,
+    log_path: &Path,
+) -> Result<()> {
+    if !runner.needs_sudo_host_write_grants() {
+        return Ok(());
+    }
+    let uid = current_numeric_id("-u")?;
+    let gid = current_numeric_id("-g")?;
+    let mut command = sudo_command("bash");
+    command
+        .arg("-c")
+        .arg(rootfs_host_write_access_script())
+        .arg("mbuild-rootfs-write-access")
+        .arg(rootfs_dir)
+        .arg(uid.to_string())
+        .arg(gid.to_string());
+    for path in rootfs_host_write_grant_paths(config) {
+        command.arg(path);
+    }
+    run_logged_command(&mut command, log_path, "prepare rootfs host write access")
+}
+
+fn rootfs_host_write_access_script() -> &'static str {
+    r#"set -euo pipefail
+rootfs="$(readlink -f "$1")"
+uid="$2"
+gid="$3"
+shift 3
+for guest_path in "$@"; do
+    rel="${guest_path#/}"
+    target="$rootfs/$rel"
+    mkdir -p "$target"
+    chown "$uid:$gid" "$target"
+    chmod u+rwx "$target"
+done
+for guest_path in \
+    /etc/ssh/sshd_config \
+    /etc/fstab \
+    /etc/motd \
+    /etc/cloud/cloud.cfg.d/99_motlie_ch.cfg; do
+    target="$rootfs/${guest_path#/}"
+    if [ -e "$target" ]; then
+        chown "$uid:$gid" "$target"
+        chmod u+rw "$target"
+    fi
+done
+"#
+}
+
+fn rootfs_host_write_grant_paths(config: &ImageBuildConfig) -> Vec<&'static str> {
+    let mut paths = vec![
+        "/opt",
+        "/opt/motlie",
+        "/opt/motlie/v1.5",
+        "/opt/motlie/v1.5/guest",
+        "/opt/motlie/v1.5/guest/bin",
+        "/usr/local/bin",
+        "/etc",
+        "/etc/cloud",
+        "/etc/cloud/cloud.cfg.d",
+        "/etc/motlie",
+        "/etc/motlie/v1.5",
+        "/etc/motlie-vfs",
+        "/etc/motlie-vmm",
+        "/etc/profile.d",
+        "/etc/ssh",
+        "/etc/ssh/ca",
+        "/etc/ssh/sshd_config.d",
+        "/workspace",
+        "/agent-state",
+        "/home",
+        "/sbin",
+    ];
+    match config.source.profile.as_str() {
+        UBUNTU_SYSTEMD_PROFILE => paths.extend([
+            "/etc/apt",
+            "/etc/apt/apt.conf.d",
+            "/etc/systemd",
+            "/etc/systemd/system",
+            "/etc/systemd/system/cloud-init.target.wants",
+            "/etc/systemd/system/multi-user.target.wants",
+        ]),
+        ALPINE_OPENRC_PROFILE => paths.extend([
+            "/etc/init.d",
+            "/etc/local.d",
+            "/etc/runlevels",
+            "/etc/runlevels/default",
+        ]),
+        _ => {}
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    paths
 }
 
 fn apt_stage_script() -> &'static str {
@@ -1843,18 +2192,31 @@ fn ch_motd(source: &ExternalOciSource, guest: &ChGuestTarget) -> String {
     )
 }
 
-fn emit_squashfs(rootfs_dir: &Path, rootfs_path: &Path, log_path: &Path) -> Result<()> {
+fn emit_squashfs(
+    rootfs_dir: &Path,
+    rootfs_path: &Path,
+    log_path: &Path,
+    runner: Option<&PackageStageRunner>,
+) -> Result<()> {
     if let Some(parent) = rootfs_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let script = "set -euo pipefail\nrm -f \"$2\"\ntar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C \"$1\" -cf - . | tar2sqfs -f \"$2\"\n";
-    let mut command = Command::new("bash");
+    let sudo_uid_gid = sudo_output_owner(runner)?;
+    let mut command = bash_for_rootfs_read(runner);
     command
         .arg("-c")
-        .arg(script)
+        .arg(if sudo_uid_gid.is_some() {
+            "set -euo pipefail\nrm -f \"$2\"\ntar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C \"$1\" -cf - . | tar2sqfs -f \"$2\"\nchown \"$3:$4\" \"$2\"\n"
+        } else {
+            script
+        })
         .arg("mbuild-squashfs")
         .arg(rootfs_dir)
         .arg(rootfs_path);
+    if let Some((uid, gid)) = sudo_uid_gid {
+        command.arg(uid.to_string()).arg(gid.to_string());
+    }
     run_logged_command(&mut command, log_path, "emit CH squashfs")
 }
 
@@ -1862,20 +2224,44 @@ fn emit_rootfs_tarball(
     rootfs_dir: &Path,
     tarball_path: &Path,
     log_path: &Path,
+    runner: &PackageStageRunner,
 ) -> Result<RootfsTarballRecord> {
     if let Some(parent) = tarball_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let script = "set -euo pipefail\nrm -f \"$2\"\ntar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C \"$1\" -cf \"$2\" .\n";
-    let mut command = Command::new("bash");
+    let sudo_uid_gid = sudo_output_owner(Some(runner))?;
+    let mut command = bash_for_rootfs_read(Some(runner));
     command
         .arg("-c")
-        .arg(script)
+        .arg(if sudo_uid_gid.is_some() {
+            "set -euo pipefail\nrm -f \"$2\"\ntar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C \"$1\" -cf \"$2\" .\nchown \"$3:$4\" \"$2\"\n"
+        } else {
+            script
+        })
         .arg("mbuild-rootfs-tarball")
         .arg(rootfs_dir)
         .arg(tarball_path);
+    if let Some((uid, gid)) = sudo_uid_gid {
+        command.arg(uid.to_string()).arg(gid.to_string());
+    }
     run_logged_command(&mut command, log_path, "emit common rootfs tarball")?;
     rootfs_tarball_record(tarball_path)
+}
+
+fn bash_for_rootfs_read(runner: Option<&PackageStageRunner>) -> Command {
+    if runner.is_some_and(|runner| runner.uses_sudo()) {
+        sudo_command("bash")
+    } else {
+        Command::new("bash")
+    }
+}
+
+fn sudo_output_owner(runner: Option<&PackageStageRunner>) -> Result<Option<(u32, u32)>> {
+    if runner.is_some_and(|runner| runner.uses_sudo()) {
+        return Ok(Some((current_numeric_id("-u")?, current_numeric_id("-g")?)));
+    }
+    Ok(None)
 }
 
 fn emit_ch_kernel(base_dir: &Path, guest: &ChGuestTarget, log_path: &Path) -> Result<PathBuf> {
@@ -2900,6 +3286,9 @@ enum Commands {
         /// Local OCI image layout containing a Motlie assembled rootfs payload to consume.
         #[arg(long)]
         oci_layout: Option<PathBuf>,
+        /// How CH external-OCI package staging is executed: auto, rootless, sudo, or root.
+        #[arg(long, value_enum)]
+        package_stage_mode: Option<PackageStageMode>,
     },
     /// Emit per-guest seed artifacts without rebuilding the immutable image.
     Seed {
@@ -4706,7 +5095,40 @@ validation:
                 plan_only: false,
                 adapter_arg: Vec::new(),
                 rootfs_tarball: None,
-                oci_layout: None
+                oci_layout: None,
+                package_stage_mode: None
+            }
+        );
+    }
+
+    #[test]
+    fn parses_build_package_stage_mode() {
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "build",
+            "--config",
+            "motlie-image.yaml",
+            "--target",
+            "ch",
+            "--out",
+            "artifacts/ch",
+            "--package-stage-mode",
+            "sudo",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.command,
+            Commands::Build {
+                config: PathBuf::from("motlie-image.yaml"),
+                target: "ch".parse().unwrap(),
+                out: PathBuf::from("artifacts/ch"),
+                repo_root: None,
+                plan_only: false,
+                adapter_arg: Vec::new(),
+                rootfs_tarball: None,
+                oci_layout: None,
+                package_stage_mode: Some(PackageStageMode::Sudo)
             }
         );
     }
@@ -4737,7 +5159,8 @@ validation:
                 plan_only: false,
                 adapter_arg: Vec::new(),
                 rootfs_tarball: Some(PathBuf::from("artifacts/rootfs.tar")),
-                oci_layout: None
+                oci_layout: None,
+                package_stage_mode: None
             }
         );
     }
@@ -4768,7 +5191,8 @@ validation:
                 plan_only: false,
                 adapter_arg: Vec::new(),
                 rootfs_tarball: None,
-                oci_layout: Some(PathBuf::from("artifacts/oci-arm64"))
+                oci_layout: Some(PathBuf::from("artifacts/oci-arm64")),
+                package_stage_mode: None
             }
         );
     }
@@ -5058,6 +5482,62 @@ validation:
     }
 
     #[test]
+    fn rootless_unshare_uses_host_compatible_flags() {
+        let mut command = rootless_unshare_command_for_ranges(100000, 65536, 200000, 65536);
+        command.arg("true");
+        let debug = format!("{command:?}");
+
+        assert!(debug.contains("--map-root-user"));
+        assert!(debug.contains("--map-users=1:100000:65535"));
+        assert!(debug.contains("--map-groups=1:200000:65535"));
+        assert!(debug.contains("--propagation"));
+        assert!(debug.contains("unchanged"));
+        assert!(!debug.contains("--setgroups"));
+        assert!(!debug.contains("--mount-proc"));
+    }
+
+    #[test]
+    fn package_stage_runner_builds_sudo_and_root_commands() {
+        let script = Path::new("/tmp/mbuild-package-stage.sh");
+        let sudo = PackageStageRunner {
+            mode: PackageStageMode::Sudo,
+        }
+        .package_stage_command(script)
+        .unwrap();
+        let root = PackageStageRunner {
+            mode: PackageStageMode::Root,
+        }
+        .package_stage_command(script)
+        .unwrap();
+
+        let sudo_debug = format!("{sudo:?}");
+        let root_debug = format!("{root:?}");
+        assert!(sudo_debug.contains("sudo"));
+        assert!(sudo_debug.contains("-n"));
+        assert!(sudo_debug.contains("bash"));
+        assert!(sudo_debug.contains("/tmp/mbuild-package-stage.sh"));
+        assert!(root_debug.contains("bash"));
+        assert!(root_debug.contains("/tmp/mbuild-package-stage.sh"));
+        assert!(!root_debug.contains("sudo"));
+    }
+
+    #[test]
+    fn alpine_sudo_write_grants_cover_openrc_and_ch_paths() {
+        let config = load_config(&release_config_path(
+            "motlie-image.alpine-3.22.linux-arm64.yaml",
+        ))
+        .unwrap();
+        let paths = rootfs_host_write_grant_paths(&config);
+
+        assert!(paths.contains(&"/etc/init.d"));
+        assert!(paths.contains(&"/etc/local.d"));
+        assert!(paths.contains(&"/etc/runlevels/default"));
+        assert!(paths.contains(&"/opt/motlie/v1.5/guest/bin"));
+        assert!(paths.contains(&"/sbin"));
+        assert!(paths.contains(&"/etc/cloud/cloud.cfg.d"));
+    }
+
+    #[test]
     fn apk_stage_uses_guest_sbin_path() {
         let script = apk_stage_script();
         assert!(script.contains(
@@ -5103,6 +5583,7 @@ validation:
             adapter_args: Vec::new(),
             rootfs_tarball: None,
             oci_layout: None,
+            package_stage_mode: None,
         };
 
         let error = run_build_execution(Path::new("."), &config, emitter, &options, None)

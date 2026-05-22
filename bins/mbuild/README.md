@@ -66,6 +66,46 @@ Without qemu-user/binfmt, run the per-arch CH build on native hardware for that
 guest platform. `mbuild` fails before OCI layer import if cross-arch package
 staging cannot execute guest rootfs binaries.
 
+### CH Package Stage Modes
+
+2026-05-22, gpt55-ch-aarch64-258=280 -- CH external-OCI builds run
+package-manager and npm installation inside the imported guest rootfs. By
+default, `mbuild build` uses `--package-stage-mode auto`, which probes the
+rootless user/mount namespace path and fails early with operator guidance when
+the host blocks rootless chroot or bind mounts. It does not silently escalate.
+
+Use explicit rootless mode on hosts known to support unprivileged user
+namespaces, subordinate uid/gid maps, mount namespaces, bind mounts, and chroot:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch-alpine-arm64 \
+  --package-stage-mode rootless
+```
+
+Use sudo mode on CH builder hosts that permit KVM/CH work but restrict rootless
+mount or chroot operations. `mbuild` remains user-owned and runs only the
+rootfs mutation/readback subprocesses through `sudo -n`; if passwordless sudo is
+not already authorized for the operator, the build fails before package staging:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch-alpine-arm64 \
+  --package-stage-mode sudo
+```
+
+`--package-stage-mode root` is for controlled CI/container builders where the
+entire `mbuild` process is already uid 0. Operators should prefer sudo mode over
+running `sudo mbuild` so Cargo caches, OCI caches, manifests, and most artifact
+writes stay owned by the invoking user.
+
+The same value can be supplied with `MOTLIE_MBUILD_PACKAGE_STAGE_MODE` when a
+builder host has a fixed policy.
+
 Build VZ artifacts through the current VZ adapter on an Apple Silicon macOS
 host. The current VZ path consumes a local `linux/arm64` OCI layout and passes
 its validated rootfs layer through the adapter rootfs handoff:
