@@ -29,6 +29,11 @@ v1.5 is greenfield for this product contract: pre-v1.5 VZ source VMs/cached
 disks are unsupported, and per-guest users are seed/runtime state rather than
 image content.
 
+`mbuild` does not require a local Docker daemon or Docker CLI. `docker.io/...`
+values in image configs are OCI registry references; `mbuild` resolves and
+fetches those manifests/layers directly through its registry client, then uses
+local rootfs/package-stage tooling for guest assembly.
+
 ## Commands
 
 Build CH artifacts through the native external-OCI CH path:
