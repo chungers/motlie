@@ -38,7 +38,8 @@ pub use sink::{
     JoinedStream, LabelFormat, LateEventPolicy, OutputBus, PipeHandle, PollHistory, RenderMode,
     RenderOptions, SinkEvent, SinkFilter, SinkId, SinkKind, SourceAccumulator, SourceLabel,
     StreamChunk, Subscription, TargetOutput, TimelineCursor, TimelineEntry, TimelineEntryKind,
-    TimelineHandle, TimelineOptions, TimelineOrdering, TimelinePage, TimelineRenderPage,
+    TimelineHandle, TimelineMarkerScope, TimelineOptions, TimelineOrdering, TimelinePage,
+    TimelineRenderPage,
 };
 pub use sinks::stdio::{StdioFormat, StdioSink};
 pub use transport::{

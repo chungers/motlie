@@ -1871,7 +1871,7 @@ output.raw_content       // Some(...) when normalization changed content
 output.sequence          // Per-source sequence number (monotonic within a
                          // continuous stream segment; resets on Discontinuity)
 output.fidelity          // OutputFidelity (clean for control mode)
-output.timestamp         // std::time::Instant of emission
+output.timestamp         // std::time::Instant of daemon-side receipt
 
 // Accessors:
 output.session_name()    // Session name at any source level
@@ -2255,10 +2255,10 @@ filters, retention, rendering, and ordering policy.
 use std::time::Duration;
 use motlie_tmux::{
     LabelFormat, LateEventPolicy, RenderMode, RenderOptions, SinkFilter,
-    TimelineCursor, TimelineOptions, TimelineOrdering,
+    TimelineCursor, TimelineMarkerScope, TimelineOptions, TimelineOrdering,
 };
 
-let timeline = bus.create_timeline(
+let timeline = bus.create_or_get_timeline(
     "review-round-17",
     TimelineOptions {
         filters: vec![
@@ -2289,32 +2289,48 @@ let rendered = timeline
 Timeline management lives on the bus:
 
 ```rust
-let handle = bus.timeline("review-round-17")?;
+let handle = bus.timeline("review-round-17")?.expect("timeline exists");
+let same = bus.create_or_get_timeline("review-round-17", TimelineOptions::default())?;
 let names = bus.timelines()?;
+let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
 bus.remove_timeline("review-round-17")?;
 ```
+
+`TimelineHandle` supports dynamic workstreams without dropping buffered output:
+
+```rust
+handle.add_filter(SinkFilter::for_host_session("amd1", "new-agent")).await?;
+handle.set_filters(vec![SinkFilter::for_host_session("amd1", "codex-submit")]).await?;
+handle.ingest_historical(rebuilt_entries).await?;
+handle.detach()?;
+```
+
+Removing or detaching a timeline marks outstanding handles stale; subsequent
+`entries_after`, `latest`, `render_after`, filter mutation, or backfill calls on
+that old generation return an error instead of silently polling a frozen buffer.
 
 `Fleet` exposes convenience methods that delegate to its shared bus:
 
 ```rust
-let timeline = fleet.create_timeline("all-agents", TimelineOptions::default())?;
+let timeline = fleet.create_or_get_timeline("all-agents", TimelineOptions::default())?;
 let same = fleet.timeline("all-agents")?;
+let detached = fleet.remove_idle_timelines(Duration::from_secs(300))?;
 fleet.remove_timeline("all-agents")?;
 ```
 
 `TimelineEntry` preserves source metadata for prompt summaries and handoff
 detection: host alias, session name, pane id/target identity, `SourceLabel`,
-content, per-source output sequence, the `TargetOutput` emission timestamp, bus
-ingest timestamp, timeline sequence, discontinuity epoch, and a `late` flag.
-`TimelineEntryKind` distinguishes normal output, gap markers, and upstream
-monitor discontinuities.
+content, per-source output sequence, the `TargetOutput` daemon-side receipt
+`Instant`, wall-clock receipt and ingest times for JSONL-friendly consumers,
+timeline sequence, discontinuity epoch, and a `late` flag. `TimelineEntryKind`
+distinguishes normal output, gap markers, and upstream monitor discontinuities.
 
 Ordering modes:
 
 | Mode | Behavior |
 |------|----------|
 | `TimelineOrdering::Arrival` | Preserve bus ingest order. This matches existing subscription behavior. |
-| `TimelineOrdering::TimestampMerge` | Insert output by `TargetOutput.timestamp` within a bounded reorder window. Events older than the newest observed timestamp by more than the window are appended and marked `late`. |
+| `TimelineOrdering::TimestampMerge` | Insert output by daemon-side receipt `TargetOutput.timestamp` within a bounded reorder window. Events older than the newest observed receipt timestamp by more than the window are appended and marked `late`. |
 
 Queries return stable cursors for incremental polling. `TimelineCursor` carries
 `next_sequence` plus out-of-order `seen_sequences`, so bounded pages over
@@ -2328,9 +2344,21 @@ the rendered text, so a character cap cannot skip unrendered entries. Pages
 include `omitted_entries` so callers can detect when ring retention has dropped
 older entries.
 
-`OutputBus::publish_discontinuity()` records discontinuity markers in every
-registered timeline. `OutputBus::publish_gap(dropped_events)` records a
-bus-level gap marker for clients that need explicit retained gap events.
+`OutputBus::publish_discontinuity()` and `publish_gap()` record global markers
+only in unfiltered timelines. Use scoped marker APIs for per-workstream
+continuity so unrelated timelines do not receive reconnect or gap markers:
+
+```rust
+bus.publish_discontinuity_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    "stream resumed after reconnect",
+);
+bus.publish_gap_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    12,
+);
+```
+
 Subscriber-local backpressure still uses `SinkEvent::Gap` on the subscription
 channel.
 

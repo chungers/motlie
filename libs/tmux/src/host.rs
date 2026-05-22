@@ -15,6 +15,7 @@ use crate::monitor::{
 };
 use crate::sink::{
     HistoryHandle, HistoryOptions, HistorySnapshot, OutputBus, SinkFilter, TargetOutput,
+    TimelineMarkerScope,
 };
 use crate::transport::TransportKind;
 use crate::types::*;
@@ -980,10 +981,13 @@ impl HostHandle {
                         );
 
                         // Unexpected EOF — emit discontinuity and attempt reconnect
-                        bus.publish_discontinuity(&format!(
-                            "stream interrupted: control channel lost for {}:{}",
-                            host_alias, session
-                        ));
+                        bus.publish_discontinuity_for(
+                            TimelineMarkerScope::for_host_session(&host_alias, &session),
+                            &format!(
+                                "stream interrupted: control channel lost for {}:{}",
+                                host_alias, session
+                            ),
+                        );
                         set_health(MonitorHealth::Reconnecting);
 
                         attempt += 1;
@@ -1036,10 +1040,13 @@ impl HostHandle {
 
                         if !sessions.iter().any(|s| s.name == session) {
                             // Session gone — permanent failure (DC29 session identity)
-                            bus.publish_discontinuity(&format!(
-                                "stream failed: session '{}' no longer exists on {}",
-                                session, host_alias
-                            ));
+                            bus.publish_discontinuity_for(
+                                TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                &format!(
+                                    "stream failed: session '{}' no longer exists on {}",
+                                    session, host_alias
+                                ),
+                            );
                             set_health(MonitorHealth::Failed);
                             if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
                                 signals.remove(&session_for_cleanup);
@@ -1059,10 +1066,13 @@ impl HostHandle {
                                 // visible content and publish as TargetOutput so
                                 // downstream consumers (history, subscribers) get
                                 // re-anchored with current screen state.
-                                bus.publish_discontinuity(&format!(
-                                    "stream resumed: reattached after reconnect for {}:{}",
-                                    host_alias, session
-                                ));
+                                bus.publish_discontinuity_for(
+                                    TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                    &format!(
+                                        "stream resumed: reattached after reconnect for {}:{}",
+                                        host_alias, session
+                                    ),
+                                );
 
                                 let mut snapshot_panes = 0usize;
                                 let mut snapshot_failed = false;
@@ -1134,7 +1144,10 @@ impl HostHandle {
                                         if snapshot_panes == 1 { "" } else { "s" }
                                     )
                                 };
-                                bus.publish_discontinuity(&snapshot_msg);
+                                bus.publish_discontinuity_for(
+                                    TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                    &snapshot_msg,
+                                );
 
                                 set_health(MonitorHealth::Streaming);
                                 attempt = 0; // Reset on successful reconnect

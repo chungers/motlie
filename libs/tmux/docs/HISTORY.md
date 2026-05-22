@@ -247,13 +247,21 @@ later (e.g. `--filter-tmux-claude=agent --filter-tmux=shell`).
 Timestamp-aware merge ordering is now supported by bus-owned timelines rather
 than by `Subscription::history()`. Use `OutputBus::create_timeline()` when a
 supervisor needs a named retained ring buffer, incremental cursors, rendered
-prompt windows, or timestamp merge-sort across multiple monitored sources.
+prompt windows, or receipt-time merge ordering across multiple monitored sources.
 
 `TimelineOrdering::Arrival` keeps existing arrival-order behavior.
-`TimelineOrdering::TimestampMerge` inserts output by `TargetOutput.timestamp`
-within a bounded reorder window; events that arrive older than the window are
-appended and marked late. Timelines also retain discontinuity and bus-level gap
-markers so supervisors can distinguish output from continuity loss.
+`TimelineOrdering::TimestampMerge` inserts output by daemon-side receipt
+`TargetOutput.timestamp` within a bounded reorder window; events that arrive
+older than the window are appended and marked late. Timelines also retain
+scoped discontinuity and bus-level gap markers so supervisors can distinguish
+output from continuity loss without injecting unrelated reconnect markers into
+filtered workstream timelines.
+
+Timeline handles now support dynamic workstreams: `create_or_get_timeline`,
+`set_filters`, `add_filter`, `ingest_historical`, explicit `detach`, stale-handle
+errors after removal/recreate, and `remove_idle_timelines` for TTL-style cleanup.
+Timeline entries include wall-clock receipt/ingest times alongside `Instant`
+values for JSONL-friendly consumers.
 
 Cross-source semantic correlation (e.g. "pane A's build finished, then pane B's
 tests started") remains the agent's job. The library provides ordered,
