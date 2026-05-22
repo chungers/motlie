@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-22 | @codex | Addressed issue #323 feedback: renamed workstream creation to `open`, defined `close` as conclusion that frees agents, and added domain/context tags plus `recruit --goal` matching. |
 | 2026-05-21 | @codex | Initial design for issue #323: stateless `bins/mstream` daemon/client, tmux-tag hydration, host reconnect flow, workstream CLI, recruiting, and JSONL observation. |
 
 ## Status
@@ -63,7 +64,7 @@ unstick collaborators.
   abstraction.
 - FR3: Start the daemon with zero hosts; hosts are connected by explicit
   client commands after startup.
-- FR4: Support a workstream with zero or more associated tmux agent sessions.
+- FR4: Open a workstream with zero or more associated tmux agent sessions.
 - FR5: Join an existing tmux session to a workstream and optionally send a
   pivot/task prompt.
 - FR6: Create a new tmux session on a connected host, start an agent binary,
@@ -71,13 +72,19 @@ unstick collaborators.
 - FR7: Leave a session from a workstream without killing it.
 - FR8: Kill a session only through an explicit destructive command.
 - FR9: Recruit agents from connected/scanned hosts, preferring tagged available
-  sessions before creating new sessions.
+  sessions and goal/context matches before creating new sessions.
 - FR10: Scan connected hosts and hydrate workstream/session state from tmux
   session tags.
 - FR11: Observe workstreams through bounded polling commands suitable for an
   orchestrating agent.
 - FR12: Emit machine-facing output as JSONL on stdout. Human diagnostics and
   debug logs go to stderr.
+- FR13: Close a workstream as a conclusion step that marks participating agents
+  available for other work and preserves useful domain/context metadata in tmux
+  session tags.
+- FR14: Accept a high-level `--goal` for workstream opening and recruiting so
+  an orchestrating agent can match new work to agents with relevant prior
+  context or specialty.
 
 ### State And Recovery Requirements
 
@@ -120,9 +127,10 @@ Users and orchestrating agents should think in these terms:
 
 - connect a host
 - scan known sessions
-- create a workstream
+- open a workstream
 - join or create agents for the workstream
 - recruit available agents
+- close the workstream when the work is concluded
 - poll status, events, snapshots, or summary input
 
 The public CLI should not expose Fleet or OutputBus directly. Internally,
@@ -221,17 +229,37 @@ Initial tags:
 @mstream/managed=true
 @mstream/workstream=pr-322
 @mstream/workstream-title=OutputBus timelines
+@mstream/workstream-state=open
+@mstream/workstream-goal=Add OutputBus-backed timelines
+@mstream/workstream-domain=tmux
 @mstream/role=reviewer
 @mstream/agent=codex
 @mstream/identity=ops47-mmux-reviewer
 @mstream/state=available|busy|idle|reserved
 @mstream/cwd=/abs/path
+@mstream/context-domains=tmux,vmm
+@mstream/context-specialties=output-bus,timeline-review
+@mstream/context-summary=Reviewed OutputBus timeline design and tmux tag hydration.
+@mstream/last-workstream=pr-322
+@mstream/last-workstream-title=OutputBus timelines
 @mstream/updated-at=2026-05-21T12:34:56Z
 ```
 
 The tag values must stay small. Larger state belongs in tmux history, in the
 repo, or in the human/orchestrator conversation. Tags are for hydration and
 selection, not transcripts.
+
+There are two classes of tags:
+
+- active assignment tags such as `workstream`, `workstream-title`,
+  `workstream-state`, `workstream-goal`, `workstream-domain`, and `role`
+- reusable agent context tags such as `context-domains`,
+  `context-specialties`, `context-summary`, and `last-workstream`
+
+The active assignment tags describe the work currently occupying the agent.
+The reusable context tags describe the agent's accumulated local context and
+specialty so a future `recruit --goal` can find agents whose tmux session,
+working tree, scrollback, and model context are likely useful for related work.
 
 ### Hydration Flow
 
@@ -250,14 +278,23 @@ requirement is stronger than durable empty-workstream metadata.
 
 ### Workstream Commands
 
-Create an in-memory workstream:
+Open an in-memory workstream:
 
 ```sh
-mstream create pr-322 --title "OutputBus timelines"
+mstream open pr-322 \
+  --title "OutputBus timelines" \
+  --goal "Add OutputBus-backed timelines for multi-agent monitoring" \
+  --domain tmux
 mstream list
 mstream show pr-322
 mstream close pr-322
 ```
+
+`open` replaces `create` as the workstream verb. Opening a workstream records
+the daemon-memory workstream handle and any provided title/goal/domain metadata.
+Because `mstream` has no durable local store, an open workstream becomes
+durable only when at least one joined session receives `@mstream/workstream=*`
+tags.
 
 Join an existing tmux session:
 
@@ -290,12 +327,23 @@ that does only `mkdir -p`, `cd`, and `exec <agent>` with validated/escaped
 arguments. A later `motlie-tmux` improvement may add `new-session -c` support
 to `CreateSessionOptions`.
 
-Leave or kill:
+Close, leave, or kill:
 
 ```sh
+mstream close pr-322 \
+  --summary "OutputBus timeline design is ready for implementation." \
+  --domain tmux \
+  --specialty output-bus \
+  --specialty timeline-review
 mstream leave pr-322 amd1::gpt55-mmux-reviewer
 mstream kill amd1::gpt55-mmux-reviewer
 ```
+
+`close` concludes a workstream. For each participating session, it marks the
+agent available for new work, clears active workstream membership, records the
+closed workstream as `last-workstream`, and merges any provided domain,
+specialty, and summary text into reusable context tags. Closing does not kill
+sessions.
 
 `leave` unsets workstream-specific tags but leaves the session running.
 `kill` is explicit and destructive.
@@ -309,20 +357,31 @@ mstream recruit pr-322 \
   --role reviewer \
   --agent codex \
   --count 2 \
+  --goal "Clean up vmm examples" \
   --selector pool=amd \
   --task "Review PR 322 and summarize blockers."
 ```
 
 Selection order:
 
-1. Prefer sessions tagged `@mstream/state=available` and matching requested
-   role/agent/selector constraints.
-2. If creation is allowed and placement metadata is sufficient, create new
+1. Prefer sessions tagged `@mstream/state=available`.
+2. Within available sessions, prefer role/agent/selector matches and sessions
+   whose `context-domains`, `context-specialties`, `context-summary`, and
+   recent `last-workstream` tags match the requested `--goal`.
+3. If multiple candidates remain, return or choose candidates with enough
+   context metadata for the orchestrating agent to explain the selection.
+4. If creation is allowed and placement metadata is sufficient, create new
    sessions on connected hosts using the same behavior as `mstream new`.
-3. Prefer lower observed busy-session count per host when choosing among
+5. Prefer lower observed busy-session count per host when choosing among
    otherwise equivalent hosts.
-4. Refuse with an actionable JSONL error if hosts, labels, capacity, work root,
+6. Refuse with an actionable JSONL error if hosts, labels, capacity, work root,
    or credentials are unknown.
+
+`mstream` is not required to be an LLM. The first implementation may use
+structured/lexical scoring over the session context tags and include candidate
+metadata in JSONL so the orchestrating agent can make the semantic judgment.
+A future model-backed scorer can improve `--goal` matching without changing
+the CLI contract.
 
 `mstream` must not infer that an arbitrary untagged tmux session is available.
 Availability is explicit.
