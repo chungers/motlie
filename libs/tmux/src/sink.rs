@@ -176,10 +176,23 @@ impl Default for TimelineOptions {
 }
 
 /// Stable cursor for incremental timeline polling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineCursor {
-    /// Next timeline sequence number the caller wants.
+    /// Lowest timeline sequence number that has not been fully drained.
     pub next_sequence: u64,
+    /// Out-of-order sequences already returned while lower retained sequences
+    /// are still pending. This lets timestamp-ordered pages resume without
+    /// replaying or skipping entries.
+    pub seen_sequences: Vec<u64>,
+}
+
+impl Default for TimelineCursor {
+    fn default() -> Self {
+        TimelineCursor {
+            next_sequence: 1,
+            seen_sequences: Vec::new(),
+        }
+    }
 }
 
 /// Options for rendering a timeline window.
@@ -1901,25 +1914,69 @@ impl TimelineState {
         }
     }
 
-    fn entries_after(&self, cursor: TimelineCursor, limit: usize) -> TimelinePage {
-        let mut entries: Vec<TimelineEntry> = self
+    fn pending_entries_after(&self, cursor: &TimelineCursor) -> Vec<TimelineEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.sequence >= cursor.next_sequence
+                    && !cursor.seen_sequences.contains(&entry.sequence)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn advance_cursor(
+        &self,
+        cursor: &TimelineCursor,
+        returned: &[TimelineEntry],
+    ) -> TimelineCursor {
+        if returned.is_empty() {
+            return cursor.clone();
+        }
+
+        let mut seen_sequences = cursor.seen_sequences.clone();
+        for sequence in returned.iter().map(|entry| entry.sequence) {
+            if !seen_sequences.contains(&sequence) {
+                seen_sequences.push(sequence);
+            }
+        }
+        seen_sequences.sort_unstable();
+
+        let pending_next = self
             .entries
             .iter()
-            .filter(|entry| entry.sequence >= cursor.next_sequence)
-            .cloned()
-            .collect();
+            .filter(|entry| {
+                entry.sequence >= cursor.next_sequence && !seen_sequences.contains(&entry.sequence)
+            })
+            .map(|entry| entry.sequence)
+            .min();
+
+        if let Some(next_sequence) = pending_next {
+            let seen_sequences = seen_sequences
+                .into_iter()
+                .filter(|sequence| *sequence >= next_sequence)
+                .collect();
+            TimelineCursor {
+                next_sequence,
+                seen_sequences,
+            }
+        } else {
+            TimelineCursor {
+                next_sequence: self.next_sequence,
+                seen_sequences: Vec::new(),
+            }
+        }
+    }
+
+    fn entries_after(&self, cursor: TimelineCursor, limit: usize) -> TimelinePage {
+        let mut entries = self.pending_entries_after(&cursor);
         if limit > 0 && entries.len() > limit {
             entries.truncate(limit);
         }
-        let next_sequence = entries
-            .iter()
-            .map(|entry| entry.sequence)
-            .max()
-            .map(|sequence| sequence + 1)
-            .unwrap_or(cursor.next_sequence);
+        let next_cursor = self.advance_cursor(&cursor, &entries);
         TimelinePage {
             entries,
-            cursor: TimelineCursor { next_sequence },
+            cursor: next_cursor,
             omitted_entries: self.omitted_entries,
         }
     }
@@ -1932,15 +1989,21 @@ impl TimelineState {
             len - limit
         };
         let entries: Vec<TimelineEntry> = self.entries.iter().skip(start).cloned().collect();
-        let next_sequence = entries
+        let cursor = entries
             .iter()
             .map(|entry| entry.sequence)
             .max()
-            .map(|sequence| sequence + 1)
-            .unwrap_or(self.next_sequence);
+            .map(|sequence| TimelineCursor {
+                next_sequence: sequence + 1,
+                seen_sequences: Vec::new(),
+            })
+            .unwrap_or_else(|| TimelineCursor {
+                next_sequence: self.next_sequence,
+                seen_sequences: Vec::new(),
+            });
         TimelinePage {
             entries,
-            cursor: TimelineCursor { next_sequence },
+            cursor,
             omitted_entries: self.omitted_entries,
         }
     }
@@ -1950,21 +2013,11 @@ impl TimelineState {
         cursor: TimelineCursor,
         opts: RenderOptions,
     ) -> (Vec<TimelineEntry>, TimelineCursor) {
-        let entries: Vec<TimelineEntry> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.sequence >= cursor.next_sequence)
-            .cloned()
-            .collect();
+        let entries = self.pending_entries_after(&cursor);
         let cap = self.render_cap(opts);
         if cap == 0 {
-            let next_sequence = entries
-                .iter()
-                .map(|entry| entry.sequence)
-                .max()
-                .map(|sequence| sequence + 1)
-                .unwrap_or(cursor.next_sequence);
-            return (entries, TimelineCursor { next_sequence });
+            let next_cursor = self.advance_cursor(&cursor, &entries);
+            return (entries, next_cursor);
         }
 
         let mut selected = Vec::new();
@@ -1987,13 +2040,8 @@ impl TimelineState {
             }
         }
 
-        let next_sequence = selected
-            .iter()
-            .map(|entry| entry.sequence)
-            .max()
-            .map(|sequence| sequence + 1)
-            .unwrap_or(cursor.next_sequence);
-        (selected, TimelineCursor { next_sequence })
+        let next_cursor = self.advance_cursor(&cursor, &selected);
+        (selected, next_cursor)
     }
 
     fn render_entries(&self, entries: &[TimelineEntry], opts: RenderOptions) -> String {
@@ -2835,6 +2883,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bus_timeline_timestamp_merge_limit_cursor_does_not_skip_lower_sequence() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "bounded-cursor",
+                TimelineOptions {
+                    ordering: TimelineOrdering::TimestampMerge {
+                        reorder_window: Duration::from_millis(100),
+                        late_event_policy: LateEventPolicy::AppendWithMarker,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let base = Instant::now();
+        let mut b = make_output("h", "b", "%2", "second", 1);
+        b.timestamp = base + Duration::from_millis(20);
+        let mut a = make_output("h", "a", "%1", "first", 1);
+        a.timestamp = base + Duration::from_millis(10);
+
+        bus.publish(b);
+        bus.publish(a);
+
+        let first = timeline
+            .entries_after(TimelineCursor::default(), 1)
+            .await
+            .unwrap();
+        assert_eq!(first.entries.len(), 1);
+        assert_eq!(first.entries[0].sequence, 2);
+        assert_eq!(first.cursor.next_sequence, 1);
+        assert_eq!(first.cursor.seen_sequences, vec![2]);
+
+        let second = timeline.entries_after(first.cursor, 1).await.unwrap();
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.entries[0].sequence, 1);
+        assert_eq!(second.cursor.next_sequence, 3);
+        assert!(second.cursor.seen_sequences.is_empty());
+
+        let done = timeline.entries_after(second.cursor, 1).await.unwrap();
+        assert!(done.entries.is_empty());
+    }
+
+    #[tokio::test]
     async fn bus_timeline_latest_cursor_uses_max_sequence() {
         let bus = OutputBus::new();
         let timeline = bus
@@ -2904,6 +2996,59 @@ mod tests {
         assert!(next.text.contains("two"));
         assert!(next.text.contains("three"));
         assert_eq!(next.cursor.next_sequence, 4);
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_timestamp_merge_render_cursor_does_not_skip_lower_sequence() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "render-bounded-cursor",
+                TimelineOptions {
+                    ordering: TimelineOrdering::TimestampMerge {
+                        reorder_window: Duration::from_millis(100),
+                        late_event_policy: LateEventPolicy::AppendWithMarker,
+                    },
+                    label_format: LabelFormat::Prompt,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let base = Instant::now();
+        let mut b = make_output("h", "b", "%2", "second", 1);
+        b.timestamp = base + Duration::from_millis(20);
+        let mut a = make_output("h", "a", "%1", "first", 1);
+        a.timestamp = base + Duration::from_millis(10);
+
+        bus.publish(b);
+        bus.publish(a);
+
+        let ordered = timeline.latest(0).await.unwrap();
+        assert_eq!(ordered.entries[0].sequence, 2);
+        let first_entry_chars = ordered.entries[0].rendered_chars(&LabelFormat::Prompt);
+
+        let first = timeline
+            .render_after(
+                TimelineCursor::default(),
+                RenderOptions {
+                    max_chars: first_entry_chars,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(first.text.contains("first"));
+        assert!(!first.text.contains("second"));
+        assert_eq!(first.cursor.next_sequence, 1);
+        assert_eq!(first.cursor.seen_sequences, vec![2]);
+
+        let second = timeline
+            .render_after(first.cursor, RenderOptions::default())
+            .await
+            .unwrap();
+        assert!(second.text.contains("second"));
+        assert_eq!(second.cursor.next_sequence, 3);
+        assert!(second.cursor.seen_sequences.is_empty());
     }
 
     #[tokio::test]

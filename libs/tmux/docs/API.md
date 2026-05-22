@@ -2316,15 +2316,17 @@ Ordering modes:
 | `TimelineOrdering::Arrival` | Preserve bus ingest order. This matches existing subscription behavior. |
 | `TimelineOrdering::TimestampMerge` | Insert output by `TargetOutput.timestamp` within a bounded reorder window. Events older than the newest observed timestamp by more than the window are appended and marked `late`. |
 
-Queries return stable cursors for incremental polling. `entries_after(cursor,
-limit)` fetches retained entries with `sequence >= cursor.next_sequence` and
-returns the next cursor based on the highest sequence actually returned, even
-when timestamp ordering displays entries out of sequence-number order.
-`latest(limit)` returns the newest retained entries. `render_after(cursor,
-opts)` returns prompt-ready text in `Interleaved` or `PerSource` mode and only
-advances the cursor through entries represented in the rendered text, so a
-character cap cannot skip unrendered entries. Pages include `omitted_entries`
-so callers can detect when ring retention has dropped older entries.
+Queries return stable cursors for incremental polling. `TimelineCursor` carries
+`next_sequence` plus out-of-order `seen_sequences`, so bounded pages over
+timestamp-merged timelines can return timestamp-sorted entries without skipping
+lower sequence numbers that sort after a higher sequence. `entries_after(cursor,
+limit)` fetches retained entries at or after the cursor that have not already
+been seen by that cursor. `latest(limit)` returns the newest retained entries.
+`render_after(cursor, opts)` returns prompt-ready text in `Interleaved` or
+`PerSource` mode and only advances the cursor through entries represented in
+the rendered text, so a character cap cannot skip unrendered entries. Pages
+include `omitted_entries` so callers can detect when ring retention has dropped
+older entries.
 
 `OutputBus::publish_discontinuity()` records discontinuity markers in every
 registered timeline. `OutputBus::publish_gap(dropped_events)` records a
