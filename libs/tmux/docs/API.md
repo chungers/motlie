@@ -2291,6 +2291,7 @@ Timeline management lives on the bus:
 ```rust
 let handle = bus.timeline("review-round-17")?.expect("timeline exists");
 let same = bus.create_or_get_timeline("review-round-17", TimelineOptions::default())?;
+// Existing timelines are returned unchanged; create_or_get opts apply only on create.
 let names = bus.timelines()?;
 let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
 bus.remove_timeline("review-round-17")?;
@@ -2304,6 +2305,10 @@ handle.set_filters(vec![SinkFilter::for_host_session("amd1", "codex-submit")]).a
 handle.ingest_historical(rebuilt_entries).await?;
 handle.detach()?;
 ```
+
+Historical entries are appended in caller order even when the timeline uses
+`TimestampMerge`; their process-local `received_at` instants are cleared during
+backfill, so persisted history should use wall-clock metadata instead.
 
 Removing or detaching a timeline marks outstanding handles stale; subsequent
 `entries_after`, `latest`, `render_after`, filter mutation, or backfill calls on
@@ -2321,8 +2326,9 @@ fleet.remove_timeline("all-agents")?;
 `TimelineEntry` preserves source metadata for prompt summaries and handoff
 detection: host alias, session name, pane id/target identity, `SourceLabel`,
 content, per-source output sequence, the `TargetOutput` daemon-side receipt
-`Instant`, wall-clock receipt and ingest times for JSONL-friendly consumers,
-timeline sequence, discontinuity epoch, and a `late` flag. `TimelineEntryKind`
+`Instant`, estimated wall-clock receipt time and ingest wall-clock time for
+JSONL-friendly consumers, timeline sequence, discontinuity epoch, and a `late`
+flag. `TimelineEntryKind`
 distinguishes normal output, gap markers, and upstream monitor discontinuities.
 
 Ordering modes:
@@ -2337,8 +2343,10 @@ Queries return stable cursors for incremental polling. `TimelineCursor` carries
 timestamp-merged timelines can return timestamp-sorted entries without skipping
 lower sequence numbers that sort after a higher sequence. `entries_after(cursor,
 limit)` fetches retained entries at or after the cursor that have not already
-been seen by that cursor. `latest(limit)` returns the newest retained entries.
-`render_after(cursor, opts)` returns prompt-ready text in `Interleaved` or
+been seen by that cursor. `latest(limit)` returns the newest retained entries
+and returns a cursor positioned after the full snapshot watermark, so the next
+`entries_after()` poll only returns future entries. `render_after(cursor, opts)`
+returns prompt-ready text in `Interleaved` or
 `PerSource` mode and only advances the cursor through entries represented in
 the rendered text, so a character cap cannot skip unrendered entries. Pages
 include `omitted_entries` so callers can detect when ring retention has dropped

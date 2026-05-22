@@ -289,7 +289,7 @@ pub struct TimelineEntry {
     pub output_sequence: Option<u64>,
     /// Daemon-side receipt timestamp from `TargetOutput`.
     pub received_at: Option<Instant>,
-    /// Wall-clock time captured when this timeline observed the output.
+    /// Estimated wall-clock time corresponding to `received_at`.
     pub received_at_wall: Option<SystemTime>,
     /// Bus ingest timestamp.
     pub ingested_at: Instant,
@@ -1928,6 +1928,10 @@ impl TimelineState {
 
         let received_at = output.timestamp;
         let ingested_at_wall = SystemTime::now();
+        let received_at_wall = ingested_at
+            .checked_duration_since(received_at)
+            .and_then(|age| ingested_at_wall.checked_sub(age))
+            .unwrap_or(ingested_at_wall);
         let mut late = false;
         if let Some(newest) = self.newest_received_at {
             if received_at > newest {
@@ -1955,7 +1959,7 @@ impl TimelineState {
             content: Some(output.content.clone()),
             output_sequence: Some(output.sequence),
             received_at: Some(received_at),
-            received_at_wall: Some(ingested_at_wall),
+            received_at_wall: Some(received_at_wall),
             ingested_at,
             ingested_at_wall,
             late,
@@ -2022,28 +2026,28 @@ impl TimelineState {
         for mut entry in entries {
             entry.sequence = self.next_sequence;
             entry.discontinuity_epoch = self.discontinuity_epoch;
+            entry.received_at = None;
             self.next_sequence += 1;
-            if let Some(received_at) = entry.received_at {
-                if self
-                    .newest_received_at
-                    .is_none_or(|newest| received_at > newest)
-                {
-                    self.newest_received_at = Some(received_at);
-                }
-            }
             if matches!(entry.kind, TimelineEntryKind::Discontinuity { .. }) {
                 self.discontinuity_epoch += 1;
             }
-            self.insert_entry(entry.clone());
+            self.append_entry(entry.clone());
             accepted.push(entry);
         }
-        self.touch();
         let cursor = self.advance_cursor(&cursor, &accepted);
         TimelinePage {
             entries: accepted,
             cursor,
             omitted_entries: self.omitted_entries,
         }
+    }
+
+    fn append_entry(&mut self, entry: TimelineEntry) {
+        let chars = entry.rendered_chars(&self.options.label_format);
+        self.entries.push_back(entry);
+        self.rendered_chars += chars;
+        self.trim();
+        self.touch();
     }
 
     fn insert_entry(&mut self, entry: TimelineEntry) {
@@ -2067,6 +2071,7 @@ impl TimelineState {
         }
         self.rendered_chars += chars;
         self.trim();
+        self.touch();
     }
 
     fn timestamp_insert_position(&self, received_at: Instant) -> usize {
@@ -2182,21 +2187,12 @@ impl TimelineState {
             len - limit
         };
         let entries: Vec<TimelineEntry> = self.entries.iter().skip(start).cloned().collect();
-        let cursor = entries
-            .iter()
-            .map(|entry| entry.sequence)
-            .max()
-            .map(|sequence| TimelineCursor {
-                next_sequence: sequence + 1,
-                seen_sequences: Vec::new(),
-            })
-            .unwrap_or_else(|| TimelineCursor {
-                next_sequence: self.next_sequence,
-                seen_sequences: Vec::new(),
-            });
         TimelinePage {
             entries,
-            cursor,
+            cursor: TimelineCursor {
+                next_sequence: self.next_sequence,
+                seen_sequences: Vec::new(),
+            },
             omitted_entries: self.omitted_entries,
         }
     }
@@ -2399,8 +2395,9 @@ impl TimelineHandle {
 
     /// Ingest already reconstructed history into this timeline.
     ///
-    /// Supplied entries are accepted into this timeline with fresh timeline
-    /// sequence numbers so subsequent live output continues after the backfill.
+    /// Supplied entries are appended in caller order with fresh timeline
+    /// sequence numbers. Process-local `received_at` instants are cleared during
+    /// backfill; use wall-clock fields for persisted history metadata.
     pub async fn ingest_historical(&self, entries: Vec<TimelineEntry>) -> Result<TimelinePage> {
         let mut state = self.lock_state()?;
         Ok(state.ingest_historical(entries))
@@ -2536,6 +2533,9 @@ impl OutputBus {
     }
 
     /// Return an existing timeline or create it if missing.
+    ///
+    /// When the timeline already exists, `opts` are ignored and the existing
+    /// generation is returned unchanged.
     pub fn create_or_get_timeline(
         &self,
         name: impl Into<String>,
@@ -3357,6 +3357,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bus_timeline_timestamp_merge_latest_limit_cursor_does_not_replay_snapshot() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "latest-bounded-cursor",
+                TimelineOptions {
+                    ordering: TimelineOrdering::TimestampMerge {
+                        reorder_window: Duration::from_millis(100),
+                        late_event_policy: LateEventPolicy::AppendWithMarker,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let base = Instant::now();
+        let mut b = make_output("h", "b", "%2", "second", 1);
+        b.timestamp = base + Duration::from_millis(20);
+        let mut a = make_output("h", "a", "%1", "first", 1);
+        a.timestamp = base + Duration::from_millis(10);
+
+        bus.publish(b);
+        bus.publish(a);
+
+        let latest = timeline.latest(1).await.unwrap();
+        let sequences: Vec<u64> = latest.entries.iter().map(|entry| entry.sequence).collect();
+        assert_eq!(sequences, vec![1]);
+        assert_eq!(latest.cursor.next_sequence, 3);
+
+        let next = timeline
+            .entries_after(latest.cursor.clone(), 0)
+            .await
+            .unwrap();
+        assert!(next.entries.is_empty());
+
+        let mut c = make_output("h", "c", "%3", "third", 1);
+        c.timestamp = base + Duration::from_millis(30);
+        bus.publish(c);
+
+        let next = timeline.entries_after(latest.cursor, 0).await.unwrap();
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(next.entries[0].sequence, 3);
+        assert_eq!(next.entries[0].content.as_deref(), Some("third"));
+    }
+
+    #[tokio::test]
     async fn bus_timeline_render_after_cursor_stops_at_rendered_entries() {
         let bus = OutputBus::new();
         let timeline = bus
@@ -3642,6 +3688,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bus_timeline_writes_refresh_idle_deadline() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "active",
+                TimelineOptions {
+                    filters: vec![SinkFilter::for_session("s")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        {
+            let mut state = timeline.state.lock().unwrap();
+            state.last_accessed_at = Instant::now() - Duration::from_secs(60);
+        }
+
+        bus.publish(make_output("h", "s", "%1", "live", 1));
+
+        let removed = bus.remove_idle_timelines(Duration::from_secs(30)).unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(timeline.latest(0).await.unwrap().entries.len(), 1);
+    }
+
+    #[tokio::test]
     async fn bus_timeline_idle_cleanup_detaches_handles() {
         let bus = OutputBus::new();
         let timeline = bus
@@ -3651,6 +3722,55 @@ mod tests {
         let removed = bus.remove_idle_timelines(Duration::ZERO).unwrap();
         assert_eq!(removed, vec!["idle"]);
         assert!(timeline.latest(0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bus_timeline_historical_ingest_appends_in_caller_order() {
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline(
+                "history-order",
+                TimelineOptions {
+                    ordering: TimelineOrdering::TimestampMerge {
+                        reorder_window: Duration::from_millis(100),
+                        late_event_policy: LateEventPolicy::AppendWithMarker,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let base = Instant::now();
+        let mut first = make_timeline_entry("h", "s", "%1", "first");
+        first.received_at = Some(base + Duration::from_millis(20));
+        let mut second = make_timeline_entry("h", "s", "%2", "second");
+        second.received_at = Some(base + Duration::from_millis(10));
+
+        timeline
+            .ingest_historical(vec![first, second])
+            .await
+            .unwrap();
+
+        let page = timeline.latest(0).await.unwrap();
+        let contents: Vec<&str> = page
+            .entries
+            .iter()
+            .filter_map(|entry| entry.content.as_deref())
+            .collect();
+        assert_eq!(contents, vec!["first", "second"]);
+        assert!(page.entries.iter().all(|entry| entry.received_at.is_none()));
+
+        let mut live = make_output("h", "s", "%3", "live", 3);
+        live.timestamp = base + Duration::from_millis(5);
+        bus.publish(live);
+
+        let page = timeline.latest(0).await.unwrap();
+        let contents: Vec<&str> = page
+            .entries
+            .iter()
+            .filter_map(|entry| entry.content.as_deref())
+            .collect();
+        assert_eq!(contents, vec!["first", "second", "live"]);
     }
 
     #[tokio::test]

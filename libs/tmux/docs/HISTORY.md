@@ -257,11 +257,14 @@ scoped discontinuity and bus-level gap markers so supervisors can distinguish
 output from continuity loss without injecting unrelated reconnect markers into
 filtered workstream timelines.
 
-Timeline handles now support dynamic workstreams: `create_or_get_timeline`,
-`set_filters`, `add_filter`, `ingest_historical`, explicit `detach`, stale-handle
-errors after removal/recreate, and `remove_idle_timelines` for TTL-style cleanup.
-Timeline entries include wall-clock receipt/ingest times alongside `Instant`
-values for JSONL-friendly consumers.
+Timeline handles now support dynamic workstreams: `create_or_get_timeline`
+(existing options are ignored on the get path), `set_filters`, `add_filter`,
+`ingest_historical`, explicit `detach`, stale-handle errors after
+removal/recreate, and `remove_idle_timelines` for TTL-style cleanup. Writes
+refresh the idle deadline so actively filling timelines are not evicted between
+polls. Historical ingest appends in caller order and clears process-local
+`received_at` instants. Timeline entries include estimated wall-clock receipt
+and ingest times alongside `Instant` values for JSONL-friendly consumers.
 
 Cross-source semantic correlation (e.g. "pane A's build finished, then pane B's
 tests started") remains the agent's job. The library provides ordered,
