@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff implementation phase, explicit completion state ownership, timeline dependency gates, and status/process-state follow-ups. |
 | 2026-05-22 | @codex | Synced PLAN with issue #323 feedback: use `open`/`close`, add close-time agent availability/context tags, and require `recruit --goal` matching. |
 | 2026-05-21 | @codex | Initial implementation plan for issue #323, covering scaffolding, stateless daemon/client, host connection, tmux-tag hydration, workstream commands, recruiting, observation, and validation. |
 
@@ -13,7 +14,8 @@ This plan implements the design in [`DESIGN.md`](./DESIGN.md) for
 [issue #323](https://github.com/chungers/motlie/issues/323). The first
 deliverable is a usable agent-facing CLI/daemon. It may expose arrival-order
 merged timelines until [issue #322](https://github.com/chungers/motlie/issues/322)
-adds timestamp merge-sorted OutputBus timelines.
+adds OutputBus timelines with the additional mutable-filter, filtered-continuity,
+and cursor guarantees required by workstream observation.
 
 ## Phase 0. Project Setup And Traceability
 
@@ -31,9 +33,10 @@ Tasks:
   non-goals, requirements, and CLI/system design.
 - [x] 0.3 Create this `bins/mstream/docs/PLAN.md` with traceable implementation
   phases and validation gates.
-- [ ] 0.4 Add a follow-up issue or DESIGN note if implementation discovers that
-  `libs/tmux` needs new public APIs beyond the currently known session
-  start-directory gap.
+- [ ] 0.4 Add follow-up issues or DESIGN notes for known `libs/tmux` gaps:
+  session start-directory support, pane/process-state status for better stuck
+  hints, mutable OutputBus timeline filters, filter-respecting timeline
+  continuity markers, and bounded timestamp-merge cursor safety.
 
 Validation:
 
@@ -117,7 +120,9 @@ Tasks:
 - [ ] 3.1 Implement strict parsing for `<host-alias>::<tmux-session-name>`.
 - [ ] 3.2 Reject empty host aliases, empty session names, and malformed target
   strings with actionable JSONL errors.
-- [ ] 3.3 Define opaque cursor types for workstream event streams.
+- [ ] 3.3 Define opaque cursor types for workstream event streams. The encoding
+  is owned by `mstream`; it must not expose `std::time::Instant` or depend on
+  `libs/tmux` timeline serde support.
 - [ ] 3.4 Add snapshot-safe text fields that preserve content without control
   characters leaking into JSONL.
 - [ ] 3.5 Add golden tests for JSONL output shape for representative success
@@ -175,7 +180,8 @@ Tasks:
 - [ ] 5.2 Use `HostHandle::list_tags_for_session_infos("mstream", sessions)`
   for batch hydration.
 - [ ] 5.3 Implement tag writes for `open`, `join`, `new`, `close`, state
-  changes, role/agent metadata, and reusable agent context metadata.
+  changes, role/agent metadata, small `last-report-*` fields, and reusable
+  agent context metadata.
 - [ ] 5.4 Implement tag unsets for `leave` and close-time clearing of active
   workstream membership.
 - [ ] 5.5 Preserve unknown `@mstream/*` tags unless a command explicitly owns
@@ -184,6 +190,9 @@ Tasks:
   and partial metadata.
 - [ ] 5.7 Add tests for domain/specialty/context-summary tags used by
   `recruit --goal`.
+- [ ] 5.8 Add tests for state values `available`, `reserved`, `busy`, `idle`,
+  `done`, `blocked`, and `needs-input`, including ownership rules that prevent
+  output silence from becoming completion.
 
 Validation:
 
@@ -210,13 +219,15 @@ Tasks:
 - [ ] 6.3 Implement `mstream join <workstream> <target> --role <role>
   [--task <text>]`.
 - [ ] 6.4 Make `join` write session tags before sending a task prompt.
-- [ ] 6.5 Implement `mstream leave <workstream> <target>` by removing
+- [ ] 6.5 Include the managed-agent reporting contract in `join` task prompts:
+  `mstream session mark self --state done|blocked|needs-input --summary ...`.
+- [ ] 6.6 Implement `mstream leave <workstream> <target>` by removing
   workstream membership tags while preserving non-workstream metadata.
-- [ ] 6.6 Implement `mstream kill <target>` as a separate explicit destructive
+- [ ] 6.7 Implement `mstream kill <target>` as a separate explicit destructive
   command.
-- [ ] 6.7 Ensure each state-changing command returns a JSONL cursor or enough
+- [ ] 6.8 Ensure each state-changing command returns a JSONL cursor or enough
   metadata for the orchestrating agent to poll next.
-- [ ] 6.8 Make `mstream close <workstream>` mark participating agents available,
+- [ ] 6.9 Make `mstream close <workstream>` mark participating agents available,
   clear active workstream membership, and merge optional `--summary`,
   `--domain`, and repeated `--specialty` values into reusable context tags.
 
@@ -245,10 +256,10 @@ Tasks:
   `exec <agent>` with validated and escaped arguments.
 - [ ] 7.4 Start the tmux session with the target session name as the agent's
   operational identity.
-- [ ] 7.5 Set initial environment variables such as `MSTREAM_WORKSTREAM`,
-  `MSTREAM_TARGET`, and `MSTREAM_ROLE` when useful.
+- [ ] 7.5 Set initial environment variables such as `MSTREAM_SOCKET`,
+  `MSTREAM_WORKSTREAM`, `MSTREAM_TARGET`, and `MSTREAM_ROLE` when useful.
 - [ ] 7.6 Send an initial prompt that explicitly states the agent identity,
-  role, workstream, cwd, and task.
+  role, workstream, cwd, task, and completion/report command contract.
 - [ ] 7.7 Add a design follow-up if `CreateSessionOptions::start_directory`
   should be added to `libs/tmux` instead of using the bootstrap command.
 
@@ -259,7 +270,54 @@ cargo test -p motlie-mstream bootstrap
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock new pr-323 local::codex-test --role reviewer --cwd /tmp/mstream-pr-323-reviewer --agent codex --task "Report status."
 ```
 
-## Phase 8. Monitoring, Timelines, And Observation
+## Phase 8. Communication, Completion, And Handoff
+
+Design references:
+
+- [Communication And Handoff](./DESIGN.md#communication-and-handoff)
+- [Workstream Commands](./DESIGN.md#workstream-commands)
+- [Tmux Tag Schema](./DESIGN.md#tmux-tag-schema)
+
+Tasks:
+
+- [ ] 8.1 Implement `mstream send <workstream> <target> --text <text>
+  (--enter|--no-enter)` using typed `motlie-tmux` send APIs.
+- [ ] 8.2 Implement multi-line send behavior with explicit
+  `--paste-mode bracketed|literal`, and report the effective paste mode in
+  JSONL.
+- [ ] 8.3 Implement `send --require-state <state>` and `send --set-state busy`
+  so new assignments can update state atomically without guessing from output.
+- [ ] 8.4 Implement `mstream interrupt <target> [--key esc|ctrl-c]` as a
+  non-destructive command distinct from `kill`.
+- [ ] 8.5 Implement `mstream send --interrupt-first [--settle-ms N]` as one
+  daemon-side sequence: interrupt, wait, text, optional Enter, JSONL result.
+- [ ] 8.6 Implement `mstream broadcast <workstream> --text <text>` with
+  optional `--role` and `--state` filters and one result record per target.
+- [ ] 8.7 Implement `mstream session mark <target|self> --state
+  done|blocked|needs-input|available|reserved|busy|idle --summary <text>`.
+- [ ] 8.8 Make `self` resolve from `MSTREAM_TARGET`; update `@mstream/state`,
+  `@mstream/last-report-kind`, `@mstream/last-report-summary`, and
+  `@mstream/updated-at` on successful marks.
+- [ ] 8.9 Emit structured events for `message_sent`, `interrupted`,
+  `broadcast_sent`, `completed`, `blocked`, and `needs_input`.
+- [ ] 8.10 Implement `mstream handoff arm/list/cancel` as daemon-memory state
+  that fires when a source target reaches a requested terminal state.
+- [ ] 8.11 Ensure handoff firing sends the configured task to the destination,
+  emits `handoff_fired`, and does not claim durability across daemon restart.
+- [ ] 8.12 Add tests that silence, prompt heuristics, and missing output do not
+  transition a session to `done`, `blocked`, or `needs-input`.
+
+Validation:
+
+```sh
+cargo test -p motlie-mstream communication
+cargo test -p motlie-mstream handoff
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock send pr-323 local::codex-test --text "Report status." --enter
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock interrupt local::codex-test
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock session mark local::codex-test --state done --summary "manual smoke completed"
+```
+
+## Phase 9. Monitoring, Timelines, And Observation
 
 Design references:
 
@@ -269,19 +327,28 @@ Design references:
 
 Tasks:
 
-- [ ] 8.1 Use `motlie-tmux` Fleet/OutputBus to start monitoring joined
+- [ ] 9.1 Use `motlie-tmux` Fleet/OutputBus to start monitoring joined
   sessions.
-- [ ] 8.2 Maintain per-workstream in-memory ring buffers with opaque cursors.
-- [ ] 8.3 Implement `mstream status <workstream>`.
-- [ ] 8.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
-- [ ] 8.5 Implement `mstream snapshot <workstream> --after <cursor>
+- [ ] 9.2 Maintain per-workstream in-memory ring buffers with opaque cursors.
+- [ ] 9.3 Implement `mstream status <workstream>`.
+- [ ] 9.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
+- [ ] 9.5 Implement `mstream snapshot <workstream> --after <cursor>
   --max-chars N`.
-- [ ] 8.6 Implement `mstream summary-input <workstream> --since <duration>
+- [ ] 9.6 Implement `mstream summary-input <workstream> --since <duration>
   --max-chars N` with server-side filtering/compaction.
-- [ ] 8.7 Mark ordering as arrival-order in JSONL metadata until issue #322
-  provides timestamp merge-sorted timelines.
-- [ ] 8.8 After issue #322 lands, replace the local ring-buffer/timeline layer
-  with the `libs/tmux` OutputBus-backed timeline API where possible.
+- [ ] 9.7 Mark ordering as arrival-order in JSONL metadata until issue #322
+  and the follow-up timeline API gaps provide a usable OutputBus substrate for
+  timestamp-aware workstream timelines.
+- [ ] 9.8 Make `status` include explicit session state, last report summary,
+  last output age, monitor health, and process/prompt-based stuck hints when
+  available.
+- [ ] 9.9 Keep stuck hints separate from explicit completion states in JSONL.
+- [ ] 9.10 Remove a workstream timeline on `close` and when `leave` removes the
+  last session from an otherwise empty/closed workstream.
+- [ ] 9.11 After issue #322 and follow-up gaps land, replace the local
+  ring-buffer/timeline layer with the `libs/tmux` OutputBus-backed timeline API
+  where possible. This task is gated on mutable filters, filter-respecting
+  continuity markers, and bounded timestamp-merge cursor safety.
 
 Validation:
 
@@ -293,7 +360,7 @@ cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock events pr-323 --l
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock summary-input pr-323 --max-chars 12000
 ```
 
-## Phase 9. Recruiting And Availability
+## Phase 10. Recruiting And Availability
 
 Design references:
 
@@ -303,21 +370,21 @@ Design references:
 
 Tasks:
 
-- [ ] 9.1 Implement `mstream session list` and `mstream session mark <target>
-  --state available|busy|idle|reserved`.
-- [ ] 9.2 Implement `mstream recruit <workstream> --role <role>
+- [ ] 10.1 Implement `mstream session list`. `session mark` is implemented in
+  Phase 8 because it is part of the completion/report channel.
+- [ ] 10.2 Implement `mstream recruit <workstream> --role <role>
   --agent <agent> --count N [--goal <goal>] [--selector key=value]
   [--task <text>]`.
-- [ ] 9.3 Prefer explicitly tagged available sessions.
-- [ ] 9.4 Refuse to recruit untagged sessions unless the target is explicitly
+- [ ] 10.3 Prefer explicitly tagged available sessions.
+- [ ] 10.4 Refuse to recruit untagged sessions unless the target is explicitly
   named by the human.
-- [ ] 9.5 Score available sessions against `--goal` using structured/lexical
+- [ ] 10.5 Score available sessions against `--goal` using structured/lexical
   matching over `context-domains`, `context-specialties`, `context-summary`,
   and `last-workstream` tags; include candidate metadata in JSONL so the
   orchestrating agent can make a semantic selection.
-- [ ] 9.6 Add optional creation only when placement, cwd/work-root, and capacity
+- [ ] 10.6 Add optional creation only when placement, cwd/work-root, and capacity
   information are explicitly available in the daemon's current memory.
-- [ ] 9.7 Return actionable JSONL errors when recruiting cannot proceed because
+- [ ] 10.7 Return actionable JSONL errors when recruiting cannot proceed because
   host metadata is unknown after restart.
 
 Validation:
@@ -328,7 +395,7 @@ cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock session list
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock recruit pr-323 --role reviewer --agent codex --count 1 --goal "clean up vmm examples" --task "Review the current branch."
 ```
 
-## Phase 10. Documentation And Agent Skill Follow-Up
+## Phase 11. Documentation And Agent Skill Follow-Up
 
 Design references:
 
@@ -338,15 +405,16 @@ Design references:
 
 Tasks:
 
-- [ ] 10.1 Add `bins/mstream/docs/API.md` or `CLI.md` after the implemented
+- [ ] 11.1 Add `bins/mstream/docs/API.md` or `CLI.md` after the implemented
   command behavior exists.
-- [ ] 10.2 Document daemon restart recovery with exact orchestrating-agent
+- [ ] 11.2 Document daemon restart recovery with exact orchestrating-agent
   behavior: ask the human to restart/provide socket, then ask for host aliases
   and SSH URIs, reconnect, rescan.
-- [ ] 10.3 Update the project skill only after the implemented CLI has been
+- [ ] 11.3 Update the project skill only after the implemented CLI has been
   validated, so the skill instructions match reality.
-- [ ] 10.4 Add examples for one submitter plus one reviewer workstream.
-- [ ] 10.5 Add a release-note candidate entry only if `mstream` is intended for
+- [ ] 11.4 Add examples for one submitter plus one reviewer workstream,
+  including send, mark-done, handoff, and reviewer re-review.
+- [ ] 11.5 Add a release-note candidate entry only if `mstream` is intended for
   the next release.
 
 Validation:
@@ -373,6 +441,8 @@ cargo run -p motlie-mstream -- daemon start --socket /tmp/mstream-smoke.sock
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock connect local ssh://localhost
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock open pr-323 --title "mstream smoke" --goal "validate mstream local orchestration"
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock new pr-323 local::mstream-smoke-reviewer --role reviewer --cwd /tmp/mstream-smoke-reviewer --agent codex --task "Say ready, then wait."
+cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock send pr-323 local::mstream-smoke-reviewer --text "Mark done after this." --enter --set-state busy
+cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock session mark local::mstream-smoke-reviewer --state done --summary "local send/mark smoke completed"
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock status pr-323
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock summary-input pr-323 --max-chars 4000
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock close pr-323 --summary "local smoke completed" --domain tmux --specialty mstream-smoke

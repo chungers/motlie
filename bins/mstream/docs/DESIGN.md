@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff, explicit completion/state ownership, OutputBus timeline dependency gates, cursor/time ownership, and timeline cleanup rules. |
 | 2026-05-22 | @codex | Addressed issue #323 feedback: renamed workstream creation to `open`, defined `close` as conclusion that frees agents, and added domain/context tags plus `recruit --goal` matching. |
 | 2026-05-21 | @codex | Initial design for issue #323: stateless `bins/mstream` daemon/client, tmux-tag hydration, host reconnect flow, workstream CLI, recruiting, and JSONL observation. |
 
@@ -15,9 +16,12 @@ model over existing `motlie-tmux` capabilities, so there is no migration or
 backwards-compatibility contract for existing users.
 
 The related `libs/tmux` timeline dependency is
-[issue #322](https://github.com/chungers/motlie/issues/322). Until #322 lands,
-`mstream` can expose useful arrival-order merged output, but true timestamp
-merge-sorted multi-agent timelines remain a dependency.
+[issue #322](https://github.com/chungers/motlie/issues/322). Until #322 lands
+and the follow-on API gaps are closed, `mstream` can expose useful arrival-order
+merged output, but it must not claim exact agent-emission-time merge sorting.
+The current `TargetOutput.timestamp` substrate is a daemon receipt timestamp,
+not an agent-authored event time, so timestamp-aware timelines are useful for
+stable multi-source ordering but not a proof of wall-clock agent emission order.
 
 ## Business Problem
 
@@ -34,6 +38,8 @@ conversation:
 - which sessions are assigned to a task, PR, issue, or review role
 - which sessions are idle or available for new work
 - how to watch multiple agents without flooding the orchestrator's context
+- how to send follow-up instructions, interrupts, and handoffs after agents are
+  already running
 - how to recover after a watcher process or daemon restart
 
 This is fragile. It pushes every orchestrating agent toward custom local
@@ -52,8 +58,10 @@ unstick collaborators.
 - No separate `libs/workstream` wrapper in the first slice.
 - No automatic takeover of arbitrary tmux sessions without explicit join or
   managed-session tags.
-- No exact timestamp merge-sort before `libs/tmux` provides the timeline
-  support tracked by issue #322.
+- No exact agent-emission-time merge-sort in the first slice.
+- No durable workflow engine in the first slice. Handoff edges may survive the
+  orchestrator's context compaction while the daemon is running, but they do
+  not survive daemon restart because `mstream` has no local durable state.
 
 ## Requirements
 
@@ -85,6 +93,13 @@ unstick collaborators.
 - FR14: Accept a high-level `--goal` for workstream opening and recruiting so
   an orchestrating agent can match new work to agents with relevant prior
   context or specialty.
+- FR15: Send ad-hoc follow-up messages to running agents after join/new.
+- FR16: Interrupt a running agent non-destructively without killing the tmux
+  session.
+- FR17: Provide an agent-to-coordinator completion/report channel with explicit
+  state transitions.
+- FR18: Support handoff and broadcast workflows so one agent's completion can
+  trigger another agent's next prompt while the daemon remains alive.
 
 ### State And Recovery Requirements
 
@@ -100,6 +115,8 @@ unstick collaborators.
   are live/volatile and can be rebuilt only from still-available tmux history.
 - SR6: Empty workstreams are ephemeral because there is no durable local store
   and no session tag to attach their metadata to.
+- SR7: Session state tags are hints owned by `mstream` commands and managed
+  agents. Silence or lack of output must never be persisted as completion.
 
 ### Non-Functional Requirements
 
@@ -114,6 +131,12 @@ unstick collaborators.
   understand what changed and what cursor to use next.
 - NFR6: Keep the first implementation useful without issue #322 while avoiding
   a CLI contract that blocks timestamp-sorted timelines later.
+- NFR7: Coordinator-to-agent communication must use typed `libs/tmux`
+  `send_text`/`send_keys`/`KeySequence` APIs rather than shell-built tmux
+  commands.
+- NFR8: Status output may include stuck hints, prompt heuristics, or process
+  state, but those hints must be labeled separately from explicit agent states
+  such as `done`, `blocked`, or `needs-input`.
 
 ## Selected Design
 
@@ -235,11 +258,13 @@ Initial tags:
 @mstream/role=reviewer
 @mstream/agent=codex
 @mstream/identity=ops47-mmux-reviewer
-@mstream/state=available|busy|idle|reserved
+@mstream/state=available|reserved|busy|idle|done|blocked|needs-input
 @mstream/cwd=/abs/path
 @mstream/context-domains=tmux,vmm
 @mstream/context-specialties=output-bus,timeline-review
 @mstream/context-summary=Reviewed OutputBus timeline design and tmux tag hydration.
+@mstream/last-report-kind=done
+@mstream/last-report-summary=PR feedback addressed; waiting for reviewer.
 @mstream/last-workstream=pr-322
 @mstream/last-workstream-title=OutputBus timelines
 @mstream/updated-at=2026-05-21T12:34:56Z
@@ -260,6 +285,23 @@ The active assignment tags describe the work currently occupying the agent.
 The reusable context tags describe the agent's accumulated local context and
 specialty so a future `recruit --goal` can find agents whose tmux session,
 working tree, scrollback, and model context are likely useful for related work.
+
+State ownership:
+
+- `available`: set by `close`, `leave --available`, or explicit coordinator
+  marking when the agent can accept new work.
+- `reserved`: set by `recruit` before a task is sent to prevent double
+  assignment.
+- `busy`: set by `join`, `new`, `recruit`, `send --set-state busy`, or an
+  explicit coordinator/agent mark while work is active.
+- `idle`: reported as a status hint or set by explicit mark; it means
+  quiet/ready, not complete.
+- `done`, `blocked`, `needs-input`: set by a managed agent calling
+  `mstream session mark self ...` or by an explicit coordinator mark. These are
+  never inferred from output silence.
+
+`last-report-*` tags are intentionally small. Detailed reports belong in the
+agent pane transcript or PR/issue comments.
 
 ### Hydration Flow
 
@@ -348,6 +390,155 @@ sessions.
 `leave` unsets workstream-specific tags but leaves the session running.
 `kill` is explicit and destructive.
 
+### Communication And Handoff
+
+`mstream` is a coordination tool, not only an observation tool. It must provide
+coordinator-to-agent and agent-to-coordinator communication after the initial
+`join`/`new` prompt.
+
+#### Send
+
+Ad-hoc messages use:
+
+```sh
+mstream send pr-322 amd1::gpt55-mmux-reviewer \
+  --text "Please re-run the focused timeline tests." \
+  --enter
+
+mstream send pr-322 amd1::gpt55-mmux-reviewer \
+  --text "$(cat /tmp/followup.txt)" \
+  --paste-mode bracketed \
+  --no-enter
+```
+
+`send` targets one joined session. It writes a structured `message_sent` event
+and uses `libs/tmux` typed send APIs. Multi-line text defaults to bracketed
+paste mode so terminal programs that support bracketed paste receive one paste
+operation instead of many typed lines. Single-line text may use literal
+`send_text`. `--paste-mode literal` is allowed for agents or shells where
+bracketed paste is known to be wrong.
+
+`--enter` appends the submit key after the text. `--no-enter` only places the
+text in the pane. The command must make this choice explicit; the CLI help may
+default to `--enter` for `--text` and `--no-enter` for `--stdin`, but JSONL
+must always report the effective value.
+
+If the target is currently `busy`, `send` still sends the text unless
+`--require-state <state>` is provided. The JSONL response must include
+`target_state` and a `mid_generation_risk` boolean so the orchestrator can
+decide whether the message was merely typed into an active TUI or should be
+resent with interruption.
+
+`send` does not change `@mstream/state` by default. `--set-state busy` may be
+used when the message assigns new work, including handoff-generated messages.
+
+#### Interrupt
+
+Non-destructive interruption is separate from `kill`:
+
+```sh
+mstream interrupt amd1::gpt55-mmux-reviewer
+mstream interrupt amd1::gpt55-mmux-reviewer --key ctrl-c
+mstream send pr-322 amd1::gpt55-mmux-reviewer \
+  --interrupt-first \
+  --settle-ms 500 \
+  --text "Stop the current run and inspect PR feedback." \
+  --enter
+```
+
+The default interrupt key is `Esc` because most agent TUIs use it as a soft
+stop. `--key ctrl-c` is available for shell commands or agents that require a
+process interrupt. `interrupt` never kills the tmux session.
+
+`send --interrupt-first` is an atomic daemon-side sequence: send the interrupt
+key, wait the settle delay, send text, optionally send Enter, then emit one
+JSONL result. The timing belongs in `mstream` so the orchestrating agent does
+not race a TUI by issuing separate one-shot commands.
+
+#### Broadcast
+
+Round-level coordination uses:
+
+```sh
+mstream broadcast pr-322 \
+  --text "Wrap up your current step and mark done or blocked." \
+  --enter
+```
+
+`broadcast` is `send` applied to every joined session that matches optional
+filters such as `--role reviewer` or `--state busy`. The response emits one
+record per target and a final summary record.
+
+#### Completion And Reports
+
+Managed agents may call `mstream` themselves. `mstream new` and `mstream join`
+must pass enough context for this to work:
+
+```text
+MSTREAM_SOCKET=/tmp/mstream.sock
+MSTREAM_WORKSTREAM=pr-322
+MSTREAM_TARGET=amd1::gpt55-mmux-reviewer
+MSTREAM_ROLE=reviewer
+```
+
+The initial prompt sent to a managed agent should include the exact reporting
+contract:
+
+```sh
+mstream session mark self --state done --summary "Implemented requested fixes."
+mstream session mark self --state blocked --summary "Need access to host amd1."
+mstream session mark self --state needs-input --summary "Reviewer must choose A or B."
+```
+
+`self` resolves from the environment above. A successful mark updates
+`@mstream/state`, `@mstream/last-report-kind`,
+`@mstream/last-report-summary`, and `@mstream/updated-at`, and emits a
+structured event:
+
+```jsonl
+{"type":"event","kind":"completed","workstream":"pr-322","target":"amd1::gpt55-mmux-reviewer","state":"done","summary":"Implemented requested fixes."}
+```
+
+The orchestrator or human may also run `mstream session mark <target> ...`
+when managing an agent that cannot call `mstream`. That manual mark must be
+reported as `source:"coordinator"` in JSONL.
+
+Output silence, prompt-looking text, or unchanged tmux history can create
+`idle` or `stuck_hint` status fields, but cannot transition an agent to
+`done`, `blocked`, or `needs-input`.
+
+#### Handoff
+
+The coordinator owns the dependency graph. The minimum reliable pattern is:
+
+```sh
+mstream status pr-322
+mstream events pr-322 --after <cursor> --limit 100
+mstream send pr-322 amd2::ops47-reviewer \
+  --text "A marked done. Re-review PR 322 now." \
+  --enter
+```
+
+For context compaction resilience while the daemon remains alive, `mstream`
+also provides a thin armed handoff primitive:
+
+```sh
+mstream handoff arm pr-322 \
+  --from amd1::gpt55-submitter \
+  --to amd2::ops47-reviewer \
+  --on done \
+  --task "The submitter marked done. Re-review PR 322 and post verdict."
+
+mstream handoff list pr-322
+mstream handoff cancel pr-322 <handoff-id>
+```
+
+An armed handoff is daemon-memory state. When the `from` target reports the
+matching terminal state, the daemon sends the task to the `to` target, emits a
+`handoff_fired` event, and marks the handoff fired. It does not survive daemon
+restart, but it lets the orchestrator set a dependency edge and safely compact
+or poll less often.
+
 ### Recruiting
 
 Recruiting uses only connected/scanned hosts and tagged session metadata:
@@ -398,7 +589,10 @@ mstream summary-input pr-322 --since 15m --max-chars 12000
 ```
 
 `status` reports current daemon knowledge: connected hosts, participating
-sessions, last output time, basic state, and stuck hints.
+sessions, explicit `@mstream/state`, last output time, last report summary,
+and stuck hints. Stuck hints must be based on observable facts such as output
+silence, pane process state, prompt heuristics, or monitor health, and must not
+be conflated with explicit completion states.
 
 `events` returns bounded structured event records after a cursor.
 
@@ -407,6 +601,12 @@ sessions, last output time, basic state, and stuck hints.
 `summary-input` applies server-side filtering and compaction: strip repeated
 terminal chrome, collapse low-value progress noise, preserve human prompts,
 tool errors, final answers, and obvious stuck states.
+
+`last_output_secs`, `--since`, and `@mstream/updated-at` are owned by
+`mstream`. The daemon should derive wall-clock fields from its own clock when
+it ingests output or writes tags. Internal `libs/tmux` timeline cursors may use
+`Instant`, but public `mstream` cursors are opaque serialized strings that do
+not expose `Instant` or require `serde` support from `libs/tmux`.
 
 All machine-facing stdout is JSONL. Do not add a `--format` flag until there is
 a concrete non-JSONL consumer.
@@ -431,8 +631,33 @@ source labels. After #322, `mstream` should delegate timestamp-aware merge-sort
 and bounded buffering to the `libs/tmux` OutputBus-backed timeline API rather
 than implementing its own reorder buffer.
 
+Delegation to `libs/tmux` is gated on API details needed by workstreams:
+
+- mutable timeline filters or equivalent get-or-create behavior when a
+  workstream gains or loses sessions mid-round
+- continuity/gap markers that respect timeline filters, so unrelated sessions
+  do not pollute a workstream timeline
+- cursor behavior that cannot skip retained entries when timestamp ordering and
+  bounded reads are combined
+- enough metadata for `mstream` to encode opaque cursors and derive its own
+  wall-clock status fields
+
+Until those are present, `mstream` should keep a local daemon-memory timeline
+layer over the `OutputBus` subscription stream.
+
 The CLI cursor contract should remain independent from the internal timeline
 implementation. Cursors are opaque strings.
+
+Timeline lifecycle:
+
+- `open` performs get-or-create for the daemon-memory workstream timeline.
+- `join`/`new` adds the target to the workstream timeline filter set.
+- `leave` removes the target from the filter set and removes the timeline when
+  the last session leaves an otherwise closed/empty workstream.
+- `close` removes the active workstream timeline after final status/summary
+  output is emitted.
+- re-`open` after close creates a fresh timeline and must not reuse stale
+  cursors.
 
 ## Alternatives Considered
 
@@ -475,3 +700,7 @@ coverage for:
 - JSONL output shape
 - bounded observation and cursor behavior
 - arrival-order timeline behavior before issue #322
+- coordinator-to-agent `send`, `interrupt`, and `broadcast`
+- agent-to-coordinator `session mark self` state transitions
+- handoff arming, firing, cancellation, and daemon-restart loss behavior
+- status hints that distinguish explicit completion from idle/stuck heuristics
