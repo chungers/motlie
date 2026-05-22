@@ -8,7 +8,7 @@
 //! - **Terminal consumers**: SinkKind (stdio, callback), custom code via into_receiver()
 
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -122,9 +122,10 @@ pub enum LateEventPolicy {
 }
 
 /// Ordering policy for bus-owned timelines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimelineOrdering {
     /// Preserve bus ingest order.
+    #[default]
     Arrival,
     /// Insert output by emission timestamp within a bounded reorder window.
     TimestampMerge {
@@ -134,12 +135,6 @@ pub enum TimelineOrdering {
         /// How late arrivals are represented.
         late_event_policy: LateEventPolicy,
     },
-}
-
-impl Default for TimelineOrdering {
-    fn default() -> Self {
-        TimelineOrdering::Arrival
-    }
 }
 
 /// Options for a named [`OutputBus`] timeline.
@@ -196,16 +191,10 @@ impl Default for TimelineCursor {
 }
 
 /// Options for rendering a timeline window.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RenderOptions {
     /// Maximum characters to return. `0` uses the timeline's configured budget.
     pub max_chars: usize,
-}
-
-impl Default for RenderOptions {
-    fn default() -> Self {
-        RenderOptions { max_chars: 0 }
-    }
 }
 
 /// Kind of event retained by a timeline.
@@ -1915,11 +1904,11 @@ impl TimelineState {
     }
 
     fn pending_entries_after(&self, cursor: &TimelineCursor) -> Vec<TimelineEntry> {
+        let seen_sequences: HashSet<u64> = cursor.seen_sequences.iter().copied().collect();
         self.entries
             .iter()
             .filter(|entry| {
-                entry.sequence >= cursor.next_sequence
-                    && !cursor.seen_sequences.contains(&entry.sequence)
+                entry.sequence >= cursor.next_sequence && !seen_sequences.contains(&entry.sequence)
             })
             .cloned()
             .collect()
@@ -1934,22 +1923,20 @@ impl TimelineState {
             return cursor.clone();
         }
 
-        let mut seen_sequences = cursor.seen_sequences.clone();
-        for sequence in returned.iter().map(|entry| entry.sequence) {
-            if !seen_sequences.contains(&sequence) {
-                seen_sequences.push(sequence);
-            }
-        }
-        seen_sequences.sort_unstable();
+        let mut seen_set: HashSet<u64> = cursor.seen_sequences.iter().copied().collect();
+        seen_set.extend(returned.iter().map(|entry| entry.sequence));
 
         let pending_next = self
             .entries
             .iter()
             .filter(|entry| {
-                entry.sequence >= cursor.next_sequence && !seen_sequences.contains(&entry.sequence)
+                entry.sequence >= cursor.next_sequence && !seen_set.contains(&entry.sequence)
             })
             .map(|entry| entry.sequence)
             .min();
+
+        let mut seen_sequences: Vec<u64> = seen_set.into_iter().collect();
+        seen_sequences.sort_unstable();
 
         if let Some(next_sequence) = pending_next {
             let seen_sequences = seen_sequences
@@ -2311,16 +2298,19 @@ impl OutputBus {
         Ok(())
     }
 
+    fn timeline_states(&self) -> Vec<Arc<std::sync::Mutex<TimelineState>>> {
+        self.timelines
+            .lock()
+            .map(|timelines| timelines.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Fan out to all matching subscribers. Non-blocking (try_send).
     pub fn publish(&self, output: TargetOutput) {
         let ingested_at = Instant::now();
-        if let Ok(timelines) = self.timelines.lock() {
-            let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> =
-                timelines.values().cloned().collect();
-            for state in timeline_states {
-                if let Ok(mut state) = state.lock() {
-                    state.push_output(&output, ingested_at);
-                }
+        for state in self.timeline_states() {
+            if let Ok(mut state) = state.lock() {
+                state.push_output(&output, ingested_at);
             }
         }
 
@@ -2390,13 +2380,9 @@ impl OutputBus {
     /// method is for callers that need a bus-level retained gap marker.
     pub fn publish_gap(&self, dropped_events: usize) {
         let ingested_at = Instant::now();
-        if let Ok(timelines) = self.timelines.lock() {
-            let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> =
-                timelines.values().cloned().collect();
-            for state in timeline_states {
-                if let Ok(mut state) = state.lock() {
-                    state.push_gap(dropped_events, ingested_at);
-                }
+        for state in self.timeline_states() {
+            if let Ok(mut state) = state.lock() {
+                state.push_gap(dropped_events, ingested_at);
             }
         }
     }
@@ -2411,13 +2397,9 @@ impl OutputBus {
     /// continuity was broken, even under severe backpressure.
     pub fn publish_discontinuity(&self, reason: &str) {
         let ingested_at = Instant::now();
-        if let Ok(timelines) = self.timelines.lock() {
-            let timeline_states: Vec<Arc<std::sync::Mutex<TimelineState>>> =
-                timelines.values().cloned().collect();
-            for state in timeline_states {
-                if let Ok(mut state) = state.lock() {
-                    state.push_discontinuity(reason, ingested_at);
-                }
+        for state in self.timeline_states() {
+            if let Ok(mut state) = state.lock() {
+                state.push_discontinuity(reason, ingested_at);
             }
         }
 
