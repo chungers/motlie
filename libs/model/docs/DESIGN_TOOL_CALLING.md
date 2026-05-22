@@ -10,6 +10,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-19 | @codex-tool-calling: Fixed the #310 safetensors regression by replacing `mistralrs::RequestBuilder` chat transcript replay with a Motlie `RequestLike` adapter that emits template-compatible `tool_calls`, named tool results, and tool-bearing thinking-mode control. | Curated Model Capability, Backend Adaptation, Validation Strategy |
 | 2026-05-11 | @codex-tool-calling: Initial design for a unified tool-calling chat contract that supports the curated Gemma 4 and Qwen3/Qwen3.6 LLMs with backend-local adaptation. | All |
 | 2026-05-13 | @codex-tool-calling: Refined the API around typed Rust tool binding, documented existing function and closure binding, implemented the `mistral.rs` adapter path, and enabled `ToolUse` for safetensors Qwen3/Gemma 4 descriptors. | Proposed Core API, Backend Adaptation, Validation Strategy |
 | 2026-05-13 | @codex-tool-calling: Implemented the llama.cpp GGUF tool-aware adapter path using OpenAI-compatible chat templates and documented the remaining GGUF descriptor gate. | Backend Adaptation, Validation Strategy |
@@ -66,15 +67,25 @@ This blocks a standard LLM tool loop:
 
 ## Curated Model Capability
 
-The current curated chat LLMs are model-capable for tool calling, but Motlie should not advertise that capability until the API and adapters below are implemented.
+The current curated chat LLMs are model-capable for tool calling. Motlie advertises `ToolUse` only when the concrete backend path has a structured adapter that can preserve tool definitions, assistant tool-call replay, tool-result turns, and model-family thinking controls.
 
 | Curated selector | Backend | Common capability stance | Convention behind the adapter |
 | --- | --- | --- | --- |
-| `google/gemma4_e2b` | `mistral.rs` multimodal | ToolUse advertised after adapter unit tests. | Gemma 4 chat template with `tools`, assistant `tool_calls`, tool-result turns, and Gemma tool-call/tool-response tokens. |
+| `google/gemma4_e2b` | `mistral.rs` multimodal | `ToolUse` advertised through the shared safetensors transcript adapter; #310 fixed the previous `mistralrs::RequestBuilder` replay mismatch. | Gemma 4 chat template with `tools`, assistant `tool_calls`, named tool-result turns, Gemma tool-call/tool-response tokens, and tool-bearing requests defaulting `enable_thinking=false` unless requested. |
+| `google/gemma4_e4b` | `mistral.rs` multimodal | `ToolUse` advertised through the same Gemma 4 safetensors adapter path as E2B. | Same Gemma 4 convention as E2B; live smoke remains host/artifact-gated but the adapter contract is shared. |
 | `google/gemma4_e2b_gguf` | `llama.cpp` text | Tool-capable if the GGUF template is preserved and routed through llama.cpp chat-template helpers. | Same Gemma 4 convention, exposed to Motlie through an OpenAI-compatible JSON bridge. |
-| `qwen/qwen3_4b` | `mistral.rs` text | ToolUse advertised after adapter unit tests. | Qwen3/Hermes-style tools, `<tool_call>`, and `<tool_response>` through the model chat template. |
+| `google/gemma4_e4b_gguf` | `llama.cpp` text | ToolUse advertised after model-specific GGUF template smoke. | Same Gemma 4 convention; GGUF bundles are validated per model because the embedded chat template owns the concrete tool markers. |
+| `qwen/qwen3_4b` | `mistral.rs` text | `ToolUse` advertised through the shared safetensors transcript adapter; #310 fixed the previous assistant replay and thinking-mode mismatch. | Qwen3/Hermes-style tools, assistant `tool_calls`, `<tool_call>`, `<tool_response>`, and tool-bearing requests defaulting `enable_thinking=false` unless requested. |
 | `qwen/qwen3_4b_gguf` | `llama.cpp` text | Tool-capable if the GGUF template is preserved and routed through llama.cpp chat-template helpers. | Same Qwen3/Hermes convention, exposed to Motlie through an OpenAI-compatible JSON bridge. |
 | `qwen/qwen3_6_27b_gguf` | `llama.cpp` text | Tool-capable after GGUF template validation and adapter support. | Qwen-family tool convention plus Qwen3.6 thinking-mode handling. |
+
+Capability gating policy: curated bundles should advertise `ToolUse` only when
+that concrete backend/artifact path preserves the full structured tool
+transcript and has a validation path for multi-round tool loops. The
+`mistral.rs` safetensors bundles share one Motlie request adapter, so the #310
+fix applies uniformly to Qwen3 and Gemma 4 safetensors paths. GGUF bundles on
+`llama.cpp` still require model-specific chat-template smoke because the
+artifact's embedded template defines the concrete tool and thinking markers.
 
 ## Design Principle
 
@@ -421,6 +432,7 @@ pub struct ChatRequest {
     pub params: GenerationParams,
     pub tools: Vec<ToolSpec>,
     pub tool_choice: Option<ToolChoice>,
+    pub thinking: Option<ThinkingMode>,
 }
 ```
 
@@ -429,6 +441,7 @@ Rules:
 - Empty `tools` means ordinary chat.
 - `tool_choice` without tools is invalid unless it is `None`.
 - Backends that do not support tools must reject requests with non-empty `tools` using `UnsupportedCapability(CapabilityKind::ToolUse)`.
+- `thinking` is an optional per-request override for model families with thinking/reasoning modes. Backends without a thinking control may accept and ignore it, but must document that behavior.
 
 ### Chat Response
 
@@ -523,14 +536,22 @@ The helper constructors should make this ergonomic, but the contract should keep
 
 ### `mistral.rs`
 
-Current implementation status: the Motlie `mistral.rs` wrappers now map the common tool contract into the native builder and response types for the safetensors Qwen3 text and Gemma 4 multimodal paths.
+Current implementation status: the Motlie `mistral.rs` wrappers map the common
+tool contract into a local `RequestLike` implementation for safetensors Qwen3
+text and Gemma 4 multimodal paths. This avoids the upstream
+`mistralrs::RequestBuilder` mismatch that replayed assistant tool calls under
+`function` instead of `tool_calls` and omitted tool-result names, the root cause
+tracked in #310. Plain chat and non-tool multimodal flows continue through the
+same runtime layer.
 
 Implemented adaptation:
 
 - Route text and multimodal wrappers through the shared `MistralProfile` runtime layer for backend startup, handle plumbing, metrics, request construction, and response mapping.
 - Map `ToolSpec` to `mistralrs::Tool`.
 - Map `ToolChoice` to `mistralrs::ToolChoice`.
-- Map `ChatRole::Tool` and assistant `tool_calls` into the native request message shape.
+- Map `ChatRole::Tool` and assistant `tool_calls` into the template-compatible native request message shape.
+- Emit assistant replay under `tool_calls`, parse tool-call arguments into JSON values before template rendering, and include tool-result `name` with `tool_call_id`.
+- Set `enable_thinking=false` by default for tool-bearing safetensors requests unless the caller explicitly chooses `ThinkingMode::Auto`.
 - Preserve multimodal image handling in `MistralMultimodalHandle`.
 - Extract `choice.message.tool_calls` into `ChatResponse.tool_calls`.
 - Map upstream finish reason and usage into the new response fields.
@@ -539,7 +560,7 @@ Implemented adaptation:
 Backend-specific limitations:
 
 - `ToolChoice::Required` returns `ModelError::InvalidConfiguration` because the current `mistral.rs` builder API exposes `Auto`, `None`, and specific-tool choice, but not required-tool enforcement.
-- Tool-result `ChatMessage::name` remains part of the Motlie transcript, but the current `mistral.rs` tool-message builder accepts only content and `tool_call_id`.
+- Motlie intentionally bypasses `mistralrs::RequestBuilder` for chat requests that may contain tool transcript turns because that builder currently cannot preserve the template shape required by Qwen3 and Gemma 4.
 
 ### `llama.cpp`
 
@@ -610,8 +631,7 @@ Backend unit tests:
 
 Integration/smoke tests:
 
-- safetensors Qwen3 4B returns a structured tool call for a simple deterministic tool prompt
-- safetensors Gemma 4 E2B returns a structured tool call for the same prompt
+- safetensors Qwen3 4B and Gemma 4 E2B/E4B keep unit coverage for template-compatible `tool_calls`, named tool results, and thinking-mode control, with host/artifact live smoke used to verify #310 end to end
 - GGUF Qwen3 4B and Gemma 4 E2B validate that the selected artifact has a usable chat template
 - Qwen3.6 GGUF validates template availability and thinking/tool-call separation before advertising `ToolUse`
 

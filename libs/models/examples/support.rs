@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ pub struct StartupSampler {
 }
 
 pub fn current_process_snapshot() -> ProcessSnapshot {
-    use sysinfo::{get_current_pid, ProcessesToUpdate, System};
+    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
 
     let pid = get_current_pid().ok();
     let rss_mib = pid.and_then(|pid| {

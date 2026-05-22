@@ -1,10 +1,11 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use motlie_model::{
     ArtifactPolicy, BundleHandle, ChatMessage, ChatModel, ChatRequest, ChatRole, ContentPart,
     QuantizationBits, StartOptions,
 };
+use motlie_model_mistral::MistralMultimodalSpec;
 use motlie_models::{chat::ChatModels, default_artifact_root, quantization_label_isq};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[path = "../support.rs"]
@@ -16,12 +17,14 @@ mod tool_demo_support;
 async fn main() -> Result<()> {
     let mut precision = None;
     let mut image_path = None;
+    let mut artifact_root = None;
     let mut download_artifacts = false;
     let mut tool_demo = false;
     let mut tool_demo_only = false;
     let mut input_parts = Vec::new();
 
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         if arg == "--download-artifacts" {
             download_artifacts = true;
         } else if arg == "--tool-demo" {
@@ -29,6 +32,13 @@ async fn main() -> Result<()> {
         } else if arg == "--tool-demo-only" {
             tool_demo = true;
             tool_demo_only = true;
+        } else if arg == "--artifact-root" {
+            artifact_root = Some(PathBuf::from(
+                args.next()
+                    .context("--artifact-root requires a path argument")?,
+            ));
+        } else if let Some(path) = arg.strip_prefix("--artifact-root=") {
+            artifact_root = Some(PathBuf::from(path));
         } else if let Some(p) = arg.strip_prefix("--precision=") {
             precision = Some(p.to_owned());
         } else if let Some(path) = arg.strip_prefix("--image=") {
@@ -42,7 +52,7 @@ async fn main() -> Result<()> {
     if input.trim().is_empty() {
         bail!(
             "usage: cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- \
-             [--download-artifacts] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
+             [--download-artifacts] [--artifact-root <path>] [--tool-demo|--tool-demo-only] [--precision=q4|q8|f32] [--image=/path/to/image] <prompt>"
         );
     }
 
@@ -59,7 +69,7 @@ async fn main() -> Result<()> {
     let descriptor = model.descriptor();
     let bundle = model.bundle();
 
-    let artifact_root = default_artifact_root();
+    let artifact_root = artifact_root.unwrap_or_else(default_artifact_root);
     let catalog = motlie_models::Catalog::with_defaults();
 
     println!("catalog-entry-count: {}", catalog.len());
@@ -125,9 +135,18 @@ async fn main() -> Result<()> {
     support::print_model_metrics("model-metrics-after-start", handle.metric_snapshot());
 
     let chat = handle.chat().context("gemma4 bundle should expose chat")?;
+    let generation_defaults = MistralMultimodalSpec::gemma4_e2b().recommended_generation_params;
 
     if tool_demo_only {
-        tool_demo_support::run_tool_demo(chat).await?;
+        tool_demo_support::run_tool_demo_with_options(
+            chat,
+            tool_demo_support::ToolDemoOptions {
+                generation_defaults: &generation_defaults,
+                system_prompt: None,
+                thinking: None,
+            },
+        )
+        .await?;
         support::print_process_snapshot(
             "process-after-tool-demo",
             &support::current_process_snapshot(),
@@ -212,7 +231,15 @@ async fn main() -> Result<()> {
     }
 
     if tool_demo {
-        tool_demo_support::run_tool_demo(chat).await?;
+        tool_demo_support::run_tool_demo_with_options(
+            chat,
+            tool_demo_support::ToolDemoOptions {
+                generation_defaults: &generation_defaults,
+                system_prompt: None,
+                thinking: None,
+            },
+        )
+        .await?;
         support::print_process_snapshot(
             "process-after-tool-demo",
             &support::current_process_snapshot(),

@@ -10,6 +10,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, ChatTemplateResult, LlamaModel};
 use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
+pub use motlie_model::ThinkingMode;
 use motlie_model::{
     BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
     CapabilityKind, ChatFinishReason, ChatModel, ChatRequest, ChatResponse, ChatRole,
@@ -35,12 +36,6 @@ const DEFAULT_TEMPERATURE: f32 = 0.7;
 pub enum LlamaCppTextArch {
     Qwen3,
     Gemma4,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ThinkingMode {
-    Disabled,
-    Auto,
 }
 
 /// Maps `QuantizationBits` to the curated GGUF filename for a given model.
@@ -75,6 +70,8 @@ pub struct LlamaCppTextSpec {
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
     pub default_context_length: u32,
+    pub recommended_generation_params: GenerationParams,
+    pub recommended_system_prompt: Option<&'static str>,
 }
 
 impl LlamaCppTextSpec {
@@ -88,6 +85,8 @@ impl LlamaCppTextSpec {
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support(),
             default_context_length: 4096,
+            recommended_generation_params: GenerationParams::default(),
+            recommended_system_prompt: None,
         }
     }
 
@@ -101,6 +100,27 @@ impl LlamaCppTextSpec {
             capabilities: Capabilities::chat_completion_and_tool_use(),
             quantization: curated_q4_q8_support(),
             default_context_length: 4096,
+            recommended_generation_params: GenerationParams::default(),
+            recommended_system_prompt: None,
+        }
+    }
+
+    pub fn gemma4_e4b() -> Self {
+        Self {
+            id: BundleId::new("gemma4_e4b_gguf"),
+            display_name: "Gemma 4 E4B-it (GGUF)",
+            model_prefix: "gemma-4-E4B-it",
+            arch: LlamaCppTextArch::Gemma4,
+            thinking: ThinkingMode::Auto,
+            capabilities: Capabilities::chat_completion_and_tool_use(),
+            quantization: curated_q4_q8_support_with_recommended(QuantizationBits::Eight),
+            default_context_length: 32768,
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
         }
     }
 
@@ -114,6 +134,8 @@ impl LlamaCppTextSpec {
             capabilities: Capabilities::chat_and_completion(),
             quantization: curated_qwen36_gguf_support(),
             default_context_length: 32768,
+            recommended_generation_params: GenerationParams::default(),
+            recommended_system_prompt: None,
         }
     }
 }
@@ -211,17 +233,22 @@ impl BackendAdapter for LlamaCppTextAdapter {
     }
 }
 
-/// Q4 recommended, Q8 supported. Inputs are compile-time constants (Four ∈ [Four, Eight]).
+/// Q4 recommended, Q8 supported. Inputs are compile-time constants.
 /// On the unreachable error path, degrades to no-recommended rather than panicking.
-fn curated_q4_q8_support() -> QuantizationSupport {
+fn curated_q4_q8_support_with_recommended(recommended: QuantizationBits) -> QuantizationSupport {
     QuantizationSupport::with_recommended(
         [QuantizationBits::Four, QuantizationBits::Eight],
-        QuantizationBits::Four,
+        recommended,
     )
     .unwrap_or_else(|e| {
         tracing::error!("curated quantization construction failed (this is a bug): {e}");
         QuantizationSupport::without_recommended([QuantizationBits::Four, QuantizationBits::Eight])
     })
+}
+
+/// Q4 recommended, Q8 supported.
+fn curated_q4_q8_support() -> QuantizationSupport {
+    curated_q4_q8_support_with_recommended(QuantizationBits::Four)
 }
 
 /// Qwen3.6 currently has validated GGUF Q4/Q5/Q8 artifacts in the curated repo.
@@ -384,15 +411,17 @@ unsafe impl Sync for LlamaCppRuntime {}
 
 impl LlamaCppRuntime {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ModelError> {
-        if request.requires_tool_use() {
-            let rendered = render_openai_compatible_chat(&self.model, self.thinking, &request)?;
+        let thinking = request.thinking.unwrap_or(self.thinking);
+        if request.requires_tool_use() || thinking == ThinkingMode::Auto {
+            let rendered = render_openai_compatible_chat(&self.model, thinking, &request)?;
             return self.generate_rendered_chat(rendered, &request.params).await;
         }
 
         // Keep text-only chat on the existing handwritten prompt path in this
-        // PR so non-tool generation behavior stays stable. Tool-bearing chats
-        // use llama.cpp's OpenAI-compatible Jinja path because the embedded
-        // templates define model-specific tool markers and response parsing.
+        // PR when thinking is disabled so existing non-tool generation behavior
+        // stays stable. Tool-bearing and thinking-enabled chats use
+        // llama.cpp's OpenAI-compatible Jinja path because the embedded
+        // templates define model-specific tool and thinking markers.
         let prompt = format_chat_prompt(self.arch, &request)?;
         self.generate_text(&prompt, &request.params).await
     }
@@ -1291,6 +1320,31 @@ mod tests {
         assert_eq!(spec.id.as_str(), "gemma4_e2b_gguf");
         assert_eq!(spec.display_name, "Gemma 4 E2B-it (GGUF)");
         assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
+        assert!(spec.capabilities.supports(CapabilityKind::Chat));
+        assert!(spec.capabilities.supports(CapabilityKind::Completion));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
+    }
+
+    #[test]
+    fn gemma4_e4b_spec_uses_model_card_defaults_and_advertises_tool_use() {
+        let spec = LlamaCppTextSpec::gemma4_e4b();
+
+        assert_eq!(spec.id.as_str(), "gemma4_e4b_gguf");
+        assert_eq!(spec.display_name, "Gemma 4 E4B-it (GGUF)");
+        assert_eq!(spec.model_prefix, "gemma-4-E4B-it");
+        assert_eq!(spec.arch, LlamaCppTextArch::Gemma4);
+        assert_eq!(spec.thinking, ThinkingMode::Auto);
+        assert_eq!(
+            spec.quantization.recommended(),
+            Some(QuantizationBits::Eight)
+        );
+        assert_eq!(spec.default_context_length, 32768);
+        assert_eq!(spec.recommended_generation_params.temperature, Some(1.0));
+        assert_eq!(spec.recommended_generation_params.top_p, Some(0.95));
+        assert_eq!(
+            spec.recommended_system_prompt,
+            Some("You are Gemma, a helpful assistant.")
+        );
         assert!(spec.capabilities.supports(CapabilityKind::Chat));
         assert!(spec.capabilities.supports(CapabilityKind::Completion));
         assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
