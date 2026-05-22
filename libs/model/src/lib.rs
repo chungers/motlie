@@ -25,7 +25,7 @@ pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, Embedd
 pub use eval::EvalTrack;
 pub use generation::{
     ChatFinishReason, ChatRequest, ChatResponse, CompletionRequest, CompletionResponse,
-    GenerationParams, GenerationUsage,
+    GenerationParams, GenerationUsage, ThinkingMode,
 };
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
 pub use speech::SpeechParams;
