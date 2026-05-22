@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-22 | @codex | Synced PLAN with issue #323 feedback: use `open`/`close`, add close-time agent availability/context tags, and require `recruit --goal` matching. |
 | 2026-05-21 | @codex | Initial implementation plan for issue #323, covering scaffolding, stateless daemon/client, host connection, tmux-tag hydration, workstream commands, recruiting, observation, and validation. |
 
 ## Scope
@@ -173,13 +174,16 @@ Tasks:
   `@mstream/*` session tags.
 - [ ] 5.2 Use `HostHandle::list_tags_for_session_infos("mstream", sessions)`
   for batch hydration.
-- [ ] 5.3 Implement tag writes for `join`, `new`, state changes, and role/agent
-  metadata.
-- [ ] 5.4 Implement tag unsets for `leave`.
+- [ ] 5.3 Implement tag writes for `open`, `join`, `new`, `close`, state
+  changes, role/agent metadata, and reusable agent context metadata.
+- [ ] 5.4 Implement tag unsets for `leave` and close-time clearing of active
+  workstream membership.
 - [ ] 5.5 Preserve unknown `@mstream/*` tags unless a command explicitly owns
   that key.
 - [ ] 5.6 Add tests for malformed tag values, missing version, unknown version,
   and partial metadata.
+- [ ] 5.7 Add tests for domain/specialty/context-summary tags used by
+  `recruit --goal`.
 
 Validation:
 
@@ -198,8 +202,9 @@ Design references:
 
 Tasks:
 
-- [ ] 6.1 Implement `mstream create <workstream> --title <title>` as an
-  in-memory workstream until sessions are joined.
+- [ ] 6.1 Implement `mstream open <workstream> --title <title>
+  [--goal <goal>] [--domain <domain>]` as an in-memory workstream until
+  sessions are joined.
 - [ ] 6.2 Implement `mstream list`, `mstream show <workstream>`, and
   `mstream close <workstream>`.
 - [ ] 6.3 Implement `mstream join <workstream> <target> --role <role>
@@ -211,12 +216,15 @@ Tasks:
   command.
 - [ ] 6.7 Ensure each state-changing command returns a JSONL cursor or enough
   metadata for the orchestrating agent to poll next.
+- [ ] 6.8 Make `mstream close <workstream>` mark participating agents available,
+  clear active workstream membership, and merge optional `--summary`,
+  `--domain`, and repeated `--specialty` values into reusable context tags.
 
 Validation:
 
 ```sh
 cargo test -p motlie-mstream workstream
-cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock create pr-323 --title "mstream"
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock open pr-323 --title "mstream" --goal "Build mstream orchestration"
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock show pr-323
 ```
 
@@ -298,13 +306,18 @@ Tasks:
 - [ ] 9.1 Implement `mstream session list` and `mstream session mark <target>
   --state available|busy|idle|reserved`.
 - [ ] 9.2 Implement `mstream recruit <workstream> --role <role>
-  --agent <agent> --count N [--selector key=value] [--task <text>]`.
+  --agent <agent> --count N [--goal <goal>] [--selector key=value]
+  [--task <text>]`.
 - [ ] 9.3 Prefer explicitly tagged available sessions.
 - [ ] 9.4 Refuse to recruit untagged sessions unless the target is explicitly
   named by the human.
-- [ ] 9.5 Add optional creation only when placement, cwd/work-root, and capacity
+- [ ] 9.5 Score available sessions against `--goal` using structured/lexical
+  matching over `context-domains`, `context-specialties`, `context-summary`,
+  and `last-workstream` tags; include candidate metadata in JSONL so the
+  orchestrating agent can make a semantic selection.
+- [ ] 9.6 Add optional creation only when placement, cwd/work-root, and capacity
   information are explicitly available in the daemon's current memory.
-- [ ] 9.6 Return actionable JSONL errors when recruiting cannot proceed because
+- [ ] 9.7 Return actionable JSONL errors when recruiting cannot proceed because
   host metadata is unknown after restart.
 
 Validation:
@@ -312,7 +325,7 @@ Validation:
 ```sh
 cargo test -p motlie-mstream recruit
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock session list
-cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock recruit pr-323 --role reviewer --agent codex --count 1 --task "Review the current branch."
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock recruit pr-323 --role reviewer --agent codex --count 1 --goal "clean up vmm examples" --task "Review the current branch."
 ```
 
 ## Phase 10. Documentation And Agent Skill Follow-Up
@@ -358,10 +371,11 @@ Manual local tmux smoke:
 ```sh
 cargo run -p motlie-mstream -- daemon start --socket /tmp/mstream-smoke.sock
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock connect local ssh://localhost
-cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock create pr-323 --title "mstream smoke"
+cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock open pr-323 --title "mstream smoke" --goal "validate mstream local orchestration"
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock new pr-323 local::mstream-smoke-reviewer --role reviewer --cwd /tmp/mstream-smoke-reviewer --agent codex --task "Say ready, then wait."
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock status pr-323
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock summary-input pr-323 --max-chars 4000
+cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock close pr-323 --summary "local smoke completed" --domain tmux --specialty mstream-smoke
 cargo run -p motlie-mstream -- --socket /tmp/mstream-smoke.sock daemon stop
 ```
 
