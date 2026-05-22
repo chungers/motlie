@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-22 | @codex | Aligned timeline implementation tasks with PR #326's concrete OutputBus timeline APIs and latest-cursor/backfill/cleanup contracts. |
 | 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff implementation phase, explicit completion state ownership, timeline dependency gates, and status/process-state follow-ups. |
 | 2026-05-22 | @codex | Synced PLAN with issue #323 feedback: use `open`/`close`, add close-time agent availability/context tags, and require `recruit --goal` matching. |
 | 2026-05-21 | @codex | Initial implementation plan for issue #323, covering scaffolding, stateless daemon/client, host connection, tmux-tag hydration, workstream commands, recruiting, observation, and validation. |
@@ -336,19 +337,23 @@ Tasks:
   --max-chars N`.
 - [ ] 9.6 Implement `mstream summary-input <workstream> --since <duration>
   --max-chars N` with server-side filtering/compaction.
-- [ ] 9.7 Mark ordering as arrival-order in JSONL metadata until issue #322
-  and the follow-up timeline API gaps provide a usable OutputBus substrate for
-  timestamp-aware workstream timelines.
+- [ ] 9.7 Mark ordering as arrival-order in JSONL metadata until issue #322's
+  OutputBus timeline API is available on the target branch with create-or-get,
+  mutable filters, scoped markers, history ingest, stale-handle cleanup, and
+  bounded `latest` cursor safety.
 - [ ] 9.8 Make `status` include explicit session state, last report summary,
   last output age, monitor health, and process/prompt-based stuck hints when
   available.
 - [ ] 9.9 Keep stuck hints separate from explicit completion states in JSONL.
-- [ ] 9.10 Remove a workstream timeline on `close` and when `leave` removes the
-  last session from an otherwise empty/closed workstream.
-- [ ] 9.11 After issue #322 and follow-up gaps land, replace the local
+- [ ] 9.10 Remove or detach a workstream timeline on `close` and when `leave`
+  removes the last session from an otherwise empty/closed workstream.
+- [ ] 9.11 After issue #322 lands with the required APIs, replace the local
   ring-buffer/timeline layer with the `libs/tmux` OutputBus-backed timeline API
-  where possible. This task is gated on mutable filters, filter-respecting
-  continuity markers, and bounded timestamp-merge cursor safety.
+  where possible. Use `create_or_get_timeline` for hydration, `set_filters` /
+  `add_filter` for dynamic membership, scoped gap/discontinuity APIs for
+  continuity markers, `ingest_historical` for restart backfill,
+  `remove_timeline`/`detach`/idle cleanup for lifecycle, and the timeline cursor
+  contract for `entries_after`, `render_after`, and bounded `latest`.
 
 Validation:
 
