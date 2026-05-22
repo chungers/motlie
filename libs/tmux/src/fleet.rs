@@ -146,6 +146,9 @@ impl Fleet {
     }
 
     /// Return an existing timeline or create it on the shared `OutputBus`.
+    ///
+    /// When the timeline already exists, `opts` are ignored and the existing
+    /// generation is returned unchanged.
     pub fn create_or_get_timeline(
         &self,
         name: impl Into<String>,
