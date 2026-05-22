@@ -2303,7 +2303,7 @@ bus.remove_timeline("review-round-17")?;
 handle.add_filter(SinkFilter::for_host_session("amd1", "new-agent")).await?;
 handle.set_filters(vec![SinkFilter::for_host_session("amd1", "codex-submit")]).await?;
 handle.ingest_historical(rebuilt_entries).await?;
-handle.detach()?;
+handle.detach().await?;
 ```
 
 Historical entries are appended in caller order even when the timeline uses
