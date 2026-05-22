@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::host::{HostHandle, Target};
 use crate::keys::KeySequence;
 use crate::monitor::{MonitorHandle, MonitorHealth, SessionMonitorHandle};
-use crate::sink::OutputBus;
+use crate::sink::{OutputBus, TimelineHandle, TimelineOptions};
 use crate::types::TargetSpec;
 
 // ---------------------------------------------------------------------------
@@ -134,6 +134,42 @@ impl Fleet {
     /// The shared `OutputBus` aggregating output from all hosts.
     pub fn output_bus(&self) -> Arc<OutputBus> {
         self.bus.clone()
+    }
+
+    /// Create a named timeline on the shared `OutputBus`.
+    pub fn create_timeline(
+        &self,
+        name: impl Into<String>,
+        opts: TimelineOptions,
+    ) -> Result<TimelineHandle> {
+        self.bus.create_timeline(name, opts)
+    }
+
+    /// Return an existing timeline or create it on the shared `OutputBus`.
+    ///
+    /// When the timeline already exists, `opts` are ignored and the existing
+    /// generation is returned unchanged.
+    pub fn create_or_get_timeline(
+        &self,
+        name: impl Into<String>,
+        opts: TimelineOptions,
+    ) -> Result<TimelineHandle> {
+        self.bus.create_or_get_timeline(name, opts)
+    }
+
+    /// Look up a named timeline on the shared `OutputBus`.
+    pub fn timeline(&self, name: &str) -> Result<Option<TimelineHandle>> {
+        self.bus.timeline(name)
+    }
+
+    /// Remove a named timeline from the shared `OutputBus`.
+    pub fn remove_timeline(&self, name: &str) -> Result<()> {
+        self.bus.remove_timeline(name)
+    }
+
+    /// Remove idle timelines from the shared `OutputBus`.
+    pub fn remove_idle_timelines(&self, idle_for: std::time::Duration) -> Result<Vec<String>> {
+        self.bus.remove_idle_timelines(idle_for)
     }
 
     /// Status of a registered host with per-session health (DC29, 4.2d).
