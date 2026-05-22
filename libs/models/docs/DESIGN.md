@@ -281,6 +281,7 @@ The intended convention is:
 - one Cargo feature per curated bundle
 - direct bundle module, enum variant, parser support, and catalog registration are all gated together
 - the default feature set may include a small recommended slice, but distro/profile builds should compose the exact curated set explicitly
+- large or expensive variants stay opt-in even when they are curated; for example `model-gemma4-e4b` and `model-gemma4-e4b-gguf` are not part of the default feature set because the E4B artifacts are substantially larger than the default E2B slice
 
 For example:
 
@@ -292,6 +293,8 @@ model-google-gemma-300m = []
 model-qwen3-embedding-06b = []
 model-qwen3-4b = []
 model-gemma4-e2b = []
+model-gemma4-e4b = []
+model-gemma4-e4b-gguf = []
 profile-macos = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b"]
 profile-dgx = ["model-google-gemma-300m", "model-qwen3-embedding-06b", "model-qwen3-4b", "model-gemma4-e2b"]
 ```
@@ -323,8 +326,10 @@ libs/models/
       mod.rs
       qwen3_4b.rs
       gemma4_e2b.rs
+      gemma4_e4b.rs
       qwen3_4b_gguf.rs
       gemma4_e2b_gguf.rs
+      gemma4_e4b_gguf.rs
       qwen3_6_27b_gguf.rs
     bin/
       download_artifacts.rs

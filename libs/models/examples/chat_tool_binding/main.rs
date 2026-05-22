@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use motlie_model::{ChatMessage, ChatRequest, ChatRole, ContentPart, ToolCall, ToolChoice};
+use motlie_model::{
+    ChatMessage, ChatRequest, ChatRole, ContentPart, GenerationParams, ToolCall, ToolChoice,
+};
 use motlie_models::{tool_list, ToolDispatch, ToolList};
 
 #[allow(dead_code)]
@@ -12,18 +14,21 @@ async fn main() -> Result<()> {
         tool_demo_support::WeatherTool,
         tool_demo_support::EvaluateMathExpressionTool,
     );
+    let recommended_params = exercise_spec_recommendations();
 
     let request = ChatRequest {
         messages: vec![ChatMessage::text(
             ChatRole::User,
             "What is Rust, and what is the average fahrenheit temperature across Seattle, Portland, and San Francisco?",
         )],
+        params: recommended_params,
         tools: tools.specs().context("collect tool specs")?,
         tool_choice: Some(ToolChoice::Auto),
-        ..Default::default()
+        thinking: None,
     };
 
     println!("registered-tools: {}", request.tools.len());
+    println!("request-generation-params: {:?}", request.params);
     for tool in &request.tools {
         println!("tool: {}", tool.name);
         println!("schema: {}", tool.input_schema.as_json_str());
@@ -83,6 +88,72 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn exercise_spec_recommendations() -> GenerationParams {
+    let spec = DemoRecommendedChatSpec::gemma4_e4b();
+    let effective = GenerationParams::default().with_defaults(&spec.recommended_generation_params);
+
+    assert_eq!(effective.temperature, Some(1.0));
+    assert_eq!(effective.top_p, Some(0.95));
+    assert_eq!(
+        spec.recommended_system_prompt,
+        Some("You are Gemma, a helpful assistant.")
+    );
+
+    println!("spec-recommendation-source: {}", spec.source);
+    println!("spec-recommended-temperature: {:?}", effective.temperature);
+    println!("spec-recommended-top-p: {:?}", effective.top_p);
+    println!(
+        "spec-recommended-system-prompt: {:?}",
+        spec.recommended_system_prompt
+    );
+
+    effective
+}
+
+struct DemoRecommendedChatSpec {
+    source: &'static str,
+    recommended_generation_params: GenerationParams,
+    recommended_system_prompt: Option<&'static str>,
+}
+
+impl DemoRecommendedChatSpec {
+    #[cfg(feature = "model-gemma4-e4b-gguf")]
+    fn gemma4_e4b() -> Self {
+        let spec = motlie_model_llama_cpp::LlamaCppTextSpec::gemma4_e4b();
+        Self {
+            source: "motlie_model_llama_cpp::LlamaCppTextSpec::gemma4_e4b",
+            recommended_generation_params: spec.recommended_generation_params,
+            recommended_system_prompt: spec.recommended_system_prompt,
+        }
+    }
+
+    #[cfg(all(not(feature = "model-gemma4-e4b-gguf"), feature = "model-gemma4-e4b"))]
+    fn gemma4_e4b() -> Self {
+        let spec = motlie_model_mistral::MistralMultimodalSpec::gemma4_e4b();
+        Self {
+            source: "motlie_model_mistral::MistralMultimodalSpec::gemma4_e4b",
+            recommended_generation_params: spec.recommended_generation_params,
+            recommended_system_prompt: spec.recommended_system_prompt,
+        }
+    }
+
+    #[cfg(all(
+        not(feature = "model-gemma4-e4b-gguf"),
+        not(feature = "model-gemma4-e4b")
+    ))]
+    fn gemma4_e4b() -> Self {
+        Self {
+            source: "local Gemma 4 E4B recommendation witness",
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
+        }
+    }
 }
 
 fn print_message(label: &str, message: &ChatMessage) {
