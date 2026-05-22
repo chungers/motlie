@@ -69,13 +69,19 @@ staging cannot execute guest rootfs binaries.
 ### CH Package Stage Modes
 
 2026-05-22, gpt55-ch-aarch64-258=280 -- CH external-OCI builds run
-package-manager and npm installation inside the imported guest rootfs. By
-default, `mbuild build` uses `--package-stage-mode auto`, which probes the
-rootless user/mount namespace path and fails early with operator guidance when
-the host blocks rootless chroot or bind mounts. It does not silently escalate.
+package-manager and npm installation against the imported guest rootfs. By
+default, `mbuild build` uses `--package-stage-mode auto`, which first probes the
+rootless user/mount namespace chroot path. On native Alpine/OpenRC builders, if
+that chroot path is blocked, `auto` falls back to a rootless `apk --root` stage
+wrapped with `fakeroot`; npm is run through the guest Alpine node loader with
+`npm_config_libc=musl` so native optional dependencies, including Claude, match
+Alpine. If neither rootless strategy applies, `mbuild` fails early with operator
+guidance. It does not silently escalate.
 
-Use explicit rootless mode on hosts known to support unprivileged user
-namespaces, subordinate uid/gid maps, mount namespaces, bind mounts, and chroot:
+Use explicit rootless mode on hosts known to support either unprivileged
+user/mount namespace chroot staging or the native Alpine/OpenRC `apk --root`
+fallback. The Alpine fallback requires a native host/guest architecture match
+and `fakeroot` on the builder host:
 
 ```bash
 cargo run -p mbuild -- build \

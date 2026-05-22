@@ -768,11 +768,17 @@ fn run_ch_external_oci_build(
 
     let chroot_support = prepare_guest_chroot_execution(&rootfs_dir, &host, &guest, &log_path)?;
     let package_log_path = options.out.join(CH_PACKAGE_STAGE_LOG_NAME);
-    let package_runner =
-        PackageStageRunner::resolve(options.package_stage_mode, &rootfs_dir, &package_log_path)?;
+    let package_runner = PackageStageRunner::resolve(
+        options.package_stage_mode,
+        config,
+        &rootfs_dir,
+        &host,
+        &guest,
+        &package_log_path,
+    )?;
     append_log(
         &log_path,
-        &format!("package_stage_mode={}\n", package_runner.mode().as_str()),
+        &format!("package_stage_mode={}\n", package_runner.strategy_label()),
     )?;
     let guest_binaries = build_guest_binaries(repo_root, &guest, &log_path)?;
     run_package_stage(&rootfs_dir, config, &options.out, &package_runner)?;
@@ -838,7 +844,7 @@ fn run_ch_external_oci_build(
             "--target".to_string(),
             options.target.to_string(),
             "--package-stage-mode".to_string(),
-            package_runner.mode().as_str().to_string(),
+            package_runner.command_mode_arg().to_string(),
         ],
         log_path,
         exit_status: 0,
@@ -1520,11 +1526,8 @@ fn verify_guest_binary_contract_marker(
     log_path: &Path,
     runner: &PackageStageRunner,
 ) -> Result<()> {
-    let mut command = runner.chroot_command()?;
-    command
-        .arg(rootfs_dir)
-        .arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT)
-        .arg("--contract");
+    let mut command = runner.guest_binary_contract_command(rootfs_dir)?;
+    command.arg("--contract");
     append_log(
         log_path,
         &format!("\n--- verify installed guest binary contract marker ---\ncommand={command:?}\n"),
@@ -1559,15 +1562,45 @@ fn verify_guest_binary_contract_marker(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageStageStrategy {
+    RootlessChroot,
+    RootlessAlpineApkRoot,
+    Sudo,
+    Root,
+}
+
+impl PackageStageStrategy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RootlessChroot => "rootless-chroot",
+            Self::RootlessAlpineApkRoot => "rootless-alpine-apk-root",
+            Self::Sudo => "sudo",
+            Self::Root => "root",
+        }
+    }
+
+    fn command_mode_arg(self) -> &'static str {
+        match self {
+            Self::RootlessChroot | Self::RootlessAlpineApkRoot => "rootless",
+            Self::Sudo => "sudo",
+            Self::Root => "root",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PackageStageRunner {
-    mode: PackageStageMode,
+    strategy: PackageStageStrategy,
 }
 
 impl PackageStageRunner {
     fn resolve(
         requested: Option<PackageStageMode>,
+        config: &ImageBuildConfig,
         rootfs_dir: &Path,
+        host: &HostPlatformTarget,
+        guest: &ChGuestTarget,
         log_path: &Path,
     ) -> Result<Self> {
         let mode = PackageStageMode::resolve(requested)?;
@@ -1575,68 +1608,126 @@ impl PackageStageRunner {
             PackageStageMode::Auto => {
                 match preflight_rootless_package_stage(rootfs_dir, log_path) {
                     Ok(()) => Ok(Self {
-                        mode: PackageStageMode::Rootless,
+                        strategy: PackageStageStrategy::RootlessChroot,
                     }),
-                    Err(error) => bail!(
-                        "rootless package staging is unsupported on this host: {error:#}. \
+                    Err(rootless_error) => {
+                        if let Ok(()) = preflight_rootless_alpine_apk_root_stage(
+                            config, rootfs_dir, host, guest, log_path,
+                        ) {
+                            append_log(
+                                log_path,
+                                &format!(
+                                    "rootless chroot package staging unavailable; using Alpine apk --root fallback: {rootless_error:#}\n"
+                                ),
+                            )?;
+                            return Ok(Self {
+                                strategy: PackageStageStrategy::RootlessAlpineApkRoot,
+                            });
+                        }
+                        bail!(
+                            "rootless package staging is unsupported on this host: {rootless_error:#}. \
                      Re-run with --package-stage-mode sudo after operator-approved sudo policy, \
                      run mbuild as root with --package-stage-mode root in a controlled builder, \
                      or use a host that permits rootless user/mount namespace chroot staging"
-                    ),
+                        )
+                    }
                 }
             }
             PackageStageMode::Rootless => {
-                preflight_rootless_package_stage(rootfs_dir, log_path).with_context(|| {
-                    "rootless package staging preflight failed; use --package-stage-mode sudo/root or a compatible rootless builder host"
-                })?;
-                Ok(Self { mode })
+                match preflight_rootless_package_stage(rootfs_dir, log_path) {
+                    Ok(()) => Ok(Self {
+                        strategy: PackageStageStrategy::RootlessChroot,
+                    }),
+                    Err(rootless_error) => {
+                        preflight_rootless_alpine_apk_root_stage(
+                            config, rootfs_dir, host, guest, log_path,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "rootless package staging preflight failed: {rootless_error:#}; use --package-stage-mode sudo/root or a compatible rootless builder host"
+                            )
+                        })?;
+                        Ok(Self {
+                            strategy: PackageStageStrategy::RootlessAlpineApkRoot,
+                        })
+                    }
+                }
             }
             PackageStageMode::Sudo => {
                 preflight_sudo_package_stage(log_path)?;
-                Ok(Self { mode })
+                Ok(Self {
+                    strategy: PackageStageStrategy::Sudo,
+                })
             }
             PackageStageMode::Root => {
                 preflight_root_package_stage()?;
-                Ok(Self { mode })
+                Ok(Self {
+                    strategy: PackageStageStrategy::Root,
+                })
             }
         }
     }
 
-    fn mode(self) -> PackageStageMode {
-        self.mode
+    fn strategy_label(self) -> &'static str {
+        self.strategy.label()
+    }
+
+    fn command_mode_arg(self) -> &'static str {
+        self.strategy.command_mode_arg()
     }
 
     fn package_stage_command(self, script_path: &Path) -> Result<Command> {
-        let mut command = match self.mode {
-            PackageStageMode::Rootless => rootless_unshare_command()?,
-            PackageStageMode::Sudo => sudo_command("bash"),
-            PackageStageMode::Root => Command::new("bash"),
-            PackageStageMode::Auto => unreachable!("auto is resolved before command construction"),
+        let mut command = match self.strategy {
+            PackageStageStrategy::RootlessChroot => rootless_unshare_command()?,
+            PackageStageStrategy::RootlessAlpineApkRoot => Command::new("bash"),
+            PackageStageStrategy::Sudo => sudo_command("bash"),
+            PackageStageStrategy::Root => Command::new("bash"),
         };
         command.arg(script_path);
         Ok(command)
     }
 
-    fn chroot_command(self) -> Result<Command> {
-        let command = match self.mode {
-            PackageStageMode::Rootless => {
+    fn guest_binary_contract_command(self, rootfs_dir: &Path) -> Result<Command> {
+        let command = match self.strategy {
+            PackageStageStrategy::RootlessChroot => {
                 let mut command = rootless_unshare_command()?;
-                command.arg("chroot");
+                command
+                    .arg("chroot")
+                    .arg(rootfs_dir)
+                    .arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT);
                 command
             }
-            PackageStageMode::Sudo => sudo_command("chroot"),
-            PackageStageMode::Root => Command::new("chroot"),
-            PackageStageMode::Auto => unreachable!("auto is resolved before command construction"),
+            PackageStageStrategy::RootlessAlpineApkRoot => Command::new(
+                rootfs_dir.join(
+                    v1_5::MOTLIE_V15_GUEST_BIN_OPT
+                        .strip_prefix('/')
+                        .unwrap_or(v1_5::MOTLIE_V15_GUEST_BIN_OPT),
+                ),
+            ),
+            PackageStageStrategy::Sudo => {
+                let mut command = sudo_command("chroot");
+                command.arg(rootfs_dir).arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT);
+                command
+            }
+            PackageStageStrategy::Root => {
+                let mut command = Command::new("chroot");
+                command.arg(rootfs_dir).arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT);
+                command
+            }
         };
         Ok(command)
     }
 
     fn needs_sudo_host_write_grants(self) -> bool {
-        self.mode == PackageStageMode::Sudo
+        self.strategy == PackageStageStrategy::Sudo
     }
 
     fn uses_sudo(self) -> bool {
-        self.mode == PackageStageMode::Sudo
+        self.strategy == PackageStageStrategy::Sudo
+    }
+
+    fn uses_alpine_apk_root(self) -> bool {
+        self.strategy == PackageStageStrategy::RootlessAlpineApkRoot
     }
 }
 
@@ -1707,6 +1798,98 @@ chroot "$rootfs" /bin/sh -c true
 "#
 }
 
+fn preflight_rootless_alpine_apk_root_stage(
+    config: &ImageBuildConfig,
+    rootfs_dir: &Path,
+    host: &HostPlatformTarget,
+    guest: &ChGuestTarget,
+    log_path: &Path,
+) -> Result<()> {
+    if config.source.profile.as_str() != ALPINE_OPENRC_PROFILE
+        || config.package_stage.manager.as_str() != "apk"
+    {
+        bail!("Alpine apk --root package staging only supports alpine-openrc/apk configs");
+    }
+    if host.platform != guest.platform {
+        bail!(
+            "Alpine apk --root package staging requires a native builder; host={} guest={}",
+            host.platform,
+            guest.platform
+        );
+    }
+    find_executable("fakeroot").context("fakeroot not found for Alpine apk --root staging")?;
+    let mut command = alpine_apk_root_command(rootfs_dir, guest)?;
+    command.arg("--version");
+    run_preflight_command(
+        command,
+        log_path,
+        "rootless Alpine apk --root package-stage preflight",
+    )
+}
+
+fn alpine_apk_root_command(rootfs_dir: &Path, guest: &ChGuestTarget) -> Result<Command> {
+    let loader = rootfs_dir.join(alpine_musl_loader_path(guest));
+    if !loader.is_file() {
+        bail!("Alpine musl loader not found at {}", loader.display());
+    }
+    let apk = rootfs_dir.join("sbin/apk");
+    if !apk.is_file() {
+        bail!("Alpine apk binary not found at {}", apk.display());
+    }
+    let repositories = rootfs_dir.join("etc/apk/repositories");
+    if !repositories.is_file() {
+        bail!(
+            "Alpine apk repositories file not found at {}",
+            repositories.display()
+        );
+    }
+    let keys_dir = rootfs_dir.join("etc/apk/keys");
+    if !keys_dir.is_dir() {
+        bail!(
+            "Alpine apk keys directory not found at {}",
+            keys_dir.display()
+        );
+    }
+
+    let mut command = Command::new("fakeroot");
+    command
+        .arg(loader)
+        .arg("--library-path")
+        .arg(alpine_library_path(rootfs_dir))
+        .arg(apk)
+        .arg("--root")
+        .arg(rootfs_dir)
+        .arg("--repositories-file")
+        .arg(repositories)
+        .arg("--keys-dir")
+        .arg(keys_dir)
+        .arg("--arch")
+        .arg(alpine_apk_arch(guest));
+    Ok(command)
+}
+
+fn alpine_musl_loader_path(guest: &ChGuestTarget) -> &'static str {
+    match guest.platform.architecture {
+        GuestArchitecture::Amd64 => "lib/ld-musl-x86_64.so.1",
+        GuestArchitecture::Arm64 => "lib/ld-musl-aarch64.so.1",
+    }
+}
+
+fn alpine_apk_arch(guest: &ChGuestTarget) -> &'static str {
+    match guest.platform.architecture {
+        GuestArchitecture::Amd64 => "x86_64",
+        GuestArchitecture::Arm64 => "aarch64",
+    }
+}
+
+fn alpine_library_path(rootfs_dir: &Path) -> String {
+    format!(
+        "{}:{}",
+        rootfs_dir.join("lib").display(),
+        rootfs_dir.join("usr/lib").display()
+    )
+}
+
 fn preflight_sudo_package_stage(log_path: &Path) -> Result<()> {
     run_preflight_command(sudo_command("true"), log_path, "sudo package-stage preflight")
         .with_context(|| {
@@ -1774,6 +1957,7 @@ fn run_package_stage(
     let log_path = out.join(CH_PACKAGE_STAGE_LOG_NAME);
     let stage_script = match config.package_stage.manager.as_str() {
         "apt" => apt_stage_script(),
+        "apk" if runner.uses_alpine_apk_root() => apk_root_stage_script(),
         "apk" => apk_stage_script(),
         manager => bail!("CH external-OCI package stage does not implement {manager}"),
     };
@@ -1804,7 +1988,7 @@ fn run_package_stage(
         &format!(
             "{}/npm package stage ({})",
             config.package_stage.manager.as_str(),
-            runner.mode()
+            runner.strategy_label()
         ),
     )
 }
@@ -1985,6 +2169,169 @@ if [[ "$clean" == "1" ]]; then
     mkdir -p "$rootfs/var/cache/apt/archives/partial"
 fi
 truncate -s 0 "$rootfs/etc/machine-id"
+"#
+}
+
+fn apk_root_stage_script() -> &'static str {
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+rootfs="$(readlink -f "$1")"
+update="$2"
+clean="$3"
+shift 3
+
+apk_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    apk_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    npm_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_binaries=("$@")
+
+if [[ -x "$rootfs/lib/ld-musl-aarch64.so.1" ]]; then
+    loader="$rootfs/lib/ld-musl-aarch64.so.1"
+    apk_arch="aarch64"
+elif [[ -x "$rootfs/lib/ld-musl-x86_64.so.1" ]]; then
+    loader="$rootfs/lib/ld-musl-x86_64.so.1"
+    apk_arch="x86_64"
+else
+    echo "missing Alpine musl loader under $rootfs/lib" >&2
+    exit 1
+fi
+library_path="$rootfs/lib:$rootfs/usr/lib"
+apk_base=(
+    fakeroot
+    "$loader"
+    --library-path "$library_path"
+    "$rootfs/sbin/apk"
+    --root "$rootfs"
+    --repositories-file "$rootfs/etc/apk/repositories"
+    --keys-dir "$rootfs/etc/apk/keys"
+    --arch "$apk_arch"
+)
+
+run_guest_binary() {
+    local guest_path="$1"
+    shift
+    "$loader" --library-path "$library_path" "$rootfs/${guest_path#/}" "$@"
+}
+
+mkdir -p "$rootfs/etc" "$rootfs/tmp" "$rootfs/var/cache/apk" "$rootfs/usr/local/bin"
+if [[ -f "$rootfs/etc/apk/repositories" ]]; then
+    sed -i 's#^https://dl-cdn.alpinelinux.org/#http://dl-cdn.alpinelinux.org/#' "$rootfs/etc/apk/repositories"
+fi
+
+if [[ "$update" == "1" ]]; then
+    "${apk_base[@]}" update
+fi
+if [[ ${#apk_packages[@]} -gt 0 ]]; then
+    "${apk_base[@]}" --no-check-certificate add --no-cache --no-scripts "${apk_packages[@]}"
+fi
+
+# apk --root cannot run maintainer scripts without chroot. Recreate the
+# v1.5-relevant post-install effects directly in the target rootfs.
+if [[ -x "$rootfs/usr/bin/ssh-keygen" ]]; then
+    run_guest_binary /usr/bin/ssh-keygen -A -f "$rootfs"
+fi
+if [[ -f "$rootfs/etc/ssh/sshd_config" ]]; then
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' "$rootfs/etc/ssh/sshd_config" || true
+    grep -qxF 'Include /etc/ssh/sshd_config.d/*.conf' "$rootfs/etc/ssh/sshd_config" 2>/dev/null || printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> "$rootfs/etc/ssh/sshd_config"
+fi
+if [[ -f "$rootfs/usr/bin/sudo" ]]; then
+    chmod 4755 "$rootfs/usr/bin/sudo"
+fi
+if [[ -f "$rootfs/usr/bin/bwrap" ]]; then
+    chmod 4755 "$rootfs/usr/bin/bwrap" || true
+fi
+
+if [[ -d "$rootfs/etc/init.d" ]]; then
+    mkdir -p "$rootfs/etc/runlevels/sysinit" "$rootfs/etc/runlevels/boot" "$rootfs/etc/runlevels/default"
+    grep -qxF 'rc_logger="YES"' "$rootfs/etc/rc.conf" 2>/dev/null || printf '\nrc_logger="YES"\n' >> "$rootfs/etc/rc.conf"
+    grep -qxF 'rc_verbose=yes' "$rootfs/etc/rc.conf" 2>/dev/null || printf 'rc_verbose=yes\n' >> "$rootfs/etc/rc.conf"
+    enable_openrc_service() {
+        local service="$1"
+        local runlevel="$2"
+        if [[ -f "$rootfs/etc/init.d/$service" ]]; then
+            mkdir -p "$rootfs/etc/runlevels/$runlevel"
+            ln -sf "/etc/init.d/$service" "$rootfs/etc/runlevels/$runlevel/$service"
+        fi
+    }
+    for entry in \
+        "devfs sysinit" \
+        "procfs sysinit" \
+        "sysfs sysinit" \
+        "hostname boot" \
+        "bootmisc boot" \
+        "root boot" \
+        "fsck boot" \
+        "localmount boot" \
+        "loopback boot" \
+        "networking boot"; do
+        enable_openrc_service "${entry% *}" "${entry#* }"
+    done
+    for service in sshd dbus cloud-init-local cloud-init cloud-config cloud-final local; do
+        enable_openrc_service "$service" default
+    done
+fi
+
+grep -qxF user_allow_other "$rootfs/etc/fuse.conf" 2>/dev/null || printf '%s\n' user_allow_other >> "$rootfs/etc/fuse.conf"
+
+mkdir -p "$rootfs/opt/motlie/npm"
+if [[ ${#npm_packages[@]} -gt 0 ]]; then
+    node_wrapper_dir="$(mktemp -d "$rootfs/tmp/mbuild-node-wrapper.XXXXXX")"
+    npm_cache_dir="$rootfs/tmp/mbuild-npm-cache"
+    cleanup_npm() {
+        rm -rf "$node_wrapper_dir" "$npm_cache_dir" >/dev/null 2>&1 || true
+    }
+    trap cleanup_npm EXIT
+    icu_dir=""
+    if [[ -d "$rootfs/usr/share/icu" ]]; then
+        icu_dir="$(find "$rootfs/usr/share/icu" -mindepth 1 -maxdepth 1 -type d | sort | tail -n1 || true)"
+    fi
+    cat > "$node_wrapper_dir/node" <<EOF
+#!/usr/bin/env bash
+if [[ -n "$icu_dir" ]]; then
+    export ICU_DATA="$icu_dir"
+    export NODE_ICU_DATA="$icu_dir"
+fi
+exec "$loader" --library-path "$library_path" "$rootfs/usr/bin/node" "\$@"
+EOF
+    chmod 755 "$node_wrapper_dir/node"
+    npm_env=(
+        PATH="$node_wrapper_dir:$PATH"
+        HOME="$rootfs/tmp"
+        npm_config_update_notifier=false
+        npm_config_audit=false
+        npm_config_fund=false
+        npm_config_cache="$npm_cache_dir"
+        npm_config_libc=musl
+    )
+    if [[ -n "$icu_dir" ]]; then
+        npm_env+=(ICU_DATA="$icu_dir" NODE_ICU_DATA="$icu_dir")
+    fi
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        npm_env+=(NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm_config_cafile=/etc/ssl/certs/ca-certificates.crt)
+    fi
+    env "${npm_env[@]}" \
+        "$loader" --library-path "$library_path" \
+        "$rootfs/usr/bin/node" \
+        "$rootfs/usr/lib/node_modules/npm/bin/npm-cli.js" \
+        install -g --prefix "$rootfs/opt/motlie/npm" "${npm_packages[@]}"
+    mkdir -p "$rootfs/usr/local/bin"
+    for binary in "${npm_binaries[@]}"; do
+        ln -sf "/opt/motlie/npm/bin/$binary" "$rootfs/usr/local/bin/$binary"
+    done
+fi
+
+if [[ "$clean" == "1" ]]; then
+    rm -rf "$rootfs/var/cache/apk"/* "$rootfs/root/.npm" "$rootfs/tmp/mbuild-npm-cache"
+fi
 "#
 }
 
@@ -5500,12 +5847,12 @@ validation:
     fn package_stage_runner_builds_sudo_and_root_commands() {
         let script = Path::new("/tmp/mbuild-package-stage.sh");
         let sudo = PackageStageRunner {
-            mode: PackageStageMode::Sudo,
+            strategy: PackageStageStrategy::Sudo,
         }
         .package_stage_command(script)
         .unwrap();
         let root = PackageStageRunner {
-            mode: PackageStageMode::Root,
+            strategy: PackageStageStrategy::Root,
         }
         .package_stage_command(script)
         .unwrap();
@@ -5548,6 +5895,20 @@ validation:
         assert!(script.contains("\"root boot\""));
         assert!(script.contains("\"fsck boot\""));
         assert!(script.contains("\"networking boot\""));
+    }
+
+    #[test]
+    fn apk_root_stage_uses_no_chroot_musl_package_path() {
+        let script = apk_root_stage_script();
+
+        assert!(script.contains("fakeroot"));
+        assert!(script.contains(r#"--root "$rootfs""#));
+        assert!(script.contains("--no-scripts"));
+        assert!(script.contains("npm_config_libc=musl"));
+        assert!(script.contains(r#"run_guest_binary /usr/bin/ssh-keygen -A -f "$rootfs""#));
+        assert!(script.contains(r#"chmod 4755 "$rootfs/usr/bin/sudo""#));
+        assert!(script.contains(r#"ln -sf "/etc/init.d/$service""#));
+        assert!(!script.contains(r#"chroot "$rootfs""#));
     }
 
     #[test]
