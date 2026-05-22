@@ -6,11 +6,21 @@ model backend. It covers the static caller-owned shape:
 - `WeatherTool` delegates to the existing async Rust function `get_weather`
 - `EvaluateMathExpressionTool` delegates to the typed CEL-backed math function
 - `tool_list!(...)` builds the statically dispatched local tool set
+- the E4B recommended generation params and system prompt are merged into an
+  effective request shape without starting an LLM
 
 Run it with:
 
 ```bash
 cargo run -p motlie-models --example chat_tool_binding --no-default-features
+```
+
+To exercise the real Gemma 4 E4B GGUF spec recommendations without loading an
+LLM, enable the GGUF feature:
+
+```bash
+cargo run -p motlie-models --no-default-features --features model-gemma4-e4b-gguf \
+  --example chat_tool_binding
 ```
 
 The example builds a `ChatRequest` from `tools.specs()`, simulates assistant

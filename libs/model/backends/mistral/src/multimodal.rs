@@ -2,14 +2,14 @@ use std::future::Future;
 
 use mistralrs::ModelBuilder;
 use motlie_model::{
-    BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, ModelError,
-    QuantizationBits, QuantizationSupport, StartOptions, UnsupportedCompletion,
+    BundleId, Capabilities, CapabilityKind, ChatMessage, CheckpointFormat, GenerationParams,
+    ModelError, QuantizationBits, QuantizationSupport, StartOptions, UnsupportedCompletion,
     UnsupportedEmbeddings,
 };
 
 use crate::common::{
-    configure_artifact_policy, map_quantization_bits, multimodal_message_parts,
-    paged_attn_context_size, should_force_cpu, MistralMessageParts,
+    MistralMessageParts, configure_artifact_policy, map_quantization_bits,
+    multimodal_message_parts, paged_attn_context_size, should_force_cpu,
 };
 use crate::runtime::{MistralAdapter, MistralBundle, MistralHandle, MistralProfile};
 
@@ -28,6 +28,8 @@ pub struct MistralMultimodalSpec {
     pub arch: MistralMultimodalArch,
     pub capabilities: Capabilities,
     pub quantization: QuantizationSupport,
+    pub recommended_generation_params: GenerationParams,
+    pub recommended_system_prompt: Option<&'static str>,
 }
 
 impl MistralMultimodalSpec {
@@ -37,6 +39,8 @@ impl MistralMultimodalSpec {
             display_name: "Gemma 4 E2B-it",
             model_id: "google/gemma-4-E2B-it",
             arch: MistralMultimodalArch::Gemma4,
+            // ToolUse relies on the shared template-compatible transcript
+            // adapter in common.rs, not mistralrs::RequestBuilder's tool replay.
             capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
             quantization: QuantizationSupport::with_recommended(
                 [QuantizationBits::Four, QuantizationBits::Eight],
@@ -49,6 +53,36 @@ impl MistralMultimodalSpec {
                     QuantizationBits::Eight,
                 ])
             }),
+            recommended_generation_params: GenerationParams::default(),
+            recommended_system_prompt: None,
+        }
+    }
+
+    pub fn gemma4_e4b() -> Self {
+        Self {
+            id: BundleId::new("gemma4_e4b"),
+            display_name: "Gemma 4 E4B-it",
+            model_id: "google/gemma-4-E4B-it",
+            arch: MistralMultimodalArch::Gemma4,
+            // Same safetensors Gemma 4 template family and adapter path as E2B.
+            capabilities: Capabilities::multimodal_chat_vision_and_tool_use(),
+            quantization: QuantizationSupport::with_recommended(
+                [QuantizationBits::Four, QuantizationBits::Eight],
+                QuantizationBits::Eight,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("curated quantization construction failed (this is a bug): {e}");
+                QuantizationSupport::without_recommended([
+                    QuantizationBits::Four,
+                    QuantizationBits::Eight,
+                ])
+            }),
+            recommended_generation_params: GenerationParams {
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                ..Default::default()
+            },
+            recommended_system_prompt: Some("You are Gemma, a helpful assistant."),
         }
     }
 }
@@ -206,6 +240,28 @@ mod tests {
         assert!(spec.capabilities.supports(CapabilityKind::Vision));
         assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
         assert!(!spec.capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
+    fn gemma4_e4b_spec_uses_model_card_defaults() {
+        let spec = MistralMultimodalSpec::gemma4_e4b();
+
+        assert_eq!(spec.id.as_str(), "gemma4_e4b");
+        assert_eq!(spec.display_name, "Gemma 4 E4B-it");
+        assert_eq!(spec.model_id, "google/gemma-4-E4B-it");
+        assert_eq!(
+            spec.quantization.recommended(),
+            Some(QuantizationBits::Eight)
+        );
+        assert_eq!(spec.recommended_generation_params.temperature, Some(1.0));
+        assert_eq!(spec.recommended_generation_params.top_p, Some(0.95));
+        assert_eq!(
+            spec.recommended_system_prompt,
+            Some("You are Gemma, a helpful assistant.")
+        );
+        assert!(spec.capabilities.supports(CapabilityKind::Chat));
+        assert!(spec.capabilities.supports(CapabilityKind::Vision));
+        assert!(spec.capabilities.supports(CapabilityKind::ToolUse));
     }
 
     #[test]
