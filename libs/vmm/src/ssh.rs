@@ -347,6 +347,22 @@ impl GuestBridgeHandle {
         exec_on_guest(&self.registry, &self.guest_name, command, timeout).await
     }
 
+    pub async fn exec_with_connect_timeout(
+        &self,
+        command: &str,
+        connect_timeout: Duration,
+        command_timeout: Duration,
+    ) -> Result<ExecOutput, SshProxyError> {
+        exec_on_guest_with_connect_timeout(
+            &self.registry,
+            &self.guest_name,
+            command,
+            connect_timeout,
+            command_timeout,
+        )
+        .await
+    }
+
     pub async fn open_pty(
         &self,
         request: PtyRequest,
@@ -999,6 +1015,40 @@ pub async fn exec_on_guest(
             guest: guest_name.into(),
             reason: format!("command timed out after {:?}", timeout),
         })?
+}
+
+pub async fn exec_on_guest_with_connect_timeout(
+    registry: &GuestRegistry,
+    guest_name: &str,
+    command: &str,
+    connect_timeout: Duration,
+    command_timeout: Duration,
+) -> Result<ExecOutput, SshProxyError> {
+    let connect_deadline = Instant::now() + connect_timeout;
+    wait_for_guest_bridge_ready(registry, guest_name, connect_timeout).await?;
+    let remaining_connect = connect_deadline.saturating_duration_since(Instant::now());
+    if remaining_connect.is_zero() {
+        return Err(SshProxyError::GuestConnection {
+            guest: guest_name.into(),
+            reason: format!("SSH channel open timed out after {:?}", connect_timeout),
+        });
+    }
+    let channel = open_guest_session_with_retry(registry, guest_name, remaining_connect).await?;
+    if command_timeout.is_zero() {
+        return Err(SshProxyError::ExecFailed {
+            guest: guest_name.into(),
+            reason: "command timed out after 0ns".into(),
+        });
+    }
+    tokio_timeout(
+        command_timeout,
+        exec_on_channel(channel, guest_name, command),
+    )
+    .await
+    .map_err(|_| SshProxyError::ExecFailed {
+        guest: guest_name.into(),
+        reason: format!("command timed out after {:?}", command_timeout),
+    })?
 }
 
 pub async fn exec_via_proxy(

@@ -92,6 +92,17 @@ impl MotlieSshProxyHandle {
         self.inner.exec(command, timeout).await
     }
 
+    pub async fn exec_with_connect_timeout(
+        &self,
+        command: &str,
+        connect_timeout: Duration,
+        command_timeout: Duration,
+    ) -> Result<ExecOutput, SshProxyError> {
+        self.inner
+            .exec_with_connect_timeout(command, connect_timeout, command_timeout)
+            .await
+    }
+
     pub async fn open_pty(
         &self,
         request: PtyRequest,

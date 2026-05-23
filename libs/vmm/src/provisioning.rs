@@ -290,6 +290,16 @@ impl GuestProvisioner {
         Ok(())
     }
 
+    pub async fn ready_with_policy(
+        &self,
+        principal: &str,
+        policy: &ReadinessPolicy,
+    ) -> Result<(), ProvisioningError> {
+        let handle = self.active_handle(principal)?;
+        handle.ready(policy).await?;
+        Ok(())
+    }
+
     pub async fn exec(
         &self,
         principal: &str,
@@ -298,6 +308,19 @@ impl GuestProvisioner {
     ) -> Result<ExecOutput, ProvisioningError> {
         let handle = self.active_handle(principal)?;
         Ok(handle.exec(command, timeout).await?)
+    }
+
+    pub async fn exec_with_connect_timeout(
+        &self,
+        principal: &str,
+        command: &str,
+        connect_timeout: Duration,
+        command_timeout: Duration,
+    ) -> Result<ExecOutput, ProvisioningError> {
+        let handle = self.active_handle(principal)?;
+        Ok(handle
+            .exec_with_connect_timeout(command, connect_timeout, command_timeout)
+            .await?)
     }
 
     pub async fn open_pty(

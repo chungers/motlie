@@ -533,6 +533,23 @@ impl VmHandle {
         Ok(control_plane.exec(command, timeout).await?)
     }
 
+    pub async fn exec_with_connect_timeout(
+        &self,
+        command: &str,
+        connect_timeout: Duration,
+        command_timeout: Duration,
+    ) -> Result<crate::ssh::ExecOutput, OrchestratorError> {
+        let control_plane =
+            self.control_plane
+                .as_ref()
+                .ok_or_else(|| OrchestratorError::MissingSshBridge {
+                    guest_id: self.guest_id.clone(),
+                })?;
+        Ok(control_plane
+            .exec_with_connect_timeout(command, connect_timeout, command_timeout)
+            .await?)
+    }
+
     pub async fn open_pty(
         &self,
         request: crate::ssh::PtyRequest,

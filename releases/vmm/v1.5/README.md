@@ -186,4 +186,9 @@ MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
 cargo run -p motlie-vmm --example harness_v1_5 -- \
   --backend ch \
   scenario libs/vmm/examples/v1.5/scenarios/pty-agent-validation-alpine.json
+
+MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
+cargo run -p motlie-vmm --example harness_v1_5 -- \
+  --backend ch \
+  scenario libs/vmm/examples/v1.5/scenarios/pty-login-alpine.json
 ```

@@ -8,7 +8,7 @@ use motlie_vmm::backend::BackendError;
 use motlie_vmm::ca::SshCa;
 use motlie_vmm::guestfs::GuestFsError;
 use motlie_vmm::network_alloc::GuestNetAllocatorConfig;
-use motlie_vmm::orchestrator::{OrchestratorError, ShutdownReport};
+use motlie_vmm::orchestrator::{OrchestratorError, ReadinessPolicy, ShutdownReport};
 use motlie_vmm::provisioning::{GuestProvisioner, ProvisioningError};
 use motlie_vmm::runtime::RuntimeError;
 use motlie_vmm::ssh::{
@@ -16,6 +16,7 @@ use motlie_vmm::ssh::{
     SshProxyError,
 };
 use serde::{Deserialize, Serialize};
+use tokio::time::{sleep, Instant};
 
 use crate::backend::HarnessBackend;
 use crate::demo_support::cleanup_development_guest_disks;
@@ -23,10 +24,9 @@ use crate::terminal::{
     HarnessTerminalSession, TerminalBackendKind, TerminalSessionError, VteScreenSnapshot,
 };
 use crate::{
-    build_guest_provisioner, persist_json, print_instance_details, wait_for_egress_ready,
-    wait_for_proxy_listener, DynError, HarnessInstance, AGENT_CLI_START_COMMAND,
-    APK_UPDATE_COMMAND, APT_UPDATE_COMMAND, PACKAGE_MANAGER_QUIESCENT_COMMAND,
-    SSH_PROXY_READY_TIMEOUT, VFS_MEMFS_LAYER_COMMAND,
+    build_guest_provisioner, persist_json, print_instance_details, wait_for_proxy_listener,
+    DynError, HarnessInstance, AGENT_CLI_START_COMMAND, APK_UPDATE_COMMAND, APT_UPDATE_COMMAND,
+    PACKAGE_MANAGER_QUIESCENT_COMMAND, SSH_PROXY_READY_TIMEOUT, VFS_MEMFS_LAYER_COMMAND,
 };
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +53,8 @@ pub enum ScenarioStep {
         command: String,
         #[serde(default)]
         timeout_ms: Option<u64>,
+        #[serde(default)]
+        connect_timeout_ms: Option<u64>,
         #[serde(default)]
         expect: Option<ExecExpectation>,
     },
@@ -247,8 +249,6 @@ pub enum ScenarioDriverError {
     UnknownSession(String),
     #[error("PTY session '{0}' already exists")]
     SessionAlreadyExists(String),
-    #[error("exec failed: {0}")]
-    Exec(#[source] OrchestratorError),
     #[error("proxy exec failed: {0}")]
     ProxyExec(#[source] SshProxyError),
     #[error("provisioning failed: {0}")]
@@ -318,11 +318,17 @@ pub async fn run_scenario_definition(
     Ok(result)
 }
 
+struct RetriedExec {
+    output: ExecOutput,
+    attempts: usize,
+}
+
 struct ScenarioDriver {
     provisioner: GuestProvisioner,
     backend: HarnessBackend,
     proxy_config: SshProxyConfig,
     terminal_backend: TerminalBackendKind,
+    readiness_policy: ReadinessPolicy,
     terminals: HashMap<String, HarnessTerminalSession>,
     session_guests: HashMap<String, String>,
     artifact_root: PathBuf,
@@ -345,6 +351,7 @@ impl ScenarioDriver {
         let ca = Arc::new(SshCa::new()?);
         let guest_registry = new_guest_registry();
         let runtime = Arc::new(backend.runtime(&ca, &guest_registry)?);
+        let readiness_policy = backend.readiness_policy();
         let provisioner = build_guest_provisioner(
             base_dir,
             &artifacts_dir,
@@ -377,6 +384,7 @@ impl ScenarioDriver {
             backend,
             proxy_config,
             terminal_backend,
+            readiness_policy,
             terminals: HashMap::new(),
             session_guests: HashMap::new(),
             artifact_root,
@@ -511,9 +519,11 @@ impl ScenarioDriver {
                 })
             }
             ScenarioStep::Ready { guest, timeout_ms } => {
-                let _ = timeout_ms;
+                let policy = (*timeout_ms)
+                    .map(ready_policy_with_timeout)
+                    .unwrap_or(self.readiness_policy);
                 self.provisioner
-                    .ready(guest)
+                    .ready_with_policy(guest, &policy)
                     .await
                     .map_err(ScenarioDriverError::from)?;
                 Ok(ScenarioStepResult {
@@ -521,7 +531,10 @@ impl ScenarioDriver {
                     action: "ready",
                     guest: Some(guest.clone()),
                     session: None,
-                    detail: format!("{} is exec-ready", guest),
+                    detail: format!(
+                        "{} is exec-ready with ssh_bridge_timeout={:?} exec_ready_timeout={:?}",
+                        guest, policy.ssh_bridge_timeout, policy.exec_ready_timeout
+                    ),
                     exec: None,
                     pty_read: None,
                     screen: None,
@@ -532,11 +545,17 @@ impl ScenarioDriver {
                 guest,
                 command,
                 timeout_ms,
+                connect_timeout_ms,
                 expect,
             } => {
+                let command_timeout = duration_or_default(*timeout_ms, 20_000);
+                let connect_timeout = duration_or_policy(
+                    *connect_timeout_ms,
+                    self.readiness_policy.ssh_bridge_timeout,
+                );
                 let output = self
                     .provisioner
-                    .exec(guest, command, duration_or_default(*timeout_ms, 20_000))
+                    .exec_with_connect_timeout(guest, command, connect_timeout, command_timeout)
                     .await
                     .map_err(ScenarioDriverError::from)?;
                 if let Some(expect) = expect {
@@ -547,7 +566,10 @@ impl ScenarioDriver {
                     action: "exec",
                     guest: Some(guest.clone()),
                     session: None,
-                    detail: format!("exec '{}'", command),
+                    detail: format!(
+                        "exec {} connect_timeout={:?} command_timeout={:?}",
+                        command, connect_timeout, command_timeout
+                    ),
                     exec: Some(output),
                     pty_read: None,
                     screen: None,
@@ -576,7 +598,7 @@ impl ScenarioDriver {
                     action: "proxy_exec",
                     guest: Some(principal.clone()),
                     session: None,
-                    detail: format!("proxy exec '{}'", command),
+                    detail: format!("proxy exec {}", command),
                     exec: Some(output),
                     pty_read: None,
                     screen: None,
@@ -584,187 +606,174 @@ impl ScenarioDriver {
                 })
             }
             ScenarioStep::WaitPackageManagerQuiescent { guest, timeout_ms } => {
-                let output = self
-                    .provisioner
-                    .exec(
+                let result = self
+                    .exec_until_expectation(
                         guest,
                         PACKAGE_MANAGER_QUIESCENT_COMMAND,
+                        ExecExpectation {
+                            exit_code: Some(0),
+                            stdout_contains: Some("PKG_IDLE_OK".to_string()),
+                            stderr_contains: None,
+                        },
                         duration_or_default(*timeout_ms, 65_000),
+                        Duration::from_secs(10),
                     )
-                    .await
-                    .map_err(ScenarioDriverError::from)?;
-                check_exec_expectation(
-                    &ExecExpectation {
-                        exit_code: Some(0),
-                        stdout_contains: Some("PKG_IDLE_OK".to_string()),
-                        stderr_contains: None,
-                    },
-                    &output,
-                )?;
+                    .await?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "wait_package_manager_quiescent",
                     guest: Some(guest.clone()),
                     session: None,
-                    detail: format!("package manager background activity settled for {guest}"),
-                    exec: Some(output),
+                    detail: format!(
+                        "package manager background activity settled for {guest} after {} attempt(s)",
+                        result.attempts
+                    ),
+                    exec: Some(result.output),
                     pty_read: None,
                     screen: None,
                     shutdown: None,
                 })
             }
             ScenarioStep::WaitEgressReady { guest, timeout_ms } => {
-                let handle = self
-                    .provisioner
-                    .active_vm_handle(guest)
-                    .map_err(ScenarioDriverError::from)?;
-                let output =
-                    wait_for_egress_ready(&handle, duration_or_default(*timeout_ms, 30_000))
-                        .await
-                        .map_err(ScenarioDriverError::Exec)?;
-                check_exec_expectation(
-                    &ExecExpectation {
-                        exit_code: Some(0),
-                        stdout_contains: Some("EGRESS_OK".to_string()),
-                        stderr_contains: None,
-                    },
-                    &output,
-                )?;
+                let result = self
+                    .exec_until_expectation(
+                        guest,
+                        crate::EGRESS_READY_COMMAND,
+                        ExecExpectation {
+                            exit_code: Some(0),
+                            stdout_contains: Some("EGRESS_OK".to_string()),
+                            stderr_contains: None,
+                        },
+                        duration_or_default(*timeout_ms, 30_000),
+                        Duration::from_secs(70),
+                    )
+                    .await?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "wait_egress_ready",
                     guest: Some(guest.clone()),
                     session: None,
                     detail: format!(
-                        "DNS + HTTPS ready for manual-certification targets on {guest}"
+                        "DNS + HTTPS ready for manual-certification targets on {guest} after {} attempt(s)",
+                        result.attempts
                     ),
-                    exec: Some(output),
+                    exec: Some(result.output),
                     pty_read: None,
                     screen: None,
                     shutdown: None,
                 })
             }
             ScenarioStep::CheckVfsMemfs { guest, timeout_ms } => {
-                let output = self
-                    .provisioner
-                    .exec(
+                let result = self
+                    .exec_until_expectation(
                         guest,
                         VFS_MEMFS_LAYER_COMMAND,
+                        ExecExpectation {
+                            exit_code: Some(0),
+                            stdout_contains: Some("VFS_MEMFS_OK".to_string()),
+                            stderr_contains: None,
+                        },
                         duration_or_default(*timeout_ms, 20_000),
+                        Duration::from_secs(20),
                     )
-                    .await
-                    .map_err(ScenarioDriverError::from)?;
-                check_exec_expectation(
-                    &ExecExpectation {
-                        exit_code: Some(0),
-                        stdout_contains: Some("VFS_MEMFS_OK".to_string()),
-                        stderr_contains: None,
-                    },
-                    &output,
-                )?;
+                    .await?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "check_vfs_memfs",
                     guest: Some(guest.clone()),
                     session: None,
-                    detail: format!("VFS/FUSE memfs views are mounted and writable for {guest}"),
-                    exec: Some(output),
+                    detail: format!(
+                        "VFS/FUSE memfs views are mounted and writable for {guest} after {} attempt(s)",
+                        result.attempts
+                    ),
+                    exec: Some(result.output),
                     pty_read: None,
                     screen: None,
                     shutdown: None,
                 })
             }
             ScenarioStep::AptUpdate { guest, timeout_ms } => {
-                let output = self
-                    .provisioner
-                    .exec(
+                let result = self
+                    .exec_until_expectation(
                         guest,
                         APT_UPDATE_COMMAND,
+                        ExecExpectation {
+                            exit_code: Some(0),
+                            stdout_contains: Some("APT_OK".to_string()),
+                            stderr_contains: None,
+                        },
                         duration_or_default(*timeout_ms, 120_000),
+                        Duration::from_secs(90),
                     )
-                    .await
-                    .map_err(ScenarioDriverError::from)?;
-                check_exec_expectation(
-                    &ExecExpectation {
-                        exit_code: Some(0),
-                        stdout_contains: Some("APT_OK".to_string()),
-                        stderr_contains: None,
-                    },
-                    &output,
-                )?;
+                    .await?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "apt_update",
                     guest: Some(guest.clone()),
                     session: None,
                     detail: format!(
-                        "apt-get update succeeded over backend internet egress for {guest}"
+                        "apt-get update succeeded over backend internet egress for {guest} after {} attempt(s)",
+                        result.attempts
                     ),
-                    exec: Some(output),
+                    exec: Some(result.output),
                     pty_read: None,
                     screen: None,
                     shutdown: None,
                 })
             }
             ScenarioStep::ApkUpdate { guest, timeout_ms } => {
-                let output = self
-                    .provisioner
-                    .exec(
+                let result = self
+                    .exec_until_expectation(
                         guest,
                         APK_UPDATE_COMMAND,
+                        ExecExpectation {
+                            exit_code: Some(0),
+                            stdout_contains: Some("APK_OK".to_string()),
+                            stderr_contains: None,
+                        },
                         duration_or_default(*timeout_ms, 120_000),
+                        Duration::from_secs(90),
                     )
-                    .await
-                    .map_err(ScenarioDriverError::from)?;
-                check_exec_expectation(
-                    &ExecExpectation {
-                        exit_code: Some(0),
-                        stdout_contains: Some("APK_OK".to_string()),
-                        stderr_contains: None,
-                    },
-                    &output,
-                )?;
+                    .await?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "apk_update",
                     guest: Some(guest.clone()),
                     session: None,
                     detail: format!(
-                        "apk update succeeded over backend internet egress for {guest}"
+                        "apk update succeeded over backend internet egress for {guest} after {} attempt(s)",
+                        result.attempts
                     ),
-                    exec: Some(output),
+                    exec: Some(result.output),
                     pty_read: None,
                     screen: None,
                     shutdown: None,
                 })
             }
             ScenarioStep::CheckAgentCli { guest, timeout_ms } => {
-                let output = self
-                    .provisioner
-                    .exec(
+                let result = self
+                    .exec_until_expectation(
                         guest,
                         AGENT_CLI_START_COMMAND,
+                        ExecExpectation {
+                            exit_code: Some(0),
+                            stdout_contains: Some("AGENT_CLI_OK".to_string()),
+                            stderr_contains: None,
+                        },
                         duration_or_default(*timeout_ms, 60_000),
+                        Duration::from_secs(60),
                     )
-                    .await
-                    .map_err(ScenarioDriverError::from)?;
-                check_exec_expectation(
-                    &ExecExpectation {
-                        exit_code: Some(0),
-                        stdout_contains: Some("AGENT_CLI_OK".to_string()),
-                        stderr_contains: None,
-                    },
-                    &output,
-                )?;
+                    .await?;
                 Ok(ScenarioStepResult {
                     index,
                     action: "check_agent_cli",
                     guest: Some(guest.clone()),
                     session: None,
                     detail: format!(
-                        "Codex and Claude CLIs start without OS-level errors for {guest}"
+                        "Codex and Claude CLIs start without OS-level errors for {guest} after {} attempt(s)",
+                        result.attempts
                     ),
-                    exec: Some(output),
+                    exec: Some(result.output),
                     pty_read: None,
                     screen: None,
                     shutdown: None,
@@ -1026,6 +1035,49 @@ impl ScenarioDriver {
         }
     }
 
+    async fn exec_until_expectation(
+        &self,
+        guest: &str,
+        command: &str,
+        expect: ExecExpectation,
+        overall_timeout: Duration,
+        attempt_timeout_cap: Duration,
+    ) -> Result<RetriedExec, ScenarioDriverError> {
+        let deadline = Instant::now() + overall_timeout;
+        let mut attempts = 0usize;
+        let mut last_error: Option<ScenarioDriverError> = None;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(last_error.unwrap_or_else(|| retry_timeout_error(command, attempts)));
+            }
+
+            attempts += 1;
+            let command_timeout = remaining.min(attempt_timeout_cap);
+            let connect_timeout = remaining.min(self.readiness_policy.ssh_bridge_timeout);
+            let result = self
+                .provisioner
+                .exec_with_connect_timeout(guest, command, connect_timeout, command_timeout)
+                .await;
+
+            match result {
+                Ok(output) => match check_exec_expectation(&expect, &output) {
+                    Ok(()) => return Ok(RetriedExec { output, attempts }),
+                    Err(err) => last_error = Some(err),
+                },
+                Err(err) => last_error = Some(ScenarioDriverError::from(err)),
+            }
+
+            let delay =
+                Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()));
+            if delay.is_zero() {
+                continue;
+            }
+            sleep(delay).await;
+        }
+    }
+
     fn terminal(&self, session: &str) -> Result<&HarnessTerminalSession, ScenarioDriverError> {
         self.terminals
             .get(session)
@@ -1054,6 +1106,29 @@ impl ScenarioDriver {
 
 fn duration_or_default(timeout_ms: Option<u64>, default_ms: u64) -> Duration {
     Duration::from_millis(timeout_ms.unwrap_or(default_ms))
+}
+
+fn duration_or_policy(timeout_ms: Option<u64>, default: Duration) -> Duration {
+    timeout_ms.map(Duration::from_millis).unwrap_or(default)
+}
+
+fn ready_policy_with_timeout(timeout_ms: u64) -> ReadinessPolicy {
+    let timeout = Duration::from_millis(timeout_ms);
+    ReadinessPolicy {
+        api_socket_timeout: timeout,
+        guestfs_timeout: timeout,
+        ssh_bridge_timeout: timeout,
+        exec_ready_timeout: timeout,
+    }
+}
+
+fn retry_timeout_error(command: &str, attempts: usize) -> ScenarioDriverError {
+    TerminalSessionError::Assertion {
+        step: "exec",
+        expected: "command expectation before retry deadline".to_string(),
+        observed_excerpt: format!("cmd={} attempts={}", excerpt(command), attempts),
+    }
+    .into()
 }
 
 fn sanitize(value: &str) -> String {
@@ -1103,6 +1178,7 @@ fn step_guest(step: &ScenarioStep) -> Option<&str> {
         | ScenarioStep::WaitEgressReady { guest, .. }
         | ScenarioStep::CheckVfsMemfs { guest, .. }
         | ScenarioStep::AptUpdate { guest, .. }
+        | ScenarioStep::ApkUpdate { guest, .. }
         | ScenarioStep::CheckAgentCli { guest, .. }
         | ScenarioStep::PtyOpen { guest, .. }
         | ScenarioStep::Shutdown { guest } => Some(guest),
@@ -1193,7 +1269,6 @@ fn classify_driver_failure(error: &ScenarioDriverError) -> DriverFailure {
             code: "duplicate_target",
             message: error.to_string(),
         },
-        ScenarioDriverError::Exec(source) => classify_orchestrator("exec", source),
         ScenarioDriverError::ProxyExec(source) => classify_ssh_failure("proxy_exec", source),
         ScenarioDriverError::Provisioning(source) => classify_provisioning_failure(source),
         ScenarioDriverError::Pty(source) => classify_terminal_failure(source),

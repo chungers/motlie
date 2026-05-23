@@ -198,6 +198,7 @@ live harness matrix below pass on macOS. Alpine scenario files are:
 scenarios/agent-bootstrap-alpine.json
 scenarios/multiguest-validate-alpine.json
 scenarios/pty-agent-validation-alpine.json
+scenarios/pty-login-alpine.json
 ```
 
 `mbuild build --target ch` now consumes the checked-in `external-oci` source,

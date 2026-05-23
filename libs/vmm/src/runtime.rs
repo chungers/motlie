@@ -271,6 +271,19 @@ impl ControlPlaneHandle {
         }
     }
 
+    pub async fn exec_with_connect_timeout(
+        &self,
+        command: &str,
+        connect_timeout: Duration,
+        command_timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        match self {
+            Self::MotlieSshProxy(handle) => Ok(handle
+                .exec_with_connect_timeout(command, connect_timeout, command_timeout)
+                .await?),
+        }
+    }
+
     pub async fn open_pty(
         &self,
         request: PtyRequest,
