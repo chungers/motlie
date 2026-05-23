@@ -10,7 +10,7 @@
 #   ./launch-ch.sh --guest alice --cloud-init-dir /tmp/alice-cloud-init
 #
 # Shared CH packaging artifacts emitted by the v1.5 common image builder:
-#   artifacts/base/rootfs.squashfs
+#   artifacts/base/rootfs.squashfs (ext4 raw image; legacy filename)
 #   artifacts/base/Image|vmlinux.bin
 #   artifacts/base/guest-contract.json
 #
@@ -327,7 +327,7 @@ if [ ! -e /dev/vhost-vsock ]; then
     }
 fi
 
-CMDLINE="console=ttyS0 root=/dev/vda rootfstype=squashfs ro init=/sbin/overlay-init overlay_root=vdb"
+CMDLINE="console=ttyS0 root=/dev/vda rootfstype=ext4 ro init=/sbin/overlay-init overlay_root=vdb"
 if [ -n "$CLOUD_INIT_DIR" ]; then
     CMDLINE="$CMDLINE ds=nocloud;s=file:///var/lib/cloud/seed/nocloud/"
 fi
@@ -359,8 +359,8 @@ CH_ARGS=(
 )
 
 DISK_ARGS=(
-    "path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on"
-    "path=$RUNTIME_OVERLAY"
+    "path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on,image_type=raw"
+    "path=$RUNTIME_OVERLAY,image_type=raw"
 )
 
 NET_ARGS=()
@@ -377,7 +377,7 @@ rm -f "$API_SOCKET" "$VSOCK_SOCKET"
 
 echo "=== Launching Cloud Hypervisor ($GUEST_NAME) ==="
 echo "  Kernel:    $BASE_ARTIFACTS/$KERNEL_IMAGE"
-echo "  Squashfs:  $BASE_ARTIFACTS/rootfs.squashfs (vda, ro)"
+echo "  Rootfs:    $BASE_ARTIFACTS/rootfs.squashfs (ext4, vda, ro)"
 echo "  Overlay:   $RUNTIME_OVERLAY (vdb, rw runtime)"
 echo "  Size:      $OVERLAY_SIZE"
 if [ -n "$CLOUD_INIT_DIR" ]; then

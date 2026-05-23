@@ -912,7 +912,7 @@ fn run_ch_external_oci_build(
 
     let chroot_support = prepare_guest_chroot_execution(&rootfs_dir, &host, &guest, &log_path)?;
     let guest_binaries = build_guest_binaries(repo_root, &guest, &log_path)?;
-    run_package_stage(&rootfs_dir, config, &options.out)?;
+    run_package_stage(&rootfs_dir, config, &guest, &options.out)?;
 
     let assembly_manifest =
         assemble_immutable_rootfs(&rootfs_dir, config, &source, &guest_binaries)?;
@@ -938,7 +938,7 @@ fn run_ch_external_oci_build(
         &guest_binaries.vfs,
     )?;
     let rootfs_path = base_dir.join(CH_ROOTFS_NAME);
-    emit_squashfs(
+    emit_ch_rootfs_image(
         &rootfs_dir,
         &rootfs_path,
         &options.out.join(CH_EMITTER_LOG_NAME),
@@ -1057,7 +1057,7 @@ fn run_ch_oci_layout_build(
         &guest_binary,
     )?;
     let rootfs_path = base_dir.join(CH_ROOTFS_NAME);
-    emit_squashfs(
+    emit_ch_rootfs_image(
         &rootfs_dir,
         &rootfs_path,
         &options.out.join(CH_EMITTER_LOG_NAME),
@@ -1254,7 +1254,7 @@ impl ChGuestTarget {
                 rust_target: "x86_64-unknown-linux-musl",
                 deb_arch: "amd64",
                 kernel_image: "vmlinux.bin",
-                kernel_asset: "vmlinux",
+                kernel_asset: "bzImage-x86_64",
                 qemu_binfmt_name: "qemu-x86_64",
                 qemu_static_binary: "qemu-x86_64-static",
             }),
@@ -1267,6 +1267,20 @@ impl ChGuestTarget {
                 qemu_binfmt_name: "qemu-aarch64",
                 qemu_static_binary: "qemu-aarch64-static",
             }),
+        }
+    }
+
+    fn apk_arch(&self) -> &'static str {
+        match self.platform.architecture {
+            GuestArchitecture::Amd64 => "x86_64",
+            GuestArchitecture::Arm64 => "aarch64",
+        }
+    }
+
+    fn npm_arch(&self) -> &'static str {
+        match self.platform.architecture {
+            GuestArchitecture::Amd64 => "x64",
+            GuestArchitecture::Arm64 => "arm64",
         }
     }
 }
@@ -1706,7 +1720,12 @@ fn rootless_unshare_command() -> Result<Command> {
     Ok(command)
 }
 
-fn run_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -> Result<()> {
+fn run_package_stage(
+    rootfs_dir: &Path,
+    config: &ImageBuildConfig,
+    guest: &ChGuestTarget,
+    out: &Path,
+) -> Result<()> {
     let script_path = out.join(CH_PACKAGE_STAGE_SCRIPT_NAME);
     let log_path = out.join(CH_PACKAGE_STAGE_LOG_NAME);
     let stage_script = match config.package_stage.manager.as_str() {
@@ -1725,6 +1744,9 @@ fn run_package_stage(rootfs_dir: &Path, config: &ImageBuildConfig, out: &Path) -
         .arg(rootfs_dir)
         .arg(bool_env(config.package_stage.update))
         .arg(bool_env(config.package_stage.clean));
+    command.env("MOTLIE_MBUILD_GUEST_APK_ARCH", guest.apk_arch());
+    command.env("MOTLIE_MBUILD_GUEST_NPM_ARCH", guest.npm_arch());
+    command.env("MOTLIE_MBUILD_GUEST_PLATFORM", guest.platform.to_string());
     for package in &config.package_stage.install {
         command.arg(package);
     }
@@ -1851,7 +1873,92 @@ done
 [[ $# -gt 0 ]] && shift
 npm_binaries=("$@")
 
+apk_arch="${MOTLIE_MBUILD_GUEST_APK_ARCH:-}"
+if [[ -z "$apk_arch" && -f "$rootfs/etc/apk/arch" ]]; then
+    apk_arch="$(cat "$rootfs/etc/apk/arch")"
+fi
+npm_arch="${MOTLIE_MBUILD_GUEST_NPM_ARCH:-}"
+case "$apk_arch" in
+    x86_64) [[ -n "$npm_arch" ]] || npm_arch="x64" ;;
+    aarch64) [[ -n "$npm_arch" ]] || npm_arch="arm64" ;;
+    *) echo "ERROR: unsupported or unknown Alpine guest apk arch: ${apk_arch:-<empty>}" >&2; exit 1 ;;
+esac
+case "$npm_arch" in
+    x64|arm64) ;;
+    *) echo "ERROR: unsupported or unknown guest npm arch: ${npm_arch:-<empty>}" >&2; exit 1 ;;
+esac
+
+find_apk_static() {
+    if [[ -n "${MOTLIE_MBUILD_APK_STATIC:-}" ]]; then
+        if [[ -x "$MOTLIE_MBUILD_APK_STATIC" ]]; then
+            printf '%s\n' "$MOTLIE_MBUILD_APK_STATIC"
+            return 0
+        fi
+        echo "ERROR: MOTLIE_MBUILD_APK_STATIC is not executable: $MOTLIE_MBUILD_APK_STATIC" >&2
+        exit 1
+    fi
+    local candidate
+    for candidate in apk.static /sbin/apk.static /usr/sbin/apk.static /usr/local/sbin/apk.static; do
+        if [[ "$candidate" == */* ]]; then
+            if [[ -x "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        elif command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return 0
+        fi
+    done
+    echo "ERROR: apk.static not found. Install apk-tools-static or set MOTLIE_MBUILD_APK_STATIC." >&2
+    exit 1
+}
+
+restore_apk_recorded_modes() {
+    local db="$rootfs/lib/apk/db/installed"
+    [[ -f "$db" ]] || return 0
+    local line field value dir="" file="" uid="" gid="" mode="" path=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -n "$line" && "$line" == *:* ]] || continue
+        field="${line%%:*}"
+        value="${line#*:}"
+        case "$field" in
+            F)
+                dir="$value"
+                file=""
+                ;;
+            M)
+                IFS=: read -r uid gid mode <<< "$value"
+                path="$rootfs/$dir"
+                if [[ -n "$dir" && -n "$mode" && -e "$path" && ! -L "$path" ]]; then
+                    chmod "$mode" "$path" || true
+                fi
+                ;;
+            R)
+                file="$value"
+                ;;
+            a)
+                IFS=: read -r uid gid mode <<< "$value"
+                path="$rootfs/$dir/$file"
+                if [[ -n "$dir" && -n "$file" && -n "$mode" && -e "$path" && ! -L "$path" ]]; then
+                    chmod "$mode" "$path" || true
+                fi
+                ;;
+        esac
+    done < "$db"
+}
+
+repair_claude_code_binary() {
+    local claude_root="$rootfs/opt/motlie/npm/lib/node_modules/@anthropic-ai/claude-code"
+    local optional_binary="$claude_root/node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/bin/claude"
+    local wrapper="$claude_root/bin/claude.exe"
+    if [[ -x "$optional_binary" && -e "$wrapper" ]]; then
+        ln -sf "../node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/bin/claude" "$wrapper"
+    fi
+}
+
 chroot_env=(env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
+apk_static="$(find_apk_static)"
+apk_root=("$apk_static" --root "$rootfs" --arch "$apk_arch" --keys-dir "$rootfs/etc/apk/keys" --repositories-file "$rootfs/etc/apk/repositories")
 
 mkdir -p "$rootfs/proc" "$rootfs/sys" "$rootfs/dev" "$rootfs/etc" "$rootfs/tmp"
 mount --bind /proc "$rootfs/proc"
@@ -1882,25 +1989,34 @@ for package in "${apk_packages[@]}"; do
 done
 
 if [[ ${#bootstrap_packages[@]} -gt 0 ]]; then
-    chroot "$rootfs" "${chroot_env[@]}" apk --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
+    "${apk_root[@]}" --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
     chroot "$rootfs" "${chroot_env[@]}" update-ca-certificates >/dev/null 2>&1 || true
 fi
 if [[ "$update" == "1" ]]; then
-    chroot "$rootfs" "${chroot_env[@]}" apk update
+    "${apk_root[@]}" update
 fi
 if [[ ${#remaining_packages[@]} -gt 0 ]]; then
-    chroot "$rootfs" "${chroot_env[@]}" apk add --no-cache "${remaining_packages[@]}"
+    "${apk_root[@]}" add --no-cache "${remaining_packages[@]}"
 fi
+restore_apk_recorded_modes
 
 mkdir -p "$rootfs/opt/motlie/npm"
 if [[ ${#npm_packages[@]} -gt 0 ]]; then
-    npm_env=(npm_config_update_notifier=false)
+    npm_env=(
+        npm_config_update_notifier=false
+        npm_config_platform=linux
+        npm_config_arch="$npm_arch"
+        npm_config_libc=musl
+        npm_config_include=optional
+        npm_config_optional=true
+    )
     if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
         cp /etc/ssl/certs/ca-certificates.crt "$rootfs/tmp/mbuild-host-ca-certificates.crt"
         npm_env+=(NODE_EXTRA_CA_CERTS=/tmp/mbuild-host-ca-certificates.crt npm_config_cafile=/tmp/mbuild-host-ca-certificates.crt)
     fi
     chroot "$rootfs" "${chroot_env[@]}" "${npm_env[@]}" npm install -g --prefix /opt/motlie/npm "${npm_packages[@]}"
     rm -f "$rootfs/tmp/mbuild-host-ca-certificates.crt"
+    repair_claude_code_binary
     mkdir -p "$rootfs/usr/local/bin"
     for binary in "${npm_binaries[@]}"; do
         chroot "$rootfs" "${chroot_env[@]}" ln -sf "/opt/motlie/npm/bin/$binary" "/usr/local/bin/$binary"
@@ -2033,19 +2149,31 @@ fn ch_motd(source: &ExternalOciSource, guest: &ChGuestTarget) -> String {
     )
 }
 
-fn emit_squashfs(rootfs_dir: &Path, rootfs_path: &Path, log_path: &Path) -> Result<()> {
+fn emit_ch_rootfs_image(rootfs_dir: &Path, rootfs_path: &Path, log_path: &Path) -> Result<()> {
     if let Some(parent) = rootfs_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let script = "set -euo pipefail\nrm -f \"$2\"\ntar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C \"$1\" -cf - . | tar2sqfs -f \"$2\"\n";
+    let script = r#"set -euo pipefail
+rm -f "$2"
+size_bytes="$(du -sb "$1" | awk '{print $1}')"
+overhead=$((size_bytes / 4))
+min_overhead=$((128 * 1024 * 1024))
+if (( overhead < min_overhead )); then
+    overhead=$min_overhead
+fi
+image_bytes=$((size_bytes + overhead))
+image_mib=$(((image_bytes + 1048575) / 1048576))
+truncate -s "${image_mib}M" "$2"
+fakeroot sh -c 'chown -h -R 0:0 "$1"; mkfs.ext4 -F -d "$1" "$2" -q' mbuild-ext4 "$1" "$2"
+"#;
     let mut command = Command::new("bash");
     command
         .arg("-c")
         .arg(script)
-        .arg("mbuild-squashfs")
+        .arg("mbuild-ch-ext4")
         .arg(rootfs_dir)
         .arg(rootfs_path);
-    run_logged_command(&mut command, log_path, "emit CH squashfs")
+    run_logged_command(&mut command, log_path, "emit CH ext4 rootfs image")
 }
 
 fn emit_rootfs_tarball(
@@ -2104,7 +2232,7 @@ fn write_ch_guest_contract(
     }
     let value = serde_json::json!({
         "contract_version": v1_5::MOTLIE_V15_CONTRACT_VERSION,
-        "packaging_backend": "ch-squashfs",
+        "packaging_backend": "ch-ext4",
         "guest_arch": guest.deb_arch,
         "guest_platform": guest.platform.to_string(),
         "guest_rust_target": guest.rust_target,
@@ -5975,10 +6103,16 @@ validation:
         assert_eq!(amd64.rust_target, "x86_64-unknown-linux-musl");
         assert_eq!(amd64.deb_arch, "amd64");
         assert_eq!(amd64.kernel_image, "vmlinux.bin");
+        assert_eq!(amd64.kernel_asset, "bzImage-x86_64");
+        assert_eq!(amd64.apk_arch(), "x86_64");
+        assert_eq!(amd64.npm_arch(), "x64");
         assert_eq!(arm64.platform, OciPlatform::linux_arm64());
         assert_eq!(arm64.rust_target, "aarch64-unknown-linux-musl");
         assert_eq!(arm64.deb_arch, "arm64");
         assert_eq!(arm64.kernel_image, "Image");
+        assert_eq!(arm64.kernel_asset, "Image-arm64");
+        assert_eq!(arm64.apk_arch(), "aarch64");
+        assert_eq!(arm64.npm_arch(), "arm64");
     }
 
     #[test]
@@ -6009,16 +6143,47 @@ validation:
     }
 
     #[test]
-    fn apk_stage_uses_guest_sbin_path() {
+    fn apk_stage_uses_apk_static_and_restores_recorded_modes() {
         let script = apk_stage_script();
+
+        assert!(script.contains(r#"apk_static="$(find_apk_static)""#));
+        assert!(script.contains(r#"--root "$rootfs" --arch "$apk_arch""#));
+        assert!(script.contains("restore_apk_recorded_modes"));
+        assert!(script.contains(r#"local db="$rootfs/lib/apk/db/installed""#));
+        assert!(script.contains(r#"chmod "$mode" "$path""#));
         assert!(script.contains(
             "chroot_env=(env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)"
         ));
-        assert!(script.contains("chroot \"$rootfs\" \"${chroot_env[@]}\" apk update"));
-        assert!(script.contains("chroot \"$rootfs\" \"${chroot_env[@]}\" rc-update add"));
-        assert!(script.contains("\"root boot\""));
-        assert!(script.contains("\"fsck boot\""));
-        assert!(script.contains("\"networking boot\""));
+        assert!(script.contains(r#"chroot "$rootfs" "${chroot_env[@]}" rc-update add"#));
+        assert!(script.contains(r#""root boot""#));
+        assert!(script.contains(r#""fsck boot""#));
+        assert!(script.contains(r#""networking boot""#));
+    }
+
+    #[test]
+    fn apk_stage_uses_guest_npm_platform_and_repairs_claude() {
+        let script = apk_stage_script();
+
+        assert!(script.contains("npm_config_platform=linux"));
+        assert!(script.contains(r#"npm_config_arch="$npm_arch""#));
+        assert!(script.contains("npm_config_libc=musl"));
+        assert!(script.contains("@anthropic-ai/claude-code-linux-${npm_arch}-musl/bin/claude"));
+        assert!(script.contains(r#"local wrapper="$claude_root/bin/claude.exe""#));
+        assert!(script.contains("repair_claude_code_binary"));
+    }
+
+    #[test]
+    fn ch_launcher_uses_ext4_raw_rootfs_disks() {
+        let launcher =
+            fs::read_to_string(repo_root_fixture().join("libs/vmm/examples/v1.5/launch-ch.sh"))
+                .unwrap();
+
+        assert!(launcher.contains("rootfstype=ext4"));
+        assert!(
+            launcher.contains("path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on,image_type=raw")
+        );
+        assert!(launcher.contains("path=$RUNTIME_OVERLAY,image_type=raw"));
+        assert!(!launcher.contains("rootfstype=squashfs"));
     }
 
     #[test]
