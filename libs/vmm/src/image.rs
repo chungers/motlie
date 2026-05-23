@@ -1614,6 +1614,7 @@ pub struct OciManifestPushResult {
 #[derive(Debug, Clone)]
 pub struct OciRegistryClient {
     client: reqwest::Client,
+    registry_base_url: Option<reqwest::Url>,
 }
 
 impl Default for OciRegistryClient {
@@ -1626,11 +1627,23 @@ impl OciRegistryClient {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            registry_base_url: None,
         }
     }
 
     pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            registry_base_url: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_registry_base_url(client: reqwest::Client, registry_base_url: reqwest::Url) -> Self {
+        Self {
+            client,
+            registry_base_url: Some(registry_base_url),
+        }
     }
 
     #[tracing::instrument(skip(self, auth, path), fields(image_ref = %image_ref, digest = %digest, path = %path.display()))]
@@ -1946,7 +1959,7 @@ impl OciRegistryClient {
         bearer_token: Option<&str>,
         auth: &OciRegistryAuth,
     ) -> Result<reqwest::Response, OciRegistryError> {
-        let request = self.client.head(blob_url(image_ref, digest));
+        let request = self.client.head(self.blob_url(image_ref, digest)?);
         apply_registry_auth(request, bearer_token, auth)
             .send()
             .await
@@ -2002,7 +2015,7 @@ impl OciRegistryClient {
                 value: "<non-utf8>".to_string(),
                 reason: source.to_string(),
             })?;
-        Ok((resolve_registry_location(image_ref, location)?, token))
+        Ok((self.resolve_registry_location(image_ref, location)?, token))
     }
 
     async fn start_blob_upload_once(
@@ -2011,7 +2024,7 @@ impl OciRegistryClient {
         bearer_token: Option<&str>,
         auth: &OciRegistryAuth,
     ) -> Result<reqwest::Response, OciRegistryError> {
-        let request = self.client.post(upload_url(image_ref));
+        let request = self.client.post(self.upload_url(image_ref)?);
         apply_registry_auth(request, bearer_token, auth)
             .send()
             .await
@@ -2089,7 +2102,7 @@ impl OciRegistryClient {
     ) -> Result<reqwest::Response, OciRegistryError> {
         let request = self
             .client
-            .put(manifest_reference_url(image_ref, reference))
+            .put(self.manifest_reference_url(image_ref, reference)?)
             .header(reqwest::header::CONTENT_TYPE, media_type)
             .body(bytes);
         apply_registry_auth(request, bearer_token, auth)
@@ -2129,7 +2142,7 @@ impl OciRegistryClient {
     ) -> Result<reqwest::Response, OciRegistryError> {
         let request = self
             .client
-            .get(manifest_url(image_ref))
+            .get(self.manifest_url(image_ref)?)
             .header(reqwest::header::ACCEPT, OCI_MANIFEST_ACCEPT);
         apply_registry_auth(request, bearer_token, auth)
             .send()
@@ -2177,8 +2190,8 @@ impl OciRegistryClient {
         digest: &OciDigest,
         bearer_token: Option<&str>,
     ) -> Result<reqwest::Response, OciRegistryError> {
-        let url = blob_url(image_ref, digest);
-        let mut request = self.client.get(&url);
+        let url = self.blob_url(image_ref, digest)?;
+        let mut request = self.client.get(url);
         if let Some(token) = bearer_token {
             request = request.bearer_auth(token);
         }
@@ -2326,10 +2339,10 @@ impl OciRegistryClient {
         image_ref: &OciImageReference,
         bearer_token: Option<&str>,
     ) -> Result<reqwest::Response, OciRegistryError> {
-        let url = manifest_url(image_ref);
+        let url = self.manifest_url(image_ref)?;
         let mut request = self
             .client
-            .get(&url)
+            .get(url)
             .header(reqwest::header::ACCEPT, OCI_MANIFEST_ACCEPT);
         if let Some(token) = bearer_token {
             request = request.bearer_auth(token);
@@ -2467,6 +2480,12 @@ pub enum OciRegistryError {
     MissingToken { image_ref: String },
     #[error("registry response for {image_ref} is missing required header {header}")]
     MissingRegistryHeader { image_ref: String, header: String },
+    #[error("registry URL for {image_ref} is invalid: {url}: {reason}")]
+    InvalidRegistryUrl {
+        image_ref: String,
+        url: String,
+        reason: String,
+    },
     #[error("registry response for {image_ref} had invalid header {header}={value:?}: {reason}")]
     InvalidRegistryHeader {
         image_ref: String,
@@ -4913,63 +4932,93 @@ async fn manifest_response_from_reqwest(
     })
 }
 
-fn manifest_url(image_ref: &OciImageReference) -> String {
-    format!(
-        "https://{}/v2/{}/manifests/{}",
-        image_ref.registry_api_host(),
-        image_ref.repository,
-        image_ref.reference.registry_reference()
-    )
-}
-
-fn blob_url(image_ref: &OciImageReference, digest: &OciDigest) -> String {
-    format!(
-        "https://{}/v2/{}/blobs/{}",
-        image_ref.registry_api_host(),
-        image_ref.repository,
-        digest
-    )
-}
-
-fn upload_url(image_ref: &OciImageReference) -> String {
-    format!(
-        "https://{}/v2/{}/blobs/uploads/",
-        image_ref.registry_api_host(),
-        image_ref.repository,
-    )
-}
-
-fn manifest_reference_url(image_ref: &OciImageReference, reference: &str) -> String {
-    format!(
-        "https://{}/v2/{}/manifests/{}",
-        image_ref.registry_api_host(),
-        image_ref.repository,
-        reference,
-    )
-}
-
-fn resolve_registry_location(
-    image_ref: &OciImageReference,
-    location: &str,
-) -> Result<reqwest::Url, OciRegistryError> {
-    if let Ok(url) = reqwest::Url::parse(location) {
-        return Ok(url);
-    }
-    let base = reqwest::Url::parse(&format!("https://{}", image_ref.registry_api_host())).map_err(
-        |source| OciRegistryError::InvalidRegistryHeader {
+impl OciRegistryClient {
+    fn registry_base_url(
+        &self,
+        image_ref: &OciImageReference,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        if let Some(url) = &self.registry_base_url {
+            return Ok(url.clone());
+        }
+        let url = format!("https://{}", image_ref.registry_api_host());
+        reqwest::Url::parse(&url).map_err(|source| OciRegistryError::InvalidRegistryUrl {
             image_ref: image_ref.normalized(),
-            header: reqwest::header::LOCATION.as_str().to_string(),
-            value: location.to_string(),
-            reason: source.to_string(),
-        },
-    )?;
-    base.join(location)
-        .map_err(|source| OciRegistryError::InvalidRegistryHeader {
-            image_ref: image_ref.normalized(),
-            header: reqwest::header::LOCATION.as_str().to_string(),
-            value: location.to_string(),
+            url,
             reason: source.to_string(),
         })
+    }
+
+    fn registry_url(
+        &self,
+        image_ref: &OciImageReference,
+        path: String,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        let mut url = self.registry_base_url(image_ref)?;
+        url.set_path(&path);
+        url.set_query(None);
+        Ok(url)
+    }
+
+    fn manifest_url(
+        &self,
+        image_ref: &OciImageReference,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!(
+                "/v2/{}/manifests/{}",
+                image_ref.repository,
+                image_ref.reference.registry_reference()
+            ),
+        )
+    }
+
+    fn blob_url(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!("/v2/{}/blobs/{}", image_ref.repository, digest),
+        )
+    }
+
+    fn upload_url(&self, image_ref: &OciImageReference) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!("/v2/{}/blobs/uploads/", image_ref.repository),
+        )
+    }
+
+    fn manifest_reference_url(
+        &self,
+        image_ref: &OciImageReference,
+        reference: &str,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!("/v2/{}/manifests/{}", image_ref.repository, reference),
+        )
+    }
+
+    fn resolve_registry_location(
+        &self,
+        image_ref: &OciImageReference,
+        location: &str,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        if let Ok(url) = reqwest::Url::parse(location) {
+            return Ok(url);
+        }
+        let base = self.registry_base_url(image_ref)?;
+        base.join(location)
+            .map_err(|source| OciRegistryError::InvalidRegistryHeader {
+                image_ref: image_ref.normalized(),
+                header: reqwest::header::LOCATION.as_str().to_string(),
+                value: location.to_string(),
+                reason: source.to_string(),
+            })
+    }
 }
 
 fn apply_registry_auth(
@@ -6152,6 +6201,364 @@ mod tests {
             challenge.scope.as_deref(),
             Some("repository:library/ubuntu:pull")
         );
+    }
+
+    #[derive(Debug)]
+    struct MockHttpRequest {
+        method: String,
+        target: String,
+        body: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct MockHttpResponse {
+        status: &'static str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct MockRegistryState {
+        blob_digest: OciDigest,
+        blob_bytes: Vec<u8>,
+        child_reference: String,
+        child_manifest: Vec<u8>,
+        child_digest: OciDigest,
+        index_reference: String,
+        index_manifest: Vec<u8>,
+        index_digest: OciDigest,
+        events: Vec<String>,
+        failures: Vec<String>,
+    }
+
+    #[tokio::test]
+    async fn registry_push_uploads_blob_and_manifests_in_order() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let blob_bytes = b"mock layer bytes".to_vec();
+        let blob_digest = digest_from_bytes(&blob_bytes).unwrap();
+        let blob_path = tempdir.path().join("layer.tar");
+        fs::write(&blob_path, &blob_bytes).unwrap();
+        let child_manifest = br#"{"schemaVersion":2,"kind":"child"}"#.to_vec();
+        let child_digest = digest_from_bytes(&child_manifest).unwrap();
+        let index_manifest = br#"{"schemaVersion":2,"kind":"index"}"#.to_vec();
+        let index_digest = digest_from_bytes(&index_manifest).unwrap();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(MockRegistryState {
+            blob_digest: blob_digest.clone(),
+            blob_bytes: blob_bytes.clone(),
+            child_reference: child_digest.to_string(),
+            child_manifest: child_manifest.clone(),
+            child_digest: child_digest.clone(),
+            index_reference: "v1".to_string(),
+            index_manifest: index_manifest.clone(),
+            index_digest: index_digest.clone(),
+            events: Vec::new(),
+            failures: Vec::new(),
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let registry_url = format!("http://{}", listener.local_addr().unwrap());
+        let registry_base_url = reqwest::Url::parse(&registry_url).unwrap();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let server_state = std::sync::Arc::clone(&state);
+        let server = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let state = std::sync::Arc::clone(&server_state);
+                        tokio::spawn(async move {
+                            handle_mock_registry_connection(stream, state).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        let client =
+            OciRegistryClient::with_registry_base_url(reqwest::Client::new(), registry_base_url);
+        let image_ref = OciImageReference::from_str("registry.example.com/acme/motlie:v1").unwrap();
+        let auth = OciRegistryAuth::Anonymous;
+
+        let blob_status = client
+            .push_blob_from_path(
+                &image_ref,
+                &blob_digest,
+                blob_bytes.len() as u64,
+                &blob_path,
+                &auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(blob_status, OciBlobPushStatus::Uploaded);
+        let child_result = client
+            .push_manifest_bytes(
+                &image_ref,
+                child_digest.as_ref(),
+                OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+                child_manifest,
+                &auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(child_result.computed_digest, child_digest);
+        let index_result = client
+            .push_manifest_bytes(
+                &image_ref,
+                "v1",
+                "application/vnd.oci.image.index.v1+json",
+                index_manifest,
+                &auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(index_result.computed_digest, index_digest);
+        let remote_digest = client
+            .fetch_manifest_digest_with_auth(&image_ref, &auth)
+            .await
+            .unwrap();
+        assert_eq!(remote_digest, index_digest);
+
+        let _ = shutdown_tx.send(());
+        server.await.unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.failures, Vec::<String>::new());
+        assert_eq!(
+            state.events,
+            vec![
+                "HEAD blob",
+                "POST upload",
+                "PUT blob",
+                "PUT child manifest",
+                "PUT index manifest",
+                "GET index manifest",
+            ]
+        );
+    }
+
+    async fn handle_mock_registry_connection(
+        mut stream: tokio::net::TcpStream,
+        state: std::sync::Arc<std::sync::Mutex<MockRegistryState>>,
+    ) {
+        let request = match read_mock_http_request(&mut stream).await {
+            Ok(request) => request,
+            Err(error) => {
+                let response = MockHttpResponse {
+                    status: "400 Bad Request",
+                    headers: Vec::new(),
+                    body: error.to_string().into_bytes(),
+                };
+                let _ = write_mock_http_response(&mut stream, response).await;
+                return;
+            }
+        };
+        let response = {
+            let mut state = state.lock().unwrap();
+            mock_registry_response(&mut state, request)
+        };
+        let _ = write_mock_http_response(&mut stream, response).await;
+    }
+
+    async fn read_mock_http_request(
+        stream: &mut tokio::net::TcpStream,
+    ) -> std::io::Result<MockHttpRequest> {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut scratch).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed before HTTP headers",
+                ));
+            }
+            bytes.extend_from_slice(&scratch[..read]);
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position;
+            }
+        };
+        let header_bytes = &bytes[..header_end];
+        let headers = String::from_utf8_lossy(header_bytes);
+        let mut lines = headers.split("\r\n");
+        let request_line = lines.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTTP request line")
+        })?;
+        let mut parts = request_line.split_whitespace();
+        let method = parts
+            .next()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing method"))?
+            .to_string();
+        let target = parts
+            .next()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing target"))?
+            .to_string();
+        let content_length = lines
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or_default();
+        let body_start = header_end + 4;
+        while bytes.len() < body_start + content_length {
+            let read = stream.read(&mut scratch).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed before HTTP body",
+                ));
+            }
+            bytes.extend_from_slice(&scratch[..read]);
+        }
+        Ok(MockHttpRequest {
+            method,
+            target,
+            body: bytes[body_start..body_start + content_length].to_vec(),
+        })
+    }
+
+    async fn write_mock_http_response(
+        stream: &mut tokio::net::TcpStream,
+        response: MockHttpResponse,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut head = format!(
+            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            response.status,
+            response.body.len()
+        );
+        for (name, value) in response.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).await?;
+        stream.write_all(&response.body).await?;
+        stream.shutdown().await
+    }
+
+    fn mock_registry_response(
+        state: &mut MockRegistryState,
+        request: MockHttpRequest,
+    ) -> MockHttpResponse {
+        let (path, query) = request
+            .target
+            .split_once('?')
+            .map_or((request.target.as_str(), ""), |(path, query)| (path, query));
+        let repo = "/v2/acme/motlie";
+        let blob_path = format!("{repo}/blobs/{}", state.blob_digest);
+        let blob_path_encoded = format!(
+            "{repo}/blobs/{}",
+            state.blob_digest.to_string().replace(':', "%3A")
+        );
+        let child_path = format!("{repo}/manifests/{}", state.child_reference);
+        let child_path_encoded = format!(
+            "{repo}/manifests/{}",
+            state.child_reference.replace(':', "%3A")
+        );
+        let index_path = format!("{repo}/manifests/{}", state.index_reference);
+
+        match (request.method.as_str(), path) {
+            ("HEAD", candidate) if candidate == blob_path || candidate == blob_path_encoded => {
+                state.events.push("HEAD blob".to_string());
+                response("404 Not Found", Vec::new(), Vec::new())
+            }
+            ("POST", "/v2/acme/motlie/blobs/uploads/") => {
+                state.events.push("POST upload".to_string());
+                response(
+                    "202 Accepted",
+                    vec![(
+                        reqwest::header::LOCATION.as_str().to_string(),
+                        "/v2/acme/motlie/blobs/uploads/mock-upload".to_string(),
+                    )],
+                    Vec::new(),
+                )
+            }
+            ("PUT", "/v2/acme/motlie/blobs/uploads/mock-upload") => {
+                state.events.push("PUT blob".to_string());
+                let expected_query = format!("digest={}", state.blob_digest);
+                let expected_query_encoded = format!(
+                    "digest={}",
+                    state.blob_digest.to_string().replace(':', "%3A")
+                );
+                if query != expected_query && query != expected_query_encoded {
+                    state.failures.push(format!(
+                        "blob upload query {query:?} did not match {expected_query:?}"
+                    ));
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                if request.body != state.blob_bytes {
+                    state.failures.push("blob upload body mismatch".to_string());
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                response(
+                    "201 Created",
+                    vec![docker_content_digest(&state.blob_digest)],
+                    Vec::new(),
+                )
+            }
+            ("PUT", candidate) if candidate == child_path || candidate == child_path_encoded => {
+                state.events.push("PUT child manifest".to_string());
+                if request.body != state.child_manifest {
+                    state
+                        .failures
+                        .push("child manifest body mismatch".to_string());
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                response(
+                    "201 Created",
+                    vec![docker_content_digest(&state.child_digest)],
+                    Vec::new(),
+                )
+            }
+            ("PUT", candidate) if candidate == index_path => {
+                state.events.push("PUT index manifest".to_string());
+                if request.body != state.index_manifest {
+                    state
+                        .failures
+                        .push("index manifest body mismatch".to_string());
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                response(
+                    "201 Created",
+                    vec![docker_content_digest(&state.index_digest)],
+                    Vec::new(),
+                )
+            }
+            ("GET", candidate) if candidate == index_path => {
+                state.events.push("GET index manifest".to_string());
+                response(
+                    "200 OK",
+                    vec![docker_content_digest(&state.index_digest)],
+                    state.index_manifest.clone(),
+                )
+            }
+            _ => {
+                state.failures.push(format!(
+                    "unexpected registry request: {} {}",
+                    request.method, request.target
+                ));
+                response("404 Not Found", Vec::new(), Vec::new())
+            }
+        }
+    }
+
+    fn docker_content_digest(digest: &OciDigest) -> (String, String) {
+        ("Docker-Content-Digest".to_string(), digest.to_string())
+    }
+
+    fn response(
+        status: &'static str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> MockHttpResponse {
+        MockHttpResponse {
+            status,
+            headers,
+            body,
+        }
     }
 
     #[test]
