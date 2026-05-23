@@ -21,6 +21,7 @@ members = [
     "bins/voice-agent",
     "bins/tmux/driver",
     "bins/mmux",
+    "bins/mstream",
 ]
 resolver = "2"
 

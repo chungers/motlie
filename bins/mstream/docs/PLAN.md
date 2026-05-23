@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-23 | @codex | Implemented first `motlie-mstream` CLI/daemon slice with JSONL socket protocol, in-memory workstreams, target parsing, tmux tag writes, communication, handoff, recruiting, and bounded observation; documented current API. |
 | 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: destination busy state, already-met handoff semantics, and generation-aware cursor validation. |
 | 2026-05-22 | @codex | Aligned timeline implementation tasks with PR #326's concrete OutputBus timeline APIs and latest-cursor/backfill/cleanup contracts. |
 | 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff implementation phase, explicit completion state ownership, timeline dependency gates, and status/process-state follow-ups. |
@@ -56,16 +57,16 @@ Design references:
 
 Tasks:
 
-- [ ] 1.1 Add `bins/mstream/Cargo.toml` with package name
+- [x] 1.1 Add `bins/mstream/Cargo.toml` with package name
   `motlie-mstream` and binary name `mstream`.
-- [ ] 1.2 Add `bins/mstream/main.rs` with a `clap` command tree and no
+- [x] 1.2 Add `bins/mstream/main.rs` with a `clap` command tree and no
   side-effecting command behavior yet.
-- [ ] 1.3 Register `bins/mstream` in the workspace root `Cargo.toml`.
-- [ ] 1.4 Add internal modules for `cli`, `protocol`, `daemon`, `jsonl`,
+- [x] 1.3 Register `bins/mstream` in the workspace root `Cargo.toml`.
+- [x] 1.4 Add internal modules for `cli`, `protocol`, `daemon`, `jsonl`,
   `target`, `tags`, `workstream`, `hosts`, and `timeline`.
-- [ ] 1.5 Define a consistent JSONL envelope for success, error, status, and
+- [x] 1.5 Define a consistent JSONL envelope for success, error, status, and
   event records.
-- [ ] 1.6 Make all diagnostics go to stderr and all machine-facing command
+- [x] 1.6 Make all diagnostics go to stderr and all machine-facing command
   output go to stdout as JSONL.
 
 Validation:
@@ -86,19 +87,19 @@ Design references:
 
 Tasks:
 
-- [ ] 2.1 Implement `mstream daemon start --socket <path>` so it daemonizes by
+- [x] 2.1 Implement `mstream daemon start --socket <path>` so it daemonizes by
   default after the socket is ready; provide `--foreground` for development and
   tests.
-- [ ] 2.2 Implement `mstream daemon status` and `mstream daemon stop`.
-- [ ] 2.3 Implement a local Unix-domain socket protocol using one JSON request
+- [x] 2.2 Implement `mstream daemon status` and `mstream daemon stop`.
+- [x] 2.3 Implement a local Unix-domain socket protocol using one JSON request
   per line and one or more JSONL response records per request.
-- [ ] 2.4 Add client connection handling for `--socket`, `MSTREAM_SOCKET`, and
+- [x] 2.4 Add client connection handling for `--socket`, `MSTREAM_SOCKET`, and
   the documented default socket path.
-- [ ] 2.5 Return a structured JSONL error when the daemon is unreachable,
+- [x] 2.5 Return a structured JSONL error when the daemon is unreachable,
   including the socket path attempted.
-- [ ] 2.6 Keep daemon state entirely in memory: no state directory, no database,
+- [x] 2.6 Keep daemon state entirely in memory: no state directory, no database,
   no host config file, no workstream ledger file.
-- [ ] 2.7 Add shutdown cleanup for the socket path the daemon owns.
+- [x] 2.7 Add shutdown cleanup for the socket path the daemon owns.
 
 Validation:
 
@@ -119,15 +120,15 @@ Design references:
 
 Tasks:
 
-- [ ] 3.1 Implement strict parsing for `<host-alias>::<tmux-session-name>`.
-- [ ] 3.2 Reject empty host aliases, empty session names, and malformed target
+- [x] 3.1 Implement strict parsing for `<host-alias>::<tmux-session-name>`.
+- [x] 3.2 Reject empty host aliases, empty session names, and malformed target
   strings with actionable JSONL errors.
-- [ ] 3.3 Define opaque cursor types for workstream event streams. The encoding
+- [x] 3.3 Define opaque cursor types for workstream event streams. The encoding
   is owned by `mstream`; it must embed the workstream timeline generation or
   epoch with the internal timeline cursor, must return structured
   `cursor_stale` errors on generation mismatch, and must not expose
   `std::time::Instant` or depend on `libs/tmux` timeline serde support.
-- [ ] 3.4 Add snapshot-safe text fields that preserve content without control
+- [x] 3.4 Add snapshot-safe text fields that preserve content without control
   characters leaking into JSONL.
 - [ ] 3.5 Add golden tests for JSONL output shape for representative success
   and failure cases.
@@ -149,15 +150,15 @@ Design references:
 
 Tasks:
 
-- [ ] 4.1 Implement `mstream connect <alias> <ssh-uri>` using `motlie-tmux`
+- [x] 4.1 Implement `mstream connect <alias> <ssh-uri>` using `motlie-tmux`
   host connection APIs.
-- [ ] 4.2 Store host alias, URI, connection handle, optional labels, and
+- [x] 4.2 Store host alias, URI, connection handle, optional labels, and
   optional capacity only in daemon memory.
-- [ ] 4.3 Implement `mstream hosts`, `mstream scan <alias>`, and
+- [x] 4.3 Implement `mstream hosts`, `mstream scan <alias>`, and
   `mstream disconnect <alias>`.
-- [ ] 4.4 Implement host scan: list tmux sessions and build an in-memory
+- [x] 4.4 Implement host scan: list tmux sessions and build an in-memory
   session ledger keyed by host alias and stable tmux session id.
-- [ ] 4.5 Expose scan results as JSONL without persisting them.
+- [x] 4.5 Expose scan results as JSONL without persisting them.
 - [ ] 4.6 Verify restart semantics manually: after daemon stop/start, `hosts`
   should be empty until `connect` is run again.
 
@@ -179,16 +180,16 @@ Design references:
 
 Tasks:
 
-- [ ] 5.1 Implement typed `MstreamTags` serialization/deserialization for
+- [x] 5.1 Implement typed `MstreamTags` serialization/deserialization for
   `@mstream/*` session tags.
-- [ ] 5.2 Use `HostHandle::list_tags_for_session_infos("mstream", sessions)`
+- [x] 5.2 Use `HostHandle::list_tags_for_session_infos("mstream", sessions)`
   for batch hydration.
-- [ ] 5.3 Implement tag writes for `open`, `join`, `new`, `close`, state
+- [x] 5.3 Implement tag writes for `open`, `join`, `new`, `close`, state
   changes, role/agent metadata, small `last-report-*` fields, and reusable
   agent context metadata.
-- [ ] 5.4 Implement tag unsets for `leave` and close-time clearing of active
+- [x] 5.4 Implement tag unsets for `leave` and close-time clearing of active
   workstream membership.
-- [ ] 5.5 Preserve unknown `@mstream/*` tags unless a command explicitly owns
+- [x] 5.5 Preserve unknown `@mstream/*` tags unless a command explicitly owns
   that key.
 - [ ] 5.6 Add tests for malformed tag values, missing version, unknown version,
   and partial metadata.
@@ -215,23 +216,23 @@ Design references:
 
 Tasks:
 
-- [ ] 6.1 Implement `mstream open <workstream> --title <title>
+- [x] 6.1 Implement `mstream open <workstream> --title <title>
   [--goal <goal>] [--domain <domain>]` as an in-memory workstream until
   sessions are joined.
-- [ ] 6.2 Implement `mstream list`, `mstream show <workstream>`, and
+- [x] 6.2 Implement `mstream list`, `mstream show <workstream>`, and
   `mstream close <workstream>`.
-- [ ] 6.3 Implement `mstream join <workstream> <target> --role <role>
+- [x] 6.3 Implement `mstream join <workstream> <target> --role <role>
   [--task <text>]`.
-- [ ] 6.4 Make `join` write session tags before sending a task prompt.
-- [ ] 6.5 Include the managed-agent reporting contract in `join` task prompts:
+- [x] 6.4 Make `join` write session tags before sending a task prompt.
+- [x] 6.5 Include the managed-agent reporting contract in `join` task prompts:
   `mstream session mark self --state done|blocked|needs-input --summary ...`.
-- [ ] 6.6 Implement `mstream leave <workstream> <target>` by removing
+- [x] 6.6 Implement `mstream leave <workstream> <target>` by removing
   workstream membership tags while preserving non-workstream metadata.
-- [ ] 6.7 Implement `mstream kill <target>` as a separate explicit destructive
+- [x] 6.7 Implement `mstream kill <target>` as a separate explicit destructive
   command.
-- [ ] 6.8 Ensure each state-changing command returns a JSONL cursor or enough
+- [x] 6.8 Ensure each state-changing command returns a JSONL cursor or enough
   metadata for the orchestrating agent to poll next.
-- [ ] 6.9 Make `mstream close <workstream>` mark participating agents available,
+- [x] 6.9 Make `mstream close <workstream>` mark participating agents available,
   clear active workstream membership, and merge optional `--summary`,
   `--domain`, and repeated `--specialty` values into reusable context tags.
 
@@ -253,16 +254,16 @@ Design references:
 
 Tasks:
 
-- [ ] 7.1 Implement `mstream new <workstream> <target> --role <role>
+- [x] 7.1 Implement `mstream new <workstream> <target> --role <role>
   --cwd <abs-path> --agent <binary> [--task <text>]`.
-- [ ] 7.2 Reject relative `--cwd` values.
-- [ ] 7.3 Build a narrow shell bootstrap for `mkdir -p`, `cd`, and
+- [x] 7.2 Reject relative `--cwd` values.
+- [x] 7.3 Build a narrow shell bootstrap for `mkdir -p`, `cd`, and
   `exec <agent>` with validated and escaped arguments.
-- [ ] 7.4 Start the tmux session with the target session name as the agent's
+- [x] 7.4 Start the tmux session with the target session name as the agent's
   operational identity.
-- [ ] 7.5 Set initial environment variables such as `MSTREAM_SOCKET`,
+- [x] 7.5 Set initial environment variables such as `MSTREAM_SOCKET`,
   `MSTREAM_WORKSTREAM`, `MSTREAM_TARGET`, and `MSTREAM_ROLE` when useful.
-- [ ] 7.6 Send an initial prompt that explicitly states the agent identity,
+- [x] 7.6 Send an initial prompt that explicitly states the agent identity,
   role, workstream, cwd, task, and completion/report command contract.
 - [ ] 7.7 Add a design follow-up if `CreateSessionOptions::start_directory`
   should be added to `libs/tmux` instead of using the bootstrap command.
@@ -284,31 +285,35 @@ Design references:
 
 Tasks:
 
-- [ ] 8.1 Implement `mstream send <workstream> <target> --text <text>
+- [x] 8.1 Implement `mstream send <workstream> <target> --text <text>
   (--enter|--no-enter)` using typed `motlie-tmux` send APIs.
-- [ ] 8.2 Implement multi-line send behavior with explicit
+- [x] 8.2 Implement multi-line send behavior with explicit
   `--paste-mode bracketed|literal`, and report the effective paste mode in
   JSONL.
-- [ ] 8.3 Implement `send --require-state <state>` and `send --set-state busy`
+- [x] 8.3 Implement `send --require-state <state>` and `send --set-state busy`
   so new assignments can update state atomically without guessing from output.
-- [ ] 8.4 Implement `mstream interrupt <target> [--key esc|ctrl-c]` as a
+- [x] 8.4 Implement `mstream interrupt <target> [--key esc|ctrl-c]` as a
   non-destructive command distinct from `kill`.
-- [ ] 8.5 Implement `mstream send --interrupt-first [--settle-ms N]` as one
+- [x] 8.5 Implement `mstream send --interrupt-first [--settle-ms N]` as one
   daemon-side sequence: interrupt, wait, text, optional Enter, JSONL result.
-- [ ] 8.6 Implement `mstream broadcast <workstream> --text <text>` with
+- [x] 8.6 Implement `mstream broadcast <workstream> --text <text>` with
   optional `--role` and `--state` filters and one result record per target.
-- [ ] 8.7 Implement `mstream session mark <target|self> --state
+- [x] 8.7 Implement `mstream session mark <target|self> --state
   done|blocked|needs-input|available|reserved|busy|idle --summary <text>`.
-- [ ] 8.8 Make `self` resolve from `MSTREAM_TARGET`; update `@mstream/state`,
+- [x] 8.8 Make `self` resolve from `MSTREAM_TARGET`; update `@mstream/state`,
   `@mstream/last-report-kind`, `@mstream/last-report-summary`, and
   `@mstream/updated-at` on successful marks.
 - [ ] 8.9 Emit structured events for `message_sent`, `interrupted`,
   `broadcast_sent`, `completed`, `blocked`, and `needs_input`.
-- [ ] 8.10 Implement `mstream handoff arm/list/cancel` as daemon-memory state
+  - 2026-05-23 @codex: first implementation emits workstream events for
+    messages, broadcasts, marks, recruiting, and handoffs. `interrupt` returns
+    a JSONL command result but does not yet append a workstream event because
+    the command has no workstream argument.
+- [x] 8.10 Implement `mstream handoff arm/list/cancel` as daemon-memory state
   that fires when a source target reaches a requested terminal state.
-- [ ] 8.11 Make `handoff arm` fire immediately when the source is already in the
+- [x] 8.11 Make `handoff arm` fire immediately when the source is already in the
   requested state; support `--only-on-transition` for edge-triggered handoffs.
-- [ ] 8.12 Ensure handoff firing marks the destination `busy`, updates
+- [x] 8.12 Ensure handoff firing marks the destination `busy`, updates
   `@mstream/updated-at`, sends the configured task to the destination, emits
   `handoff_fired`, and does not claim durability across daemon restart.
 - [ ] 8.13 Add tests that silence, prompt heuristics, and missing output do not
@@ -336,22 +341,25 @@ Tasks:
 
 - [ ] 9.1 Use `motlie-tmux` Fleet/OutputBus to start monitoring joined
   sessions.
-- [ ] 9.2 Maintain per-workstream in-memory ring buffers with opaque cursors.
-- [ ] 9.3 Implement `mstream status <workstream>`.
-- [ ] 9.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
-- [ ] 9.5 Implement `mstream snapshot <workstream> --after <cursor>
+  - 2026-05-23 @codex: first implementation starts monitoring with
+    `HostHandle::start_monitoring_session` and keeps command events locally.
+    Fleet/OutputBus timeline ingestion remains a follow-up.
+- [x] 9.2 Maintain per-workstream in-memory ring buffers with opaque cursors.
+- [x] 9.3 Implement `mstream status <workstream>`.
+- [x] 9.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
+- [x] 9.5 Implement `mstream snapshot <workstream> --after <cursor>
   --max-chars N`.
-- [ ] 9.6 Implement `mstream summary-input <workstream> --since <duration>
+- [x] 9.6 Implement `mstream summary-input <workstream> --since <duration>
   --max-chars N` with server-side filtering/compaction.
-- [ ] 9.7 Mark ordering as arrival-order in JSONL metadata until issue #322's
+- [x] 9.7 Mark ordering as arrival-order in JSONL metadata until issue #322's
   OutputBus timeline API is available on the target branch with create-or-get,
   mutable filters, scoped markers, history ingest, stale-handle cleanup, and
   bounded `latest` cursor safety.
 - [ ] 9.8 Make `status` include explicit session state, last report summary,
   last output age, monitor health, and process/prompt-based stuck hints when
   available.
-- [ ] 9.9 Keep stuck hints separate from explicit completion states in JSONL.
-- [ ] 9.10 Remove or detach a workstream timeline on `close` and when `leave`
+- [x] 9.9 Keep stuck hints separate from explicit completion states in JSONL.
+- [x] 9.10 Remove or detach a workstream timeline on `close` and when `leave`
   removes the last session from an otherwise empty/closed workstream.
 - [ ] 9.11 After issue #322 lands with the required APIs, replace the local
   ring-buffer/timeline layer with the `libs/tmux` OutputBus-backed timeline API
@@ -381,21 +389,23 @@ Design references:
 
 Tasks:
 
-- [ ] 10.1 Implement `mstream session list`. `session mark` is implemented in
+- [x] 10.1 Implement `mstream session list`. `session mark` is implemented in
   Phase 8 because it is part of the completion/report channel.
-- [ ] 10.2 Implement `mstream recruit <workstream> --role <role>
+- [x] 10.2 Implement `mstream recruit <workstream> --role <role>
   --agent <agent> --count N [--goal <goal>] [--selector key=value]
   [--task <text>]`.
-- [ ] 10.3 Prefer explicitly tagged available sessions.
-- [ ] 10.4 Refuse to recruit untagged sessions unless the target is explicitly
+- [x] 10.3 Prefer explicitly tagged available sessions.
+- [x] 10.4 Refuse to recruit untagged sessions unless the target is explicitly
   named by the human.
 - [ ] 10.5 Score available sessions against `--goal` using structured/lexical
   matching over `context-domains`, `context-specialties`, `context-summary`,
   and `last-workstream` tags; include candidate metadata in JSONL so the
   orchestrating agent can make a semantic selection.
+  - 2026-05-23 @codex: first implementation accepts `--goal` and records it in
+    recruit events, but semantic/lexical candidate scoring is not implemented.
 - [ ] 10.6 Add optional creation only when placement, cwd/work-root, and capacity
   information are explicitly available in the daemon's current memory.
-- [ ] 10.7 Return actionable JSONL errors when recruiting cannot proceed because
+- [x] 10.7 Return actionable JSONL errors when recruiting cannot proceed because
   host metadata is unknown after restart.
 
 Validation:
@@ -416,9 +426,9 @@ Design references:
 
 Tasks:
 
-- [ ] 11.1 Add `bins/mstream/docs/API.md` or `CLI.md` after the implemented
+- [x] 11.1 Add `bins/mstream/docs/API.md` or `CLI.md` after the implemented
   command behavior exists.
-- [ ] 11.2 Document daemon restart recovery with exact orchestrating-agent
+- [x] 11.2 Document daemon restart recovery with exact orchestrating-agent
   behavior: ask the human to restart/provide socket, then ask for host aliases
   and SSH URIs, reconnect, rescan.
 - [ ] 11.3 Update the project skill only after the implemented CLI has been
