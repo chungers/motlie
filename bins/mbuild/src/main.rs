@@ -13,8 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
-    v1_5, ExternalOciSource, GuestArchitecture, GuestImageProfile, OciContentCache, OciDigest,
-    OciImageReference, OciPlatform, OciRegistryClient, OciRootfsImporter, RootfsCloudInitSeed,
+    v1_5, ExternalOciSource, GuestArchitecture, GuestImageProfile, OciBlobPushStatus,
+    OciContentCache, OciDigest, OciImageReference, OciImageReferenceKind, OciPlatform,
+    OciRegistryAuth, OciRegistryClient, OciRegistryError, OciRootfsImporter, RootfsCloudInitSeed,
     RootfsCompatibilityAssembler, RootfsCompatibilityBackendEnv, RootfsCompatibilityLayerSpec,
     RootfsMountSpec, RootfsPayloadFile, RootfsPendingRequirementPolicy, RootfsProfileSpec,
     RootfsSeedOverlayAssembler, RootfsSeedOverlayManifest, RootfsSeedOverlaySpec, RootfsUserSeed,
@@ -32,6 +33,7 @@ const DEFAULT_VALIDATION_MANIFEST_NAME: &str = "mbuild-validation-manifest.json"
 const DEFAULT_OCI_EXPORT_MANIFEST_NAME: &str = "mbuild-oci-export.json";
 const DEFAULT_OCI_INDEX_MANIFEST_NAME: &str = "mbuild-oci-index.json";
 const DEFAULT_RELEASE_EVIDENCE_NAME: &str = "mbuild-release-evidence.json";
+const DEFAULT_OCI_PUSH_MANIFEST_NAME: &str = "mbuild-oci-push.json";
 const ADAPTER_LOG_NAME: &str = "mbuild-adapter.log";
 const CH_EMITTER_LOG_NAME: &str = "mbuild-ch-emitter.log";
 const CH_PACKAGE_STAGE_LOG_NAME: &str = "mbuild-package-stage.log";
@@ -150,6 +152,25 @@ fn run() -> Result<()> {
                 out,
                 image,
                 layouts: layout,
+            }),
+            OciCommands::Push {
+                layout,
+                image,
+                dry_run,
+                allow_overwrite,
+                username,
+                password_env,
+                token_env,
+                out,
+            } => oci_push(OciPushOptions {
+                layout,
+                image,
+                dry_run,
+                allow_overwrite,
+                username,
+                password_env,
+                token_env,
+                out,
             }),
             OciCommands::Evidence {
                 config,
@@ -356,6 +377,18 @@ struct OciIndexOptions {
 }
 
 #[derive(Debug)]
+struct OciPushOptions {
+    layout: PathBuf,
+    image: String,
+    dry_run: bool,
+    allow_overwrite: bool,
+    username: Option<String>,
+    password_env: Option<String>,
+    token_env: Option<String>,
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug)]
 struct OciReleaseEvidenceOptions {
     config_path: PathBuf,
     artifact: PathBuf,
@@ -520,6 +553,157 @@ fn oci_index(options: OciIndexOptions) -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip(options), fields(layout = %options.layout.display(), image = %options.image, dry_run = options.dry_run))]
+fn oci_push(options: OciPushOptions) -> Result<()> {
+    let image_ref = OciImageReference::from_str(&options.image)?;
+    let publish_reference = match &image_ref.reference {
+        OciImageReferenceKind::Tag(tag) => tag.clone(),
+        OciImageReferenceKind::Digest(_) => {
+            bail!("mbuild oci push requires a tag destination, not a digest reference")
+        }
+    };
+    let plan = build_oci_push_plan(&options.layout, image_ref.clone())?;
+    let out = options
+        .out
+        .clone()
+        .unwrap_or_else(|| options.layout.join(DEFAULT_OCI_PUSH_MANIFEST_NAME));
+    info!(
+        layout = %options.layout.display(),
+        image = %image_ref,
+        blobs = plan.blobs.len(),
+        manifests = plan.manifests.len(),
+        dry_run = options.dry_run,
+        "prepared native OCI registry push plan"
+    );
+
+    if options.dry_run {
+        let evidence = OciPushEvidence::dry_run(&plan, &out)?;
+        write_oci_push_evidence(&out, &evidence)?;
+        return Ok(());
+    }
+
+    let auth = resolve_registry_auth(
+        &image_ref,
+        options.username.as_deref(),
+        options.password_env.as_deref(),
+        options.token_env.as_deref(),
+    )?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create OCI registry push runtime")?;
+    let evidence = runtime.block_on(async {
+        let client = OciRegistryClient::new();
+        if !options.allow_overwrite {
+            match client
+                .fetch_manifest_digest_with_auth(&image_ref, &auth)
+                .await
+            {
+                Ok(existing) => bail!(
+                    "destination tag {} already exists with digest {}; rerun with --allow-overwrite to replace it",
+                    image_ref,
+                    existing
+                ),
+                Err(OciRegistryError::RegistryStatus { status: 404, .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        let mut blob_records = Vec::with_capacity(plan.blobs.len());
+        for descriptor in &plan.blobs {
+            let digest = OciDigest::new(descriptor.digest.clone())?;
+            let path = descriptor_path(&plan.layout, descriptor)?;
+            let status = client
+                .push_blob_from_path(
+                    &image_ref,
+                    &digest,
+                    descriptor.size_bytes,
+                    &path,
+                    &auth,
+                )
+                .await?;
+            blob_records.push(OciPushedBlobRecord {
+                descriptor: descriptor.clone(),
+                status,
+            });
+        }
+
+        let mut manifest_records = Vec::with_capacity(plan.manifests.len() + 1);
+        for descriptor in &plan.manifests {
+            let path = descriptor_path(&plan.layout, descriptor)?;
+            let bytes = tokio::fs::read(&path).await.with_context(|| {
+                format!("read OCI manifest blob for push {}", path.display())
+            })?;
+            let result = client
+                .push_manifest_bytes(
+                    &image_ref,
+                    &descriptor.digest,
+                    &descriptor.media_type,
+                    bytes,
+                    &auth,
+                )
+                .await?;
+            if result.computed_digest.as_ref() != descriptor.digest {
+                bail!(
+                    "pushed manifest digest mismatch for {}: computed {}, descriptor {}",
+                    path.display(),
+                    result.computed_digest,
+                    descriptor.digest
+                );
+            }
+            manifest_records.push(OciPushedManifestRecord {
+                descriptor: descriptor.clone(),
+                reference: descriptor.digest.clone(),
+                registry_digest: result.registry_digest.map(|digest| digest.to_string()),
+            });
+        }
+
+        let index_path = descriptor_path(&plan.layout, &plan.image_index)?;
+        let index_bytes = tokio::fs::read(&index_path).await.with_context(|| {
+            format!("read OCI index blob for push {}", index_path.display())
+        })?;
+        let index_result = client
+            .push_manifest_bytes(
+                &image_ref,
+                &publish_reference,
+                &plan.image_index.media_type,
+                index_bytes,
+                &auth,
+            )
+            .await?;
+        if index_result.computed_digest.as_ref() != plan.image_index.digest {
+            bail!(
+                "pushed index digest mismatch for {}: computed {}, descriptor {}",
+                index_path.display(),
+                index_result.computed_digest,
+                plan.image_index.digest
+            );
+        }
+        manifest_records.push(OciPushedManifestRecord {
+            descriptor: plan.image_index.clone(),
+            reference: publish_reference.clone(),
+            registry_digest: index_result.registry_digest.map(|digest| digest.to_string()),
+        });
+
+        let remote_digest = client
+            .fetch_manifest_digest_with_auth(&image_ref, &auth)
+            .await?;
+        if remote_digest.as_ref() != plan.image_index.digest {
+            bail!(
+                "remote tag {} resolved to digest {}, expected {}",
+                image_ref,
+                remote_digest,
+                plan.image_index.digest
+            );
+        }
+
+        OciPushEvidence::from_push(&plan, blob_records, manifest_records, &remote_digest, &out)
+    })?;
+    write_oci_push_evidence(&out, &evidence)?;
+    Ok(())
+}
+
 #[instrument(skip(options), fields(config = %options.config_path.display(), artifact = %options.artifact.display(), layout = %options.layout.display()))]
 fn oci_release_evidence(options: OciReleaseEvidenceOptions) -> Result<()> {
     let config = load_config(&options.config_path)?;
@@ -565,6 +749,12 @@ fn load_oci_export_manifest(layout: &Path) -> Result<OciExportManifest> {
     let manifest_path = layout.join(DEFAULT_OCI_EXPORT_MANIFEST_NAME);
     serde_json::from_slice(&fs::read(&manifest_path)?)
         .with_context(|| format!("read OCI export manifest {}", manifest_path.display()))
+}
+
+fn load_oci_index_manifest(layout: &Path) -> Result<OciMultiArchIndexManifest> {
+    let manifest_path = layout.join(DEFAULT_OCI_INDEX_MANIFEST_NAME);
+    serde_json::from_slice(&fs::read(&manifest_path)?)
+        .with_context(|| format!("read OCI index manifest {}", manifest_path.display()))
 }
 
 #[derive(Debug, Clone)]
@@ -2617,6 +2807,248 @@ fn validate_oci_layout(
     Ok(export.clone())
 }
 
+fn build_oci_push_plan(layout: &Path, image_ref: OciImageReference) -> Result<OciPushPlan> {
+    if layout.join(DEFAULT_OCI_INDEX_MANIFEST_NAME).exists() {
+        let index = load_oci_index_manifest(layout)?;
+        validate_oci_index_layout(layout, &index, image_ref)
+    } else {
+        let export = load_oci_export_manifest(layout)?;
+        let validation = validate_oci_layout(layout, &export, None, None)?;
+        Ok(OciPushPlan {
+            layout: layout.to_path_buf(),
+            image_ref,
+            layout_kind: OciPushLayoutKind::SinglePlatformExport,
+            image_index: validation.image_index,
+            manifests: vec![validation.image_manifest],
+            blobs: vec![validation.image_config, validation.rootfs_layer],
+        })
+    }
+}
+
+fn validate_oci_index_layout(
+    layout: &Path,
+    manifest: &OciMultiArchIndexManifest,
+    image_ref: OciImageReference,
+) -> Result<OciPushPlan> {
+    validate_oci_layout_version(layout, &manifest.oci_layout_version)?;
+    verify_descriptor_blob(layout, &manifest.image_index)?;
+    let index_value = read_descriptor_json(layout, &manifest.image_index)?;
+    require_json_str(
+        &index_value,
+        "mediaType",
+        OCI_IMAGE_INDEX_MEDIA_TYPE,
+        "multi-arch index mediaType",
+    )?;
+    let index_manifests = index_value
+        .get("manifests")
+        .and_then(|value| value.as_array())
+        .context("multi-arch index.json is missing manifests array")?;
+    if index_manifests.is_empty() {
+        bail!("multi-arch OCI index contains no manifests");
+    }
+
+    let mut manifests = BTreeMap::new();
+    let mut blobs = BTreeMap::new();
+    for (idx, value) in index_manifests.iter().enumerate() {
+        let descriptor = descriptor_from_json(value, &format!("index manifests[{idx}]"))?;
+        verify_descriptor_blob(layout, &descriptor)?;
+        collect_image_manifest_dependencies(layout, &descriptor, &mut blobs)?;
+        insert_descriptor(&mut manifests, descriptor)?;
+    }
+
+    Ok(OciPushPlan {
+        layout: layout.to_path_buf(),
+        image_ref,
+        layout_kind: OciPushLayoutKind::MultiArchIndex,
+        image_index: manifest.image_index.clone(),
+        manifests: manifests.into_values().collect(),
+        blobs: blobs.into_values().collect(),
+    })
+}
+
+fn validate_oci_layout_version(layout: &Path, expected: &str) -> Result<()> {
+    if !layout.is_dir() {
+        bail!("OCI layout is not a directory: {}", layout.display());
+    }
+    if expected != OCI_LAYOUT_VERSION {
+        bail!(
+            "OCI layout manifest version {} does not match expected {}",
+            expected,
+            OCI_LAYOUT_VERSION
+        );
+    }
+    let layout_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(layout.join("oci-layout"))?)?;
+    let layout_version = layout_json
+        .get("imageLayoutVersion")
+        .and_then(|value| value.as_str())
+        .context("oci-layout is missing imageLayoutVersion")?;
+    if layout_version != OCI_LAYOUT_VERSION {
+        bail!(
+            "oci-layout imageLayoutVersion {layout_version:?} does not match expected {OCI_LAYOUT_VERSION:?}"
+        );
+    }
+    Ok(())
+}
+
+fn collect_image_manifest_dependencies(
+    layout: &Path,
+    manifest_descriptor: &OciBlobDescriptor,
+    blobs: &mut BTreeMap<String, OciBlobDescriptor>,
+) -> Result<()> {
+    if manifest_descriptor.media_type != OCI_IMAGE_MANIFEST_MEDIA_TYPE {
+        bail!(
+            "OCI index references unsupported child manifest media type {} for {}",
+            manifest_descriptor.media_type,
+            manifest_descriptor.digest
+        );
+    }
+    let manifest_value = read_descriptor_json(layout, manifest_descriptor)?;
+    let config = manifest_value
+        .get("config")
+        .context("image manifest is missing config descriptor")?;
+    let config_descriptor = descriptor_from_json(config, "image manifest config")?;
+    verify_descriptor_blob(layout, &config_descriptor)?;
+    insert_descriptor(blobs, config_descriptor)?;
+
+    let layers = manifest_value
+        .get("layers")
+        .and_then(|value| value.as_array())
+        .context("image manifest is missing layers array")?;
+    if layers.is_empty() {
+        bail!(
+            "image manifest {} has no layers",
+            manifest_descriptor.digest
+        );
+    }
+    for (idx, value) in layers.iter().enumerate() {
+        let layer = descriptor_from_json(value, &format!("image manifest layers[{idx}]"))?;
+        verify_descriptor_blob(layout, &layer)?;
+        insert_descriptor(blobs, layer)?;
+    }
+    Ok(())
+}
+
+fn descriptor_from_json(value: &serde_json::Value, context: &str) -> Result<OciBlobDescriptor> {
+    let media_type = value
+        .get("mediaType")
+        .and_then(|value| value.as_str())
+        .with_context(|| format!("{context} is missing mediaType"))?
+        .to_string();
+    let digest = value
+        .get("digest")
+        .and_then(|value| value.as_str())
+        .with_context(|| format!("{context} is missing digest"))?
+        .to_string();
+    OciDigest::new(digest.clone()).with_context(|| format!("{context} has invalid digest"))?;
+    let size_bytes = value
+        .get("size")
+        .and_then(|value| value.as_u64())
+        .with_context(|| format!("{context} is missing size"))?;
+    Ok(OciBlobDescriptor {
+        media_type,
+        digest,
+        size_bytes,
+        path: None,
+    })
+}
+
+fn insert_descriptor(
+    descriptors: &mut BTreeMap<String, OciBlobDescriptor>,
+    descriptor: OciBlobDescriptor,
+) -> Result<()> {
+    if let Some(existing) = descriptors.get(&descriptor.digest) {
+        if existing.media_type != descriptor.media_type
+            || existing.size_bytes != descriptor.size_bytes
+        {
+            bail!(
+                "OCI descriptor conflict for digest {}: existing media_type={} size={}, new media_type={} size={}",
+                descriptor.digest,
+                existing.media_type,
+                existing.size_bytes,
+                descriptor.media_type,
+                descriptor.size_bytes
+            );
+        }
+        return Ok(());
+    }
+    descriptors.insert(descriptor.digest.clone(), descriptor);
+    Ok(())
+}
+
+fn resolve_registry_auth(
+    image_ref: &OciImageReference,
+    username: Option<&str>,
+    password_env: Option<&str>,
+    token_env: Option<&str>,
+) -> Result<OciRegistryAuth> {
+    let username = username
+        .map(str::to_string)
+        .or_else(|| env::var("MOTLIE_MBUILD_REGISTRY_USERNAME").ok())
+        .or_else(|| env::var("GITHUB_ACTOR").ok());
+    let explicit_password = password_env
+        .map(|name| read_required_secret_env(name).map(|value| (name.to_string(), value)))
+        .transpose()?;
+    let explicit_token = token_env
+        .map(|name| read_required_secret_env(name).map(|value| (name.to_string(), value)))
+        .transpose()?;
+    if explicit_password.is_some() && explicit_token.is_some() {
+        bail!("use only one of --password-env or --token-env for OCI registry auth");
+    }
+    let secret = explicit_password
+        .or(explicit_token)
+        .or_else(default_registry_token);
+    let Some((_source, secret)) = secret else {
+        if username.is_some() {
+            bail!("registry username was provided but no password/token env var was available");
+        }
+        return Ok(OciRegistryAuth::Anonymous);
+    };
+    if let Some(username) = username {
+        return Ok(OciRegistryAuth::basic(username, secret));
+    }
+    if image_ref.registry == "ghcr.io" {
+        bail!(
+            "GHCR upload requires a username; pass --username or set MOTLIE_MBUILD_REGISTRY_USERNAME/GITHUB_ACTOR"
+        );
+    }
+    Ok(OciRegistryAuth::bearer(secret))
+}
+
+fn read_required_secret_env(name: &str) -> Result<String> {
+    let value =
+        env::var(name).with_context(|| format!("registry auth env var {name} is not set"))?;
+    if value.trim().is_empty() {
+        bail!("registry auth env var {name} is empty");
+    }
+    Ok(value)
+}
+
+fn default_registry_token() -> Option<(String, String)> {
+    [
+        "MOTLIE_MBUILD_REGISTRY_TOKEN",
+        "GHCR_TOKEN",
+        "CR_PAT",
+        "GITHUB_TOKEN",
+    ]
+    .into_iter()
+    .find_map(|name| {
+        env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (name.to_string(), value))
+    })
+}
+
+fn write_oci_push_evidence(path: &Path, evidence: &OciPushEvidence) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(evidence)?)?;
+    info!(path = %path.display(), "wrote mbuild OCI push evidence");
+    Ok(())
+}
+
 fn require_artifact_consumed_oci_payload(
     build_manifest: &ImageBuildManifest,
     export: &OciExportManifest,
@@ -3005,6 +3437,33 @@ enum OciCommands {
         /// Per-architecture mbuild OCI layout input. Repeat once per platform.
         #[arg(long = "layout")]
         layout: Vec<PathBuf>,
+    },
+    /// Push a validated mbuild OCI layout directly to an OCI registry.
+    Push {
+        /// OCI image layout directory from `mbuild oci export` or `mbuild oci index`.
+        #[arg(long)]
+        layout: PathBuf,
+        /// Destination registry image reference, for example ghcr.io/chungers/motlie-guest:v1.5.
+        #[arg(long)]
+        image: String,
+        /// Validate and print the push plan without contacting the registry.
+        #[arg(long)]
+        dry_run: bool,
+        /// Allow replacing an existing remote tag. Defaults to refusing overwrite.
+        #[arg(long)]
+        allow_overwrite: bool,
+        /// Registry username for basic/token auth. Defaults to MOTLIE_MBUILD_REGISTRY_USERNAME or GITHUB_ACTOR.
+        #[arg(long)]
+        username: Option<String>,
+        /// Environment variable containing a registry password/PAT for basic auth.
+        #[arg(long)]
+        password_env: Option<String>,
+        /// Environment variable containing a registry token. Defaults to common GHCR token env vars.
+        #[arg(long)]
+        token_env: Option<String>,
+        /// Output path for mbuild OCI push evidence. Defaults to <layout>/mbuild-oci-push.json.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Emit release-manifest-ready VM image artifact evidence.
     Evidence {
@@ -4024,6 +4483,115 @@ struct OciMultiArchIndexManifest {
     created_at_unix_seconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OciPushLayoutKind {
+    SinglePlatformExport,
+    MultiArchIndex,
+}
+
+#[derive(Debug, Clone)]
+struct OciPushPlan {
+    layout: PathBuf,
+    image_ref: OciImageReference,
+    layout_kind: OciPushLayoutKind,
+    image_index: OciBlobDescriptor,
+    manifests: Vec<OciBlobDescriptor>,
+    blobs: Vec<OciBlobDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OciPushedBlobRecord {
+    descriptor: OciBlobDescriptor,
+    status: OciBlobPushStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OciPushedManifestRecord {
+    descriptor: OciBlobDescriptor,
+    reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registry_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OciPushEvidence {
+    image: String,
+    layout_dir: PathBuf,
+    layout_kind: OciPushLayoutKind,
+    oci_layout_version: String,
+    image_index: OciBlobDescriptor,
+    blobs: Vec<OciPushedBlobRecord>,
+    manifests: Vec<OciPushedManifestRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_digest: Option<String>,
+    dry_run: bool,
+    output_path: PathBuf,
+    created_at_unix_seconds: u64,
+}
+
+impl OciPushEvidence {
+    fn dry_run(plan: &OciPushPlan, output_path: &Path) -> Result<Self> {
+        Ok(Self {
+            image: plan.image_ref.to_string(),
+            layout_dir: plan.layout.clone(),
+            layout_kind: plan.layout_kind,
+            oci_layout_version: OCI_LAYOUT_VERSION.to_string(),
+            image_index: plan.image_index.clone(),
+            blobs: plan
+                .blobs
+                .iter()
+                .cloned()
+                .map(|descriptor| OciPushedBlobRecord {
+                    descriptor,
+                    status: OciBlobPushStatus::DryRun,
+                })
+                .collect(),
+            manifests: plan
+                .manifests
+                .iter()
+                .cloned()
+                .map(|descriptor| OciPushedManifestRecord {
+                    reference: descriptor.digest.clone(),
+                    descriptor,
+                    registry_digest: None,
+                })
+                .chain(std::iter::once(OciPushedManifestRecord {
+                    descriptor: plan.image_index.clone(),
+                    reference: plan.image_ref.reference.registry_reference().to_string(),
+                    registry_digest: None,
+                }))
+                .collect(),
+            remote_digest: None,
+            dry_run: true,
+            output_path: output_path.to_path_buf(),
+            created_at_unix_seconds: unix_now()?,
+        })
+    }
+
+    fn from_push(
+        plan: &OciPushPlan,
+        blobs: Vec<OciPushedBlobRecord>,
+        manifests: Vec<OciPushedManifestRecord>,
+        remote_digest: &OciDigest,
+        output_path: &Path,
+    ) -> Result<Self> {
+        Ok(Self {
+            image: plan.image_ref.to_string(),
+            layout_dir: plan.layout.clone(),
+            layout_kind: plan.layout_kind,
+            oci_layout_version: OCI_LAYOUT_VERSION.to_string(),
+            image_index: plan.image_index.clone(),
+            blobs,
+            manifests,
+            remote_digest: Some(remote_digest.to_string()),
+            dry_run: false,
+            output_path: output_path.to_path_buf(),
+            created_at_unix_seconds: unix_now()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReleaseArtifactEvidence {
     kind: String,
@@ -4857,6 +5425,44 @@ validation:
                         PathBuf::from("artifacts/oci-amd64"),
                         PathBuf::from("artifacts/oci-arm64")
                     ]
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_oci_push_command() {
+        let cli = Cli::try_parse_from([
+            "mbuild",
+            "oci",
+            "push",
+            "--layout",
+            "artifacts/index",
+            "--image",
+            "ghcr.io/chungers/motlie-guest:v1.5",
+            "--dry-run",
+            "--allow-overwrite",
+            "--username",
+            "octocat",
+            "--token-env",
+            "GHCR_TOKEN",
+            "--out",
+            "artifacts/index/mbuild-oci-push.json",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.command,
+            Commands::Oci {
+                command: OciCommands::Push {
+                    layout: PathBuf::from("artifacts/index"),
+                    image: "ghcr.io/chungers/motlie-guest:v1.5".to_string(),
+                    dry_run: true,
+                    allow_overwrite: true,
+                    username: Some("octocat".to_string()),
+                    password_env: None,
+                    token_env: Some("GHCR_TOKEN".to_string()),
+                    out: Some(PathBuf::from("artifacts/index/mbuild-oci-push.json")),
                 }
             }
         );

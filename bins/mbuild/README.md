@@ -199,6 +199,26 @@ cargo run -p mbuild -- oci index \
   --layout /tmp/mbuild/oci-arm64
 ```
 
+Push a validated local OCI layout directly to an OCI registry without Docker,
+ORAS, Skopeo, Crane, Buildah, or other registry tooling:
+
+```bash
+GHCR_TOKEN=... \
+cargo run -p mbuild -- oci push \
+  --layout /tmp/mbuild/oci-index \
+  --image ghcr.io/chungers/motlie-guest:v1.5 \
+  --username "$GITHUB_ACTOR" \
+  --token-env GHCR_TOKEN
+```
+
+`mbuild oci push --dry-run` validates the layout and writes
+`mbuild-oci-push.json` evidence without contacting the registry. Without
+`--allow-overwrite`, push refuses to replace an existing tag. Auth can come
+from `--password-env`, `--token-env`, or the default token envs
+`MOTLIE_MBUILD_REGISTRY_TOKEN`, `GHCR_TOKEN`, `CR_PAT`, and `GITHUB_TOKEN`;
+GHCR uploads require a username from `--username`,
+`MOTLIE_MBUILD_REGISTRY_USERNAME`, or `GITHUB_ACTOR`.
+
 Emit release-manifest-ready evidence for a VM image artifact target:
 
 ```bash
@@ -263,10 +283,11 @@ platform, or input rootfs evidence no longer matches the current build config
 and artifact manifest.
 
 `mbuild oci index` writes a local OCI layout containing one multi-arch
-`index.json` assembled from validated per-platform mbuild layouts. Registry
-push remains an operator/release step that requires credentials and registry
-policy; the checked-in builder produces the immutable local layouts, multi-arch
-index, and release evidence consumed by that step.
+`index.json` assembled from validated per-platform mbuild layouts.
+`mbuild oci push` uploads either a single-platform export layout or a
+multi-arch index layout directly through the OCI Distribution API, skips blobs
+that already exist remotely, pushes child manifests before the final index tag,
+verifies the final remote digest, and writes `mbuild-oci-push.json` evidence.
 
 Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`) used:
 
