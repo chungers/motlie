@@ -2982,62 +2982,129 @@ fn resolve_registry_auth(
     password_env: Option<&str>,
     token_env: Option<&str>,
 ) -> Result<OciRegistryAuth> {
+    resolve_registry_auth_with_env(image_ref, username, password_env, token_env, |name| {
+        env::var(name).ok()
+    })
+}
+
+fn resolve_registry_auth_with_env<F>(
+    image_ref: &OciImageReference,
+    username: Option<&str>,
+    password_env: Option<&str>,
+    token_env: Option<&str>,
+    env_get: F,
+) -> Result<OciRegistryAuth>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let is_ghcr = image_ref.registry == "ghcr.io";
     let username = username
         .map(str::to_string)
-        .or_else(|| env::var("MOTLIE_MBUILD_REGISTRY_USERNAME").ok())
-        .or_else(|| env::var("GITHUB_ACTOR").ok());
+        .or_else(|| secret_env_value("MOTLIE_MBUILD_REGISTRY_USERNAME", &env_get))
+        .or_else(|| {
+            if is_ghcr {
+                secret_env_value("GITHUB_ACTOR", &env_get)
+            } else {
+                None
+            }
+        });
     let explicit_password = password_env
-        .map(|name| read_required_secret_env(name).map(|value| (name.to_string(), value)))
+        .map(|name| {
+            read_required_secret_env_with(name, &env_get)
+                .map(|value| (RegistrySecretKind::Password, name.to_string(), value))
+        })
         .transpose()?;
     let explicit_token = token_env
-        .map(|name| read_required_secret_env(name).map(|value| (name.to_string(), value)))
+        .map(|name| {
+            read_required_secret_env_with(name, &env_get)
+                .map(|value| (RegistrySecretKind::Token, name.to_string(), value))
+        })
         .transpose()?;
     if explicit_password.is_some() && explicit_token.is_some() {
         bail!("use only one of --password-env or --token-env for OCI registry auth");
     }
     let secret = explicit_password
         .or(explicit_token)
-        .or_else(default_registry_token);
-    let Some((_source, secret)) = secret else {
+        .or_else(|| default_registry_token_with_env(image_ref, &env_get));
+    let Some((kind, _source, secret)) = secret else {
         if username.is_some() {
             bail!("registry username was provided but no password/token env var was available");
         }
         return Ok(OciRegistryAuth::Anonymous);
     };
-    if let Some(username) = username {
-        return Ok(OciRegistryAuth::basic(username, secret));
+    match kind {
+        RegistrySecretKind::Password => {
+            let username = username.with_context(|| {
+                format!(
+                    "registry password auth for {} requires --username or MOTLIE_MBUILD_REGISTRY_USERNAME{}",
+                    image_ref,
+                    if is_ghcr { "/GITHUB_ACTOR" } else { "" }
+                )
+            })?;
+            Ok(OciRegistryAuth::basic(username, secret))
+        }
+        RegistrySecretKind::Token if is_ghcr => {
+            let username = username.with_context(|| {
+                "GHCR upload requires a username; pass --username or set MOTLIE_MBUILD_REGISTRY_USERNAME/GITHUB_ACTOR"
+            })?;
+            Ok(OciRegistryAuth::basic(username, secret))
+        }
+        RegistrySecretKind::Token => {
+            if let Some(username) = username {
+                Ok(OciRegistryAuth::basic(username, secret))
+            } else {
+                Ok(OciRegistryAuth::bearer(secret))
+            }
+        }
     }
-    if image_ref.registry == "ghcr.io" {
-        bail!(
-            "GHCR upload requires a username; pass --username or set MOTLIE_MBUILD_REGISTRY_USERNAME/GITHUB_ACTOR"
-        );
-    }
-    Ok(OciRegistryAuth::bearer(secret))
 }
 
-fn read_required_secret_env(name: &str) -> Result<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrySecretKind {
+    Password,
+    Token,
+}
+
+fn read_required_secret_env_with<F>(name: &str, env_get: &F) -> Result<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let value =
-        env::var(name).with_context(|| format!("registry auth env var {name} is not set"))?;
+        env_get(name).with_context(|| format!("registry auth env var {name} is not set"))?;
     if value.trim().is_empty() {
         bail!("registry auth env var {name} is empty");
     }
     Ok(value)
 }
 
-fn default_registry_token() -> Option<(String, String)> {
-    [
-        "MOTLIE_MBUILD_REGISTRY_TOKEN",
-        "GHCR_TOKEN",
-        "CR_PAT",
-        "GITHUB_TOKEN",
-    ]
-    .into_iter()
-    .find_map(|name| {
-        env::var(name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| (name.to_string(), value))
+fn default_registry_token_with_env<F>(
+    image_ref: &OciImageReference,
+    env_get: &F,
+) -> Option<(RegistrySecretKind, String, String)>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let default_names: &[&str] = if image_ref.registry == "ghcr.io" {
+        &[
+            "MOTLIE_MBUILD_REGISTRY_TOKEN",
+            "GHCR_TOKEN",
+            "CR_PAT",
+            "GITHUB_TOKEN",
+        ]
+    } else {
+        &["MOTLIE_MBUILD_REGISTRY_TOKEN"]
+    };
+    default_names.iter().find_map(|name| {
+        secret_env_value(name, env_get)
+            .map(|value| (RegistrySecretKind::Token, (*name).to_string(), value))
     })
+}
+
+fn secret_env_value<F>(name: &str, env_get: &F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_get(name).filter(|value| !value.trim().is_empty())
 }
 
 fn write_oci_push_evidence(path: &Path, evidence: &OciPushEvidence) -> Result<()> {
@@ -3452,13 +3519,13 @@ enum OciCommands {
         /// Allow replacing an existing remote tag. Defaults to refusing overwrite.
         #[arg(long)]
         allow_overwrite: bool,
-        /// Registry username for basic/token auth. Defaults to MOTLIE_MBUILD_REGISTRY_USERNAME or GITHUB_ACTOR.
+        /// Registry username for basic/token auth. Defaults to MOTLIE_MBUILD_REGISTRY_USERNAME; GHCR also accepts GITHUB_ACTOR.
         #[arg(long)]
         username: Option<String>,
         /// Environment variable containing a registry password/PAT for basic auth.
         #[arg(long)]
         password_env: Option<String>,
-        /// Environment variable containing a registry token. Defaults to common GHCR token env vars.
+        /// Environment variable containing a registry token. Defaults to MOTLIE_MBUILD_REGISTRY_TOKEN; GHCR also uses GHCR_TOKEN, CR_PAT, or GITHUB_TOKEN.
         #[arg(long)]
         token_env: Option<String>,
         /// Output path for mbuild OCI push evidence. Defaults to <layout>/mbuild-oci-push.json.
@@ -5244,6 +5311,107 @@ validation:
             .to_path_buf()
     }
 
+    struct OciExportFixture {
+        root: PathBuf,
+        layout: PathBuf,
+    }
+
+    fn fixture_env<const N: usize>(
+        vars: [(&'static str, &'static str); N],
+    ) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    fn assert_basic_auth(auth: OciRegistryAuth, expected_username: &str, expected_password: &str) {
+        match auth {
+            OciRegistryAuth::Basic { username, password } => {
+                assert_eq!(username, expected_username);
+                assert_eq!(password, expected_password);
+            }
+            other => panic!("expected basic auth, got {other:?}"),
+        }
+    }
+
+    fn assert_bearer_auth(auth: OciRegistryAuth, expected_token: &str) {
+        match auth {
+            OciRegistryAuth::Bearer { token } => assert_eq!(token, expected_token),
+            other => panic!("expected bearer auth, got {other:?}"),
+        }
+    }
+
+    fn write_oci_export_fixture(
+        name: &str,
+        platform: OciPlatform,
+        rootfs_bytes: &[u8],
+        tag: &str,
+    ) -> OciExportFixture {
+        let root = temp_test_dir(name);
+        let config_path = root.join("motlie-image.yaml");
+        let artifact = root.join("artifact");
+        let layout = root.join("oci");
+        fs::create_dir_all(&artifact).unwrap();
+        fs::create_dir_all(&layout).unwrap();
+        fs::write(
+            &config_path,
+            external_oci_config_yaml()
+                .replace("platform: linux/arm64", &format!("platform: {platform}")),
+        )
+        .unwrap();
+        fs::write(artifact.join(COMMON_ROOTFS_TARBALL_NAME), rootfs_bytes).unwrap();
+
+        let config = load_config(&config_path).unwrap();
+        let source = ExternalOciSource::ubuntu_systemd(
+            platform,
+            OciDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            OciDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        );
+        let rootfs = rootfs_tarball_record(&artifact.join(COMMON_ROOTFS_TARBALL_NAME)).unwrap();
+        let guest = ChGuestTarget::from_platform(platform).unwrap();
+        let manifest = ImageBuildManifest::from_config(
+            &config_path,
+            BackendTargetId("ch".to_string()),
+            &artifact,
+            &config,
+            Some(AdapterRecord {
+                kind: "external-oci-ch-emitter".to_string(),
+                command: vec!["mbuild".to_string(), "build".to_string()],
+                log_path: artifact.join(CH_EMITTER_LOG_NAME),
+                exit_status: 0,
+                started_at_unix_seconds: 1,
+                completed_at_unix_seconds: 2,
+                package_include: config.package_stage.install.clone(),
+                materialized_source: None,
+                external_oci_source: Some(source),
+                build_host: Some(BuildHostRecord {
+                    platform: platform.to_string(),
+                    deb_arch: guest.deb_arch.to_string(),
+                }),
+                guest_target: Some(GuestTargetRecord::from(&guest)),
+                rootfs_tarball: Some(rootfs),
+            }),
+            Vec::new(),
+        );
+        fs::write(
+            artifact.join(DEFAULT_MANIFEST_NAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        oci_export(OciExportOptions {
+            config_path,
+            artifact,
+            out: layout.clone(),
+            tag: Some(tag.to_string()),
+        })
+        .unwrap();
+
+        OciExportFixture { root, layout }
+    }
+
     fn release_config_path(name: &str) -> PathBuf {
         repo_root_fixture()
             .join("releases/vmm/v1.5/configs")
@@ -5466,6 +5634,183 @@ validation:
                 }
             }
         );
+    }
+
+    #[test]
+    fn registry_auth_github_defaults_apply_only_to_ghcr() {
+        let ghcr = OciImageReference::from_str("ghcr.io/chungers/motlie-guest:v1").unwrap();
+        let ghcr_auth = resolve_registry_auth_with_env(
+            &ghcr,
+            None,
+            None,
+            None,
+            fixture_env([("GITHUB_ACTOR", "octocat"), ("GHCR_TOKEN", "ghcr-secret")]),
+        )
+        .unwrap();
+        assert_basic_auth(ghcr_auth, "octocat", "ghcr-secret");
+
+        let other =
+            OciImageReference::from_str("registry.example.com/acme/motlie-guest:v1").unwrap();
+        let other_auth = resolve_registry_auth_with_env(
+            &other,
+            None,
+            None,
+            None,
+            fixture_env([("GITHUB_ACTOR", "octocat"), ("GHCR_TOKEN", "ghcr-secret")]),
+        )
+        .unwrap();
+        assert!(other_auth.is_anonymous());
+    }
+
+    #[test]
+    fn registry_auth_non_ghcr_uses_only_generic_default_token() {
+        let image =
+            OciImageReference::from_str("registry.example.com/acme/motlie-guest:v1").unwrap();
+        let auth = resolve_registry_auth_with_env(
+            &image,
+            None,
+            None,
+            None,
+            fixture_env([
+                ("GITHUB_ACTOR", "octocat"),
+                ("GHCR_TOKEN", "ghcr-secret"),
+                ("MOTLIE_MBUILD_REGISTRY_TOKEN", "generic-secret"),
+            ]),
+        )
+        .unwrap();
+
+        assert_bearer_auth(auth, "generic-secret");
+    }
+
+    #[test]
+    fn registry_auth_explicit_non_ghcr_token_does_not_use_github_actor() {
+        let image =
+            OciImageReference::from_str("registry.example.com/acme/motlie-guest:v1").unwrap();
+        let auth = resolve_registry_auth_with_env(
+            &image,
+            None,
+            None,
+            Some("REGISTRY_TOKEN"),
+            fixture_env([
+                ("GITHUB_ACTOR", "octocat"),
+                ("REGISTRY_TOKEN", "registry-secret"),
+            ]),
+        )
+        .unwrap();
+
+        assert_bearer_auth(auth, "registry-secret");
+    }
+
+    #[test]
+    fn registry_auth_password_requires_registry_username() {
+        let image =
+            OciImageReference::from_str("registry.example.com/acme/motlie-guest:v1").unwrap();
+        let error = resolve_registry_auth_with_env(
+            &image,
+            None,
+            Some("REGISTRY_PASSWORD"),
+            None,
+            fixture_env([
+                ("GITHUB_ACTOR", "octocat"),
+                ("REGISTRY_PASSWORD", "registry-secret"),
+            ]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires --username"));
+    }
+
+    #[test]
+    fn oci_push_dry_run_writes_single_platform_plan() {
+        let fixture = write_oci_export_fixture(
+            "oci-push-single",
+            OciPlatform::linux_arm64(),
+            b"fake-rootfs-tar-arm64",
+            "motlie-guest:v1.5-arm64",
+        );
+        let out = fixture.root.join("push-evidence.json");
+
+        oci_push(OciPushOptions {
+            layout: fixture.layout.clone(),
+            image: "ghcr.io/chungers/motlie-guest:v1.5-arm64".to_string(),
+            dry_run: true,
+            allow_overwrite: false,
+            username: Some("dry-run-should-not-resolve-auth".to_string()),
+            password_env: None,
+            token_env: None,
+            out: Some(out.clone()),
+        })
+        .unwrap();
+
+        let evidence: OciPushEvidence = serde_json::from_slice(&fs::read(out).unwrap()).unwrap();
+        assert!(evidence.dry_run);
+        assert_eq!(
+            evidence.layout_kind,
+            OciPushLayoutKind::SinglePlatformExport
+        );
+        assert_eq!(evidence.blobs.len(), 2);
+        assert!(evidence
+            .blobs
+            .iter()
+            .all(|blob| blob.status == OciBlobPushStatus::DryRun));
+        assert_eq!(evidence.manifests.len(), 2);
+        assert_eq!(evidence.remote_digest, None);
+
+        fs::remove_dir_all(fixture.root).unwrap();
+    }
+
+    #[test]
+    fn oci_push_dry_run_writes_multi_arch_index_plan() {
+        let arm64 = write_oci_export_fixture(
+            "oci-push-index-arm64",
+            OciPlatform::linux_arm64(),
+            b"fake-rootfs-tar-arm64",
+            "motlie-guest:v1.5-arm64",
+        );
+        let amd64 = write_oci_export_fixture(
+            "oci-push-index-amd64",
+            OciPlatform::linux_amd64(),
+            b"fake-rootfs-tar-amd64",
+            "motlie-guest:v1.5-amd64",
+        );
+        let index_root = temp_test_dir("oci-push-index");
+        oci_index(OciIndexOptions {
+            out: index_root.clone(),
+            image: "ghcr.io/chungers/motlie-guest:v1.5".to_string(),
+            layouts: vec![amd64.layout.clone(), arm64.layout.clone()],
+        })
+        .unwrap();
+        let out = index_root.join("push-evidence.json");
+
+        oci_push(OciPushOptions {
+            layout: index_root.clone(),
+            image: "ghcr.io/chungers/motlie-guest:v1.5".to_string(),
+            dry_run: true,
+            allow_overwrite: false,
+            username: None,
+            password_env: None,
+            token_env: None,
+            out: Some(out.clone()),
+        })
+        .unwrap();
+
+        let evidence: OciPushEvidence = serde_json::from_slice(&fs::read(out).unwrap()).unwrap();
+        assert!(evidence.dry_run);
+        assert_eq!(evidence.layout_kind, OciPushLayoutKind::MultiArchIndex);
+        assert_eq!(evidence.blobs.len(), 4);
+        assert!(evidence
+            .blobs
+            .iter()
+            .all(|blob| blob.status == OciBlobPushStatus::DryRun));
+        assert_eq!(evidence.manifests.len(), 3);
+        assert!(evidence
+            .manifests
+            .iter()
+            .any(|manifest| manifest.reference == "v1.5"));
+
+        fs::remove_dir_all(arm64.root).unwrap();
+        fs::remove_dir_all(amd64.root).unwrap();
+        fs::remove_dir_all(index_root).unwrap();
     }
 
     #[test]

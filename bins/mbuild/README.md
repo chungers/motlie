@@ -214,10 +214,11 @@ cargo run -p mbuild -- oci push \
 `mbuild oci push --dry-run` validates the layout and writes
 `mbuild-oci-push.json` evidence without contacting the registry. Without
 `--allow-overwrite`, push refuses to replace an existing tag. Auth can come
-from `--password-env`, `--token-env`, or the default token envs
-`MOTLIE_MBUILD_REGISTRY_TOKEN`, `GHCR_TOKEN`, `CR_PAT`, and `GITHUB_TOKEN`;
-GHCR uploads require a username from `--username`,
-`MOTLIE_MBUILD_REGISTRY_USERNAME`, or `GITHUB_ACTOR`.
+from `--password-env`, `--token-env`, or default token envs. All registries may
+use `MOTLIE_MBUILD_REGISTRY_TOKEN`; GHCR additionally uses `GHCR_TOKEN`,
+`CR_PAT`, or `GITHUB_TOKEN`. GHCR uploads require a username from `--username`,
+`MOTLIE_MBUILD_REGISTRY_USERNAME`, or `GITHUB_ACTOR`. Non-GHCR registries never
+receive GitHub-specific default credentials.
 
 Emit release-manifest-ready evidence for a VM image artifact target:
 
