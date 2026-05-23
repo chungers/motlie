@@ -9,10 +9,12 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
+use futures::TryStreamExt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+use tokio_util::codec::{BytesCodec, FramedRead};
 
 use crate::backend::BackendKind;
 
@@ -155,6 +157,10 @@ impl OciImageReference {
 
     pub fn pull_scope(&self) -> String {
         format!("repository:{}:pull", self.repository)
+    }
+
+    pub fn push_scope(&self) -> String {
+        format!("repository:{}:pull,push", self.repository)
     }
 
     pub fn normalized(&self) -> String {
@@ -1542,6 +1548,69 @@ impl OciRootfsImporter {
     }
 }
 
+#[derive(Clone, Default)]
+pub enum OciRegistryAuth {
+    #[default]
+    Anonymous,
+    Basic {
+        username: String,
+        password: String,
+    },
+    Bearer {
+        token: String,
+    },
+}
+
+impl std::fmt::Debug for OciRegistryAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"<redacted>")
+                .finish(),
+            Self::Bearer { .. } => f
+                .debug_struct("Bearer")
+                .field("token", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+impl OciRegistryAuth {
+    pub fn basic(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self::Basic {
+            username: username.into(),
+            password: password.into(),
+        }
+    }
+
+    pub fn bearer(token: impl Into<String>) -> Self {
+        Self::Bearer {
+            token: token.into(),
+        }
+    }
+
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self, Self::Anonymous)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OciBlobPushStatus {
+    AlreadyExists,
+    Uploaded,
+    DryRun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciManifestPushResult {
+    pub computed_digest: OciDigest,
+    pub registry_digest: Option<OciDigest>,
+}
+
 #[derive(Debug, Clone)]
 pub struct OciRegistryClient {
     client: reqwest::Client,
@@ -1562,6 +1631,126 @@ impl OciRegistryClient {
 
     pub fn with_client(client: reqwest::Client) -> Self {
         Self { client }
+    }
+
+    #[tracing::instrument(skip(self, auth, path), fields(image_ref = %image_ref, digest = %digest, path = %path.display()))]
+    pub async fn push_blob_from_path(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        size_bytes: u64,
+        path: &Path,
+        auth: &OciRegistryAuth,
+    ) -> Result<OciBlobPushStatus, OciRegistryError> {
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|source| OciRegistryError::Io {
+                path: Some(path.to_path_buf()),
+                source,
+            })?;
+        if !metadata.is_file() {
+            return Err(OciRegistryError::UploadBlobNotFile {
+                path: path.to_path_buf(),
+            });
+        }
+        if metadata.len() != size_bytes {
+            return Err(OciRegistryError::UploadBlobSizeMismatch {
+                path: path.to_path_buf(),
+                expected: size_bytes,
+                actual: metadata.len(),
+            });
+        }
+        if self.blob_exists(image_ref, digest, auth).await? {
+            tracing::info!(image_ref = %image_ref, digest = %digest, "OCI blob already present in registry");
+            return Ok(OciBlobPushStatus::AlreadyExists);
+        }
+        let (upload_url, bearer_token) = self.start_blob_upload(image_ref, auth).await?;
+        self.complete_blob_upload_from_path(BlobUploadRequest {
+            image_ref,
+            upload_url,
+            digest,
+            size_bytes,
+            path,
+            bearer_token: bearer_token.as_deref(),
+            auth,
+        })
+        .await?;
+        tracing::info!(image_ref = %image_ref, digest = %digest, size_bytes, "uploaded OCI blob");
+        Ok(OciBlobPushStatus::Uploaded)
+    }
+
+    #[tracing::instrument(skip(self, auth, bytes), fields(image_ref = %image_ref, reference = %reference, media_type = media_type))]
+    pub async fn push_manifest_bytes(
+        &self,
+        image_ref: &OciImageReference,
+        reference: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        auth: &OciRegistryAuth,
+    ) -> Result<OciManifestPushResult, OciRegistryError> {
+        let computed_digest = digest_from_bytes(&bytes)?;
+        let mut response = self
+            .put_manifest_once(image_ref, reference, media_type, bytes.clone(), None, auth)
+            .await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let token = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.push_scope(), auth)
+                .await?;
+            response = self
+                .put_manifest_once(image_ref, reference, media_type, bytes, Some(&token), auth)
+                .await?;
+        }
+        let registry_digest = registry_digest_header(image_ref, response.headers())?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(OciRegistryError::RegistryStatus {
+                image_ref: image_ref.normalized(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        if let Some(header_digest) = &registry_digest {
+            if header_digest != &computed_digest {
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: image_ref.normalized(),
+                    header_digest: header_digest.clone(),
+                    computed_digest: computed_digest.clone(),
+                });
+            }
+        }
+        tracing::info!(image_ref = %image_ref, reference, digest = %computed_digest, "pushed OCI manifest");
+        Ok(OciManifestPushResult {
+            computed_digest,
+            registry_digest,
+        })
+    }
+
+    #[tracing::instrument(skip(self, auth), fields(image_ref = %image_ref))]
+    pub async fn fetch_manifest_digest_with_auth(
+        &self,
+        image_ref: &OciImageReference,
+        auth: &OciRegistryAuth,
+    ) -> Result<OciDigest, OciRegistryError> {
+        let response = self.fetch_manifest_with_auth(image_ref, auth).await?;
+        let digest = digest_from_bytes(&response.body)?;
+        if let Some(header_digest) = response.registry_digest {
+            if header_digest != digest {
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: image_ref.normalized(),
+                    header_digest,
+                    computed_digest: digest,
+                });
+            }
+        }
+        Ok(digest)
     }
 
     #[tracing::instrument(skip(self), fields(platform = %platform))]
@@ -1711,6 +1900,244 @@ impl OciRegistryClient {
             });
         }
         cache.store_blob(digest, &manifest.body)
+    }
+
+    async fn blob_exists(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        auth: &OciRegistryAuth,
+    ) -> Result<bool, OciRegistryError> {
+        let mut response = self.head_blob_once(image_ref, digest, None, auth).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let token = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.push_scope(), auth)
+                .await?;
+            response = self
+                .head_blob_once(image_ref, digest, Some(&token), auth)
+                .await?;
+        }
+        match response.status() {
+            reqwest::StatusCode::OK => Ok(true),
+            reqwest::StatusCode::NOT_FOUND => Ok(false),
+            status if status.is_success() => Ok(true),
+            status => {
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|source| OciRegistryError::Request {
+                        image_ref: image_ref.normalized(),
+                        source,
+                    })?;
+                Err(OciRegistryError::RegistryStatus {
+                    image_ref: image_ref.normalized(),
+                    status: status.as_u16(),
+                    body,
+                })
+            }
+        }
+    }
+
+    async fn head_blob_once(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self.client.head(blob_url(image_ref, digest));
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
+    async fn start_blob_upload(
+        &self,
+        image_ref: &OciImageReference,
+        auth: &OciRegistryAuth,
+    ) -> Result<(reqwest::Url, Option<String>), OciRegistryError> {
+        let mut response = self.start_blob_upload_once(image_ref, None, auth).await?;
+        let mut token = None;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let fetched = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.push_scope(), auth)
+                .await?;
+            response = self
+                .start_blob_upload_once(image_ref, Some(&fetched), auth)
+                .await?;
+            token = Some(fetched);
+        }
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .map_err(|source| OciRegistryError::Request {
+                    image_ref: image_ref.normalized(),
+                    source,
+                })?;
+            return Err(OciRegistryError::RegistryStatus {
+                image_ref: image_ref.normalized(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| OciRegistryError::MissingRegistryHeader {
+                image_ref: image_ref.normalized(),
+                header: reqwest::header::LOCATION.as_str().to_string(),
+            })?
+            .to_str()
+            .map_err(|source| OciRegistryError::InvalidRegistryHeader {
+                image_ref: image_ref.normalized(),
+                header: reqwest::header::LOCATION.as_str().to_string(),
+                value: "<non-utf8>".to_string(),
+                reason: source.to_string(),
+            })?;
+        Ok((resolve_registry_location(image_ref, location)?, token))
+    }
+
+    async fn start_blob_upload_once(
+        &self,
+        image_ref: &OciImageReference,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self.client.post(upload_url(image_ref));
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
+    async fn complete_blob_upload_from_path(
+        &self,
+        upload: BlobUploadRequest<'_>,
+    ) -> Result<(), OciRegistryError> {
+        let mut upload_url = upload.upload_url;
+        upload_url
+            .query_pairs_mut()
+            .append_pair("digest", upload.digest.as_ref());
+        let file =
+            tokio::fs::File::open(upload.path)
+                .await
+                .map_err(|source| OciRegistryError::Io {
+                    path: Some(upload.path.to_path_buf()),
+                    source,
+                })?;
+        let stream = FramedRead::new(file, BytesCodec::new()).map_ok(|bytes| bytes.freeze());
+        let request = self
+            .client
+            .put(upload_url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_LENGTH, upload.size_bytes)
+            .body(reqwest::Body::wrap_stream(stream));
+        let response = apply_registry_auth(request, upload.bearer_token, upload.auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: upload.image_ref.normalized(),
+                source,
+            })?;
+        let registry_digest = registry_digest_header(upload.image_ref, response.headers())?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: upload.image_ref.normalized(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(OciRegistryError::RegistryStatus {
+                image_ref: upload.image_ref.normalized(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        if let Some(header_digest) = registry_digest {
+            if &header_digest != upload.digest {
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: upload.image_ref.normalized(),
+                    header_digest,
+                    computed_digest: upload.digest.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn put_manifest_once(
+        &self,
+        image_ref: &OciImageReference,
+        reference: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self
+            .client
+            .put(manifest_reference_url(image_ref, reference))
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .body(bytes);
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
+    async fn fetch_manifest_with_auth(
+        &self,
+        image_ref: &OciImageReference,
+        auth: &OciRegistryAuth,
+    ) -> Result<RegistryManifestResponse, OciRegistryError> {
+        let mut response = self
+            .fetch_manifest_once_with_auth(image_ref, None, auth)
+            .await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let token = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.pull_scope(), auth)
+                .await?;
+            response = self
+                .fetch_manifest_once_with_auth(image_ref, Some(&token), auth)
+                .await?;
+        }
+        manifest_response_from_reqwest(image_ref, response).await
+    }
+
+    async fn fetch_manifest_once_with_auth(
+        &self,
+        image_ref: &OciImageReference,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self
+            .client
+            .get(manifest_url(image_ref))
+            .header(reqwest::header::ACCEPT, OCI_MANIFEST_ACCEPT);
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
     }
 
     #[tracing::instrument(skip(self, image_ref, cache), fields(image_ref = %image_ref, digest = %digest, cache = %cache.root().display()))]
@@ -1921,6 +2348,27 @@ impl OciRegistryClient {
         challenge: &str,
         image_ref: &OciImageReference,
     ) -> Result<String, OciRegistryError> {
+        self.fetch_bearer_token_for_scope(
+            challenge,
+            image_ref,
+            &image_ref.pull_scope(),
+            &OciRegistryAuth::Anonymous,
+        )
+        .await
+    }
+
+    async fn fetch_bearer_token_for_scope(
+        &self,
+        challenge: &str,
+        image_ref: &OciImageReference,
+        scope: &str,
+        auth: &OciRegistryAuth,
+    ) -> Result<String, OciRegistryError> {
+        if let OciRegistryAuth::Bearer { token } = auth {
+            if !token.trim().is_empty() {
+                return Ok(token.clone());
+            }
+        }
         let challenge = parse_bearer_challenge(challenge)?;
         let mut url = reqwest::Url::parse(&challenge.realm).map_err(|source| {
             OciRegistryError::InvalidAuthChallenge {
@@ -1934,23 +2382,29 @@ impl OciRegistryClient {
                 query.append_pair("service", service);
             }
             let default_scope;
-            let scope = if let Some(scope) = challenge.scope.as_deref() {
-                scope
+            let requested_scope = if scope.trim().is_empty() {
+                if let Some(scope) = challenge.scope.as_deref() {
+                    scope
+                } else {
+                    default_scope = image_ref.pull_scope();
+                    &default_scope
+                }
             } else {
-                default_scope = image_ref.pull_scope();
-                &default_scope
+                scope
             };
-            query.append_pair("scope", scope);
+            query.append_pair("scope", requested_scope);
         }
-        let response =
-            self.client
-                .get(url)
-                .send()
-                .await
-                .map_err(|source| OciRegistryError::Request {
-                    image_ref: image_ref.normalized(),
-                    source,
-                })?;
+        let mut request = self.client.get(url);
+        if let OciRegistryAuth::Basic { username, password } = auth {
+            request = request.basic_auth(username, Some(password));
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })?;
         let status = response.status();
         let body = response
             .text()
@@ -2011,6 +2465,29 @@ pub enum OciRegistryError {
     InvalidAuthChallenge { challenge: String, reason: String },
     #[error("registry auth response for {image_ref} did not include a token")]
     MissingToken { image_ref: String },
+    #[error("registry response for {image_ref} is missing required header {header}")]
+    MissingRegistryHeader { image_ref: String, header: String },
+    #[error("registry response for {image_ref} had invalid header {header}={value:?}: {reason}")]
+    InvalidRegistryHeader {
+        image_ref: String,
+        header: String,
+        value: String,
+        reason: String,
+    },
+    #[error("upload blob path is not a regular file: {path:?}")]
+    UploadBlobNotFile { path: PathBuf },
+    #[error("upload blob {path:?} size was {actual}, expected {expected}")]
+    UploadBlobSizeMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("I/O error at {path:?}: {source}")]
+    Io {
+        path: Option<PathBuf>,
+        #[source]
+        source: io::Error,
+    },
     #[error(
         "registry digest header for {image_ref} was {header_digest}, but computed digest was {computed_digest}"
     )]
@@ -2181,6 +2658,16 @@ const OCI_MANIFEST_ACCEPT: &str = concat!(
     "application/vnd.oci.image.manifest.v1+json, ",
     "application/vnd.docker.distribution.manifest.v2+json"
 );
+
+struct BlobUploadRequest<'a> {
+    image_ref: &'a OciImageReference,
+    upload_url: reqwest::Url,
+    digest: &'a OciDigest,
+    size_bytes: u64,
+    path: &'a Path,
+    bearer_token: Option<&'a str>,
+    auth: &'a OciRegistryAuth,
+}
 
 #[derive(Debug)]
 struct RegistryManifestResponse {
@@ -4442,6 +4929,96 @@ fn blob_url(image_ref: &OciImageReference, digest: &OciDigest) -> String {
         image_ref.repository,
         digest
     )
+}
+
+fn upload_url(image_ref: &OciImageReference) -> String {
+    format!(
+        "https://{}/v2/{}/blobs/uploads/",
+        image_ref.registry_api_host(),
+        image_ref.repository,
+    )
+}
+
+fn manifest_reference_url(image_ref: &OciImageReference, reference: &str) -> String {
+    format!(
+        "https://{}/v2/{}/manifests/{}",
+        image_ref.registry_api_host(),
+        image_ref.repository,
+        reference,
+    )
+}
+
+fn resolve_registry_location(
+    image_ref: &OciImageReference,
+    location: &str,
+) -> Result<reqwest::Url, OciRegistryError> {
+    if let Ok(url) = reqwest::Url::parse(location) {
+        return Ok(url);
+    }
+    let base = reqwest::Url::parse(&format!("https://{}", image_ref.registry_api_host())).map_err(
+        |source| OciRegistryError::InvalidRegistryHeader {
+            image_ref: image_ref.normalized(),
+            header: reqwest::header::LOCATION.as_str().to_string(),
+            value: location.to_string(),
+            reason: source.to_string(),
+        },
+    )?;
+    base.join(location)
+        .map_err(|source| OciRegistryError::InvalidRegistryHeader {
+            image_ref: image_ref.normalized(),
+            header: reqwest::header::LOCATION.as_str().to_string(),
+            value: location.to_string(),
+            reason: source.to_string(),
+        })
+}
+
+fn apply_registry_auth(
+    request: reqwest::RequestBuilder,
+    bearer_token: Option<&str>,
+    auth: &OciRegistryAuth,
+) -> reqwest::RequestBuilder {
+    if let Some(token) = bearer_token {
+        return request.bearer_auth(token);
+    }
+    match auth {
+        OciRegistryAuth::Anonymous => request,
+        OciRegistryAuth::Basic { username, password } => {
+            request.basic_auth(username, Some(password))
+        }
+        OciRegistryAuth::Bearer { token } => request.bearer_auth(token),
+    }
+}
+
+fn response_auth_challenge<'a>(
+    image_ref: &OciImageReference,
+    headers: &'a reqwest::header::HeaderMap,
+) -> Result<&'a str, OciRegistryError> {
+    headers
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| OciRegistryError::MissingAuthChallenge {
+            image_ref: image_ref.normalized(),
+        })
+}
+
+fn registry_digest_header(
+    image_ref: &OciImageReference,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Option<OciDigest>, OciRegistryError> {
+    headers
+        .get("Docker-Content-Digest")
+        .map(|value| {
+            let raw = value
+                .to_str()
+                .map_err(|source| OciRegistryError::InvalidRegistryHeader {
+                    image_ref: image_ref.normalized(),
+                    header: "Docker-Content-Digest".to_string(),
+                    value: "<non-utf8>".to_string(),
+                    reason: source.to_string(),
+                })?;
+            OciDigest::new(raw).map_err(OciRegistryError::Contract)
+        })
+        .transpose()
 }
 
 fn cache_tmp_path(path: &Path) -> Result<PathBuf, OciRegistryError> {
