@@ -53,6 +53,33 @@ seed_mount_paths_from_mounts_yaml() {
     done < <(sed -n 's/^    guest_path: //p' "$mounts_yaml")
 }
 
+cloud_hypervisor_supports_disk_image_type() {
+    local help
+    if ! help="$(cloud-hypervisor --help 2>/dev/null)"; then
+        return 1
+    fi
+    grep -q 'image_type=' <<< "$help"
+}
+
+cloud_hypervisor_raw_disk_suffix() {
+    case "${CH_DISK_IMAGE_TYPE_RAW:-auto}" in
+        auto|"")
+            if cloud_hypervisor_supports_disk_image_type; then
+                printf ',image_type=raw'
+            fi
+            ;;
+        on|true|1)
+            printf ',image_type=raw'
+            ;;
+        off|false|0)
+            ;;
+        *)
+            echo "ERROR: CH_DISK_IMAGE_TYPE_RAW must be auto, on, or off" >&2
+            exit 1
+            ;;
+    esac
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/common-contract.sh"
 
@@ -358,9 +385,10 @@ CH_ARGS=(
     --console "$CONSOLE_BACKEND"
 )
 
+DISK_IMAGE_TYPE_SUFFIX="$(cloud_hypervisor_raw_disk_suffix)"
 DISK_ARGS=(
-    "path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on,image_type=raw"
-    "path=$RUNTIME_OVERLAY,image_type=raw"
+    "path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on${DISK_IMAGE_TYPE_SUFFIX}"
+    "path=$RUNTIME_OVERLAY${DISK_IMAGE_TYPE_SUFFIX}"
 )
 
 NET_ARGS=()

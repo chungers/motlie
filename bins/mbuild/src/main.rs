@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use motlie_vmm::image::{
     v1_5, ExternalOciSource, GuestArchitecture, GuestImageProfile, OciBlobPushStatus,
     OciContentCache, OciDigest, OciImageReference, OciImageReferenceKind, OciPlatform,
@@ -82,7 +82,6 @@ fn run() -> Result<()> {
             adapter_arg,
             rootfs_tarball,
             oci_layout,
-            package_stage_mode,
         } => build(BuildOptions {
             config_path: config,
             target,
@@ -92,7 +91,6 @@ fn run() -> Result<()> {
             adapter_args: adapter_arg,
             rootfs_tarball,
             oci_layout,
-            package_stage_mode,
         }),
         Commands::Seed {
             config,
@@ -201,21 +199,24 @@ struct BuildOptions {
     adapter_args: Vec<String>,
     rootfs_tarball: Option<PathBuf>,
     oci_layout: Option<PathBuf>,
-    package_stage_mode: PackageStageMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum PackageStageMode {
-    Rootless,
-    Sudo,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackageStageStrategy {
+    RootlessChroot,
+    HostApk { apk_static: PathBuf },
 }
 
-impl PackageStageMode {
-    fn as_str(self) -> &'static str {
+impl PackageStageStrategy {
+    fn as_str(&self) -> &'static str {
         match self {
-            Self::Rootless => "rootless",
-            Self::Sudo => "sudo",
+            Self::RootlessChroot => "rootless-chroot",
+            Self::HostApk { .. } => "host-apk",
         }
+    }
+
+    fn requires_guest_chroot(&self) -> bool {
+        matches!(self, Self::RootlessChroot)
     }
 }
 
@@ -914,7 +915,10 @@ fn run_ch_external_oci_build(
             host.platform, guest.platform, guest.rust_target, guest.deb_arch
         ),
     )?;
-    preflight_guest_chroot_execution(&host, &guest, &log_path)?;
+    let package_stage_strategy = select_package_stage_strategy(config, &guest, &log_path)?;
+    if package_stage_strategy.requires_guest_chroot() {
+        preflight_guest_chroot_execution(&host, &guest, &log_path)?;
+    }
 
     let work_root = create_work_root("mbuild-ch-rootfs")?;
     let rootfs_dir = work_root.join("rootfs");
@@ -928,13 +932,17 @@ fn run_ch_external_oci_build(
         serde_json::to_vec_pretty(&imported)?,
     )?;
 
-    let chroot_support = prepare_guest_chroot_execution(&rootfs_dir, &host, &guest, &log_path)?;
+    let chroot_support = if package_stage_strategy.requires_guest_chroot() {
+        prepare_guest_chroot_execution(&rootfs_dir, &host, &guest, &log_path)?
+    } else {
+        None
+    };
     let guest_binaries = build_guest_binaries(repo_root, &guest, &log_path)?;
     run_package_stage(
         &rootfs_dir,
         config,
         &guest,
-        options.package_stage_mode,
+        &package_stage_strategy,
         &options.out,
     )?;
 
@@ -944,7 +952,13 @@ fn run_ch_external_oci_build(
         options.out.join("mbuild-rootfs-assembly.json"),
         serde_json::to_vec_pretty(&assembly_manifest)?,
     )?;
-    verify_guest_binary_contract_marker(&rootfs_dir, &log_path, options.package_stage_mode)?;
+    verify_guest_binary_contract_marker(
+        &rootfs_dir,
+        &log_path,
+        &package_stage_strategy,
+        &host,
+        &guest,
+    )?;
     cleanup_guest_chroot_execution(&rootfs_dir, chroot_support.as_ref(), &log_path)?;
     let common_rootfs_tarball = emit_rootfs_tarball(
         &rootfs_dir,
@@ -1672,28 +1686,73 @@ fn ensure_binfmt_enabled(guest: &ChGuestTarget) -> Result<()> {
     Ok(())
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn find_executable(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
-    if candidate.components().count() > 1 && candidate.is_file() {
+    if candidate.components().count() > 1 && is_executable_file(candidate) {
         return Some(candidate.to_path_buf());
     }
     env::var_os("PATH").and_then(|path| {
         env::split_paths(&path)
             .map(|dir| dir.join(name))
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| is_executable_file(candidate))
     })
 }
 
 fn verify_guest_binary_contract_marker(
     rootfs_dir: &Path,
     log_path: &Path,
-    package_stage_mode: PackageStageMode,
+    package_stage_strategy: &PackageStageStrategy,
+    host: &HostPlatformTarget,
+    guest: &ChGuestTarget,
 ) -> Result<()> {
-    let mut command = package_stage_chroot_command(package_stage_mode)?;
-    command
-        .arg(rootfs_dir)
-        .arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT)
-        .arg("--contract");
+    let mut command = match package_stage_strategy {
+        PackageStageStrategy::RootlessChroot => {
+            let mut command = rootless_unshare_command()?;
+            command
+                .arg("--mount-proc")
+                .arg("chroot")
+                .arg(rootfs_dir)
+                .arg(v1_5::MOTLIE_V15_GUEST_BIN_OPT);
+            command
+        }
+        PackageStageStrategy::HostApk { .. } => {
+            let guest_binary = rootfs_dir.join(
+                v1_5::MOTLIE_V15_GUEST_BIN_OPT
+                    .strip_prefix('/')
+                    .unwrap_or(v1_5::MOTLIE_V15_GUEST_BIN_OPT),
+            );
+            if host.platform == guest.platform {
+                Command::new(guest_binary)
+            } else {
+                let qemu = find_executable(guest.qemu_static_binary).with_context(|| {
+                    format!(
+                        "cross-architecture host-apk contract check requires {}; install qemu-user-static or build on native {} hardware",
+                        guest.qemu_static_binary, guest.platform
+                    )
+                })?;
+                let mut command = Command::new(qemu);
+                command.arg(guest_binary);
+                command
+            }
+        }
+    };
+    command.arg("--contract");
     append_log(
         log_path,
         &format!("\n--- verify installed guest binary contract marker ---\ncommand={command:?}\n"),
@@ -1749,87 +1808,128 @@ fn rootless_unshare_command() -> Result<Command> {
     Ok(command)
 }
 
-fn package_stage_chroot_command(package_stage_mode: PackageStageMode) -> Result<Command> {
-    match package_stage_mode {
-        PackageStageMode::Rootless => {
-            let mut command = rootless_unshare_command()?;
-            command.arg("--mount-proc").arg("chroot");
-            Ok(command)
+fn select_package_stage_strategy(
+    config: &ImageBuildConfig,
+    guest: &ChGuestTarget,
+    log_path: &Path,
+) -> Result<PackageStageStrategy> {
+    match config.package_stage.manager.as_str() {
+        "apk" => {
+            let explicit_apk_static = env::var_os("MOTLIE_MBUILD_APK_STATIC").is_some();
+            match host_apk_stage_requirements(config) {
+                Ok(apk_static) => {
+                    append_log(
+                        log_path,
+                        &format!(
+                            "package_stage_strategy=host-apk guest_platform={} apk_static={}\n",
+                            guest.platform,
+                            apk_static.display()
+                        ),
+                    )?;
+                    Ok(PackageStageStrategy::HostApk { apk_static })
+                }
+                Err(error) if explicit_apk_static => Err(error),
+                Err(error) => {
+                    append_log(
+                        log_path,
+                        &format!(
+                            "package_stage_strategy=rootless-chroot guest_platform={} reason=host-apk-unavailable error={error:#}\n",
+                            guest.platform
+                        ),
+                    )?;
+                    Ok(PackageStageStrategy::RootlessChroot)
+                }
+            }
         }
-        PackageStageMode::Sudo => {
-            let mut command = Command::new("sudo");
-            command.arg("-n").arg("chroot");
-            Ok(command)
+        "apt" => {
+            append_log(
+                log_path,
+                &format!(
+                    "package_stage_strategy=rootless-chroot guest_platform={} manager=apt\n",
+                    guest.platform
+                ),
+            )?;
+            Ok(PackageStageStrategy::RootlessChroot)
         }
+        manager => bail!("CH external-OCI package stage does not implement {manager}"),
     }
 }
 
-fn current_process_id(flag: &str, label: &str) -> Result<u32> {
-    let output = Command::new("id")
-        .arg(flag)
-        .output()
-        .with_context(|| format!("read current {label}"))?;
-    if !output.status.success() {
+fn host_apk_stage_requirements(config: &ImageBuildConfig) -> Result<PathBuf> {
+    let apk_static = resolve_host_apk_static_path()?.context(
+        "host-side Alpine package staging requires apk.static; install apk-tools-static or set MOTLIE_MBUILD_APK_STATIC",
+    )?;
+    if !config.package_stage.npm_global.is_empty() {
+        find_executable("npm").context(
+            "host-side Alpine npm staging requires host npm; install node/npm or allow rootless chroot fallback by unsetting MOTLIE_MBUILD_APK_STATIC",
+        )?;
+    }
+    find_executable("ssh-keygen").context(
+        "host-side Alpine package staging requires ssh-keygen to generate guest host keys",
+    )?;
+    Ok(apk_static)
+}
+
+fn resolve_host_apk_static_path() -> Result<Option<PathBuf>> {
+    if let Some(path) = env::var_os("MOTLIE_MBUILD_APK_STATIC") {
+        let path = PathBuf::from(path);
+        if is_executable_file(&path) {
+            return Ok(Some(path));
+        }
         bail!(
-            "id {flag} failed with status {}",
-            output.status.code().unwrap_or(-1)
+            "MOTLIE_MBUILD_APK_STATIC is set but does not point to an executable file: {}",
+            path.display()
         );
     }
-    let stdout = String::from_utf8(output.stdout).context("id output was not UTF-8")?;
-    stdout
-        .trim()
-        .parse::<u32>()
-        .with_context(|| format!("parse current {label}"))
+    for candidate in [
+        "apk.static",
+        "/sbin/apk.static",
+        "/usr/sbin/apk.static",
+        "/usr/local/sbin/apk.static",
+    ] {
+        if let Some(path) = find_executable(candidate) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn run_package_stage(
     rootfs_dir: &Path,
     config: &ImageBuildConfig,
     guest: &ChGuestTarget,
-    package_stage_mode: PackageStageMode,
+    package_stage_strategy: &PackageStageStrategy,
     out: &Path,
 ) -> Result<()> {
     let script_path = out.join(CH_PACKAGE_STAGE_SCRIPT_NAME);
     let log_path = out.join(CH_PACKAGE_STAGE_LOG_NAME);
-    let stage_script = match config.package_stage.manager.as_str() {
-        "apt" => apt_stage_script(),
-        "apk" => apk_stage_script(),
-        manager => bail!("CH external-OCI package stage does not implement {manager}"),
+    let stage_script = match (
+        config.package_stage.manager.as_str(),
+        package_stage_strategy,
+    ) {
+        ("apt", PackageStageStrategy::RootlessChroot) => apt_stage_script(),
+        ("apk", PackageStageStrategy::RootlessChroot) => apk_chroot_stage_script(),
+        ("apk", PackageStageStrategy::HostApk { .. }) => apk_host_stage_script(),
+        (manager, _) => bail!("CH external-OCI package stage does not implement {manager}"),
     };
     fs::write(&script_path, stage_script)?;
     set_mode(&script_path, 0o755)?;
 
-    let mut command = match package_stage_mode {
-        PackageStageMode::Rootless => {
+    let mut command = match package_stage_strategy {
+        PackageStageStrategy::RootlessChroot => {
             let mut command = rootless_unshare_command()?;
             command.arg("--mount-proc").arg("bash");
-            command.env("MOTLIE_MBUILD_GUEST_APK_ARCH", guest.apk_arch());
-            command.env("MOTLIE_MBUILD_GUEST_NPM_ARCH", guest.npm_arch());
-            command.env("MOTLIE_MBUILD_GUEST_PLATFORM", guest.platform.to_string());
             command
         }
-        PackageStageMode::Sudo => {
-            let host_uid = current_process_id("-u", "uid")?;
-            let host_gid = current_process_id("-g", "gid")?;
-            let mut command = Command::new("sudo");
-            command
-                .arg("-n")
-                .arg("env")
-                .arg(format!("MOTLIE_MBUILD_GUEST_APK_ARCH={}", guest.apk_arch()))
-                .arg(format!("MOTLIE_MBUILD_GUEST_NPM_ARCH={}", guest.npm_arch()))
-                .arg(format!("MOTLIE_MBUILD_GUEST_PLATFORM={}", guest.platform))
-                .arg(format!("MOTLIE_MBUILD_PACKAGE_STAGE_HOST_UID={host_uid}"))
-                .arg(format!("MOTLIE_MBUILD_PACKAGE_STAGE_HOST_GID={host_gid}"));
-            if let Some(apk_static) = env::var_os("MOTLIE_MBUILD_APK_STATIC") {
-                command.arg(format!(
-                    "MOTLIE_MBUILD_APK_STATIC={}",
-                    PathBuf::from(apk_static).display()
-                ));
-            }
-            command.arg("bash");
+        PackageStageStrategy::HostApk { apk_static } => {
+            let mut command = Command::new("bash");
+            command.env("MOTLIE_MBUILD_APK_STATIC", apk_static);
             command
         }
     };
+    command.env("MOTLIE_MBUILD_GUEST_APK_ARCH", guest.apk_arch());
+    command.env("MOTLIE_MBUILD_GUEST_NPM_ARCH", guest.npm_arch());
+    command.env("MOTLIE_MBUILD_GUEST_PLATFORM", guest.platform.to_string());
     command
         .arg(&script_path)
         .arg(rootfs_dir)
@@ -1854,7 +1954,7 @@ fn run_package_stage(
         &format!(
             "{}/npm package stage ({})",
             config.package_stage.manager.as_str(),
-            package_stage_mode.as_str()
+            package_stage_strategy.as_str()
         ),
     )
 }
@@ -1949,7 +2049,7 @@ release_package_stage_rootfs_ownership
 "#
 }
 
-fn apk_stage_script() -> &'static str {
+fn apk_chroot_stage_script() -> &'static str {
     r#"#!/usr/bin/env bash
 set -euo pipefail
 rootfs="$(readlink -f "$1")"
@@ -1985,31 +2085,6 @@ case "$npm_arch" in
     x64|arm64) ;;
     *) echo "ERROR: unsupported or unknown guest npm arch: ${npm_arch:-<empty>}" >&2; exit 1 ;;
 esac
-
-find_apk_static() {
-    if [[ -n "${MOTLIE_MBUILD_APK_STATIC:-}" ]]; then
-        if [[ -x "$MOTLIE_MBUILD_APK_STATIC" ]]; then
-            printf '%s\n' "$MOTLIE_MBUILD_APK_STATIC"
-            return 0
-        fi
-        echo "ERROR: MOTLIE_MBUILD_APK_STATIC is not executable: $MOTLIE_MBUILD_APK_STATIC" >&2
-        exit 1
-    fi
-    local candidate
-    for candidate in apk.static /sbin/apk.static /usr/sbin/apk.static /usr/local/sbin/apk.static; do
-        if [[ "$candidate" == */* ]]; then
-            if [[ -x "$candidate" ]]; then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
-        elif command -v "$candidate" >/dev/null 2>&1; then
-            command -v "$candidate"
-            return 0
-        fi
-    done
-    echo "ERROR: apk.static not found. Install apk-tools-static or set MOTLIE_MBUILD_APK_STATIC." >&2
-    exit 1
-}
 
 restore_apk_recorded_modes() {
     local db="$rootfs/lib/apk/db/installed"
@@ -2047,25 +2122,14 @@ restore_apk_recorded_modes() {
 
 repair_claude_code_binary() {
     local claude_root="$rootfs/opt/motlie/npm/lib/node_modules/@anthropic-ai/claude-code"
-    local optional_binary="$claude_root/node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/bin/claude"
+    local optional_binary="$claude_root/node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/claude"
     local wrapper="$claude_root/bin/claude.exe"
     if [[ -x "$optional_binary" && -e "$wrapper" ]]; then
-        ln -sf "../node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/bin/claude" "$wrapper"
-    fi
-}
-
-release_package_stage_rootfs_ownership() {
-    local host_uid="${MOTLIE_MBUILD_PACKAGE_STAGE_HOST_UID:-}"
-    local host_gid="${MOTLIE_MBUILD_PACKAGE_STAGE_HOST_GID:-}"
-    if [[ -n "$host_uid" && -n "$host_gid" ]]; then
-        chown -h -R "$host_uid:$host_gid" "$rootfs"
-        restore_apk_recorded_modes
+        ln -sf "../node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/claude" "$wrapper"
     fi
 }
 
 chroot_env=(env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
-apk_static="$(find_apk_static)"
-apk_root=("$apk_static" --root "$rootfs" --arch "$apk_arch" --keys-dir "$rootfs/etc/apk/keys" --repositories-file "$rootfs/etc/apk/repositories")
 
 mkdir -p "$rootfs/proc" "$rootfs/sys" "$rootfs/dev" "$rootfs/etc" "$rootfs/tmp"
 mount --bind /proc "$rootfs/proc"
@@ -2096,14 +2160,14 @@ for package in "${apk_packages[@]}"; do
 done
 
 if [[ ${#bootstrap_packages[@]} -gt 0 ]]; then
-    "${apk_root[@]}" --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
+    chroot "$rootfs" "${chroot_env[@]}" apk --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
     chroot "$rootfs" "${chroot_env[@]}" update-ca-certificates >/dev/null 2>&1 || true
 fi
 if [[ "$update" == "1" ]]; then
-    "${apk_root[@]}" update
+    chroot "$rootfs" "${chroot_env[@]}" apk update
 fi
 if [[ ${#remaining_packages[@]} -gt 0 ]]; then
-    "${apk_root[@]}" add --no-cache "${remaining_packages[@]}"
+    chroot "$rootfs" "${chroot_env[@]}" apk add --no-cache "${remaining_packages[@]}"
 fi
 restore_apk_recorded_modes
 
@@ -2164,7 +2228,192 @@ grep -qxF user_allow_other "$rootfs/etc/fuse.conf" 2>/dev/null || printf '%s\n' 
 if [[ "$clean" == "1" ]]; then
     rm -rf "$rootfs/var/cache/apk"/* "$rootfs/root/.npm"
 fi
-release_package_stage_rootfs_ownership
+"#
+}
+
+fn apk_host_stage_script() -> &'static str {
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+rootfs="$(readlink -f "$1")"
+update="$2"
+clean="$3"
+shift 3
+
+apk_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    apk_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_packages=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    npm_packages+=("$1")
+    shift
+done
+[[ $# -gt 0 ]] && shift
+npm_binaries=("$@")
+
+apk_arch="${MOTLIE_MBUILD_GUEST_APK_ARCH:-}"
+if [[ -z "$apk_arch" && -f "$rootfs/etc/apk/arch" ]]; then
+    apk_arch="$(cat "$rootfs/etc/apk/arch")"
+fi
+npm_arch="${MOTLIE_MBUILD_GUEST_NPM_ARCH:-}"
+case "$apk_arch" in
+    x86_64) [[ -n "$npm_arch" ]] || npm_arch="x64" ;;
+    aarch64) [[ -n "$npm_arch" ]] || npm_arch="arm64" ;;
+    *) echo "ERROR: unsupported or unknown Alpine guest apk arch: ${apk_arch:-<empty>}" >&2; exit 1 ;;
+esac
+case "$npm_arch" in
+    x64|arm64) ;;
+    *) echo "ERROR: unsupported or unknown guest npm arch: ${npm_arch:-<empty>}" >&2; exit 1 ;;
+esac
+
+apk_static="${MOTLIE_MBUILD_APK_STATIC:?MOTLIE_MBUILD_APK_STATIC is required for host apk staging}"
+apk_root=("$apk_static" --root "$rootfs" --arch "$apk_arch" --keys-dir "$rootfs/etc/apk/keys" --repositories-file "$rootfs/etc/apk/repositories")
+apk_root_add=("${apk_root[@]}" --no-scripts --no-chown)
+mkdir -p "$rootfs/tmp"
+
+restore_apk_recorded_modes() {
+    local db="$rootfs/lib/apk/db/installed"
+    [[ -f "$db" ]] || return 0
+    local line field value dir="" file="" uid="" gid="" mode="" path=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -n "$line" && "$line" == *:* ]] || continue
+        field="${line%%:*}"
+        value="${line#*:}"
+        case "$field" in
+            F)
+                dir="$value"
+                file=""
+                ;;
+            M)
+                IFS=: read -r uid gid mode <<< "$value"
+                path="$rootfs/$dir"
+                if [[ -n "$dir" && -n "$mode" && -e "$path" && ! -L "$path" ]]; then
+                    chmod "$mode" "$path" || true
+                fi
+                ;;
+            R)
+                file="$value"
+                ;;
+            a)
+                IFS=: read -r uid gid mode <<< "$value"
+                path="$rootfs/$dir/$file"
+                if [[ -n "$dir" && -n "$file" && -n "$mode" && -e "$path" && ! -L "$path" ]]; then
+                    chmod "$mode" "$path" || true
+                fi
+                ;;
+        esac
+    done < "$db"
+}
+
+repair_claude_code_binary() {
+    local claude_root="$rootfs/opt/motlie/npm/lib/node_modules/@anthropic-ai/claude-code"
+    local optional_binary="$claude_root/node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/claude"
+    local wrapper="$claude_root/bin/claude.exe"
+    if [[ -x "$optional_binary" && -e "$wrapper" ]]; then
+        ln -sf "../node_modules/@anthropic-ai/claude-code-linux-${npm_arch}-musl/claude" "$wrapper"
+    fi
+}
+
+generate_ssh_host_keys() {
+    mkdir -p "$rootfs/etc/ssh"
+    local key
+    key="$rootfs/etc/ssh/ssh_host_rsa_key"
+    [[ -f "$key" ]] || ssh-keygen -q -t rsa -b 3072 -N '' -f "$key"
+    key="$rootfs/etc/ssh/ssh_host_ecdsa_key"
+    [[ -f "$key" ]] || ssh-keygen -q -t ecdsa -N '' -f "$key"
+    key="$rootfs/etc/ssh/ssh_host_ed25519_key"
+    [[ -f "$key" ]] || ssh-keygen -q -t ed25519 -N '' -f "$key"
+    chmod 600 "$rootfs"/etc/ssh/ssh_host_*_key
+    chmod 644 "$rootfs"/etc/ssh/ssh_host_*_key.pub
+}
+
+enable_openrc_service() {
+    local service="$1"
+    local runlevel="$2"
+    if [[ -f "$rootfs/etc/init.d/$service" ]]; then
+        mkdir -p "$rootfs/etc/runlevels/$runlevel"
+        ln -sf "/etc/init.d/$service" "$rootfs/etc/runlevels/$runlevel/$service"
+    fi
+}
+
+if [[ -f "$rootfs/etc/apk/repositories" ]]; then
+    sed -i 's#^https://dl-cdn.alpinelinux.org/#http://dl-cdn.alpinelinux.org/#' "$rootfs/etc/apk/repositories"
+fi
+
+bootstrap_packages=()
+remaining_packages=()
+for package in "${apk_packages[@]}"; do
+    case "$package" in
+        ca-certificates|ca-certificates-bundle) bootstrap_packages+=("$package") ;;
+        *) remaining_packages+=("$package") ;;
+    esac
+done
+
+if [[ ${#bootstrap_packages[@]} -gt 0 ]]; then
+    "${apk_root_add[@]}" --no-check-certificate add --no-cache "${bootstrap_packages[@]}"
+fi
+if [[ "$update" == "1" ]]; then
+    "${apk_root[@]}" update
+fi
+if [[ ${#remaining_packages[@]} -gt 0 ]]; then
+    "${apk_root_add[@]}" add --no-cache "${remaining_packages[@]}"
+fi
+restore_apk_recorded_modes
+
+mkdir -p "$rootfs/opt/motlie/npm"
+if [[ ${#npm_packages[@]} -gt 0 ]]; then
+    npm_env=(
+        npm_config_update_notifier=false
+        npm_config_platform=linux
+        npm_config_arch="$npm_arch"
+        npm_config_libc=musl
+        npm_config_include=optional
+        npm_config_optional=true
+    )
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        cp /etc/ssl/certs/ca-certificates.crt "$rootfs/tmp/mbuild-host-ca-certificates.crt"
+        npm_env+=(NODE_EXTRA_CA_CERTS="$rootfs/tmp/mbuild-host-ca-certificates.crt" npm_config_cafile="$rootfs/tmp/mbuild-host-ca-certificates.crt")
+    fi
+    env "${npm_env[@]}" npm install -g --prefix "$rootfs/opt/motlie/npm" "${npm_packages[@]}"
+    rm -f "$rootfs/tmp/mbuild-host-ca-certificates.crt"
+    repair_claude_code_binary
+    mkdir -p "$rootfs/usr/local/bin"
+    for binary in "${npm_binaries[@]}"; do
+        ln -sf "/opt/motlie/npm/bin/$binary" "$rootfs/usr/local/bin/$binary"
+    done
+fi
+
+generate_ssh_host_keys
+sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' "$rootfs/etc/ssh/sshd_config" || true
+grep -qxF 'Include /etc/ssh/sshd_config.d/*.conf' "$rootfs/etc/ssh/sshd_config" 2>/dev/null || printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> "$rootfs/etc/ssh/sshd_config"
+if [[ -d "$rootfs/etc/init.d" ]]; then
+    mkdir -p "$rootfs/etc/runlevels/sysinit" "$rootfs/etc/runlevels/boot" "$rootfs/etc/runlevels/default"
+    grep -qxF 'rc_logger="YES"' "$rootfs/etc/rc.conf" 2>/dev/null || printf '\nrc_logger="YES"\n' >> "$rootfs/etc/rc.conf"
+    grep -qxF 'rc_verbose=yes' "$rootfs/etc/rc.conf" 2>/dev/null || printf 'rc_verbose=yes\n' >> "$rootfs/etc/rc.conf"
+    for entry in \
+        "devfs sysinit" \
+        "procfs sysinit" \
+        "sysfs sysinit" \
+        "hostname boot" \
+        "bootmisc boot" \
+        "root boot" \
+        "fsck boot" \
+        "localmount boot" \
+        "loopback boot" \
+        "networking boot"; do
+        enable_openrc_service "${entry% *}" "${entry#* }"
+    done
+    for service in sshd dbus cloud-init-local cloud-init cloud-config cloud-final local; do
+        enable_openrc_service "$service" default
+    done
+fi
+grep -qxF user_allow_other "$rootfs/etc/fuse.conf" 2>/dev/null || printf '%s\n' user_allow_other >> "$rootfs/etc/fuse.conf"
+if [[ "$clean" == "1" ]]; then
+    rm -rf "$rootfs/var/cache/apk"/* "$rootfs/root/.npm"
+fi
+restore_apk_recorded_modes
 "#
 }
 
@@ -3635,9 +3884,6 @@ enum Commands {
         /// Local OCI image layout containing a Motlie assembled rootfs payload to consume.
         #[arg(long)]
         oci_layout: Option<PathBuf>,
-        /// Package-stage isolation mode: rootless user namespace by default, or sudo for hosts that restrict rootless chroot/mount.
-        #[arg(long, value_enum, default_value = "rootless")]
-        package_stage_mode: PackageStageMode,
     },
     /// Emit per-guest seed artifacts without rebuilding the immutable image.
     Seed {
@@ -5681,34 +5927,9 @@ validation:
                 plan_only: false,
                 adapter_arg: Vec::new(),
                 rootfs_tarball: None,
-                oci_layout: None,
-                package_stage_mode: PackageStageMode::Rootless
+                oci_layout: None
             }
         );
-    }
-
-    #[test]
-    fn parses_build_package_stage_mode_sudo() {
-        let cli = Cli::try_parse_from([
-            "mbuild",
-            "build",
-            "--config",
-            "motlie-image.yaml",
-            "--target",
-            "ch",
-            "--out",
-            "artifacts/ch",
-            "--package-stage-mode",
-            "sudo",
-        ])
-        .unwrap();
-
-        match cli.command {
-            Commands::Build {
-                package_stage_mode, ..
-            } => assert_eq!(package_stage_mode, PackageStageMode::Sudo),
-            other => panic!("expected build command, got {other:?}"),
-        }
     }
 
     #[test]
@@ -5737,8 +5958,7 @@ validation:
                 plan_only: false,
                 adapter_arg: Vec::new(),
                 rootfs_tarball: Some(PathBuf::from("artifacts/rootfs.tar")),
-                oci_layout: None,
-                package_stage_mode: PackageStageMode::Rootless
+                oci_layout: None
             }
         );
     }
@@ -5769,8 +5989,7 @@ validation:
                 plan_only: false,
                 adapter_arg: Vec::new(),
                 rootfs_tarball: None,
-                oci_layout: Some(PathBuf::from("artifacts/oci-arm64")),
-                package_stage_mode: PackageStageMode::Rootless
+                oci_layout: Some(PathBuf::from("artifacts/oci-arm64"))
             }
         );
     }
@@ -6281,47 +6500,85 @@ validation:
     }
 
     #[test]
-    fn apk_stage_uses_apk_static_and_restores_recorded_modes() {
-        let script = apk_stage_script();
+    fn package_stage_strategy_marks_only_chroot_strategy_as_chroot_required() {
+        assert!(PackageStageStrategy::RootlessChroot.requires_guest_chroot());
+        assert!(!PackageStageStrategy::HostApk {
+            apk_static: PathBuf::from("/tmp/apk.static")
+        }
+        .requires_guest_chroot());
+        assert_eq!(
+            PackageStageStrategy::RootlessChroot.as_str(),
+            "rootless-chroot"
+        );
+        assert_eq!(
+            PackageStageStrategy::HostApk {
+                apk_static: PathBuf::from("/tmp/apk.static")
+            }
+            .as_str(),
+            "host-apk"
+        );
+    }
 
-        assert!(script.contains(r#"apk_static="$(find_apk_static)""#));
+    #[test]
+    fn apk_host_stage_uses_apk_static_without_chroot_and_restores_recorded_modes() {
+        let script = apk_host_stage_script();
+
+        assert!(script.contains(r#"apk_static="${MOTLIE_MBUILD_APK_STATIC:?"#));
         assert!(script.contains(r#"--root "$rootfs" --arch "$apk_arch""#));
+        assert!(script.contains(r#"apk_root_add=("${apk_root[@]}" --no-scripts --no-chown)"#));
+        assert!(script.contains(r#""${apk_root_add[@]}" --no-check-certificate add --no-cache"#));
+        assert!(script.contains(r#""${apk_root_add[@]}" add --no-cache"#));
         assert!(script.contains("restore_apk_recorded_modes"));
-        assert!(script.contains("release_package_stage_rootfs_ownership"));
         assert!(script.contains(r#"local db="$rootfs/lib/apk/db/installed""#));
         assert!(script.contains(r#"chmod "$mode" "$path""#));
-        assert!(script.contains(
-            "chroot_env=(env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)"
-        ));
-        assert!(script.contains(r#"chroot "$rootfs" "${chroot_env[@]}" rc-update add"#));
+        assert!(script.contains("generate_ssh_host_keys"));
+        assert!(script.contains("enable_openrc_service"));
+        assert!(!script.contains("mount --bind /proc"));
+        assert!(!script.contains(r#"chroot "$rootfs""#));
         assert!(script.contains(r#""root boot""#));
         assert!(script.contains(r#""fsck boot""#));
         assert!(script.contains(r#""networking boot""#));
     }
 
     #[test]
-    fn apk_stage_uses_guest_npm_platform_and_repairs_claude() {
-        let script = apk_stage_script();
+    fn apk_chroot_stage_uses_guest_apk_without_host_apk_static() {
+        let script = apk_chroot_stage_script();
+
+        assert!(script.contains(r#"chroot "$rootfs" "${chroot_env[@]}" apk update"#));
+        assert!(script.contains(r#"chroot "$rootfs" "${chroot_env[@]}" rc-update add"#));
+        assert!(script.contains("mount --bind /proc"));
+        assert!(script.contains("restore_apk_recorded_modes"));
+        assert!(!script.contains("apk_static="));
+    }
+
+    #[test]
+    fn apk_host_stage_uses_guest_npm_platform_and_repairs_claude() {
+        let script = apk_host_stage_script();
 
         assert!(script.contains("npm_config_platform=linux"));
         assert!(script.contains(r#"npm_config_arch="$npm_arch""#));
         assert!(script.contains("npm_config_libc=musl"));
-        assert!(script.contains("@anthropic-ai/claude-code-linux-${npm_arch}-musl/bin/claude"));
+        assert!(script.contains("@anthropic-ai/claude-code-linux-${npm_arch}-musl/claude"));
         assert!(script.contains(r#"local wrapper="$claude_root/bin/claude.exe""#));
         assert!(script.contains("repair_claude_code_binary"));
     }
 
     #[test]
-    fn ch_launcher_uses_ext4_raw_rootfs_disks() {
+    fn ch_launcher_uses_ext4_and_portable_raw_disk_options() {
         let launcher =
             fs::read_to_string(repo_root_fixture().join("libs/vmm/examples/v1.5/launch-ch.sh"))
                 .unwrap();
 
         assert!(launcher.contains("rootfstype=ext4"));
+        assert!(launcher.contains("cloud_hypervisor_raw_disk_suffix"));
+        assert!(launcher.contains("grep -q 'image_type='"));
+        assert!(launcher.contains("printf ',image_type=raw'"));
         assert!(
-            launcher.contains("path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on,image_type=raw")
+            launcher.contains(r#"DISK_IMAGE_TYPE_SUFFIX="$(cloud_hypervisor_raw_disk_suffix)""#)
         );
-        assert!(launcher.contains("path=$RUNTIME_OVERLAY,image_type=raw"));
+        assert!(launcher
+            .contains("path=$BASE_ARTIFACTS/rootfs.squashfs,readonly=on${DISK_IMAGE_TYPE_SUFFIX}"));
+        assert!(launcher.contains("path=$RUNTIME_OVERLAY${DISK_IMAGE_TYPE_SUFFIX}"));
         assert!(!launcher.contains("rootfstype=squashfs"));
     }
 
@@ -6358,7 +6615,6 @@ validation:
             adapter_args: Vec::new(),
             rootfs_tarball: None,
             oci_layout: None,
-            package_stage_mode: PackageStageMode::Rootless,
         };
 
         let error = run_build_execution(Path::new("."), &config, emitter, &options, None)
