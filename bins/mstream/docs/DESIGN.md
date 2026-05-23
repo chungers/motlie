@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: handoff firing marks the destination busy, already-met handoffs fire immediately by default, and public cursors carry timeline generation for stale-cursor detection. |
 | 2026-05-22 | @codex | Aligned timeline dependency language with PR #326's concrete OutputBus timeline APIs: create-or-get, mutable filters, scoped markers, history ingest, stale handles, cleanup, and latest-cursor semantics. |
 | 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff, explicit completion/state ownership, OutputBus timeline dependency gates, cursor/time ownership, and timeline cleanup rules. |
 | 2026-05-22 | @codex | Addressed issue #323 feedback: renamed workstream creation to `open`, defined `close` as conclusion that frees agents, and added domain/context tags plus `recruit --goal` matching. |
@@ -530,15 +531,31 @@ mstream handoff arm pr-322 \
   --on done \
   --task "The submitter marked done. Re-review PR 322 and post verdict."
 
+mstream handoff arm pr-322 \
+  --from amd1::gpt55-submitter \
+  --to amd2::ops47-reviewer \
+  --on done \
+  --only-on-transition \
+  --task "Re-review only after the submitter next reports done."
+
 mstream handoff list pr-322
 mstream handoff cancel pr-322 <handoff-id>
 ```
 
 An armed handoff is daemon-memory state. When the `from` target reports the
-matching terminal state, the daemon sends the task to the `to` target, emits a
-`handoff_fired` event, and marks the handoff fired. It does not survive daemon
-restart, but it lets the orchestrator set a dependency edge and safely compact
-or poll less often.
+matching terminal state, the daemon atomically marks the `to` target `busy`,
+updates `@mstream/updated-at`, sends the task to the `to` target, emits a
+`handoff_fired` event, and marks the handoff fired. The destination state update
+is part of firing so a target that was previously `done`, `blocked`, or
+`needs-input` is not misclassified while it works on the new task.
+
+If the `from` target is already in the requested state when `handoff arm` runs,
+the handoff fires immediately by default. This makes the common coordinator
+sequence race-free: poll status, observe `A=done`, then arm `A -> B`. Callers
+that need edge-triggered behavior can pass `--only-on-transition`; in that mode
+the handoff waits for a future state transition even if the current state already
+matches. Armed handoffs do not survive daemon restart, but they let the
+orchestrator set a dependency edge and safely compact or poll less often.
 
 ### Recruiting
 
@@ -608,6 +625,14 @@ tool errors, final answers, and obvious stuck states.
 it ingests output or writes tags. Internal `libs/tmux` timeline cursors may use
 `Instant`, but public `mstream` cursors are opaque serialized strings that do
 not expose `Instant` or require `serde` support from `libs/tmux`.
+
+Public cursors must embed the workstream timeline generation or epoch alongside
+the internal timeline cursor. `close` followed by re-`open` of the same
+workstream name creates a fresh timeline generation; using a cursor from the old
+generation against the new timeline must return a structured JSONL error such as
+`{"type":"error","kind":"cursor_stale",...}`. The orchestrator can then
+re-baseline with `latest` instead of receiving plausible but wrong replay/skip
+behavior.
 
 All machine-facing stdout is JSONL. Do not add a `--format` flag until there is
 a concrete non-JSONL consumer.
