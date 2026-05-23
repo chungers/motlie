@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: destination busy state, already-met handoff semantics, and generation-aware cursor validation. |
 | 2026-05-22 | @codex | Aligned timeline implementation tasks with PR #326's concrete OutputBus timeline APIs and latest-cursor/backfill/cleanup contracts. |
 | 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff implementation phase, explicit completion state ownership, timeline dependency gates, and status/process-state follow-ups. |
 | 2026-05-22 | @codex | Synced PLAN with issue #323 feedback: use `open`/`close`, add close-time agent availability/context tags, and require `recruit --goal` matching. |
@@ -122,8 +123,10 @@ Tasks:
 - [ ] 3.2 Reject empty host aliases, empty session names, and malformed target
   strings with actionable JSONL errors.
 - [ ] 3.3 Define opaque cursor types for workstream event streams. The encoding
-  is owned by `mstream`; it must not expose `std::time::Instant` or depend on
-  `libs/tmux` timeline serde support.
+  is owned by `mstream`; it must embed the workstream timeline generation or
+  epoch with the internal timeline cursor, must return structured
+  `cursor_stale` errors on generation mismatch, and must not expose
+  `std::time::Instant` or depend on `libs/tmux` timeline serde support.
 - [ ] 3.4 Add snapshot-safe text fields that preserve content without control
   characters leaking into JSONL.
 - [ ] 3.5 Add golden tests for JSONL output shape for representative success
@@ -303,9 +306,12 @@ Tasks:
   `broadcast_sent`, `completed`, `blocked`, and `needs_input`.
 - [ ] 8.10 Implement `mstream handoff arm/list/cancel` as daemon-memory state
   that fires when a source target reaches a requested terminal state.
-- [ ] 8.11 Ensure handoff firing sends the configured task to the destination,
-  emits `handoff_fired`, and does not claim durability across daemon restart.
-- [ ] 8.12 Add tests that silence, prompt heuristics, and missing output do not
+- [ ] 8.11 Make `handoff arm` fire immediately when the source is already in the
+  requested state; support `--only-on-transition` for edge-triggered handoffs.
+- [ ] 8.12 Ensure handoff firing marks the destination `busy`, updates
+  `@mstream/updated-at`, sends the configured task to the destination, emits
+  `handoff_fired`, and does not claim durability across daemon restart.
+- [ ] 8.13 Add tests that silence, prompt heuristics, and missing output do not
   transition a session to `done`, `blocked`, or `needs-input`.
 
 Validation:
