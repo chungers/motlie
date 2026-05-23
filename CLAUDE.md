@@ -223,17 +223,39 @@ Be sure your work is tracked in a local working branch.  Stage for commits only 
 NEVER commit any harness files (CLAUDE.md, AGENTS.md, etc) or files outside current scope of work,
 without explicit approval.  Commit local changes as you go.
 
-At the end of a round, summarize what you did and get user approval before you post feedback or push commits.
+At the end of a round, summarize what you did and get user approval before you post feedback or push.
+
+## Core Tenets of Engineering
+
+→ Think before coding
+state your assumptions. ask when unsure. never guess.
+
+→ Simplicity first
+write the minimum code that solves the problem.
+no abstractions nobody asked for.
+
+→ Surgical changes
+don't touch code unrelated to the request.
+every changed line must trace back to what was asked.
+
+→ Goal-driven execution
+turn vague instructions into verifiable success criteria
+before writing a single line.
+
 
 ## Rust Coding Guidelines
 
 ### Core Principles
+
 Prioritize **correctness, safety, and maintainability** over stylistic preferences.
-No code smells, leaky abstractions, duplications and boilerplates without clear rationalization.
-Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide) for help when possible.
+No code smells, leaky abstractions, duplications and boilerplates.
+Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide)
+for help when possible.
+
 ---
 
 ### 1. Basics, Ownership & Lifetimes
+
 - Prefer static dispatch over dynamic (must justify Box<dyn ...>).
 - Prefer **clear ownership** over complex borrowing
 - Avoid unnecessary references (`&T`, `&mut T`)
@@ -243,6 +265,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 2. No Panics in Production
+
 - **Disallow `unwrap()` / `expect()`** in non-test code
 - Use `Result` + `?` for error propagation
 - Allow only for proven invariants (must justify)
@@ -251,6 +274,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 3. Types Encode Invariants
+
 - Replace primitives with domain types
 - Use `enum` over strings/flags
 - Prefer `Option` / `Result` over sentinel values
@@ -259,6 +283,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 4. Minimize Mutability
+
 - Prefer `let` over `let mut`
 - Favor functional/iterator patterns where clear
 - Keep functions small and side-effect-free when possible
@@ -266,6 +291,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 5. Errors Must Carry Context
+
 - Add context at I/O, network, and parsing boundaries
 - Use `anyhow::Context` or structured errors
 - Use `thiserror` in libraries to define error types. No `anyhow` in libs.
@@ -275,6 +301,7 @@ Consult [Official Rust Style Guide](https://doc.rust-lang.org/stable/style-guide
 ---
 
 ### 6. Tooling Enforcement
+
 - `cargo fmt` must pass
 - `cargo clippy -- -D warnings`
 - Take deadcode warning seriously.  Do not hide them by adding `#[allow(dead_code)]`
