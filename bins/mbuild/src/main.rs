@@ -894,18 +894,6 @@ fn run_ch_external_oci_build(
     append_log(&log_path, "=== mbuild CH external-OCI builder ===\n")?;
 
     let platform = parse_source_platform(&config.source.platform)?;
-    let source = resolve_external_source(config, platform)?;
-    append_log(
-        &log_path,
-        &format!(
-            "source={} platform={} index={} manifest={}\n",
-            source.image_ref,
-            source.platform,
-            source.image_index_digest,
-            source.platform_manifest_digest
-        ),
-    )?;
-
     let host = HostPlatformTarget::detect()?;
     let guest = ChGuestTarget::from_platform(platform)?;
     append_log(
@@ -919,6 +907,18 @@ fn run_ch_external_oci_build(
     if package_stage_strategy.requires_guest_chroot() {
         preflight_guest_chroot_execution(&host, &guest, &log_path)?;
     }
+
+    let source = resolve_external_source(config, platform)?;
+    append_log(
+        &log_path,
+        &format!(
+            "source={} platform={} index={} manifest={}\n",
+            source.image_ref,
+            source.platform,
+            source.image_index_digest,
+            source.platform_manifest_digest
+        ),
+    )?;
 
     let work_root = create_work_root("mbuild-ch-rootfs")?;
     let rootfs_dir = work_root.join("rootfs");
@@ -1558,6 +1558,17 @@ fn cargo_target_linker_env(rust_target: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
+struct RootlessChrootPrerequisites {
+    unshare: PathBuf,
+    newuidmap: PathBuf,
+    newgidmap: PathBuf,
+    subuid_start: u32,
+    subuid_count: u32,
+    subgid_start: u32,
+    subgid_count: u32,
+}
+
+#[derive(Debug, Clone)]
 struct GuestChrootSupport {
     copied_qemu_guest_path: Option<PathBuf>,
 }
@@ -1567,7 +1578,15 @@ fn preflight_guest_chroot_execution(
     guest: &ChGuestTarget,
     log_path: &Path,
 ) -> Result<()> {
+    preflight_rootless_chroot_execution(log_path)?;
     if host.platform == guest.platform {
+        append_log(
+            log_path,
+            &format!(
+                "guest chroot preflight passed: host={} guest={} mode=native\n",
+                host.platform, guest.platform
+            ),
+        )?;
         return Ok(());
     }
     let qemu = cross_chroot_qemu_path(host, guest)?;
@@ -1582,6 +1601,131 @@ fn preflight_guest_chroot_execution(
         ),
     )?;
     Ok(())
+}
+
+fn preflight_rootless_chroot_execution(log_path: &Path) -> Result<()> {
+    let prerequisites = rootless_chroot_prerequisites()?;
+    let mut command = rootless_unshare_command_with_prerequisites(&prerequisites);
+    command.arg("true");
+    let command_display = format!("{command:?}");
+    append_log(
+        log_path,
+        &format!(
+            "\n--- rootless chroot package-stage preflight ---\nunshare={} newuidmap={} newgidmap={} subuid={}:{} subgid={}:{}\ncommand={command_display}\n",
+            prerequisites.unshare.display(),
+            prerequisites.newuidmap.display(),
+            prerequisites.newgidmap.display(),
+            prerequisites.subuid_start,
+            prerequisites.subuid_count,
+            prerequisites.subgid_start,
+            prerequisites.subgid_count,
+        ),
+    )?;
+    let output = command
+        .output()
+        .context("run rootless chroot package-stage preflight")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    append_log(
+        log_path,
+        &format!(
+            "status={}\nstdout={stdout}\nstderr={stderr}\n",
+            output.status.code().unwrap_or(-1)
+        ),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "{}",
+            rootless_chroot_preflight_failure_message(
+                &command_display,
+                output.status.code().unwrap_or(-1),
+                &stdout,
+                &stderr,
+            )
+        );
+    }
+    append_log(log_path, "rootless chroot package-stage preflight passed\n")?;
+    Ok(())
+}
+
+fn rootless_chroot_prerequisites() -> Result<RootlessChrootPrerequisites> {
+    let mut missing = Vec::new();
+    let unshare = match find_executable("unshare") {
+        Some(path) => path,
+        None => {
+            missing.push("unshare".to_string());
+            PathBuf::new()
+        }
+    };
+    let newuidmap = match find_executable("newuidmap") {
+        Some(path) => path,
+        None => {
+            missing.push("newuidmap".to_string());
+            PathBuf::new()
+        }
+    };
+    let newgidmap = match find_executable("newgidmap") {
+        Some(path) => path,
+        None => {
+            missing.push("newgidmap".to_string());
+            PathBuf::new()
+        }
+    };
+    if !missing.is_empty() {
+        bail!(
+            "{}",
+            rootless_chroot_prerequisite_failure_message(&format!(
+                "Missing executable prerequisite(s): {}.",
+                missing.join(", ")
+            ))
+        );
+    }
+
+    let (subuid_start, subuid_count) = match subordinate_id_range("/etc/subuid") {
+        Ok(range) => range,
+        Err(error) => bail!(
+            "{}",
+            rootless_chroot_prerequisite_failure_message(&format!(
+                "Missing usable /etc/subuid range for the current user: {error:#}."
+            ))
+        ),
+    };
+    let (subgid_start, subgid_count) = match subordinate_id_range("/etc/subgid") {
+        Ok(range) => range,
+        Err(error) => bail!(
+            "{}",
+            rootless_chroot_prerequisite_failure_message(&format!(
+                "Missing usable /etc/subgid range for the current user: {error:#}."
+            ))
+        ),
+    };
+
+    Ok(RootlessChrootPrerequisites {
+        unshare,
+        newuidmap,
+        newgidmap,
+        subuid_start,
+        subuid_count,
+        subgid_start,
+        subgid_count,
+    })
+}
+
+fn rootless_chroot_prerequisite_failure_message(missing: &str) -> String {
+    format!(
+        "Ubuntu/Debian CH package staging selected package_stage_strategy=rootless-chroot and requires uidmap-capable rootless chroot support. {missing}\nInstall the uidmap package if newuidmap/newgidmap are missing, ensure this user has usable /etc/subuid and /etc/subgid ranges, start a fresh login session after changing subordinate ID ranges, and verify unprivileged user namespaces are enabled for this host. On Debian/Ubuntu hosts, also check kernel.unprivileged_userns_clone and AppArmor/LSM policy such as kernel.apparmor_restrict_unprivileged_userns. Alpine/APK builds can use host-apk when apk.static is available; APT builds do not have a rootless-free host-side staging path."
+    )
+}
+
+fn rootless_chroot_preflight_failure_message(
+    command: &str,
+    status: i32,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    format!(
+        "Ubuntu/Debian CH package staging selected package_stage_strategy=rootless-chroot and requires uidmap-capable rootless chroot support. Missing or blocked prerequisite: the rootless unshare namespace probe failed with status {status}.\ncommand: {command}\nstdout:\n{stdout}\nstderr:\n{stderr}\nInstall the uidmap package if newuidmap/newgidmap are missing, ensure this user has usable /etc/subuid and /etc/subgid ranges, start a fresh login session after changing subordinate ID ranges, and verify unprivileged user namespaces are enabled for this host. On Debian/Ubuntu hosts, also check kernel.unprivileged_userns_clone and AppArmor/LSM policy such as kernel.apparmor_restrict_unprivileged_userns. Alpine/APK builds can use host-apk when apk.static is available; APT builds do not have a rootless-free host-side staging path."
+    )
 }
 
 fn prepare_guest_chroot_execution(
@@ -1788,16 +1932,28 @@ fn verify_guest_binary_contract_marker(
 }
 
 fn rootless_unshare_command() -> Result<Command> {
-    let (subuid_start, subuid_count) = subordinate_id_range("/etc/subuid")?;
-    let (subgid_start, subgid_count) = subordinate_id_range("/etc/subgid")?;
-    let uid_count = subuid_count.min(65_535);
-    let gid_count = subgid_count.min(65_535);
-    let mut command = Command::new("unshare");
+    Ok(rootless_unshare_command_with_prerequisites(
+        &rootless_chroot_prerequisites()?,
+    ))
+}
+
+fn rootless_unshare_command_with_prerequisites(
+    prerequisites: &RootlessChrootPrerequisites,
+) -> Command {
+    let uid_count = prerequisites.subuid_count.min(65_535);
+    let gid_count = prerequisites.subgid_count.min(65_535);
+    let mut command = Command::new(&prerequisites.unshare);
     command
         .arg("--user")
         .arg("--map-root-user")
-        .arg(format!("--map-users=1:{subuid_start}:{uid_count}"))
-        .arg(format!("--map-groups=1:{subgid_start}:{gid_count}"))
+        .arg(format!(
+            "--map-users=1:{}:{uid_count}",
+            prerequisites.subuid_start
+        ))
+        .arg(format!(
+            "--map-groups=1:{}:{gid_count}",
+            prerequisites.subgid_start
+        ))
         .arg("--setgroups")
         .arg("allow")
         .arg("--mount")
@@ -1805,7 +1961,7 @@ fn rootless_unshare_command() -> Result<Command> {
         .arg("unchanged")
         .arg("--pid")
         .arg("--fork");
-    Ok(command)
+    command
 }
 
 fn select_package_stage_strategy(
@@ -6517,6 +6673,41 @@ validation:
             .as_str(),
             "host-apk"
         );
+    }
+
+    #[test]
+    fn rootless_chroot_preflight_failure_message_is_actionable() {
+        let message = rootless_chroot_preflight_failure_message(
+            "unshare --user --map-root-user true",
+            1,
+            "",
+            "unshare: cannot open /proc/self/setgroups: Permission denied",
+        );
+
+        assert!(message.contains("package_stage_strategy=rootless-chroot"));
+        assert!(message.contains("rootless unshare namespace probe failed"));
+        assert!(message.contains("/etc/subuid"));
+        assert!(message.contains("/etc/subgid"));
+        assert!(message.contains("newuidmap/newgidmap"));
+        assert!(message.contains("fresh login session"));
+        assert!(message.contains("kernel.unprivileged_userns_clone"));
+        assert!(message.contains("kernel.apparmor_restrict_unprivileged_userns"));
+        assert!(message.contains("APT builds do not have a rootless-free host-side staging path"));
+        assert!(message.contains("Permission denied"));
+    }
+
+    #[test]
+    fn rootless_chroot_prerequisite_failure_message_names_missing_helpers() {
+        let message = rootless_chroot_prerequisite_failure_message(
+            "Missing executable prerequisite(s): newuidmap, newgidmap.",
+        );
+
+        assert!(message.contains("package_stage_strategy=rootless-chroot"));
+        assert!(message.contains("Missing executable prerequisite(s): newuidmap, newgidmap"));
+        assert!(message.contains("Install the uidmap package"));
+        assert!(message.contains("/etc/subuid"));
+        assert!(message.contains("/etc/subgid"));
+        assert!(message.contains("kernel.unprivileged_userns_clone"));
     }
 
     #[test]
