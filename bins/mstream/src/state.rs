@@ -682,12 +682,32 @@ impl DaemonState {
     async fn interrupt(&mut self, request: InterruptRequest) -> anyhow::Result<Vec<Value>> {
         let target: SessionTarget = request.target.parse()?;
         self.send_interrupt_to_target(&target, request.key).await?;
-        Ok(vec![json!({
+        let event_context = self.sessions.get(&target).and_then(|record| {
+            record
+                .workstream
+                .clone()
+                .map(|workstream| (workstream, record.state))
+        });
+        let mut record = json!({
             "type": "ok",
             "op": "interrupt",
             "target": target.to_string(),
             "key": request.key.as_str(),
-        })])
+        });
+        if let Some((workstream, state)) = event_context {
+            let cursor = self.record_event(
+                &workstream,
+                EventDraft::new("interrupted")
+                    .target(&target)
+                    .text(request.key.as_str())
+                    .state(state),
+            )?;
+            if let Some(object) = record.as_object_mut() {
+                object.insert("workstream".to_string(), json!(workstream));
+                object.insert("cursor".to_string(), json!(cursor));
+            }
+        }
+        Ok(vec![record])
     }
 
     async fn broadcast(&mut self, request: BroadcastRequest) -> anyhow::Result<Vec<Value>> {
