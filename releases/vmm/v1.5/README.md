@@ -92,6 +92,49 @@ coordination, and future agents. Large binary artifacts should live in the run
 root, registry, or release artifact store, with only evidence JSON copied into
 release coordination if needed.
 
+## PR 280 / Issue 258 Closure Status
+
+Local validation from 2026-05-24 by `gpt55-ch-aarch64-258=280-og` on
+Linux/aarch64 covered the Alpine/OpenRC arm64 CH path that this host can run:
+
+- exported the assembled Alpine arm64 rootfs to a local OCI layout
+- validated the OCI layout by reading descriptors and blobs back
+- rebuilt CH artifacts from that OCI layout
+- ran `mbuild validate --scenario` for
+  `multiguest-validate-alpine.json`
+- ran the live CH Alpine scenario set:
+  `agent-bootstrap-alpine.json`, `multiguest-validate-alpine.json`,
+  `pty-agent-validation-alpine.json`, and `auto-provision-ssh.json`
+
+The local run wrote release-manifest-ready evidence at:
+
+```text
+/tmp/mbuild-pr280-258-alpine-arm64-oci-readback/mbuild-release-evidence.json
+```
+
+That is staging evidence only. It should be copied or linked from a release
+coordination PR/comment if it is needed later; generated rootfs tarballs, OCI
+blobs, and CH disk artifacts remain outside git.
+
+The remaining #258 closure gates require hosts or credentials not available on
+the Linux/aarch64 CH host used for the local validation above:
+
+- `vz-darwin-arm64`: requires an Apple Silicon macOS host with
+  Virtualization.framework to build/consume the same `linux/arm64` OCI payload
+  and run the full v1.5 VZ scenario matrix.
+- `ch-linux-amd64`: requires a native x86_64/amd64 Linux/KVM/CH host to build
+  and validate the `linux/amd64` guest payload.
+- Ubuntu/Debian rootless package staging cannot run on this host until
+  unprivileged user namespaces are allowed. The current preflight stops before
+  OCI import with the host policy failure
+  `unshare: cannot open /proc/self/setgroups: Permission denied`.
+- Registry publication requires an approved target ref, overwrite/tag policy,
+  and registry credentials. For GHCR that means an operator-provided token and
+  username accepted by `mbuild oci push`.
+- #258 should close only after the published multi-arch OCI reference has
+  immutable registry digests and CH/VZ validation evidence tied to those
+  digests for every required target.
+
 ## Commands
 
 Arm64 CH source build from the pinned Ubuntu OCI rootfs:
