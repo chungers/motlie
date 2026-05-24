@@ -169,6 +169,22 @@ struct HandoffRecord {
     created_at: String,
 }
 
+#[derive(Debug, Clone)]
+struct StateChange {
+    target: SessionTarget,
+    state: AgentState,
+    previous_state: Option<AgentState>,
+}
+
+struct AssignmentTags<'a> {
+    workstream: &'a str,
+    session_target: &'a SessionTarget,
+    role: &'a str,
+    agent: Option<&'a str>,
+    cwd: Option<&'a Path>,
+    state: AgentState,
+}
+
 impl DaemonState {
     pub async fn handle(&mut self, request: ClientRequest) -> anyhow::Result<Vec<Value>> {
         match request {
@@ -292,6 +308,7 @@ impl DaemonState {
                 record.workstream = parsed.workstream.clone();
                 record.last_report_kind = parsed.last_report_kind.clone();
                 record.last_report_summary = parsed.last_report_summary.clone();
+                record.cwd = parsed.cwd.clone();
                 record.context_domains = parsed.context_domains.clone();
                 record.context_specialties = parsed.context_specialties.clone();
                 record.context_summary = parsed.context_summary.clone();
@@ -302,11 +319,13 @@ impl DaemonState {
                     let title = parsed
                         .workstream_title
                         .unwrap_or_else(|| workstream_name.clone());
-                    let generation = self.next_generation();
-                    let workstream = self
-                        .workstreams
-                        .entry(workstream_name.clone())
-                        .or_insert_with(|| WorkstreamRecord::new(title, None, None, generation));
+                    if !self.workstreams.contains_key(&workstream_name) {
+                        let generation = self.next_generation();
+                        let workstream =
+                            WorkstreamRecord::new(title.clone(), None, None, generation);
+                        self.workstreams.insert(workstream_name.clone(), workstream);
+                    }
+                    let workstream = self.workstream_mut(&workstream_name)?;
                     workstream.sessions.insert(target.clone());
                     let _ = handle.start_monitoring_session(target.session_name()).await;
                 }
@@ -367,11 +386,14 @@ impl DaemonState {
         let tmux_target = self.tmux_target(&target).await?;
         self.write_assignment(
             &tmux_target,
-            &request.workstream,
-            &target,
-            &request.role,
-            None,
-            None,
+            AssignmentTags {
+                workstream: &request.workstream,
+                session_target: &target,
+                role: &request.role,
+                agent: None,
+                cwd: None,
+                state: AgentState::Busy,
+            },
         )
         .await?;
         self.add_session_to_workstream(
@@ -442,11 +464,14 @@ impl DaemonState {
             .await?;
         self.write_assignment(
             &tmux_target,
-            &request.workstream,
-            &target,
-            &request.role,
-            Some(&request.agent),
-            Some(&request.cwd),
+            AssignmentTags {
+                workstream: &request.workstream,
+                session_target: &target,
+                role: &request.role,
+                agent: Some(&request.agent),
+                cwd: Some(&request.cwd),
+                state: AgentState::Busy,
+            },
         )
         .await?;
         self.add_session_to_workstream(
@@ -494,13 +519,12 @@ impl DaemonState {
     async fn close(&mut self, request: CloseRequest) -> anyhow::Result<Vec<Value>> {
         let sessions = self.workstream(&request.workstream)?.sessions.clone();
         let title = self.workstream(&request.workstream)?.title.clone();
+        let mut handoff_records = Vec::new();
         for target in &sessions {
             if let Ok(tmux_target) = self.tmux_target(target).await {
                 let mut pairs = vec![
-                    ("state", tags::state_value(AgentState::Available)),
                     ("last-workstream", request.workstream.clone()),
                     ("last-workstream-title", title.clone()),
-                    ("updated-at", tags::now_tag()),
                 ];
                 if let Some(summary) = &request.summary {
                     pairs.push(("context-summary", summary.clone()));
@@ -524,13 +548,15 @@ impl DaemonState {
                     ],
                 )
                 .await?;
+                handoff_records.extend(
+                    self.set_session_state(target, AgentState::Available, None)
+                        .await?,
+                );
             }
             if let Some(record) = self.sessions.get_mut(target) {
-                record.state = AgentState::Available;
                 record.workstream = None;
                 record.last_workstream = Some(request.workstream.clone());
                 record.last_workstream_title = Some(title.clone());
-                record.updated_at = Utc::now();
                 if let Some(summary) = &request.summary {
                     record.context_summary = Some(summary.clone());
                 }
@@ -555,12 +581,14 @@ impl DaemonState {
         let workstream = self.workstream_mut(&request.workstream)?;
         workstream.state = WorkstreamState::Closed;
         workstream.sessions.clear();
-        Ok(vec![json!({
+        let mut records = vec![json!({
             "type": "ok",
             "op": "close",
             "workstream": request.workstream,
             "cursor": cursor,
-        })])
+        })];
+        records.append(&mut handoff_records);
+        Ok(records)
     }
 
     async fn leave(&mut self, request: LeaveRequest) -> anyhow::Result<Vec<Value>> {
@@ -578,22 +606,15 @@ impl DaemonState {
             ],
         )
         .await?;
+        let mut handoff_records = Vec::new();
         if request.available {
-            tags::set_many(
-                &tmux_target,
-                &[
-                    ("state", tags::state_value(AgentState::Available)),
-                    ("updated-at", tags::now_tag()),
-                ],
-            )
-            .await?;
+            handoff_records.extend(
+                self.set_session_state(&target, AgentState::Available, None)
+                    .await?,
+            );
         }
         if let Some(record) = self.sessions.get_mut(&target) {
             record.workstream = None;
-            if request.available {
-                record.state = AgentState::Available;
-            }
-            record.updated_at = Utc::now();
         }
         let mut event = EventDraft::new("left").target(&target);
         if request.available {
@@ -602,13 +623,15 @@ impl DaemonState {
         let cursor = self.record_event(&request.workstream, event)?;
         let workstream = self.workstream_mut(&request.workstream)?;
         workstream.sessions.remove(&target);
-        Ok(vec![json!({
+        let mut records = vec![json!({
             "type": "ok",
             "op": "leave",
             "workstream": request.workstream,
             "target": target.to_string(),
             "cursor": cursor,
-        })])
+        })];
+        records.append(&mut handoff_records);
+        Ok(records)
     }
 
     async fn kill(&mut self, target: &str) -> anyhow::Result<Vec<Value>> {
@@ -651,8 +674,9 @@ impl DaemonState {
         }
         self.send_text_to_target(&target, &request.text, request.paste_mode, request.enter)
             .await?;
+        let mut handoff_records = Vec::new();
         if let Some(state) = request.set_state {
-            self.set_session_state(&target, state, None).await?;
+            handoff_records.extend(self.set_session_state(&target, state, None).await?);
         }
         let state_after = self
             .sessions
@@ -666,7 +690,7 @@ impl DaemonState {
                 .text(request.text)
                 .state(state_after),
         )?;
-        Ok(vec![json!({
+        let record = json!({
             "type": "ok",
             "op": "send",
             "workstream": request.workstream,
@@ -676,7 +700,10 @@ impl DaemonState {
             "paste_mode": request.paste_mode.as_str(),
             "enter": request.enter,
             "cursor": cursor,
-        })])
+        });
+        let mut records = vec![record];
+        records.append(&mut handoff_records);
+        Ok(records)
     }
 
     async fn interrupt(&mut self, request: InterruptRequest) -> anyhow::Result<Vec<Value>> {
@@ -728,15 +755,17 @@ impl DaemonState {
             if request.state.is_some_and(|state| session.state != state) {
                 continue;
             }
+            let state = session.state;
             self.send_text_to_target(&target, &request.text, request.paste_mode, request.enter)
                 .await?;
+            self.touch_session(&target).await?;
             sent += 1;
             let cursor = self.record_event(
                 &request.workstream,
                 EventDraft::new("broadcast_sent")
                     .target(&target)
                     .text(request.text.clone())
-                    .state(session.state),
+                    .state(state),
             )?;
             records.push(json!({
                 "type": "ok",
@@ -757,7 +786,8 @@ impl DaemonState {
 
     async fn session_mark(&mut self, request: SessionMarkRequest) -> anyhow::Result<Vec<Value>> {
         let target: SessionTarget = request.target.parse()?;
-        self.set_session_state(&target, request.state, Some(&request.summary))
+        let mut handoff_records = self
+            .set_session_state(&target, request.state, Some(&request.summary))
             .await?;
         let workstream = self
             .sessions
@@ -789,10 +819,7 @@ impl DaemonState {
                 "state": request.state.as_str(),
             }));
         }
-        let fired = self.collect_matching_handoffs(&target, request.state);
-        for (workstream, handoff_id) in fired {
-            records.push(self.fire_handoff(&workstream, &handoff_id).await?);
-        }
+        records.append(&mut handoff_records);
         Ok(records)
     }
 
@@ -821,8 +848,7 @@ impl DaemonState {
             .get(&from)
             .is_some_and(|record| record.state == request.on);
         if already_met && !request.only_on_transition {
-            let record = self.fire_handoff(&request.workstream, &id).await?;
-            return Ok(vec![record]);
+            return self.fire_handoff(&request.workstream, &id).await;
         }
         Ok(vec![json!({
             "type": "ok",
@@ -911,27 +937,62 @@ impl DaemonState {
         let selected: Vec<SessionTarget> = candidates.into_iter().take(request.count).collect();
         let mut records = Vec::new();
         for target in selected {
-            self.add_session_to_workstream(
-                &request.workstream,
-                target.clone(),
-                request.role.clone(),
-                request.agent.clone(),
-                None,
-                AgentState::Reserved,
-            )?;
-            self.set_session_state(&target, AgentState::Reserved, None)
-                .await?;
-            if let Some(task) = &request.task {
-                self.send_text_to_target(&target, task, PasteMode::Bracketed, true)
-                    .await?;
-                self.set_session_state(&target, AgentState::Busy, None)
-                    .await?;
-            }
             let state = if request.task.is_some() {
                 AgentState::Busy
             } else {
                 AgentState::Reserved
             };
+            let (agent, cwd) = self
+                .sessions
+                .get(&target)
+                .map(|record| {
+                    (
+                        request.agent.clone().or_else(|| record.agent.clone()),
+                        record.cwd.clone(),
+                    )
+                })
+                .unwrap_or_else(|| (request.agent.clone(), None));
+            let tmux_target = self.tmux_target(&target).await?;
+            self.write_assignment(
+                &tmux_target,
+                AssignmentTags {
+                    workstream: &request.workstream,
+                    session_target: &target,
+                    role: &request.role,
+                    agent: agent.as_deref(),
+                    cwd: cwd.as_deref(),
+                    state,
+                },
+            )
+            .await?;
+            self.add_session_to_workstream(
+                &request.workstream,
+                target.clone(),
+                request.role.clone(),
+                request.agent.clone(),
+                cwd.clone(),
+                state,
+            )?;
+            self.host(target.host_alias())?
+                .handle
+                .start_monitoring_session(target.session_name())
+                .await?;
+            let mut handoff_records = self.set_session_state(&target, state, None).await?;
+            if let Some(task) = &request.task {
+                self.send_text_to_target(
+                    &target,
+                    &managed_prompt(
+                        &request.workstream,
+                        &target,
+                        self.session_role(&target),
+                        cwd.as_deref(),
+                        Some(task),
+                    ),
+                    PasteMode::Bracketed,
+                    true,
+                )
+                .await?;
+            }
             let mut event = EventDraft::new("recruited").target(&target).state(state);
             if let Some(goal) = request.goal.clone() {
                 event = event.text(goal);
@@ -944,6 +1005,7 @@ impl DaemonState {
                 "target": target.to_string(),
                 "cursor": cursor,
             }));
+            records.append(&mut handoff_records);
         }
         Ok(records)
     }
@@ -1050,8 +1112,8 @@ impl DaemonState {
 
     fn events(&self, request: EventsRequest) -> anyhow::Result<Value> {
         let workstream = self.workstream(&request.workstream)?;
-        let from = match request.after {
-            Some(cursor) => match PublicCursor::decode(&cursor) {
+        let from = match request.after.as_deref() {
+            Some(cursor) => match PublicCursor::decode(cursor) {
                 Ok(cursor) => {
                     if cursor.workstream != request.workstream
                         || cursor.generation != workstream.generation
@@ -1082,11 +1144,16 @@ impl DaemonState {
             .filter(|event| event.sequence >= from)
             .take(limit)
             .collect();
+        let cursor = if let Some(event) = events.last() {
+            event.cursor.clone()
+        } else {
+            workstream.cursor(&request.workstream)?
+        };
         Ok(json!({
             "type": "events",
             "workstream": request.workstream,
             "events": events,
-            "cursor": workstream.cursor(&request.workstream)?,
+            "cursor": cursor,
             "ordering": "arrival",
         }))
     }
@@ -1115,24 +1182,49 @@ impl DaemonState {
         Ok(truncate_chars(&text, max_chars))
     }
 
-    async fn fire_handoff(&mut self, workstream: &str, handoff_id: &str) -> anyhow::Result<Value> {
+    async fn fire_handoff(
+        &mut self,
+        workstream: &str,
+        handoff_id: &str,
+    ) -> anyhow::Result<Vec<Value>> {
+        let (record, change) = self.fire_handoff_once(workstream, handoff_id).await?;
+        let mut records = vec![record];
+        records.extend(self.fire_handoffs_for_changes(vec![change]).await?);
+        Ok(records)
+    }
+
+    async fn fire_handoff_once(
+        &mut self,
+        workstream: &str,
+        handoff_id: &str,
+    ) -> anyhow::Result<(Value, StateChange)> {
         let handoff = {
             let workstream_record = self.workstream_mut(workstream)?;
             let Some(handoff) = workstream_record.handoffs.get_mut(handoff_id) else {
                 bail!("handoff '{handoff_id}' not found in workstream '{workstream}'");
             };
             if handoff.fired {
-                return Ok(json!({
+                let target = handoff.to.clone();
+                let record = json!({
                     "type": "ok",
                     "op": "handoff_already_fired",
                     "workstream": workstream,
                     "handoff_id": handoff_id,
-                }));
+                });
+                return Ok((
+                    record,
+                    StateChange {
+                        target,
+                        state: AgentState::Busy,
+                        previous_state: Some(AgentState::Busy),
+                    },
+                ));
             }
             handoff.fired = true;
             handoff.clone()
         };
-        self.set_session_state(&handoff.to, AgentState::Busy, None)
+        let change = self
+            .apply_session_state(&handoff.to, AgentState::Busy, None)
             .await?;
         self.send_text_to_target(&handoff.to, &handoff.task, PasteMode::Bracketed, true)
             .await?;
@@ -1144,7 +1236,7 @@ impl DaemonState {
                 .state(AgentState::Busy)
                 .handoff_id(handoff.id.clone()),
         )?;
-        Ok(json!({
+        let record = json!({
             "type": "event",
             "kind": "handoff_fired",
             "workstream": workstream,
@@ -1153,18 +1245,38 @@ impl DaemonState {
             "to": handoff.to.to_string(),
             "state": AgentState::Busy.as_str(),
             "cursor": cursor,
-        }))
+        });
+        Ok((record, change))
     }
 
-    fn collect_matching_handoffs(
-        &self,
-        target: &SessionTarget,
-        state: AgentState,
-    ) -> Vec<(String, String)> {
+    async fn fire_handoffs_for_changes(
+        &mut self,
+        changes: Vec<StateChange>,
+    ) -> anyhow::Result<Vec<Value>> {
+        let mut records = Vec::new();
+        let mut pending = changes;
+        while let Some(change) = pending.pop() {
+            let fired = self.collect_matching_handoffs(&change);
+            for (workstream, handoff_id) in fired {
+                let (record, next_change) =
+                    self.fire_handoff_once(&workstream, &handoff_id).await?;
+                records.push(record);
+                pending.push(next_change);
+            }
+        }
+        Ok(records)
+    }
+
+    fn collect_matching_handoffs(&self, change: &StateChange) -> Vec<(String, String)> {
         let mut handoffs = Vec::new();
+        let is_transition = change.previous_state != Some(change.state);
         for (workstream_name, workstream) in &self.workstreams {
             for (handoff_id, handoff) in &workstream.handoffs {
-                if !handoff.fired && handoff.from == *target && handoff.on == state {
+                if !handoff.fired
+                    && handoff.from == change.target
+                    && handoff.on == change.state
+                    && (!handoff.only_on_transition || is_transition)
+                {
                     handoffs.push((workstream_name.clone(), handoff_id.clone()));
                 }
             }
@@ -1177,7 +1289,17 @@ impl DaemonState {
         target: &SessionTarget,
         state: AgentState,
         summary: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<Value>> {
+        let change = self.apply_session_state(target, state, summary).await?;
+        self.fire_handoffs_for_changes(vec![change]).await
+    }
+
+    async fn apply_session_state(
+        &mut self,
+        target: &SessionTarget,
+        state: AgentState,
+        summary: Option<&str>,
+    ) -> anyhow::Result<StateChange> {
         let tmux_target = self.tmux_target(target).await?;
         let now = tags::now_tag();
         let mut pairs = vec![
@@ -1189,6 +1311,7 @@ impl DaemonState {
             pairs.push(("last-report-kind", state.as_str().to_string()));
         }
         tags::set_many(&tmux_target, &pairs).await?;
+        let previous_state = self.sessions.get(target).map(|record| record.state);
         let record = self
             .sessions
             .entry(target.clone())
@@ -1199,7 +1322,11 @@ impl DaemonState {
             record.last_report_kind = Some(state.as_str().to_string());
             record.last_report_summary = Some(summary.to_string());
         }
-        Ok(())
+        Ok(StateChange {
+            target: target.clone(),
+            state,
+            previous_state,
+        })
     }
 
     async fn send_interrupt_to_target(
@@ -1239,25 +1366,34 @@ impl DaemonState {
         Ok(())
     }
 
+    async fn touch_session(&mut self, target: &SessionTarget) -> anyhow::Result<()> {
+        let tmux_target = self.tmux_target(target).await?;
+        let now = tags::now_tag();
+        tags::set_many(&tmux_target, &[("updated-at", now)]).await?;
+        if let Some(record) = self.sessions.get_mut(target) {
+            record.updated_at = Utc::now();
+        }
+        Ok(())
+    }
+
     async fn write_assignment(
         &self,
         target: &Target,
-        workstream: &str,
-        session_target: &SessionTarget,
-        role: &str,
-        agent: Option<&str>,
-        cwd: Option<&Path>,
+        assignment: AssignmentTags<'_>,
     ) -> anyhow::Result<()> {
-        let workstream_record = self.workstream(workstream)?;
+        let workstream_record = self.workstream(assignment.workstream)?;
         let mut pairs = vec![
             ("version", "1".to_string()),
             ("managed", "true".to_string()),
-            ("workstream", workstream.to_string()),
+            ("workstream", assignment.workstream.to_string()),
             ("workstream-title", workstream_record.title.clone()),
             ("workstream-state", "open".to_string()),
-            ("role", role.to_string()),
-            ("identity", session_target.session_name().to_string()),
-            ("state", tags::state_value(AgentState::Busy)),
+            ("role", assignment.role.to_string()),
+            (
+                "identity",
+                assignment.session_target.session_name().to_string(),
+            ),
+            ("state", tags::state_value(assignment.state)),
             ("updated-at", tags::now_tag()),
         ];
         if let Some(goal) = &workstream_record.goal {
@@ -1266,10 +1402,10 @@ impl DaemonState {
         if let Some(domain) = &workstream_record.domain {
             pairs.push(("workstream-domain", domain.clone()));
         }
-        if let Some(agent) = agent {
+        if let Some(agent) = assignment.agent {
             pairs.push(("agent", agent.to_string()));
         }
-        if let Some(cwd) = cwd {
+        if let Some(cwd) = assignment.cwd {
             pairs.push(("cwd", cwd.display().to_string()));
         }
         tags::set_many(target, &pairs).await
@@ -1494,6 +1630,7 @@ struct ParsedTags {
     workstream_title: Option<String>,
     role: Option<String>,
     agent: Option<String>,
+    cwd: Option<PathBuf>,
     state: Option<AgentState>,
     last_report_kind: Option<String>,
     last_report_summary: Option<String>,
@@ -1515,6 +1652,7 @@ impl ParsedTags {
                 "workstream-title" => parsed.workstream_title = Some(tag.value().to_string()),
                 "role" => parsed.role = Some(tag.value().to_string()),
                 "agent" => parsed.agent = Some(tag.value().to_string()),
+                "cwd" => parsed.cwd = Some(PathBuf::from(tag.value())),
                 "state" => parsed.state = parse_state(tag.value()),
                 "last-report-kind" => parsed.last_report_kind = Some(tag.value().to_string()),
                 "last-report-summary" => parsed.last_report_summary = Some(tag.value().to_string()),
@@ -1661,5 +1799,44 @@ mod tests {
     fn compact_text_collapses_repeated_blank_lines() {
         let text = "a\n\n\nb\n";
         assert_eq!(compact_text(text, 100), "a\n\nb\n");
+    }
+
+    #[test]
+    fn events_cursor_advances_to_last_returned_event() {
+        let mut state = DaemonState::default();
+        state
+            .open(OpenRequest {
+                workstream: "pr-324".to_string(),
+                title: "PR 324".to_string(),
+                goal: None,
+                domain: None,
+            })
+            .expect("open workstream");
+        state
+            .record_event("pr-324", EventDraft::new("first"))
+            .expect("record first");
+        state
+            .record_event("pr-324", EventDraft::new("second"))
+            .expect("record second");
+
+        let first_page = state
+            .events(EventsRequest {
+                workstream: "pr-324".to_string(),
+                after: None,
+                limit: 1,
+            })
+            .expect("first page");
+        let cursor = first_page["cursor"].as_str().expect("cursor");
+        let decoded = PublicCursor::decode(cursor).expect("decode cursor");
+        assert_eq!(decoded.next_sequence, 2);
+
+        let second_page = state
+            .events(EventsRequest {
+                workstream: "pr-324".to_string(),
+                after: Some(cursor.to_string()),
+                limit: 1,
+            })
+            .expect("second page");
+        assert_eq!(second_page["events"][0]["kind"], "second");
     }
 }

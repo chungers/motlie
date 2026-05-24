@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-24 | @codex | Addressed PR #330 feedback: bounded event cursors advance only to the last returned event, handoffs trigger from all explicit state-change paths, recruited sessions persist workstream tags, daemon connections are spawned per client, scan hydrates `cwd`, and broadcast touches `updated-at`. |
 | 2026-05-23 | @codex | Documented the first implemented `mstream` CLI/daemon surface, JSONL protocol, and current observation limits. |
 
 ## Status
@@ -33,6 +34,10 @@ debugging:
 ```sh
 cargo run -p motlie-mstream -- --socket /tmp/mstream.sock daemon start --foreground
 ```
+
+The foreground daemon accepts each socket connection in its own task and shares
+daemon state through an in-process lock, so a slow client does not block socket
+acceptance for other clients.
 
 Client commands resolve the socket from `--socket`, then `MSTREAM_SOCKET`, then
 `/tmp/mstream-${USER}.sock`.
@@ -72,6 +77,8 @@ mstream kill local::codex-worker
 `new` validates absolute `--cwd`, creates the directory on the target host, and
 starts the agent through a narrow shell bootstrap. Joined/new sessions receive
 `@mstream/*` tags and a managed-agent reporting prompt when a task is sent.
+Recruited sessions also receive workstream-membership tags before any task is
+sent, so restart plus `scan` can hydrate their assignment.
 
 ## Communication And Handoff
 
@@ -124,7 +131,9 @@ mstream summary-input pr-324 --max-chars 12000
 
 Event cursors are opaque base64 JSON owned by `mstream`; they embed the
 workstream timeline generation. A cursor from an older generation returns a
-structured `cursor_stale` JSONL error.
+structured `cursor_stale` JSONL error. Bounded `events --limit N` responses
+return a cursor that advances only to the last returned event, not to the
+workstream watermark.
 
 All machine-facing output is JSONL on stdout. Errors are also JSONL records,
 for example:
