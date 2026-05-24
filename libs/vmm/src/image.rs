@@ -9,16 +9,20 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
+use futures::TryStreamExt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+use tokio_util::codec::{BytesCodec, FramedRead};
 
 use crate::backend::BackendKind;
 
-/// First supported external OCI import profile.
+/// Supported external OCI import profiles.
 pub const UBUNTU_SYSTEMD_PROFILE: &str = "ubuntu-systemd";
 pub const UBUNTU_SYSTEMD_SOURCE_REF: &str = "docker.io/library/ubuntu:24.04";
+pub const ALPINE_OPENRC_PROFILE: &str = "alpine-openrc";
+pub const ALPINE_OPENRC_SOURCE_REF: &str = "docker.io/library/alpine:3.22";
 
 /// Motlie v1.5 product image contract constants.
 pub mod v1_5 {
@@ -153,6 +157,10 @@ impl OciImageReference {
 
     pub fn pull_scope(&self) -> String {
         format!("repository:{}:pull", self.repository)
+    }
+
+    pub fn push_scope(&self) -> String {
+        format!("repository:{}:pull,push", self.repository)
     }
 
     pub fn normalized(&self) -> String {
@@ -312,6 +320,19 @@ impl ExternalOciSource {
         }
     }
 
+    pub fn alpine_openrc(
+        platform: OciPlatform,
+        image_index_digest: OciDigest,
+        platform_manifest_digest: OciDigest,
+    ) -> Self {
+        Self {
+            image_ref: ALPINE_OPENRC_SOURCE_REF.to_string(),
+            image_index_digest,
+            platform,
+            platform_manifest_digest,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ImageContractError> {
         if self.image_ref.trim().is_empty() {
             return Err(ImageContractError::EmptyImageRef);
@@ -370,6 +391,46 @@ impl GuestImageProfile {
                 "systemd".to_string(),
                 "systemd-sysv".to_string(),
                 "tmux".to_string(),
+                "util-linux".to_string(),
+                "vim".to_string(),
+                "wget".to_string(),
+            ],
+            required_mount_points: vec![
+                PathBuf::from("/workspace"),
+                PathBuf::from("/agent-state"),
+                PathBuf::from("/home"),
+            ],
+        }
+    }
+
+    pub fn alpine_openrc(source: ExternalOciSource) -> Self {
+        Self {
+            name: ALPINE_OPENRC_PROFILE.to_string(),
+            init: InitProfile::AlpineOpenRc,
+            source,
+            required_packages: vec![
+                "bash".to_string(),
+                "bind-tools".to_string(),
+                "bubblewrap".to_string(),
+                "ca-certificates".to_string(),
+                "cloud-init".to_string(),
+                "coreutils".to_string(),
+                "curl".to_string(),
+                "dbus".to_string(),
+                "fuse3".to_string(),
+                "git".to_string(),
+                "iproute2".to_string(),
+                "iputils".to_string(),
+                "nodejs".to_string(),
+                "npm".to_string(),
+                "openrc".to_string(),
+                "openssh-server".to_string(),
+                "python3".to_string(),
+                "shadow".to_string(),
+                "socat".to_string(),
+                "strace".to_string(),
+                "sudo".to_string(),
+                "tmux".to_string(),
                 "vim".to_string(),
                 "wget".to_string(),
             ],
@@ -386,21 +447,13 @@ impl GuestImageProfile {
             return Err(ImageContractError::EmptyProfileName);
         }
         self.source.validate()?;
-        if self.name == UBUNTU_SYSTEMD_PROFILE {
-            if self.init != InitProfile::UbuntuSystemd {
-                return Err(ImageContractError::ProfileInitMismatch {
-                    profile: self.name.clone(),
-                    expected: InitProfile::UbuntuSystemd,
-                    actual: self.init,
-                });
+        match self.name.as_str() {
+            UBUNTU_SYSTEMD_PROFILE => self
+                .validate_builtin_profile(InitProfile::UbuntuSystemd, UBUNTU_SYSTEMD_SOURCE_REF)?,
+            ALPINE_OPENRC_PROFILE => {
+                self.validate_builtin_profile(InitProfile::AlpineOpenRc, ALPINE_OPENRC_SOURCE_REF)?
             }
-            if self.source.image_ref != UBUNTU_SYSTEMD_SOURCE_REF {
-                return Err(ImageContractError::ProfileSourceMismatch {
-                    profile: self.name.clone(),
-                    expected_image_ref: UBUNTU_SYSTEMD_SOURCE_REF.to_string(),
-                    actual_image_ref: self.source.image_ref.clone(),
-                });
-            }
+            _ => {}
         }
         if self
             .required_packages
@@ -422,6 +475,28 @@ impl GuestImageProfile {
             .find(|path| !path.is_absolute())
         {
             return Err(ImageContractError::RelativeRequiredMountPoint(path.clone()));
+        }
+        Ok(())
+    }
+
+    fn validate_builtin_profile(
+        &self,
+        expected_init: InitProfile,
+        expected_image_ref: &str,
+    ) -> Result<(), ImageContractError> {
+        if self.init != expected_init {
+            return Err(ImageContractError::ProfileInitMismatch {
+                profile: self.name.clone(),
+                expected: expected_init,
+                actual: self.init,
+            });
+        }
+        if self.source.image_ref != expected_image_ref {
+            return Err(ImageContractError::ProfileSourceMismatch {
+                profile: self.name.clone(),
+                expected_image_ref: expected_image_ref.to_string(),
+                actual_image_ref: self.source.image_ref.clone(),
+            });
         }
         Ok(())
     }
@@ -573,6 +648,16 @@ impl RootfsOsRequirement {
         }
     }
 
+    pub fn alpine_3_22() -> Self {
+        Self {
+            accepted_ids: vec!["alpine".to_string()],
+            // Alpine point releases update VERSION_ID under the stable 3.22 tag. The
+            // immutable OCI digest pins the exact foundation; the classifier only
+            // needs to reject non-Alpine roots here.
+            accepted_version_ids: Vec::new(),
+        }
+    }
+
     pub fn linux_any() -> Self {
         Self {
             accepted_ids: Vec::new(),
@@ -600,6 +685,7 @@ impl RootfsOsRequirement {
 pub enum PackageManagerRequirement {
     None,
     AptDpkg,
+    Apk,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,6 +734,11 @@ impl RootfsProfileSpec {
                 PackageManagerRequirement::AptDpkg,
                 vec![PathBuf::from("/bin/sh")],
             ),
+            InitProfile::AlpineOpenRc => (
+                RootfsOsRequirement::alpine_3_22(),
+                PackageManagerRequirement::Apk,
+                vec![PathBuf::from("/bin/sh")],
+            ),
             _ => (
                 RootfsOsRequirement::linux_any(),
                 PackageManagerRequirement::None,
@@ -666,6 +757,10 @@ impl RootfsProfileSpec {
 
     pub fn ubuntu_systemd(source: ExternalOciSource) -> Self {
         Self::for_profile(GuestImageProfile::ubuntu_systemd(source))
+    }
+
+    pub fn alpine_openrc(source: ExternalOciSource) -> Self {
+        Self::for_profile(GuestImageProfile::alpine_openrc(source))
     }
 
     pub fn validate(&self) -> Result<(), RootfsClassificationError> {
@@ -823,11 +918,12 @@ impl RootfsClassifier {
             package_manager.available,
         )?);
         findings.extend(classify_required_binaries(root, &spec.required_binaries)?);
-        let installed_packages = read_installed_dpkg_packages(root)?;
+        let installed_packages = read_installed_packages(root, spec.package_manager)?;
         findings.extend(classify_required_packages(
             &spec.profile.required_packages,
             &installed_packages,
             package_manager.available,
+            spec.package_manager,
         ));
         findings.extend(classify_required_mount_points(
             root,
@@ -1452,9 +1548,73 @@ impl OciRootfsImporter {
     }
 }
 
+#[derive(Clone, Default)]
+pub enum OciRegistryAuth {
+    #[default]
+    Anonymous,
+    Basic {
+        username: String,
+        password: String,
+    },
+    Bearer {
+        token: String,
+    },
+}
+
+impl std::fmt::Debug for OciRegistryAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"<redacted>")
+                .finish(),
+            Self::Bearer { .. } => f
+                .debug_struct("Bearer")
+                .field("token", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+impl OciRegistryAuth {
+    pub fn basic(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self::Basic {
+            username: username.into(),
+            password: password.into(),
+        }
+    }
+
+    pub fn bearer(token: impl Into<String>) -> Self {
+        Self::Bearer {
+            token: token.into(),
+        }
+    }
+
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self, Self::Anonymous)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OciBlobPushStatus {
+    AlreadyExists,
+    Uploaded,
+    DryRun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciManifestPushResult {
+    pub computed_digest: OciDigest,
+    pub registry_digest: Option<OciDigest>,
+}
+
 #[derive(Debug, Clone)]
 pub struct OciRegistryClient {
     client: reqwest::Client,
+    registry_base_url: Option<reqwest::Url>,
 }
 
 impl Default for OciRegistryClient {
@@ -1467,11 +1627,143 @@ impl OciRegistryClient {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            registry_base_url: None,
         }
     }
 
     pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            registry_base_url: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_registry_base_url(client: reqwest::Client, registry_base_url: reqwest::Url) -> Self {
+        Self {
+            client,
+            registry_base_url: Some(registry_base_url),
+        }
+    }
+
+    #[tracing::instrument(skip(self, auth, path), fields(image_ref = %image_ref, digest = %digest, path = %path.display()))]
+    pub async fn push_blob_from_path(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        size_bytes: u64,
+        path: &Path,
+        auth: &OciRegistryAuth,
+    ) -> Result<OciBlobPushStatus, OciRegistryError> {
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|source| OciRegistryError::Io {
+                path: Some(path.to_path_buf()),
+                source,
+            })?;
+        if !metadata.is_file() {
+            return Err(OciRegistryError::UploadBlobNotFile {
+                path: path.to_path_buf(),
+            });
+        }
+        if metadata.len() != size_bytes {
+            return Err(OciRegistryError::UploadBlobSizeMismatch {
+                path: path.to_path_buf(),
+                expected: size_bytes,
+                actual: metadata.len(),
+            });
+        }
+        if self.blob_exists(image_ref, digest, auth).await? {
+            tracing::info!(image_ref = %image_ref, digest = %digest, "OCI blob already present in registry");
+            return Ok(OciBlobPushStatus::AlreadyExists);
+        }
+        let (upload_url, bearer_token) = self.start_blob_upload(image_ref, auth).await?;
+        self.complete_blob_upload_from_path(BlobUploadRequest {
+            image_ref,
+            upload_url,
+            digest,
+            size_bytes,
+            path,
+            bearer_token: bearer_token.as_deref(),
+            auth,
+        })
+        .await?;
+        tracing::info!(image_ref = %image_ref, digest = %digest, size_bytes, "uploaded OCI blob");
+        Ok(OciBlobPushStatus::Uploaded)
+    }
+
+    #[tracing::instrument(skip(self, auth, bytes), fields(image_ref = %image_ref, reference = %reference, media_type = media_type))]
+    pub async fn push_manifest_bytes(
+        &self,
+        image_ref: &OciImageReference,
+        reference: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        auth: &OciRegistryAuth,
+    ) -> Result<OciManifestPushResult, OciRegistryError> {
+        let computed_digest = digest_from_bytes(&bytes)?;
+        let mut response = self
+            .put_manifest_once(image_ref, reference, media_type, bytes.clone(), None, auth)
+            .await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let token = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.push_scope(), auth)
+                .await?;
+            response = self
+                .put_manifest_once(image_ref, reference, media_type, bytes, Some(&token), auth)
+                .await?;
+        }
+        let registry_digest = registry_digest_header(image_ref, response.headers())?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(OciRegistryError::RegistryStatus {
+                image_ref: image_ref.normalized(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        if let Some(header_digest) = &registry_digest {
+            if header_digest != &computed_digest {
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: image_ref.normalized(),
+                    header_digest: header_digest.clone(),
+                    computed_digest: computed_digest.clone(),
+                });
+            }
+        }
+        tracing::info!(image_ref = %image_ref, reference, digest = %computed_digest, "pushed OCI manifest");
+        Ok(OciManifestPushResult {
+            computed_digest,
+            registry_digest,
+        })
+    }
+
+    #[tracing::instrument(skip(self, auth), fields(image_ref = %image_ref))]
+    pub async fn fetch_manifest_digest_with_auth(
+        &self,
+        image_ref: &OciImageReference,
+        auth: &OciRegistryAuth,
+    ) -> Result<OciDigest, OciRegistryError> {
+        let response = self.fetch_manifest_with_auth(image_ref, auth).await?;
+        let digest = digest_from_bytes(&response.body)?;
+        if let Some(header_digest) = response.registry_digest {
+            if header_digest != digest {
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: image_ref.normalized(),
+                    header_digest,
+                    computed_digest: digest,
+                });
+            }
+        }
+        Ok(digest)
     }
 
     #[tracing::instrument(skip(self), fields(platform = %platform))]
@@ -1623,6 +1915,244 @@ impl OciRegistryClient {
         cache.store_blob(digest, &manifest.body)
     }
 
+    async fn blob_exists(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        auth: &OciRegistryAuth,
+    ) -> Result<bool, OciRegistryError> {
+        let mut response = self.head_blob_once(image_ref, digest, None, auth).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let token = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.push_scope(), auth)
+                .await?;
+            response = self
+                .head_blob_once(image_ref, digest, Some(&token), auth)
+                .await?;
+        }
+        match response.status() {
+            reqwest::StatusCode::OK => Ok(true),
+            reqwest::StatusCode::NOT_FOUND => Ok(false),
+            status if status.is_success() => Ok(true),
+            status => {
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|source| OciRegistryError::Request {
+                        image_ref: image_ref.normalized(),
+                        source,
+                    })?;
+                Err(OciRegistryError::RegistryStatus {
+                    image_ref: image_ref.normalized(),
+                    status: status.as_u16(),
+                    body,
+                })
+            }
+        }
+    }
+
+    async fn head_blob_once(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self.client.head(self.blob_url(image_ref, digest)?);
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
+    async fn start_blob_upload(
+        &self,
+        image_ref: &OciImageReference,
+        auth: &OciRegistryAuth,
+    ) -> Result<(reqwest::Url, Option<String>), OciRegistryError> {
+        let mut response = self.start_blob_upload_once(image_ref, None, auth).await?;
+        let mut token = None;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let fetched = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.push_scope(), auth)
+                .await?;
+            response = self
+                .start_blob_upload_once(image_ref, Some(&fetched), auth)
+                .await?;
+            token = Some(fetched);
+        }
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .map_err(|source| OciRegistryError::Request {
+                    image_ref: image_ref.normalized(),
+                    source,
+                })?;
+            return Err(OciRegistryError::RegistryStatus {
+                image_ref: image_ref.normalized(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| OciRegistryError::MissingRegistryHeader {
+                image_ref: image_ref.normalized(),
+                header: reqwest::header::LOCATION.as_str().to_string(),
+            })?
+            .to_str()
+            .map_err(|source| OciRegistryError::InvalidRegistryHeader {
+                image_ref: image_ref.normalized(),
+                header: reqwest::header::LOCATION.as_str().to_string(),
+                value: "<non-utf8>".to_string(),
+                reason: source.to_string(),
+            })?;
+        Ok((self.resolve_registry_location(image_ref, location)?, token))
+    }
+
+    async fn start_blob_upload_once(
+        &self,
+        image_ref: &OciImageReference,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self.client.post(self.upload_url(image_ref)?);
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
+    async fn complete_blob_upload_from_path(
+        &self,
+        upload: BlobUploadRequest<'_>,
+    ) -> Result<(), OciRegistryError> {
+        let mut upload_url = upload.upload_url;
+        upload_url
+            .query_pairs_mut()
+            .append_pair("digest", upload.digest.as_ref());
+        let file =
+            tokio::fs::File::open(upload.path)
+                .await
+                .map_err(|source| OciRegistryError::Io {
+                    path: Some(upload.path.to_path_buf()),
+                    source,
+                })?;
+        let stream = FramedRead::new(file, BytesCodec::new()).map_ok(|bytes| bytes.freeze());
+        let request = self
+            .client
+            .put(upload_url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_LENGTH, upload.size_bytes)
+            .body(reqwest::Body::wrap_stream(stream));
+        let response = apply_registry_auth(request, upload.bearer_token, upload.auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: upload.image_ref.normalized(),
+                source,
+            })?;
+        let registry_digest = registry_digest_header(upload.image_ref, response.headers())?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: upload.image_ref.normalized(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(OciRegistryError::RegistryStatus {
+                image_ref: upload.image_ref.normalized(),
+                status: status.as_u16(),
+                body,
+            });
+        }
+        if let Some(header_digest) = registry_digest {
+            if &header_digest != upload.digest {
+                return Err(OciRegistryError::DigestHeaderMismatch {
+                    image_ref: upload.image_ref.normalized(),
+                    header_digest,
+                    computed_digest: upload.digest.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn put_manifest_once(
+        &self,
+        image_ref: &OciImageReference,
+        reference: &str,
+        media_type: &str,
+        bytes: Vec<u8>,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self
+            .client
+            .put(self.manifest_reference_url(image_ref, reference)?)
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .body(bytes);
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
+    async fn fetch_manifest_with_auth(
+        &self,
+        image_ref: &OciImageReference,
+        auth: &OciRegistryAuth,
+    ) -> Result<RegistryManifestResponse, OciRegistryError> {
+        let mut response = self
+            .fetch_manifest_once_with_auth(image_ref, None, auth)
+            .await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let challenge = response_auth_challenge(image_ref, response.headers())?;
+            let token = self
+                .fetch_bearer_token_for_scope(challenge, image_ref, &image_ref.pull_scope(), auth)
+                .await?;
+            response = self
+                .fetch_manifest_once_with_auth(image_ref, Some(&token), auth)
+                .await?;
+        }
+        manifest_response_from_reqwest(image_ref, response).await
+    }
+
+    async fn fetch_manifest_once_with_auth(
+        &self,
+        image_ref: &OciImageReference,
+        bearer_token: Option<&str>,
+        auth: &OciRegistryAuth,
+    ) -> Result<reqwest::Response, OciRegistryError> {
+        let request = self
+            .client
+            .get(self.manifest_url(image_ref)?)
+            .header(reqwest::header::ACCEPT, OCI_MANIFEST_ACCEPT);
+        apply_registry_auth(request, bearer_token, auth)
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })
+    }
+
     #[tracing::instrument(skip(self, image_ref, cache), fields(image_ref = %image_ref, digest = %digest, cache = %cache.root().display()))]
     async fn fetch_blob_to_cache(
         &self,
@@ -1660,8 +2190,8 @@ impl OciRegistryClient {
         digest: &OciDigest,
         bearer_token: Option<&str>,
     ) -> Result<reqwest::Response, OciRegistryError> {
-        let url = blob_url(image_ref, digest);
-        let mut request = self.client.get(&url);
+        let url = self.blob_url(image_ref, digest)?;
+        let mut request = self.client.get(url);
         if let Some(token) = bearer_token {
             request = request.bearer_auth(token);
         }
@@ -1809,10 +2339,10 @@ impl OciRegistryClient {
         image_ref: &OciImageReference,
         bearer_token: Option<&str>,
     ) -> Result<reqwest::Response, OciRegistryError> {
-        let url = manifest_url(image_ref);
+        let url = self.manifest_url(image_ref)?;
         let mut request = self
             .client
-            .get(&url)
+            .get(url)
             .header(reqwest::header::ACCEPT, OCI_MANIFEST_ACCEPT);
         if let Some(token) = bearer_token {
             request = request.bearer_auth(token);
@@ -1831,6 +2361,27 @@ impl OciRegistryClient {
         challenge: &str,
         image_ref: &OciImageReference,
     ) -> Result<String, OciRegistryError> {
+        self.fetch_bearer_token_for_scope(
+            challenge,
+            image_ref,
+            &image_ref.pull_scope(),
+            &OciRegistryAuth::Anonymous,
+        )
+        .await
+    }
+
+    async fn fetch_bearer_token_for_scope(
+        &self,
+        challenge: &str,
+        image_ref: &OciImageReference,
+        scope: &str,
+        auth: &OciRegistryAuth,
+    ) -> Result<String, OciRegistryError> {
+        if let OciRegistryAuth::Bearer { token } = auth {
+            if !token.trim().is_empty() {
+                return Ok(token.clone());
+            }
+        }
         let challenge = parse_bearer_challenge(challenge)?;
         let mut url = reqwest::Url::parse(&challenge.realm).map_err(|source| {
             OciRegistryError::InvalidAuthChallenge {
@@ -1844,23 +2395,29 @@ impl OciRegistryClient {
                 query.append_pair("service", service);
             }
             let default_scope;
-            let scope = if let Some(scope) = challenge.scope.as_deref() {
-                scope
+            let requested_scope = if scope.trim().is_empty() {
+                if let Some(scope) = challenge.scope.as_deref() {
+                    scope
+                } else {
+                    default_scope = image_ref.pull_scope();
+                    &default_scope
+                }
             } else {
-                default_scope = image_ref.pull_scope();
-                &default_scope
+                scope
             };
-            query.append_pair("scope", scope);
+            query.append_pair("scope", requested_scope);
         }
-        let response =
-            self.client
-                .get(url)
-                .send()
-                .await
-                .map_err(|source| OciRegistryError::Request {
-                    image_ref: image_ref.normalized(),
-                    source,
-                })?;
+        let mut request = self.client.get(url);
+        if let OciRegistryAuth::Basic { username, password } = auth {
+            request = request.basic_auth(username, Some(password));
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|source| OciRegistryError::Request {
+                image_ref: image_ref.normalized(),
+                source,
+            })?;
         let status = response.status();
         let body = response
             .text()
@@ -1921,6 +2478,35 @@ pub enum OciRegistryError {
     InvalidAuthChallenge { challenge: String, reason: String },
     #[error("registry auth response for {image_ref} did not include a token")]
     MissingToken { image_ref: String },
+    #[error("registry response for {image_ref} is missing required header {header}")]
+    MissingRegistryHeader { image_ref: String, header: String },
+    #[error("registry URL for {image_ref} is invalid: {url}: {reason}")]
+    InvalidRegistryUrl {
+        image_ref: String,
+        url: String,
+        reason: String,
+    },
+    #[error("registry response for {image_ref} had invalid header {header}={value:?}: {reason}")]
+    InvalidRegistryHeader {
+        image_ref: String,
+        header: String,
+        value: String,
+        reason: String,
+    },
+    #[error("upload blob path is not a regular file: {path:?}")]
+    UploadBlobNotFile { path: PathBuf },
+    #[error("upload blob {path:?} size was {actual}, expected {expected}")]
+    UploadBlobSizeMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("I/O error at {path:?}: {source}")]
+    Io {
+        path: Option<PathBuf>,
+        #[source]
+        source: io::Error,
+    },
     #[error(
         "registry digest header for {image_ref} was {header_digest}, but computed digest was {computed_digest}"
     )]
@@ -2092,6 +2678,16 @@ const OCI_MANIFEST_ACCEPT: &str = concat!(
     "application/vnd.docker.distribution.manifest.v2+json"
 );
 
+struct BlobUploadRequest<'a> {
+    image_ref: &'a OciImageReference,
+    upload_url: reqwest::Url,
+    digest: &'a OciDigest,
+    size_bytes: u64,
+    path: &'a Path,
+    bearer_token: Option<&'a str>,
+    auth: &'a OciRegistryAuth,
+}
+
 #[derive(Debug)]
 struct RegistryManifestResponse {
     body: bytes::Bytes,
@@ -2225,13 +2821,108 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 "#;
+const MOTLIE_OPENRC_VFS_GUEST_SERVICE: &str = r#"#!/sbin/openrc-run
+description="motlie-vmm v1.5 guest filesystem mounter"
+pidfile="/run/${RC_SVCNAME}.pid"
+command="/usr/local/bin/motlie-vfs-guest"
+command_args="--mounts /etc/motlie-vfs/mounts.yaml --backend-env /etc/motlie/v1.5/backend.env"
+command_background=true
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.err"
+
+depend() {
+    need localmount
+    after cloud-init cloud-config cloud-final
+}
+
+start_pre() {
+    # Apple VZ presents virtio-vsock through the Ubuntu kernel preserved by the
+    # VZ disk adapter. Alpine/OpenRC does not load that transport implicitly,
+    # so the VMM-owned VFS service owns this platform-specific kernel module
+    # readiness before the common guest mounter connects to host CID 2.
+    modprobe fuse >/dev/null 2>&1 || true
+    modprobe vmw_vsock_virtio_transport >/dev/null 2>&1 || true
+    checkpath -d -m 0755 /etc/motlie /etc/motlie/v1.5 /etc/motlie-vfs /var/log
+}
+"#;
+const MOTLIE_OPENRC_AGENT_STATE_SERVICE: &str = r#"#!/sbin/openrc-run
+description="Link agent state into mounted guest home"
+
+depend() {
+    need motlie-vfs-guest
+}
+
+start() {
+    ebegin "Starting motlie agent state setup"
+    /usr/local/bin/motlie-agent-state-setup \
+        >>/var/log/${RC_SVCNAME}.log 2>>/var/log/${RC_SVCNAME}.err
+    eend $?
+}
+"#;
+const MOTLIE_OPENRC_VSOCK_SSH_SERVICE: &str = r#"#!/sbin/openrc-run
+description="motlie-vmm vsock-to-SSH bridge"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+    need sshd
+}
+
+start() {
+    ebegin "Starting ${RC_SVCNAME}"
+    start-stop-daemon --start --background --make-pidfile --pidfile "$pidfile" \
+        --exec /bin/sh -- -c \
+        "exec /usr/local/bin/motlie-vsock-ssh-bridge >>/var/log/${RC_SVCNAME}.log 2>>/var/log/${RC_SVCNAME}.err"
+    eend $?
+}
+"#;
+const MOTLIE_OPENRC_EGRESS_SERVICE: &str = r#"#!/sbin/openrc-run
+description="motlie-vmm v1.5 CH egress NIC setup"
+
+depend() {
+    need localmount
+}
+
+start() {
+    [ -f /etc/motlie-vmm/egress.mac ] || return 0
+    ebegin "Configuring motlie CH egress"
+    /usr/local/bin/motlie-vmm-egress-setup \
+        >>/var/log/${RC_SVCNAME}.log 2>>/var/log/${RC_SVCNAME}.err
+    eend $?
+}
+"#;
+const MOTLIE_OPENRC_LOCAL_START: &str = r#"#!/bin/sh
+set -eu
+
+log=/var/log/motlie-openrc-start.log
+exec >>"$log" 2>&1
+
+echo "motlie OpenRC local starter: begin"
+
+if rc-service --exists sshd >/dev/null 2>&1; then
+    rc-service sshd start || rc-service sshd restart || true
+fi
+
+for service in \
+    motlie-vfs-guest \
+    motlie-agent-state \
+    motlie-vmm-egress \
+    motlie-vmm-vsock-ssh; do
+    if rc-service --exists "$service" >/dev/null 2>&1; then
+        rc-service "$service" start || rc-service "$service" restart
+    fi
+done
+
+echo "motlie OpenRC local starter: complete"
+"#;
 const MOTLIE_AGENT_STATE_SETUP_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 
-# MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V3
-# This script is immutable base-image content. It must not chown VFS-backed
+# MOTLIE_CONVERGENCE_AGENT_STATE_SETUP_V4
+# This script is immutable base-image content for v1.5 CH/VZ. It must not chown VFS-backed
 # /agent-state or /home paths because ownership is presented by the active VFS
-# layer for the guest uid/gid.
+# layer for the guest uid/gid. Keep Codex/Claude state on /agent-state without
+# nested bind mounts; bind-mounting back into FUSE-backed home directories is
+# not a portable CH/VZ convergence contract.
 
 is_mounted() {
     mount_path="$1"
@@ -2259,22 +2950,19 @@ setup_user() {
     claude_code_dst="$config_dir/claude-code"
 
     [ -d "$home_dir" ] || return 0
+    # CH systemd and VZ OpenRC can start this helper after the VFS guest process
+    # is running but before FUSE has mounted each path. Wait here so agent state
+    # is never written under a future mount point and hidden by the VFS layer.
     wait_for_mount /agent-state
     wait_for_mount "$home_dir"
-
-    for mount_path in "$codex_dst" "$claude_dst" "$claude_code_dst"; do
-        umount "$mount_path" >/dev/null 2>&1 || true
-    done
 
     install -d -m 0755 "$config_dir"
     install -d -m 0700 /agent-state/codex /agent-state/claude /agent-state/claude-code /agent-state/codex/sqlite
 
     rm -rf "$codex_dst" "$claude_dst" "$claude_code_dst"
-    install -d -m 0700 "$codex_dst" "$claude_dst" "$claude_code_dst"
-
-    mount --bind /agent-state/codex "$codex_dst"
-    mount --bind /agent-state/claude "$claude_dst"
-    mount --bind /agent-state/claude-code "$claude_code_dst"
+    ln -s /agent-state/codex "$codex_dst"
+    ln -s /agent-state/claude "$claude_dst"
+    ln -s /agent-state/claude-code "$claude_code_dst"
 }
 
 for home_dir in /home/*; do
@@ -2714,10 +3402,20 @@ fn install_required_directories(
         PathBuf::from("/etc/motlie/v1.5"),
         PathBuf::from("/etc/motlie-vfs"),
         PathBuf::from("/etc/profile.d"),
-        PathBuf::from("/etc/systemd/system"),
-        PathBuf::from("/etc/systemd/system/cloud-init.target.wants"),
-        PathBuf::from("/etc/systemd/system/multi-user.target.wants"),
     ]);
+    match spec.profile_spec.profile.init {
+        InitProfile::UbuntuSystemd => {
+            dirs.insert(PathBuf::from("/etc/systemd/system"));
+            dirs.insert(PathBuf::from("/etc/systemd/system/cloud-init.target.wants"));
+            dirs.insert(PathBuf::from("/etc/systemd/system/multi-user.target.wants"));
+        }
+        InitProfile::AlpineOpenRc => {
+            dirs.insert(PathBuf::from("/etc/init.d"));
+            dirs.insert(PathBuf::from("/etc/local.d"));
+            dirs.insert(PathBuf::from("/etc/runlevels/default"));
+        }
+        InitProfile::MotlieInit | InitProfile::Unsupported => {}
+    }
     if spec.profile_spec.vfs.requires_dev_directory {
         dirs.insert(PathBuf::from("/dev"));
     }
@@ -2856,30 +3554,7 @@ fn install_builtin_support_files(
         "/opt/motlie/v1.5/guest/bin/motlie-vmm-vsock-ssh-loop",
         installed,
     )?;
-    install_builtin_file(
-        root,
-        "/etc/systemd/system/motlie-vfs-guest.service",
-        MOTLIE_VFS_GUEST_SERVICE,
-        0o644,
-        RootfsCompatibilityInstallKind::ServiceUnit,
-        installed,
-    )?;
-    install_builtin_file(
-        root,
-        "/etc/systemd/system/motlie-agent-state.service",
-        MOTLIE_AGENT_STATE_SERVICE,
-        0o644,
-        RootfsCompatibilityInstallKind::ServiceUnit,
-        installed,
-    )?;
-    install_builtin_file(
-        root,
-        "/etc/systemd/system/motlie-vmm-vsock-ssh.service",
-        MOTLIE_VMM_VSOCK_SSH_SERVICE,
-        0o644,
-        RootfsCompatibilityInstallKind::ServiceUnit,
-        installed,
-    )?;
+    install_profile_service_files(root, profile_spec.profile.init, installed)?;
     install_builtin_file(
         root,
         MOTLIE_V15_SSHD_CA_CONFIG_PATH,
@@ -2888,6 +3563,7 @@ fn install_builtin_support_files(
         RootfsCompatibilityInstallKind::Config,
         installed,
     )?;
+    ensure_sshd_config_include(root, installed)?;
     install_builtin_file(
         root,
         "/etc/ssh/ca/user_ca.pub",
@@ -2896,24 +3572,7 @@ fn install_builtin_support_files(
         RootfsCompatibilityInstallKind::Config,
         installed,
     )?;
-    install_service_enablement(
-        root,
-        "/etc/systemd/system/cloud-init.target.wants/motlie-vfs-guest.service",
-        "../motlie-vfs-guest.service",
-        installed,
-    )?;
-    install_service_enablement(
-        root,
-        "/etc/systemd/system/cloud-init.target.wants/motlie-agent-state.service",
-        "../motlie-agent-state.service",
-        installed,
-    )?;
-    install_service_enablement(
-        root,
-        "/etc/systemd/system/multi-user.target.wants/motlie-vmm-vsock-ssh.service",
-        "../motlie-vmm-vsock-ssh.service",
-        installed,
-    )?;
+    install_profile_service_enablement(root, profile_spec.profile.init, installed)?;
     install_builtin_file(
         root,
         "/etc/profile.d/tmux-auto.sh",
@@ -2964,20 +3623,172 @@ fn install_builtin_support_files(
             "/opt/motlie/v1.5/guest/bin/motlie-vmm-egress-setup",
             installed,
         )?;
-        install_builtin_file(
-            root,
-            "/etc/systemd/system/motlie-vmm-egress.service",
-            MOTLIE_VMM_EGRESS_SERVICE,
-            0o644,
-            RootfsCompatibilityInstallKind::ServiceUnit,
-            installed,
-        )?;
-        install_service_enablement(
-            root,
-            "/etc/systemd/system/multi-user.target.wants/motlie-vmm-egress.service",
-            "../motlie-vmm-egress.service",
-            installed,
-        )?;
+        install_profile_egress_service(root, profile_spec.profile.init, installed)?;
+    }
+    Ok(())
+}
+
+fn install_profile_service_files(
+    root: &Path,
+    init: InitProfile,
+    installed: &mut Vec<RootfsCompatibilityInstallRecord>,
+) -> Result<(), RootfsCompatibilityError> {
+    match init {
+        InitProfile::UbuntuSystemd => {
+            install_builtin_file(
+                root,
+                "/etc/systemd/system/motlie-vfs-guest.service",
+                MOTLIE_VFS_GUEST_SERVICE,
+                0o644,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+            install_builtin_file(
+                root,
+                "/etc/systemd/system/motlie-agent-state.service",
+                MOTLIE_AGENT_STATE_SERVICE,
+                0o644,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+            install_builtin_file(
+                root,
+                "/etc/systemd/system/motlie-vmm-vsock-ssh.service",
+                MOTLIE_VMM_VSOCK_SSH_SERVICE,
+                0o644,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+        }
+        InitProfile::AlpineOpenRc => {
+            install_builtin_file(
+                root,
+                "/etc/init.d/motlie-vfs-guest",
+                MOTLIE_OPENRC_VFS_GUEST_SERVICE,
+                0o755,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+            install_builtin_file(
+                root,
+                "/etc/init.d/motlie-agent-state",
+                MOTLIE_OPENRC_AGENT_STATE_SERVICE,
+                0o755,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+            install_builtin_file(
+                root,
+                "/etc/init.d/motlie-vmm-vsock-ssh",
+                MOTLIE_OPENRC_VSOCK_SSH_SERVICE,
+                0o755,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+            install_builtin_file(
+                root,
+                "/etc/local.d/motlie-vmm.start",
+                MOTLIE_OPENRC_LOCAL_START,
+                0o755,
+                RootfsCompatibilityInstallKind::ProfileScript,
+                installed,
+            )?;
+        }
+        InitProfile::MotlieInit | InitProfile::Unsupported => {}
+    }
+    Ok(())
+}
+
+fn install_profile_service_enablement(
+    root: &Path,
+    init: InitProfile,
+    installed: &mut Vec<RootfsCompatibilityInstallRecord>,
+) -> Result<(), RootfsCompatibilityError> {
+    match init {
+        InitProfile::UbuntuSystemd => {
+            install_service_enablement(
+                root,
+                "/etc/systemd/system/cloud-init.target.wants/motlie-vfs-guest.service",
+                "../motlie-vfs-guest.service",
+                installed,
+            )?;
+            install_service_enablement(
+                root,
+                "/etc/systemd/system/cloud-init.target.wants/motlie-agent-state.service",
+                "../motlie-agent-state.service",
+                installed,
+            )?;
+            install_service_enablement(
+                root,
+                "/etc/systemd/system/multi-user.target.wants/motlie-vmm-vsock-ssh.service",
+                "../motlie-vmm-vsock-ssh.service",
+                installed,
+            )?;
+        }
+        InitProfile::AlpineOpenRc => {
+            install_service_enablement(
+                root,
+                "/etc/runlevels/default/motlie-vfs-guest",
+                "/etc/init.d/motlie-vfs-guest",
+                installed,
+            )?;
+            install_service_enablement(
+                root,
+                "/etc/runlevels/default/motlie-agent-state",
+                "/etc/init.d/motlie-agent-state",
+                installed,
+            )?;
+            install_service_enablement(
+                root,
+                "/etc/runlevels/default/motlie-vmm-vsock-ssh",
+                "/etc/init.d/motlie-vmm-vsock-ssh",
+                installed,
+            )?;
+        }
+        InitProfile::MotlieInit | InitProfile::Unsupported => {}
+    }
+    Ok(())
+}
+
+fn install_profile_egress_service(
+    root: &Path,
+    init: InitProfile,
+    installed: &mut Vec<RootfsCompatibilityInstallRecord>,
+) -> Result<(), RootfsCompatibilityError> {
+    match init {
+        InitProfile::UbuntuSystemd => {
+            install_builtin_file(
+                root,
+                "/etc/systemd/system/motlie-vmm-egress.service",
+                MOTLIE_VMM_EGRESS_SERVICE,
+                0o644,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+            install_service_enablement(
+                root,
+                "/etc/systemd/system/multi-user.target.wants/motlie-vmm-egress.service",
+                "../motlie-vmm-egress.service",
+                installed,
+            )?;
+        }
+        InitProfile::AlpineOpenRc => {
+            install_builtin_file(
+                root,
+                "/etc/init.d/motlie-vmm-egress",
+                MOTLIE_OPENRC_EGRESS_SERVICE,
+                0o755,
+                RootfsCompatibilityInstallKind::ServiceUnit,
+                installed,
+            )?;
+            install_service_enablement(
+                root,
+                "/etc/runlevels/default/motlie-vmm-egress",
+                "/etc/init.d/motlie-vmm-egress",
+                installed,
+            )?;
+        }
+        InitProfile::MotlieInit | InitProfile::Unsupported => {}
     }
     Ok(())
 }
@@ -3129,6 +3940,44 @@ fn install_builtin_file(
     Ok(())
 }
 
+fn ensure_sshd_config_include(
+    root: &Path,
+    installed: &mut Vec<RootfsCompatibilityInstallRecord>,
+) -> Result<(), RootfsCompatibilityError> {
+    let guest_path = Path::new("/etc/ssh/sshd_config");
+    let host_path = rootfs_host_path_for_create(root, guest_path)?;
+    let include = "Include /etc/ssh/sshd_config.d/*.conf";
+    let mut contents = match fs::read_to_string(&host_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(RootfsCompatibilityError::Io {
+                path: Some(host_path),
+                source,
+            });
+        }
+    };
+    if contents.lines().any(|line| line.trim() == include) {
+        return Ok(());
+    }
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(include);
+    contents.push('\n');
+    fs::write(&host_path, contents).map_err(|source| RootfsCompatibilityError::Io {
+        path: Some(host_path),
+        source,
+    })?;
+    rootfs_set_mode(&rootfs_host_path_for_create(root, guest_path)?, 0o644)?;
+    installed.push(RootfsCompatibilityInstallRecord::new(
+        RootfsCompatibilityInstallKind::Config,
+        guest_path,
+        Some(0o644),
+    ));
+    Ok(())
+}
+
 fn install_compat_symlink(
     root: &Path,
     link_path: &str,
@@ -3197,6 +4046,7 @@ fn render_cloud_init_user_data(
     let mut out = String::from("#cloud-config\n");
     out.push_str("apt:\n");
     out.push_str("  preserve_sources_list: true\n");
+    out.push_str("ssh_pwauth: false\n");
     if users.is_empty() {
         out.push_str("users: []\n");
         return Ok(out);
@@ -3230,7 +4080,8 @@ fn render_cloud_init_user_data(
             writeln!(&mut out, "    sudo: ALL=(ALL) NOPASSWD:ALL")
                 .expect("writing to String cannot fail");
         }
-        writeln!(&mut out, "    lock_passwd: true").expect("writing to String cannot fail");
+        writeln!(&mut out, "    passwd: '*'").expect("writing to String cannot fail");
+        writeln!(&mut out, "    lock_passwd: false").expect("writing to String cannot fail");
     }
     Ok(out)
 }
@@ -3670,6 +4521,30 @@ fn classify_package_manager(
                 }),
             }
         }
+        PackageManagerRequirement::Apk => {
+            let apk = find_existing_rootfs_file(
+                root,
+                &["/sbin/apk", "/usr/sbin/apk", "/bin/apk", "/usr/bin/apk"],
+            )?;
+            match apk {
+                Some(apk) => Ok(PackageManagerClassification {
+                    available: true,
+                    finding: RootfsRequirementFinding::new(
+                        RootfsRequirementKind::PackageManager,
+                        RootfsRequirementStatus::Present,
+                        format!("apk at {apk:?}"),
+                    ),
+                }),
+                None => Ok(PackageManagerClassification {
+                    available: false,
+                    finding: RootfsRequirementFinding::new(
+                        RootfsRequirementKind::PackageManager,
+                        RootfsRequirementStatus::Unsupported,
+                        "apk was not found",
+                    ),
+                }),
+            }
+        }
     }
 }
 
@@ -3711,6 +4586,33 @@ fn classify_init_system(
                     RootfsRequirementKind::InitSystem,
                     RootfsRequirementStatus::Unsupported,
                     "systemd not present and package manager is unavailable",
+                )
+            }
+        }
+        InitProfile::AlpineOpenRc => {
+            let openrc = find_existing_rootfs_file(root, &["/sbin/openrc", "/sbin/rc"])?;
+            let openrc_run = find_existing_rootfs_file(root, &["/sbin/openrc-run"])?;
+            let init = find_existing_rootfs_file(root, &["/sbin/init"])?;
+            let init_d = classify_path_kind(root, Path::new("/etc/init.d"))?;
+            if let (Some(init), Some(openrc), Some(openrc_run), RootfsPathKind::Directory) =
+                (init, openrc, openrc_run, init_d)
+            {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::InitSystem,
+                    RootfsRequirementStatus::Present,
+                    format!("OpenRC indicators at {init:?}, {openrc:?}, and {openrc_run:?}"),
+                )
+            } else if package_manager_available {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::InitSystem,
+                    RootfsRequirementStatus::MissingButInstallable,
+                    "OpenRC not fully present; apk can install profile init packages",
+                )
+            } else {
+                RootfsRequirementFinding::new(
+                    RootfsRequirementKind::InitSystem,
+                    RootfsRequirementStatus::Unsupported,
+                    "OpenRC not present and package manager is unavailable",
                 )
             }
         }
@@ -3760,6 +4662,17 @@ fn classify_required_binaries(
         .collect()
 }
 
+fn read_installed_packages(
+    root: &Path,
+    package_manager: PackageManagerRequirement,
+) -> Result<BTreeSet<String>, RootfsClassificationError> {
+    match package_manager {
+        PackageManagerRequirement::None => Ok(BTreeSet::new()),
+        PackageManagerRequirement::AptDpkg => read_installed_dpkg_packages(root),
+        PackageManagerRequirement::Apk => read_installed_apk_packages(root),
+    }
+}
+
 fn read_installed_dpkg_packages(
     root: &Path,
 ) -> Result<BTreeSet<String>, RootfsClassificationError> {
@@ -3794,11 +4707,35 @@ fn parse_dpkg_status(contents: &str) -> BTreeSet<String> {
     packages
 }
 
+fn read_installed_apk_packages(root: &Path) -> Result<BTreeSet<String>, RootfsClassificationError> {
+    let Some(installed) = read_rootfs_file_optional(root, Path::new("/lib/apk/db/installed"))?
+    else {
+        return Ok(BTreeSet::new());
+    };
+    Ok(parse_apk_installed(&installed))
+}
+
+fn parse_apk_installed(contents: &str) -> BTreeSet<String> {
+    contents
+        .lines()
+        .filter_map(|line| line.strip_prefix("P:"))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn classify_required_packages(
     required_packages: &[String],
     installed_packages: &BTreeSet<String>,
     package_manager_available: bool,
+    package_manager: PackageManagerRequirement,
 ) -> Vec<RootfsRequirementFinding> {
+    let package_manager_name = match package_manager {
+        PackageManagerRequirement::None => "no package manager",
+        PackageManagerRequirement::AptDpkg => "apt/dpkg",
+        PackageManagerRequirement::Apk => "apk",
+    };
     required_packages
         .iter()
         .map(|package| {
@@ -3813,7 +4750,9 @@ fn classify_required_packages(
                 RootfsRequirementFinding::new(
                     RootfsRequirementKind::RequiredPackage,
                     RootfsRequirementStatus::MissingButInstallable,
-                    format!("package {package} is not installed but apt/dpkg is available"),
+                    format!(
+                        "package {package} is not installed but {package_manager_name} is available"
+                    ),
                 )
                 .with_package(package.clone())
             } else {
@@ -3993,22 +4932,142 @@ async fn manifest_response_from_reqwest(
     })
 }
 
-fn manifest_url(image_ref: &OciImageReference) -> String {
-    format!(
-        "https://{}/v2/{}/manifests/{}",
-        image_ref.registry_api_host(),
-        image_ref.repository,
-        image_ref.reference.registry_reference()
-    )
+impl OciRegistryClient {
+    fn registry_base_url(
+        &self,
+        image_ref: &OciImageReference,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        if let Some(url) = &self.registry_base_url {
+            return Ok(url.clone());
+        }
+        let url = format!("https://{}", image_ref.registry_api_host());
+        reqwest::Url::parse(&url).map_err(|source| OciRegistryError::InvalidRegistryUrl {
+            image_ref: image_ref.normalized(),
+            url,
+            reason: source.to_string(),
+        })
+    }
+
+    fn registry_url(
+        &self,
+        image_ref: &OciImageReference,
+        path: String,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        let mut url = self.registry_base_url(image_ref)?;
+        url.set_path(&path);
+        url.set_query(None);
+        Ok(url)
+    }
+
+    fn manifest_url(
+        &self,
+        image_ref: &OciImageReference,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!(
+                "/v2/{}/manifests/{}",
+                image_ref.repository,
+                image_ref.reference.registry_reference()
+            ),
+        )
+    }
+
+    fn blob_url(
+        &self,
+        image_ref: &OciImageReference,
+        digest: &OciDigest,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!("/v2/{}/blobs/{}", image_ref.repository, digest),
+        )
+    }
+
+    fn upload_url(&self, image_ref: &OciImageReference) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!("/v2/{}/blobs/uploads/", image_ref.repository),
+        )
+    }
+
+    fn manifest_reference_url(
+        &self,
+        image_ref: &OciImageReference,
+        reference: &str,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        self.registry_url(
+            image_ref,
+            format!("/v2/{}/manifests/{}", image_ref.repository, reference),
+        )
+    }
+
+    fn resolve_registry_location(
+        &self,
+        image_ref: &OciImageReference,
+        location: &str,
+    ) -> Result<reqwest::Url, OciRegistryError> {
+        if let Ok(url) = reqwest::Url::parse(location) {
+            return Ok(url);
+        }
+        let base = self.registry_base_url(image_ref)?;
+        base.join(location)
+            .map_err(|source| OciRegistryError::InvalidRegistryHeader {
+                image_ref: image_ref.normalized(),
+                header: reqwest::header::LOCATION.as_str().to_string(),
+                value: location.to_string(),
+                reason: source.to_string(),
+            })
+    }
 }
 
-fn blob_url(image_ref: &OciImageReference, digest: &OciDigest) -> String {
-    format!(
-        "https://{}/v2/{}/blobs/{}",
-        image_ref.registry_api_host(),
-        image_ref.repository,
-        digest
-    )
+fn apply_registry_auth(
+    request: reqwest::RequestBuilder,
+    bearer_token: Option<&str>,
+    auth: &OciRegistryAuth,
+) -> reqwest::RequestBuilder {
+    if let Some(token) = bearer_token {
+        return request.bearer_auth(token);
+    }
+    match auth {
+        OciRegistryAuth::Anonymous => request,
+        OciRegistryAuth::Basic { username, password } => {
+            request.basic_auth(username, Some(password))
+        }
+        OciRegistryAuth::Bearer { token } => request.bearer_auth(token),
+    }
+}
+
+fn response_auth_challenge<'a>(
+    image_ref: &OciImageReference,
+    headers: &'a reqwest::header::HeaderMap,
+) -> Result<&'a str, OciRegistryError> {
+    headers
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| OciRegistryError::MissingAuthChallenge {
+            image_ref: image_ref.normalized(),
+        })
+}
+
+fn registry_digest_header(
+    image_ref: &OciImageReference,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Option<OciDigest>, OciRegistryError> {
+    headers
+        .get("Docker-Content-Digest")
+        .map(|value| {
+            let raw = value
+                .to_str()
+                .map_err(|source| OciRegistryError::InvalidRegistryHeader {
+                    image_ref: image_ref.normalized(),
+                    header: "Docker-Content-Digest".to_string(),
+                    value: "<non-utf8>".to_string(),
+                    reason: source.to_string(),
+                })?;
+            OciDigest::new(raw).map_err(OciRegistryError::Contract)
+        })
+        .transpose()
 }
 
 fn cache_tmp_path(path: &Path) -> Result<PathBuf, OciRegistryError> {
@@ -4768,6 +5827,18 @@ mod tests {
         ExternalOciSource::ubuntu_systemd(OciPlatform::linux_amd64(), digest('a'), digest('b'))
     }
 
+    fn alpine_classifier_source() -> ExternalOciSource {
+        ExternalOciSource::alpine_openrc(OciPlatform::linux_amd64(), digest('a'), digest('b'))
+    }
+
+    fn write_apk_installed(root: &Path, packages: &[&str]) {
+        let mut installed = String::new();
+        for package in packages {
+            installed.push_str(&format!("P:{package}\n\n"));
+        }
+        write_rootfs_file(root, "/lib/apk/db/installed", &installed);
+    }
+
     fn write_ubuntu_systemd_foundation(root: &Path, packages: &[&str]) {
         write_rootfs_file(root, "/etc/os-release", "ID=ubuntu\nVERSION_ID=\"24.04\"\n");
         write_rootfs_file(root, "/usr/bin/apt-get", "#!/bin/sh\n");
@@ -4775,6 +5846,22 @@ mod tests {
         write_rootfs_file(root, "/bin/sh", "#!/bin/sh\n");
         write_rootfs_file(root, "/usr/lib/systemd/systemd", "");
         write_dpkg_status(root, packages);
+        create_rootfs_dir(root, "/dev");
+    }
+
+    fn write_alpine_openrc_foundation(root: &Path, packages: &[&str]) {
+        write_rootfs_file(
+            root,
+            "/etc/os-release",
+            "ID=alpine\nVERSION_ID=\"3.22.2\"\n",
+        );
+        write_rootfs_file(root, "/sbin/apk", "#!/bin/sh\n");
+        write_rootfs_file(root, "/bin/sh", "#!/bin/sh\n");
+        write_rootfs_file(root, "/sbin/init", "#!/bin/sh\n");
+        write_rootfs_file(root, "/sbin/openrc", "#!/bin/sh\n");
+        write_rootfs_file(root, "/sbin/openrc-run", "#!/bin/sh\n");
+        create_rootfs_dir(root, "/etc/init.d");
+        write_apk_installed(root, packages);
         create_rootfs_dir(root, "/dev");
     }
 
@@ -4808,6 +5895,36 @@ mod tests {
             "sudo",
             "systemd",
             "systemd-sysv",
+            "tmux",
+            "util-linux",
+            "vim",
+            "wget",
+        ]
+    }
+
+    fn installed_alpine_packages() -> Vec<&'static str> {
+        vec![
+            "bash",
+            "bind-tools",
+            "bubblewrap",
+            "ca-certificates",
+            "cloud-init",
+            "coreutils",
+            "curl",
+            "dbus",
+            "fuse3",
+            "git",
+            "iproute2",
+            "iputils",
+            "nodejs",
+            "npm",
+            "openrc",
+            "openssh-server",
+            "python3",
+            "shadow",
+            "socat",
+            "strace",
+            "sudo",
             "tmux",
             "vim",
             "wget",
@@ -5086,6 +6203,364 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct MockHttpRequest {
+        method: String,
+        target: String,
+        body: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct MockHttpResponse {
+        status: &'static str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct MockRegistryState {
+        blob_digest: OciDigest,
+        blob_bytes: Vec<u8>,
+        child_reference: String,
+        child_manifest: Vec<u8>,
+        child_digest: OciDigest,
+        index_reference: String,
+        index_manifest: Vec<u8>,
+        index_digest: OciDigest,
+        events: Vec<String>,
+        failures: Vec<String>,
+    }
+
+    #[tokio::test]
+    async fn registry_push_uploads_blob_and_manifests_in_order() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let blob_bytes = b"mock layer bytes".to_vec();
+        let blob_digest = digest_from_bytes(&blob_bytes).unwrap();
+        let blob_path = tempdir.path().join("layer.tar");
+        fs::write(&blob_path, &blob_bytes).unwrap();
+        let child_manifest = br#"{"schemaVersion":2,"kind":"child"}"#.to_vec();
+        let child_digest = digest_from_bytes(&child_manifest).unwrap();
+        let index_manifest = br#"{"schemaVersion":2,"kind":"index"}"#.to_vec();
+        let index_digest = digest_from_bytes(&index_manifest).unwrap();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(MockRegistryState {
+            blob_digest: blob_digest.clone(),
+            blob_bytes: blob_bytes.clone(),
+            child_reference: child_digest.to_string(),
+            child_manifest: child_manifest.clone(),
+            child_digest: child_digest.clone(),
+            index_reference: "v1".to_string(),
+            index_manifest: index_manifest.clone(),
+            index_digest: index_digest.clone(),
+            events: Vec::new(),
+            failures: Vec::new(),
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let registry_url = format!("http://{}", listener.local_addr().unwrap());
+        let registry_base_url = reqwest::Url::parse(&registry_url).unwrap();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let server_state = std::sync::Arc::clone(&state);
+        let server = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let state = std::sync::Arc::clone(&server_state);
+                        tokio::spawn(async move {
+                            handle_mock_registry_connection(stream, state).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        let client =
+            OciRegistryClient::with_registry_base_url(reqwest::Client::new(), registry_base_url);
+        let image_ref = OciImageReference::from_str("registry.example.com/acme/motlie:v1").unwrap();
+        let auth = OciRegistryAuth::Anonymous;
+
+        let blob_status = client
+            .push_blob_from_path(
+                &image_ref,
+                &blob_digest,
+                blob_bytes.len() as u64,
+                &blob_path,
+                &auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(blob_status, OciBlobPushStatus::Uploaded);
+        let child_result = client
+            .push_manifest_bytes(
+                &image_ref,
+                child_digest.as_ref(),
+                OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+                child_manifest,
+                &auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(child_result.computed_digest, child_digest);
+        let index_result = client
+            .push_manifest_bytes(
+                &image_ref,
+                "v1",
+                "application/vnd.oci.image.index.v1+json",
+                index_manifest,
+                &auth,
+            )
+            .await
+            .unwrap();
+        assert_eq!(index_result.computed_digest, index_digest);
+        let remote_digest = client
+            .fetch_manifest_digest_with_auth(&image_ref, &auth)
+            .await
+            .unwrap();
+        assert_eq!(remote_digest, index_digest);
+
+        let _ = shutdown_tx.send(());
+        server.await.unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.failures, Vec::<String>::new());
+        assert_eq!(
+            state.events,
+            vec![
+                "HEAD blob",
+                "POST upload",
+                "PUT blob",
+                "PUT child manifest",
+                "PUT index manifest",
+                "GET index manifest",
+            ]
+        );
+    }
+
+    async fn handle_mock_registry_connection(
+        mut stream: tokio::net::TcpStream,
+        state: std::sync::Arc<std::sync::Mutex<MockRegistryState>>,
+    ) {
+        let request = match read_mock_http_request(&mut stream).await {
+            Ok(request) => request,
+            Err(error) => {
+                let response = MockHttpResponse {
+                    status: "400 Bad Request",
+                    headers: Vec::new(),
+                    body: error.to_string().into_bytes(),
+                };
+                let _ = write_mock_http_response(&mut stream, response).await;
+                return;
+            }
+        };
+        let response = {
+            let mut state = state.lock().unwrap();
+            mock_registry_response(&mut state, request)
+        };
+        let _ = write_mock_http_response(&mut stream, response).await;
+    }
+
+    async fn read_mock_http_request(
+        stream: &mut tokio::net::TcpStream,
+    ) -> std::io::Result<MockHttpRequest> {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut scratch).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed before HTTP headers",
+                ));
+            }
+            bytes.extend_from_slice(&scratch[..read]);
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position;
+            }
+        };
+        let header_bytes = &bytes[..header_end];
+        let headers = String::from_utf8_lossy(header_bytes);
+        let mut lines = headers.split("\r\n");
+        let request_line = lines.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTTP request line")
+        })?;
+        let mut parts = request_line.split_whitespace();
+        let method = parts
+            .next()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing method"))?
+            .to_string();
+        let target = parts
+            .next()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing target"))?
+            .to_string();
+        let content_length = lines
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or_default();
+        let body_start = header_end + 4;
+        while bytes.len() < body_start + content_length {
+            let read = stream.read(&mut scratch).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed before HTTP body",
+                ));
+            }
+            bytes.extend_from_slice(&scratch[..read]);
+        }
+        Ok(MockHttpRequest {
+            method,
+            target,
+            body: bytes[body_start..body_start + content_length].to_vec(),
+        })
+    }
+
+    async fn write_mock_http_response(
+        stream: &mut tokio::net::TcpStream,
+        response: MockHttpResponse,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut head = format!(
+            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            response.status,
+            response.body.len()
+        );
+        for (name, value) in response.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).await?;
+        stream.write_all(&response.body).await?;
+        stream.shutdown().await
+    }
+
+    fn mock_registry_response(
+        state: &mut MockRegistryState,
+        request: MockHttpRequest,
+    ) -> MockHttpResponse {
+        let (path, query) = request
+            .target
+            .split_once('?')
+            .map_or((request.target.as_str(), ""), |(path, query)| (path, query));
+        let repo = "/v2/acme/motlie";
+        let blob_path = format!("{repo}/blobs/{}", state.blob_digest);
+        let blob_path_encoded = format!(
+            "{repo}/blobs/{}",
+            state.blob_digest.to_string().replace(':', "%3A")
+        );
+        let child_path = format!("{repo}/manifests/{}", state.child_reference);
+        let child_path_encoded = format!(
+            "{repo}/manifests/{}",
+            state.child_reference.replace(':', "%3A")
+        );
+        let index_path = format!("{repo}/manifests/{}", state.index_reference);
+
+        match (request.method.as_str(), path) {
+            ("HEAD", candidate) if candidate == blob_path || candidate == blob_path_encoded => {
+                state.events.push("HEAD blob".to_string());
+                response("404 Not Found", Vec::new(), Vec::new())
+            }
+            ("POST", "/v2/acme/motlie/blobs/uploads/") => {
+                state.events.push("POST upload".to_string());
+                response(
+                    "202 Accepted",
+                    vec![(
+                        reqwest::header::LOCATION.as_str().to_string(),
+                        "/v2/acme/motlie/blobs/uploads/mock-upload".to_string(),
+                    )],
+                    Vec::new(),
+                )
+            }
+            ("PUT", "/v2/acme/motlie/blobs/uploads/mock-upload") => {
+                state.events.push("PUT blob".to_string());
+                let expected_query = format!("digest={}", state.blob_digest);
+                let expected_query_encoded = format!(
+                    "digest={}",
+                    state.blob_digest.to_string().replace(':', "%3A")
+                );
+                if query != expected_query && query != expected_query_encoded {
+                    state.failures.push(format!(
+                        "blob upload query {query:?} did not match {expected_query:?}"
+                    ));
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                if request.body != state.blob_bytes {
+                    state.failures.push("blob upload body mismatch".to_string());
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                response(
+                    "201 Created",
+                    vec![docker_content_digest(&state.blob_digest)],
+                    Vec::new(),
+                )
+            }
+            ("PUT", candidate) if candidate == child_path || candidate == child_path_encoded => {
+                state.events.push("PUT child manifest".to_string());
+                if request.body != state.child_manifest {
+                    state
+                        .failures
+                        .push("child manifest body mismatch".to_string());
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                response(
+                    "201 Created",
+                    vec![docker_content_digest(&state.child_digest)],
+                    Vec::new(),
+                )
+            }
+            ("PUT", candidate) if candidate == index_path => {
+                state.events.push("PUT index manifest".to_string());
+                if request.body != state.index_manifest {
+                    state
+                        .failures
+                        .push("index manifest body mismatch".to_string());
+                    return response("400 Bad Request", Vec::new(), Vec::new());
+                }
+                response(
+                    "201 Created",
+                    vec![docker_content_digest(&state.index_digest)],
+                    Vec::new(),
+                )
+            }
+            ("GET", candidate) if candidate == index_path => {
+                state.events.push("GET index manifest".to_string());
+                response(
+                    "200 OK",
+                    vec![docker_content_digest(&state.index_digest)],
+                    state.index_manifest.clone(),
+                )
+            }
+            _ => {
+                state.failures.push(format!(
+                    "unexpected registry request: {} {}",
+                    request.method, request.target
+                ));
+                response("404 Not Found", Vec::new(), Vec::new())
+            }
+        }
+    }
+
+    fn docker_content_digest(digest: &OciDigest) -> (String, String) {
+        ("Docker-Content-Digest".to_string(), digest.to_string())
+    }
+
+    fn response(
+        status: &'static str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> MockHttpResponse {
+        MockHttpResponse {
+            status,
+            headers,
+            body,
+        }
+    }
+
     #[test]
     fn content_cache_uses_digest_addressed_paths_and_reuses_blobs() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -5308,6 +6783,38 @@ mod tests {
             )
             .status,
             RootfsRequirementStatus::NeedsRuntimeProvisioning
+        );
+    }
+
+    #[test]
+    fn rootfs_classifier_marks_alpine_foundation_compatible_with_adaptation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        write_alpine_openrc_foundation(root, &["bash", "ca-certificates"]);
+
+        let spec = RootfsProfileSpec::alpine_openrc(alpine_classifier_source());
+        let classification = RootfsClassifier::new().classify(root, &spec).unwrap();
+
+        assert_eq!(
+            classification.status,
+            RootfsClassificationStatus::CompatibleWithAdaptation
+        );
+        assert!(classification.is_supported_foundation());
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::OsRelease).status,
+            RootfsRequirementStatus::Present
+        );
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::PackageManager).status,
+            RootfsRequirementStatus::Present
+        );
+        assert_eq!(
+            finding_by_kind(&classification, RootfsRequirementKind::InitSystem).status,
+            RootfsRequirementStatus::Present
+        );
+        assert_eq!(
+            package_finding(&classification, "git").status,
+            RootfsRequirementStatus::MissingButInstallable
         );
     }
 
@@ -5590,6 +7097,12 @@ mod tests {
             fs::read_to_string(rootfs_path(&root, MOTLIE_V15_SSHD_CA_CONFIG_PATH)).unwrap();
         assert!(sshd_ca_config.contains("TrustedUserCAKeys /etc/ssh/ca/user_ca.pub"));
         assert!(sshd_ca_config.contains("AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u"));
+        assert!(
+            fs::read_to_string(rootfs_path(&root, "/etc/ssh/sshd_config"))
+                .unwrap()
+                .contains("Include /etc/ssh/sshd_config.d/*.conf"),
+            "base sshd_config must include the common CA config directory"
+        );
         assert_eq!(
             fs::read_to_string(rootfs_path(&root, "/etc/ssh/ca/user_ca.pub")).unwrap(),
             "",
@@ -5644,9 +7157,12 @@ mod tests {
             fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_CLOUD_INIT_USER_DATA_PATH))
                 .unwrap();
         assert!(cloud_user.contains("  preserve_sources_list: true\n"));
+        assert!(cloud_user.contains("ssh_pwauth: false\n"));
         assert!(cloud_user.contains("  - name: alice\n"));
         assert!(cloud_user.contains("    home: /home/alice\n"));
         assert!(cloud_user.contains("    sudo: ALL=(ALL) NOPASSWD:ALL\n"));
+        assert!(cloud_user.contains("    passwd: '*'\n"));
+        assert!(cloud_user.contains("    lock_passwd: false\n"));
         let backend_env =
             fs::read_to_string(rootfs_path(&overlay, MOTLIE_V15_BACKEND_ENV_PATH)).unwrap();
         assert!(backend_env.contains("MOTLIE_BACKEND=ch\n"));
@@ -5816,6 +7332,37 @@ mod tests {
         assert!(
             !status.contains("Package: git\n"),
             "the assembler must not claim package installation happened"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootfs_assembler_installs_openrc_service_layer_for_alpine_profile() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("rootfs");
+        fs::create_dir(&root).unwrap();
+        write_alpine_openrc_foundation(&root, &installed_alpine_packages());
+        let binary = fake_guest_binary(tempdir.path());
+        let spec = rootfs_assembly_spec_for_profile(
+            RootfsProfileSpec::alpine_openrc(alpine_classifier_source()),
+            &binary,
+        );
+
+        let manifest = RootfsCompatibilityAssembler::new()
+            .assemble(&root, &spec)
+            .unwrap();
+
+        assert_eq!(manifest.contract_version, MOTLIE_V15_CONTRACT_VERSION);
+        assert!(rootfs_path(&root, "/etc/init.d/motlie-vfs-guest").is_file());
+        assert!(rootfs_path(&root, "/etc/init.d/motlie-vmm-vsock-ssh").is_file());
+        assert!(rootfs_path(&root, "/etc/local.d/motlie-vmm.start").is_file());
+        assert!(rootfs_path(&root, "/etc/runlevels/default/motlie-vfs-guest").is_symlink());
+        assert!(rootfs_path(&root, "/etc/runlevels/default/motlie-vmm-egress").is_symlink());
+        assert!(
+            fs::read_to_string(rootfs_path(&root, "/etc/ssh/sshd_config"))
+                .unwrap()
+                .contains("Include /etc/ssh/sshd_config.d/*.conf"),
+            "Alpine OpenRC roots must load the shared sshd CA config fragment"
         );
     }
 

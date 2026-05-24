@@ -12,18 +12,19 @@
 
 use anyhow::Result;
 use motlie_vfs::client::guest::{GuestMountRunner, GuestMountSpec};
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 use std::time::Duration;
 
 /// Host CID for vsock (always 2 in the guest→host direction).
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const HOST_CID: u32 = 2;
 
 /// Port the host FsServer listens on via the vsock socket.
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const VMM_PORT: u32 = 5000;
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const CONNECT_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
-#[cfg(all(feature = "vsock", feature = "client"))]
+#[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(serde::Deserialize)]
@@ -57,7 +58,10 @@ fn main() -> Result<()> {
 
     eprintln!("motlie-vfs-guest: mounting {} filesystem(s)", specs.len());
     for spec in &specs {
-        eprintln!("  tag={} path={} ro={}", spec.tag, spec.guest_path, spec.read_only);
+        eprintln!(
+            "  tag={} path={} ro={}",
+            spec.tag, spec.guest_path, spec.read_only
+        );
     }
 
     let runner = GuestMountRunner::new(specs);
@@ -66,7 +70,7 @@ fn main() -> Result<()> {
     // Each mount connects to the host listener on port 5000, sends a tiny
     // `TAG <name>\n` prelude, and then switches to the framed FsOp/FsResult
     // request/response stream.
-    #[cfg(all(feature = "vsock", feature = "client"))]
+    #[cfg(all(feature = "vsock", feature = "client", target_os = "linux"))]
     let handles = {
         use motlie_vfs::vsock::client::VsockClientTransport;
 
@@ -106,7 +110,7 @@ fn main() -> Result<()> {
         })?
     };
 
-    #[cfg(not(all(feature = "vsock", feature = "client")))]
+    #[cfg(not(all(feature = "vsock", feature = "client", target_os = "linux")))]
     let handles = {
         eprintln!("motlie-vfs-guest: vsock+client features not enabled, using stub mounts");
         runner.mount_all_stub()?

@@ -1,0 +1,232 @@
+# Motlie VMM v1.5 Release Inputs
+
+This directory stores checked-in release inputs and worked-example notes for
+the v1.5 VMM image flow. Generated VM images, rootfs tarballs, OCI blobs, and
+harness logs are intentionally not checked in here.
+
+## Configs
+
+The worked examples currently cover Ubuntu 24.04 with the `ubuntu-systemd`
+rootfs profile and Alpine 3.22 with the `alpine-openrc` rootfs profile:
+
+```text
+configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
+configs/motlie-image.ubuntu-24.04.linux-amd64.yaml
+configs/motlie-image.ubuntu-24.04.default-arm64.yaml
+configs/motlie-image.alpine-3.22.linux-arm64.yaml
+configs/motlie-image.alpine-3.22.linux-amd64.yaml
+```
+
+The explicit per-platform files are the release-facing inputs. The
+`default-arm64` file preserves the former v1.5 example default for traceability;
+new build and release evidence should use the explicit platform config.
+
+Alpine uses the same v1.5 guest software surface as Ubuntu: OpenSSH, VFS/VNET
+guest support, Git, Codex, and Claude. Distro-specific differences live in the
+rootfs profile, package manager, init-service layer, and harness scenarios:
+Alpine uses `apk`/OpenRC checks where Ubuntu uses `apt`/systemd checks.
+
+To add another rootfs, add a config named:
+
+```text
+configs/motlie-image.<rootfs-id>.<platform>.yaml
+```
+
+Update at least:
+
+- `source.image`, `source.profile`, `source.platform`, and pinned OCI digests.
+- `package_stage.manager`, packages, and npm globals.
+- `immutable_payloads`, `services`, and `immutable_files` if the rootfs has a
+  different init or filesystem layout.
+- `emitters` only when backend adapter contracts change.
+
+The rootfs profile must be implemented by the classifier/assembler before a
+new config is accepted as a working image contract.
+
+## Worked Example Artifacts
+
+A full v1.5 run produces these artifact groups under an operator-selected run
+root such as `/tmp/mbuild/v1.5-ubuntu-arm64`:
+
+```text
+ch-src/
+  mbuild-manifest.json
+  mbuild-common-rootfs.json
+  mbuild-rootfs-assembly.json
+  mbuild-oci-import.json
+  mbuild-ch-emitter.log
+  assembled-rootfs.tar
+  base/Image
+  base/rootfs.squashfs
+  base/guest-contract.json
+  ch-build-result.json
+
+oci-arm64/
+  oci-layout
+  index.json
+  blobs/sha256/<config-digest>
+  blobs/sha256/<manifest-digest>
+  blobs/sha256/<rootfs-layer-digest>
+  mbuild-oci-export.json
+
+ch-from-oci/
+  mbuild-manifest.json
+  mbuild-common-rootfs.json
+  mbuild-validation-manifest.json
+  mbuild-validation.log
+  mbuild-release-evidence.json
+  base/Image
+  base/rootfs.squashfs
+  base/guest-contract.json
+  ch-build-result.json
+
+oci-index/
+  oci-layout
+  index.json
+  blobs/sha256/<per-platform-manifest-digests>
+  mbuild-oci-index.json
+```
+
+The generated JSON files are the machine-readable contract for CI, release
+coordination, and future agents. Large binary artifacts should live in the run
+root, registry, or release artifact store, with only evidence JSON copied into
+release coordination if needed.
+
+## PR 280 / Issue 258 Closure Status
+
+Local validation from 2026-05-24 by `gpt55-ch-aarch64-258=280-og` on
+Linux/aarch64 covered the Alpine/OpenRC arm64 CH path that this host can run:
+
+- exported the assembled Alpine arm64 rootfs to a local OCI layout
+- validated the OCI layout by reading descriptors and blobs back
+- rebuilt CH artifacts from that OCI layout
+- ran `mbuild validate --scenario` for
+  `multiguest-validate-alpine.json`
+- ran the live CH Alpine scenario set:
+  `agent-bootstrap-alpine.json`, `multiguest-validate-alpine.json`,
+  `pty-agent-validation-alpine.json`, and `auto-provision-ssh.json`
+
+The local run wrote release-manifest-ready evidence at:
+
+```text
+/tmp/mbuild-pr280-258-alpine-arm64-oci-readback/mbuild-release-evidence.json
+```
+
+That is staging evidence only. It should be copied or linked from a release
+coordination PR/comment if it is needed later; generated rootfs tarballs, OCI
+blobs, and CH disk artifacts remain outside git.
+
+The remaining #258 closure gates require hosts or credentials not available on
+the Linux/aarch64 CH host used for the local validation above:
+
+- `vz-darwin-arm64`: requires an Apple Silicon macOS host with
+  Virtualization.framework to build/consume the same `linux/arm64` OCI payload
+  and run the full v1.5 VZ scenario matrix.
+- `ch-linux-amd64`: requires a native x86_64/amd64 Linux/KVM/CH host to build
+  and validate the `linux/amd64` guest payload.
+- Ubuntu/Debian rootless package staging cannot run on this host until
+  unprivileged user namespaces are allowed. The current preflight stops before
+  OCI import with the host policy failure
+  `unshare: cannot open /proc/self/setgroups: Permission denied`.
+- Registry publication requires an approved target ref, overwrite/tag policy,
+  and registry credentials. For GHCR that means an operator-provided token and
+  username accepted by `mbuild oci push`.
+- #258 should close only after the published multi-arch OCI reference has
+  immutable registry digests and CH/VZ validation evidence tied to those
+  digests for every required target.
+
+## Commands
+
+Arm64 CH source build from the pinned Ubuntu OCI rootfs:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-ubuntu-arm64/ch-src
+```
+
+Arm64 CH source build from the pinned Alpine OCI rootfs:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-alpine-arm64/ch-src
+```
+
+Plan-only Alpine manifests can be generated for both release platforms without
+running a backend adapter:
+
+```bash
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-alpine-arm64/plan
+
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-amd64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-alpine-amd64/plan
+```
+
+Export the common rootfs to a local OCI layout:
+
+```bash
+cargo run -p mbuild -- oci export \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --artifact /tmp/mbuild/v1.5-ubuntu-arm64/ch-src \
+  --out /tmp/mbuild/v1.5-ubuntu-arm64/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+```
+
+Build CH from that OCI payload:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/v1.5-ubuntu-arm64/ch-from-oci \
+  --oci-layout /tmp/mbuild/v1.5-ubuntu-arm64/oci-arm64
+```
+
+Build VZ from the same OCI payload on Apple Silicon macOS:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --target vz \
+  --out /tmp/mbuild/v1.5-ubuntu-arm64/vz-from-oci \
+  --oci-layout /tmp/mbuild/v1.5-ubuntu-arm64/oci-arm64
+```
+
+Validate a CH artifact with the v1.5 harness:
+
+```bash
+cargo run -p mbuild -- validate \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --artifact /tmp/mbuild/v1.5-ubuntu-arm64/ch-from-oci \
+  --require-executed \
+  --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+```
+
+Alpine validation uses Alpine-specific scenarios that replace `apt-get update`
+with `apk update` while preserving the same VFS, VNET, SSH, sudo, multi-guest,
+and Codex/Claude agent checks:
+
+```bash
+MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
+cargo run -p motlie-vmm --example harness_v1_5 -- \
+  --backend ch \
+  scenario libs/vmm/examples/v1.5/scenarios/agent-bootstrap-alpine.json
+
+MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
+cargo run -p motlie-vmm --example harness_v1_5 -- \
+  --backend ch \
+  scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate-alpine.json
+
+MOTLIE_V15_CH_BASE_ARTIFACTS_DIR=/tmp/mbuild/v1.5-alpine-arm64/ch-src/base \
+cargo run -p motlie-vmm --example harness_v1_5 -- \
+  --backend ch \
+  scenario libs/vmm/examples/v1.5/scenarios/pty-agent-validation-alpine.json
+```

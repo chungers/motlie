@@ -133,7 +133,7 @@ first v1.5 image-builder slice.
 The checked-in v1.5 image-builder contract starts at:
 
 ```text
-libs/vmm/examples/v1.5/motlie-image.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
 ```
 
 The standalone builder binary is:
@@ -146,12 +146,12 @@ Current CLI:
 
 ```bash
 cargo run -p mbuild -- \
-  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- \
-  seed --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  seed --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --guest alice \
   --uid 2001 \
@@ -159,23 +159,68 @@ cargo run -p mbuild -- \
   --out /tmp/mbuild/seed/alice
 
 cargo run -p mbuild -- \
-  validate --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  validate --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --require-executed \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
 ```
 
+Explicit per-platform release configs are checked in for #258 acceptance:
+
+```text
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-amd64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.default-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-amd64.yaml
+```
+
+The explicit per-platform configs are the release-facing inputs. The
+`default-arm64` file preserves the former example default for traceability; new
+release evidence should use the explicit per-platform configs so native
+`vz-darwin-arm64` and `ch-linux-arm64` priority targets are unambiguous. The
+follow-up `ch-linux-amd64` target uses `linux/amd64` and should be coordinated
+on a separate x86_64/amd64 Linux host. Current Apple Silicon VZ acceptance uses
+the `linux/arm64` guest payload and must be built/validated on a macOS host
+with Virtualization.framework.
+
+Alpine 3.22 is the second checked-in rootfs profile. It uses the same Motlie
+guest software surface as Ubuntu but swaps the package/init contracts to
+`apk` and OpenRC. Current Alpine support is validated for CH. The Alpine
+release configs also declare a VZ adapter target so Apple Silicon VZ can
+consume a Linux-produced `linux/arm64` Alpine OCI/rootfs payload through
+`--oci-layout` or `--rootfs-tarball`; direct Alpine VZ adapter builds without
+such a payload are rejected so the native Ubuntu/systemd source VM cannot be
+mistaken for Alpine evidence. Alpine VZ is not green until the VZ build and
+live harness matrix below pass on macOS. Alpine scenario files are:
+
+```text
+scenarios/agent-bootstrap-alpine.json
+scenarios/multiguest-validate-alpine.json
+scenarios/pty-agent-validation-alpine.json
+```
+
 `mbuild build --target ch` now consumes the checked-in `external-oci` source,
-resolves and fetches the pinned Ubuntu OCI arm64 platform, imports the rootfs,
-runs the apt/npm package stage, applies the native Motlie v1.5 compatibility
-layer, emits the common `assembled-rootfs.tar` handoff, and then emits CH
-artifacts. The VZ target still records its current macOS adapter source until
-the VZ emitter consumes that `mbuild`-emitted rootfs tarball and produces fresh
-VZ validation evidence.
+resolves and fetches the pinned Ubuntu OCI platform, imports the rootfs, runs
+the apt/npm package stage, applies the native Motlie v1.5 compatibility layer,
+emits the common `assembled-rootfs.tar` handoff, and then emits CH artifacts.
+`mbuild oci export` turns that common rootfs into a local OCI image layout,
+`mbuild oci validate` reads the layout back and rejects stale or corrupt
+outputs, and `mbuild build --target ch --oci-layout <layout>` consumes that OCI
+payload as the CH emitter input. `mbuild oci index` combines validated
+per-platform layouts into a local multi-arch OCI index; registry upload remains
+a release/operator step because it requires credentials and tag policy.
+
+The VZ target remains adapter-backed, but it can consume the same local OCI
+layout with `mbuild build --target vz --oci-layout <layout>`. `mbuild`
+validates the OCI payload and passes the canonical rootfs layer through the
+current VZ adapter rootfs handoff, so VZ validation evidence can distinguish
+OCI payload consumption from legacy source-VM-only emission.
 `mbuild seed` regenerates per-guest seed files from the config-driven seed
 topology without rebuilding the immutable image. `mbuild validate` checks the
 emitted manifest, can require execution evidence, and can delegate a live
-scenario to `harness_v1_5` while recording the harness log and exit status.
+scenario to `harness_v1_5` while recording the harness log, exit status, and
+OCI source digest fields.
 
 Linux/CH evidence from 2026-05-14 (`@vmm-cdx`): the rebuilt artifact at
 `/tmp/mbuild-pr270-oci-ch-7` passed manifest validation and all v1.5 CH
@@ -189,32 +234,57 @@ pty-agent-validation.json
 pty-login.json
 ```
 
-VZ has an explicit issue #271 handoff for the common rootfs contract:
+VZ has an explicit issue #271/#258 handoff for the common OCI rootfs contract:
 
 ```bash
 cargo run -p mbuild -- \
-  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 
 cargo run -p mbuild -- \
-  build --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  oci export --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --out /tmp/mbuild/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+
+cargo run -p mbuild -- \
+  build --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
-  --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
+  --oci-layout /tmp/mbuild/oci-arm64
 ```
 
 The CH build writes `/tmp/mbuild/ch/assembled-rootfs.tar` plus
 `/tmp/mbuild/ch/mbuild-common-rootfs.json` before CH-specific boot adaptations.
-`mbuild` canonicalizes and digests that tarball, then passes it to the VZ
-adapter as `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. The tarball is consumed
-during VZ image build only. The current VZ adapter still preserves a native
-Apple VZ EFI/NVRAM boot container, applies the assembled rootfs payload into
-that container, and records `rootfs_input` with canonical path, size, and
-sha256 in `build-result.json` and `guest-contract.json`. Guest launch and first
-SSH must not apply this tarball, install packages, or build binaries. Reusable
-VZ images do not intentionally bake demo guest users; `alice`, `bob`, and
-future harness guests are per-guest provisioning state.
+`mbuild oci export` wraps that rootfs as the local OCI payload. The VZ build
+validates the OCI descriptors, canonicalizes the rootfs layer blob, and passes
+it to the VZ adapter as `MOTLIE_V15_ASSEMBLED_ROOTFS_TARBALL`. `--rootfs-tarball`
+remains available as an explicit low-level adapter handoff, but the issue #258
+path should prefer `--oci-layout`. The tarball is consumed during VZ image
+build only. The current VZ adapter still preserves a native Apple VZ EFI/NVRAM
+boot container, applies the assembled rootfs payload into that container, and
+records `rootfs_input` with canonical path, size, and sha256 in
+`build-result.json` and `guest-contract.json`. Guest launch and first SSH must
+not apply this tarball, install packages, or build binaries. Reusable VZ images
+do not intentionally bake demo guest users; `alice`, `bob`, and future harness
+guests are per-guest provisioning state.
+
+For Alpine/OpenRC payloads, the VZ adapter starts the privileged finalization
+shell before replacing the native source rootfs, then extracts the assembled
+payload, writes the VZ backend defaults, enables OpenRC services, verifies the
+v1.5 guest binaries and init scripts, and powers off. It must not fall through
+to the Ubuntu/systemd cargo/npm build path.
+
+macOS-hosted builders cross-compile the Linux guest binaries before rootfs
+injection. The workspace patches `fuser` 0.15.1 through
+`third_party/fuser-0.15.1` so the pure-rust Linux mount path is selected from
+Cargo's target OS rather than the macOS build host.
+
+Until the durable VZ emitter builds a bootable disk directly from the assembled
+rootfs, launch-time init detection intentionally prefers OpenRC when present.
+That prevents leftover source-VM systemd files in the transitional VZ overlay
+from misclassifying Alpine payloads.
 
 v1.5 is greenfield for the image-builder product contract. Do not reuse
 pre-v1.5/v1.35 source VMs or cached disks. If a launch finds a requested guest

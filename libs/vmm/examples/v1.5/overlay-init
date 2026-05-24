@@ -47,16 +47,40 @@ log "mounting $OVERLAY_DEV"
     /mnt/merged                                             || die "mount overlay failed"
 log "overlayfs mounted"
 
-# 6. Unmount pseudo-fs (systemd will remount them after pivot)
-/bin/umount /proc
-/bin/umount /sys
+if [ -x /mnt/merged/sbin/openrc ]; then
+    log "detected OpenRC root; mounting pseudo-fs inside overlay"
+    /bin/mkdir -p /mnt/merged/proc /mnt/merged/sys /mnt/merged/dev
+    /bin/mount -t proc proc /mnt/merged/proc                 || die "mount overlay /proc failed"
+    /bin/mount -t sysfs sysfs /mnt/merged/sys                || die "mount overlay /sys failed"
+    /bin/mount -t devtmpfs devtmpfs /mnt/merged/dev 2>/dev/null \
+        || /bin/mount --bind /dev /mnt/merged/dev            || die "mount overlay /dev failed"
+    log "execing OpenRC init via chroot"
+    if [ -x /usr/sbin/chroot ]; then
+        exec /usr/sbin/chroot /mnt/merged /sbin/init "$@"
+    fi
+    exec chroot /mnt/merged /sbin/init "$@"
+fi
+
+# 6. Unmount pseudo-fs (the real init will remount them after pivot).
+# Busybox-based roots can hold transient references during PID 1 shell setup;
+# lazy unmount keeps the pivot path portable across Ubuntu/systemd and
+# Alpine/OpenRC without changing the guest contract.
+log "preparing pivot"
+/bin/umount -l /proc 2>/dev/null || log "lazy umount /proc skipped"
+/bin/umount -l /sys 2>/dev/null || log "lazy umount /sys skipped"
 # /dev stays — pivot_root needs it
 
 # 7. Pivot root
-/bin/mount --make-rprivate /
+log "pivoting root"
 cd /mnt/merged                                              || die "cd merged failed"
 /bin/mkdir -p old_root
-pivot_root . old_root                                       || die "pivot_root failed"
+if command -v pivot_root >/dev/null 2>&1; then
+    pivot_root . old_root                                   || die "pivot_root failed"
+elif [ -x /sbin/pivot_root ]; then
+    /sbin/pivot_root . old_root                             || die "/sbin/pivot_root failed"
+else
+    die "pivot_root command not found"
+fi
 log "pivot complete"
 
 # 8. Clean up old mounts

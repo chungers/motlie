@@ -5,19 +5,29 @@ Dockerfile-like image contract used by the v1.5 examples, drives the current
 backend image adapters, regenerates per-guest seed artifacts, and emits
 machine-readable manifests for CI and harness consumption.
 
-Status as of 2026-05-15 (`@vmm-cdx`): `mbuild build --target ch` is the
+Status as of 2026-05-18 (`@vmm-cdx`): `mbuild build --target ch` is the
 durable Linux/CH image-builder entrypoint for the v1.5 demo. It resolves the
-pinned Ubuntu OCI source, imports rootfs layers, runs the apt/npm package stage,
+pinned Ubuntu or Alpine OCI source, imports rootfs layers, runs the selected
+apt/npm or apk/npm package stage,
 applies the native v1.5 Motlie compatibility layer, emits the common
 `assembled-rootfs.tar` handoff before CH-specific boot adaptations, and emits CH
-artifacts plus machine-readable manifests. `mbuild seed` regenerates per-guest
-seed overlays without rebuilding the immutable image. `mbuild validate`
-validates manifests, can require execution evidence, and can delegate live guest
-conformance to the v1.5 harness. The VZ target consumes the CH-emitted tarball
-with `--rootfs-tarball` while the durable Apple VZ boot-container emitter is
-still transitional. v1.5 is greenfield for this product contract: pre-v1.5 VZ
-source VMs/cached disks are unsupported, and per-guest users are seed/runtime
-state rather than image content.
+artifacts plus machine-readable manifests. The CH path no longer assumes the
+guest platform is the same as the builder host platform: `source.platform`
+selects the guest architecture, guest binaries are built as static musl
+payloads with `rust-lld`, and cross-arch package staging requires qemu-user
+binfmt or a native builder for that guest architecture. `mbuild seed`
+regenerates per-guest seed overlays without rebuilding the immutable image.
+Checked-in worked-example configs now live under `releases/vmm/v1.5/configs/`.
+`mbuild validate` validates manifests, can require execution evidence, and can
+delegate live guest conformance to the v1.5 harness. `mbuild oci export`
+converts an executed artifact's `assembled-rootfs.tar` into a local OCI image
+layout for issue #258 per-arch payload work. Adapter-backed targets such as VZ
+can consume that local OCI layout with `--oci-layout`; `mbuild` validates the
+layout and passes the canonical rootfs layer through the current adapter rootfs
+handoff. The durable Apple VZ boot-container emitter is still transitional.
+v1.5 is greenfield for this product contract: pre-v1.5 VZ source VMs/cached
+disks are unsupported, and per-guest users are seed/runtime state rather than
+image content.
 
 ## Commands
 
@@ -25,41 +35,104 @@ Build CH artifacts through the native external-OCI CH path:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 ```
 
-Build VZ artifacts through the current VZ adapter:
+Priority #258 targets are Apple Silicon VZ (`vz-darwin-arm64`) and
+DGX/aarch64 Linux CH (`ch-linux-arm64`) first. Both consume/build the
+`linux/arm64` guest payload. CH Linux amd64 (`ch-linux-amd64`) follows on a
+coordinated x86_64/amd64 Linux host and consumes/builds the `linux/amd64`
+guest payload.
+
+Build CH artifacts for a non-native guest platform by setting
+`source.platform` in the image config to the desired OCI platform. For example,
+an arm64 Linux builder can build a `linux/amd64` CH guest when the host has:
+
+- Rust target `x86_64-unknown-linux-musl`
+- toolchain `rust-lld`
+- `qemu-x86_64-static`
+- enabled `/proc/sys/fs/binfmt_misc/qemu-x86_64`
+
+The matching arm64 guest requirements on an amd64 Linux builder are:
+
+- Rust target `aarch64-unknown-linux-musl`
+- toolchain `rust-lld`
+- `qemu-aarch64-static`
+- enabled `/proc/sys/fs/binfmt_misc/qemu-aarch64`
+
+Without qemu-user/binfmt, run the per-arch CH build on native hardware for that
+guest platform. `mbuild` fails before OCI layer import if cross-arch package
+staging cannot execute guest rootfs binaries.
+
+Build VZ artifacts through the current VZ adapter on an Apple Silicon macOS
+host. The current VZ path consumes a local `linux/arm64` OCI layout and passes
+its validated rootfs layer through the adapter rootfs handoff:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/ch
 
+cargo run -p mbuild -- oci export \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --out /tmp/mbuild/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target vz \
   --out /tmp/mbuild/vz \
-  --rootfs-tarball /tmp/mbuild/ch/assembled-rootfs.tar
+  --oci-layout /tmp/mbuild/oci-arm64
 ```
+
+The first command may run on Linux/DGX to produce the arm64 common rootfs
+handoff and OCI layout. The VZ build command must run on the macOS VZ builder.
+`--rootfs-tarball` remains available as an explicit low-level adapter handoff,
+but the issue #258 path should prefer `--oci-layout` so CH and VZ consume the
+same OCI payload contract.
 
 Plan without running backend adapters:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild/plan/ch \
   --plan-only
+```
+
+Plan Alpine configs without running backend adapters:
+
+```bash
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/plan/alpine-arm64
+
+cargo run -p mbuild -- build --plan-only \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-amd64.yaml \
+  --target ch \
+  --out /tmp/mbuild/plan/alpine-amd64
+```
+
+Build Alpine arm64 CH artifacts from the pinned Alpine OCI rootfs:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.alpine-3.22.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch-alpine-arm64
 ```
 
 Regenerate per-guest seed artifacts:
 
 ```bash
 cargo run -p mbuild -- seed \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --guest alice \
   --uid 2001 \
@@ -71,7 +144,7 @@ Validate an emitted build manifest:
 
 ```bash
 cargo run -p mbuild -- validate \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --require-executed
 ```
@@ -80,10 +153,89 @@ Delegate live conformance to the v1.5 harness and write a validation record:
 
 ```bash
 cargo run -p mbuild -- validate \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild/ch \
   --require-executed \
   --scenario libs/vmm/examples/v1.5/scenarios/multiguest-validate.json
+```
+
+Export the assembled rootfs handoff as a local OCI image layout:
+
+```bash
+cargo run -p mbuild -- oci export \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --out /tmp/mbuild/oci-arm64 \
+  --tag motlie-guest:v1.5-arm64
+```
+
+Validate that the exported layout still matches the build config and artifact:
+
+```bash
+cargo run -p mbuild -- oci validate \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --layout /tmp/mbuild/oci-arm64
+```
+
+Consume a validated local OCI payload as the CH emitter input:
+
+```bash
+cargo run -p mbuild -- build \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --target ch \
+  --out /tmp/mbuild/ch-from-oci \
+  --oci-layout /tmp/mbuild/oci-arm64
+```
+
+Create a local multi-arch OCI image index after both per-platform payloads
+exist:
+
+```bash
+cargo run -p mbuild -- oci index \
+  --out /tmp/mbuild/oci-index \
+  --image ghcr.io/chungers/motlie-guest:v1.5 \
+  --layout /tmp/mbuild/oci-amd64 \
+  --layout /tmp/mbuild/oci-arm64
+```
+
+Push a validated local OCI layout directly to an OCI registry without Docker,
+ORAS, Skopeo, Crane, Buildah, or other registry tooling:
+
+```bash
+GHCR_TOKEN=... \
+cargo run -p mbuild -- oci push \
+  --layout /tmp/mbuild/oci-index \
+  --image ghcr.io/chungers/motlie-guest:v1.5 \
+  --username "$GITHUB_ACTOR" \
+  --token-env GHCR_TOKEN
+```
+
+`mbuild oci push --dry-run` validates the layout and writes
+`mbuild-oci-push.json` evidence without contacting the registry. Without
+`--allow-overwrite`, push refuses to replace an existing tag. Auth can come
+from `--password-env`, `--token-env`, or default token envs. All registries may
+use `MOTLIE_MBUILD_REGISTRY_TOKEN`; GHCR additionally uses `GHCR_TOKEN`,
+`CR_PAT`, or `GITHUB_TOKEN`. GHCR uploads require a username from `--username`,
+`MOTLIE_MBUILD_REGISTRY_USERNAME`, or `GITHUB_ACTOR`. Non-GHCR registries never
+receive GitHub-specific default credentials.
+
+Emit release-manifest-ready evidence for a VM image artifact target:
+
+```bash
+cargo run -p mbuild -- oci evidence \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
+  --artifact /tmp/mbuild/ch \
+  --layout /tmp/mbuild/oci-arm64 \
+  --publish-ref ghcr.io/chungers/motlie-guest:v1.5-arm64
+```
+
+Resolve registry pins with the same OCI client used by the builder:
+
+```bash
+cargo run -p mbuild -- oci resolve \
+  --image docker.io/library/ubuntu:24.04 \
+  --platform linux/amd64
 ```
 
 The build command writes:
@@ -113,16 +265,41 @@ When `validate --scenario` is used, validation also writes:
 <artifact>/mbuild-validation.log
 ```
 
+When `oci export` is used, the output directory contains:
+
+```text
+<out>/oci-layout
+<out>/index.json
+<out>/blobs/sha256/<config-digest>
+<out>/blobs/sha256/<manifest-digest>
+<out>/blobs/sha256/<rootfs-layer-digest>
+<out>/mbuild-oci-export.json
+```
+
+`mbuild oci validate` reads the layout back and verifies blob digests, blob
+sizes, `index.json` platform annotations, image-manifest config/layer
+descriptors, image-config platform fields, and the rootfs diff ID. It also
+rejects stale layouts when the source digest, contract version, selected
+platform, or input rootfs evidence no longer matches the current build config
+and artifact manifest.
+
+`mbuild oci index` writes a local OCI layout containing one multi-arch
+`index.json` assembled from validated per-platform mbuild layouts.
+`mbuild oci push` uploads either a single-platform export layout or a
+multi-arch index layout directly through the OCI Distribution API, skips blobs
+that already exist remotely, pushes child manifests before the final index tag,
+verifies the final remote digest, and writes `mbuild-oci-push.json` evidence.
+
 Linux/CH validation evidence from 2026-05-14 (`@vmm-cdx`) used:
 
 ```bash
 cargo run -p mbuild -- build \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --target ch \
   --out /tmp/mbuild-pr270-oci-ch-7
 
 cargo run -p mbuild -- validate \
-  --config libs/vmm/examples/v1.5/motlie-image.yaml \
+  --config releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml \
   --artifact /tmp/mbuild-pr270-oci-ch-7 \
   --require-executed
 ```
@@ -164,6 +341,22 @@ The current config schema is intentionally explicit:
   the CLI accepts any target ID declared here.
 - `validation`: post-boot behavior checks the produced image must satisfy.
 
+Checked-in v1.5 release configs:
+
+```text
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-amd64.yaml
+releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.default-arm64.yaml
+```
+
+The explicit per-platform configs are the release-facing inputs. The
+`default-arm64` file preserves the former v1.5 example default for traceability;
+new #258 acceptance work should prefer the explicit per-platform paths so
+release evidence can distinguish priority `vz-darwin-arm64` and
+`ch-linux-arm64` targets from the later coordinated `ch-linux-amd64` target. In
+Motlie docs, `amd64` is the OCI/Debian platform name and `x86_64` is the
+Linux/Rust host architecture spelling.
+
 `package_stage.manager` currently supports only `apt` in executable adapters.
 APT package entries are validated with APT-aware syntax, including `+`, arch
 qualifiers such as `foo:amd64`, and pinned specs such as `foo=version`. The
@@ -200,6 +393,14 @@ log path, and exit status.
 The manifests are deliberately machine-readable so harnesses and CI can verify
 what stage was produced without rediscovering output paths or inferring backend
 intent from directory names.
+
+`mbuild-oci-export.json` records the exported OCI layout descriptors, source
+image-index digest, selected platform-manifest digest, contract version,
+selected platform, input rootfs size/sha, and ref-name annotation. This is the
+first #258 handoff format: publish/multi-arch work consumes this layout instead
+of rediscovering rootfs tarball paths or rebuilding backend artifacts from shell
+defaults. `mbuild-release-evidence.json` records the same data in the
+`kind = "motlie.vm-image-artifact"` shape used by release manifests.
 
 `mbuild` emits structured tracing logs. Use `RUST_LOG=debug` when debugging OCI
 fetch/import, rootfs classification, backend adapter delegation, or harness

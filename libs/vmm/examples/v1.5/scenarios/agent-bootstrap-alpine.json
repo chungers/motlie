@@ -1,0 +1,40 @@
+{
+  "name": "agent-bootstrap-alpine",
+  "description": "Boot alice and verify Alpine/OpenRC agent guest prerequisites: VFS mounts, passwordless sudo, preinstalled git, Codex CLI, outbound internet, and apk repository refresh.",
+  "steps": [
+    { "action": "boot", "guest": "alice" },
+    { "action": "ready", "guest": "alice" },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'test -f /workspace/README.md && echo WORKSPACE_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "WORKSPACE_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'sudo -n true && echo SUDO_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "SUDO_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'git --version | grep -q \"^git version \" && echo GIT_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "GIT_OK" }
+    },
+    {
+      "action": "exec",
+      "guest": "alice",
+      "command": "/bin/sh -lc 'codex --version | grep -q \"^codex-cli \" && echo CODEX_OK'",
+      "timeout_ms": 10000,
+      "expect": { "exit_code": 0, "stdout_contains": "CODEX_OK" }
+    },
+    { "action": "wait_egress_ready", "guest": "alice", "timeout_ms": 30000 },
+    { "action": "wait_package_manager_quiescent", "guest": "alice", "timeout_ms": 65000 },
+    { "action": "apk_update", "guest": "alice", "timeout_ms": 60000 },
+    { "action": "shutdown", "guest": "alice" }
+  ]
+}

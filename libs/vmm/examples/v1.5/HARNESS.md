@@ -151,6 +151,12 @@ repair, or guest binary builds. Reusable VZ image build must not bake demo
 guest identities; `alice`, `bob`, and future harness guests are provisioned from
 per-guest seed/runtime inputs.
 
+Alpine/OpenRC is an init-profile adaptation of the same handoff. The VZ build
+path enters root before the rootfs overlay, finalizes OpenRC service enablement
+and backend defaults inside the assembled payload, verifies the v1.5 guest
+contract, and then stops. It must not continue into the Ubuntu/systemd package,
+cargo, or npm stages.
+
 v1.5 is greenfield in the product sense. The harness does not preserve
 compatibility with pre-v1.5 cached VZ disks or v1.35 source VMs. If launch-time
 provisioning finds a requested principal already present with a different

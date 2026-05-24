@@ -1,7 +1,7 @@
 //! GuestMountRunner and GuestMountSpec: guest-side mount orchestration.
 //!
 //! This module compiles on any platform. The real FUSE mount path is gated
-//! behind `#[cfg(feature = "client")]`.
+//! behind `#[cfg(all(feature = "client", target_os = "linux"))]`.
 //!
 //! `GuestMountRunner::mount_all()` spawns one thread per mount spec, calls
 //! the caller-supplied connector closure to obtain a transport, wraps it in
@@ -11,9 +11,9 @@
 //! future `motlie-vmm-guest` binaries
 //! should call into this module rather than reimplementing mount loops.
 
-use std::thread::{self, JoinHandle};
-#[cfg(all(feature = "client", feature = "vsock"))]
+#[cfg(all(feature = "client", feature = "vsock", target_os = "linux"))]
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
 
@@ -50,7 +50,10 @@ impl MountHandles {
     pub fn join_all(self) -> Vec<Result<()>> {
         self.handles
             .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("mount thread panicked"))))
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("mount thread panicked")))
+            })
             .collect()
     }
 }
@@ -88,11 +91,17 @@ impl GuestMountRunner {
     /// thread's Tokio runtime handle. The connector must use this runtime for
     /// any async work (e.g. vsock connect) so that IO resources are registered
     /// with the same reactor that will later drive the FUSE request loop.
-    #[cfg(all(feature = "client", feature = "vsock"))]
+    #[cfg(all(feature = "client", feature = "vsock", target_os = "linux"))]
     pub fn mount_all<S, F>(self, connector: F) -> Result<MountHandles>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-        F: Fn(&str, &tokio::runtime::Runtime) -> Result<crate::vsock::client::VsockClientTransport<S>> + Send + Sync + 'static,
+        F: Fn(
+                &str,
+                &tokio::runtime::Runtime,
+            ) -> Result<crate::vsock::client::VsockClientTransport<S>>
+            + Send
+            + Sync
+            + 'static,
     {
         let connector = Arc::new(connector);
         let mut handles = Vec::new();

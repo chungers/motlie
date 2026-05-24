@@ -53,6 +53,7 @@ pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
     let mut out = String::from("#cloud-config\n");
     writeln!(&mut out, "apt:").expect("writing to String cannot fail");
     writeln!(&mut out, "  preserve_sources_list: true").expect("writing to String cannot fail");
+    writeln!(&mut out, "ssh_pwauth: false").expect("writing to String cannot fail");
     writeln!(&mut out, "users:").expect("writing to String cannot fail");
     writeln!(&mut out, "  - name: {}", guest.user.name).expect("writing to String cannot fail");
     writeln!(&mut out, "    uid: {}", guest.user.uid).expect("writing to String cannot fail");
@@ -62,7 +63,8 @@ pub fn render_cloud_init(guest: &GuestSpec) -> Result<String, ArtifactError> {
     writeln!(&mut out, "    shell: /bin/bash").expect("writing to String cannot fail");
     writeln!(&mut out, "    groups: [sudo]").expect("writing to String cannot fail");
     writeln!(&mut out, "    sudo: ALL=(ALL) NOPASSWD:ALL").expect("writing to String cannot fail");
-    writeln!(&mut out, "    lock_passwd: true").expect("writing to String cannot fail");
+    writeln!(&mut out, "    passwd: '*'").expect("writing to String cannot fail");
+    writeln!(&mut out, "    lock_passwd: false").expect("writing to String cannot fail");
 
     if !guest.software.packages.is_empty() {
         writeln!(&mut out, "packages:").expect("writing to String cannot fail");
@@ -567,8 +569,11 @@ mod tests {
         let guest = sample_guest();
         let rendered = render_cloud_init(&guest).unwrap();
         assert!(rendered.contains("preserve_sources_list: true"));
+        assert!(rendered.contains("ssh_pwauth: false"));
         assert!(rendered.contains("name: alice"));
         assert!(rendered.contains("sudo: ALL=(ALL) NOPASSWD:ALL"));
+        assert!(rendered.contains("passwd: '*'"));
+        assert!(rendered.contains("lock_passwd: false"));
         assert!(rendered.contains("packages:"));
         assert!(rendered.contains("  - vim"));
         assert!(rendered.contains("  - gh"));

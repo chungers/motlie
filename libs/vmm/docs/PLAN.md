@@ -4,6 +4,15 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-20 | @codex | Add CH-side pre-merge compatibility work for PR #319: keep V4 agent-state symlinks while waiting for CH/VZ FUSE mounts before linking state directories |
+| 2026-05-18 | @vmm-cdx | Add Alpine 3.22/OpenRC as the second v1.5 rootfs profile: checked-in arm64/amd64 configs, apk package strategy, OpenRC compatibility layer, Alpine harness scenarios, and live CH arm64 validation |
+| 2026-05-17 | @vmm-cdx | Move v1.5 worked-example image configs into `releases/vmm/v1.5/configs/` and document the release-input namespace for rootfs/platform-specific configs |
+| 2026-05-16 | @vmm-cdx | Close the VZ OCI consumption gap for this phase: adapter-backed VZ builds now accept `mbuild build --target vz --oci-layout <layout>`, validate the local OCI payload, and pass its canonical rootfs layer through the current VZ rootfs handoff |
+| 2026-05-16 | @vmm-cdx | Reprioritize #258 acceptance targets: Apple Silicon VZ (`vz-darwin-arm64`) and DGX/aarch64 Linux CH (`ch-linux-arm64`) are first, while CH Linux amd64 (`ch-linux-amd64`, guest `linux/amd64`, Rust `x86_64`) is a coordinated follow-up host target |
+| 2026-05-16 | @vmm-cdx | Implement the next #258 mbuild slice: OCI layouts are validated by reading descriptors back, CH can consume a local OCI layout as emitter input, per-platform configs are checked in for linux/amd64 and linux/arm64, local multi-arch OCI indexes can be assembled, and release-manifest-ready VM image evidence can be emitted |
+| 2026-05-16 | @vmm-cdx | Align Phase 12 with the `origin/main` release process: VM guest images are optional release artifact targets, binary-only releases do not require image gates, native per-platform builders are the #258 acceptance path, and `native-ch-bootstrap` remains the outstanding CH package-engine improvement |
+| 2026-05-16 | @vmm-cdx | Update Phase 12 after removing the CH host-native platform guard: guest platform now drives CH guest target metadata, guest binaries build as static musl payloads, and cross-arch package staging is explicitly gated on qemu-user/binfmt or native per-arch builders |
+| 2026-05-16 | @vmm-cdx | Add Phase 12 for GitHub issue #258: local OCI image-layout export from the v1.5 assembled rootfs, then per-arch payload publication, backend consumption from OCI payloads, digest-keyed validation, and final multi-arch image-index publishing |
 | 2026-05-14 | @vmm-cdx | Complete the Linux/CH side of issue #271: native `mbuild build --target ch` now consumes pinned Ubuntu OCI, runs apt/npm packaging, emits CH artifacts, and passes the v1.5 CH harness matrix |
 | 2026-05-11 | @vmm-cdx | Add the PR #270 build-file hardening tasks: strict YAML schema, APT-aware package spec validation, and manifest/config comparison during `mbuild validate` |
 | 2026-05-11 | @vmm-cdx | Update Phase 11 after PR #270 review: `mbuild` now records transitional adapter source truth, per-emitter materialized sources, config-driven seed topology, apt-only executable package support, and portable seed ownership metadata instead of host chown |
@@ -117,7 +126,7 @@ Current common guest-image implementation status:
       sudo/user env seed files, and uid/gid guest ownership metadata for
       user-owned seed files without requiring host `chown`.
 - [x] GitHub issue #271 has an initial product surface:
-      `libs/vmm/examples/v1.5/motlie-image.yaml` plus
+      `releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml` plus
       `bins/mbuild/src/main.rs`.
 - [ ] GitHub issue #271 remains open as a required v1.5 demo success criterion:
       the demo is not accepted until `mbuild` drives the native OCI
@@ -681,9 +690,12 @@ Tasks:
   - [x] cloud-init preserves OCI-provided apt sources and emits scalar
         passwordless-sudo rules so Ubuntu guests keep valid `noble` sources and
         `sudo -n` works in validation
-- [ ] close GitHub issue #271 as part of the v1.5 demo:
+- [x] close GitHub issue #271 as part of the v1.5 demo:
   - [x] define and check in the Dockerfile-like builder spec
-        (`libs/vmm/examples/v1.5/motlie-image.yaml`)
+        (`releases/vmm/v1.5/configs/motlie-image.ubuntu-24.04.linux-arm64.yaml`)
+  - [x] move worked-example release inputs into
+        `releases/vmm/v1.5/configs/` so future rootfs/platform configs can be
+        added without changing the v1.5 harness/example code tree
   - [x] declare ordered source/import/classify/package/immutable-layer/policy/
         seed/backend-emitter/validation stages in that spec
   - [x] make package-manager stages explicit; apt is implemented by the native
@@ -696,8 +708,8 @@ Tasks:
   - [x] switch the checked-in top-level source to `external-oci` with pinned
         Ubuntu `linux/arm64` image-index and selected platform-manifest digests
   - [x] record the remaining per-emitter source truth: VZ still has
-        `materialized_source` for the current macOS source-VM adapter until the
-        VZ emitter consumes the assembled OCI rootfs path
+        `materialized_source` for the current macOS adapter, while `--oci-layout`
+        feeds the validated OCI rootfs layer through the adapter rootfs handoff
   - [x] move seed topology into config templates for user home, SSH principal,
         and mount declarations so `mbuild seed` does not hardcode the v1.5
         example layout
@@ -727,9 +739,10 @@ Tasks:
   - [x] Linux/CH issue #271 path complete as of 2026-05-14: artifact
         `/tmp/mbuild-pr270-oci-ch-7` was built from the pinned Ubuntu OCI source
         and passed manifest validation plus the v1.5 CH scenario matrix
-  - [ ] VZ issue #271 path remains a macOS follow-up: update the VZ emitter to
-        consume the same assembled OCI rootfs contract and rerun the same
-        logical v1.5 scenario matrix on macOS
+  - [x] VZ issue #271 path completed through the v1.5 bridge: the VZ adapter
+        consumes the `mbuild`-emitted assembled rootfs tarball, records
+        size/sha evidence, and the logical v1.5 scenario matrix passed on
+        macOS VZ in PR #275/#270 acceptance
 - [x] add the package strategy for installable profile requirements for the
       supported apt profile:
   - [x] install the selected profile's package baseline before backend emit
@@ -738,13 +751,16 @@ Tasks:
         concrete package manager contract; reserved managers fail closed
   - [x] preserve explicit evidence for requirements that remain runtime-owned,
         such as `/dev/fuse`
-- [ ] emit backend artifacts from the same assembled rootfs:
-  - [x] switch `motlie-image.yaml` source from `transitional-adapter` to
-        `external-oci` for the native CH path
+- [x] emit backend artifacts from the same assembled rootfs for the accepted
+      v1.5 demo:
+  - [x] switch the worked-example image config source from
+        `transitional-adapter` to `external-oci` for the native CH path
   - [x] CH kernel/rootfs/seed artifacts
-  - [ ] VZ disk/boot artifacts
+  - [x] VZ disk/boot artifacts through the transitional Apple VZ adapter that
+        consumes the shared assembled rootfs tarball
   - [x] backend artifact manifest with digests for CH
-- [ ] write and preserve `GuestImageValidationRecord` with:
+- [ ] write and preserve `GuestImageValidationRecord` with full #258
+      digest-keyed validation metadata:
   - [x] typed `GuestImageProfile`
   - [x] source image reference
   - [x] image-index digest
@@ -753,14 +769,14 @@ Tasks:
   - [ ] contract version
   - [ ] backend kind
   - [x] emitted CH artifact digests
-- [ ] run the shared v1.5 harness matrix against emitted CH and VZ artifacts
-      before accepting a source digest update
+- [x] run the shared v1.5 harness matrix against emitted CH and VZ artifacts
+      for the accepted v1.5 demo
   - [x] Linux/CH matrix passed on 2026-05-14 with
         `/tmp/mbuild-pr270-oci-ch-7`:
         `multiguest-validate`, `auto-provision-ssh`, `agent-bootstrap`,
         `pty-agent-validation`, and `pty-login`
-  - [ ] macOS/VZ matrix must still pass against VZ artifacts emitted from the
-        same OCI-derived rootfs contract
+  - [x] macOS/VZ matrix passed against VZ artifacts emitted from the same
+        OCI-derived rootfs contract in PR #275/#270 acceptance
 
 Acceptance:
 - the first supported input is the Ubuntu official OCI image
@@ -788,9 +804,167 @@ Acceptance:
   - [x] Linux/CH passwordless sudo for validation users
   - [x] Linux/CH PTY/TUI interaction and Codex/Claude startup checks
   - [x] Linux/CH reproducible run artifacts for debugging
-  - [ ] macOS/VZ equivalent matrix against the same logical v1.5 contract
+  - [x] macOS/VZ equivalent matrix against the same logical v1.5 contract
 - v1.4 and v1.45 remain historical acceptance baselines; new v1.5 work must not
   fork their harness or image-builder shapes forward
+
+## Phase 12: Shared OCI Guest Payload And Multi-Arch Image Index
+
+Design reference:
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#roadmap-to-a-shared-oci-guest-image`
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#oci-payload-export-contract`
+- `libs/vmm/docs/DESIGN_GUEST_IMAGE.md#native-per-platform-image-build-coordination`
+- `docs/DESIGN_RELEASES.md#optional-vm-image-artifact-targets`
+
+Goal:
+- close GitHub issue #258 by making the v1.5 Motlie guest payload a published
+  multi-arch OCI image reference consumed by CH and VZ emitters
+- align VM guest image publication with the release branch/master issue/sub-PR
+  process as optional artifact targets; binary-only releases do not depend on
+  VM image generation or VM image gates
+
+Current starting point:
+- Phase 11 closed #245 and #271 on `feature/vmm-vz`: the v1.5 demo has a
+  common guest contract, common seed schema, shared harness scenarios, native
+  CH external-OCI build path, and a VZ rootfs-tarball handoff over the same
+  assembled rootfs contract.
+- The current `mbuild` emitter imports compatible OCI roots, builds requested
+  guest-platform binaries as static musl payloads, stages packages through
+  rootless `chroot`, emits CH artifacts, and exports a local OCI image layout.
+  Cross-architecture rootless-`chroot` staging requires qemu-user/binfmt.
+- #258 remains open because the common rootfs is not yet republished as a
+  Motlie-owned per-arch OCI payload, backend emitters do not yet consume a
+  published OCI payload as their primary input, and no multi-arch image index is
+  published.
+
+Tasks:
+- [x] document the release-process alignment for optional VM image artifact
+      targets:
+  - [x] VM images are optional release artifacts, not prerequisites for binary
+        releases
+  - [x] `kind = "motlie.vm-image-artifact"` distinguishes VM guest image
+        manifests from `kind = "motlie.binary-release"` manifests
+  - [x] release branches remain ledgers; rootfs tarballs, disk images, and OCI
+        blobs are not committed to git
+  - [x] target sub-PRs record build/validation evidence for native
+        per-platform builders
+- [x] add the first local OCI payload export surface:
+  - [x] `mbuild oci export --config ... --artifact ... --out ...`
+  - [x] consume an executed artifact containing `assembled-rootfs.tar`
+  - [x] validate the artifact manifest against the current build config before
+        export
+  - [x] verify the local rootfs tarball size/sha against adapter evidence
+  - [x] write an OCI image layout with `oci-layout`, `index.json`, config blob,
+        image manifest blob, and uncompressed rootfs tar layer blob
+  - [x] write `mbuild-oci-export.json` with contract version, source digest,
+        selected platform, rootfs digest, OCI descriptor digests, and ref-name
+        annotation
+- [x] add local OCI export validation:
+  - [x] verify exported blob digests and sizes by reading the layout back
+  - [x] verify `index.json` platform and annotations match the mbuild manifest
+  - [x] reject stale exports when the source digest, contract version, or
+        selected platform differs from the current config
+- [ ] add per-arch native build/export acceptance:
+  - [x] first exported platform is `linux/arm64`, matching current v1.5
+        release config
+  - [x] remove the CH host-native guest-platform guard so `source.platform`
+        selects the guest target instead of `env::consts::ARCH`
+  - [x] build Motlie guest binaries as static musl payloads for the requested
+        guest platform using `rust-lld`
+  - [x] fail cross-arch CH package staging explicitly unless qemu-user/binfmt
+        for the selected guest platform is available
+  - [x] add checked-in per-platform config/digest inputs for `linux/amd64`
+        and `linux/arm64` instead of using temporary floating configs
+  - [x] move those config/digest inputs under `releases/vmm/v1.5/configs/`
+        as rootfs/platform release inputs
+  - [x] add a second rootfs worked example using Alpine 3.22/OpenRC:
+        `motlie-image.alpine-3.22.linux-arm64.yaml` and
+        `motlie-image.alpine-3.22.linux-amd64.yaml`
+  - [x] declare payload-backed VZ emitters for the Alpine release configs and
+        reject direct Alpine VZ adapter execution without `--oci-layout` or
+        `--rootfs-tarball`, so the native Ubuntu/systemd VZ source VM cannot be
+        mistaken for Alpine/OpenRC evidence
+  - [x] generate and validate plan-only Alpine manifests for `linux/arm64` and
+        `linux/amd64`
+  - [x] live-validate Alpine `linux/arm64` on this CH host with:
+        `agent-bootstrap-alpine.json`, `multiguest-validate-alpine.json`, and
+        `pty-agent-validation-alpine.json`
+  - [x] add CH-side PR #319 pre-merge compatibility guard: the shared
+        `motlie-agent-state-setup.sh` keeps the V4 symlink contract and waits
+        for `/agent-state` plus each FUSE-backed guest home before linking
+        Codex/Claude state directories
+  - [ ] run the VZ build/export/validation path on a native Apple Silicon Mac
+        for `vz-darwin-arm64` using the `linux/arm64` guest payload
+  - [ ] run the CH build/export/validation path on native DGX/aarch64 Linux
+        for `ch-linux-arm64` using the `linux/arm64` guest payload
+  - [ ] run the CH build/export path on a native x86_64/amd64 Linux builder
+        for `ch-linux-amd64` using the `linux/amd64` guest payload
+  - [ ] run the CH cross-arch build/export path on a builder with qemu-user
+        binfmt enabled and compare the output with native per-arch builds
+  - [ ] record per-arch source image-index digest, selected platform-manifest
+        digest, rootfs layer digest, and OCI manifest digest
+- [ ] implement native same-architecture package staging for CH:
+  - [ ] add `package_engine = "native-ch-bootstrap"` as an mbuild option
+  - [ ] emit temporary CH boot artifacts from the selected OCI platform rootfs
+  - [ ] boot a same-architecture provisioning VM with isolated credentials
+  - [ ] run package, npm, locale, ssh-key, service-enable, and cleanup steps
+        inside the guest
+  - [ ] shut down the provisioning VM cleanly and extract or snapshot the
+        finalized rootfs for normal CH artifact emission
+  - [ ] keep qemu-user/binfmt as optional cross-arch local convenience only,
+        not an acceptance substitute for native `vz-darwin-arm64`,
+        `ch-linux-arm64`, or `ch-linux-amd64` evidence
+- [ ] make backend emitters consume OCI payloads:
+  - [x] CH emitter can import from a local OCI image layout instead of only an
+        in-process assembled rootfs directory
+  - [ ] CH emitter can import directly from a registry reference after publish
+        support defines credentials/tag policy
+  - [x] VZ adapter-backed build can import from a local OCI image layout by
+        validating descriptors and passing the canonical rootfs layer to the
+        current VZ rootfs handoff
+  - [ ] VZ emitter can import from the same OCI payload contract and produce
+        Apple VZ disk/NVRAM artifacts without relying on a native source-VM
+        substrate as the durable path
+  - [x] backend artifacts record the OCI image-index digest and selected
+        platform manifest digest they consumed
+- [ ] add publish support:
+  - [ ] push per-arch OCI payloads to the selected registry
+  - [x] create one local multi-arch OCI image index from validated
+        per-platform layouts
+  - [ ] push one multi-arch OCI image index / Docker manifest list
+  - [x] record local publish/provenance inputs in release-manifest-ready
+        evidence
+  - [ ] record registry publish provenance and immutable digest output in a
+        machine-readable manifest
+- [ ] key harness validation to OCI digests:
+  - [x] `mbuild validate --scenario` records the consumed OCI image-index
+        digest and selected platform-manifest digest
+  - [ ] CH and VZ validation records can be compared for the same logical
+        Motlie guest contract and source image index
+  - [ ] source digest updates require rerunning the shared scenario matrix on
+        every supported backend/platform pair
+- [ ] integrate VM image artifact evidence with release manifests:
+  - [x] define the release evidence shape for
+        `kind = "motlie.vm-image-artifact"`
+  - [x] teach `mbuild` to emit manifest-ready evidence for
+        source commit, host platform, guest platform, OCI digests, backend
+        artifact digests, harness result paths, and publication URLs
+  - [ ] use release sub-issues/sub-PRs first for `vz-darwin-arm64` and
+        `ch-linux-arm64`, then for coordinated `ch-linux-amd64` target evidence
+
+Acceptance:
+- one canonical reference, for example `ghcr.io/chungers/motlie-guest:v1.5`,
+  resolves first to `linux/arm64` for Apple Silicon VZ and DGX/aarch64 CH, and
+  then to `linux/amd64` for the coordinated x86_64/amd64 CH target
+- each per-arch image carries contract version, source OCI digests, validation
+  profile, and provenance labels
+- CH and VZ emitters consume the OCI payload contract rather than rebuilding
+  backend-specific guest roots from shell-script defaults
+- validation evidence records OCI image-index digest, selected platform
+  manifest digest, backend kind, emitted backend artifact digests, and scenario
+  pass/fail output
+- #258 closes only after the multi-arch reference exists and both CH and VZ have
+  validation evidence tied to that reference/digest set
 
 ## Non-Goals for This Plan
 
