@@ -1,12 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{watch, Mutex};
 use tokio::time::sleep;
 
 use crate::jsonl;
@@ -58,13 +60,26 @@ pub async fn run_foreground(socket: PathBuf) -> anyhow::Result<()> {
     prepare_socket(&socket).await?;
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind daemon socket {}", socket.display()))?;
-    let mut state = DaemonState::default();
+    let state = Arc::new(Mutex::new(DaemonState::default()));
+    let (stop_tx, mut stop_rx) = watch::channel(false);
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let stop = handle_connection(stream, &mut state).await?;
-        if stop {
-            break;
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let state = Arc::clone(&state);
+                let stop_tx = stop_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_connection(stream, state, stop_tx).await {
+                        eprintln!("mstream daemon connection error: {err}");
+                    }
+                });
+            }
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    break;
+                }
+            }
         }
     }
 
@@ -96,19 +111,23 @@ pub async fn send_request(socket: &Path, request: &ClientRequest) -> anyhow::Res
     Ok(records)
 }
 
-async fn handle_connection(stream: UnixStream, state: &mut DaemonState) -> anyhow::Result<bool> {
+async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<Mutex<DaemonState>>,
+    stop_tx: watch::Sender<bool>,
+) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let read = reader.read_line(&mut line).await?;
     if read == 0 {
-        return Ok(false);
+        return Ok(());
     }
 
     let parsed: Result<ClientRequest, _> = serde_json::from_str(line.trim_end());
     let (records, stop) = match parsed {
         Ok(request) => {
             let stop = DaemonState::should_stop(&request);
-            let records = match state.handle(request).await {
+            let records = match state.lock().await.handle(request).await {
                 Ok(records) => records,
                 Err(err) => vec![jsonl::error("request_failed", err.to_string())],
             };
@@ -125,7 +144,10 @@ async fn handle_connection(stream: UnixStream, state: &mut DaemonState) -> anyho
         stream.write_all(b"\n").await?;
     }
     stream.shutdown().await?;
-    Ok(stop)
+    if stop {
+        let _ = stop_tx.send(true);
+    }
+    Ok(())
 }
 
 async fn prepare_socket(socket: &Path) -> anyhow::Result<()> {

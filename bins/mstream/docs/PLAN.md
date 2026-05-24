@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-24 | @codex | Addressed PR #330 feedback: bounded `events` cursors, centralized handoff firing from explicit state changes, recruited-session tag persistence, spawned daemon connection handlers, `cwd` scan hydration, broadcast `updated-at`, and scan generation cleanup. |
 | 2026-05-23 | @codex | Implemented first `motlie-mstream` CLI/daemon slice with JSONL socket protocol, in-memory workstreams, target parsing, tmux tag writes, communication, handoff, recruiting, and bounded observation; documented current API. |
 | 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: destination busy state, already-met handoff semantics, and generation-aware cursor validation. |
 | 2026-05-22 | @codex | Aligned timeline implementation tasks with PR #326's concrete OutputBus timeline APIs and latest-cursor/backfill/cleanup contracts. |
@@ -100,6 +101,9 @@ Tasks:
 - [x] 2.6 Keep daemon state entirely in memory: no state directory, no database,
   no host config file, no workstream ledger file.
 - [x] 2.7 Add shutdown cleanup for the socket path the daemon owns.
+- [x] 2.8 Spawn a handler task per accepted socket connection and protect
+  daemon memory with an in-process lock, so socket acceptance is not serialized
+  behind slow client requests.
 
 Validation:
 
@@ -157,7 +161,8 @@ Tasks:
 - [x] 4.3 Implement `mstream hosts`, `mstream scan <alias>`, and
   `mstream disconnect <alias>`.
 - [x] 4.4 Implement host scan: list tmux sessions and build an in-memory
-  session ledger keyed by host alias and stable tmux session id.
+  session ledger keyed by host alias and stable tmux session id, including
+  tagged `cwd` hydration.
 - [x] 4.5 Expose scan results as JSONL without persisting them.
 - [ ] 4.6 Verify restart semantics manually: after daemon stop/start, `hosts`
   should be empty until `connect` is run again.
@@ -298,6 +303,8 @@ Tasks:
   daemon-side sequence: interrupt, wait, text, optional Enter, JSONL result.
 - [x] 8.6 Implement `mstream broadcast <workstream> --text <text>` with
   optional `--role` and `--state` filters and one result record per target.
+  - 2026-05-24 @codex: broadcast updates `@mstream/updated-at` and the
+    in-memory session timestamp after each successful target send.
 - [x] 8.7 Implement `mstream session mark <target|self> --state
   done|blocked|needs-input|available|reserved|busy|idle --summary <text>`.
 - [x] 8.8 Make `self` resolve from `MSTREAM_TARGET`; update `@mstream/state`,
@@ -317,6 +324,10 @@ Tasks:
 - [x] 8.12 Ensure handoff firing marks the destination `busy`, updates
   `@mstream/updated-at`, sends the configured task to the destination, emits
   `handoff_fired`, and does not claim durability across daemon restart.
+  - 2026-05-24 @codex: explicit state changes now collect and fire matching
+    handoffs through the state-change path rather than only from `session mark`;
+    this covers `send --set-state`, `recruit`, `leave --available`, `close`,
+    and handoff destination updates.
 - [ ] 8.13 Add tests that silence, prompt heuristics, and missing output do not
   transition a session to `done`, `blocked`, or `needs-input`.
 
@@ -348,6 +359,8 @@ Tasks:
 - [x] 9.2 Maintain per-workstream in-memory ring buffers with opaque cursors.
 - [x] 9.3 Implement `mstream status <workstream>`.
 - [x] 9.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
+  - 2026-05-24 @codex: bounded pages now return a cursor after the last
+    returned event instead of the workstream watermark, avoiding silent skips.
 - [x] 9.5 Implement `mstream snapshot <workstream> --after <cursor>
   --max-chars N`.
 - [x] 9.6 Implement `mstream summary-input <workstream> --since <duration>
@@ -398,6 +411,9 @@ Tasks:
 - [x] 10.3 Prefer explicitly tagged available sessions.
 - [x] 10.4 Refuse to recruit untagged sessions unless the target is explicitly
   named by the human.
+- [x] 10.4a Write workstream-membership tags before assigning recruited
+  sessions, so restart plus `scan` preserves their workstream, role, identity,
+  agent, and `cwd` metadata.
 - [ ] 10.5 Score available sessions against `--goal` using structured/lexical
   matching over `context-domains`, `context-specialties`, `context-summary`,
   and `last-workstream` tags; include candidate metadata in JSONL so the
