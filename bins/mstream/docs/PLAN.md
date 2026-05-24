@@ -303,12 +303,13 @@ Tasks:
 - [x] 8.8 Make `self` resolve from `MSTREAM_TARGET`; update `@mstream/state`,
   `@mstream/last-report-kind`, `@mstream/last-report-summary`, and
   `@mstream/updated-at` on successful marks.
-- [ ] 8.9 Emit structured events for `message_sent`, `interrupted`,
+- [x] 8.9 Emit structured events for `message_sent`, `interrupted`,
   `broadcast_sent`, `completed`, `blocked`, and `needs_input`.
   - 2026-05-23 @codex: first implementation emits workstream events for
-    messages, broadcasts, marks, recruiting, and handoffs. `interrupt` returns
-    a JSONL command result but does not yet append a workstream event because
-    the command has no workstream argument.
+    messages, broadcasts, marks, recruiting, and handoffs.
+  - 2026-05-23 @codex: `interrupt` now emits an `interrupted` event when the
+    target is joined to a known workstream; unjoined connected sessions still
+    return a command result without a workstream cursor.
 - [x] 8.10 Implement `mstream handoff arm/list/cancel` as daemon-memory state
   that fires when a source target reaches a requested terminal state.
 - [x] 8.11 Make `handoff arm` fire immediately when the source is already in the

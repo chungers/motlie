@@ -89,6 +89,11 @@ mstream session mark local::codex-worker --state done --summary "Implemented req
 mstream session mark self --state blocked --summary "Need host credentials."
 ```
 
+When the target is joined to an open workstream, `interrupt` appends an
+`interrupted` event to that workstream and returns the resulting cursor. If the
+target is a connected tmux session that is not joined to a known workstream, the
+command still sends the key and returns only the command result.
+
 `session mark self` resolves `MSTREAM_TARGET` in the client environment.
 
 Handoffs are daemon-memory edges:
