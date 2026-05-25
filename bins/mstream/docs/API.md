@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-24 | @codex | Addressed PR #330 re-review: request execution now snapshots state under short locks, performs SSH/tmux awaits outside the state mutex, then re-locks briefly to reconcile events and metadata. |
 | 2026-05-24 | @codex | Addressed PR #330 feedback: bounded event cursors advance only to the last returned event, handoffs trigger from all explicit state-change paths, recruited sessions persist workstream tags, daemon connections are spawned per client, scan hydrates `cwd`, and broadcast touches `updated-at`. |
 | 2026-05-23 | @codex | Documented the first implemented `mstream` CLI/daemon surface, JSONL protocol, and current observation limits. |
 
@@ -35,9 +36,9 @@ debugging:
 cargo run -p motlie-mstream -- --socket /tmp/mstream.sock daemon start --foreground
 ```
 
-The foreground daemon accepts each socket connection in its own task and shares
-daemon state through an in-process lock, so a slow client does not block socket
-acceptance for other clients.
+The foreground daemon accepts each socket connection in its own task. Commands
+snapshot daemon state under short locks, perform SSH/tmux awaits outside the
+state mutex, then re-lock briefly to reconcile metadata and emit events.
 
 Client commands resolve the socket from `--socket`, then `MSTREAM_SOCKET`, then
 `/tmp/mstream-${USER}.sock`.

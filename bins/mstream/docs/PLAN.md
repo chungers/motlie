@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-24 | @codex | Addressed PR #330 re-review: replaced the lock-held request handler with split-phase shared execution, so SSH/tmux awaits happen outside the daemon state mutex. |
 | 2026-05-24 | @codex | Addressed PR #330 feedback: bounded `events` cursors, centralized handoff firing from explicit state changes, recruited-session tag persistence, spawned daemon connection handlers, `cwd` scan hydration, broadcast `updated-at`, and scan generation cleanup. |
 | 2026-05-23 | @codex | Implemented first `motlie-mstream` CLI/daemon slice with JSONL socket protocol, in-memory workstreams, target parsing, tmux tag writes, communication, handoff, recruiting, and bounded observation; documented current API. |
 | 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: destination busy state, already-met handoff semantics, and generation-aware cursor validation. |
@@ -104,6 +105,10 @@ Tasks:
 - [x] 2.8 Spawn a handler task per accepted socket connection and protect
   daemon memory with an in-process lock, so socket acceptance is not serialized
   behind slow client requests.
+- [x] 2.9 Split request execution into short locked state snapshots, unlocked
+  SSH/tmux awaits, and short locked reconciliation phases. The daemon no longer
+  holds the state mutex across `connect`, `scan`, `capture`, `send_keys`, tag
+  writes, or handoff task sends.
 
 Validation:
 
