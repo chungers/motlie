@@ -127,7 +127,7 @@ async fn handle_connection(
     let (records, stop) = match parsed {
         Ok(request) => {
             let stop = DaemonState::should_stop(&request);
-            let records = match state.lock().await.handle(request).await {
+            let records = match DaemonState::handle_shared(Arc::clone(&state), request).await {
                 Ok(records) => records,
                 Err(err) => vec![jsonl::error("request_failed", err.to_string())],
             };
