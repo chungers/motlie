@@ -46,13 +46,13 @@ package_stage:
   clean: true
 immutable_payloads:
   - label: motlie-vfs-guest
-    source: target/release/motlie-vfs-guest-v1_5
+    source: target/{rust_target}/release/motlie-vfs-guest-v1_5
     guest_path: /opt/motlie/v1.5/guest/bin/motlie-vfs-guest
     mode: "0755"
     links:
       - /usr/local/bin/motlie-vfs-guest
   - label: motlie-vsock-ssh-bridge
-    source: target/release/motlie-vsock-ssh-bridge-v1_5
+    source: target/{rust_target}/release/motlie-vsock-ssh-bridge-v1_5
     guest_path: /opt/motlie/v1.5/guest/bin/motlie-vsock-ssh-bridge
     mode: "0755"
     links:
