@@ -9,7 +9,8 @@ use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
     OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
-    SummaryInputRequest, WorkstreamSettings, DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    SummaryInputRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
+    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -67,9 +68,7 @@ pub enum Command {
     Session(SessionCommand),
     #[command(subcommand)]
     Handoff(HandoffCommand),
-    Status {
-        workstream: String,
-    },
+    Status(StatusArgs),
     Events(EventsArgs),
     Snapshot(SnapshotArgs),
     SummaryInput(SummaryInputArgs),
@@ -155,7 +154,11 @@ impl Command {
                 workstream,
                 handoff_id,
             }),
-            Command::Status { workstream } => Ok(ClientRequest::Status { workstream }),
+            Command::Status(args) => Ok(ClientRequest::Status {
+                workstream: args.workstream,
+                active_window_secs: args.active_window_secs,
+                idle_after_secs: args.idle_after_secs,
+            }),
             Command::Events(args) => Ok(ClientRequest::Events(EventsRequest {
                 workstream: args.workstream,
                 after: args.after,
@@ -402,6 +405,15 @@ pub struct HandoffArmArgs {
     pub task: String,
     #[arg(long)]
     pub only_on_transition: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    pub workstream: String,
+    #[arg(long, default_value_t = DEFAULT_STATUS_ACTIVE_WINDOW_SECS)]
+    pub active_window_secs: u64,
+    #[arg(long, default_value_t = DEFAULT_STATUS_IDLE_AFTER_SECS)]
+    pub idle_after_secs: u64,
 }
 
 #[derive(Debug, Args)]
