@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-26 | @codex | Addressed PR #330 feedback by replacing the fixed mstream event ring size with a per-workstream `--event-limit` setting and validation coverage. |
 | 2026-05-24 | @codex | Addressed PR #330 re-review: replaced the lock-held request handler with split-phase shared execution, so SSH/tmux awaits happen outside the daemon state mutex. |
 | 2026-05-24 | @codex | Addressed PR #330 feedback: bounded `events` cursors, centralized handoff firing from explicit state changes, recruited-session tag persistence, spawned daemon connection handlers, `cwd` scan hydration, broadcast `updated-at`, and scan generation cleanup. |
 | 2026-05-23 | @codex | Implemented first `motlie-mstream` CLI/daemon slice with JSONL socket protocol, in-memory workstreams, target parsing, tmux tag writes, communication, handoff, recruiting, and bounded observation; documented current API. |
@@ -362,6 +363,9 @@ Tasks:
     `HostHandle::start_monitoring_session` and keeps command events locally.
     Fleet/OutputBus timeline ingestion remains a follow-up.
 - [x] 9.2 Maintain per-workstream in-memory ring buffers with opaque cursors.
+  - 2026-05-26 @codex: ring size is controlled by workstream
+    `settings.event_limit`, exposed as `mstream open --event-limit`, defaulting
+    to 1000.
 - [x] 9.3 Implement `mstream status <workstream>`.
 - [x] 9.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
   - 2026-05-24 @codex: bounded pages now return a cursor after the last

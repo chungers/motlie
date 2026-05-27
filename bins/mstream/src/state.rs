@@ -18,13 +18,11 @@ use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
     OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
-    SummaryInputRequest,
+    SummaryInputRequest, WorkstreamSettings,
 };
 use crate::tags;
 use crate::target::SessionTarget;
 use crate::timeline::PublicCursor;
-
-const EVENT_LIMIT: usize = 1_000;
 
 pub struct DaemonState {
     hosts: BTreeMap<String, HostRecord>,
@@ -77,6 +75,7 @@ struct WorkstreamRecord {
     title: String,
     goal: Option<String>,
     domain: Option<String>,
+    settings: WorkstreamSettings,
     state: WorkstreamState,
     sessions: BTreeSet<SessionTarget>,
     generation: u64,
@@ -360,8 +359,13 @@ impl DaemonState {
                             .unwrap_or_else(|| workstream_name.clone());
                         if !state.workstreams.contains_key(&workstream_name) {
                             let generation = state.next_generation();
-                            let workstream =
-                                WorkstreamRecord::new(title.clone(), None, None, generation);
+                            let workstream = WorkstreamRecord::new(
+                                title.clone(),
+                                None,
+                                None,
+                                WorkstreamSettings::default(),
+                                generation,
+                            );
                             state
                                 .workstreams
                                 .insert(workstream_name.clone(), workstream);
@@ -1147,6 +1151,9 @@ impl DaemonState {
     }
 
     fn open(&mut self, request: OpenRequest) -> anyhow::Result<Vec<Value>> {
+        if request.settings.event_limit == 0 {
+            bail!("--event-limit must be greater than zero");
+        }
         let cursor;
         if self.workstreams.contains_key(&request.workstream) {
             let mut needs_generation = false;
@@ -1165,16 +1172,23 @@ impl DaemonState {
             workstream.title = request.title;
             workstream.goal = request.goal;
             workstream.domain = request.domain;
+            workstream.settings = request.settings;
             if let Some(generation) = new_generation {
                 workstream.reopen(generation);
             } else {
                 workstream.state = WorkstreamState::Open;
+                workstream.prune_events();
             }
             cursor = workstream.cursor(&request.workstream)?;
         } else {
             let generation = self.next_generation();
-            let workstream =
-                WorkstreamRecord::new(request.title, request.goal, request.domain, generation);
+            let workstream = WorkstreamRecord::new(
+                request.title,
+                request.goal,
+                request.domain,
+                request.settings,
+                generation,
+            );
             cursor = workstream.cursor(&request.workstream)?;
             self.workstreams
                 .insert(request.workstream.clone(), workstream);
@@ -1232,6 +1246,7 @@ impl DaemonState {
                     "state": workstream.state.as_str(),
                     "goal": workstream.goal,
                     "domain": workstream.domain,
+                    "settings": workstream.settings,
                     "sessions": workstream.sessions.len(),
                     "generation": workstream.generation,
                 })
@@ -1249,6 +1264,7 @@ impl DaemonState {
             "state": record.state.as_str(),
             "goal": record.goal,
             "domain": record.domain,
+            "settings": record.settings,
             "generation": record.generation,
             "cursor": record.cursor(workstream)?,
             "sessions": record.sessions.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -1299,6 +1315,7 @@ impl DaemonState {
             "workstream": workstream,
             "state": workstream_record.state.as_str(),
             "generation": workstream_record.generation,
+            "settings": workstream_record.settings,
             "cursor": workstream_record.cursor(workstream)?,
             "agents": agents,
         }))
@@ -1684,9 +1701,7 @@ impl DaemonState {
             timestamp: tags::now_tag(),
         };
         workstream_record.events.push_back(event);
-        while workstream_record.events.len() > EVENT_LIMIT {
-            workstream_record.events.pop_front();
-        }
+        workstream_record.prune_events();
         Ok(cursor)
     }
 
@@ -1885,11 +1900,18 @@ impl SessionRecord {
 }
 
 impl WorkstreamRecord {
-    fn new(title: String, goal: Option<String>, domain: Option<String>, generation: u64) -> Self {
+    fn new(
+        title: String,
+        goal: Option<String>,
+        domain: Option<String>,
+        settings: WorkstreamSettings,
+        generation: u64,
+    ) -> Self {
         Self {
             title,
             goal,
             domain,
+            settings,
             state: WorkstreamState::Open,
             sessions: BTreeSet::new(),
             generation,
@@ -1909,6 +1931,12 @@ impl WorkstreamRecord {
 
     fn cursor(&self, workstream: &str) -> anyhow::Result<String> {
         PublicCursor::new(workstream, self.generation, self.next_sequence).encode()
+    }
+
+    fn prune_events(&mut self) {
+        while self.events.len() > self.settings.event_limit {
+            self.events.pop_front();
+        }
     }
 }
 
@@ -2108,6 +2136,7 @@ mod tests {
                 title: "PR 324".to_string(),
                 goal: None,
                 domain: None,
+                settings: WorkstreamSettings { event_limit: 10 },
             })
             .expect("open workstream");
         state
@@ -2136,5 +2165,41 @@ mod tests {
             })
             .expect("second page");
         assert_eq!(second_page["events"][0]["kind"], "second");
+    }
+
+    #[test]
+    fn workstream_event_limit_prunes_old_events() {
+        let mut state = DaemonState::default();
+        state
+            .open(OpenRequest {
+                workstream: "pr-324".to_string(),
+                title: "PR 324".to_string(),
+                goal: None,
+                domain: None,
+                settings: WorkstreamSettings { event_limit: 2 },
+            })
+            .expect("open workstream");
+
+        state
+            .record_event("pr-324", EventDraft::new("first"))
+            .expect("record first");
+        state
+            .record_event("pr-324", EventDraft::new("second"))
+            .expect("record second");
+        state
+            .record_event("pr-324", EventDraft::new("third"))
+            .expect("record third");
+
+        let events = state
+            .events(EventsRequest {
+                workstream: "pr-324".to_string(),
+                after: None,
+                limit: 0,
+            })
+            .expect("read events");
+
+        assert_eq!(events["events"].as_array().expect("events").len(), 2);
+        assert_eq!(events["events"][0]["kind"], "second");
+        assert_eq!(events["events"][1]["kind"], "third");
     }
 }

@@ -9,7 +9,7 @@ use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
     OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
-    SummaryInputRequest,
+    SummaryInputRequest, WorkstreamSettings, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -93,6 +93,9 @@ impl Command {
                 title: args.title,
                 goal: args.goal,
                 domain: args.domain,
+                settings: WorkstreamSettings {
+                    event_limit: args.event_limit,
+                },
             })),
             Command::List => Ok(ClientRequest::List),
             Command::Show { workstream } => Ok(ClientRequest::Show { workstream }),
@@ -219,6 +222,8 @@ pub struct OpenArgs {
     pub goal: Option<String>,
     #[arg(long)]
     pub domain: Option<String>,
+    #[arg(long, default_value_t = DEFAULT_WORKSTREAM_EVENT_LIMIT)]
+    pub event_limit: usize,
 }
 
 #[derive(Debug, Args)]

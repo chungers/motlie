@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-26 | @codex | Added per-workstream `--event-limit` setting to replace the fixed event ring size while keeping 1000 as the default. |
 | 2026-05-24 | @codex | Addressed PR #330 re-review: request execution now snapshots state under short locks, performs SSH/tmux awaits outside the state mutex, then re-locks briefly to reconcile events and metadata. |
 | 2026-05-24 | @codex | Addressed PR #330 feedback: bounded event cursors advance only to the last returned event, handoffs trigger from all explicit state-change paths, recruited sessions persist workstream tags, daemon connections are spawned per client, scan hydrates `cwd`, and broadcast touches `updated-at`. |
 | 2026-05-23 | @codex | Documented the first implemented `mstream` CLI/daemon surface, JSONL protocol, and current observation limits. |
@@ -51,14 +52,17 @@ mstream hosts
 mstream scan local
 mstream disconnect local
 
-mstream open pr-324 --title "mstream implementation" --goal "Implement PR 324"
+mstream open pr-324 --title "mstream implementation" --goal "Implement PR 324" --event-limit 1000
 mstream list
 mstream show pr-324
 mstream close pr-324 --summary "done" --domain tmux --specialty mstream
 ```
 
-Host metadata is daemon memory only. After daemon restart, reconnect hosts and
-run `scan` to hydrate tagged sessions from tmux.
+Host metadata is daemon memory only. Workstream `settings.event_limit` controls
+the in-memory event ring size and defaults to 1000 when omitted. Re-opening an
+existing workstream can raise or lower this limit; lowering it trims old events
+immediately. After daemon restart, reconnect hosts and run `scan` to hydrate
+tagged sessions from tmux.
 
 ## Session Assignment
 
