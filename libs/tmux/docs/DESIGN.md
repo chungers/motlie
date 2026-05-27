@@ -64,7 +64,7 @@
 | 2026-03-08 | Explicit FIFO cleanup on monitoring stop: `SessionMonitorHandle::shutdown()` and `stop_monitoring_session()` call `PipeManager::cleanup()` when pipe-pane fallback is active (P4). | Core Abstractions, Module Specs, DC13 |
 | 2026-03-08 | Static dispatch on hot paths: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Remaining dynamic types: `CallbackSink.state` (`Arc<dyn Any>`), `on_flush` (`Pin<Box<dyn Future>>` — Rust async limitation). | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
 | 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
-| 2026-03-08 | Added workstreams to `Fleet`: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. Future DC18 outlines composite workstreams composing with sinks/streams. | Core Abstractions |
+| 2026-03-08 | Added the original `Fleet` named-target APIs: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. These names are now historical compatibility wrappers around target aliases. | Core Abstractions |
 | 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
 | 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
 | 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
@@ -131,7 +131,7 @@ A library that:
 5. Sends arbitrary input to panes with proper key escaping (Enter, C-c, etc.)
 6. Executes shell commands in panes and captures structured output (exit code, stdout)
 7. Manages session metadata (rename sessions/windows)
-8. Names logical workstreams across hosts and targets for domain-meaningful addressing
+8. Names target aliases across hosts and targets for domain-meaningful addressing
 9. Attaches output pipes for continuous monitoring
 10. Combines multi-source output into conversation/transcript-friendly history
 11. Exposes composable stream/history adapters for external analysis
@@ -143,7 +143,7 @@ A library that:
   multi-host connection pool, tmux session creation and termination, session/window/pane
   listing, pane content capture, structured command execution (exec with exit code),
   remote input with escaping, host-level file transfer (local filesystem / SSH SFTP),
-  session metadata management, named workstreams, stream/history-oriented output
+  session metadata management, target aliases, stream/history-oriented output
   sink pipeline, control-mode monitoring, external-agent-friendly stream composition,
   structured logging, CLI binary
 - **Out of scope**: Web UI, SSH server setup/configuration, tmux installation
@@ -408,7 +408,7 @@ libs/tmux/
 │   ├── config.rs           # Historical appendix direction only — built-in automation config is deferred
 │   ├── transport.rs        # TransportKind enum + LocalTransport + SshTransport
 │   ├── host.rs             # HostHandle: per-host facade for all tmux operations
-│   ├── fleet.rs            # Fleet: multi-host registry, aggregation, routing, workstreams
+│   ├── fleet.rs            # Fleet: multi-host registry, aggregation, target-alias routing
 │   ├── discovery.rs        # Session/window/pane listing, filter, PaneAddress type
 │   ├── capture.rs          # Pane content capture (capture-pane) and scrollback dump
 │   ├── control.rs          # Session lifecycle, send-keys with escaping, rename
@@ -664,23 +664,11 @@ for alias in fleet.target_aliases() {
 }
 ```
 
-**Future: workstreams as sink/stream groups** (DC18). A workstream today binds a single
-name to a single (host, target). A natural extension is *composite workstreams* that
-group multiple targets under one name — e.g., "deploy" spans `web-1:build`, `db-1:migrate`,
-and `web-1:test`. This would compose with the existing sink pipeline:
-
-- **`SinkFilter` by workstream**: Filter output by workstream name instead of
-  individual host/session/pane fields. The bus resolves the workstream to its member
-  targets at filter-match time.
-- **`JoinedStream` over a workstream**: `bus.subscribe()` with a workstream-derived
-  filter, wrapped by `JoinedStream`, gives a consolidated labeled view of all member
-  targets in that logical workflow.
-- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
-  workstream with a single call.
-
-This extension is deferred — single-target workstreams cover the immediate need.
-Composite workstreams require decisions about membership lifecycle (what happens when
-a target is killed?) that should be informed by real usage patterns.
+**Future: target alias groups**. Fleet aliases intentionally bind one name to one
+target today. A possible future extension is grouping multiple targets under one
+alias, e.g. "deploy" spanning `web-1:build`, `db-1:migrate`, and `web-1:test`.
+That grouping belongs above the current generic target-alias API and is deferred
+until real usage clarifies membership lifecycle and monitoring semantics.
 
 ### `HostHandle` — Per-Host Entry Point
 
@@ -2329,7 +2317,7 @@ Internal responsibilities:
 - Per-host stop delegates to `HostHandle::stop_monitoring()`, which tears down all session monitors for that host
 - Owns the `shutdown` watch channel; `shutdown()` signals all targets
 - Owns the `OutputBus` (shared with HostHandles via `Arc`); exposes `output_bus()` accessor
-- Maintains workstream registry: `HashMap<String, WorkstreamEntry>` for named (host, target) bindings
+- Maintains target alias registry: `HashMap<String, TargetAliasEntry>` for named cross-host target bindings
 
 ```rust
 pub enum HostStatus {
@@ -3652,13 +3640,13 @@ conversation-history direction while leaving room for a deeper full-fidelity TUI
 ### DC27: Fleet Routing Convenience vs Direct Target Use
 
 **Decision**: Keep both levels. `Target` remains the canonical direct-control handle,
-while `Fleet` offers convenience routing for workflows that reason in aliases and
-workstream names rather than holding a resolved `Target` the whole time.
+while `Fleet` offers convenience routing for workflows that reason in target aliases
+rather than holding a resolved `Target` the whole time.
 
 **Rationale**:
 - External agents often consume output first, then decide later what to do. In that
-  delay, the most convenient stable handle is often a workstream or host alias rather
-  than a previously retained `Target`.
+  delay, the most convenient stable handle is often a target alias or host alias
+  rather than a previously retained `Target`.
 - `Fleet` already owns the registry/binding layer, so convenience methods like
   `send_text(name, ...)`, `send_keys(name, ...)`, and `capture(name)` are natural
   wrappers around `find(name)` plus normal `Target` operations.
@@ -3669,8 +3657,10 @@ workstream names rather than holding a resolved `Target` the whole time.
 - `Fleet`-level routing helpers are conveniences, not privileged APIs.
 - They resolve a binding or alias, then delegate to the same underlying
   `HostHandle` / `Target` control path used by direct callers.
-- Workstream name resolution remains explicit and inspectable through `bind()`,
-  `find()`, and `workstreams()`.
+- Target alias resolution remains explicit and inspectable through
+  `bind_target_alias()`, `resolve_target_alias()`, and `target_aliases()`.
+  The older `bind()`, `find()`, and `workstreams()` names remain compatibility
+  wrappers for historical callers only.
 
 ### DC7: Capture-Pane vs Stream Monitoring
 
@@ -4083,27 +4073,20 @@ string, and `host.target(&spec)` queries tmux to verify the entity exists and re
 is preferred when components are known at compile time. This is the bridge from raw
 strings (CLI args, config files) to typed handles.
 
-### DC18: Composite Workstreams (Future)
+### DC18: Target Alias Groups (Future)
 
-**Status**: Deferred — documented for future reference. Single-target workstreams
-(`Fleet::bind()`) are in scope; composite workstreams require real usage patterns to
-inform membership lifecycle decisions.
+**Status**: Deferred — documented for future reference. Current Fleet aliases
+bind one name to one cross-host target. Multi-target grouping is out of scope for
+`libs/tmux` until consumers prove the lifecycle and monitoring requirements.
 
-**Concept**: Extend workstreams to group multiple (host, target) pairs under one name —
-e.g., "deploy" spans `web-1:build`, `db-1:migrate`, and `web-1:test`. This would
-compose with existing abstractions:
-
-- **`SinkFilter` by workstream**: Filter output by workstream name. The bus resolves
-  the workstream to its member targets at filter-match time.
-- **`JoinedStream` over a workstream**: `bus.subscribe()` with workstream-derived
-  filters, wrapped by `JoinedStream`, gives a consolidated labeled view.
-- **Workstream-scoped monitoring**: Start/stop monitoring for all targets in a
-  workstream with a single call.
+**Concept**: A higher layer could group multiple `(host, target)` pairs under one
+name, e.g. "deploy" spans `web-1:build`, `db-1:migrate`, and `web-1:test`, then
+derive ordinary `SinkFilter` values from the member targets.
 
 **Open questions** (to be resolved by usage):
 - What happens when a member target is killed or disconnected?
-- Can targets belong to multiple workstreams?
-- Should workstreams be defined in config or only programmatically?
+- Can targets belong to multiple groups?
+- Should groups be defined in config or only programmatically?
 
 ### DC25: Hierarchy Creation Symmetry on `Target`
 
@@ -4326,7 +4309,7 @@ into a single call with clear completion semantics and an exit code.
 - **Host-level `HostHandle::exec()`** (transport bypass): Rejected — runs outside tmux,
   so the command doesn't execute in the pane's environment (virtualenvs, working directory,
   shell aliases, env vars set by prior commands). The pane's shell is the ground truth for
-  the workstream's state; bypassing it loses that context.
+  the target's state; bypassing it loses that context.
 - **`tmux run-shell`**: Runs a command in tmux's server context, not in the pane's shell.
   Output appears in the pane but isn't easily captured programmatically. Doesn't inherit
   the pane's shell environment.
@@ -4733,18 +4716,18 @@ without embedding policy or decision logic.
 ### Phase 2c: Fleet Coordination + Routed Control
 
 **Goal**: Make `Fleet` the coordination layer for multi-host monitoring, aggregation,
-binding/workstream lookup, and routed control actions.
+target-alias lookup, and routed control actions.
 
 **Tasks**:
 1. Implement `fleet.rs` as a programmatic registry: connect hosts, assign aliases,
-   expose `host()`, `hosts()`, `output_bus()`, and workstream bindings
+   expose `host()`, `hosts()`, `output_bus()`, and target alias bindings
 2. Aggregate monitoring lifecycle across hosts with `start_monitoring()`,
    `start_monitoring_host()`, `stop_monitoring_host()`, and `shutdown()`
 3. Add convenience routing helpers (`send_text`, `send_keys`, `capture`, `target`)
    so external agents can act through Fleet without reimplementing lookup logic
 4. Preserve explicit per-host status tracking and per-target error isolation
 5. Unit/integration tests: multi-host connect with one failure, alias conflict
-   detection, workstream bind/find/unbind, routed action correctness
+   detection, target alias bind/find/unbind, routed action correctness
 
 **Deliverable**: Multi-host registry and routing layer that pairs naturally with
 external policy engines.

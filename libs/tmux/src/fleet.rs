@@ -2,7 +2,7 @@
 //!
 //! `Fleet` is a programmatic registry of `HostHandle`s with convenience routing.
 //! It owns an `OutputBus`, manages per-host monitoring lifecycle, and provides
-//! workstream bindings for alias-based targeting.
+//! target alias bindings for cross-host routing.
 //!
 //! Fleet-level routing helpers are convenience wrappers over normal
 //! `HostHandle` / `Target` operations, not a separate action system.
@@ -217,7 +217,7 @@ struct TargetAliasEntry {
 /// Multi-host coordination registry (DC27).
 ///
 /// Provides programmatic host registration, aggregate monitoring lifecycle,
-/// workstream-based routing, and a shared `OutputBus` that aggregates output
+/// target-alias routing, and a shared `OutputBus` that aggregates output
 /// from all registered hosts.
 pub struct Fleet {
     hosts: HashMap<String, HostHandle>,
@@ -444,14 +444,11 @@ impl Fleet {
             }
         }
 
-        if let Some(monitor) = self.full_monitors.get_mut(spec.host_alias()) {
-            if monitor.get(spec.session_name()).is_some() {
-                return Ok(());
-            }
-        }
-
         if let Some(host) = self.hosts.get(spec.host_alias()) {
             let _ = host.stop_monitoring_session(spec.session_name());
+        }
+        if let Some(monitor) = self.full_monitors.get_mut(spec.host_alias()) {
+            monitor.remove_session(spec.session_name());
         }
         Ok(())
     }
@@ -803,35 +800,38 @@ impl Fleet {
 
     // --- Convenience routed actions ---
 
-    /// Send text to a workstream target.
-    pub async fn send_text(&self, workstream: &str, text: &str) -> Result<()> {
-        let target = self.find_target(workstream).await?.ok_or_else(|| {
-            Error::NotFound(format!("target alias '{}' target not found", workstream))
-        })?;
+    /// Send text to a target alias.
+    pub async fn send_text(&self, alias: &str, text: &str) -> Result<()> {
+        let target = self
+            .find_target(alias)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))?;
         target.send_text(text).await
     }
 
-    /// Send keys to a workstream target.
-    pub async fn send_keys(&self, workstream: &str, keys: &KeySequence) -> Result<()> {
-        let target = self.find_target(workstream).await?.ok_or_else(|| {
-            Error::NotFound(format!("target alias '{}' target not found", workstream))
-        })?;
+    /// Send keys to a target alias.
+    pub async fn send_keys(&self, alias: &str, keys: &KeySequence) -> Result<()> {
+        let target = self
+            .find_target(alias)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))?;
         target.send_keys(keys).await
     }
 
-    /// Capture the current content of a workstream target.
-    pub async fn capture(&self, workstream: &str) -> Result<String> {
-        let target = self.find_target(workstream).await?.ok_or_else(|| {
-            Error::NotFound(format!("target alias '{}' target not found", workstream))
-        })?;
+    /// Capture the current content of a target alias.
+    pub async fn capture(&self, alias: &str) -> Result<String> {
+        let target = self
+            .find_target(alias)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))?;
         target.capture().await
     }
 
-    /// Resolve a workstream to its `Target` handle.
-    pub async fn target(&self, workstream: &str) -> Result<Target> {
-        self.find_target(workstream).await?.ok_or_else(|| {
-            Error::NotFound(format!("target alias '{}' target not found", workstream))
-        })
+    /// Resolve a target alias to its `Target` handle.
+    pub async fn target(&self, alias: &str) -> Result<Target> {
+        self.find_target(alias)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))
     }
 
     /// Send text to a target spec without first creating an alias.
@@ -878,7 +878,9 @@ impl Default for Fleet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::SinkEvent;
     use crate::types::{SessionTag, TargetSpec};
+    use std::time::Duration;
 
     fn local_host() -> HostHandle {
         HostHandle::local()
@@ -1085,6 +1087,114 @@ mod tests {
 
         assert!(matches!(err, Error::UnsupportedTarget { .. }));
         assert!(fleet.monitor_status_for_target(&spec).is_none());
+    }
+
+    #[tokio::test]
+    async fn fleet_stop_monitoring_session_target_removes_full_monitor_entry() {
+        let mock = crate::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ build $1 100 0 1  200\n")
+            .with_shell_data(vec![b"%output %5 active\n".to_vec()]);
+        let mut fleet = Fleet::new();
+        fleet
+            .register("web-1", mock_host_aliased("web-1", mock))
+            .unwrap();
+        let spec = FleetTargetSpec::session("web-1", "build").unwrap();
+
+        fleet.start_monitoring_host("web-1").await.unwrap();
+        assert!(fleet.monitor_status_for_target(&spec).is_some());
+
+        fleet.stop_monitoring_session_target(&spec).unwrap();
+
+        assert!(fleet.monitor_status_for_target(&spec).is_none());
+        assert!(fleet
+            .full_monitors
+            .get("web-1")
+            .is_none_or(|monitor| monitor.get("build").is_none()));
+        assert!(matches!(
+            fleet.host_status("web-1"),
+            Some(HostStatus::Connected)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fleet_monitor_recovery_publishes_resume_and_snapshot_markers() {
+        let mock = crate::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ build $1 100 0 1  200\n")
+            .with_response("list-sessions", "build $1 100 0 1  200\n")
+            .with_response("list-panes", "%5 build 0 0 title bash 123 80 24 1\n")
+            .with_response("capture-pane", "snapshot\n")
+            .with_shell_sequence(vec![b"%output %5 before\n".to_vec()])
+            .with_shell_sequence(vec![b"%output %5 after\n".to_vec()]);
+        let mut fleet = Fleet::new();
+        fleet
+            .register("web-1", mock_host_aliased("web-1", mock))
+            .unwrap();
+        let mut rx = fleet
+            .output_bus()
+            .subscribe(vec![], 16)
+            .unwrap()
+            .into_receiver();
+
+        fleet
+            .start_monitoring_session("web-1", "build")
+            .await
+            .unwrap();
+
+        match rx.recv().await.unwrap() {
+            SinkEvent::Data(output) => assert_eq!(output.content, "before"),
+            other => panic!("expected initial data, got {:?}", other),
+        }
+        match rx.recv().await.unwrap() {
+            SinkEvent::Discontinuity { reason } => {
+                assert!(reason.contains("stream interrupted"));
+            }
+            other => panic!("expected interrupt marker, got {:?}", other),
+        }
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+
+        let mut saw_resume = false;
+        let mut saw_snapshot_marker = false;
+        let mut saw_post_reconnect_output = false;
+        let mut observed = Vec::new();
+        for _ in 0..5 {
+            match rx.recv().await.unwrap() {
+                SinkEvent::Data(output) if output.content == "after" => {
+                    observed.push(format!("data:{}", output.content));
+                    saw_post_reconnect_output = true;
+                }
+                SinkEvent::Data(output) => {
+                    observed.push(format!("data:{}", output.content));
+                }
+                SinkEvent::Discontinuity { reason } => {
+                    observed.push(format!("discontinuity:{reason}"));
+                    saw_resume |= reason.contains("stream resumed");
+                    saw_snapshot_marker |= reason.contains("stream snapshot");
+                }
+                SinkEvent::Gap { dropped, .. } => {
+                    observed.push(format!("gap:{dropped}"));
+                }
+            }
+        }
+
+        assert!(
+            saw_resume,
+            "expected reconnect resume marker, observed {observed:?}"
+        );
+        assert!(
+            saw_snapshot_marker,
+            "expected reconnect snapshot marker, observed {observed:?}"
+        );
+        assert!(
+            saw_post_reconnect_output,
+            "expected output from reopened control channel, observed {observed:?}"
+        );
+
+        let spec = FleetTargetSpec::session("web-1", "build").unwrap();
+        fleet.stop_monitoring_session_target(&spec).unwrap();
     }
 
     #[tokio::test]
