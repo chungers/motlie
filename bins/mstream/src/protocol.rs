@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_WORKSTREAM_EVENT_LIMIT: usize = 1_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentState {
@@ -133,6 +135,21 @@ pub struct OpenRequest {
     pub title: String,
     pub goal: Option<String>,
     pub domain: Option<String>,
+    #[serde(default)]
+    pub settings: WorkstreamSettings,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WorkstreamSettings {
+    pub event_limit: usize,
+}
+
+impl Default for WorkstreamSettings {
+    fn default() -> Self {
+        Self {
+            event_limit: DEFAULT_WORKSTREAM_EVENT_LIMIT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
