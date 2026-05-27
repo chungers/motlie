@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-27 | @codex | Added live tmux activity refresh to `status` so orchestrators can detect active, quiet, idle, missing, or unknown sessions without direct SSH/tmux probes. |
 | 2026-05-26 | @codex | Added per-workstream `--event-limit` setting to replace the fixed event ring size while keeping 1000 as the default. |
 | 2026-05-24 | @codex | Addressed PR #330 re-review: request execution now snapshots state under short locks, performs SSH/tmux awaits outside the state mutex, then re-locks briefly to reconcile events and metadata. |
 | 2026-05-24 | @codex | Addressed PR #330 feedback: bounded event cursors advance only to the last returned event, handoffs trigger from all explicit state-change paths, recruited sessions persist workstream tags, daemon connections are spawned per client, scan hydrates `cwd`, and broadcast touches `updated-at`. |
@@ -95,10 +96,10 @@ mstream send pr-324 local::codex-worker --interrupt-first --settle-ms 500 \
 mstream interrupt local::codex-worker
 mstream interrupt local::codex-worker --key ctrl-c
 
-mstream broadcast pr-324 --state busy --text "Wrap up and mark done or blocked." --enter
+mstream broadcast pr-324 --state busy --text "Wrap up your current step and summarize status." --enter
 
 mstream session mark local::codex-worker --state done --summary "Implemented requested fixes."
-mstream session mark self --state blocked --summary "Need host credentials."
+mstream session mark local::codex-worker --state blocked --summary "Need host credentials."
 ```
 
 When the target is joined to an open workstream, `interrupt` appends an
@@ -106,7 +107,12 @@ When the target is joined to an open workstream, `interrupt` appends an
 target is a connected tmux session that is not joined to a known workstream, the
 command still sends the key and returns only the command result.
 
-`session mark self` resolves `MSTREAM_TARGET` in the client environment.
+`session mark` is coordinator-owned in the project workflow: the orchestrator
+marks explicit targets after observing durable evidence such as pushed commits,
+PRs, review comments, test output, or blockers. Collaborating agents do not
+have mstream access and should not be instructed to call mstream state commands.
+The `self` alias exists for local debugging or an orchestrator managing its own
+session, but project workflow should use explicit targets.
 
 Handoffs are daemon-memory edges:
 
@@ -129,10 +135,29 @@ updates tags, sends the task, and emits `handoff_fired`.
 
 ```sh
 mstream status pr-324
+mstream status pr-324 --active-window-secs 30 --idle-after-secs 300
 mstream events pr-324 --limit 50
 mstream snapshot pr-324 --max-chars 12000
 mstream summary-input pr-324 --max-chars 12000
 ```
+
+`status` refreshes live tmux session activity through each connected
+`HostHandle::list_sessions()` call before returning JSONL. The activity value is
+the tmux library's session-level maximum of `session_activity` and
+`window_activity`, so it reflects either attached-client input or program
+output. Use this command for liveness instead of direct SSH/tmux probing.
+
+Each status agent includes:
+
+- `tmux_present`: `true`, `false`, or `null` when host activity could not be read
+- `tmux_session_id`, `tmux_activity`, and `tmux_activity_at`
+- `last_output_secs`: age of the latest tmux activity according to the daemon clock
+- `observed_activity_idle_secs`: how long the daemon has observed the same activity value
+- `activity_hint`: `active`, `quiet`, `idle`, `missing`, or `unknown`
+- `activity_error`: host activity refresh error when known
+
+The default hint thresholds classify sessions with activity in the last 30
+seconds as `active` and sessions quiet for at least 300 seconds as `idle`.
 
 Event cursors are opaque base64 JSON owned by `mstream`; they embed the
 workstream timeline generation. A cursor from an older generation returns a

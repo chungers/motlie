@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_tmux::{
-    CreateSessionOptions, HostHandle, KeySequence, SessionEnvVar, SessionTag, SshConfig, Target,
+    CreateSessionOptions, HostHandle, KeySequence, SessionEnvVar, SessionInfo, SessionTag,
+    SshConfig, Target,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -68,6 +69,8 @@ struct SessionRecord {
     context_summary: Option<String>,
     last_workstream: Option<String>,
     last_workstream_title: Option<String>,
+    last_tmux_activity: Option<u64>,
+    activity_observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug)]
@@ -225,6 +228,19 @@ struct RecruitPlanSnapshot {
     state: AgentState,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StatusActivityOptions {
+    active_window_secs: u64,
+    idle_after_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+enum LiveActivity {
+    Present(SessionInfo),
+    Missing,
+    Error(String),
+}
+
 impl DaemonState {
     pub async fn handle_shared(
         shared: Arc<Mutex<Self>>,
@@ -274,9 +290,11 @@ impl DaemonState {
                 workstream,
                 handoff_id,
             } => shared.lock().await.handoff_cancel(&workstream, &handoff_id),
-            ClientRequest::Status { workstream } => {
-                Ok(vec![shared.lock().await.status(&workstream)?])
-            }
+            ClientRequest::Status {
+                workstream,
+                active_window_secs,
+                idle_after_secs,
+            } => Self::status_shared(shared, workstream, active_window_secs, idle_after_secs).await,
             ClientRequest::Events(request) => Ok(vec![shared.lock().await.events(request)?]),
         }
     }
@@ -489,14 +507,8 @@ impl DaemonState {
                 state.workstream_meta(&request.workstream)?,
             )
         };
-        let socket_hint = std::env::var("MSTREAM_SOCKET").ok();
         let command = bootstrap_command(&request.cwd, &request.agent);
-        let env = session_environment(
-            socket_hint.as_deref(),
-            &request.workstream,
-            &target,
-            &request.role,
-        )?;
+        let env = session_environment(&request.workstream, &target, &request.role)?;
         let opts = CreateSessionOptions {
             command: Some(command),
             initial_environment: env,
@@ -1052,6 +1064,75 @@ impl DaemonState {
         })])
     }
 
+    async fn status_shared(
+        shared: Arc<Mutex<Self>>,
+        workstream: String,
+        active_window_secs: u64,
+        idle_after_secs: u64,
+    ) -> anyhow::Result<Vec<Value>> {
+        let options = StatusActivityOptions {
+            active_window_secs,
+            idle_after_secs,
+        };
+        let (targets, hosts) = {
+            let state = shared.lock().await;
+            let workstream_record = state.workstream(&workstream)?;
+            let targets = workstream_record
+                .sessions
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut hosts = BTreeMap::new();
+            for target in &targets {
+                if !hosts.contains_key(target.host_alias()) {
+                    hosts.insert(
+                        target.host_alias().to_string(),
+                        state.host(target.host_alias())?.handle.clone(),
+                    );
+                }
+            }
+            (targets, hosts)
+        };
+
+        let mut live = BTreeMap::new();
+        for (alias, handle) in hosts {
+            let host_targets = targets
+                .iter()
+                .filter(|target| target.host_alias() == alias)
+                .cloned()
+                .collect::<Vec<_>>();
+            match handle.list_sessions().await {
+                Ok(sessions) => {
+                    let mut by_name = sessions
+                        .into_iter()
+                        .map(|session| (session.name.clone(), session))
+                        .collect::<BTreeMap<_, _>>();
+                    for target in host_targets {
+                        let activity = by_name
+                            .remove(target.session_name())
+                            .map(LiveActivity::Present)
+                            .unwrap_or(LiveActivity::Missing);
+                        live.insert(target, activity);
+                    }
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    for target in host_targets {
+                        live.insert(target, LiveActivity::Error(message.clone()));
+                    }
+                }
+            }
+        }
+
+        let now = Utc::now();
+        Ok(vec![shared.lock().await.status(
+            &workstream,
+            &live,
+            options,
+            now,
+        )?])
+    }
+
     async fn recruit_shared(
         shared: Arc<Mutex<Self>>,
         request: RecruitRequest,
@@ -1301,33 +1382,46 @@ impl DaemonState {
         }))
     }
 
-    fn status(&self, workstream: &str) -> anyhow::Result<Value> {
-        let workstream_record = self.workstream(workstream)?;
-        let agents: Vec<Value> = workstream_record
-            .sessions
-            .iter()
-            .filter_map(|target| {
-                self.sessions.get(target).map(|session| {
-                    json!({
-                        "target": target.to_string(),
-                        "role": session.role,
-                        "agent": session.agent,
-                        "state": session.state.as_str(),
-                        "last_report_kind": session.last_report_kind,
-                        "last_report_summary": session.last_report_summary,
-                        "updated_at": session.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                        "stuck_hint": Value::Null,
-                    })
-                })
-            })
-            .collect();
+    fn status(
+        &mut self,
+        workstream: &str,
+        live: &BTreeMap<SessionTarget, LiveActivity>,
+        activity_options: StatusActivityOptions,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Value> {
+        let (workstream_state, generation, settings, cursor, targets) = {
+            let workstream_record = self.workstream(workstream)?;
+            (
+                workstream_record.state.as_str(),
+                workstream_record.generation,
+                workstream_record.settings,
+                workstream_record.cursor(workstream)?,
+                workstream_record
+                    .sessions
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut agents = Vec::new();
+        for target in targets {
+            if let Some(session) = self.sessions.get_mut(&target) {
+                agents.push(session.status_json(&target, live.get(&target), activity_options, now));
+            }
+        }
         Ok(json!({
             "type": "status",
             "workstream": workstream,
-            "state": workstream_record.state.as_str(),
-            "generation": workstream_record.generation,
-            "settings": workstream_record.settings,
-            "cursor": workstream_record.cursor(workstream)?,
+            "state": workstream_state,
+            "generation": generation,
+            "settings": settings,
+            "cursor": cursor,
+            "activity": {
+                "source": "tmux-list-sessions",
+                "semantics": "max(session_activity,window_activity)",
+                "active_window_secs": activity_options.active_window_secs,
+                "idle_after_secs": activity_options.idle_after_secs,
+            },
             "agents": agents,
         }))
     }
@@ -1927,6 +2021,113 @@ impl SessionRecord {
             context_summary: None,
             last_workstream: None,
             last_workstream_title: None,
+            last_tmux_activity: None,
+            activity_observed_at: None,
+        }
+    }
+
+    fn observe_activity(&mut self, tmux_activity: u64, now: DateTime<Utc>) -> u64 {
+        if self.last_tmux_activity != Some(tmux_activity) {
+            self.last_tmux_activity = Some(tmux_activity);
+            self.activity_observed_at = Some(now);
+            return 0;
+        }
+        self.activity_observed_at
+            .and_then(|observed_at| seconds_between(observed_at, now))
+            .unwrap_or(0)
+    }
+
+    fn status_json(
+        &mut self,
+        target: &SessionTarget,
+        live: Option<&LiveActivity>,
+        activity_options: StatusActivityOptions,
+        now: DateTime<Utc>,
+    ) -> Value {
+        let activity = self.activity_json(live, activity_options, now);
+        json!({
+            "target": target.to_string(),
+            "role": self.role,
+            "agent": self.agent,
+            "state": self.state.as_str(),
+            "last_report_kind": self.last_report_kind,
+            "last_report_summary": self.last_report_summary,
+            "updated_at": self.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "tmux_present": activity.tmux_present,
+            "tmux_session_id": activity.tmux_session_id,
+            "tmux_activity": activity.tmux_activity,
+            "tmux_activity_at": activity.tmux_activity_at,
+            "last_output_secs": activity.last_output_secs,
+            "observed_activity_idle_secs": activity.observed_activity_idle_secs,
+            "observed_activity_at": activity.observed_activity_at,
+            "activity_hint": activity.activity_hint,
+            "activity_error": activity.activity_error,
+            "stuck_hint": Value::Null,
+        })
+    }
+
+    fn activity_json(
+        &mut self,
+        live: Option<&LiveActivity>,
+        activity_options: StatusActivityOptions,
+        now: DateTime<Utc>,
+    ) -> SessionActivityJson {
+        match live {
+            Some(LiveActivity::Present(session)) => {
+                let observed_idle_secs = Some(self.observe_activity(session.activity, now));
+                let last_output_secs = seconds_since_epoch(now, session.activity);
+                SessionActivityJson {
+                    tmux_present: json!(true),
+                    tmux_session_id: json!(session.id.as_str()),
+                    tmux_activity: json!(session.activity),
+                    tmux_activity_at: epoch_seconds_json(session.activity),
+                    last_output_secs: option_u64_json(last_output_secs),
+                    observed_activity_idle_secs: option_u64_json(observed_idle_secs),
+                    observed_activity_at: datetime_option_json(self.activity_observed_at),
+                    activity_hint: json!(activity_hint(last_output_secs, activity_options)),
+                    activity_error: Value::Null,
+                }
+            }
+            Some(LiveActivity::Missing) | None => SessionActivityJson {
+                tmux_present: json!(false),
+                tmux_session_id: Value::Null,
+                tmux_activity: option_u64_json(self.last_tmux_activity),
+                tmux_activity_at: self
+                    .last_tmux_activity
+                    .map(epoch_seconds_json)
+                    .unwrap_or(Value::Null),
+                last_output_secs: option_u64_json(
+                    self.last_tmux_activity
+                        .and_then(|activity| seconds_since_epoch(now, activity)),
+                ),
+                observed_activity_idle_secs: option_u64_json(
+                    self.activity_observed_at
+                        .and_then(|observed_at| seconds_between(observed_at, now)),
+                ),
+                observed_activity_at: datetime_option_json(self.activity_observed_at),
+                activity_hint: json!("missing"),
+                activity_error: Value::Null,
+            },
+            Some(LiveActivity::Error(err)) => SessionActivityJson {
+                tmux_present: Value::Null,
+                tmux_session_id: Value::Null,
+                tmux_activity: option_u64_json(self.last_tmux_activity),
+                tmux_activity_at: self
+                    .last_tmux_activity
+                    .map(epoch_seconds_json)
+                    .unwrap_or(Value::Null),
+                last_output_secs: option_u64_json(
+                    self.last_tmux_activity
+                        .and_then(|activity| seconds_since_epoch(now, activity)),
+                ),
+                observed_activity_idle_secs: option_u64_json(
+                    self.activity_observed_at
+                        .and_then(|observed_at| seconds_between(observed_at, now)),
+                ),
+                observed_activity_at: datetime_option_json(self.activity_observed_at),
+                activity_hint: json!("unknown"),
+                activity_error: json!(err),
+            },
         }
     }
 
@@ -1947,8 +2148,22 @@ impl SessionRecord {
             "context_summary": self.context_summary,
             "last_workstream": self.last_workstream,
             "last_workstream_title": self.last_workstream_title,
+            "tmux_activity": self.last_tmux_activity,
+            "activity_observed_at": datetime_option_json(self.activity_observed_at),
         })
     }
+}
+
+struct SessionActivityJson {
+    tmux_present: Value,
+    tmux_session_id: Value,
+    tmux_activity: Value,
+    tmux_activity_at: Value,
+    last_output_secs: Value,
+    observed_activity_idle_secs: Value,
+    observed_activity_at: Value,
+    activity_hint: Value,
+    activity_error: Value,
 }
 
 impl WorkstreamRecord {
@@ -2081,20 +2296,15 @@ fn bootstrap_command(cwd: &Path, agent: &str) -> String {
 }
 
 fn session_environment(
-    socket: Option<&str>,
     workstream: &str,
     target: &SessionTarget,
     role: &str,
 ) -> anyhow::Result<Vec<SessionEnvVar>> {
-    let mut vars = vec![
+    Ok(vec![
         SessionEnvVar::new("MSTREAM_WORKSTREAM", workstream)?,
         SessionEnvVar::new("MSTREAM_TARGET", target.to_string())?,
         SessionEnvVar::new("MSTREAM_ROLE", role)?,
-    ];
-    if let Some(socket) = socket {
-        vars.push(SessionEnvVar::new("MSTREAM_SOCKET", socket)?);
-    }
-    Ok(vars)
+    ])
 }
 
 fn managed_prompt(
@@ -2117,8 +2327,9 @@ fn managed_prompt(
         prompt.push_str(&format!(" CWD: {}.", cwd.display()));
     }
     prompt.push_str(
-        " When finished, run: mstream session mark self --state done --summary \"<summary>\". \
-         If blocked, use --state blocked; if you need input, use --state needs-input.",
+        " Report progress, blockers, questions, PR links, pushed commits, and review comments \
+         plainly in your normal output. The orchestrator owns workstream state and will decide \
+         whether you should continue, stand by, or wait for feedback.",
     );
     if let Some(task) = task {
         prompt.push_str("\n\nTask:\n");
@@ -2162,6 +2373,54 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 
 fn char_count(text: &str) -> usize {
     text.chars().count()
+}
+
+fn activity_hint(last_output_secs: Option<u64>, options: StatusActivityOptions) -> &'static str {
+    match last_output_secs {
+        Some(age) if age <= options.active_window_secs => "active",
+        Some(age) if age >= options.idle_after_secs => "idle",
+        Some(_) => "quiet",
+        None => "unknown",
+    }
+}
+
+fn seconds_since_epoch(now: DateTime<Utc>, epoch_seconds: u64) -> Option<u64> {
+    let now_seconds = now.timestamp();
+    if now_seconds < 0 {
+        return None;
+    }
+    let now_seconds = now_seconds as u64;
+    if epoch_seconds <= now_seconds {
+        Some(now_seconds - epoch_seconds)
+    } else {
+        None
+    }
+}
+
+fn seconds_between(start: DateTime<Utc>, end: DateTime<Utc>) -> Option<u64> {
+    end.signed_duration_since(start)
+        .to_std()
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+fn epoch_seconds_json(epoch_seconds: u64) -> Value {
+    if epoch_seconds > i64::MAX as u64 {
+        return Value::Null;
+    }
+    DateTime::<Utc>::from_timestamp(epoch_seconds as i64, 0)
+        .map(|timestamp| json!(timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+        .unwrap_or(Value::Null)
+}
+
+fn datetime_option_json(timestamp: Option<DateTime<Utc>>) -> Value {
+    timestamp
+        .map(|timestamp| json!(timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+        .unwrap_or(Value::Null)
+}
+
+fn option_u64_json(value: Option<u64>) -> Value {
+    value.map(Value::from).unwrap_or(Value::Null)
 }
 
 #[cfg(test)]
@@ -2253,5 +2512,92 @@ mod tests {
         assert_eq!(events["events"].as_array().expect("events").len(), 2);
         assert_eq!(events["events"][0]["kind"], "second");
         assert_eq!(events["events"][1]["kind"], "third");
+    }
+
+    #[test]
+    fn observe_activity_tracks_local_idle_since_last_change() {
+        let target: SessionTarget = "local::worker".parse().expect("target");
+        let mut record = SessionRecord::from_target(&target, AgentState::Busy, None);
+        let first = DateTime::<Utc>::from_timestamp(1_000, 0).expect("timestamp");
+        let later = first + chrono::Duration::seconds(90);
+        let changed = later + chrono::Duration::seconds(5);
+
+        assert_eq!(record.observe_activity(10, first), 0);
+        assert_eq!(record.observe_activity(10, later), 90);
+        assert_eq!(record.observe_activity(11, changed), 0);
+    }
+
+    #[test]
+    fn activity_hint_uses_active_and_idle_thresholds() {
+        let options = StatusActivityOptions {
+            active_window_secs: 30,
+            idle_after_secs: 300,
+        };
+
+        assert_eq!(activity_hint(Some(10), options), "active");
+        assert_eq!(activity_hint(Some(120), options), "quiet");
+        assert_eq!(activity_hint(Some(900), options), "idle");
+        assert_eq!(activity_hint(None, options), "unknown");
+    }
+
+    #[test]
+    fn status_json_reports_live_tmux_activity() {
+        let target: SessionTarget = "local::worker".parse().expect("target");
+        let mut record = SessionRecord::from_target(&target, AgentState::Busy, None);
+        let live = LiveActivity::Present(SessionInfo {
+            name: "worker".to_string(),
+            id: "$1".try_into().expect("session id"),
+            created: 900,
+            attached_count: 0,
+            window_count: 1,
+            group: None,
+            activity: 970,
+        });
+        let now = DateTime::<Utc>::from_timestamp(1_000, 0).expect("timestamp");
+        let status = record.status_json(
+            &target,
+            Some(&live),
+            StatusActivityOptions {
+                active_window_secs: 30,
+                idle_after_secs: 300,
+            },
+            now,
+        );
+
+        assert_eq!(status["tmux_present"], true);
+        assert_eq!(status["tmux_session_id"], "$1");
+        assert_eq!(status["last_output_secs"], 30);
+        assert_eq!(status["observed_activity_idle_secs"], 0);
+        assert_eq!(status["activity_hint"], "active");
+    }
+
+    #[test]
+    fn session_environment_does_not_include_orchestrator_socket() {
+        let target: SessionTarget = "local::worker".parse().expect("target");
+        let vars = session_environment("pr-324", &target, "reviewer").expect("environment");
+        let names = vars.iter().map(SessionEnvVar::name).collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec!["MSTREAM_WORKSTREAM", "MSTREAM_TARGET", "MSTREAM_ROLE"]
+        );
+        assert!(!names.contains(&"MSTREAM_SOCKET"));
+    }
+
+    #[test]
+    fn managed_prompt_uses_normal_output_reporting() {
+        let target: SessionTarget = "local::worker".parse().expect("target");
+        let prompt = managed_prompt(
+            "pr-324",
+            &target,
+            Some("reviewer"),
+            None,
+            Some("Review the PR."),
+        );
+
+        assert!(prompt.contains("Report progress, blockers, questions"));
+        assert!(prompt.contains("The orchestrator owns workstream state"));
+        assert!(!prompt.contains("mstream session mark"));
+        assert!(!prompt.contains("MSTREAM_SOCKET"));
     }
 }

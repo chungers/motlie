@@ -5,6 +5,8 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_WORKSTREAM_EVENT_LIMIT: usize = 1_000;
+pub const DEFAULT_STATUS_ACTIVE_WINDOW_SECS: u64 = 30;
+pub const DEFAULT_STATUS_IDLE_AFTER_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -113,6 +115,10 @@ pub enum ClientRequest {
     },
     Status {
         workstream: String,
+        #[serde(default = "default_status_active_window_secs")]
+        active_window_secs: u64,
+        #[serde(default = "default_status_idle_after_secs")]
+        idle_after_secs: u64,
     },
     Events(EventsRequest),
     Snapshot(SnapshotRequest),
@@ -236,6 +242,14 @@ pub struct EventsRequest {
     pub workstream: String,
     pub after: Option<String>,
     pub limit: usize,
+}
+
+fn default_status_active_window_secs() -> u64 {
+    DEFAULT_STATUS_ACTIVE_WINDOW_SECS
+}
+
+fn default_status_idle_after_secs() -> u64 {
+    DEFAULT_STATUS_IDLE_AFTER_SECS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

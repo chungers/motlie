@@ -235,8 +235,10 @@ Tasks:
 - [x] 6.3 Implement `mstream join <workstream> <target> --role <role>
   [--task <text>]`.
 - [x] 6.4 Make `join` write session tags before sending a task prompt.
-- [x] 6.5 Include the managed-agent reporting contract in `join` task prompts:
-  `mstream session mark self --state done|blocked|needs-input --summary ...`.
+- [x] 6.5 Include the managed-agent normal-output reporting contract in `join`
+  task prompts:
+  agents report progress, blockers, questions, PR links, pushed commits, and
+  review comments in normal output; the orchestrator owns mstream state.
 - [x] 6.6 Implement `mstream leave <workstream> <target>` by removing
   workstream membership tags while preserving non-workstream metadata.
 - [x] 6.7 Implement `mstream kill <target>` as a separate explicit destructive
@@ -272,10 +274,10 @@ Tasks:
   `exec <agent>` with validated and escaped arguments.
 - [x] 7.4 Start the tmux session with the target session name as the agent's
   operational identity.
-- [x] 7.5 Set initial environment variables such as `MSTREAM_SOCKET`,
+- [x] 7.5 Set initial non-socket environment variables such as
   `MSTREAM_WORKSTREAM`, `MSTREAM_TARGET`, and `MSTREAM_ROLE` when useful.
 - [x] 7.6 Send an initial prompt that explicitly states the agent identity,
-  role, workstream, cwd, task, and completion/report command contract.
+  role, workstream, cwd, task, and normal-output reporting contract.
 - [ ] 7.7 Add a design follow-up if `CreateSessionOptions::start_directory`
   should be added to `libs/tmux` instead of using the bootstrap command.
 
@@ -367,6 +369,10 @@ Tasks:
     `settings.event_limit`, exposed as `mstream open --event-limit`, defaulting
     to 1000.
 - [x] 9.3 Implement `mstream status <workstream>`.
+  - 2026-05-27 @codex: `status` now refreshes live tmux activity through
+    connected `HostHandle::list_sessions()` calls and reports
+    `last_output_secs`, observed idle age, `tmux_present`, and activity hints
+    without requiring direct SSH/tmux probes by the orchestrator.
 - [x] 9.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
   - 2026-05-24 @codex: bounded pages now return a cursor after the last
     returned event instead of the workstream watermark, avoiding silent skips.
@@ -381,6 +387,9 @@ Tasks:
 - [ ] 9.8 Make `status` include explicit session state, last report summary,
   last output age, monitor health, and process/prompt-based stuck hints when
   available.
+  - 2026-05-27 @codex: explicit state, last report summary, last output age,
+    and missing/unknown activity health are implemented. Pane process and prompt
+    heuristics remain follow-ups.
 - [x] 9.9 Keep stuck hints separate from explicit completion states in JSONL.
 - [x] 9.10 Remove or detach a workstream timeline on `close` and when `leave`
   removes the last session from an otherwise empty/closed workstream.
