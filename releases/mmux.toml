@@ -549,55 +549,58 @@ id = "npm-published"
 target_id = ""
 channel = "npm"
 rollup = true
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
-evidence = []
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "npm channel deferred for 2026-05-apex-anchor: @motlie npm org not yet claimed and trusted-publishing / NPM_TOKEN not yet configured. Final artifacts are published via GitHub Release at https://github.com/chungers/motlie/releases/tag/2026-05-apex-anchor and the install-mmux.sh release-pinned installer is the supported install path; npm is a developer-convenience channel not on the critical path for v0. Re-open this gate (and the 4 per-target rows) in a future release event once the @motlie npm org is claimed and one of trusted publishing (preferred) or a scoped NPM_TOKEN secret is configured."
+evidence = [
+  { kind = "deferral", ref = "release-owner approved deferring npm channel for 2026-05-apex-anchor", note = "@chungers chose to ship via direct installer + GitHub Release archives for v0; npm registers as a Phase 9-style follow-up not gating the release" },
+  { kind = "alternate-channel", ref = "https://github.com/chungers/motlie/releases/tag/2026-05-apex-anchor", note = "GitHub Release publishes all 4 archive .tar.gz assets + SHA256SUMS + install-mmux.sh; end users can install via curl|sh or direct archive download without npm" },
+]
 
 [[gate]]
 id = "npm-published"
 target_id = "linux-x64-musl"
 channel = "npm"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "deferred under rollup deferral (channel-level): @motlie npm org not yet claimed for v0"
 evidence = []
 
 [[gate]]
 id = "npm-published"
 target_id = "linux-arm64-musl"
 channel = "npm"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "deferred under rollup deferral (channel-level): @motlie npm org not yet claimed for v0"
 evidence = []
 
 [[gate]]
 id = "npm-published"
 target_id = "darwin-x64"
 channel = "npm"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "deferred under rollup deferral (channel-level): @motlie npm org not yet claimed for v0. Note: even when re-opened, darwin-x64 npm publication should respect the Apple-Silicon-only policy from PR #306 — consider deferring this row separately as 'not officially supported'."
 evidence = []
 
 [[gate]]
 id = "npm-published"
 target_id = "darwin-arm64"
 channel = "npm"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "deferred under rollup deferral (channel-level): @motlie npm org not yet claimed for v0"
 evidence = []
 
 # homebrew-formula-published (global, single)
@@ -606,12 +609,15 @@ evidence = []
 id = "homebrew-formula-published"
 target_id = ""
 channel = "homebrew"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
-evidence = []
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "Homebrew channel deferred for 2026-05-apex-anchor: motlie/homebrew-tap GitHub repository does not yet exist. Defer the formula PR + bottle build to a future release event after the tap repo is created. Re-open this gate (and the homebrew-bottle-published rollup + per-arch rows) once motlie/homebrew-tap exists and the tap's CI for bottle builds is configured. Final source tarball for the formula's url stanza is available at https://github.com/chungers/motlie/archive/refs/tags/2026-05-apex-anchor.tar.gz."
+evidence = [
+  { kind = "deferral", ref = "release-owner approved deferring Homebrew channel for 2026-05-apex-anchor", note = "@chungers chose to ship via direct installer + GitHub Release archives for v0; Homebrew tap infrastructure is a follow-up" },
+  { kind = "alternate-channel", ref = "https://github.com/chungers/motlie/releases/download/2026-05-apex-anchor/install-mmux.sh", note = "macOS users can install via the release-pinned curl|sh installer; brew is a convenience channel, not on the critical path for v0" },
+]
 
 # homebrew-bottle-published (rollup + per-darwin)
 
@@ -620,31 +626,31 @@ id = "homebrew-bottle-published"
 target_id = ""
 channel = "homebrew"
 rollup = true
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "deferred under same prereq as homebrew-formula-published: motlie/homebrew-tap repo doesn't exist for v0"
 evidence = []
 
 [[gate]]
 id = "homebrew-bottle-published"
 target_id = "darwin-x64"
 channel = "homebrew"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "deferred under rollup deferral (channel-level): motlie/homebrew-tap doesn't exist. Also subject to Apple-Silicon-only policy from PR #306 — when re-opening, evaluate whether to ship darwin-x64 bottles at all."
 evidence = []
 
 [[gate]]
 id = "homebrew-bottle-published"
 target_id = "darwin-arm64"
 channel = "homebrew"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
-deferred_reason = ""
+state = "deferred"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@chungers"
+source_commit = "7c546c94"
+deferred_reason = "deferred under rollup deferral (channel-level): motlie/homebrew-tap doesn't exist for v0"
 evidence = []

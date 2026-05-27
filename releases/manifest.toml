@@ -1,6 +1,6 @@
 schema_version = 1
 kind = "motlie.workspace-release"
-state = "planned"
+state = "published"
 
 [identity]
 release_name = "2026-05-apex-anchor"
@@ -51,9 +51,18 @@ binary = "mmux"
 version = "0.1.0"
 manifest = "releases/mmux.toml"
 notes_path = "releases/mmux.md"
-state = "planned"
-final_artifacts_complete = false
-published = false
+state = "published"
+final_artifacts_complete = true
+published = true
+github_release_assets = [
+  { name = "motlie-mmux-v0.1.0-linux-x64-musl.tar.gz",   sha256 = "5e4ab4676d9a0f610f3bd24fe83ed808d3ebf8950b7fa787fee72de1058e4339" },
+  { name = "motlie-mmux-v0.1.0-linux-arm64-musl.tar.gz", sha256 = "2bd777528f0c197726a46b4b5d9f55d0a9efaca9cfba3ef3169114aff0bea3ea" },
+  { name = "motlie-mmux-v0.1.0-darwin-x64.tar.gz",       sha256 = "8dbe10743f6ec9589a6e069295e196210b91d8c0db100e92965f95bb9ea12212" },
+  { name = "motlie-mmux-v0.1.0-darwin-arm64.tar.gz",     sha256 = "9041f4e860294fe2873587abef29f9ca936ba00129ca71f1b502433e751df2e1" },
+]
+channels_complete = ["archive", "installer"]
+channels_deferred = ["npm", "homebrew"]
+deferred_channels_followup = "npm: claim @motlie org + configure trusted publishing or NPM_TOKEN. homebrew: create motlie/homebrew-tap repo and tap CI for bottle builds."
 
 [[gate]]
 id = "release-branch-created"
@@ -143,12 +152,19 @@ evidence = [
 
 [[gate]]
 id = "post-release-ledger-committed"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-24T01:36:52Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "7c546c94"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "workspace-state", ref = "state = \"planned\" -> \"published\"", note = "workspace manifest top-level state flipped to published in this commit" },
+  { kind = "binary-completion", ref = "[[binary_completion]] mmux", note = "state=published, final_artifacts_complete=true, published=true. github_release_assets[] now records the 4 final archive sha256s. channels_complete=[archive, installer]; channels_deferred=[npm, homebrew] with documented re-open conditions." },
+  { kind = "github-release", ref = "https://github.com/chungers/motlie/releases/tag/2026-05-apex-anchor", note = "live and marked --latest; 10 assets including SHA256SUMS and install-mmux.sh" },
+  { kind = "installer-validation", ref = "installer-validated rollup = complete (PRs #303 darwin-arm64, #306 darwin-x64 deferred Apple-Silicon-only, #307 linux-arm64-musl, #311 linux-x64-musl)", note = "end-to-end install verified on macmini, spark-2f6e DGX, and amd-ryzen7-1; darwin-x64 deferred per policy" },
+  { kind = "channel-deferral", ref = "npm-published rollup + 4 per-target rows = deferred; homebrew-formula-published + homebrew-bottle-published rollup + 2 darwin rows = deferred", note = "channel deferrals documented inline on each gate with re-open conditions: @motlie npm org claim; motlie/homebrew-tap repo creation" },
+  { kind = "cherry-picks-to-main", ref = "PR #312 (mmux --version + Help modal; merged without -x trailer), PR #313 (Cargo.toml workspace metadata; merged with -x), PR #316 (release skill cherry-pick procedure; merged with -x)", note = "all three deferred main-cherry-picks landed on main; one drift (#312 without -x) documented on master #287" },
+]
 
 [[gate]]
 id = "master-issue-closed"
