@@ -17,7 +17,7 @@ main_fix_policy = "cherry-pick-source-fixes-only"
 
 [tracking]
 master_issue = "https://github.com/chungers/motlie/issues/287"
-master_issue_state = "open"
+master_issue_state = "closed"
 master_issue_policy = "close-after-github-release-live-and-final-ledger-pushed"
 sub_issue_policy = "one-or-more-issues-per-platform-channel-or-binary-gate"
 label = "release:2026-05-apex-anchor"
@@ -168,9 +168,13 @@ evidence = [
 
 [[gate]]
 id = "master-issue-closed"
-state = "planned"
-completed_at = ""
-completed_by = ""
-source_commit = ""
+state = "complete"
+completed_at = "2026-05-27T05:48:32Z"
+completed_by = "@opus47-rel-eng"
+source_commit = "c57721bb"
 deferred_reason = ""
-evidence = []
+evidence = [
+  { kind = "issue-closed", ref = "https://github.com/chungers/motlie/issues/287", note = "master tracking issue closed as completed at 2026-05-27T05:48:32Z with full release-completion summary in the closing comment" },
+  { kind = "sub-issues-closed", ref = "#288 (#294), #289 (#293), #290 (#303 #306 #307 #311), #291 (deferred via #338), #292 (deferred via #338), #298 (#300)", note = "all 6 sub-issues closed; 4 closed as completed, 2 closed as not-planned (deferred-for-v0)" },
+  { kind = "final-state", ref = "workspace state=published, mmux.published=true, channels_complete=[archive, installer], channels_deferred=[npm, homebrew]", note = "release 2026-05-apex-anchor is closed; reopening deferred channels happens via a new release event with its own release branch, not by reopening 2026-05-apex-anchor" },
+]
