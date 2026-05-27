@@ -1292,6 +1292,7 @@ impl ExecHandle {
 }
 
 /// Unified target at any hierarchy level (DC16).
+#[derive(Clone)]
 pub struct Target {
     inner: Arc<HostHandleInner>,
     address: TargetAddress,
@@ -1327,6 +1328,22 @@ impl<'a> SessionTags<'a> {
         .await
     }
 
+    /// Set several metadata tags in this namespace.
+    ///
+    /// This currently performs the same validation and tmux writes as repeated
+    /// [`set`](Self::set) calls.
+    pub async fn set_many<I, K, V>(&self, pairs: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in pairs {
+            self.set(key.as_ref(), value.as_ref()).await?;
+        }
+        Ok(())
+    }
+
     /// Remove one metadata tag from this namespace.
     pub async fn unset(&self, key: &str) -> Result<()> {
         control::unset_session_tag_with_prefix(
@@ -1337,6 +1354,21 @@ impl<'a> SessionTags<'a> {
             key,
         )
         .await
+    }
+
+    /// Remove several metadata tags in this namespace.
+    ///
+    /// Missing keys follow the same behavior as repeated [`unset`](Self::unset)
+    /// calls.
+    pub async fn unset_many<I, K>(&self, keys: I) -> Result<()>
+    where
+        I: IntoIterator<Item = K>,
+        K: AsRef<str>,
+    {
+        for key in keys {
+            self.unset(key.as_ref()).await?;
+        }
+        Ok(())
     }
 
     /// Read one metadata tag from this namespace.
@@ -3410,6 +3442,23 @@ mod tests {
         let tags = target.tags("mmux").await.unwrap();
 
         tags.unset("foo").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_tags_set_many_and_unset_many() {
+        let mock = MockTransport::new()
+            .with_response("set-option -t '$0' @mmux/role 'builder'", "")
+            .with_response("set-option -t '$0' @mmux/group 'frontend'", "")
+            .with_response("set-option -u -t '$0' @mmux/role", "")
+            .with_response("set-option -u -t '$0' @mmux/group", "");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let tags = target.tags("mmux").await.unwrap();
+
+        tags.set_many([("role", "builder"), ("group", "frontend")])
+            .await
+            .unwrap();
+        tags.unset_many(["role", "group"]).await.unwrap();
     }
 
     #[tokio::test]

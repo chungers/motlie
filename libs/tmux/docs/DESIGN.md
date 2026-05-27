@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-27 | @gpt55-337-og: Issue #337 Fleet API follow-up — add cross-host `FleetTargetSpec`, target aliases, fleet-wide session inventory with generic tag prefixing, batch tag writes/removals, idempotent target monitoring, and timeline filter/scope helpers. Keep application/workflow business concepts outside `libs/tmux`. | Fleet |
 | 2026-05-02 | @codex: Added initial session environment values to `CreateSessionOptions` and documented that post-creation `SessionEnvironment` writes only affect future tmux-spawned processes. | HostHandle, Target, control.rs, types.rs |
 | 2026-05-02 | @codex: Reworked session status-bar control into `Target::status() -> SessionStatus`, with snapshot/apply/restore helpers and validated `StatusLeftLength`. | Target, SessionStatus |
 | 2026-05-02 | @codex: DC34 follow-up for mmux PR feedback — add a host-level batch session-tag read API so selector refreshes can enrich a fresh session listing without one round trip per session. | Target, DC34 |
@@ -504,7 +505,27 @@ control actions back to the right host/target when an external agent decides to 
 <!-- @claude 2026-03-20 — updated to match shipped API (PR #92 R2). -->
 
 ```rust
-pub struct Fleet { /* host registry, shared output bus, workstream bindings */ }
+pub struct Fleet { /* host registry, shared output bus, target aliases */ }
+
+pub struct FleetTargetSpec { /* host alias + TargetSpec */ }
+
+pub struct ResolvedFleetTarget {
+    pub spec: FleetTargetSpec,
+    pub host: HostHandle,
+    pub target: Target,
+}
+
+pub struct FleetSnapshotOptions {
+    pub hosts: Option<Vec<String>>,
+    pub tag_prefixes: Vec<String>,
+}
+
+pub struct FleetSessionSnapshot {
+    pub host_alias: String,
+    pub session: SessionInfo,
+    pub target: FleetTargetSpec,
+    pub tags: BTreeMap<String, Vec<SessionTag>>,
+}
 
 impl Fleet {
     /// Create an empty fleet with a fresh shared OutputBus.
@@ -528,6 +549,13 @@ impl Fleet {
     /// Host status: Connected, Monitoring { sessions }, Error(String).
     pub fn host_status(&self, alias: &str) -> Option<HostStatus>;
 
+    /// Resolve a cross-host target spec.
+    pub async fn resolve_target(&self, spec: &FleetTargetSpec) -> Result<Option<ResolvedFleetTarget>>;
+    pub async fn require_target(&self, spec: &FleetTargetSpec) -> Result<ResolvedFleetTarget>;
+    pub async fn resolve_targets<I>(&self, specs: I) -> Result<Vec<ResolvedFleetTarget>>
+    where
+        I: IntoIterator<Item = FleetTargetSpec>;
+
     // --- Monitoring lifecycle ---
 
     /// Start monitoring a specific session on a host.
@@ -536,31 +564,58 @@ impl Fleet {
     /// Start monitoring all sessions on a host.
     pub async fn start_monitoring_host(&mut self, alias: &str) -> Result<()>;
 
+    /// Start/stop monitoring the session containing a target.
+    /// Repeated calls are idempotent.
+    pub async fn start_monitoring_target(&mut self, spec: &FleetTargetSpec) -> Result<()>;
+    pub fn stop_monitoring_target(&mut self, spec: &FleetTargetSpec) -> Result<()>;
+    pub async fn ensure_monitoring_session(&mut self, spec: &FleetTargetSpec) -> Result<SessionMonitorStatus>;
+    pub async fn ensure_monitoring_sessions<I>(&mut self, specs: I) -> Result<Vec<SessionMonitorStatus>>
+    where
+        I: IntoIterator<Item = FleetTargetSpec>;
+    pub fn stop_monitoring_session_target(&mut self, spec: &FleetTargetSpec) -> Result<()>;
+    pub fn monitor_status_for_target(&self, spec: &FleetTargetSpec) -> Option<SessionMonitorStatus>;
+
     /// Stop all monitoring on a host.
     pub fn stop_monitoring_host(&mut self, alias: &str) -> Result<()>;
 
     /// Shutdown: stop all monitoring, close the bus.
     pub fn shutdown(&mut self);
 
-    // --- Workstreams (named bindings) ---
+    // --- Inventory ---
 
-    /// Bind a workstream name to a host alias + TargetSpec.
+    pub async fn list_sessions_by_host(&self) -> Result<BTreeMap<String, Vec<SessionInfo>>>;
+    pub async fn list_sessions_with_tags(&self, tag_prefix: &str) -> Result<Vec<FleetSessionInfo>>;
+    pub async fn snapshot_sessions(&self, opts: FleetSnapshotOptions) -> Result<Vec<FleetSessionSnapshot>>;
+
+    // --- Target aliases (named bindings) ---
+
+    pub fn bind_target_alias(&mut self, name: &str, target: FleetTargetSpec) -> Result<()>;
+    pub fn unbind_target_alias(&mut self, name: &str) -> Result<()>;
+    pub async fn resolve_target_alias(&self, name: &str) -> Result<Option<ResolvedFleetTarget>>;
+    pub async fn require_target_alias(&self, name: &str) -> Result<ResolvedFleetTarget>;
+    pub fn target_aliases(&self) -> impl Iterator<Item = &str>;
+
+    /// Compatibility aliases for historical workstream naming.
     pub fn bind(&mut self, name: &str, host_alias: &str, target: TargetSpec) -> Result<()>;
-
-    /// Remove a workstream binding.
     pub fn unbind(&mut self, name: &str) -> Result<()>;
-
-    /// Resolve a workstream to a Target (async — resolves TargetSpec).
     pub async fn find(&self, name: &str) -> Result<Option<Target>>;
-
-    /// List all workstream names.
     pub fn workstreams(&self) -> impl Iterator<Item = &str>;
+
+    // --- Timeline helpers ---
+
+    pub fn timeline_options_for_targets(
+        &self,
+        targets: &[ResolvedFleetTarget],
+        base: TimelineOptions,
+    ) -> TimelineOptions;
 
     /// Convenience routing helpers for external agents.
     pub async fn send_text(&self, name: &str, text: &str) -> Result<()>;
     pub async fn send_keys(&self, name: &str, keys: &KeySequence) -> Result<()>;
     pub async fn capture(&self, name: &str) -> Result<String>;
     pub async fn target(&self, name: &str) -> Result<Target>;
+    pub async fn send_text_to(&self, spec: &FleetTargetSpec, text: &str) -> Result<()>;
+    pub async fn capture_target(&self, spec: &FleetTargetSpec) -> Result<String>;
 }
 ```
 
@@ -570,31 +625,42 @@ then uses Motlie to act. `Fleet` therefore focuses on three coordination jobs:
 
 1. **Connection registry**: keep `HostHandle`s by stable alias.
 2. **Stream aggregation**: expose one cross-host `OutputBus` / subscription seam.
-3. **Action routing**: resolve a domain name or binding back to the correct `HostHandle`
-   and `Target`.
+3. **Action routing**: resolve a target alias or `FleetTargetSpec` back to the
+   correct `HostHandle` and `Target`.
 
-**Workstreams** give callers a domain-meaningful vocabulary that decouples intent from
-infrastructure. Instead of `fleet.host("web-1")?.session("build")`, a caller says
-`fleet.find("build-pipeline")` — the mapping from name to (host, target) is established
-once and referenced everywhere. This is especially useful when an external agent builds
-conversation history from many sources and later needs to route a tool call back to the
-same source session or pane.
+**Target aliases** give callers a stable vocabulary that decouples caller intent from
+tmux addressing. Instead of repeatedly resolving `fleet.host("web-1")?.target(...)`, a
+caller can bind `"primary"` to `FleetTargetSpec::new("web-1", TargetSpec::session("build"))?`.
+The historical `workstream` methods remain as compatibility aliases, but the preferred
+terminology is target alias so domain-specific workflow concepts stay outside `libs/tmux`.
+
+**Session inventory + tags** provide generic discovery for higher-level selectors and
+dashboards. `Fleet::list_sessions_with_tags(prefix)` enumerates all registered hosts,
+batch-reads tags under a caller-owned prefix on each host, and returns `FleetSessionInfo`
+records. The library validates prefix/key/value syntax but does not interpret tag names
+or values.
+
+**Timeline helpers** are intentionally narrow. `ResolvedFleetTarget::sink_filter()` and
+`Fleet::timeline_options_for_targets()` produce generic bus filters for each target's
+host/session. Storage, retention, rendering, and marker persistence remain owned by the
+existing output/history pipeline or external consumers.
 
 **Usage**:
 
 ```rust
 let host = fleet.host("web-1").unwrap();
 let opts = CreateSessionOptions { command: Some("cargo build".to_string()), ..Default::default() };
-let build = host.create_session("build", &opts).await?;
-fleet.bind("build-pipeline", host, build.clone())?;
+host.create_session("build", &opts).await?;
+let build = FleetTargetSpec::session("web-1", "build")?;
+fleet.bind_target_alias("build-pipeline", build.clone())?;
 
 // Later — anywhere in the codebase
-let (_, _, target) = fleet.find("build-pipeline").unwrap();
+let target = fleet.target("build-pipeline").await?;
 target.send_text("cargo test").await?;
 
-// List all workstreams
-for ws in fleet.workstreams() {
-    println!("{}: {} on {}", ws.name, ws.target.target_string(), ws.host_alias);
+// List all target aliases
+for alias in fleet.target_aliases() {
+    println!("{alias}");
 }
 ```
 
