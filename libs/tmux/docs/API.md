@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-27 | @gpt55-337-og | Added Fleet target APIs for issue #337: `FleetTargetSpec`, target aliases, cross-host session inventory with tags, batch `SessionTags` writes/removals, idempotent target monitoring, and timeline filter/scope helpers. |
 | 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
 | 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
 | 2026-05-02 | @codex | Replaced direct `Target` status option methods with `Target::status() -> SessionStatus`, plus `SessionStatusSnapshot` / `SessionStatusOverrides` for attach-time snapshot/apply/restore flows. |
@@ -2245,8 +2246,9 @@ let snapshot = history.join().await?;
 ## 23. Fleet — Multi-Host Coordination (DC27)
 
 `Fleet` is a programmatic registry of `HostHandle`s with a shared `OutputBus`,
-workstream bindings, and convenience routing. Fleet-level actions are wrappers
-over `HostHandle` / `Target` operations, not a separate action system.
+target aliases, cross-host target specs, session inventory helpers, and
+convenience routing. Fleet-level actions are wrappers over `HostHandle` /
+`Target` operations, not a separate action system.
 
 ### Create and register hosts
 
@@ -2295,26 +2297,99 @@ fleet.stop_monitoring_host("web-1")?;
 fleet.shutdown();
 ```
 
-### Workstream bindings
-
-Workstreams map stable names to host + target combinations for alias-based routing:
+Target specs can also drive monitoring. Window and pane specs monitor their
+containing session. Repeated starts/stops are idempotent.
 
 ```rust
-use motlie_tmux::TargetSpec;
+use motlie_tmux::{FleetTargetSpec, TargetSpec};
 
-fleet.bind("ci", "web-1", TargetSpec::session("build").window(0).pane(0))?;
-fleet.bind("db", "db-1", TargetSpec::session("migration"))?;
+let pane = FleetTargetSpec::new(
+    "web-1",
+    TargetSpec::session("build").window(0).pane(0)?,
+)?;
 
-// Route actions by workstream name
+fleet.ensure_monitoring_session(&FleetTargetSpec::session("web-1", "build")?).await?;
+fleet.stop_monitoring_session_target(&FleetTargetSpec::session("web-1", "build")?)?;
+```
+
+### Target specs and aliases
+
+`FleetTargetSpec` is the cross-host address form: a host alias plus a
+`TargetSpec`. Target aliases map stable caller-owned names to these specs for
+alias-based routing:
+
+```rust
+use motlie_tmux::{FleetTargetSpec, TargetSpec};
+
+let ci = FleetTargetSpec::new("web-1", TargetSpec::session("build").window(0).pane(0)?)?;
+let db = FleetTargetSpec::session("db-1", "migration")?;
+
+fleet.bind_target_alias("ci", ci.clone())?;
+fleet.bind_target_alias("db", db.clone())?;
+
+// Route actions by target alias
 fleet.send_text("ci", "cargo test\n").await?;
 let output = fleet.capture("db").await?;
+
+// Or route directly by spec without binding an alias
+fleet.send_text_to(&ci, "cargo nextest run\n").await?;
+let current = fleet.capture_target(&db).await?;
 
 // Resolve to a Target for direct control
 let target = fleet.target("ci").await?;
 target.send_keys(&KeySequence::from_str("C-c")).await?;
 
 // Unbind when done
-fleet.unbind("ci")?;
+fleet.unbind_target_alias("ci")?;
+```
+
+The older `bind` / `unbind` / `find` / `workstreams` names remain as
+compatibility aliases for target aliases.
+
+### Cross-host session inventory and tags
+
+Fleet can enumerate sessions across registered hosts and batch-read tags under a
+caller-owned prefix without encoding application concepts in `libs/tmux`:
+
+```rust
+let snapshots = fleet
+    .snapshot_sessions(FleetSnapshotOptions {
+        hosts: None,
+        tag_prefixes: vec!["app".to_string()],
+    })
+    .await?;
+
+for item in snapshots {
+    println!(
+        "{}:{} tags={:?}",
+        item.host_alias,
+        item.session.name,
+        item.tags.get("app").cloned().unwrap_or_default()
+    );
+}
+```
+
+For per-session writes, `SessionTags` supports batch helpers:
+
+```rust
+let target = fleet.require_target(&FleetTargetSpec::session("web-1", "build")?).await?.target;
+let tags = target.tags("app").await?;
+tags.set_many([("role", "builder"), ("group", "frontend")]).await?;
+tags.unset_many(["group"]).await?;
+```
+
+### Timeline filter helpers
+
+Fleet does not own timeline storage. It can build the generic filters and marker
+scope that a timeline/history consumer needs for a target:
+
+```rust
+let spec = FleetTargetSpec::session("web-1", "build")?;
+let resolved = fleet.require_target(&spec).await?;
+let timeline = fleet.timeline_options_for_targets(&[resolved], TimelineOptions::default());
+
+let sub = fleet.output_bus().subscribe(timeline.filters, 256)?;
+let history = sub.history(HistoryOptions::default());
 ```
 
 ### Host status
