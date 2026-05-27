@@ -2615,7 +2615,7 @@ assert!(issues.is_empty());
 | `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `render_mode`, `global_max_render_chars`, `include_omission_marker` |
 | `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
 | `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }`, `Discontinuity { reason }` |
-| `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, workstreams, routing |
+| `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, target aliases, routing |
 | `HostStatus` | Enum: `Connected`, `Monitoring { sessions: Vec<SessionMonitorStatus> }`, `Error(String)` |
 | `SessionMonitorStatus` | Per-session status: `name`, `health: MonitorHealth` |
 | `RenderMode` | Enum: `Interleaved` (default), `PerSource` — controls how `render_text()` groups entries |
