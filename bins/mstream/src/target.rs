@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use motlie_tmux::TargetSpec;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -48,6 +49,10 @@ impl SessionTarget {
     pub fn session_name(&self) -> &str {
         &self.session_name
     }
+
+    pub fn target_spec(&self) -> TargetSpec {
+        TargetSpec::session(&self.session_name)
+    }
 }
 
 impl fmt::Display for SessionTarget {
@@ -79,6 +84,7 @@ mod tests {
         let target: SessionTarget = "amd1::codex-reviewer".parse().expect("valid target");
         assert_eq!(target.host_alias(), "amd1");
         assert_eq!(target.session_name(), "codex-reviewer");
+        assert_eq!(target.target_spec().session_name(), "codex-reviewer");
         assert_eq!(target.to_string(), "amd1::codex-reviewer");
     }
 
