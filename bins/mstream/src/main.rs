@@ -1,4 +1,5 @@
 mod cli;
+mod client;
 mod daemon;
 mod jsonl;
 mod protocol;
@@ -39,7 +40,7 @@ async fn run() -> anyhow::Result<i32> {
         }
         command => {
             let request = command.into_request()?;
-            match daemon::send_request(&socket, &request).await {
+            match client::send_request(&socket, &request).await {
                 Ok(records) => jsonl::print_records(&records)?,
                 Err(err) => {
                     let record = jsonl::error(
