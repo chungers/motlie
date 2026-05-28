@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-28 | @codex: Add policy-light attached-client activity signals for orchestrators: `ClientInfo` now includes `client_activity`, `client_readonly`, and `client_tty`, and `HostHandle::session_client_activity()` summarizes input recency for one session without embedding delivery policy in the library. | Discovery, HostHandle |
+| 2026-05-28 | @codex: Add the host-alias integration cleanup from feature/mstream: `SshConfig::connect_with_alias()` creates `HostHandle`s with caller-owned Fleet aliases, `Fleet::unregister()` removes host, monitor, and target-alias bookkeeping together, timeline lifecycle remains on `OutputBus` rather than duplicated on Fleet, and historical workstream/short-name aliases were removed in favor of explicit target-alias APIs. | Fleet, DC21 |
 | 2026-05-27 | @gpt55-337-og: Issue #337 Fleet API follow-up — add cross-host `FleetTargetSpec`, target aliases, fleet-wide session inventory with generic tag prefixing, batch tag writes/removals, idempotent target monitoring, and timeline filter/scope helpers. Keep application/workflow business concepts outside `libs/tmux`. | Fleet |
 | 2026-05-02 | @codex: Added initial session environment values to `CreateSessionOptions` and documented that post-creation `SessionEnvironment` writes only affect future tmux-spawned processes. | HostHandle, Target, control.rs, types.rs |
 | 2026-05-02 | @codex: Reworked session status-bar control into `Target::status() -> SessionStatus`, with snapshot/apply/restore helpers and validated `StatusLeftLength`. | Target, SessionStatus |
@@ -64,7 +66,7 @@
 | 2026-03-08 | Explicit FIFO cleanup on monitoring stop: `SessionMonitorHandle::shutdown()` and `stop_monitoring_session()` call `PipeManager::cleanup()` when pipe-pane fallback is active (P4). | Core Abstractions, Module Specs, DC13 |
 | 2026-03-08 | Static dispatch on hot paths: `Transport` → `TransportKind` enum, `ContentMatcher` → `MatcherKind` enum, `OutputSink` → `SinkKind` enum, `LabelFormat::Custom` → `fn` pointer. Remaining dynamic types: `CallbackSink.state` (`Arc<dyn Any>`), `on_flush` (`Pin<Box<dyn Future>>` — Rust async limitation). | Core Abstractions, Output Sink Pipeline, Module Specs, DC14 |
 | 2026-03-08 | Added `Target::exec()` for structured command execution with sentinel-based capture (DC19). `ExecOutput` type with stdout and exit code. | Core Abstractions, DC19 |
-| 2026-03-08 | Added the original `Fleet` named-target APIs: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. These names are now historical compatibility wrappers around target aliases. | Core Abstractions |
+| 2026-03-08 | Added the original `Fleet` named-target APIs: `bind()`, `find()`, `workstreams()` for named (host, target) bindings. These names were later replaced by target-alias APIs so application terms remain outside `libs/tmux`. | Core Abstractions |
 | 2026-03-08 | `PaneOutput` → `TargetOutput`: source identified by `TargetAddress` instead of flat pane fields. Generalizes to session-only hosts. `SourceLabel` uses `TargetAddress`. | Output Sink Pipeline, DC12 |
 | 2026-03-08 | `MonitorHandle` lookup API uses `&Target`/`&TargetSpec` instead of raw strings; `start/stop_monitoring_session` accept `&Target`. Rationale for keeping `SessionMonitorHandle` name (DC10 session-scoped constraint). | Core Abstractions, DC13 |
 | 2026-03-08 | Added `TargetSpec` type with builder for `HostHandle::target()` — replaces raw string parameter | Core Abstractions, DC17 |
@@ -537,6 +539,9 @@ impl Fleet {
     /// publish to a single aggregation bus.
     pub fn register(&mut self, alias: &str, host: HostHandle) -> Result<()>;
 
+    /// Remove a host plus Fleet-owned monitor and target-alias bookkeeping.
+    pub fn unregister(&mut self, alias: &str) -> Result<HostHandle>;
+
     /// Look up a host by alias.
     pub fn host(&self, name: &str) -> Option<&HostHandle>;
 
@@ -595,12 +600,6 @@ impl Fleet {
     pub async fn require_target_alias(&self, name: &str) -> Result<ResolvedFleetTarget>;
     pub fn target_aliases(&self) -> impl Iterator<Item = &str>;
 
-    /// Compatibility aliases for historical workstream naming.
-    pub fn bind(&mut self, name: &str, host_alias: &str, target: TargetSpec) -> Result<()>;
-    pub fn unbind(&mut self, name: &str) -> Result<()>;
-    pub async fn find(&self, name: &str) -> Result<Option<Target>>;
-    pub fn workstreams(&self) -> impl Iterator<Item = &str>;
-
     // --- Timeline helpers ---
 
     pub fn timeline_options_for_targets(
@@ -631,8 +630,12 @@ then uses Motlie to act. `Fleet` therefore focuses on three coordination jobs:
 **Target aliases** give callers a stable vocabulary that decouples caller intent from
 tmux addressing. Instead of repeatedly resolving `fleet.host("web-1")?.target(...)`, a
 caller can bind `"primary"` to `FleetTargetSpec::new("web-1", TargetSpec::session("build"))?`.
-The historical `workstream` methods remain as compatibility aliases, but the preferred
-terminology is target alias so domain-specific workflow concepts stay outside `libs/tmux`.
+Fleet registration requires `alias == host.host_alias()` so monitor labels and routing
+names are consistent; `SshConfig::connect_with_alias(alias)` is the canonical way for
+higher-level tools to use stable routing names like `"local"` or `"amd2"` when the
+transport URI host differs.
+The only naming layer in `Fleet` is the target-alias registry; domain-specific workflow
+concepts stay outside `libs/tmux`.
 
 **Session inventory + tags** provide generic discovery for higher-level selectors and
 dashboards. `Fleet::list_sessions_with_tags(prefix)` enumerates all registered hosts,
@@ -3399,7 +3402,7 @@ transcript as complete.
   - if reconnect succeeds but the monitored session no longer exists, emit a terminal
     discontinuity/failure marker and transition that session monitor to permanent
     failed/stopped state
-  - Fleet bindings remain as names, but subsequent `find()` / routed actions may fail
+  - Fleet target aliases remain as names, but subsequent target resolution / routed actions may fail
     until the caller recreates or rebinds the target
 - **Pane topology change during outage**:
   - if the session still exists but pane IDs changed, the monitor resumes at the session
@@ -3659,8 +3662,8 @@ rather than holding a resolved `Target` the whole time.
   `HostHandle` / `Target` control path used by direct callers.
 - Target alias resolution remains explicit and inspectable through
   `bind_target_alias()`, `resolve_target_alias()`, and `target_aliases()`.
-  The older `bind()`, `find()`, and `workstreams()` names remain compatibility
-  wrappers for historical callers only.
+  Historical `bind()`, `find()`, and `workstreams()` names were removed; caller
+  concepts such as workstreams stay outside `libs/tmux`.
 
 ### DC7: Capture-Pane vs Stream Monitoring
 

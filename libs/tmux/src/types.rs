@@ -517,7 +517,9 @@ impl fmt::Display for TargetLevel {
 ///
 /// Fields are private to enforce the hierarchy invariant: pane requires window.
 /// Use `session()`, `.window()/.window_name()`, `.pane()` builders or `parse()`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct TargetSpec {
     session_name: String,
     window_sel: Option<String>,
@@ -1000,6 +1002,18 @@ pub struct ClientInfo {
     pub width: u32,
     pub height: u32,
     pub session: String,
+    pub activity: u64,
+    pub readonly: bool,
+    pub tty: Option<String>,
+}
+
+/// Attached-client activity summary for one tmux session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionClientActivity {
+    pub session: String,
+    pub attached_clients: usize,
+    pub writable_clients: usize,
+    pub latest_client_activity: Option<u64>,
 }
 
 /// Pane geometry and scrollback state for reflow detection (DC20, Phase 1.9b).
@@ -1315,6 +1329,9 @@ mod tests {
                     width: w,
                     height: h,
                     session: session.to_string(),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 })
                 .collect(),
             pane: PaneGeometry {
@@ -1395,11 +1412,17 @@ mod tests {
                     width: 200,
                     height: 50,
                     session: "build".to_string(),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
                 ClientInfo {
                     width: 180,
                     height: 40,
                     session: "other".to_string(),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
             ],
             pane: PaneGeometry {
@@ -1416,12 +1439,18 @@ mod tests {
                     width: 200,
                     height: 50,
                     session: "build".to_string(),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
                 // "other" session client resized — should not matter
                 ClientInfo {
                     width: 100,
                     height: 20,
                     session: "other".to_string(),
+                    activity: 0,
+                    readonly: false,
+                    tty: None,
                 },
             ],
             pane: PaneGeometry {
@@ -1442,6 +1471,9 @@ mod tests {
                 width: 200,
                 height: 50,
                 session: "build".to_string(),
+                activity: 0,
+                readonly: false,
+                tty: None,
             }],
             pane: PaneGeometry {
                 pane_width: 80,
@@ -1456,6 +1488,9 @@ mod tests {
                 width: 180,
                 height: 40,
                 session: "build".to_string(),
+                activity: 0,
+                readonly: false,
+                tty: None,
             }],
             pane: PaneGeometry {
                 pane_width: 80,

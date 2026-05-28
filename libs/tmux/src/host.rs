@@ -15,6 +15,7 @@ use crate::monitor::{
 };
 use crate::sink::{
     HistoryHandle, HistoryOptions, HistorySnapshot, OutputBus, SinkFilter, TargetOutput,
+    TimelineMarkerScope,
 };
 use crate::transport::TransportKind;
 use crate::types::*;
@@ -592,6 +593,36 @@ impl HostHandle {
         discovery::list_clients_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Summarize attached-client input activity for one session.
+    pub async fn session_client_activity(&self, session: &str) -> Result<SessionClientActivity> {
+        let clients = self.list_clients().await?;
+        let mut attached_clients = 0usize;
+        let mut writable_clients = 0usize;
+        let mut latest_client_activity = None;
+
+        for client in clients
+            .into_iter()
+            .filter(|client| client.session == session)
+        {
+            attached_clients += 1;
+            if !client.readonly {
+                writable_clients += 1;
+            }
+            latest_client_activity = Some(
+                latest_client_activity
+                    .unwrap_or(client.activity)
+                    .max(client.activity),
+            );
+        }
+
+        Ok(SessionClientActivity {
+            session: session.to_string(),
+            attached_clients,
+            writable_clients,
+            latest_client_activity,
+        })
+    }
+
     /// Set global `history-limit` (DC20, Phase 1.9b).
     ///
     /// **Must be set before creating sessions/panes.** Existing panes
@@ -980,10 +1011,13 @@ impl HostHandle {
                         );
 
                         // Unexpected EOF — emit discontinuity and attempt reconnect
-                        bus.publish_discontinuity(&format!(
-                            "stream interrupted: control channel lost for {}:{}",
-                            host_alias, session
-                        ));
+                        bus.publish_discontinuity_for(
+                            TimelineMarkerScope::for_host_session(&host_alias, &session),
+                            &format!(
+                                "stream interrupted: control channel lost for {}:{}",
+                                host_alias, session
+                            ),
+                        );
                         set_health(MonitorHealth::Reconnecting);
 
                         attempt += 1;
@@ -1036,10 +1070,13 @@ impl HostHandle {
 
                         if !sessions.iter().any(|s| s.name == session) {
                             // Session gone — permanent failure (DC29 session identity)
-                            bus.publish_discontinuity(&format!(
-                                "stream failed: session '{}' no longer exists on {}",
-                                session, host_alias
-                            ));
+                            bus.publish_discontinuity_for(
+                                TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                &format!(
+                                    "stream failed: session '{}' no longer exists on {}",
+                                    session, host_alias
+                                ),
+                            );
                             set_health(MonitorHealth::Failed);
                             if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
                                 signals.remove(&session_for_cleanup);
@@ -1059,10 +1096,13 @@ impl HostHandle {
                                 // visible content and publish as TargetOutput so
                                 // downstream consumers (history, subscribers) get
                                 // re-anchored with current screen state.
-                                bus.publish_discontinuity(&format!(
-                                    "stream resumed: reattached after reconnect for {}:{}",
-                                    host_alias, session
-                                ));
+                                bus.publish_discontinuity_for(
+                                    TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                    &format!(
+                                        "stream resumed: reattached after reconnect for {}:{}",
+                                        host_alias, session
+                                    ),
+                                );
 
                                 let mut snapshot_panes = 0usize;
                                 let mut snapshot_failed = false;
@@ -1134,7 +1174,10 @@ impl HostHandle {
                                         if snapshot_panes == 1 { "" } else { "s" }
                                     )
                                 };
-                                bus.publish_discontinuity(&snapshot_msg);
+                                bus.publish_discontinuity_for(
+                                    TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                    &snapshot_msg,
+                                );
 
                                 set_health(MonitorHealth::Streaming);
                                 attempt = 0; // Reset on successful reconnect
@@ -3087,6 +3130,38 @@ mod tests {
         let host = mock_host(mock);
         let target = host.session_by_id("$1").await.unwrap();
         assert!(target.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_client_activity_summarizes_matching_clients() {
+        let mock = MockTransport::new().with_response(
+            "list-clients",
+            "200 50 build 100 0 /dev/ttys001\n\
+             180 40 build 120 1 /dev/ttys002\n\
+             160 30 other 300 0 /dev/ttys003\n",
+        );
+        let host = mock_host(mock);
+
+        let activity = host.session_client_activity("build").await.unwrap();
+
+        assert_eq!(activity.session, "build");
+        assert_eq!(activity.attached_clients, 2);
+        assert_eq!(activity.writable_clients, 1);
+        assert_eq!(activity.latest_client_activity, Some(120));
+    }
+
+    #[tokio::test]
+    async fn session_client_activity_handles_no_attached_clients() {
+        let mock =
+            MockTransport::new().with_response("list-clients", "200 50 other 100 0 /dev/ttys001\n");
+        let host = mock_host(mock);
+
+        let activity = host.session_client_activity("build").await.unwrap();
+
+        assert_eq!(activity.session, "build");
+        assert_eq!(activity.attached_clients, 0);
+        assert_eq!(activity.writable_clients, 0);
+        assert_eq!(activity.latest_client_activity, None);
     }
 
     #[tokio::test]

@@ -371,15 +371,26 @@ impl SshConfig {
     /// the current OS user). For SSH hosts, `user` is required — `connect()`
     /// returns an error if empty.
     pub async fn connect(self) -> Result<HostHandle> {
+        let alias = self.host().to_string();
+        self.connect_with_alias(&alias).await
+    }
+
+    /// Connect and return a `HostHandle` using an explicit Fleet/output alias.
+    ///
+    /// This is useful when the transport host name (`localhost`, `amd2`, an IP)
+    /// is not the caller's stable routing alias.
+    pub async fn connect_with_alias(self, alias: &str) -> Result<HostHandle> {
+        if alias.is_empty() {
+            return Err(Error::Parse("host alias cannot be empty".to_string()));
+        }
         let is_local = self.is_localhost();
         let user_empty = self.user().is_empty();
         let timeout = self.timeout();
         let socket = self.socket().cloned();
-        let alias = self.host().to_string();
 
         if is_local {
             let transport = TransportKind::Local(LocalTransport::with_timeout(timeout));
-            return Ok(HostHandle::with_alias(transport, socket, &alias));
+            return Ok(HostHandle::with_alias(transport, socket, alias));
         }
 
         if user_empty {
@@ -387,7 +398,7 @@ impl SshConfig {
         }
 
         let transport = TransportKind::Ssh(SshTransport::connect(self).await?);
-        Ok(HostHandle::with_alias(transport, socket, &alias))
+        Ok(HostHandle::with_alias(transport, socket, alias))
     }
 }
 
@@ -1090,6 +1101,17 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(host.transport_kind(), TransportKind::Local(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_with_alias_sets_host_alias() {
+        let host = SshConfig::parse("ssh://localhost")
+            .unwrap()
+            .connect_with_alias("local")
+            .await
+            .unwrap();
+        assert!(matches!(host.transport_kind(), TransportKind::Local(_)));
+        assert_eq!(host.host_alias(), "local");
     }
 
     #[tokio::test]

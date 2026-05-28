@@ -38,6 +38,18 @@ to your current scope of work, without user's explicit approval.
 Skills are organized by namespace in `.agents/skills/`.
 Read the relevant `SKILL.md` before creating any file.
 
+### Project
+
+| Skill | Path | When to use |
+|---|---|---|
+| `project` | `.agents/skills/project/SKILL.md` | Manage Motlie engineering projects and multi-agent workstreams with mstream |
+
+### Release
+
+| Skill | Path | When to use |
+|---|---|---|
+| `release` | `.agents/skills/release/SKILL.md` | Plan, stage, package, verify, or publish Motlie releases |
+
 ### Voice
 
 | Skill | Path | When to use |

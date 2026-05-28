@@ -462,7 +462,7 @@ async fn stream_fidelity(target: &motlie_tmux::Target, interval: Duration) -> an
                     } else {
                         write!(stdout, " FIDELITY: CLEAN ")?;
                     }
-                    write!(stdout, "\x1b[0m\n")?; // reset
+                    writeln!(stdout, "\x1b[0m")?; // reset
                     stdout.flush()?;
 
                     previous_text = result.text;
@@ -497,11 +497,11 @@ async fn stream_monitor(
     // Subscribe to the output bus BEFORE starting the monitor to avoid a race
     // where initial %output frames are published before any subscriber exists.
     let bus = host.output_bus();
-    let filter = SinkFilter::for_session(&session_name);
+    let filter = SinkFilter::for_session(session_name);
     let subscription = bus.subscribe(vec![filter], 64)?;
 
     // Start monitoring the session — opens control mode via a shell channel
-    let monitor_handle = host.start_monitoring_session(&session_name).await?;
+    let monitor_handle = host.start_monitoring_session(session_name).await?;
 
     // Convert to a JoinedStream — merges events with source labels
     let mut stream = subscription.joined(LabelFormat::Bracketed);
@@ -580,10 +580,10 @@ async fn stream_render(
     let mut refresh = tokio::time::interval(Duration::from_millis(250));
 
     let bus = host.output_bus();
-    let filter = SinkFilter::for_session(&session_name);
+    let filter = SinkFilter::for_session(session_name);
     let subscription = bus.subscribe(vec![filter], 64)?;
 
-    let monitor_handle = host.start_monitoring_session(&session_name).await?;
+    let monitor_handle = host.start_monitoring_session(session_name).await?;
     let mut stream = subscription.joined(LabelFormat::Bracketed);
 
     let mut stdout = std::io::stdout().lock();

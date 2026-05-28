@@ -38,9 +38,11 @@ pub use keys::{KeySequence, SpecialKey};
 pub use monitor::{MonitorExitReason, MonitorHandle, MonitorHealth, SessionMonitorHandle};
 pub use sink::{
     CallbackSink, FlushPolicy, HistoryEntry, HistoryHandle, HistoryOptions, HistorySnapshot,
-    JoinedStream, LabelFormat, OutputBus, PipeHandle, PollHistory, RenderMode, SinkEvent,
-    SinkFilter, SinkId, SinkKind, SourceAccumulator, SourceLabel, StreamChunk, Subscription,
-    TargetOutput, TimelineMarkerScope, TimelineOptions,
+    JoinedStream, LabelFormat, LateEventPolicy, OutputBus, PipeHandle, PollHistory, RenderMode,
+    RenderOptions, SinkEvent, SinkFilter, SinkId, SinkKind, SourceAccumulator, SourceLabel,
+    StreamChunk, Subscription, TargetOutput, TimelineCursor, TimelineEntry, TimelineEntryKind,
+    TimelineHandle, TimelineMarkerScope, TimelineOptions, TimelineOrdering, TimelinePage,
+    TimelineRenderPage,
 };
 pub use sinks::stdio::{StdioFormat, StdioSink};
 pub use transport::{
@@ -50,9 +52,9 @@ pub use types::{
     CaptureNormalizeMode, CaptureOptions, CaptureResult, ClientInfo, CreateSessionOptions,
     CreateWindowOptions, ExecId, ExecOutput, ExecState, FidelityIssue, GeometrySnapshot,
     HostKeyPolicy, OutputFidelity, PaneAddress, PaneGeometry, PaneInfo, ScrollbackQuery,
-    SessionEnvVar, SessionId, SessionInfo, SessionTag, SplitDirection, SplitPaneOptions, SplitSize,
-    StatusLeft, StatusLeftLength, StatusStyle, TargetAddress, TargetLevel, TargetSpec, TmuxSocket,
-    TmuxStyle, TransferOptions, WindowInfo, WindowStyle, SESSION_ENV_VAR_VALUE_MAX_BYTES,
-    SESSION_TAG_VALUE_MAX_BYTES, STATUS_LEFT_LENGTH_MAX, STATUS_LEFT_MAX_BYTES,
-    STATUS_STYLE_MAX_BYTES, TMUX_STYLE_MAX_BYTES,
+    SessionClientActivity, SessionEnvVar, SessionId, SessionInfo, SessionTag, SplitDirection,
+    SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength, StatusStyle, TargetAddress,
+    TargetLevel, TargetSpec, TmuxSocket, TmuxStyle, TransferOptions, WindowInfo, WindowStyle,
+    SESSION_ENV_VAR_VALUE_MAX_BYTES, SESSION_TAG_VALUE_MAX_BYTES, STATUS_LEFT_LENGTH_MAX,
+    STATUS_LEFT_MAX_BYTES, STATUS_STYLE_MAX_BYTES, TMUX_STYLE_MAX_BYTES,
 };
