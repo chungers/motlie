@@ -344,9 +344,13 @@ Tasks:
   `last_error`, and do not survive daemon restart.
 - [x] 8.14 Add CLI parser coverage for timer duration parsing and request
   conversion.
-- [ ] 8.15 Add an integration smoke test for timer delivery against a local
+- [x] 8.15 Add timer submit retry options so timer prompts can send extra
+  Enter keys after a delay without re-sending prompt text. Defaults:
+  `--submit-retries 1 --submit-retry-delay-ms 750`; `--no-enter` disables
+  submit retries.
+- [ ] 8.16 Add an integration smoke test for timer delivery against a local
   tmux session.
-- [ ] 8.16 Add tests that silence, prompt heuristics, and missing output do not
+- [ ] 8.17 Add tests that silence, prompt heuristics, and missing output do not
   transition a session to `done`, `blocked`, or `needs-input`.
 
 Validation:
@@ -357,7 +361,7 @@ cargo test -p motlie-mstream handoff
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock send pr-323 local::codex-test --text "Report status." --enter
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock interrupt local::codex-test
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock session mark local::codex-test --state done --summary "manual smoke completed"
-cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer start pr-323-poll --every 5m --target local::codex-test --prompt "Wakeup: poll pr-323."
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer start pr-323-poll --every 5m --target local::codex-test --prompt "Wakeup: poll pr-323." --submit-retries 1 --submit-retry-delay-ms 750
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer list
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer fire pr-323-poll
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer stop pr-323-poll

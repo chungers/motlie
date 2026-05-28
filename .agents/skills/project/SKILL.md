@@ -111,7 +111,9 @@ poll and unblock the workstream:
 mstream --socket /tmp/mstream-${USER}.sock timer start <workstream>-poll \
   --every 5m \
   --target <orchestrator-host-alias>::<your-tmux-session> \
-  --prompt "[mstream:<workstream>-poll] Wakeup: check <workstream> with mstream status and summary-input. Unblock agents, summarize only material changes, and decide whether to keep, change, or stop this timer."
+  --prompt "[mstream:<workstream>-poll] Wakeup: check <workstream> with mstream status and summary-input. Unblock agents, summarize only material changes, and decide whether to keep, change, or stop this timer." \
+  --submit-retries 1 \
+  --submit-retry-delay-ms 750
 ```
 
 Use `mstream timer list` to verify active timers, `mstream timer fire <name>`
@@ -119,6 +121,9 @@ to test prompt delivery, and `mstream timer stop <name>` when the workstream is
 closed or no longer needs periodic attention. Timer state is daemon memory only
 and must be recreated after daemon restart. Do not target collaborator sessions
 with orchestrator timers unless the user explicitly asks for that behavior.
+Timer prompts default to one extra Enter after 750ms because agent TUIs
+occasionally miss the first submit key. Retries send only extra Enter keys, not
+the prompt text; `--no-enter` disables retries.
 
 If the daemon is unreachable, ask the user to restart it or provide the correct socket. After daemon restart, ask the user for the host aliases and SSH URIs; mstream does not persist the host ledger.
 

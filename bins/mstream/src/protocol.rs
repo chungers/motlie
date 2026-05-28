@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_WORKSTREAM_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_STATUS_ACTIVE_WINDOW_SECS: u64 = 30;
 pub const DEFAULT_STATUS_IDLE_AFTER_SECS: u64 = 300;
+pub const DEFAULT_TIMER_SUBMIT_RETRIES: u8 = 1;
+pub const DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS: u64 = 750;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -252,6 +254,10 @@ pub struct TimerStartRequest {
     pub target: String,
     pub prompt: String,
     pub enter: bool,
+    #[serde(default = "default_timer_submit_retries")]
+    pub submit_retries: u8,
+    #[serde(default = "default_timer_submit_retry_delay_ms")]
+    pub submit_retry_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +273,14 @@ fn default_status_active_window_secs() -> u64 {
 
 fn default_status_idle_after_secs() -> u64 {
     DEFAULT_STATUS_IDLE_AFTER_SECS
+}
+
+fn default_timer_submit_retries() -> u8 {
+    DEFAULT_TIMER_SUBMIT_RETRIES
+}
+
+fn default_timer_submit_retry_delay_ms() -> u64 {
+    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

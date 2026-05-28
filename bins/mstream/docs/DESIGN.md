@@ -587,7 +587,9 @@ The main use case is an orchestrator waking its own agent session:
 mstream timer start issue-337-poll \
   --every 5m \
   --target local::codex-orchestrator \
-  --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize material changes, and decide whether to keep, change, or stop this timer."
+  --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize material changes, and decide whether to keep, change, or stop this timer." \
+  --submit-retries 1 \
+  --submit-retry-delay-ms 750
 
 mstream timer list
 mstream timer fire issue-337-poll
@@ -598,7 +600,13 @@ Timer names are daemon-unique and should describe their purpose. `--every`
 accepts seconds or minutes. `--target` uses `<host-alias>::<session>` and must
 resolve when the timer starts. `--prompt` is not persisted outside daemon
 memory. The default behavior submits the prompt with Enter; `--no-enter` leaves
-the text in the pane.
+the text in the pane and disables submit retries.
+
+Timer prompts default to one extra Enter after 750ms because agent TUIs
+occasionally miss the first submit key after pasted text. The retry policy is
+configurable with `--submit-retries` and `--submit-retry-delay-ms`. Retries
+send only extra Enter keys, never the prompt text, so the duplicate-submission
+risk is limited to the submit action.
 
 Timers are intentionally best-effort. If the target TUI is busy, tmux queues
 input for that pane according to normal PTY behavior. If the target is gone,

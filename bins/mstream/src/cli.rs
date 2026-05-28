@@ -10,7 +10,8 @@ use crate::protocol::{
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
     OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
     SummaryInputRequest, TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
-    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
+    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -436,6 +437,10 @@ pub struct TimerStartArgs {
     pub enter: bool,
     #[arg(long)]
     pub no_enter: bool,
+    #[arg(long, default_value_t = DEFAULT_TIMER_SUBMIT_RETRIES)]
+    pub submit_retries: u8,
+    #[arg(long, default_value_t = DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS)]
+    pub submit_retry_delay_ms: u64,
 }
 
 impl TimerStartArgs {
@@ -446,12 +451,15 @@ impl TimerStartArgs {
         if self.prompt.is_empty() {
             bail!("--prompt cannot be empty");
         }
+        let enter = resolve_enter(self.enter, self.no_enter)?;
         Ok(TimerStartRequest {
             name: self.name,
             every_secs: self.every_secs,
             target: self.target,
             prompt: self.prompt,
-            enter: resolve_enter(self.enter, self.no_enter)?,
+            enter,
+            submit_retries: if enter { self.submit_retries } else { 0 },
+            submit_retry_delay_ms: self.submit_retry_delay_ms,
         })
     }
 }
@@ -629,5 +637,60 @@ mod tests {
         assert_eq!(request.target, "local::orchestrator");
         assert_eq!(request.prompt, "Wake up and poll.");
         assert!(request.enter);
+        assert_eq!(request.submit_retries, 1);
+        assert_eq!(request.submit_retry_delay_ms, 750);
+    }
+
+    #[test]
+    fn timer_start_command_allows_submit_retry_override() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+            "--submit-retries",
+            "2",
+            "--submit-retry-delay-ms",
+            "1000",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert_eq!(request.submit_retries, 2);
+        assert_eq!(request.submit_retry_delay_ms, 1000);
+    }
+
+    #[test]
+    fn timer_start_no_enter_disables_submit_retries() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+            "--no-enter",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert!(!request.enter);
+        assert_eq!(request.submit_retries, 0);
     }
 }
