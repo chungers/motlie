@@ -517,7 +517,9 @@ impl fmt::Display for TargetLevel {
 ///
 /// Fields are private to enforce the hierarchy invariant: pane requires window.
 /// Use `session()`, `.window()/.window_name()`, `.pane()` builders or `parse()`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct TargetSpec {
     session_name: String,
     window_sel: Option<String>,

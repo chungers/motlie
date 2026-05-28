@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::host::{HostHandle, Target};
 use crate::keys::KeySequence;
 use crate::monitor::{MonitorHandle, MonitorHealth, SessionMonitorHandle};
-use crate::sink::{OutputBus, SinkFilter, TimelineHandle, TimelineMarkerScope, TimelineOptions};
+use crate::sink::{OutputBus, SinkFilter, TimelineMarkerScope, TimelineOptions};
 use crate::types::{SessionId, SessionInfo, SessionTag, TargetAddress, TargetLevel, TargetSpec};
 
 // ---------------------------------------------------------------------------
@@ -52,7 +52,9 @@ pub enum HostStatus {
 // ---------------------------------------------------------------------------
 
 /// Cross-host target spec used by Fleet routing APIs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct FleetTargetSpec {
     pub host_alias: String,
     pub target: TargetSpec,
@@ -270,6 +272,21 @@ impl Fleet {
         Ok(())
     }
 
+    /// Remove a registered host and any Fleet-owned routing or monitor state
+    /// associated with it.
+    pub fn unregister(&mut self, alias: &str) -> Result<HostHandle> {
+        let host = self
+            .hosts
+            .remove(alias)
+            .ok_or_else(|| Error::NotFound(format!("host '{}' not registered", alias)))?;
+        self.target_aliases
+            .retain(|_, entry| entry.target.host_alias() != alias);
+        self.session_monitors.remove(alias);
+        self.full_monitors.remove(alias);
+        host.stop_monitoring();
+        Ok(host)
+    }
+
     /// Look up a host by alias.
     pub fn host(&self, name: &str) -> Option<&HostHandle> {
         self.hosts.get(name)
@@ -288,43 +305,6 @@ impl Fleet {
     /// The shared `OutputBus` aggregating output from all hosts.
     pub fn output_bus(&self) -> Arc<OutputBus> {
         self.bus.clone()
-    }
-
-    /// Create a named timeline on the shared `OutputBus`.
-    pub fn create_timeline(
-        &self,
-        name: impl Into<String>,
-        opts: TimelineOptions,
-    ) -> Result<TimelineHandle> {
-        self.bus.create_timeline(name, opts)
-    }
-
-    /// Open a named timeline on the shared `OutputBus` — return the existing
-    /// one or create it if missing.
-    ///
-    /// When the timeline already exists, `opts` are ignored and the existing
-    /// generation is returned unchanged.
-    pub fn open_timeline(
-        &self,
-        name: impl Into<String>,
-        opts: TimelineOptions,
-    ) -> Result<TimelineHandle> {
-        self.bus.open_timeline(name, opts)
-    }
-
-    /// Look up a named timeline on the shared `OutputBus`.
-    pub fn timeline(&self, name: &str) -> Result<Option<TimelineHandle>> {
-        self.bus.timeline(name)
-    }
-
-    /// Remove a named timeline from the shared `OutputBus`.
-    pub fn remove_timeline(&self, name: &str) -> Result<()> {
-        self.bus.remove_timeline(name)
-    }
-
-    /// Remove idle timelines from the shared `OutputBus`.
-    pub fn remove_idle_timelines(&self, idle_for: std::time::Duration) -> Result<Vec<String>> {
-        self.bus.remove_idle_timelines(idle_for)
     }
 
     /// Status of a registered host with per-session health (DC29, 4.2d).
@@ -751,44 +731,6 @@ impl Fleet {
         self.target_aliases.keys().map(|k| k.as_str())
     }
 
-    /// Compatibility alias for [`bind_target_alias`](Self::bind_target_alias).
-    pub fn bind_target(&mut self, alias: &str, target: FleetTargetSpec) -> Result<()> {
-        self.bind_target_alias(alias, target)
-    }
-
-    /// Compatibility alias for [`unbind_target_alias`](Self::unbind_target_alias).
-    pub fn unbind_target(&mut self, alias: &str) -> Result<()> {
-        self.unbind_target_alias(alias)
-    }
-
-    /// Compatibility alias returning only the resolved `Target`.
-    pub async fn find_target(&self, alias: &str) -> Result<Option<Target>> {
-        Ok(self.resolve_target_alias(alias).await?.map(|r| r.target))
-    }
-
-    /// Compatibility alias for older workstream terminology.
-    pub fn bind(&mut self, workstream: &str, host_alias: &str, target: TargetSpec) -> Result<()> {
-        self.bind_target_alias(workstream, FleetTargetSpec::new(host_alias, target)?)
-    }
-
-    /// Compatibility alias for older workstream terminology.
-    pub fn unbind(&mut self, workstream: &str) -> Result<()> {
-        self.unbind_target_alias(workstream)
-            .map_err(|err| Error::NotFound(err.to_string().replace("target alias", "workstream")))
-    }
-
-    /// Compatibility alias for older workstream terminology.
-    pub async fn find(&self, workstream: &str) -> Result<Option<Target>> {
-        self.find_target(workstream)
-            .await
-            .map_err(|err| Error::NotFound(err.to_string().replace("target alias", "workstream")))
-    }
-
-    /// Compatibility alias for older workstream terminology.
-    pub fn workstreams(&self) -> impl Iterator<Item = &str> {
-        self.target_aliases()
-    }
-
     // --- Timeline helpers ---
 
     /// Build a `TimelineOptions` whose source-routing filter is derived from a
@@ -842,36 +784,34 @@ impl Fleet {
 
     /// Send text to a target alias.
     pub async fn send_text(&self, alias: &str, text: &str) -> Result<()> {
-        let target = self
-            .find_target(alias)
+        self.require_target_alias(alias)
             .await?
-            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))?;
-        target.send_text(text).await
+            .target
+            .send_text(text)
+            .await
     }
 
     /// Send keys to a target alias.
     pub async fn send_keys(&self, alias: &str, keys: &KeySequence) -> Result<()> {
-        let target = self
-            .find_target(alias)
+        self.require_target_alias(alias)
             .await?
-            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))?;
-        target.send_keys(keys).await
+            .target
+            .send_keys(keys)
+            .await
     }
 
     /// Capture the current content of a target alias.
     pub async fn capture(&self, alias: &str) -> Result<String> {
-        let target = self
-            .find_target(alias)
+        self.require_target_alias(alias)
             .await?
-            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))?;
-        target.capture().await
+            .target
+            .capture()
+            .await
     }
 
     /// Resolve a target alias to its `Target` handle.
     pub async fn target(&self, alias: &str) -> Result<Target> {
-        self.find_target(alias)
-            .await?
-            .ok_or_else(|| Error::NotFound(format!("target alias '{}' target not found", alias)))
+        Ok(self.require_target_alias(alias).await?.target)
     }
 
     /// Send text to a target spec without first creating an alias.
@@ -973,6 +913,27 @@ mod tests {
         assert_eq!(resolved.target.session_name(), "build");
     }
 
+    #[test]
+    fn fleet_unregister_removes_host_and_target_aliases() {
+        let mut fleet = Fleet::new();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
+        fleet
+            .bind_target_alias(
+                "builder",
+                FleetTargetSpec::session("web-1", "build").unwrap(),
+            )
+            .unwrap();
+
+        let removed = fleet.unregister("web-1").unwrap();
+
+        assert_eq!(removed.host_alias(), "web-1");
+        assert!(fleet.host("web-1").is_none());
+        assert_eq!(fleet.target_aliases().count(), 0);
+        assert!(fleet.unregister("web-1").is_err());
+    }
+
     #[tokio::test]
     async fn resolved_target_timeline_filter_matches_host_session_only() {
         let mock = crate::transport::MockTransport::new()
@@ -1059,24 +1020,6 @@ mod tests {
         let mut aliases: Vec<&str> = fleet.hosts().map(|(k, _)| k).collect();
         aliases.sort();
         assert_eq!(aliases, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn fleet_workstream_bind_find_unbind() {
-        let mut fleet = Fleet::new();
-        fleet
-            .register("web-1", local_host_aliased("web-1"))
-            .unwrap();
-
-        let spec = TargetSpec::session("build");
-        fleet.bind("ci", "web-1", spec).unwrap();
-
-        let mut ws: Vec<&str> = fleet.workstreams().collect();
-        ws.sort();
-        assert_eq!(ws, vec!["ci"]);
-
-        fleet.unbind("ci").unwrap();
-        assert!(fleet.workstreams().next().is_none());
     }
 
     #[test]
@@ -1299,18 +1242,21 @@ mod tests {
     }
 
     #[test]
-    fn fleet_bind_rejects_unknown_host() {
+    fn fleet_bind_target_alias_rejects_unknown_host() {
         let mut fleet = Fleet::new();
         let err = fleet
-            .bind("ci", "nonexistent", TargetSpec::session("build"))
+            .bind_target_alias(
+                "ci",
+                FleetTargetSpec::session("nonexistent", "build").unwrap(),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("not registered"));
     }
 
     #[test]
-    fn fleet_unbind_rejects_unknown_workstream() {
+    fn fleet_unbind_target_alias_rejects_unknown_alias() {
         let mut fleet = Fleet::new();
-        let err = fleet.unbind("nonexistent").unwrap_err();
+        let err = fleet.unbind_target_alias("nonexistent").unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -1347,7 +1293,7 @@ mod tests {
             .register("web-1", local_host_aliased("web-1"))
             .unwrap();
         fleet
-            .bind("ci", "web-1", TargetSpec::session("build"))
+            .bind_target_alias("ci", FleetTargetSpec::session("web-1", "build").unwrap())
             .unwrap();
 
         fleet.shutdown();

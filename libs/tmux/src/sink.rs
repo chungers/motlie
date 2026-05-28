@@ -4833,7 +4833,7 @@ mod tests {
 
         // Drain the channel to make room
         let mut drained = 0;
-        while let Ok(_) = rx.try_recv() {
+        while rx.try_recv().is_ok() {
             drained += 1;
         }
         assert_eq!(drained, 3, "should have drained 3 data events");

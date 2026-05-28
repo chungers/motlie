@@ -25,8 +25,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<20} {:<8} {:<8} {:<8} {}",
-        "NAME", "ID", "WINDOWS", "CLIENTS", "ATTACHED"
+        "{:<20} {:<8} {:<8} {:<8} ATTACHED",
+        "NAME", "ID", "WINDOWS", "CLIENTS"
     );
     println!("{}", "-".repeat(50));
     for s in &sessions {

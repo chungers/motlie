@@ -169,9 +169,8 @@ pub async fn run(host: &HostHandle, host_uri: &str) -> anyhow::Result<TuiAction>
     // succeeds here because the panic hook closure (the other Arc ref)
     // was just removed by take_hook().
     let _ = std::panic::take_hook();
-    match std::sync::Arc::try_unwrap(original_hook) {
-        Ok(hook) => std::panic::set_hook(hook),
-        Err(_) => {} // Should not happen; fall back to default hook.
+    if let Ok(hook) = std::sync::Arc::try_unwrap(original_hook) {
+        std::panic::set_hook(hook);
     }
 
     // Tear down any active watch.
@@ -456,7 +455,7 @@ async fn process_command(
 
     match parts[0] {
         "tui" => {
-            if parts.get(1).map(|s| *s) == Some("off") {
+            if parts.get(1).copied() == Some("off") {
                 return Ok(Some(TuiAction::TuiOff));
             }
             state.push_output("already in tui mode; use 'tui off' to exit");
@@ -690,7 +689,7 @@ async fn process_command(
                 let _ = prev.history_handle.join().await;
                 let _ = prev.monitor_handle.shutdown().await;
             }
-            let words: Vec<&str> = cmd.trim().split_whitespace().collect();
+            let words: Vec<&str> = cmd.split_whitespace().collect();
             if words.len() < 2 {
                 state.push_output("usage: history <session> [session...]");
                 return Ok(None);
@@ -741,7 +740,7 @@ async fn process_command(
             }
         }
         "stream" => {
-            let words: Vec<&str> = cmd.trim().split_whitespace().collect();
+            let words: Vec<&str> = cmd.split_whitespace().collect();
             if words.len() < 2 {
                 state.push_output(
                     "usage: stream <target> [--mode visible|tail|until|fidelity|monitor|render] \
@@ -889,10 +888,10 @@ async fn process_command(
                         state.mirror_text.clear();
                     }
 
-                    match host.start_monitoring_session(&session_name).await {
+                    match host.start_monitoring_session(session_name).await {
                         Ok(monitor_handle) => {
                             let bus = host.output_bus();
-                            let filter = SinkFilter::for_session(&session_name);
+                            let filter = SinkFilter::for_session(session_name);
                             match bus.subscribe(vec![filter], 64) {
                                 Ok(sub) => {
                                     let (cols, rows) =
