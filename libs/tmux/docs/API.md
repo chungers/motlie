@@ -22,6 +22,8 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added attached-client activity fields to `ClientInfo` and `HostHandle::session_client_activity()` for policy-light input-recency consumers such as mstream timer guards. |
+| 2026-05-28 | @codex | Added `SshConfig::connect_with_alias()` and `Fleet::unregister()` so higher-level orchestrators can use stable routing aliases while keeping Fleet as the host registry; kept timeline lifecycle methods on `OutputBus` instead of duplicating them on `Fleet`; removed historical workstream/short-name aliases in favor of explicit target-alias APIs. |
 | 2026-05-27 | @gpt55-337-og | Added Fleet target APIs for issue #337: `FleetTargetSpec`, target aliases, cross-host session inventory with tags, batch `SessionTags` writes/removals, idempotent target monitoring, and timeline filter/scope helpers. |
 | 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
 | 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
@@ -78,6 +80,7 @@ in [`examples/README.md`](../examples/README.md).
 **Part II-c — External-Agent Substrate (Track B)**
 21. [Predicate Filtering — filter_fn](#21-predicate-filtering--filter_fn)
 22. [Rolling Transcript / History (DC28)](#22-rolling-transcript--history-dc28)
+22b. [OutputBus Timelines](#22b-outputbus-timelines)
 23. [Fleet — Multi-Host Coordination (DC27)](#23-fleet--multi-host-coordination-dc27)
 
 **Part II-d — TUI (DC32)**
@@ -803,9 +806,24 @@ let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
 ```rust
 let clients = host.list_clients().await?;
 for c in &clients {
-    println!("{}x{} on '{}'", c.width, c.height, c.session);
+    println!(
+        "{}x{} on '{}' activity={} readonly={} tty={:?}",
+        c.width, c.height, c.session, c.activity, c.readonly, c.tty
+    );
 }
-// Useful for geometry/reflow detection (section 15).
+// Useful for geometry/reflow detection and attached-client input recency.
+```
+
+For one session, use the policy-light summary helper:
+
+```rust
+let activity = host.session_client_activity("build").await?;
+println!(
+    "attached={} writable={} latest={:?}",
+    activity.attached_clients,
+    activity.writable_clients,
+    activity.latest_client_activity
+);
 ```
 
 ### Host text file read
@@ -1871,7 +1889,7 @@ output.raw_content       // Some(...) when normalization changed content
 output.sequence          // Per-source sequence number (monotonic within a
                          // continuous stream segment; resets on Discontinuity)
 output.fidelity          // OutputFidelity (clean for control mode)
-output.timestamp         // std::time::Instant of emission
+output.timestamp         // std::time::Instant of daemon-side receipt
 
 // Accessors:
 output.session_name()    // Session name at any source level
@@ -2243,6 +2261,135 @@ bus.unsubscribe(history.id())?;
 let snapshot = history.join().await?;
 ```
 
+
+## 22b. OutputBus Timelines
+
+`OutputBus` can retain named, bus-owned timelines for supervisor loops that
+need durable-enough multi-agent context without creating their own local event
+store. A bus can host multiple timelines at once; each timeline has independent
+filters, retention, rendering, and ordering policy.
+
+```rust
+use std::time::Duration;
+use motlie_tmux::{
+    LabelFormat, LateEventPolicy, RenderMode, RenderOptions, SinkFilter,
+    TimelineCursor, TimelineMarkerScope, TimelineOptions, TimelineOrdering,
+};
+
+let timeline = bus.open_timeline(
+    "review-round-17",
+    TimelineOptions {
+        filters: vec![
+            SinkFilter::for_host_session("amd1", "codex-submit"),
+            SinkFilter::for_host_session("amd1", "claude-review"),
+        ],
+        max_entries: 10_000,
+        max_render_chars: 200_000,
+        ordering: TimelineOrdering::TimestampMerge {
+            reorder_window: Duration::from_millis(500),
+            late_event_policy: LateEventPolicy::AppendWithMarker,
+        },
+        render_mode: RenderMode::Interleaved,
+        label_format: LabelFormat::Prompt,
+        ..Default::default()
+    },
+)?;
+
+let mut cursor = TimelineCursor::default();
+let page = timeline.entries_after(cursor, 200).await?;
+cursor = page.cursor;
+
+let rendered = timeline
+    .render_after(cursor, RenderOptions { max_chars: 20_000 })
+    .await?;
+```
+
+Timeline management lives on the bus:
+
+```rust
+let handle = bus.timeline("review-round-17")?.expect("timeline exists");
+let same = bus.open_timeline("review-round-17", TimelineOptions::default())?;
+// Existing timelines are returned unchanged; create_or_get opts apply only on create.
+let names = bus.timelines()?;
+let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
+bus.remove_timeline("review-round-17")?;
+```
+
+`TimelineHandle` supports dynamic workstreams without dropping buffered output:
+
+```rust
+handle.add_filter(SinkFilter::for_host_session("amd1", "new-agent")).await?;
+handle.set_filters(vec![SinkFilter::for_host_session("amd1", "codex-submit")]).await?;
+handle.ingest_historical(rebuilt_entries).await?;
+handle.detach().await?;
+```
+
+Historical entries are appended in caller order even when the timeline uses
+`TimestampMerge`; their process-local `received_at` instants are cleared during
+backfill, so persisted history should use wall-clock metadata instead.
+
+Removing or detaching a timeline marks outstanding handles stale; subsequent
+`entries_after`, `latest`, `render_after`, filter mutation, or backfill calls on
+that old generation return an error instead of silently polling a frozen buffer.
+
+Timeline lifecycle methods stay on `OutputBus`. `Fleet` exposes the shared bus
+and target-derived filter helpers, but does not duplicate timeline storage APIs:
+
+```rust
+let bus = fleet.output_bus();
+let timeline = bus.open_timeline("all-agents", TimelineOptions::default())?;
+let same = bus.timeline("all-agents")?;
+let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
+bus.remove_timeline("all-agents")?;
+```
+
+`TimelineEntry` preserves source metadata for prompt summaries and handoff
+detection: host alias, session name, pane id/target identity, `SourceLabel`,
+content, per-source output sequence, the `TargetOutput` daemon-side receipt
+`Instant`, estimated wall-clock receipt time and ingest wall-clock time for
+JSONL-friendly consumers, timeline sequence, discontinuity epoch, and a `late`
+flag. `TimelineEntryKind`
+distinguishes normal output, gap markers, and upstream monitor discontinuities.
+
+Ordering modes:
+
+| Mode | Behavior |
+|------|----------|
+| `TimelineOrdering::Arrival` | Preserve bus ingest order. This matches existing subscription behavior. |
+| `TimelineOrdering::TimestampMerge` | Insert output by daemon-side receipt `TargetOutput.timestamp` within a bounded reorder window. Events older than the newest observed receipt timestamp by more than the window are appended and marked `late`. |
+
+Queries return stable cursors for incremental polling. `TimelineCursor` carries
+`next_sequence` plus out-of-order `seen_sequences`, so bounded pages over
+timestamp-merged timelines can return timestamp-sorted entries without skipping
+lower sequence numbers that sort after a higher sequence. `entries_after(cursor,
+limit)` fetches retained entries at or after the cursor that have not already
+been seen by that cursor. `latest(limit)` returns the newest retained entries
+and returns a cursor positioned after the full snapshot watermark, so the next
+`entries_after()` poll only returns future entries. `render_after(cursor, opts)`
+returns prompt-ready text in `Interleaved` or
+`PerSource` mode and only advances the cursor through entries represented in
+the rendered text, so a character cap cannot skip unrendered entries. Pages
+include `omitted_entries` so callers can detect when ring retention has dropped
+older entries.
+
+`OutputBus::publish_discontinuity()` and `publish_gap()` record global markers
+only in unfiltered timelines. Use scoped marker APIs for per-workstream
+continuity so unrelated timelines do not receive reconnect or gap markers:
+
+```rust
+bus.publish_discontinuity_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    "stream resumed after reconnect",
+);
+bus.publish_gap_for(
+    TimelineMarkerScope::for_host_session("amd1", "codex-submit"),
+    12,
+);
+```
+
+Subscriber-local backpressure still uses `SinkEvent::Gap` on the subscription
+channel.
+
 ## 23. Fleet — Multi-Host Coordination (DC27)
 
 `Fleet` is a programmatic registry of `HostHandle`s with a shared `OutputBus`,
@@ -2257,17 +2404,24 @@ use motlie_tmux::{Fleet, SshConfig};
 
 let mut fleet = Fleet::new();
 
-// Hosts must be created with the fleet alias via with_alias()
+// Hosts must be created with the fleet alias.
 let web = SshConfig::parse("ssh://deploy@web-1")?.connect().await?;
-// ^ SshConfig::connect() returns HostHandle with host_alias matching the URI host
+// ^ connect() returns HostHandle with host_alias matching the URI host
 fleet.register("web-1", web)?;
 
-let db = SshConfig::parse("ssh://admin@db-1")?.connect().await?;
-fleet.register("db-1", db)?;
+let local = SshConfig::parse("ssh://localhost")?
+    .connect_with_alias("local")
+    .await?;
+fleet.register("local", local)?;
+
+fleet.unregister("local")?;
 ```
 
 Fleet enforces that the registration alias matches `host.host_alias()`, so output
-labels and routing names stay consistent in external-agent workflows.
+labels and routing names stay consistent in external-agent workflows. Use
+`connect_with_alias()` when the transport host name is not the stable Fleet
+alias. `unregister()` removes the host plus Fleet-owned monitor and target-alias
+bookkeeping for that host.
 
 ### Shared OutputBus
 
@@ -2343,8 +2497,9 @@ target.send_keys(&KeySequence::from_str("C-c")).await?;
 fleet.unbind_target_alias("ci")?;
 ```
 
-The older `bind` / `unbind` / `find` / `workstreams` names remain as
-compatibility aliases for target aliases.
+Fleet intentionally avoids application-specific terms such as workstreams.
+Use target aliases for stable routed control and keep higher-level workflow
+names in the caller.
 
 ### Cross-host session inventory and tags
 
@@ -2540,7 +2695,8 @@ assert!(issues.is_empty());
 | `StatusStyle` / `StatusLeft` / `StatusLeftLength` | Validated tmux status-bar override values used by `SessionStatus` |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
-| `ClientInfo` | width, height, session |
+| `ClientInfo` | width, height, session, activity, readonly, tty |
+| `SessionClientActivity` | session, attached_clients, writable_clients, latest_client_activity |
 | `HostEvent` | SessionsChanged, SessionAdded, SessionClosed, SessionRenamed, ClientAttached, ClientDetached, Disconnect |
 
 ### Input
@@ -2576,7 +2732,7 @@ assert!(issues.is_empty());
 | `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
 | `LocalTransport` | Subprocess exec, configurable timeout |
 | `SshTransport` | russh 0.46, ssh-agent or key-file auth (DC26); `connect()`, `is_closed()` |
-| `SshConfig` | host, port, user, host_key_policy, timeout, inactivity_timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
+| `SshConfig` | host, port, user, host_key_policy, timeout, inactivity_timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `connect_with_alias()`, `Display`/`FromStr` |
 | `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()`, `with_shell_sequence()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
 | `TmuxSocket` | Enum: Name(String), Path(String) |
@@ -2591,8 +2747,9 @@ assert!(issues.is_empty());
 | `MonitorHandle` | Aggregate handle — `shutdown()`, `get()`, `get_by_spec()`, `stop_session()`, `active_sessions()`, `all_sessions()` |
 | `MonitorHealth` | Enum: `Streaming`, `Reconnecting`, `Failed`, `Stopped` — per-session ground truth (DC29) |
 | `MonitorExitReason` | Enum: `Stopped`, `ConnectionLost` — returned by `SessionMonitor::run()` |
-| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, `unsubscribe()`, `shutdown()` |
+| `OutputBus` | Fan-out bus — `subscribe()`, `publish()`, `publish_discontinuity()`, timeline management, `unsubscribe()`, `shutdown()` |
 | `Subscription` | Bus subscription — `.into_receiver()`, `.joined()`, `.pipe()`, `.filter_fn()`, `.history()` |
+| `TimelineHandle` | Bus-owned retained timeline — fallible `entries_after()`, `latest()`, `render_after()` |
 | `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
 | `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }`, `Discontinuity { reason }` |
@@ -2615,7 +2772,7 @@ assert!(issues.is_empty());
 | `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `render_mode`, `global_max_render_chars`, `include_omission_marker` |
 | `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
 | `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }`, `Discontinuity { reason }` |
-| `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, target aliases, routing |
+| `Fleet` | Multi-host registry — `register()`, `unregister()`, `host()`, `hosts()`, `output_bus()`, monitoring, target aliases, routing |
 | `HostStatus` | Enum: `Connected`, `Monitoring { sessions: Vec<SessionMonitorStatus> }`, `Error(String)` |
 | `SessionMonitorStatus` | Per-session status: `name`, `health: MonitorHealth` |
 | `RenderMode` | Enum: `Interleaved` (default), `PerSource` — controls how `render_text()` groups entries |

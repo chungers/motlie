@@ -1,0 +1,26 @@
+[package]
+name = "motlie-mstream"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent-facing tmux workstream orchestrator"
+
+[[bin]]
+name = "mstream"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+motlie-tmux = { path = "../../libs/tmux" }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5.58", features = ["derive"] }
+serde_json = "1.0.149"
+
+[dev-dependencies]
+tempfile = "3.25.0"
