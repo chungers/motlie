@@ -137,95 +137,6 @@ pub enum TimelineOrdering {
     },
 }
 
-/// Options for a named [`OutputBus`] timeline.
-#[derive(Debug, Clone)]
-pub struct TimelineOptions {
-    /// Source-routing filters. Empty means "all output".
-    pub filters: Vec<SinkFilter>,
-    /// Maximum entries retained in the ring buffer.
-    pub max_entries: usize,
-    /// Maximum rendered characters retained. `0` disables character trimming.
-    pub max_render_chars: usize,
-    /// Ordering policy.
-    pub ordering: TimelineOrdering,
-    /// Rendering mode for prompt-ready text.
-    pub render_mode: RenderMode,
-    /// Source label format for rendering.
-    pub label_format: LabelFormat,
-    /// Include omission markers when rendering retained windows.
-    pub include_omission_marker: bool,
-}
-
-impl Default for TimelineOptions {
-    fn default() -> Self {
-        TimelineOptions {
-            filters: Vec::new(),
-            max_entries: 10_000,
-            max_render_chars: 0,
-            ordering: TimelineOrdering::Arrival,
-            render_mode: RenderMode::Interleaved,
-            label_format: LabelFormat::Bracketed,
-            include_omission_marker: true,
-        }
-    }
-}
-
-/// Source identity for timeline gap and discontinuity markers.
-///
-/// Empty scope is a global marker and only matches unfiltered timelines. Scoped
-/// markers match timelines using the same [`SinkFilter`] rules as output data.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TimelineMarkerScope {
-    /// Host alias associated with the marker.
-    pub host: Option<String>,
-    /// Session name associated with the marker.
-    pub session: Option<String>,
-    /// Window target string associated with the marker.
-    pub window: Option<String>,
-    /// Pane id or target string associated with the marker.
-    pub pane: Option<String>,
-}
-
-impl TimelineMarkerScope {
-    /// Global marker for unfiltered timelines.
-    pub fn global() -> Self {
-        Self::default()
-    }
-
-    /// Marker scoped to a host alias.
-    pub fn for_host(host: &str) -> Self {
-        Self {
-            host: Some(host.to_string()),
-            ..Default::default()
-        }
-    }
-
-    /// Marker scoped to a session on any host.
-    pub fn for_session(session: &str) -> Self {
-        Self {
-            session: Some(session.to_string()),
-            ..Default::default()
-        }
-    }
-
-    /// Marker scoped to a host/session pair.
-    pub fn for_host_session(host: &str, session: &str) -> Self {
-        Self {
-            host: Some(host.to_string()),
-            session: Some(session.to_string()),
-            ..Default::default()
-        }
-    }
-
-    /// Marker scoped to a pane id or target string.
-    pub fn for_pane(pane: &str) -> Self {
-        Self {
-            pane: Some(pane.to_string()),
-            ..Default::default()
-        }
-    }
-}
-
 /// Stable cursor for incremental timeline polling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineCursor {
@@ -404,6 +315,95 @@ pub struct SinkFilter {
     pub window: Option<String>,
     /// Regex pattern against pane_id or "session:window.pane".
     pub pane: Option<String>,
+}
+
+/// Options for a named [`OutputBus`] timeline.
+#[derive(Debug, Clone)]
+pub struct TimelineOptions {
+    /// Source-routing filters. Empty means "all output".
+    pub filters: Vec<SinkFilter>,
+    /// Maximum entries retained in the ring buffer.
+    pub max_entries: usize,
+    /// Maximum rendered characters retained. `0` disables character trimming.
+    pub max_render_chars: usize,
+    /// Ordering policy.
+    pub ordering: TimelineOrdering,
+    /// Rendering mode for prompt-ready text.
+    pub render_mode: RenderMode,
+    /// Source label format for rendering.
+    pub label_format: LabelFormat,
+    /// Include omission markers when rendering retained windows.
+    pub include_omission_marker: bool,
+}
+
+impl Default for TimelineOptions {
+    fn default() -> Self {
+        TimelineOptions {
+            filters: Vec::new(),
+            max_entries: 10_000,
+            max_render_chars: 0,
+            ordering: TimelineOrdering::Arrival,
+            render_mode: RenderMode::Interleaved,
+            label_format: LabelFormat::Bracketed,
+            include_omission_marker: true,
+        }
+    }
+}
+
+/// Source identity for timeline gap and discontinuity markers.
+///
+/// Empty scope is a global marker and only matches unfiltered timelines. Scoped
+/// markers match timelines using the same [`SinkFilter`] rules as output data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimelineMarkerScope {
+    /// Host alias associated with the marker.
+    pub host: Option<String>,
+    /// Session name associated with the marker.
+    pub session: Option<String>,
+    /// Window target string associated with the marker.
+    pub window: Option<String>,
+    /// Pane id or target string associated with the marker.
+    pub pane: Option<String>,
+}
+
+impl TimelineMarkerScope {
+    /// Global marker for unfiltered timelines.
+    pub fn global() -> Self {
+        Self::default()
+    }
+
+    /// Marker scoped to a host alias.
+    pub fn for_host(host: &str) -> Self {
+        Self {
+            host: Some(host.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a session on any host.
+    pub fn for_session(session: &str) -> Self {
+        Self {
+            session: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a host/session pair.
+    pub fn for_host_session(host: &str, session: &str) -> Self {
+        Self {
+            host: Some(host.to_string()),
+            session: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a pane id or target string.
+    pub fn for_pane(pane: &str) -> Self {
+        Self {
+            pane: Some(pane.to_string()),
+            ..Default::default()
+        }
+    }
 }
 
 impl SinkFilter {
