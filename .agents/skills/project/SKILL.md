@@ -114,22 +114,37 @@ Before starting any daemon path, use `mstream daemon status` on the chosen socke
 When assigned as orchestrator and the harness has no first-class cron, start a
 daemon-owned self-wakeup timer targeted at your own tmux session. The timer
 sends a prompt to you through tmux, which creates a queued self-reminder to
-poll and unblock the workstream:
+poll and unblock the workstream. Start this timer immediately after agents are
+recruited or joined for an active workstream:
 
 ```sh
 mstream --socket /tmp/mstream-${USER}.sock timer start <workstream>-poll \
   --every 5m \
-  --target <orchestrator-host-alias>::<your-tmux-session> \
+  --workstream <workstream> \
+  --self \
   --prompt "[mstream:<workstream>-poll] Wakeup: check <workstream> with mstream status and summary-input. Unblock agents, summarize only material changes, and decide whether to keep, change, or stop this timer." \
   --submit-retries 1 \
   --submit-retry-delay-ms 750
 ```
 
-Use `mstream timer list` to verify active timers, `mstream timer fire <name>`
-to test prompt delivery, and `mstream timer stop <name>` when the workstream is
-closed or no longer needs periodic attention. Timer state is daemon memory only
-and must be recreated after daemon restart. Do not target collaborator sessions
-with orchestrator timers unless the user explicitly asks for that behavior.
+If the installed `mstream` does not support `--self`, fall back to resolving
+your tmux session name and using an explicit target:
+
+```sh
+tmux display-message -p '#S'
+mstream --socket /tmp/mstream-${USER}.sock timer start <workstream>-poll \
+  --every 5m \
+  --workstream <workstream> \
+  --target <orchestrator-host-alias>::<your-tmux-session> \
+  --prompt "[mstream:<workstream>-poll] Wakeup: check <workstream> with mstream status and summary-input. Unblock agents, summarize only material changes, and decide whether to keep, change, or stop this timer."
+```
+
+Use `mstream timer list --workstream <workstream>` to verify active scoped
+timers, `mstream timer fire <name>` to test prompt delivery, and
+`mstream timer stop <name>` when the workstream is closed or no longer needs
+periodic attention. Timer state is daemon memory only and must be recreated
+after daemon restart. Do not target collaborator sessions with orchestrator
+timers unless the user explicitly asks for that behavior.
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key. Retries send only extra Enter keys, not
 the prompt text; `--no-enter` disables retries. Timer delivery also defaults to
@@ -400,7 +415,9 @@ Acceptance and merge rules:
 - Reviewers must post comments and a verdict after every review round, including the final accepting round.
 - When the reviewer finally accepts, verify that all open PR threads are resolved and closed.
 - Only the reviewer may merge the accepted PR.
-- After merge, tell all parties to stand by.
+- After merge, have the reviewer verify the merged commit fully addresses the issue, then close the original issue or create a follow-up issue for remaining gaps.
+- Treat "PR merged but issue still open" as a closeout gap and nudge the reviewer to resolve it.
+- After issue closeout or follow-up creation, tell all parties to stand by.
 - Do not close the workstream automatically after merge; the user decides whether the workstream is good enough to close.
 
 ## Communication
@@ -506,6 +523,16 @@ Use the mstream timeline/history to infer what each agent is doing. Summaries to
 - decisions needed from the user
 - next recommended action
 
+When the user asks to see a timeline, prefer the human-readable event view if
+the installed binary supports it:
+
+```sh
+mstream events <workstream> --limit 50 --readable
+```
+
+Fall back to normal JSONL `events` and summarize it yourself only when
+`--readable` is unavailable.
+
 When an agent is stuck, unblock by sending focused instructions, clarifying requirements, relaying feedback, or asking the user for missing external state. Do not invent credentials, host aliases, issue numbers, or product direction.
 
 If a state annotation helps coordinate the workstream, mark the target yourself
@@ -539,8 +566,16 @@ mstream close issue-337-tmux-fleet-api \
   --summary "Fleet API issue created and implementation work completed." \
   --domain tmux \
   --specialty fleet \
-  --specialty mstream
+  --specialty mstream \
+  --stop-timers \
+  --standby-agents
 ```
+
+Use `--stop-timers` for workstream-scoped self-wakeup timers and
+`--standby-agents` to send a final standby message before freeing agents. If
+the installed `mstream` does not support these flags, manually broadcast the
+standby instruction, stop workstream timers, then run the older `close`
+command.
 
 Use `leave --available` to free individual agents without killing sessions:
 
@@ -554,4 +589,8 @@ Use `kill` only when explicitly destructive session cleanup is intended:
 mstream kill amd1::gpt55-337-og
 ```
 
-At closeout, tell the user what merged, what remains open, which agents were freed, and whether any local uncommitted changes remain.
+Before closeout, verify the complete chain: PR merged, original issue closed
+or follow-up issue created, reviewers posted final verdict, agents were told to
+stand by, and active workstream timers are stopped. At closeout, tell the user
+what merged, what remains open, which agents were freed, which timers were
+stopped, and whether any local uncommitted changes remain.
