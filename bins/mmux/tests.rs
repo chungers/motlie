@@ -1,29 +1,29 @@
 use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motlie_tmux::{
-    HostHandle, SSH_DEFAULT_PORT, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
-    StatusStyle, TransportKind, WindowStyle, transport::MockTransport,
+    transport::MockTransport, HostHandle, SessionId, SessionInfo, StatusLeft, StatusLeftLength,
+    StatusStyle, TransportKind, WindowStyle, SSH_DEFAULT_PORT,
 };
-use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::Terminal;
 
-use crate::cli::{Cli, is_portrait_pty, select_layout};
+use crate::cli::{is_portrait_pty, select_layout, Cli};
 use crate::consts::{
-    APP_BASE_BG, APP_BASE_FG, BUILD_DATE, BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE,
-    HOST_COLOR_SQUARE, HOST_CONNECTION_FAILED_FG, LANDSCAPE_MAX_LEFT_PERCENT,
-    LANDSCAPE_MIN_LEFT_PERCENT, MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH,
-    MODAL_CONTENT_HORIZONTAL_PADDING, MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER,
-    PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT, STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
-    mmux_attach_status_style, mmux_attach_window_style,
+    mmux_attach_status_style, mmux_attach_window_style, APP_BASE_BG, APP_BASE_FG, BUILD_DATE,
+    BUILD_GIT_SHA, HELP_KEY_FUNCTIONS, HOST_COLOR_PALETTE, HOST_COLOR_SQUARE,
+    HOST_CONNECTION_FAILED_FG, LANDSCAPE_MAX_LEFT_PERCENT, LANDSCAPE_MIN_LEFT_PERCENT,
+    MMUX_ATTACH_STATUS_LEFT, MMUX_ATTACH_STATUS_LEFT_LENGTH, MODAL_CONTENT_HORIZONTAL_PADDING,
+    MODAL_MIN_WIDTH, MOTLIE_PLACEHOLDER, PORTRAIT_MAX_TOP_PERCENT, PORTRAIT_MIN_TOP_PERCENT,
+    STATUS_BAR_BG, STATUS_BAR_MNEMONIC_FG,
 };
 use crate::controller::{
-    KeyOutcome, RefreshApplyOptions, apply_fleet_snapshot, apply_streaming_host_results,
-    fetch_fleet_refresh, fetch_host_refresh, handle_key, refresh_sessions_preserving,
-    refresh_sessions_quiet,
+    apply_fleet_snapshot, apply_streaming_host_results, fetch_fleet_refresh, fetch_host_refresh,
+    handle_key, refresh_sessions_preserving, refresh_sessions_quiet, KeyOutcome,
+    RefreshApplyOptions,
 };
 use crate::detail::render_live_preview;
 use crate::model::{
@@ -41,8 +41,8 @@ use crate::render::{
 };
 use crate::target_host::resolve_ip_address;
 use crate::{
-    PendingHostRefreshTask, prepare_attach_status, prepare_attach_styles, restore_attach_status,
-    restore_attach_styles, session_refresh_task_failure_status,
+    prepare_attach_status, prepare_attach_styles, restore_attach_status, restore_attach_styles,
+    session_refresh_task_failure_status, PendingHostRefreshTask,
 };
 
 fn sid(id: &str) -> SessionId {
@@ -4316,12 +4316,11 @@ fn detail_uses_ansi_vte_parser_for_screen_content() {
     let text = detail_text_for_render("\x1b[31mred\x1b[0m");
     assert_eq!(text.lines[0].spans[0].content.as_ref(), "red");
     assert!(!text.lines[0].spans[0].content.contains('\x1b'));
-    assert!(
-        text.lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .all(|span| span.style.fg != Some(Color::Reset) && span.style.bg != Some(Color::Reset))
-    );
+    assert!(text
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .all(|span| span.style.fg != Some(Color::Reset) && span.style.bg != Some(Color::Reset)));
 }
 
 #[test]
@@ -4391,29 +4390,16 @@ fn ssh_host_entry(uri: &str, label: &str, ip: &str, handle: HostHandle) -> HostE
 }
 
 #[test]
-fn cli_accepts_alias_overrides_with_empty_entries() {
-    let aliases = Cli::try_parse_from([
+fn cli_rejects_alias_override_flag() {
+    let err = Cli::try_parse_from([
         "mmux",
         "--alias=foo,,baz",
         "ssh://a.example.com",
         "ssh://b.example.com",
     ])
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(aliases.alias.as_deref(), Some("foo,,baz"));
-    assert_eq!(aliases.host_alias_override(0), Some("foo"));
-    assert_eq!(aliases.host_alias_override(1), None);
-    assert_eq!(aliases.host_alias_override(2), Some("baz"));
-    assert_eq!(aliases.host_alias_override(3), None);
-
-    let leading_empty = Cli::try_parse_from([
-        "mmux",
-        "--alias=,bar",
-        "ssh://a.example.com",
-    ])
-    .unwrap();
-    assert_eq!(leading_empty.host_alias_override(0), None);
-    assert_eq!(leading_empty.host_alias_override(1), Some("bar"));
+    assert!(err.to_string().contains("unexpected argument '--alias'"));
 }
 
 #[test]
@@ -4454,82 +4440,84 @@ async fn connect_initial_fleet_rejects_duplicate_ssh_uris() {
 }
 
 #[tokio::test]
-async fn connect_initial_fleet_applies_alias_overrides_by_host_order() {
+async fn connect_initial_fleet_labels_ssh_hosts_with_endpoint_aliases() {
     use crate::target_host::connect_initial_fleet;
 
     let cli = Cli::try_parse_from([
         "mmux",
-        "--alias=local-name,remote-a,,remote-c",
-        "ssh://a.example.com",
-        "ssh://b.example.com",
-        "ssh://c.example.com",
+        "ssh://david@amd1",
+        "ssh://alice@amd1",
+        "ssh://david@amd1:2222",
+        "ssh://david;socket-name=build@amd1",
     ])
     .unwrap();
 
     let initial_fleet = connect_initial_fleet(&cli).await.unwrap();
     let fleet = initial_fleet.fleet;
     let specs = initial_fleet.retry_specs;
-    let local_id = local_host_id();
-    let remote_a_id = ssh_host_id("ssh://a.example.com");
-    let remote_b_id = ssh_host_id("ssh://b.example.com");
-    let remote_c_id = ssh_host_id("ssh://c.example.com");
+    let david_id = ssh_host_id("ssh://david@amd1");
+    let alice_id = ssh_host_id("ssh://alice@amd1");
+    let port_id = ssh_host_id("ssh://david@amd1:2222");
+    let socket_id = ssh_host_id("ssh://david;socket-name=build@amd1");
 
-    assert_eq!(fleet.entry(&local_id).unwrap().label, "local-name");
+    assert_eq!(specs[0].label, "david@amd1");
+    assert_eq!(specs[0].alias, "david@amd1");
+    assert_eq!(specs[1].label, "alice@amd1");
+    assert_eq!(specs[1].alias, "alice@amd1");
+    assert_eq!(specs[2].label, "david@amd1:2222");
+    assert_eq!(specs[2].alias, "david@amd1:2222");
+    assert_eq!(specs[3].label, "david@amd1/socket:build");
+    assert_eq!(specs[3].alias, "david@amd1/socket:build");
     assert_eq!(
-        fleet.host_slot(&local_id).map(|slot| slot.label.as_str()),
-        Some("local-name")
-    );
-    assert_eq!(specs[0].label, "remote-a");
-    assert_eq!(specs[1].label, "b.example.com");
-    assert_eq!(specs[2].label, "remote-c");
-    assert_eq!(
-        fleet.host_slot(&remote_a_id).map(|slot| slot.label.as_str()),
-        Some("remote-a")
-    );
-    assert_eq!(
-        fleet.host_slot(&remote_b_id).map(|slot| slot.label.as_str()),
-        Some("b.example.com")
+        fleet.host_slot(&david_id).map(|slot| slot.label.as_str()),
+        Some("david@amd1")
     );
     assert_eq!(
-        fleet.host_slot(&remote_c_id).map(|slot| slot.label.as_str()),
-        Some("remote-c")
+        fleet.host_slot(&alice_id).map(|slot| slot.label.as_str()),
+        Some("alice@amd1")
+    );
+    assert_eq!(
+        fleet.host_slot(&port_id).map(|slot| slot.label.as_str()),
+        Some("david@amd1:2222")
+    );
+    assert_eq!(
+        fleet.host_slot(&socket_id).map(|slot| slot.label.as_str()),
+        Some("david@amd1/socket:build")
     );
 }
 
 #[tokio::test]
-async fn connect_initial_fleet_keeps_alias_override_when_ssh_host_later_connects() {
+async fn connect_initial_fleet_keeps_endpoint_label_when_ssh_host_later_connects() {
     use crate::target_host::connect_initial_fleet;
 
-    let cli = Cli::try_parse_from([
-        "mmux",
-        "--alias=,remote-name",
-        "ssh://remote.example.com",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["mmux", "ssh://david@remote.example.com"]).unwrap();
 
     let initial_fleet = connect_initial_fleet(&cli).await.unwrap();
     let mut fleet = initial_fleet.fleet;
     let spec = initial_fleet.retry_specs.first().unwrap();
-    let remote_id = ssh_host_id("ssh://remote.example.com");
+    let remote_id = ssh_host_id("ssh://david@remote.example.com");
 
     assert_eq!(
         fleet.host_slot(&remote_id).map(|slot| slot.label.as_str()),
-        Some("remote-name")
+        Some("david@remote.example.com")
     );
-    assert_eq!(spec.label, "remote-name");
+    assert_eq!(spec.label, "david@remote.example.com");
 
     let remote = ssh_host_entry(
-        "ssh://remote.example.com",
+        "ssh://david@remote.example.com",
         &spec.label,
         "10.0.0.8",
         HostHandle::local(),
     );
     fleet.upsert_connected(remote);
 
-    assert_eq!(fleet.entry(&remote_id).unwrap().label, "remote-name");
+    assert_eq!(
+        fleet.entry(&remote_id).unwrap().label,
+        "david@remote.example.com"
+    );
     assert_eq!(
         fleet.host_slot(&remote_id).map(|slot| slot.label.as_str()),
-        Some("remote-name")
+        Some("david@remote.example.com")
     );
 }
 
@@ -4537,12 +4525,12 @@ async fn connect_initial_fleet_keeps_alias_override_when_ssh_host_later_connects
 async fn connect_initial_fleet_includes_localhost_and_defers_ssh_connect() {
     use crate::target_host::connect_initial_fleet;
 
-    let cli = Cli::try_parse_from(["mmux", "ssh://remote.example.com"]).unwrap();
+    let cli = Cli::try_parse_from(["mmux", "ssh://david@remote.example.com"]).unwrap();
 
     let initial_fleet = connect_initial_fleet(&cli).await.unwrap();
     let fleet = initial_fleet.fleet;
     let specs = initial_fleet.retry_specs;
-    let remote_id = ssh_host_id("ssh://remote.example.com");
+    let remote_id = ssh_host_id("ssh://david@remote.example.com");
 
     assert!(fleet.is_multi());
     assert_eq!(fleet.len(), 2);
@@ -4555,7 +4543,7 @@ async fn connect_initial_fleet_includes_localhost_and_defers_ssh_connect() {
     );
     assert_eq!(
         fleet.host_slot(&remote_id).map(|slot| slot.label.as_str()),
-        Some("remote.example.com")
+        Some("david@remote.example.com")
     );
 }
 
