@@ -61,19 +61,34 @@ Decision checkpoint:
 
 Client commands use JSONL stdout. The socket resolves from `--socket`, then `MSTREAM_SOCKET`, then `/tmp/mstream-${USER}.sock`.
 
-Check daemon health:
+Once assigned as orchestrator for an active workstream, keep the mstream daemon running across turns for the duration of that orchestration assignment. Do not stop and restart it after routine `list`, `status`, `summary-input`, or progress checks. Stop it only when the user tells you to, when the workstream is closed and no active orchestration remains, or when replacing a failed daemon instance.
+
+Use a stable explicit socket for the whole assignment:
 
 ```sh
-mstream daemon status
+mstream --socket /tmp/mstream-${USER}.sock daemon status
+mstream --socket /tmp/mstream-${USER}.sock daemon start
 ```
+
+Normal rehydration/playbook after daemon start or restart:
+
+```sh
+mstream --socket /tmp/mstream-${USER}.sock connect <host-alias> '<ssh-uri>' --work-root <host-work-root>
+mstream --socket /tmp/mstream-${USER}.sock scan <host-alias>
+mstream --socket /tmp/mstream-${USER}.sock list
+mstream --socket /tmp/mstream-${USER}.sock status <workstream> --active-window-secs 30 --idle-after-secs 300
+mstream --socket /tmp/mstream-${USER}.sock summary-input <workstream> --max-chars 12000
+```
+
+Use the concrete host aliases, SSH URIs, work roots, and workstream names supplied by the user or recovered from durable context. Do not rediscover basic CLI shapes with `--help` during normal orchestration; keep this playbook as the default sequence and inspect help only when a command actually fails because the local binary changed.
 
 Start the daemon when the user asks you to operate mstream and no daemon is running:
 
 ```sh
-mstream daemon start
+mstream --socket /tmp/mstream-${USER}.sock daemon start
 ```
 
-When running from an agent session, prefer foreground daemon mode in a managed exec session so failures are visible:
+When running from an agent session, prefer a background daemon that survives client command exit. If the environment reaps background daemonized processes, use foreground daemon mode in a managed exec session for the active orchestration window:
 
 ```sh
 mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground
@@ -83,9 +98,9 @@ If `daemon start` reports success but the next client call says `daemon_unreacha
 
 In some agent sandbox or exec environments, daemonized startup may report
 success and then be reaped when the launching command exits. If that happens,
-run foreground mode in a managed exec session for the active orchestration
-window, then stop it cleanly before ending the turn if no background daemon can
-be kept alive.
+run foreground mode in a managed exec session while actively orchestrating. Do
+not tear it down merely because a single user request has been answered if the
+same orchestration assignment is still active.
 
 If the daemon is unreachable, ask the user to restart it or provide the correct socket. After daemon restart, ask the user for the host aliases and SSH URIs; mstream does not persist the host ledger.
 
@@ -94,6 +109,11 @@ plus `tmux` commands for liveness, session listing, snapshots, monitoring, or
 agent communication. If mstream lacks a signal needed to manage a workstream,
 extend mstream in the active PR or ask the user before proceeding with a
 temporary manual path.
+
+Keep user-facing progress updates outcome-focused. Do not narrate every command
+or tool call. Report material state changes, blockers, risks, and decisions;
+omit routine command logging unless it explains a failure or a user explicitly
+asks for command-level detail.
 
 Only the orchestrator has access to mstream. Collaborating agents do not have
 mstream access and should never be instructed to run mstream commands, inspect
