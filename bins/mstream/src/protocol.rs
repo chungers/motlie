@@ -117,7 +117,9 @@ pub enum ClientRequest {
         handoff_id: String,
     },
     TimerStart(TimerStartRequest),
-    TimerList,
+    TimerList {
+        workstream: Option<String>,
+    },
     TimerStop {
         name: String,
     },
@@ -175,6 +177,10 @@ pub struct CloseRequest {
     pub summary: Option<String>,
     pub domain: Option<String>,
     pub specialties: Vec<String>,
+    #[serde(default)]
+    pub stop_timers: bool,
+    #[serde(default)]
+    pub standby_agents: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +257,8 @@ pub struct HandoffArmRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerStartRequest {
     pub name: String,
+    #[serde(default)]
+    pub workstream: Option<String>,
     pub every_secs: u64,
     pub target: String,
     pub prompt: String,
@@ -268,6 +276,8 @@ pub struct EventsRequest {
     pub workstream: String,
     pub after: Option<String>,
     pub limit: usize,
+    #[serde(default)]
+    pub readable: bool,
 }
 
 fn default_status_active_window_secs() -> u64 {

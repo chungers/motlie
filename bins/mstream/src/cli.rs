@@ -107,6 +107,8 @@ impl Command {
                 summary: args.summary,
                 domain: args.domain,
                 specialties: args.specialty,
+                stop_timers: args.stop_timers,
+                standby_agents: args.standby_agents,
             })),
             Command::Join(args) => Ok(ClientRequest::Join(JoinRequest {
                 workstream: args.workstream,
@@ -161,7 +163,9 @@ impl Command {
             Command::Timer(TimerCommand::Start(args)) => {
                 Ok(ClientRequest::TimerStart(args.into_request()?))
             }
-            Command::Timer(TimerCommand::List) => Ok(ClientRequest::TimerList),
+            Command::Timer(TimerCommand::List(args)) => Ok(ClientRequest::TimerList {
+                workstream: args.workstream,
+            }),
             Command::Timer(TimerCommand::Stop { name }) => Ok(ClientRequest::TimerStop { name }),
             Command::Timer(TimerCommand::Fire { name }) => Ok(ClientRequest::TimerFire { name }),
             Command::Status(args) => Ok(ClientRequest::Status {
@@ -173,6 +177,7 @@ impl Command {
                 workstream: args.workstream,
                 after: args.after,
                 limit: args.limit,
+                readable: args.readable,
             })),
             Command::Snapshot(args) => Ok(ClientRequest::Snapshot(SnapshotRequest {
                 workstream: args.workstream,
@@ -248,6 +253,10 @@ pub struct CloseArgs {
     pub domain: Option<String>,
     #[arg(long = "specialty")]
     pub specialty: Vec<String>,
+    #[arg(long)]
+    pub stop_timers: bool,
+    #[arg(long)]
+    pub standby_agents: bool,
 }
 
 #[derive(Debug, Args)]
@@ -414,7 +423,7 @@ pub struct HandoffArmArgs {
 #[derive(Debug, Subcommand)]
 pub enum TimerCommand {
     Start(TimerStartArgs),
-    List,
+    List(TimerListArgs),
     Stop { name: String },
     Fire { name: String },
 }
@@ -422,10 +431,16 @@ pub enum TimerCommand {
 #[derive(Debug, Args)]
 pub struct TimerStartArgs {
     pub name: String,
+    #[arg(long)]
+    pub workstream: Option<String>,
     #[arg(long = "every", value_parser = parse_duration_secs)]
     pub every_secs: u64,
     #[arg(long)]
-    pub target: String,
+    pub target: Option<String>,
+    #[arg(long = "self")]
+    pub self_target: bool,
+    #[arg(long, default_value = "local")]
+    pub self_host: String,
     #[arg(long)]
     pub prompt: String,
     #[arg(long)]
@@ -454,11 +469,18 @@ impl TimerStartArgs {
         if self.prompt.is_empty() {
             bail!("--prompt cannot be empty");
         }
+        let target = resolve_timer_target(
+            self.target,
+            self.self_target,
+            self.self_host,
+            current_tmux_session,
+        )?;
         let enter = resolve_enter(self.enter, self.no_enter)?;
         Ok(TimerStartRequest {
             name: self.name,
+            workstream: self.workstream,
             every_secs: self.every_secs,
-            target: self.target,
+            target,
             prompt: self.prompt,
             enter,
             submit_retries: if enter { self.submit_retries } else { 0 },
@@ -470,6 +492,12 @@ impl TimerStartArgs {
             },
         })
     }
+}
+
+#[derive(Debug, Args)]
+pub struct TimerListArgs {
+    #[arg(long)]
+    pub workstream: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -488,6 +516,8 @@ pub struct EventsArgs {
     pub after: Option<String>,
     #[arg(long, default_value_t = 200)]
     pub limit: usize,
+    #[arg(long)]
+    pub readable: bool,
 }
 
 #[derive(Debug, Args)]
@@ -544,6 +574,46 @@ fn resolve_enter(enter: bool, no_enter: bool) -> anyhow::Result<bool> {
         bail!("--enter and --no-enter are mutually exclusive");
     }
     Ok(!no_enter)
+}
+
+fn resolve_timer_target(
+    target: Option<String>,
+    self_target: bool,
+    self_host: String,
+    current_session: impl FnOnce() -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    match (target, self_target) {
+        (Some(_), true) => bail!("--target and --self are mutually exclusive"),
+        (Some(target), false) => Ok(target),
+        (None, true) => {
+            let session = current_session()?;
+            Ok(format!("{self_host}::{session}"))
+        }
+        (None, false) => bail!("timer start requires --target <target> or --self"),
+    }
+}
+
+fn current_tmux_session() -> anyhow::Result<String> {
+    let output = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#S"])
+        .output()
+        .map_err(|err| anyhow::anyhow!("failed to run tmux to resolve --self target: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "failed to resolve --self target with tmux display-message: {}",
+            if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+    let session = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if session.is_empty() {
+        bail!("failed to resolve --self target: tmux session name was empty");
+    }
+    Ok(session)
 }
 
 fn parse_pairs(name: &str, values: Vec<String>) -> anyhow::Result<BTreeMap<String, String>> {
@@ -629,6 +699,8 @@ mod tests {
             "issue-337-poll",
             "--every",
             "5m",
+            "--workstream",
+            "issue-337-tmux-fleet-api",
             "--target",
             "local::orchestrator",
             "--prompt",
@@ -641,6 +713,10 @@ mod tests {
             panic!("expected timer start request");
         };
         assert_eq!(request.name, "issue-337-poll");
+        assert_eq!(
+            request.workstream.as_deref(),
+            Some("issue-337-tmux-fleet-api")
+        );
         assert_eq!(request.every_secs, 300);
         assert_eq!(request.target, "local::orchestrator");
         assert_eq!(request.prompt, "Wake up and poll.");
@@ -753,5 +829,51 @@ mod tests {
         };
         assert!(!request.enter);
         assert_eq!(request.submit_retries, 0);
+    }
+
+    #[test]
+    fn timer_list_allows_workstream_filter() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "list",
+            "--workstream",
+            "issue-342-mmux-endpoint-identity",
+        ])
+        .expect("timer list parses");
+
+        let request = cli.command.into_request().expect("timer list request");
+        let ClientRequest::TimerList { workstream } = request else {
+            panic!("expected timer list request");
+        };
+        assert_eq!(
+            workstream.as_deref(),
+            Some("issue-342-mmux-endpoint-identity")
+        );
+    }
+
+    #[test]
+    fn resolve_timer_target_supports_self_target() {
+        let target = resolve_timer_target(None, true, "local".to_string(), || {
+            Ok("gpt55-324-330-og".to_string())
+        })
+        .expect("self target");
+
+        assert_eq!(target, "local::gpt55-324-330-og");
+    }
+
+    #[test]
+    fn resolve_timer_target_rejects_ambiguous_or_missing_target() {
+        assert!(resolve_timer_target(
+            Some("local::orchestrator".to_string()),
+            true,
+            "local".to_string(),
+            || Ok("self".to_string()),
+        )
+        .is_err());
+        assert!(resolve_timer_target(None, false, "local".to_string(), || {
+            Ok("self".to_string())
+        })
+        .is_err());
     }
 }
