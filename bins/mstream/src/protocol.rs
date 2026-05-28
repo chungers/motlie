@@ -257,6 +257,7 @@ pub struct HandoffArmRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerStartRequest {
     pub name: String,
+    #[serde(default)]
     pub workstream: Option<String>,
     pub every_secs: u64,
     pub target: String,

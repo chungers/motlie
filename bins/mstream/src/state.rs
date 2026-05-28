@@ -651,6 +651,7 @@ impl DaemonState {
         };
         let mut changes = Vec::new();
         let mut standby_notified = 0usize;
+        let mut standby_failed = 0usize;
         for target in &sessions {
             let handle = {
                 let state = shared.lock().await;
@@ -663,14 +664,34 @@ impl DaemonState {
                             "Orchestrator closeout: workstream '{}' is closed. Please stand by and do not start new work unless assigned.",
                             request.workstream
                         );
-                        Self::send_text_to_resolved(
+                        match Self::send_text_to_resolved(
                             &resolved,
                             &message,
                             PasteMode::Bracketed,
                             true,
                         )
-                        .await?;
-                        standby_notified += 1;
+                        .await
+                        {
+                            Ok(()) => {
+                                standby_notified += 1;
+                                shared.lock().await.record_event(
+                                    &request.workstream,
+                                    EventDraft::new("standby_sent")
+                                        .target(target)
+                                        .text(message.clone())
+                                        .summary("standby instruction sent"),
+                                )?;
+                            }
+                            Err(err) => {
+                                standby_failed += 1;
+                                shared.lock().await.record_event(
+                                    &request.workstream,
+                                    EventDraft::new("standby_failed")
+                                        .target(target)
+                                        .summary(format!("standby send failed: {err}")),
+                                )?;
+                            }
+                        }
                     }
                     let mut pairs = vec![
                         ("last-workstream", request.workstream.clone()),
@@ -763,6 +784,7 @@ impl DaemonState {
             "cursor": cursor,
             "standby_agents": request.standby_agents,
             "standby_notified": standby_notified,
+            "standby_failed": standby_failed,
             "stopped_timers": stopped_timers,
         })];
         records.extend(Self::fire_handoffs_for_changes_shared(shared, changes).await?);
@@ -2892,7 +2914,9 @@ fn render_readable_event(event: &EventRecord) -> String {
         rendered.push_str(&format!("\n  summary: {}", compact_inline(summary, 240)));
     }
     if let Some(text) = &event.text {
-        rendered.push_str(&format!("\n  {}", compact_inline(text, 320)));
+        if event.summary.as_deref() != Some(text.as_str()) {
+            rendered.push_str(&format!("\n  {}", compact_inline(text, 320)));
+        }
     }
     rendered
 }
@@ -3301,6 +3325,50 @@ mod tests {
         let timers = value["timers"].as_array().expect("timers");
         assert_eq!(timers.len(), 1);
         assert_eq!(timers[0]["name"], "issue-342-poll");
+    }
+
+    #[test]
+    fn stop_timers_for_workstream_removes_only_scoped_timers() {
+        let mut state = DaemonState::default();
+        let started_at = DateTime::<Utc>::from_timestamp(1_000, 0).expect("timestamp");
+        for (name, workstream) in [
+            ("x-timer", Some("issue-x")),
+            ("y-timer", Some("issue-y")),
+            ("global-timer", None),
+        ] {
+            state.timers.insert(
+                name.to_string(),
+                TimerRecord {
+                    name: name.to_string(),
+                    workstream: workstream.map(ToString::to_string),
+                    target: "local::worker".parse().expect("target"),
+                    every_secs: 60,
+                    prompt: "Wake up.".to_string(),
+                    enter: true,
+                    submit_retries: 1,
+                    submit_retry_delay_ms: 750,
+                    input_quiet_for_secs: Some(10),
+                    generation: 1,
+                    started_at,
+                    next_fire_at: Some(started_at),
+                    last_fired_at: None,
+                    fire_count: 0,
+                    defer_count: 0,
+                    last_deferred_at: None,
+                    last_defer_reason: None,
+                    last_input_activity: None,
+                    last_error: None,
+                    task: None,
+                },
+            );
+        }
+
+        let stopped = state.stop_timers_for_workstream("issue-x");
+
+        assert_eq!(stopped, vec!["x-timer"]);
+        assert!(!state.timers.contains_key("x-timer"));
+        assert!(state.timers.contains_key("y-timer"));
+        assert!(state.timers.contains_key("global-timer"));
     }
 
     #[test]
