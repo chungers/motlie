@@ -9,7 +9,7 @@ use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
     OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
-    SummaryInputRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
+    SummaryInputRequest, TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
     DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
@@ -68,6 +68,8 @@ pub enum Command {
     Session(SessionCommand),
     #[command(subcommand)]
     Handoff(HandoffCommand),
+    #[command(subcommand)]
+    Timer(TimerCommand),
     Status(StatusArgs),
     Events(EventsArgs),
     Snapshot(SnapshotArgs),
@@ -154,6 +156,12 @@ impl Command {
                 workstream,
                 handoff_id,
             }),
+            Command::Timer(TimerCommand::Start(args)) => {
+                Ok(ClientRequest::TimerStart(args.into_request()?))
+            }
+            Command::Timer(TimerCommand::List) => Ok(ClientRequest::TimerList),
+            Command::Timer(TimerCommand::Stop { name }) => Ok(ClientRequest::TimerStop { name }),
+            Command::Timer(TimerCommand::Fire { name }) => Ok(ClientRequest::TimerFire { name }),
             Command::Status(args) => Ok(ClientRequest::Status {
                 workstream: args.workstream,
                 active_window_secs: args.active_window_secs,
@@ -407,6 +415,47 @@ pub struct HandoffArmArgs {
     pub only_on_transition: bool,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum TimerCommand {
+    Start(TimerStartArgs),
+    List,
+    Stop { name: String },
+    Fire { name: String },
+}
+
+#[derive(Debug, Args)]
+pub struct TimerStartArgs {
+    pub name: String,
+    #[arg(long = "every", value_parser = parse_duration_secs)]
+    pub every_secs: u64,
+    #[arg(long)]
+    pub target: String,
+    #[arg(long)]
+    pub prompt: String,
+    #[arg(long)]
+    pub enter: bool,
+    #[arg(long)]
+    pub no_enter: bool,
+}
+
+impl TimerStartArgs {
+    fn into_request(self) -> anyhow::Result<TimerStartRequest> {
+        if self.name.trim().is_empty() {
+            bail!("timer name cannot be empty");
+        }
+        if self.prompt.is_empty() {
+            bail!("--prompt cannot be empty");
+        }
+        Ok(TimerStartRequest {
+            name: self.name,
+            every_secs: self.every_secs,
+            target: self.target,
+            prompt: self.prompt,
+            enter: resolve_enter(self.enter, self.no_enter)?,
+        })
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     pub workstream: String,
@@ -493,4 +542,92 @@ fn parse_pairs(name: &str, values: Vec<String>) -> anyhow::Result<BTreeMap<Strin
         parsed.insert(key.to_string(), val.to_string());
     }
     Ok(parsed)
+}
+
+fn parse_duration_secs(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+
+    let (digits, multiplier) = if let Some(digits) = trimmed.strip_suffix("seconds") {
+        (digits, 1)
+    } else if let Some(digits) = trimmed.strip_suffix("second") {
+        (digits, 1)
+    } else if let Some(digits) = trimmed.strip_suffix("secs") {
+        (digits, 1)
+    } else if let Some(digits) = trimmed.strip_suffix("sec") {
+        (digits, 1)
+    } else if let Some(digits) = trimmed.strip_suffix("minutes") {
+        (digits, 60)
+    } else if let Some(digits) = trimmed.strip_suffix("minute") {
+        (digits, 60)
+    } else if let Some(digits) = trimmed.strip_suffix("mins") {
+        (digits, 60)
+    } else if let Some(digits) = trimmed.strip_suffix("min") {
+        (digits, 60)
+    } else if let Some(digits) = trimmed.strip_suffix('s') {
+        (digits, 1)
+    } else if let Some(digits) = trimmed.strip_suffix('m') {
+        (digits, 60)
+    } else {
+        (trimmed, 1)
+    };
+
+    let count = digits.trim().parse::<u64>().map_err(|_| {
+        format!("invalid duration '{value}', expected seconds like 30s or minutes like 5m")
+    })?;
+    if count == 0 {
+        return Err("duration must be greater than zero".to_string());
+    }
+    count
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration '{value}' is too large"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_duration_accepts_seconds_and_minutes() {
+        assert_eq!(parse_duration_secs("30").expect("seconds"), 30);
+        assert_eq!(parse_duration_secs("30s").expect("seconds suffix"), 30);
+        assert_eq!(parse_duration_secs("2m").expect("minutes suffix"), 120);
+        assert_eq!(parse_duration_secs("3 minutes").expect("minutes word"), 180);
+    }
+
+    #[test]
+    fn parse_duration_rejects_empty_zero_and_invalid_values() {
+        assert!(parse_duration_secs("").is_err());
+        assert!(parse_duration_secs("0s").is_err());
+        assert!(parse_duration_secs("soon").is_err());
+    }
+
+    #[test]
+    fn timer_start_command_builds_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert_eq!(request.name, "issue-337-poll");
+        assert_eq!(request.every_secs, 300);
+        assert_eq!(request.target, "local::orchestrator");
+        assert_eq!(request.prompt, "Wake up and poll.");
+        assert!(request.enter);
+    }
 }

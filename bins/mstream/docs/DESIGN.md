@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added daemon-owned self-wakeup timers that send prompts to the orchestrator's tmux session. |
 | 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: handoff firing marks the destination busy, already-met handoffs fire immediately by default, and public cursors carry timeline generation for stale-cursor detection. |
 | 2026-05-22 | @codex | Aligned timeline dependency language with PR #326's concrete OutputBus timeline APIs: create-or-get, mutable filters, scoped markers, history ingest, stale handles, cleanup, and latest-cursor semantics. |
 | 2026-05-22 | @codex | Addressed PR #324 review: added Communication & Handoff, explicit completion/state ownership, OutputBus timeline dependency gates, cursor/time ownership, and timeline cleanup rules. |
@@ -64,6 +65,8 @@ unstick collaborators.
 - No durable workflow engine in the first slice. Handoff edges may survive the
   orchestrator's context compaction while the daemon is running, but they do
   not survive daemon restart because `mstream` has no local durable state.
+- No durable scheduler in the first slice. Timer state lives only in the
+  running daemon and must be recreated after daemon restart.
 
 ## Requirements
 
@@ -102,6 +105,9 @@ unstick collaborators.
   output, pushed commits, PRs, review comments, tests, blockers, and questions.
 - FR18: Support handoff and broadcast workflows so one agent's completion can
   trigger another agent's next prompt while the daemon remains alive.
+- FR19: Support daemon-owned timers that periodically send a configured prompt
+  to a tmux target, primarily the orchestrator's own agent session, so the
+  orchestrator can wake itself to poll and unblock workstreams.
 
 ### State And Recovery Requirements
 
@@ -119,6 +125,8 @@ unstick collaborators.
   and no session tag to attach their metadata to.
 - SR7: Session state tags are hints owned by `mstream` commands and managed
   agents. Silence or lack of output must never be persisted as completion.
+- SR8: Timer state is daemon-memory only. After daemon restart, the
+  orchestrator must recreate any needed timers.
 
 ### Non-Functional Requirements
 
@@ -139,6 +147,9 @@ unstick collaborators.
 - NFR8: Status output may include stuck hints, prompt heuristics, or process
   state, but those hints must be labeled separately from explicit agent states
   such as `done`, `blocked`, or `needs-input`.
+- NFR9: Timer delivery must use typed `libs/tmux` targeting and send-key
+  primitives. The target must be explicit; `mstream` must not infer or mutate
+  the orchestrator session identity.
 
 ## Selected Design
 
@@ -561,6 +572,44 @@ that need edge-triggered behavior can pass `--only-on-transition`; in that mode
 the handoff waits for a future state transition even if the current state already
 matches. Armed handoffs do not survive daemon restart, but they let the
 orchestrator set a dependency edge and safely compact or poll less often.
+
+### Self-Wakeup Timers
+
+The agent harness does not provide a first-class cron primitive, so `mstream`
+provides a small daemon-owned timer surface. The timer does not decide project
+state. It only sends a prompt to an explicit tmux target on an interval, using
+the same typed `libs/tmux` targeting and send-key path as other coordinator
+messages.
+
+The main use case is an orchestrator waking its own agent session:
+
+```sh
+mstream timer start issue-337-poll \
+  --every 5m \
+  --target local::codex-orchestrator \
+  --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize material changes, and decide whether to keep, change, or stop this timer."
+
+mstream timer list
+mstream timer fire issue-337-poll
+mstream timer stop issue-337-poll
+```
+
+Timer names are daemon-unique and should describe their purpose. `--every`
+accepts seconds or minutes. `--target` uses `<host-alias>::<session>` and must
+resolve when the timer starts. `--prompt` is not persisted outside daemon
+memory. The default behavior submits the prompt with Enter; `--no-enter` leaves
+the text in the pane.
+
+Timers are intentionally best-effort. If the target TUI is busy, tmux queues
+input for that pane according to normal PTY behavior. If the target is gone,
+the host is disconnected, or send-keys fails, `mstream` records `last_error`
+and tries again on the next tick until the timer is stopped. `timer fire` is an
+immediate smoke-test trigger and does not replace the next scheduled tick.
+
+Timers do not survive daemon restart. They are not a substitute for status
+polling, workstream events, review-loop judgment, or future alerting. They are
+the smallest wakeup primitive needed so an orchestrator can periodically ask
+itself to poll and unblock active workstreams.
 
 ### Recruiting
 

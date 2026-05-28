@@ -102,6 +102,24 @@ run foreground mode in a managed exec session while actively orchestrating. Do
 not tear it down merely because a single user request has been answered if the
 same orchestration assignment is still active.
 
+When assigned as orchestrator and the harness has no first-class cron, start a
+daemon-owned self-wakeup timer targeted at your own tmux session. The timer
+sends a prompt to you through tmux, which creates a queued self-reminder to
+poll and unblock the workstream:
+
+```sh
+mstream --socket /tmp/mstream-${USER}.sock timer start <workstream>-poll \
+  --every 5m \
+  --target <orchestrator-host-alias>::<your-tmux-session> \
+  --prompt "[mstream:<workstream>-poll] Wakeup: check <workstream> with mstream status and summary-input. Unblock agents, summarize only material changes, and decide whether to keep, change, or stop this timer."
+```
+
+Use `mstream timer list` to verify active timers, `mstream timer fire <name>`
+to test prompt delivery, and `mstream timer stop <name>` when the workstream is
+closed or no longer needs periodic attention. Timer state is daemon memory only
+and must be recreated after daemon restart. Do not target collaborator sessions
+with orchestrator timers unless the user explicitly asks for that behavior.
+
 If the daemon is unreachable, ask the user to restart it or provide the correct socket. After daemon restart, ask the user for the host aliases and SSH URIs; mstream does not persist the host ledger.
 
 Use `mstream` as the orchestration boundary. Do not bypass it with direct `ssh`
@@ -423,6 +441,12 @@ Treat `mstream status` as the first polling layer:
 - during normal active work, check about every 3-5 minutes
 - during known long-running tests or builds, check about every 5-10 minutes unless the user is waiting on an update
 - after an agent produces a durable output, review verdict, blocker, or question, act immediately rather than waiting for the next poll
+
+Use a self-wakeup timer to make those checks happen without relying on the
+human to poll you. For active review/implementation loops, choose an interval
+that matches the risk: about 3-5 minutes for normal active work and 5-10
+minutes for long tests or builds. If a timer wakes you and the workstream is
+complete or waiting on a human decision, stop or lengthen the timer yourself.
 
 Workstream state is coordinator-owned. Do not ask collaborating agents to run
 any mstream command. Determine whether an agent is done, blocked, needs input,
