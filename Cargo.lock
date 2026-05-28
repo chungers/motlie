@@ -5528,6 +5528,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-mstream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "motlie-tmux",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "motlie-tmux"
 version = "0.1.0"
 dependencies = [
