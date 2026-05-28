@@ -246,6 +246,13 @@ fn parse_u32_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u
     })
 }
 
+fn parse_client_dimension_field(value: &str, field: &str, line: &str) -> Result<u32> {
+    if value.is_empty() {
+        return Ok(0);
+    }
+    parse_u32_field(value, field, "client", line)
+}
+
 fn parse_u64_field(value: &str, field: &str, kind: &str, line: &str) -> Result<u64> {
     value.parse().map_err(|e| {
         Error::Parse(format!(
@@ -386,8 +393,8 @@ fn parse_clients(output: &str) -> Result<Vec<ClientInfo>> {
         }
         let fields = parse_exact_fields(line, 6, "client")?;
         clients.push(ClientInfo {
-            width: parse_u32_field(&fields[0], "width", "client", line)?,
-            height: parse_u32_field(&fields[1], "height", "client", line)?,
+            width: parse_client_dimension_field(&fields[0], "width", line)?,
+            height: parse_client_dimension_field(&fields[1], "height", line)?,
             session: fields[2].clone(),
             activity: parse_u64_field(&fields[3], "activity", "client", line)?,
             readonly: parse_bool_field(&fields[4], "readonly", "client", line)?,
@@ -807,11 +814,11 @@ mod tests {
     async fn list_clients_parses() {
         let mock = MockTransport::new().with_response(
             "list-clients",
-            "200 50 build 100 0 /dev/ttys001\n180 40 test 80 1 \n",
+            "200 50 build 100 0 /dev/ttys001\n180 40 test 80 1 \n80  worker 120 0 \n",
         );
         let transport = TransportKind::Mock(mock);
         let clients = list_clients_with_prefix(&transport, "tmux").await.unwrap();
-        assert_eq!(clients.len(), 2);
+        assert_eq!(clients.len(), 3);
         assert_eq!(clients[0].width, 200);
         assert_eq!(clients[0].height, 50);
         assert_eq!(clients[0].session, "build");
@@ -823,6 +830,12 @@ mod tests {
         assert_eq!(clients[1].activity, 80);
         assert!(clients[1].readonly);
         assert_eq!(clients[1].tty, None);
+        assert_eq!(clients[2].width, 80);
+        assert_eq!(clients[2].height, 0);
+        assert_eq!(clients[2].session, "worker");
+        assert_eq!(clients[2].activity, 120);
+        assert!(!clients[2].readonly);
+        assert_eq!(clients[2].tty, None);
     }
 
     #[tokio::test]
