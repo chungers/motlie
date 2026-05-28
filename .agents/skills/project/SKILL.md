@@ -132,7 +132,17 @@ and must be recreated after daemon restart. Do not target collaborator sessions
 with orchestrator timers unless the user explicitly asks for that behavior.
 Timer prompts default to one extra Enter after 750ms because agent TUIs
 occasionally miss the first submit key. Retries send only extra Enter keys, not
-the prompt text; `--no-enter` disables retries.
+the prompt text; `--no-enter` disables retries. Timer delivery also defaults to
+an input-quiet guard (`--input-quiet-for 10s`): if an attached client typed in
+the target session recently, mstream defers the timer and reports the deferral
+in `timer list` instead of interleaving prompt text with user input. Use
+`--no-input-guard` only when you explicitly want unattended delivery to ignore
+attached-client input.
+
+The input-quiet guard applies to key/text delivery, not observation. Keep
+polling workstreams with `status`, `events`, `snapshot`, `summary-input`, and
+`timer list` even when a timer is deferring because recent user input was
+detected.
 
 If the daemon is unreachable, ask the user to restart it or provide the correct socket. After daemon restart, ask the user for the host aliases and SSH URIs; mstream does not persist the host ledger.
 

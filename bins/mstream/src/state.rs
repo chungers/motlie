@@ -103,11 +103,16 @@ struct TimerRecord {
     enter: bool,
     submit_retries: u8,
     submit_retry_delay_ms: u64,
+    input_quiet_for_secs: Option<u64>,
     generation: u64,
     started_at: DateTime<Utc>,
     next_fire_at: Option<DateTime<Utc>>,
     last_fired_at: Option<DateTime<Utc>>,
     fire_count: u64,
+    defer_count: u64,
+    last_deferred_at: Option<DateTime<Utc>>,
+    last_defer_reason: Option<String>,
+    last_input_activity: Option<u64>,
     last_error: Option<String>,
     task: Option<JoinHandle<()>>,
 }
@@ -255,7 +260,30 @@ struct TimerFireSnapshot {
     enter: bool,
     submit_retries: u8,
     submit_retry_delay_ms: u64,
+    input_quiet_for_secs: Option<u64>,
     generation: u64,
+}
+
+struct TimerDeferSnapshot {
+    name: String,
+    target: SessionTarget,
+    generation: u64,
+    reason: &'static str,
+    latest_client_activity: Option<u64>,
+    latest_client_activity_age_secs: Option<u64>,
+    quiet_for_secs: u64,
+    next_fire_at: Option<DateTime<Utc>>,
+}
+
+enum TimerFireOutcome {
+    Sent(TimerFireSnapshot),
+    Deferred(TimerDeferSnapshot),
+}
+
+struct InputGuardDecision {
+    latest_client_activity: Option<u64>,
+    latest_client_activity_age_secs: Option<u64>,
+    retry_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -385,7 +413,7 @@ impl DaemonState {
             .list_tags_for_session_infos(tags::PREFIX, &sessions)
             .await?;
 
-        let mut monitor_sessions = Vec::new();
+        let mut monitor_targets = Vec::new();
         let hydrated = {
             let mut state = shared.lock().await;
             let mut hydrated = 0usize;
@@ -434,15 +462,15 @@ impl DaemonState {
                         }
                         let workstream = state.workstream_mut(&workstream_name)?;
                         workstream.sessions.insert(target.clone());
-                        monitor_sessions.push(target.session_name().to_string());
+                        monitor_targets.push(target.clone());
                     }
                 }
             }
             hydrated
         };
 
-        for session_name in monitor_sessions {
-            let _ = handle.start_monitoring_session(&session_name).await;
+        for target in monitor_targets {
+            let _ = Self::ensure_monitoring_target_shared(Arc::clone(&shared), &target).await;
         }
 
         Ok(vec![json!({
@@ -480,10 +508,7 @@ impl DaemonState {
             },
         )
         .await?;
-        resolved
-            .host
-            .start_monitoring_session(resolved.spec.session_name())
-            .await?;
+        Self::ensure_monitoring_target_shared(Arc::clone(&shared), &resolved.spec).await?;
         if let Some(task) = &request.task {
             Self::send_text_to_resolved(
                 &resolved,
@@ -567,10 +592,7 @@ impl DaemonState {
             },
         )
         .await?;
-        resolved
-            .host
-            .start_monitoring_session(resolved.spec.session_name())
-            .await?;
+        Self::ensure_monitoring_target_shared(Arc::clone(&shared), &resolved.spec).await?;
         if let Some(task) = &request.task {
             Self::send_text_to_resolved(
                 &resolved,
@@ -1109,11 +1131,16 @@ impl DaemonState {
                     enter: request.enter,
                     submit_retries,
                     submit_retry_delay_ms: request.submit_retry_delay_ms,
+                    input_quiet_for_secs: request.input_quiet_for_secs,
                     generation,
                     started_at,
                     next_fire_at,
                     last_fired_at: None,
                     fire_count: 0,
+                    defer_count: 0,
+                    last_deferred_at: None,
+                    last_defer_reason: None,
+                    last_input_activity: None,
                     last_error: None,
                     task: None,
                 },
@@ -1144,6 +1171,7 @@ impl DaemonState {
             "enter": request.enter,
             "submit_retries": submit_retries,
             "submit_retry_delay_ms": request.submit_retry_delay_ms,
+            "input_quiet_for_secs": option_u64_json(request.input_quiet_for_secs),
             "generation": generation,
             "next_fire_at": datetime_option_json(next_fire_at),
         })])
@@ -1153,20 +1181,13 @@ impl DaemonState {
         shared: Arc<Mutex<Self>>,
         name: String,
     ) -> anyhow::Result<Vec<Value>> {
-        let snapshot =
-            Self::timer_fire_once_shared(Arc::clone(&shared), &name, None, false).await?;
-        Ok(vec![json!({
-            "type": "ok",
-            "op": "timer_fire",
-            "name": snapshot.name,
-            "target": snapshot.target.to_string(),
-            "generation": snapshot.generation,
-        })])
+        let outcome = Self::timer_fire_once_shared(Arc::clone(&shared), &name, None, false).await?;
+        Ok(vec![timer_fire_outcome_json(outcome)])
     }
 
     async fn timer_loop(shared: Arc<Mutex<Self>>, name: String, generation: u64) {
         loop {
-            let every_secs = {
+            let sleep_for = {
                 let state = shared.lock().await;
                 let Some(timer) = state.timers.get(&name) else {
                     break;
@@ -1174,9 +1195,15 @@ impl DaemonState {
                 if timer.generation != generation {
                     break;
                 }
-                timer.every_secs
+                let now = Utc::now();
+                timer
+                    .next_fire_at
+                    .unwrap_or(now)
+                    .signed_duration_since(now)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO)
             };
-            sleep(Duration::from_secs(every_secs)).await;
+            sleep(sleep_for).await;
             if let Err(err) =
                 Self::timer_fire_once_shared(Arc::clone(&shared), &name, Some(generation), true)
                     .await
@@ -1191,7 +1218,7 @@ impl DaemonState {
         name: &str,
         required_generation: Option<u64>,
         scheduled: bool,
-    ) -> anyhow::Result<TimerFireSnapshot> {
+    ) -> anyhow::Result<TimerFireOutcome> {
         let snapshot = {
             let state = shared.lock().await;
             let timer = state
@@ -1209,13 +1236,76 @@ impl DaemonState {
                 enter: timer.enter,
                 submit_retries: timer.submit_retries,
                 submit_retry_delay_ms: timer.submit_retry_delay_ms,
+                input_quiet_for_secs: timer.input_quiet_for_secs,
                 generation: timer.generation,
             }
         };
 
+        let resolved =
+            match Self::resolve_target(snapshot.handle.clone(), snapshot.target.clone()).await {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    Self::record_timer_error_shared(
+                        Arc::clone(&shared),
+                        name,
+                        snapshot.generation,
+                        scheduled,
+                        err.to_string(),
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+        let now = Utc::now();
+        if let Some(quiet_for_secs) = snapshot.input_quiet_for_secs {
+            let decision = match Self::evaluate_input_guard(&resolved, quiet_for_secs, now).await {
+                Ok(decision) => decision,
+                Err(err) => {
+                    Self::record_timer_error_shared(
+                        Arc::clone(&shared),
+                        name,
+                        snapshot.generation,
+                        scheduled,
+                        err.to_string(),
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+            if let Some(retry_after_secs) = decision.retry_after_secs {
+                let next_fire_at = if scheduled {
+                    add_secs(now, retry_after_secs)
+                } else {
+                    None
+                };
+                let defer_snapshot = TimerDeferSnapshot {
+                    name: snapshot.name.clone(),
+                    target: snapshot.target.clone(),
+                    generation: snapshot.generation,
+                    reason: "recent_client_input",
+                    latest_client_activity: decision.latest_client_activity,
+                    latest_client_activity_age_secs: decision.latest_client_activity_age_secs,
+                    quiet_for_secs,
+                    next_fire_at,
+                };
+                let mut state = shared.lock().await;
+                if let Some(timer) = state.timers.get_mut(name) {
+                    if timer.generation == snapshot.generation {
+                        if scheduled {
+                            timer.next_fire_at = next_fire_at;
+                        }
+                        timer.defer_count += 1;
+                        timer.last_deferred_at = Some(now);
+                        timer.last_defer_reason = Some(defer_snapshot.reason.to_string());
+                        timer.last_input_activity = decision.latest_client_activity;
+                        timer.last_error = None;
+                    }
+                }
+                return Ok(TimerFireOutcome::Deferred(defer_snapshot));
+            }
+        }
+
         let result = async {
-            let resolved =
-                Self::resolve_target(snapshot.handle.clone(), snapshot.target.clone()).await?;
             Self::send_text_to_resolved(
                 &resolved,
                 &snapshot.prompt,
@@ -1252,7 +1342,26 @@ impl DaemonState {
             }
         }
         result?;
-        Ok(snapshot)
+        Ok(TimerFireOutcome::Sent(snapshot))
+    }
+
+    async fn record_timer_error_shared(
+        shared: Arc<Mutex<Self>>,
+        name: &str,
+        generation: u64,
+        scheduled: bool,
+        message: String,
+    ) {
+        let now = Utc::now();
+        let mut state = shared.lock().await;
+        if let Some(timer) = state.timers.get_mut(name) {
+            if timer.generation == generation {
+                if scheduled {
+                    timer.next_fire_at = add_secs(now, timer.every_secs);
+                }
+                timer.last_error = Some(message);
+            }
+        }
     }
 
     async fn snapshot_shared(
@@ -1387,10 +1496,7 @@ impl DaemonState {
                 },
             )
             .await?;
-            plan.target
-                .host
-                .start_monitoring_session(plan.target.spec.session_name())
-                .await?;
+            Self::ensure_monitoring_target_shared(Arc::clone(&shared), &plan.target.spec).await?;
             if let Some(task) = &request.task {
                 Self::send_text_to_resolved(
                     &plan.target,
@@ -1645,6 +1751,7 @@ impl DaemonState {
             "target": timer.target.to_string(),
             "generation": timer.generation,
             "fire_count": timer.fire_count,
+            "defer_count": timer.defer_count,
         })])
     }
 
@@ -1977,6 +2084,38 @@ impl DaemonState {
         Ok(())
     }
 
+    async fn evaluate_input_guard(
+        target: &ResolvedTarget,
+        quiet_for_secs: u64,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<InputGuardDecision> {
+        let activity = target
+            .host
+            .session_client_activity(target.spec.session_name())
+            .await?;
+        let Some(latest_client_activity) = activity.latest_client_activity else {
+            return Ok(InputGuardDecision {
+                latest_client_activity: None,
+                latest_client_activity_age_secs: None,
+                retry_after_secs: None,
+            });
+        };
+
+        let latest_client_activity_age_secs =
+            seconds_since_epoch(now, latest_client_activity).unwrap_or(0);
+        let retry_after_secs = if latest_client_activity_age_secs >= quiet_for_secs {
+            None
+        } else {
+            Some((quiet_for_secs - latest_client_activity_age_secs).max(1))
+        };
+
+        Ok(InputGuardDecision {
+            latest_client_activity: Some(latest_client_activity),
+            latest_client_activity_age_secs: Some(latest_client_activity_age_secs),
+            retry_after_secs,
+        })
+    }
+
     async fn resolve_target(
         handle: HostHandle,
         logical: SessionTarget,
@@ -1990,6 +2129,15 @@ impl DaemonState {
             host: handle,
             target,
         })
+    }
+
+    async fn ensure_monitoring_target_shared(
+        shared: Arc<Mutex<Self>>,
+        target: &SessionTarget,
+    ) -> anyhow::Result<()> {
+        let mut state = shared.lock().await;
+        state.fleet.ensure_monitoring_session(target).await?;
+        Ok(())
     }
 
     async fn touch_resolved_session_shared(
@@ -2455,11 +2603,20 @@ impl TimerRecord {
             "enter": self.enter,
             "submit_retries": self.submit_retries,
             "submit_retry_delay_ms": self.submit_retry_delay_ms,
+            "input_quiet_for_secs": option_u64_json(self.input_quiet_for_secs),
             "generation": self.generation,
             "started_at": self.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "next_fire_at": datetime_option_json(self.next_fire_at),
             "last_fired_at": datetime_option_json(self.last_fired_at),
             "fire_count": self.fire_count,
+            "defer_count": self.defer_count,
+            "last_deferred_at": datetime_option_json(self.last_deferred_at),
+            "last_defer_reason": &self.last_defer_reason,
+            "last_input_activity": option_u64_json(self.last_input_activity),
+            "last_input_activity_at": self
+                .last_input_activity
+                .map(epoch_seconds_json)
+                .unwrap_or(Value::Null),
             "last_error": &self.last_error,
             "prompt_chars": char_count(&self.prompt),
         })
@@ -2612,6 +2769,37 @@ fn session_environment(workstream: &str, role: &str) -> anyhow::Result<Vec<Sessi
         SessionEnvVar::new("MSTREAM_WORKSTREAM", workstream)?,
         SessionEnvVar::new("MSTREAM_ROLE", role)?,
     ])
+}
+
+fn timer_fire_outcome_json(outcome: TimerFireOutcome) -> Value {
+    match outcome {
+        TimerFireOutcome::Sent(snapshot) => json!({
+            "type": "ok",
+            "op": "timer_fire",
+            "name": snapshot.name,
+            "target": snapshot.target.to_string(),
+            "generation": snapshot.generation,
+            "input_quiet_for_secs": option_u64_json(snapshot.input_quiet_for_secs),
+        }),
+        TimerFireOutcome::Deferred(snapshot) => json!({
+            "type": "ok",
+            "op": "timer_deferred",
+            "name": snapshot.name,
+            "target": snapshot.target.to_string(),
+            "generation": snapshot.generation,
+            "reason": snapshot.reason,
+            "latest_client_activity": option_u64_json(snapshot.latest_client_activity),
+            "latest_client_activity_at": snapshot
+                .latest_client_activity
+                .map(epoch_seconds_json)
+                .unwrap_or(Value::Null),
+            "latest_client_activity_age_secs": option_u64_json(
+                snapshot.latest_client_activity_age_secs
+            ),
+            "quiet_for_secs": snapshot.quiet_for_secs,
+            "next_fire_at": datetime_option_json(snapshot.next_fire_at),
+        }),
+    }
 }
 
 fn managed_prompt(
@@ -2892,6 +3080,65 @@ mod tests {
         assert_eq!(names, vec!["MSTREAM_WORKSTREAM", "MSTREAM_ROLE"]);
         assert!(!names.contains(&"MSTREAM_TARGET"));
         assert!(!names.contains(&"MSTREAM_SOCKET"));
+    }
+
+    #[test]
+    fn timer_record_json_reports_input_guard_deferrals() {
+        let target: SessionTarget = "local::worker".parse().expect("target");
+        let started_at = DateTime::<Utc>::from_timestamp(1_000, 0).expect("timestamp");
+        let record = TimerRecord {
+            name: "poll".to_string(),
+            target,
+            every_secs: 60,
+            prompt: "Wake up.".to_string(),
+            enter: true,
+            submit_retries: 1,
+            submit_retry_delay_ms: 750,
+            input_quiet_for_secs: Some(10),
+            generation: 3,
+            started_at,
+            next_fire_at: add_secs(started_at, 7),
+            last_fired_at: None,
+            fire_count: 2,
+            defer_count: 1,
+            last_deferred_at: Some(started_at),
+            last_defer_reason: Some("recent_client_input".to_string()),
+            last_input_activity: Some(995),
+            last_error: None,
+            task: None,
+        };
+
+        let value = record.to_json();
+
+        assert_eq!(value["input_quiet_for_secs"], 10);
+        assert_eq!(value["fire_count"], 2);
+        assert_eq!(value["defer_count"], 1);
+        assert_eq!(value["last_defer_reason"], "recent_client_input");
+        assert_eq!(value["last_input_activity"], 995);
+        assert_eq!(value["last_input_activity_at"], "1970-01-01T00:16:35Z");
+    }
+
+    #[test]
+    fn timer_deferred_json_reports_guard_decision() {
+        let target: SessionTarget = "local::worker".parse().expect("target");
+        let next_fire_at = DateTime::<Utc>::from_timestamp(1_007, 0).expect("timestamp");
+        let value = timer_fire_outcome_json(TimerFireOutcome::Deferred(TimerDeferSnapshot {
+            name: "poll".to_string(),
+            target,
+            generation: 3,
+            reason: "recent_client_input",
+            latest_client_activity: Some(995),
+            latest_client_activity_age_secs: Some(5),
+            quiet_for_secs: 10,
+            next_fire_at: Some(next_fire_at),
+        }));
+
+        assert_eq!(value["op"], "timer_deferred");
+        assert_eq!(value["reason"], "recent_client_input");
+        assert_eq!(value["latest_client_activity"], 995);
+        assert_eq!(value["latest_client_activity_age_secs"], 5);
+        assert_eq!(value["quiet_for_secs"], 10);
+        assert_eq!(value["next_fire_at"], "1970-01-01T00:16:47Z");
     }
 
     #[test]

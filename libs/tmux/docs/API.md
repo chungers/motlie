@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added attached-client activity fields to `ClientInfo` and `HostHandle::session_client_activity()` for policy-light input-recency consumers such as mstream timer guards. |
 | 2026-05-28 | @codex | Added `SshConfig::connect_with_alias()` and `Fleet::unregister()` so higher-level orchestrators can use stable routing aliases while keeping Fleet as the host registry; kept timeline lifecycle methods on `OutputBus` instead of duplicating them on `Fleet`; removed historical workstream/short-name aliases in favor of explicit target-alias APIs. |
 | 2026-05-27 | @gpt55-337-og | Added Fleet target APIs for issue #337: `FleetTargetSpec`, target aliases, cross-host session inventory with tags, batch `SessionTags` writes/removals, idempotent target monitoring, and timeline filter/scope helpers. |
 | 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
@@ -805,9 +806,24 @@ let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
 ```rust
 let clients = host.list_clients().await?;
 for c in &clients {
-    println!("{}x{} on '{}'", c.width, c.height, c.session);
+    println!(
+        "{}x{} on '{}' activity={} readonly={} tty={:?}",
+        c.width, c.height, c.session, c.activity, c.readonly, c.tty
+    );
 }
-// Useful for geometry/reflow detection (section 15).
+// Useful for geometry/reflow detection and attached-client input recency.
+```
+
+For one session, use the policy-light summary helper:
+
+```rust
+let activity = host.session_client_activity("build").await?;
+println!(
+    "attached={} writable={} latest={:?}",
+    activity.attached_clients,
+    activity.writable_clients,
+    activity.latest_client_activity
+);
 ```
 
 ### Host text file read
@@ -2679,7 +2695,8 @@ assert!(issues.is_empty());
 | `StatusStyle` / `StatusLeft` / `StatusLeftLength` | Validated tmux status-bar override values used by `SessionStatus` |
 | `WindowInfo` | session_name, index, name, active, pane_count |
 | `PaneInfo` | address, current_command, pid, width, height, active |
-| `ClientInfo` | width, height, session |
+| `ClientInfo` | width, height, session, activity, readonly, tty |
+| `SessionClientActivity` | session, attached_clients, writable_clients, latest_client_activity |
 | `HostEvent` | SessionsChanged, SessionAdded, SessionClosed, SessionRenamed, ClientAttached, ClientDetached, Disconnect |
 
 ### Input
