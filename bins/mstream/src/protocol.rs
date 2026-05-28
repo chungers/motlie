@@ -113,6 +113,14 @@ pub enum ClientRequest {
         workstream: String,
         handoff_id: String,
     },
+    TimerStart(TimerStartRequest),
+    TimerList,
+    TimerStop {
+        name: String,
+    },
+    TimerFire {
+        name: String,
+    },
     Status {
         workstream: String,
         #[serde(default = "default_status_active_window_secs")]
@@ -235,6 +243,15 @@ pub struct HandoffArmRequest {
     pub on: AgentState,
     pub task: String,
     pub only_on_transition: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimerStartRequest {
+    pub name: String,
+    pub every_secs: u64,
+    pub target: String,
+    pub prompt: String,
+    pub enter: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

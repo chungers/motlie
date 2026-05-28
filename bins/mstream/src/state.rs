@@ -12,6 +12,7 @@ use motlie_tmux::{
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::jsonl;
@@ -19,7 +20,7 @@ use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
     OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
-    SummaryInputRequest, WorkstreamSettings,
+    SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
 };
 use crate::tags;
 use crate::target::SessionTarget;
@@ -29,8 +30,10 @@ pub struct DaemonState {
     hosts: BTreeMap<String, HostRecord>,
     sessions: BTreeMap<SessionTarget, SessionRecord>,
     workstreams: BTreeMap<String, WorkstreamRecord>,
+    timers: BTreeMap<String, TimerRecord>,
     next_generation: u64,
     next_handoff_id: u64,
+    next_timer_generation: u64,
 }
 
 impl Default for DaemonState {
@@ -39,8 +42,10 @@ impl Default for DaemonState {
             hosts: BTreeMap::new(),
             sessions: BTreeMap::new(),
             workstreams: BTreeMap::new(),
+            timers: BTreeMap::new(),
             next_generation: 1,
             next_handoff_id: 1,
+            next_timer_generation: 1,
         }
     }
 }
@@ -85,6 +90,21 @@ struct WorkstreamRecord {
     next_sequence: u64,
     events: VecDeque<EventRecord>,
     handoffs: BTreeMap<String, HandoffRecord>,
+}
+
+struct TimerRecord {
+    name: String,
+    target: SessionTarget,
+    every_secs: u64,
+    prompt: String,
+    enter: bool,
+    generation: u64,
+    started_at: DateTime<Utc>,
+    next_fire_at: Option<DateTime<Utc>>,
+    last_fired_at: Option<DateTime<Utc>>,
+    fire_count: u64,
+    last_error: Option<String>,
+    task: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +248,15 @@ struct RecruitPlanSnapshot {
     state: AgentState,
 }
 
+struct TimerFireSnapshot {
+    name: String,
+    target: SessionTarget,
+    handle: HostHandle,
+    prompt: String,
+    enter: bool,
+    generation: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct StatusActivityOptions {
     active_window_secs: u64,
@@ -259,6 +288,8 @@ impl DaemonState {
             ClientRequest::Broadcast(request) => Self::broadcast_shared(shared, request).await,
             ClientRequest::SessionMark(request) => Self::session_mark_shared(shared, request).await,
             ClientRequest::HandoffArm(request) => Self::handoff_arm_shared(shared, request).await,
+            ClientRequest::TimerStart(request) => Self::timer_start_shared(shared, request).await,
+            ClientRequest::TimerFire { name } => Self::timer_fire_shared(shared, name).await,
             ClientRequest::Snapshot(request) => Self::snapshot_shared(shared, request).await,
             ClientRequest::SummaryInput(request) => {
                 Self::summary_input_shared(shared, request).await
@@ -290,6 +321,8 @@ impl DaemonState {
                 workstream,
                 handoff_id,
             } => shared.lock().await.handoff_cancel(&workstream, &handoff_id),
+            ClientRequest::TimerList => Ok(vec![shared.lock().await.timer_list_json()]),
+            ClientRequest::TimerStop { name } => shared.lock().await.timer_stop(&name),
             ClientRequest::Status {
                 workstream,
                 active_window_secs,
@@ -1026,6 +1059,183 @@ impl DaemonState {
         Ok(records)
     }
 
+    async fn timer_start_shared(
+        shared: Arc<Mutex<Self>>,
+        request: TimerStartRequest,
+    ) -> anyhow::Result<Vec<Value>> {
+        if request.name.trim().is_empty() {
+            bail!("timer name cannot be empty");
+        }
+        if request.every_secs == 0 {
+            bail!("timer interval must be greater than zero");
+        }
+        if request.prompt.is_empty() {
+            bail!("timer prompt cannot be empty");
+        }
+
+        let target: SessionTarget = request.target.parse()?;
+        let handle = {
+            let state = shared.lock().await;
+            if state.timers.contains_key(&request.name) {
+                bail!("timer '{}' already exists", request.name);
+            }
+            state.host(target.host_alias())?.handle.clone()
+        };
+        Self::resolve_target(handle, target.clone()).await?;
+
+        let (generation, next_fire_at) = {
+            let mut state = shared.lock().await;
+            if state.timers.contains_key(&request.name) {
+                bail!("timer '{}' already exists", request.name);
+            }
+            let generation = state.next_timer_generation;
+            state.next_timer_generation += 1;
+            let started_at = Utc::now();
+            let next_fire_at = add_secs(started_at, request.every_secs);
+            state.timers.insert(
+                request.name.clone(),
+                TimerRecord {
+                    name: request.name.clone(),
+                    target: target.clone(),
+                    every_secs: request.every_secs,
+                    prompt: request.prompt,
+                    enter: request.enter,
+                    generation,
+                    started_at,
+                    next_fire_at,
+                    last_fired_at: None,
+                    fire_count: 0,
+                    last_error: None,
+                    task: None,
+                },
+            );
+            (generation, next_fire_at)
+        };
+        let name = request.name.clone();
+        let task = tokio::spawn(Self::timer_loop(Arc::clone(&shared), name, generation));
+        {
+            let mut state = shared.lock().await;
+            if let Some(timer) = state.timers.get_mut(&request.name) {
+                if timer.generation == generation {
+                    timer.task = Some(task);
+                } else {
+                    task.abort();
+                }
+            } else {
+                task.abort();
+            }
+        }
+
+        Ok(vec![json!({
+            "type": "ok",
+            "op": "timer_start",
+            "name": request.name,
+            "target": target.to_string(),
+            "every_secs": request.every_secs,
+            "enter": request.enter,
+            "generation": generation,
+            "next_fire_at": datetime_option_json(next_fire_at),
+        })])
+    }
+
+    async fn timer_fire_shared(
+        shared: Arc<Mutex<Self>>,
+        name: String,
+    ) -> anyhow::Result<Vec<Value>> {
+        let snapshot =
+            Self::timer_fire_once_shared(Arc::clone(&shared), &name, None, false).await?;
+        Ok(vec![json!({
+            "type": "ok",
+            "op": "timer_fire",
+            "name": snapshot.name,
+            "target": snapshot.target.to_string(),
+            "generation": snapshot.generation,
+        })])
+    }
+
+    async fn timer_loop(shared: Arc<Mutex<Self>>, name: String, generation: u64) {
+        loop {
+            let every_secs = {
+                let state = shared.lock().await;
+                let Some(timer) = state.timers.get(&name) else {
+                    break;
+                };
+                if timer.generation != generation {
+                    break;
+                }
+                timer.every_secs
+            };
+            sleep(Duration::from_secs(every_secs)).await;
+            if let Err(err) =
+                Self::timer_fire_once_shared(Arc::clone(&shared), &name, Some(generation), true)
+                    .await
+            {
+                eprintln!("mstream timer '{name}' failed: {err}");
+            }
+        }
+    }
+
+    async fn timer_fire_once_shared(
+        shared: Arc<Mutex<Self>>,
+        name: &str,
+        required_generation: Option<u64>,
+        scheduled: bool,
+    ) -> anyhow::Result<TimerFireSnapshot> {
+        let snapshot = {
+            let state = shared.lock().await;
+            let timer = state
+                .timers
+                .get(name)
+                .with_context(|| format!("timer '{name}' not found"))?;
+            if required_generation.is_some_and(|generation| timer.generation != generation) {
+                bail!("timer '{name}' is no longer active");
+            }
+            TimerFireSnapshot {
+                name: timer.name.clone(),
+                target: timer.target.clone(),
+                handle: state.host(timer.target.host_alias())?.handle.clone(),
+                prompt: timer.prompt.clone(),
+                enter: timer.enter,
+                generation: timer.generation,
+            }
+        };
+
+        let result = async {
+            let resolved =
+                Self::resolve_target(snapshot.handle.clone(), snapshot.target.clone()).await?;
+            Self::send_text_to_resolved(
+                &resolved,
+                &snapshot.prompt,
+                PasteMode::Bracketed,
+                snapshot.enter,
+            )
+            .await
+        }
+        .await;
+
+        let now = Utc::now();
+        let mut state = shared.lock().await;
+        if let Some(timer) = state.timers.get_mut(name) {
+            if timer.generation == snapshot.generation {
+                if scheduled {
+                    timer.next_fire_at = add_secs(now, timer.every_secs);
+                }
+                match &result {
+                    Ok(()) => {
+                        timer.last_fired_at = Some(now);
+                        timer.fire_count += 1;
+                        timer.last_error = None;
+                    }
+                    Err(err) => {
+                        timer.last_error = Some(err.to_string());
+                    }
+                }
+            }
+        }
+        result?;
+        Ok(snapshot)
+    }
+
     async fn snapshot_shared(
         shared: Arc<Mutex<Self>>,
         request: SnapshotRequest,
@@ -1223,6 +1433,19 @@ impl DaemonState {
         if self.hosts.remove(alias).is_none() {
             bail!("host alias '{alias}' is not connected");
         }
+        let removed_timers: Vec<String> = self
+            .timers
+            .iter()
+            .filter(|(_, timer)| timer.target.host_alias() == alias)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for timer_name in &removed_timers {
+            if let Some(timer) = self.timers.remove(timer_name) {
+                if let Some(task) = timer.task {
+                    task.abort();
+                }
+            }
+        }
         let removed: Vec<SessionTarget> = self
             .sessions
             .keys()
@@ -1239,6 +1462,7 @@ impl DaemonState {
             "type": "ok",
             "op": "disconnect",
             "host": alias,
+            "stopped_timers": removed_timers,
         })])
     }
 
@@ -1380,6 +1604,28 @@ impl DaemonState {
             "workstream": workstream,
             "handoffs": handoffs,
         }))
+    }
+
+    fn timer_list_json(&self) -> Value {
+        let timers: Vec<Value> = self.timers.values().map(TimerRecord::to_json).collect();
+        json!({ "type": "timers", "timers": timers })
+    }
+
+    fn timer_stop(&mut self, name: &str) -> anyhow::Result<Vec<Value>> {
+        let Some(timer) = self.timers.remove(name) else {
+            bail!("timer '{name}' not found");
+        };
+        if let Some(task) = timer.task {
+            task.abort();
+        }
+        Ok(vec![json!({
+            "type": "ok",
+            "op": "timer_stop",
+            "name": name,
+            "target": timer.target.to_string(),
+            "generation": timer.generation,
+            "fire_count": timer.fire_count,
+        })])
     }
 
     fn status(
@@ -2154,6 +2400,24 @@ impl SessionRecord {
     }
 }
 
+impl TimerRecord {
+    fn to_json(&self) -> Value {
+        json!({
+            "name": &self.name,
+            "target": self.target.to_string(),
+            "every_secs": self.every_secs,
+            "enter": self.enter,
+            "generation": self.generation,
+            "started_at": self.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "next_fire_at": datetime_option_json(self.next_fire_at),
+            "last_fired_at": datetime_option_json(self.last_fired_at),
+            "fire_count": self.fire_count,
+            "last_error": &self.last_error,
+            "prompt_chars": char_count(&self.prompt),
+        })
+    }
+}
+
 struct SessionActivityJson {
     tmux_present: Value,
     tmux_session_id: Value,
@@ -2421,6 +2685,12 @@ fn datetime_option_json(timestamp: Option<DateTime<Utc>>) -> Value {
 
 fn option_u64_json(value: Option<u64>) -> Value {
     value.map(Value::from).unwrap_or(Value::Null)
+}
+
+fn add_secs(timestamp: DateTime<Utc>, seconds: u64) -> Option<DateTime<Utc>> {
+    chrono::Duration::from_std(Duration::from_secs(seconds))
+        .ok()
+        .and_then(|duration| timestamp.checked_add_signed(duration))
 }
 
 #[cfg(test)]

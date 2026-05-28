@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added a daemon-owned timer phase for orchestrator self-wakeup prompts. |
 | 2026-05-26 | @codex | Addressed PR #330 feedback by replacing the fixed mstream event ring size with a per-workstream `--event-limit` setting and validation coverage. |
 | 2026-05-24 | @codex | Addressed PR #330 re-review: replaced the lock-held request handler with split-phase shared execution, so SSH/tmux awaits happen outside the daemon state mutex. |
 | 2026-05-24 | @codex | Addressed PR #330 feedback: bounded `events` cursors, centralized handoff firing from explicit state changes, recruited-session tag persistence, spawned daemon connection handlers, `cwd` scan hydration, broadcast `updated-at`, and scan generation cleanup. |
@@ -336,7 +337,16 @@ Tasks:
     handoffs through the state-change path rather than only from `session mark`;
     this covers `send --set-state`, `recruit`, `leave --available`, `close`,
     and handoff destination updates.
-- [ ] 8.13 Add tests that silence, prompt heuristics, and missing output do not
+- [x] 8.13 Implement daemon-memory `mstream timer start/list/stop/fire` for
+  orchestrator self-wakeup prompts. Timers target explicit
+  `<host-alias>::<session>` tmux sessions, use typed `libs/tmux` send-key
+  delivery, report `next_fire_at`, `last_fired_at`, `fire_count`, and
+  `last_error`, and do not survive daemon restart.
+- [x] 8.14 Add CLI parser coverage for timer duration parsing and request
+  conversion.
+- [ ] 8.15 Add an integration smoke test for timer delivery against a local
+  tmux session.
+- [ ] 8.16 Add tests that silence, prompt heuristics, and missing output do not
   transition a session to `done`, `blocked`, or `needs-input`.
 
 Validation:
@@ -347,6 +357,10 @@ cargo test -p motlie-mstream handoff
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock send pr-323 local::codex-test --text "Report status." --enter
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock interrupt local::codex-test
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock session mark local::codex-test --state done --summary "manual smoke completed"
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer start pr-323-poll --every 5m --target local::codex-test --prompt "Wakeup: poll pr-323."
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer list
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer fire pr-323-poll
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer stop pr-323-poll
 ```
 
 ## Phase 9. Monitoring, Timelines, And Observation
@@ -466,7 +480,7 @@ Tasks:
 - [x] 11.2 Document daemon restart recovery with exact orchestrating-agent
   behavior: ask the human to restart/provide socket, then ask for host aliases
   and SSH URIs, reconnect, rescan.
-- [ ] 11.3 Update the project skill only after the implemented CLI has been
+- [x] 11.3 Update the project skill only after the implemented CLI has been
   validated, so the skill instructions match reality.
 - [ ] 11.4 Add examples for one submitter plus one reviewer workstream,
   including send, mark-done, handoff, and reviewer re-review.

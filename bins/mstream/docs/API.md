@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added daemon-owned `timer` commands for orchestrator self-wakeup prompts delivered to a tmux target. |
 | 2026-05-27 | @codex | Added live tmux activity refresh to `status` so orchestrators can detect active, quiet, idle, missing, or unknown sessions without direct SSH/tmux probes. |
 | 2026-05-26 | @codex | Added per-workstream `--event-limit` setting to replace the fixed event ring size while keeping 1000 as the default. |
 | 2026-05-24 | @codex | Addressed PR #330 re-review: request execution now snapshots state under short locks, performs SSH/tmux awaits outside the state mutex, then re-locks briefly to reconcile events and metadata. |
@@ -16,7 +17,8 @@
 `mstream`. It provides a Unix-domain socket daemon, JSONL client responses,
 strict `<host>::<session>` target parsing, in-memory workstreams, tmux session
 tags, state marking, send/interrupt/broadcast, handoffs, and bounded
-observation commands.
+observation commands. It also provides daemon-memory self-wakeup timers that
+send a configured prompt to an orchestrator tmux session on an interval.
 
 The first implementation keeps command/event history in an in-memory
 per-workstream ring buffer. `snapshot` and `summary-input` use bounded one-shot
@@ -130,6 +132,38 @@ mstream handoff cancel pr-324 h1
 If the source is already in the requested state, the handoff fires immediately
 unless `--only-on-transition` is supplied. Firing marks the destination `busy`,
 updates tags, sends the task, and emits `handoff_fired`.
+
+## Timers
+
+Timers solve the orchestrator wakeup problem when the agent harness has no
+first-class cron or scheduler. A timer lives in the daemon and periodically
+sends a configured prompt into a tmux target through `motlie-tmux` send-keys.
+Timer state is daemon memory only; daemon restart loses timers.
+
+```sh
+mstream timer start issue-337-poll \
+  --every 5m \
+  --target local::codex-orchestrator \
+  --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer."
+
+mstream timer list
+mstream timer fire issue-337-poll
+mstream timer stop issue-337-poll
+```
+
+`--every` accepts raw seconds, second suffixes such as `30s`, or minute
+suffixes such as `5m`. The target must use the normal
+`<host-alias>::<tmux-session-name>` syntax and the host must already be
+connected. `timer start` validates that the target exists before scheduling.
+
+Timer prompts default to sending Enter after the text, matching the
+orchestrator self-prompt use case. Use `--no-enter` when the text should be
+placed in the pane without submission.
+
+`timer fire` is a manual immediate trigger for smoke testing the target and
+prompt. It does not replace the next scheduled wakeup. `timer list` reports
+`next_fire_at`, `last_fired_at`, `fire_count`, `last_error`, and prompt length
+without echoing the prompt body.
 
 ## Observation
 
