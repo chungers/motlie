@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Clarified release-binary installation and removed the obsolete `session mark self` workflow. |
 | 2026-05-28 | @codex | Added daemon-owned `timer` commands for orchestrator self-wakeup prompts delivered to a tmux target. |
 | 2026-05-27 | @codex | Added live tmux activity refresh to `status` so orchestrators can detect active, quiet, idle, missing, or unknown sessions without direct SSH/tmux probes. |
 | 2026-05-26 | @codex | Added per-workstream `--event-limit` setting to replace the fixed event ring size while keeping 1000 as the default. |
@@ -25,19 +26,29 @@ per-workstream ring buffer. `snapshot` and `summary-input` use bounded one-shot
 tmux capture for joined sessions. Continuous OutputBus transcript ingestion and
 pane/process-state stuck hints remain implementation follow-ups.
 
+Install the release binary from the Motlie checkout before using this API:
+
+```sh
+cargo install --path bins/mstream --locked
+```
+
+Make sure Cargo's bin directory, usually `~/.cargo/bin`, is on `PATH` so
+`mstream` resolves to the installed binary. The examples below assume the
+release binary is available on `PATH`.
+
 ## Daemon
 
 ```sh
-cargo run -p motlie-mstream -- daemon start --socket /tmp/mstream.sock
-cargo run -p motlie-mstream -- --socket /tmp/mstream.sock daemon status
-cargo run -p motlie-mstream -- --socket /tmp/mstream.sock daemon stop
+mstream --socket /tmp/mstream.sock daemon start
+mstream --socket /tmp/mstream.sock daemon status
+mstream --socket /tmp/mstream.sock daemon stop
 ```
 
 `daemon start` daemonizes by default. Use `--foreground` for tests and manual
 debugging:
 
 ```sh
-cargo run -p motlie-mstream -- --socket /tmp/mstream.sock daemon start --foreground
+mstream --socket /tmp/mstream.sock daemon start --foreground
 ```
 
 The foreground daemon accepts each socket connection in its own task. Commands
@@ -113,8 +124,8 @@ command still sends the key and returns only the command result.
 marks explicit targets after observing durable evidence such as pushed commits,
 PRs, review comments, test output, or blockers. Collaborating agents do not
 have mstream access and should not be instructed to call mstream state commands.
-The `self` alias exists for local debugging or an orchestrator managing its own
-session, but project workflow should use explicit targets.
+There is no `self` alias; use explicit `<host>::<session>` targets so marks are
+auditable coordinator actions.
 
 Handoffs are daemon-memory edges:
 

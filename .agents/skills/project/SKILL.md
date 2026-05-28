@@ -61,6 +61,14 @@ Decision checkpoint:
 
 Client commands use JSONL stdout. The socket resolves from `--socket`, then `MSTREAM_SOCKET`, then `/tmp/mstream-${USER}.sock`.
 
+Install the release `mstream` binary on `PATH` from the Motlie checkout before orchestration:
+
+```sh
+cargo install --path bins/mstream --locked
+```
+
+Ensure Cargo's bin directory, usually `~/.cargo/bin`, is on `PATH`. Use the release binary name `mstream` in orchestration commands, not `cargo run` or `./target/debug/mstream`.
+
 Once assigned as orchestrator for an active workstream, keep the mstream daemon running across turns for the duration of that orchestration assignment. Do not stop and restart it after routine `list`, `status`, `summary-input`, or progress checks. Stop it only when the user tells you to, when the workstream is closed and no active orchestration remains, or when replacing a failed daemon instance.
 
 Use a stable explicit socket for the whole assignment:
@@ -97,7 +105,7 @@ Fallback only if the managed foreground exec session is unavailable or lost whil
 tmux new-session -d \
   -s mstream-daemon-${USER} \
   -c '<absolute-motlie-worktree>' \
-  './target/debug/mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground'
+  'mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground'
 mstream --socket /tmp/mstream-${USER}.sock daemon status
 ```
 

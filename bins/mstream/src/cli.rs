@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use clap::{Args, Parser, Subcommand};
 
 use crate::protocol::{
@@ -375,14 +375,8 @@ pub struct SessionMarkArgs {
 
 impl SessionMarkArgs {
     fn into_request(self) -> anyhow::Result<SessionMarkRequest> {
-        let target = if self.target == "self" {
-            env::var("MSTREAM_TARGET")
-                .map_err(|_| anyhow!("MSTREAM_TARGET is required when marking self"))?
-        } else {
-            self.target
-        };
         Ok(SessionMarkRequest {
-            target,
+            target: self.target,
             state: self.state,
             summary: self.summary,
         })

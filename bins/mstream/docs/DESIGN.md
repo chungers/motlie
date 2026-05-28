@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Removed `session mark self`; coordinator state marks now require explicit targets. |
 | 2026-05-28 | @codex | Added daemon-owned self-wakeup timers that send prompts to the orchestrator's tmux session. |
 | 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: handoff firing marks the destination busy, already-met handoffs fire immediately by default, and public cursors carry timeline generation for stale-cursor detection. |
 | 2026-05-22 | @codex | Aligned timeline dependency language with PR #326's concrete OutputBus timeline APIs: create-or-get, mutable filters, scoped markers, history ingest, stale handles, cleanup, and latest-cursor semantics. |
@@ -490,11 +491,10 @@ Managed agents do not have mstream access and must not be asked to call
 `mstream` themselves. They should report progress, blockers, questions, PR
 links, pushed commits, and review comments plainly in their normal output.
 `mstream new` still passes non-socket environment context so the session can
-identify its workstream:
+identify its workstream and role:
 
 ```text
 MSTREAM_WORKSTREAM=pr-322
-MSTREAM_TARGET=amd1::gpt55-mmux-reviewer
 MSTREAM_ROLE=reviewer
 ```
 
@@ -507,9 +507,8 @@ mstream session mark amd1::gpt55-mmux-reviewer --state blocked --summary "Cannot
 mstream session mark amd1::gpt55-mmux-reviewer --state needs-input --summary "Needs API naming decision from the user."
 ```
 
-`self` is reserved for local debugging or for an orchestrator managing its own
-session; it is not the collaborator reporting protocol. A successful mark
-updates `@mstream/state`, `@mstream/last-report-kind`,
+`session mark` requires an explicit `<host>::<session>` target. A successful
+mark updates `@mstream/state`, `@mstream/last-report-kind`,
 `@mstream/last-report-summary`, and `@mstream/updated-at`, and emits a
 structured event:
 
@@ -517,9 +516,9 @@ structured event:
 {"type":"event","kind":"completed","workstream":"pr-322","target":"amd1::gpt55-mmux-reviewer","state":"done","summary":"Implemented requested fixes."}
 ```
 
-All project workflow marks should use explicit targets and be made by the
-orchestrator after observing evidence. A future JSONL extension may add
-`source:"coordinator"` for auditability.
+All project workflow marks are made by the orchestrator after observing
+evidence. A future JSONL extension may add `source:"coordinator"` for
+auditability.
 
 Output silence, prompt-looking text, or unchanged tmux history can create
 `idle` or `stuck_hint` status fields, but cannot transition an agent to

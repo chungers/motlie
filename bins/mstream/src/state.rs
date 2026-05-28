@@ -545,7 +545,7 @@ impl DaemonState {
             )
         };
         let command = bootstrap_command(&request.cwd, &request.agent);
-        let env = session_environment(&request.workstream, &target, &request.role)?;
+        let env = session_environment(&request.workstream, &request.role)?;
         let opts = CreateSessionOptions {
             command: Some(command),
             initial_environment: env,
@@ -2598,14 +2598,9 @@ fn bootstrap_command(cwd: &Path, agent: &str) -> String {
     )
 }
 
-fn session_environment(
-    workstream: &str,
-    target: &SessionTarget,
-    role: &str,
-) -> anyhow::Result<Vec<SessionEnvVar>> {
+fn session_environment(workstream: &str, role: &str) -> anyhow::Result<Vec<SessionEnvVar>> {
     Ok(vec![
         SessionEnvVar::new("MSTREAM_WORKSTREAM", workstream)?,
-        SessionEnvVar::new("MSTREAM_TARGET", target.to_string())?,
         SessionEnvVar::new("MSTREAM_ROLE", role)?,
     ])
 }
@@ -2881,15 +2876,12 @@ mod tests {
     }
 
     #[test]
-    fn session_environment_does_not_include_orchestrator_socket() {
-        let target: SessionTarget = "local::worker".parse().expect("target");
-        let vars = session_environment("pr-324", &target, "reviewer").expect("environment");
+    fn session_environment_is_context_only() {
+        let vars = session_environment("pr-324", "reviewer").expect("environment");
         let names = vars.iter().map(SessionEnvVar::name).collect::<Vec<_>>();
 
-        assert_eq!(
-            names,
-            vec!["MSTREAM_WORKSTREAM", "MSTREAM_TARGET", "MSTREAM_ROLE"]
-        );
+        assert_eq!(names, vec!["MSTREAM_WORKSTREAM", "MSTREAM_ROLE"]);
+        assert!(!names.contains(&"MSTREAM_TARGET"));
         assert!(!names.contains(&"MSTREAM_SOCKET"));
     }
 
