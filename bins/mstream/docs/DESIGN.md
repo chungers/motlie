@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added issue #344 input-quiet timer delivery guard: timed prompts defer when attached-client input was recent, while read-only polling remains unaffected. |
 | 2026-05-28 | @codex | Adopted issue #337 tmux Fleet abstractions for host registration, target specs/resolved targets, and batch session tags while keeping workstream business logic in mstream. |
 | 2026-05-28 | @codex | Removed `session mark self`; coordinator state marks now require explicit targets. |
 | 2026-05-28 | @codex | Added daemon-owned self-wakeup timers that send prompts to the orchestrator's tmux session. |
@@ -110,6 +111,9 @@ unstick collaborators.
 - FR19: Support daemon-owned timers that periodically send a configured prompt
   to a tmux target, primarily the orchestrator's own agent session, so the
   orchestrator can wake itself to poll and unblock workstreams.
+- FR20: Guard unattended timer delivery against recent attached-client input so
+  a self-wakeup prompt does not corrupt text a human is typing in the target
+  session.
 
 ### State And Recovery Requirements
 
@@ -152,6 +156,10 @@ unstick collaborators.
 - NFR9: Timer delivery must use typed `libs/tmux` targeting and send-key
   primitives. The target must be explicit; `mstream` must not infer or mutate
   the orchestrator session identity.
+- NFR10: Input guards apply only to key/text delivery. Read-only polling
+  commands such as `status`, `events`, `snapshot`, `summary-input`,
+  `timer list`, `hosts`, `scan`, `list`, and `show` must continue to run
+  without waiting for a quiet input window.
 
 ## Selected Design
 
@@ -610,11 +618,20 @@ configurable with `--submit-retries` and `--submit-retry-delay-ms`. Retries
 send only extra Enter keys, never the prompt text, so the duplicate-submission
 risk is limited to the submit action.
 
-Timers are intentionally best-effort. If the target TUI is busy, tmux queues
-input for that pane according to normal PTY behavior. If the target is gone,
-the host is disconnected, or send-keys fails, `mstream` records `last_error`
-and tries again on the next tick until the timer is stopped. `timer fire` is an
-immediate smoke-test trigger and does not replace the next scheduled tick.
+Timers default to an attached-client input guard. Before sending prompt text or
+submit retries, `mstream` asks `libs/tmux` for the target session's most recent
+attached-client activity. If input was observed within `--input-quiet-for`
+(default `10s`), the timer does not send keys, increments `defer_count`, records
+`last_deferred_at`, `last_defer_reason=recent_client_input`, records the latest
+input timestamp, and reschedules the next attempt after the remaining quiet
+window. `--no-input-guard` disables this behavior for cases where collision
+avoidance is not wanted.
+
+Timers are intentionally best-effort. If the target is gone, the host is
+disconnected, or the activity query/send-keys path fails, `mstream` records
+`last_error` and tries again on the next tick until the timer is stopped.
+`timer fire` is an immediate smoke-test trigger and does not replace the next
+scheduled tick. It follows the same input-quiet guard.
 
 Timers do not survive daemon restart. They are not a substitute for status
 polling, workstream events, review-loop judgment, or future alerting. They are
@@ -669,6 +686,11 @@ mstream events pr-322 --after <cursor> --limit 200
 mstream snapshot pr-322 --after <cursor> --max-chars 12000
 mstream summary-input pr-322 --since 15m --max-chars 12000
 ```
+
+Read-only observation commands are not gated by timer input quieting. The guard
+exists only to prevent unattended key/text injection into a session with recent
+attached-client input; it must not slow down workstream polling or stuck-agent
+detection.
 
 `status` reports current daemon knowledge plus a live tmux activity refresh:
 connected hosts, participating sessions, explicit `@mstream/state`, last output

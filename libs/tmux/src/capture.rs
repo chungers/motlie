@@ -1141,7 +1141,7 @@ mod tests {
         // Pre and post snapshots are identical → clean fidelity
         let mock = MockTransport::new()
             .with_response("capture-pane", "content\n")
-            .with_response("list-clients", "200\t50\tbuild\n")
+            .with_response("list-clients", "200 50 build 100 0 /dev/ttys001\n")
             .with_response("display-message", "80\t24\t100\t2000\n");
         let transport = TransportKind::Mock(mock);
         let opts = CaptureOptions {

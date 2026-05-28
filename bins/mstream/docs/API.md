@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added timer input-quiet guards so scheduled prompt delivery defers instead of colliding with recent attached-client input. |
 | 2026-05-28 | @codex | Clarified release-binary installation and removed the obsolete `session mark self` workflow. |
 | 2026-05-28 | @codex | Added daemon-owned `timer` commands for orchestrator self-wakeup prompts delivered to a tmux target. |
 | 2026-05-27 | @codex | Added live tmux activity refresh to `status` so orchestrators can detect active, quiet, idle, missing, or unknown sessions without direct SSH/tmux probes. |
@@ -19,7 +20,8 @@
 strict `<host>::<session>` target parsing, in-memory workstreams, tmux session
 tags, state marking, send/interrupt/broadcast, handoffs, and bounded
 observation commands. It also provides daemon-memory self-wakeup timers that
-send a configured prompt to an orchestrator tmux session on an interval.
+send a configured prompt to an orchestrator tmux session on an interval, with
+default input-quiet guarding to avoid colliding with attached human typing.
 
 The first implementation keeps command/event history in an in-memory
 per-workstream ring buffer. `snapshot` and `summary-input` use bounded one-shot
@@ -176,9 +178,19 @@ orchestrator self-prompt use case. They also default to one extra Enter after
 keys and never re-send prompt text. Use `--no-enter` when the text should be
 placed in the pane without submission; this disables submit retries.
 
+Timer delivery also defaults to `--input-quiet-for 10s`. When attached-client
+input in the target session is newer than that quiet window, the timer defers
+without sending prompt text or Enter retries, records
+`last_defer_reason=recent_client_input`, and schedules the next attempt after
+the remaining quiet time. Use `--input-quiet-for <duration>` to tune the guard,
+or `--no-input-guard` when unattended delivery should not wait for a quiet
+window.
+
 `timer fire` is a manual immediate trigger for smoke testing the target and
-prompt. It does not replace the next scheduled wakeup. `timer list` reports
-`next_fire_at`, `last_fired_at`, `fire_count`, `last_error`,
+prompt. It follows the same input-quiet guard and does not replace the next
+scheduled wakeup. `timer list` reports `next_fire_at`, `last_fired_at`,
+`fire_count`, `defer_count`, `last_deferred_at`, `last_defer_reason`,
+`last_input_activity_at`, `input_quiet_for_secs`, `last_error`,
 `submit_retries`, `submit_retry_delay_ms`, and prompt length without echoing
 the prompt body.
 
@@ -197,6 +209,9 @@ mstream summary-input pr-324 --max-chars 12000
 the tmux library's session-level maximum of `session_activity` and
 `window_activity`, so it reflects either attached-client input or program
 output. Use this command for liveness instead of direct SSH/tmux probing.
+Timer input guards do not apply to observation commands; `status`, `events`,
+`snapshot`, `summary-input`, `timer list`, `hosts`, `scan`, `list`, and `show`
+remain read-only polling operations.
 
 Each status agent includes:
 
