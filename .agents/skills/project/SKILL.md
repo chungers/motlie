@@ -81,28 +81,27 @@ mstream --socket /tmp/mstream-${USER}.sock summary-input <workstream> --max-char
 
 Use the concrete host aliases, SSH URIs, work roots, and workstream names supplied by the user or recovered from durable context. Do not rediscover basic CLI shapes with `--help` during normal orchestration; keep this playbook as the default sequence and inspect help only when a command actually fails because the local binary changed.
 
-Start the daemon when the user asks you to operate mstream and no daemon is running. In Codex/harness sandbox environments, the daemonized `mstream daemon start` and shell-background `nohup ... &` patterns may report success and then be reaped as soon as the launching command exits. Use a dedicated tmux session running the daemon in foreground; this is the known-good pattern:
+Start the daemon when the user asks you to operate mstream and no daemon is running. In Codex/harness sandbox environments, use foreground mode in a managed sandbox exec session as the one normal startup method:
 
 ```sh
-tmux new-session -d \
-  -s mstream-daemon-${USER} \
-  -c '<absolute-motlie-worktree>' \
-  'mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground'
-mstream --socket /tmp/mstream-${USER}.sock daemon status
+mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground
 ```
 
-If the binary is not on `PATH`, use the worktree build artifact in the tmux command:
+Keep that foreground exec session running and issue client commands from separate exec calls. Record the foreground exec session id in your context if available. This was validated locally: daemonized `mstream daemon start` returned success but was immediately unreachable, while foreground mode stayed reachable from separate client commands after a delay.
+
+Do not use `mstream daemon start` or `nohup ... &` as the normal Codex/harness playbook; they may be reaped by the harness even after reporting success. Outside Codex/harness, daemonized `mstream daemon start` is still a valid human/manual mode, but it is not the orchestrator playbook.
+
+Fallback only if the managed foreground exec session is unavailable or lost while the daemon must survive for timers or cross-turn orchestration: run the same foreground daemon inside a dedicated tmux session.
 
 ```sh
 tmux new-session -d \
   -s mstream-daemon-${USER} \
   -c '<absolute-motlie-worktree>' \
   './target/debug/mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground'
+mstream --socket /tmp/mstream-${USER}.sock daemon status
 ```
 
-Before creating the daemon session, use `mstream daemon status` on the chosen socket. If it is already running, reuse it. If it is unreachable but the daemon tmux session name already exists, inspect or replace that daemon session rather than starting multiple daemons on the same socket.
-
-Always use the same explicit `--socket` value for the full orchestration run once chosen. Do not stop the daemon just because one user request completes; keep it alive until the orchestration assignment is closed or the user asks you to stop it. If `daemon status` says `daemon_unreachable` after a start attempt, treat that as a startup failure and fix the tmux-hosted foreground daemon before issuing workstream commands.
+Before starting any daemon path, use `mstream daemon status` on the chosen socket. If it is already running, reuse it. Always use the same explicit `--socket` value for the full orchestration run once chosen. Do not stop the daemon just because one user request completes; keep it alive until the orchestration assignment is closed or the user asks you to stop it.
 
 When assigned as orchestrator and the harness has no first-class cron, start a
 daemon-owned self-wakeup timer targeted at your own tmux session. The timer
