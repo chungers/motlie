@@ -4736,7 +4736,7 @@ external policy engines.
 - `Fleet` can connect to multiple hosts concurrently with per-host isolation
 - `Fleet::output_bus()` exposes unified stream aggregation for all monitored hosts
 - `Fleet` can route control actions back to the correct bound host/target
-- Workstream bindings make stable target lookup possible without config DSLs
+- Target alias bindings make stable target lookup possible without config DSLs
 
 ### Phase 3: Agent-Facing API + CLI / Examples
 
