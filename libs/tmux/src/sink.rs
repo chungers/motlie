@@ -127,6 +127,43 @@ pub struct SinkFilter {
     pub pane: Option<String>,
 }
 
+/// Scope for timeline markers such as gaps and upstream discontinuities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineMarkerScope {
+    /// Host alias the marker applies to.
+    pub host: String,
+    /// Session name the marker applies to, when scoped to one session.
+    pub session: Option<String>,
+}
+
+impl TimelineMarkerScope {
+    /// Scope a marker to one host/session pair.
+    pub fn host_session(host: impl Into<String>, session: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            session: Some(session.into()),
+        }
+    }
+
+    /// Scope a marker to an entire host.
+    pub fn host(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            session: None,
+        }
+    }
+}
+
+/// Options for timeline/history consumers that subscribe to the output bus.
+///
+/// `Fleet` only helps construct the target filters. Storage and retention remain
+/// owned by output/timeline consumers.
+#[derive(Debug, Clone, Default)]
+pub struct TimelineOptions {
+    /// OutputBus filters used to select timeline sources.
+    pub filters: Vec<SinkFilter>,
+}
+
 impl SinkFilter {
     /// Filter matching a specific host (exact match).
     pub fn for_host(host: &str) -> Self {

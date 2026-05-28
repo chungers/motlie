@@ -24,7 +24,10 @@ pub use filter::{
     clean_line, diff_new_lines, is_tui_chrome, AgentTuiFilter, ContentFilter, RawFilter,
     ShellFilter,
 };
-pub use fleet::{Fleet, HostStatus, SessionMonitorStatus};
+pub use fleet::{
+    Fleet, FleetSessionInfo, FleetSessionSnapshot, FleetSnapshotOptions, FleetTargetSpec,
+    HostStatus, ResolvedFleetTarget, SessionMonitorStatus,
+};
 pub use host::{
     ExecHandle, HostEvent, HostEventStream, HostHandle, PaneTargetTree, SessionEnvironment,
     SessionStatus, SessionStatusOverrides, SessionStatusSnapshot, SessionTags, SessionTargetTree,
@@ -37,7 +40,7 @@ pub use sink::{
     CallbackSink, FlushPolicy, HistoryEntry, HistoryHandle, HistoryOptions, HistorySnapshot,
     JoinedStream, LabelFormat, OutputBus, PipeHandle, PollHistory, RenderMode, SinkEvent,
     SinkFilter, SinkId, SinkKind, SourceAccumulator, SourceLabel, StreamChunk, Subscription,
-    TargetOutput,
+    TargetOutput, TimelineMarkerScope, TimelineOptions,
 };
 pub use sinks::stdio::{StdioFormat, StdioSink};
 pub use transport::{
