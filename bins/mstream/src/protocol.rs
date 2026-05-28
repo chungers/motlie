@@ -9,6 +9,7 @@ pub const DEFAULT_STATUS_ACTIVE_WINDOW_SECS: u64 = 30;
 pub const DEFAULT_STATUS_IDLE_AFTER_SECS: u64 = 300;
 pub const DEFAULT_TIMER_SUBMIT_RETRIES: u8 = 1;
 pub const DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS: u64 = 750;
+pub const DEFAULT_TIMER_INPUT_QUIET_FOR_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -258,6 +259,8 @@ pub struct TimerStartRequest {
     pub submit_retries: u8,
     #[serde(default = "default_timer_submit_retry_delay_ms")]
     pub submit_retry_delay_ms: u64,
+    #[serde(default = "default_timer_input_quiet_for")]
+    pub input_quiet_for_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +284,10 @@ fn default_timer_submit_retries() -> u8 {
 
 fn default_timer_submit_retry_delay_ms() -> u64 {
     DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS
+}
+
+fn default_timer_input_quiet_for() -> Option<u64> {
+    Some(DEFAULT_TIMER_INPUT_QUIET_FOR_SECS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

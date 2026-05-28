@@ -593,6 +593,36 @@ impl HostHandle {
         discovery::list_clients_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Summarize attached-client input activity for one session.
+    pub async fn session_client_activity(&self, session: &str) -> Result<SessionClientActivity> {
+        let clients = self.list_clients().await?;
+        let mut attached_clients = 0usize;
+        let mut writable_clients = 0usize;
+        let mut latest_client_activity = None;
+
+        for client in clients
+            .into_iter()
+            .filter(|client| client.session == session)
+        {
+            attached_clients += 1;
+            if !client.readonly {
+                writable_clients += 1;
+            }
+            latest_client_activity = Some(
+                latest_client_activity
+                    .unwrap_or(client.activity)
+                    .max(client.activity),
+            );
+        }
+
+        Ok(SessionClientActivity {
+            session: session.to_string(),
+            attached_clients,
+            writable_clients,
+            latest_client_activity,
+        })
+    }
+
     /// Set global `history-limit` (DC20, Phase 1.9b).
     ///
     /// **Must be set before creating sessions/panes.** Existing panes
@@ -3100,6 +3130,38 @@ mod tests {
         let host = mock_host(mock);
         let target = host.session_by_id("$1").await.unwrap();
         assert!(target.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_client_activity_summarizes_matching_clients() {
+        let mock = MockTransport::new().with_response(
+            "list-clients",
+            "200 50 build 100 0 /dev/ttys001\n\
+             180 40 build 120 1 /dev/ttys002\n\
+             160 30 other 300 0 /dev/ttys003\n",
+        );
+        let host = mock_host(mock);
+
+        let activity = host.session_client_activity("build").await.unwrap();
+
+        assert_eq!(activity.session, "build");
+        assert_eq!(activity.attached_clients, 2);
+        assert_eq!(activity.writable_clients, 1);
+        assert_eq!(activity.latest_client_activity, Some(120));
+    }
+
+    #[tokio::test]
+    async fn session_client_activity_handles_no_attached_clients() {
+        let mock =
+            MockTransport::new().with_response("list-clients", "200 50 other 100 0 /dev/ttys001\n");
+        let host = mock_host(mock);
+
+        let activity = host.session_client_activity("build").await.unwrap();
+
+        assert_eq!(activity.session, "build");
+        assert_eq!(activity.attached_clients, 0);
+        assert_eq!(activity.writable_clients, 0);
+        assert_eq!(activity.latest_client_activity, None);
     }
 
     #[tokio::test]
