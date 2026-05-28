@@ -1,4 +1,4 @@
-use std::cmp::{Ordering, min};
+use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 
 use motlie_tmux::{HostHandle, SessionInfo};

@@ -220,11 +220,9 @@ async fn event_loop(
                     state.input.insert(state.cursor_pos, c);
                     state.cursor_pos += 1;
                 }
-                KeyCode::Backspace => {
-                    if state.cursor_pos > 0 {
-                        state.cursor_pos -= 1;
-                        state.input.remove(state.cursor_pos);
-                    }
+                KeyCode::Backspace if state.cursor_pos > 0 => {
+                    state.cursor_pos -= 1;
+                    state.input.remove(state.cursor_pos);
                 }
                 // Any modifier + Arrow resizes the pane split.
                 // (Ctrl+Arrow is often captured by macOS Mission Control,
@@ -246,10 +244,8 @@ async fn event_loop(
                 KeyCode::Left => {
                     state.cursor_pos = state.cursor_pos.saturating_sub(1);
                 }
-                KeyCode::Right => {
-                    if state.cursor_pos < state.input.len() {
-                        state.cursor_pos += 1;
-                    }
+                KeyCode::Right if state.cursor_pos < state.input.len() => {
+                    state.cursor_pos += 1;
                 }
                 KeyCode::Up => {
                     if state.cmd_history.is_empty() {
