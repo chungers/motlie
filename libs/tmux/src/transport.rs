@@ -1954,10 +1954,8 @@ impl SshTransport {
                     russh::ChannelMsg::Data { ref data } => {
                         stdout.extend_from_slice(data);
                     }
-                    russh::ChannelMsg::ExtendedData { ref data, ext } => {
-                        if ext == 1 {
-                            stderr.extend_from_slice(data);
-                        }
+                    russh::ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                        stderr.extend_from_slice(data);
                     }
                     russh::ChannelMsg::ExitStatus { exit_status } => {
                         exit_code = Some(exit_status);

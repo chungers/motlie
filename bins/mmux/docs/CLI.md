@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-342-og | Removed positional `--alias` overrides; SSH targets now use endpoint identity labels including user, host, non-default port, and non-default tmux socket. |
 | 2026-05-20 | @codex | Added `--alias` host-label overrides for the top status host legend, with positional mapping across localhost and SSH URI targets and empty-entry fallback to discovered labels. |
 | 2026-05-16 | @codex-tmux-tl | Focused modal text fields now keep Left/Right inside the field for cursor movement and mid-string editing; modal buttons only take Left/Right when a button is focused. |
 | 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts: `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
@@ -86,12 +87,12 @@ mmux -p
 mmux --landscape
 mmux -l
 mmux --script
-mmux --alias=local-prod                           # override localhost display label
 mmux ssh://user@host                              # single SSH host
-mmux --alias=local,remote ssh://user@host         # override local + first SSH label
+mmux ssh://david@amd1 ssh://alice@amd1            # endpoint labels distinguish users
+mmux ssh://david@amd1:2222 ssh://david@amd1       # endpoint labels distinguish ports
+mmux 'ssh://david;socket-name=build@amd1'         # endpoint label includes socket name
 mmux 'ssh://user@host?identity-file=/home/user/.ssh/id_ed25519'
 mmux ssh://a.example.com ssh://b.example.com      # multi-host (issue #235)
-mmux --alias=local,,b ssh://a.example.com ssh://b.example.com
 mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 ```
 
@@ -104,7 +105,6 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 | `--portrait`, `-p` | Force portrait layout. Body is split into `T` session list and `B` detail pane. Mutually exclusive with `--landscape` / `-l`. |
 | `--landscape`, `-l` | Force landscape/normal layout. Body is split into `L` session list and `R` detail pane. Mutually exclusive with `--portrait` / `-p`. |
 | `--script` | Select a session, print exactly `<name>\n` to stdout, and exit 0 without attaching. Cancel exits non-zero with empty stdout. |
-| `--alias=<list>` | Comma-separated display-label overrides in configured-host order: localhost is position 0, the first SSH URI is position 1, and so on. Empty entries keep the default discovered label. |
 | `--portrait --landscape` | Invalid. Startup error. |
 
 The v1 target form is positional only. There is no `--target` flag in v1.
@@ -221,11 +221,11 @@ mmux ssh://user@host1 ssh://user@host2 ssh://user@host3
 
 - Top status bar shows a host-color legend after `mmux` instead of the usual
   `<hostname> | <ip>`, for example `mmux ■ alpha ■ beta`. Host labels are
-  tmux's own `#{host}` values unless `--alias` supplies a non-empty override
-  for that configured host position. SSH URI hostnames are retained only as
-  aliases. If an SSH host is not connected yet, its override label is shown
-  when provided; otherwise its URI hostname remains in the legend in red while
-  mmux retries in the background.
+  endpoint identities for SSH targets, such as `david@amd1`,
+  `david@amd1:2222`, or `david@amd1/socket:build`. The probed tmux hostname is
+  not allowed to replace the SSH endpoint label. If an SSH host is not
+  connected yet, its endpoint label remains in the legend in red while mmux
+  retries in the background.
 - Session list rows insert the host's compact colored square between the
   attached marker and the session name:
 

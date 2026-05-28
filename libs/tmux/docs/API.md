@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-342-og | Added `SshConfig::endpoint_alias()` and `connect_with_endpoint_alias()` for stable SSH endpoint display and HostHandle aliases. |
 | 2026-05-28 | @codex | Added attached-client activity fields to `ClientInfo` and `HostHandle::session_client_activity()` for policy-light input-recency consumers such as mstream timer guards. |
 | 2026-05-28 | @codex | Added `SshConfig::connect_with_alias()` and `Fleet::unregister()` so higher-level orchestrators can use stable routing aliases while keeping Fleet as the host registry; kept timeline lifecycle methods on `OutputBus` instead of duplicating them on `Fleet`; removed historical workstream/short-name aliases in favor of explicit target-alias APIs. |
 | 2026-05-27 | @gpt55-337-og | Added Fleet target APIs for issue #337: `FleetTargetSpec`, target aliases, cross-host session inventory with tags, batch `SessionTags` writes/removals, idempotent target monitoring, and timeline filter/scope helpers. |
@@ -429,6 +430,21 @@ Transport selection is automatic:
 
 The `connect()` method consumes `self`. Socket configuration is propagated to
 the `HostHandle` for tmux commands (`-L` or `-S` flags).
+
+`connect()` keeps the historical host-only alias. Binaries that need endpoint
+identity for display or routing can use `endpoint_alias()` and
+`connect_with_endpoint_alias()`:
+
+```rust
+let cfg = SshConfig::parse("ssh://david;socket-name=build@amd1:2222")?;
+assert_eq!(cfg.endpoint_alias(), "david@amd1:2222/socket:build");
+
+let host = cfg.connect_with_endpoint_alias().await?;
+assert_eq!(host.host_alias(), "david@amd1:2222/socket:build");
+```
+
+Endpoint aliases include SSH user, host, non-default port, and non-default
+tmux socket identity. They intentionally omit `identity-file`.
 
 ---
 

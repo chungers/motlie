@@ -10,7 +10,7 @@ use std::str::FromStr;
 use crate::error::{Error, Result};
 
 use crate::host::HostHandle;
-use crate::transport::{LocalTransport, SshConfig, SshTransport, TransportKind};
+use crate::transport::{LocalTransport, SshConfig, SshTransport, TransportKind, SSH_DEFAULT_PORT};
 use crate::types::{HostKeyPolicy, TmuxSocket};
 
 /// Canonical URI component names that cannot appear as parameters.
@@ -361,6 +361,49 @@ impl SshConfig {
         result
     }
 
+    /// Stable, human-readable endpoint identity for display and Fleet/output aliases.
+    ///
+    /// The alias includes SSH user, host, non-default port, and non-default tmux
+    /// socket identity. It intentionally omits identity-file because key paths are
+    /// sensitive and too noisy for labels.
+    pub fn endpoint_alias(&self) -> String {
+        let mut alias = String::new();
+
+        if !self.user().is_empty() {
+            alias.push_str(self.user());
+            alias.push('@');
+        }
+
+        let host = self.host();
+        if host.contains(':') {
+            alias.push('[');
+            alias.push_str(host);
+            alias.push(']');
+        } else {
+            alias.push_str(host);
+        }
+
+        if self.port() != SSH_DEFAULT_PORT {
+            alias.push(':');
+            alias.push_str(&self.port().to_string());
+        }
+
+        if let Some(socket) = self.socket() {
+            match socket {
+                TmuxSocket::Name(name) => {
+                    alias.push_str("/socket:");
+                    alias.push_str(name);
+                }
+                TmuxSocket::Path(path) => {
+                    alias.push_str("/socket-path:");
+                    alias.push_str(path);
+                }
+            }
+        }
+
+        alias
+    }
+
     /// Connect and return a HostHandle.
     ///
     /// Transport selection:
@@ -372,6 +415,12 @@ impl SshConfig {
     /// returns an error if empty.
     pub async fn connect(self) -> Result<HostHandle> {
         let alias = self.host().to_string();
+        self.connect_with_alias(&alias).await
+    }
+
+    /// Connect using `endpoint_alias()` as the HostHandle alias.
+    pub async fn connect_with_endpoint_alias(self) -> Result<HostHandle> {
+        let alias = self.endpoint_alias();
         self.connect_with_alias(&alias).await
     }
 
@@ -733,6 +782,57 @@ mod tests {
         let cfg = SshConfig::parse("ssh://user@[::1]:2222").unwrap();
         assert_eq!(cfg.host(), "::1");
         assert_eq!(cfg.port(), 2222);
+    }
+
+    #[test]
+    fn endpoint_alias_includes_user_host_and_non_default_port() {
+        let cfg = SshConfig::parse("ssh://david@amd1:2222").unwrap();
+        assert_eq!(cfg.endpoint_alias(), "david@amd1:2222");
+    }
+
+    #[test]
+    fn endpoint_alias_distinguishes_users_on_same_host() {
+        let david = SshConfig::parse("ssh://david@amd1").unwrap();
+        let alice = SshConfig::parse("ssh://alice@amd1").unwrap();
+
+        assert_eq!(david.endpoint_alias(), "david@amd1");
+        assert_eq!(alice.endpoint_alias(), "alice@amd1");
+        assert_ne!(david.endpoint_alias(), alice.endpoint_alias());
+    }
+
+    #[test]
+    fn endpoint_alias_includes_socket_identity() {
+        let named = SshConfig::parse("ssh://david;socket-name=build@amd1").unwrap();
+        assert_eq!(named.endpoint_alias(), "david@amd1/socket:build");
+
+        let path = SshConfig::parse("ssh://david@amd1/tmp/tmux.sock").unwrap();
+        assert_eq!(
+            path.endpoint_alias(),
+            "david@amd1/socket-path:/tmp/tmux.sock"
+        );
+    }
+
+    #[test]
+    fn endpoint_alias_omits_identity_file() {
+        let cfg = SshConfig::parse("ssh://david@amd1?identity-file=/Users/david/.ssh/motliehost")
+            .unwrap();
+        assert_eq!(cfg.endpoint_alias(), "david@amd1");
+    }
+
+    #[test]
+    fn endpoint_alias_brackets_ipv6_hosts() {
+        let cfg = SshConfig::parse("ssh://user@[::1]:2222").unwrap();
+        assert_eq!(cfg.endpoint_alias(), "user@[::1]:2222");
+    }
+
+    #[tokio::test]
+    async fn connect_with_endpoint_alias_sets_host_alias() {
+        let host = SshConfig::parse("ssh://localhost")
+            .unwrap()
+            .connect_with_endpoint_alias()
+            .await
+            .unwrap();
+        assert_eq!(host.host_alias(), "localhost");
     }
 
     #[test]

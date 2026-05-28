@@ -549,7 +549,6 @@ struct Cli {
     portrait: bool,
     landscape: bool,
     script: bool,
-    alias: Option<String>,
 }
 ```
 
@@ -557,10 +556,10 @@ Validation rules:
 
 - `--script` prints the selected session name to stdout and exits without
   attaching
-- `--alias=<list>` is an optional comma-separated display-label override list;
-  position 0 maps to localhost and position `i + 1` maps to SSH URI `i`
-- empty `--alias` entries, such as the middle entry in `--alias=foo,,baz`, do
-  not override the corresponding host's discovered/default label
+- `--alias` is not accepted; SSH targets use endpoint identity labels from
+  `motlie_tmux::SshConfig::endpoint_alias()`
+- SSH endpoint labels include user, host, non-default port, and non-default
+  tmux socket identity; they omit `identity-file`
 - without `--script`, the selector attaches and re-enters after detach when the
   attach child succeeds or the selected session still exists
 - default attach/re-entry keeps selected session/list index, layout mode, pane
