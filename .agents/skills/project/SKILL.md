@@ -530,6 +530,10 @@ the installed binary supports it:
 mstream events <workstream> --limit 50 --readable
 ```
 
+This prints plain text in current mstream builds. The underlying daemon record
+uses an `events_readable.text` field, but the CLI unwraps it before writing
+stdout.
+
 Fall back to normal JSONL `events` and summarize it yourself only when
 `--readable` is unavailable.
 

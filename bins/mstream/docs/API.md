@@ -217,7 +217,9 @@ length without echoing the prompt body.
 
 `close --stop-timers` stops timers scoped to the closing workstream.
 `close --standby-agents` sends a standby message to joined sessions before
-freeing them.
+freeing them. Standby send attempts are recorded in the workstream timeline as
+`standby_sent` or `standby_failed`; failed standby sends are reported in
+`standby_failed` and do not abort the rest of closeout.
 
 ## Observation
 
@@ -257,12 +259,13 @@ structured `cursor_stale` JSONL error. Bounded `events --limit N` responses
 return a cursor that advances only to the last returned event, not to the
 workstream watermark.
 
-`events --readable` keeps the request/response on JSONL but returns an
-`events_readable` record with a compact `text` field suitable for human-facing
-summaries. The default `events` response remains structured JSON.
+`events --readable` prints a compact plain-text timeline for human-facing
+summaries. The daemon wire response still carries an `events_readable` record
+with a `text` field, but the CLI unwraps that field before writing stdout. The
+default `events` response remains structured JSONL.
 
-All machine-facing output is JSONL on stdout. Errors are also JSONL records,
-for example:
+Machine-facing output is JSONL on stdout except for the explicit human-readable
+`events --readable` mode. Errors are also JSONL records, for example:
 
 ```jsonl
 {"type":"error","kind":"daemon_unreachable","message":"daemon unreachable at /tmp/mstream.sock; start the daemon or provide --socket"}

@@ -8,6 +8,7 @@ mod tags;
 mod timeline;
 
 use clap::Parser;
+use serde_json::Value;
 
 use cli::{Cli, Command, DaemonCommand};
 
@@ -40,7 +41,7 @@ async fn run() -> anyhow::Result<i32> {
         command => {
             let request = command.into_request()?;
             match client::send_request(&socket, &request).await {
-                Ok(records) => jsonl::print_records(&records)?,
+                Ok(records) => print_client_records(&records)?,
                 Err(err) => {
                     let record = jsonl::error(
                         "daemon_unreachable",
@@ -54,4 +55,17 @@ async fn run() -> anyhow::Result<i32> {
     }
 
     Ok(0)
+}
+
+fn print_client_records(records: &[Value]) -> anyhow::Result<()> {
+    for record in records {
+        if record.get("type").and_then(Value::as_str) == Some("events_readable") {
+            if let Some(text) = record.get("text").and_then(Value::as_str) {
+                println!("{text}");
+                continue;
+            }
+        }
+        println!("{}", serde_json::to_string(record)?);
+    }
+    Ok(())
 }
