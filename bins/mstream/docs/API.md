@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-324-330-og | Added issue #347 closeout ergonomics: `timer --self`, workstream-scoped timers, readable events, and close-time timer/standby flags. |
 | 2026-05-28 | @codex | Added timer input-quiet guards so scheduled prompt delivery defers instead of colliding with recent attached-client input. |
 | 2026-05-28 | @codex | Clarified release-binary installation and removed the obsolete `session mark self` workflow. |
 | 2026-05-28 | @codex | Added daemon-owned `timer` commands for orchestrator self-wakeup prompts delivered to a tmux target. |
@@ -72,6 +73,7 @@ mstream open pr-324 --title "mstream implementation" --goal "Implement PR 324" -
 mstream list
 mstream show pr-324
 mstream close pr-324 --summary "done" --domain tmux --specialty mstream
+mstream close pr-324 --summary "done" --stop-timers --standby-agents
 ```
 
 Host metadata is daemon memory only. Workstream `settings.event_limit` controls
@@ -156,20 +158,39 @@ Timer state is daemon memory only; daemon restart loses timers.
 ```sh
 mstream timer start issue-337-poll \
   --every 5m \
+  --workstream issue-337-tmux-fleet-api \
+  --self \
+  --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer." \
+  --submit-retries 1 \
+  --submit-retry-delay-ms 750
+
+mstream timer start issue-337-poll \
+  --every 5m \
+  --workstream issue-337-tmux-fleet-api \
   --target local::codex-orchestrator \
   --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer." \
   --submit-retries 1 \
   --submit-retry-delay-ms 750
 
 mstream timer list
+mstream timer list --workstream issue-337-tmux-fleet-api
 mstream timer fire issue-337-poll
 mstream timer stop issue-337-poll
 ```
 
 `--every` accepts raw seconds, second suffixes such as `30s`, or minute
-suffixes such as `5m`. The target must use the normal
-`<host-alias>::<tmux-session-name>` syntax and the host must already be
-connected. `timer start` validates that the target exists before scheduling.
+suffixes such as `5m`. Use `--self` for orchestrator wakeup timers when the
+client is running inside the orchestrator tmux session. It resolves the current
+session with `tmux display-message -p '#S'` and targets `local::<session>` by
+default. Use `--self-host <alias>` when the orchestrator host alias is not
+`local`. `--self` and `--target` are mutually exclusive.
+
+Explicit `--target` still accepts normal `<host-alias>::<tmux-session-name>`
+syntax. The host must already be connected and `timer start` validates that the
+target exists before scheduling.
+
+`--workstream <name>` associates a timer with a workstream for filtering and
+closeout. `timer list --workstream <name>` returns only scoped timers.
 
 Timer prompts default to sending Enter after the text, matching the
 orchestrator self-prompt use case. They also default to one extra Enter after
@@ -191,8 +212,12 @@ prompt. It follows the same input-quiet guard and does not replace the next
 scheduled wakeup. `timer list` reports `next_fire_at`, `last_fired_at`,
 `fire_count`, `defer_count`, `last_deferred_at`, `last_defer_reason`,
 `last_input_activity_at`, `input_quiet_for_secs`, `last_error`,
-`submit_retries`, `submit_retry_delay_ms`, and prompt length without echoing
-the prompt body.
+`submit_retries`, `submit_retry_delay_ms`, optional `workstream`, and prompt
+length without echoing the prompt body.
+
+`close --stop-timers` stops timers scoped to the closing workstream.
+`close --standby-agents` sends a standby message to joined sessions before
+freeing them.
 
 ## Observation
 
@@ -200,6 +225,7 @@ the prompt body.
 mstream status pr-324
 mstream status pr-324 --active-window-secs 30 --idle-after-secs 300
 mstream events pr-324 --limit 50
+mstream events pr-324 --limit 50 --readable
 mstream snapshot pr-324 --max-chars 12000
 mstream summary-input pr-324 --max-chars 12000
 ```
@@ -230,6 +256,10 @@ workstream timeline generation. A cursor from an older generation returns a
 structured `cursor_stale` JSONL error. Bounded `events --limit N` responses
 return a cursor that advances only to the last returned event, not to the
 workstream watermark.
+
+`events --readable` keeps the request/response on JSONL but returns an
+`events_readable` record with a compact `text` field suitable for human-facing
+summaries. The default `events` response remains structured JSON.
 
 All machine-facing output is JSONL on stdout. Errors are also JSONL records,
 for example:

@@ -97,6 +97,7 @@ struct WorkstreamRecord {
 
 struct TimerRecord {
     name: String,
+    workstream: Option<String>,
     target: SessionTarget,
     every_secs: u64,
     prompt: String,
@@ -350,7 +351,10 @@ impl DaemonState {
                 workstream,
                 handoff_id,
             } => shared.lock().await.handoff_cancel(&workstream, &handoff_id),
-            ClientRequest::TimerList => Ok(vec![shared.lock().await.timer_list_json()]),
+            ClientRequest::TimerList { workstream } => Ok(vec![shared
+                .lock()
+                .await
+                .timer_list_json(workstream.as_deref())]),
             ClientRequest::TimerStop { name } => shared.lock().await.timer_stop(&name),
             ClientRequest::Status {
                 workstream,
@@ -646,6 +650,7 @@ impl DaemonState {
             )
         };
         let mut changes = Vec::new();
+        let mut standby_notified = 0usize;
         for target in &sessions {
             let handle = {
                 let state = shared.lock().await;
@@ -653,6 +658,20 @@ impl DaemonState {
             };
             if let Some(handle) = handle {
                 if let Ok(resolved) = Self::resolve_target(handle, target.clone()).await {
+                    if request.standby_agents {
+                        let message = format!(
+                            "Orchestrator closeout: workstream '{}' is closed. Please stand by and do not start new work unless assigned.",
+                            request.workstream
+                        );
+                        Self::send_text_to_resolved(
+                            &resolved,
+                            &message,
+                            PasteMode::Bracketed,
+                            true,
+                        )
+                        .await?;
+                        standby_notified += 1;
+                    }
                     let mut pairs = vec![
                         ("last-workstream", request.workstream.clone()),
                         ("last-workstream-title", title.clone()),
@@ -729,11 +748,22 @@ impl DaemonState {
             workstream.sessions.clear();
             cursor
         };
+        let stopped_timers = if request.stop_timers {
+            shared
+                .lock()
+                .await
+                .stop_timers_for_workstream(&request.workstream)
+        } else {
+            Vec::new()
+        };
         let mut records = vec![json!({
             "type": "ok",
             "op": "close",
             "workstream": request.workstream,
             "cursor": cursor,
+            "standby_agents": request.standby_agents,
+            "standby_notified": standby_notified,
+            "stopped_timers": stopped_timers,
         })];
         records.extend(Self::fire_handoffs_for_changes_shared(shared, changes).await?);
         Ok(records)
@@ -1125,6 +1155,7 @@ impl DaemonState {
                 request.name.clone(),
                 TimerRecord {
                     name: request.name.clone(),
+                    workstream: request.workstream.clone(),
                     target: target.clone(),
                     every_secs: request.every_secs,
                     prompt: request.prompt,
@@ -1166,6 +1197,7 @@ impl DaemonState {
             "type": "ok",
             "op": "timer_start",
             "name": request.name,
+            "workstream": request.workstream,
             "target": target.to_string(),
             "every_secs": request.every_secs,
             "enter": request.enter,
@@ -1732,9 +1764,21 @@ impl DaemonState {
         }))
     }
 
-    fn timer_list_json(&self) -> Value {
-        let timers: Vec<Value> = self.timers.values().map(TimerRecord::to_json).collect();
-        json!({ "type": "timers", "timers": timers })
+    fn timer_list_json(&self, workstream: Option<&str>) -> Value {
+        let timers: Vec<Value> = self
+            .timers
+            .values()
+            .filter(|timer| match workstream {
+                Some(workstream) => timer.workstream.as_deref() == Some(workstream),
+                None => true,
+            })
+            .map(TimerRecord::to_json)
+            .collect();
+        json!({
+            "type": "timers",
+            "workstream": workstream,
+            "timers": timers,
+        })
     }
 
     fn timer_stop(&mut self, name: &str) -> anyhow::Result<Vec<Value>> {
@@ -1748,11 +1792,29 @@ impl DaemonState {
             "type": "ok",
             "op": "timer_stop",
             "name": name,
+            "workstream": timer.workstream,
             "target": timer.target.to_string(),
             "generation": timer.generation,
             "fire_count": timer.fire_count,
             "defer_count": timer.defer_count,
         })])
+    }
+
+    fn stop_timers_for_workstream(&mut self, workstream: &str) -> Vec<String> {
+        let timer_names = self
+            .timers
+            .iter()
+            .filter(|(_, timer)| timer.workstream.as_deref() == Some(workstream))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for name in &timer_names {
+            if let Some(timer) = self.timers.remove(name) {
+                if let Some(task) = timer.task {
+                    task.abort();
+                }
+            }
+        }
+        timer_names
     }
 
     fn status(
@@ -1838,6 +1900,20 @@ impl DaemonState {
         } else {
             workstream.cursor(&request.workstream)?
         };
+        if request.readable {
+            let text = events
+                .iter()
+                .map(|event| render_readable_event(event))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(json!({
+                "type": "events_readable",
+                "workstream": request.workstream,
+                "text": text,
+                "cursor": cursor,
+                "ordering": "arrival",
+            }));
+        }
         Ok(json!({
             "type": "events",
             "workstream": request.workstream,
@@ -2598,6 +2674,7 @@ impl TimerRecord {
     fn to_json(&self) -> Value {
         json!({
             "name": &self.name,
+            "workstream": &self.workstream,
             "target": self.target.to_string(),
             "every_secs": self.every_secs,
             "enter": self.enter,
@@ -2802,6 +2879,29 @@ fn timer_fire_outcome_json(outcome: TimerFireOutcome) -> Value {
     }
 }
 
+fn render_readable_event(event: &EventRecord) -> String {
+    let mut first_line = format!("{}  {}", event.timestamp, event.kind);
+    if let Some(target) = &event.target {
+        first_line.push_str(&format!("  {target}"));
+    }
+    if let Some(state) = event.state {
+        first_line.push_str(&format!("  state={state}"));
+    }
+    let mut rendered = first_line;
+    if let Some(summary) = &event.summary {
+        rendered.push_str(&format!("\n  summary: {}", compact_inline(summary, 240)));
+    }
+    if let Some(text) = &event.text {
+        rendered.push_str(&format!("\n  {}", compact_inline(text, 320)));
+    }
+    rendered
+}
+
+fn compact_inline(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&compact, max_chars)
+}
+
 fn managed_prompt(
     workstream: &str,
     target: &SessionTarget,
@@ -2963,6 +3063,7 @@ mod tests {
                 workstream: "pr-324".to_string(),
                 after: None,
                 limit: 1,
+                readable: false,
             })
             .expect("first page");
         let cursor = first_page["cursor"].as_str().expect("cursor");
@@ -2974,6 +3075,7 @@ mod tests {
                 workstream: "pr-324".to_string(),
                 after: Some(cursor.to_string()),
                 limit: 1,
+                readable: false,
             })
             .expect("second page");
         assert_eq!(second_page["events"][0]["kind"], "second");
@@ -3007,12 +3109,50 @@ mod tests {
                 workstream: "pr-324".to_string(),
                 after: None,
                 limit: 0,
+                readable: false,
             })
             .expect("read events");
 
         assert_eq!(events["events"].as_array().expect("events").len(), 2);
         assert_eq!(events["events"][0]["kind"], "second");
         assert_eq!(events["events"][1]["kind"], "third");
+    }
+
+    #[test]
+    fn events_readable_renders_compact_timeline() {
+        let mut state = DaemonState::default();
+        state
+            .open(OpenRequest {
+                workstream: "issue-342".to_string(),
+                title: "Issue 342".to_string(),
+                goal: None,
+                domain: None,
+                settings: WorkstreamSettings { event_limit: 10 },
+            })
+            .expect("open workstream");
+        state
+            .record_event(
+                "issue-342",
+                EventDraft::new("message_sent")
+                    .target("amd2::gpt55-342-rv")
+                    .text("Please merge PR #346 now."),
+            )
+            .expect("record event");
+
+        let events = state
+            .events(EventsRequest {
+                workstream: "issue-342".to_string(),
+                after: None,
+                limit: 10,
+                readable: true,
+            })
+            .expect("read events");
+
+        assert_eq!(events["type"], "events_readable");
+        let text = events["text"].as_str().expect("readable text");
+        assert!(text.contains("message_sent"));
+        assert!(text.contains("amd2::gpt55-342-rv"));
+        assert!(text.contains("Please merge PR #346 now."));
     }
 
     #[test]
@@ -3088,6 +3228,7 @@ mod tests {
         let started_at = DateTime::<Utc>::from_timestamp(1_000, 0).expect("timestamp");
         let record = TimerRecord {
             name: "poll".to_string(),
+            workstream: Some("pr-324".to_string()),
             target,
             every_secs: 60,
             prompt: "Wake up.".to_string(),
@@ -3111,11 +3252,55 @@ mod tests {
         let value = record.to_json();
 
         assert_eq!(value["input_quiet_for_secs"], 10);
+        assert_eq!(value["workstream"], "pr-324");
         assert_eq!(value["fire_count"], 2);
         assert_eq!(value["defer_count"], 1);
         assert_eq!(value["last_defer_reason"], "recent_client_input");
         assert_eq!(value["last_input_activity"], 995);
         assert_eq!(value["last_input_activity_at"], "1970-01-01T00:16:35Z");
+    }
+
+    #[test]
+    fn timer_list_filters_by_workstream() {
+        let mut state = DaemonState::default();
+        let started_at = DateTime::<Utc>::from_timestamp(1_000, 0).expect("timestamp");
+        for (name, workstream) in [
+            ("issue-342-poll", Some("issue-342")),
+            ("issue-337-poll", Some("issue-337")),
+            ("global", None),
+        ] {
+            state.timers.insert(
+                name.to_string(),
+                TimerRecord {
+                    name: name.to_string(),
+                    workstream: workstream.map(ToString::to_string),
+                    target: "local::worker".parse().expect("target"),
+                    every_secs: 60,
+                    prompt: "Wake up.".to_string(),
+                    enter: true,
+                    submit_retries: 1,
+                    submit_retry_delay_ms: 750,
+                    input_quiet_for_secs: Some(10),
+                    generation: 1,
+                    started_at,
+                    next_fire_at: Some(started_at),
+                    last_fired_at: None,
+                    fire_count: 0,
+                    defer_count: 0,
+                    last_deferred_at: None,
+                    last_defer_reason: None,
+                    last_input_activity: None,
+                    last_error: None,
+                    task: None,
+                },
+            );
+        }
+
+        let value = state.timer_list_json(Some("issue-342"));
+
+        let timers = value["timers"].as_array().expect("timers");
+        assert_eq!(timers.len(), 1);
+        assert_eq!(timers[0]["name"], "issue-342-poll");
     }
 
     #[test]

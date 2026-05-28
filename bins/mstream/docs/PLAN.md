@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-324-330-og | Added issue #347 follow-up tasks for self-target timers, workstream timer scope, readable events, and closeout ergonomics. |
 | 2026-05-28 | @codex | Added issue #344 timer input-quiet guard work: timer delivery defers on recent attached-client input and reports deferral state without affecting read-only polling. |
 | 2026-05-28 | @codex | Pulled issue #337 Fleet API improvements into mstream: use Fleet-owned host registration, `FleetTargetSpec`/`ResolvedFleetTarget`, and tmux batch session-tag helpers instead of local target/tag plumbing. |
 | 2026-05-28 | @codex | Removed `session mark self` and `MSTREAM_TARGET`; coordinator marks now require explicit targets. |
@@ -252,6 +253,10 @@ Tasks:
 - [x] 6.9 Make `mstream close <workstream>` mark participating agents available,
   clear active workstream membership, and merge optional `--summary`,
   `--domain`, and repeated `--specialty` values into reusable context tags.
+- [x] 6.10 Add closeout flags for common orchestrator cleanup.
+  - 2026-05-28 @gpt55-324-330-og: `close --stop-timers` removes timers scoped
+    to the workstream and `close --standby-agents` sends a final standby
+    message before freeing joined sessions.
 
 Validation:
 
@@ -368,7 +373,11 @@ Tasks:
   `last_input_activity_at`, and `input_quiet_for_secs`.
 - [ ] 8.19 Add an integration smoke test for timer delivery against a local
   tmux session.
-- [ ] 8.20 Add tests that silence, prompt heuristics, and missing output do not
+- [x] 8.20 Add timer `--self` target resolution for orchestrator wakeups,
+  optional `--workstream` timer metadata, and `timer list --workstream`.
+  - 2026-05-28 @gpt55-324-330-og: implemented CLI request conversion,
+    daemon JSONL fields, scoped filtering, and focused parser/state tests.
+- [ ] 8.21 Add tests that silence, prompt heuristics, and missing output do not
   transition a session to `done`, `blocked`, or `needs-input`.
 
 Validation:
@@ -417,6 +426,10 @@ Tasks:
 - [x] 9.4 Implement `mstream events <workstream> --after <cursor> --limit N`.
   - 2026-05-24 @codex: bounded pages now return a cursor after the last
     returned event instead of the workstream watermark, avoiding silent skips.
+- [x] 9.4a Implement `mstream events <workstream> --readable` for compact
+  human-facing timelines.
+  - 2026-05-28 @gpt55-324-330-og: readable mode returns an `events_readable`
+    JSONL record with timestamp/kind/target/state and compact text.
 - [x] 9.5 Implement `mstream snapshot <workstream> --after <cursor>
   --max-chars N`.
 - [x] 9.6 Implement `mstream summary-input <workstream> --since <duration>
