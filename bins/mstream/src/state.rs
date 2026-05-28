@@ -98,6 +98,8 @@ struct TimerRecord {
     every_secs: u64,
     prompt: String,
     enter: bool,
+    submit_retries: u8,
+    submit_retry_delay_ms: u64,
     generation: u64,
     started_at: DateTime<Utc>,
     next_fire_at: Option<DateTime<Utc>>,
@@ -254,6 +256,8 @@ struct TimerFireSnapshot {
     handle: HostHandle,
     prompt: String,
     enter: bool,
+    submit_retries: u8,
+    submit_retry_delay_ms: u64,
     generation: u64,
 }
 
@@ -1072,6 +1076,11 @@ impl DaemonState {
         if request.prompt.is_empty() {
             bail!("timer prompt cannot be empty");
         }
+        let submit_retries = if request.enter {
+            request.submit_retries
+        } else {
+            0
+        };
 
         let target: SessionTarget = request.target.parse()?;
         let handle = {
@@ -1100,6 +1109,8 @@ impl DaemonState {
                     every_secs: request.every_secs,
                     prompt: request.prompt,
                     enter: request.enter,
+                    submit_retries,
+                    submit_retry_delay_ms: request.submit_retry_delay_ms,
                     generation,
                     started_at,
                     next_fire_at,
@@ -1133,6 +1144,8 @@ impl DaemonState {
             "target": target.to_string(),
             "every_secs": request.every_secs,
             "enter": request.enter,
+            "submit_retries": submit_retries,
+            "submit_retry_delay_ms": request.submit_retry_delay_ms,
             "generation": generation,
             "next_fire_at": datetime_option_json(next_fire_at),
         })])
@@ -1196,6 +1209,8 @@ impl DaemonState {
                 handle: state.host(timer.target.host_alias())?.handle.clone(),
                 prompt: timer.prompt.clone(),
                 enter: timer.enter,
+                submit_retries: timer.submit_retries,
+                submit_retry_delay_ms: timer.submit_retry_delay_ms,
                 generation: timer.generation,
             }
         };
@@ -1208,6 +1223,12 @@ impl DaemonState {
                 &snapshot.prompt,
                 PasteMode::Bracketed,
                 snapshot.enter,
+            )
+            .await?;
+            Self::send_submit_retries_to_resolved(
+                &resolved,
+                snapshot.submit_retries,
+                snapshot.submit_retry_delay_ms,
             )
             .await
         }
@@ -1938,6 +1959,22 @@ impl DaemonState {
         Ok(())
     }
 
+    async fn send_submit_retries_to_resolved(
+        target: &ResolvedTarget,
+        submit_retries: u8,
+        submit_retry_delay_ms: u64,
+    ) -> anyhow::Result<()> {
+        if submit_retries == 0 {
+            return Ok(());
+        }
+        let enter = KeySequence::parse("{Enter}")?;
+        for _ in 0..submit_retries {
+            sleep(Duration::from_millis(submit_retry_delay_ms)).await;
+            target.target.send_keys(&enter).await?;
+        }
+        Ok(())
+    }
+
     async fn resolve_target(
         handle: HostHandle,
         logical: SessionTarget,
@@ -2407,6 +2444,8 @@ impl TimerRecord {
             "target": self.target.to_string(),
             "every_secs": self.every_secs,
             "enter": self.enter,
+            "submit_retries": self.submit_retries,
+            "submit_retry_delay_ms": self.submit_retry_delay_ms,
             "generation": self.generation,
             "started_at": self.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "next_fire_at": datetime_option_json(self.next_fire_at),

@@ -144,7 +144,9 @@ Timer state is daemon memory only; daemon restart loses timers.
 mstream timer start issue-337-poll \
   --every 5m \
   --target local::codex-orchestrator \
-  --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer."
+  --prompt "[mstream:issue-337-poll] Wakeup: check issue-337-tmux-fleet-api with mstream status and summary-input. Unblock agents, summarize only material changes, then decide whether to keep, change, or stop this timer." \
+  --submit-retries 1 \
+  --submit-retry-delay-ms 750
 
 mstream timer list
 mstream timer fire issue-337-poll
@@ -157,13 +159,17 @@ suffixes such as `5m`. The target must use the normal
 connected. `timer start` validates that the target exists before scheduling.
 
 Timer prompts default to sending Enter after the text, matching the
-orchestrator self-prompt use case. Use `--no-enter` when the text should be
-placed in the pane without submission.
+orchestrator self-prompt use case. They also default to one extra Enter after
+750ms to handle agent TUI cases where the first submit key is missed. Tune with
+`--submit-retries` and `--submit-retry-delay-ms`; retries send only extra Enter
+keys and never re-send prompt text. Use `--no-enter` when the text should be
+placed in the pane without submission; this disables submit retries.
 
 `timer fire` is a manual immediate trigger for smoke testing the target and
 prompt. It does not replace the next scheduled wakeup. `timer list` reports
-`next_fire_at`, `last_fired_at`, `fire_count`, `last_error`, and prompt length
-without echoing the prompt body.
+`next_fire_at`, `last_fired_at`, `fire_count`, `last_error`,
+`submit_retries`, `submit_retry_delay_ms`, and prompt length without echoing
+the prompt body.
 
 ## Observation
 
