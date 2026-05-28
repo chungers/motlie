@@ -420,7 +420,7 @@ Tasks:
   removes the last session from an otherwise empty/closed workstream.
 - [ ] 9.11 After issue #322 lands with the required APIs, replace the local
   ring-buffer/timeline layer with the `libs/tmux` OutputBus-backed timeline API
-  where possible. Use `create_or_get_timeline` for hydration, `set_filters` /
+  where possible. Use `open_timeline` for hydration, `set_filters` /
   `add_filter` for dynamic membership, scoped gap/discontinuity APIs for
   continuity markers, `ingest_historical` for restart backfill,
   `remove_timeline`/`detach`/idle cleanup for lifecycle, and the timeline cursor

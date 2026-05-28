@@ -145,16 +145,17 @@ impl Fleet {
         self.bus.create_timeline(name, opts)
     }
 
-    /// Return an existing timeline or create it on the shared `OutputBus`.
+    /// Open a named timeline on the shared `OutputBus` — return the existing
+    /// one or create it if missing.
     ///
     /// When the timeline already exists, `opts` are ignored and the existing
     /// generation is returned unchanged.
-    pub fn create_or_get_timeline(
+    pub fn open_timeline(
         &self,
         name: impl Into<String>,
         opts: TimelineOptions,
     ) -> Result<TimelineHandle> {
-        self.bus.create_or_get_timeline(name, opts)
+        self.bus.open_timeline(name, opts)
     }
 
     /// Look up a named timeline on the shared `OutputBus`.
