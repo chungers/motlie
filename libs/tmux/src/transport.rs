@@ -2277,18 +2277,20 @@ impl SshShellChannel {
     }
 
     async fn read(&mut self) -> Option<ShellEvent> {
-        match self.channel.wait().await {
-            Some(russh::ChannelMsg::Data { data }) => Some(ShellEvent::Data(data.to_vec())),
-            Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
-                Some(ShellEvent::Data(data.to_vec()))
-            }
-            Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
-                Some(ShellEvent::Eof)
-            }
-            Some(_) => {
-                // Other messages (ExitStatus, etc.) — skip and read again
-                // Recurse via Box::pin to avoid stack growth
-                Box::pin(self.read()).await
+        loop {
+            match self.channel.wait().await {
+                Some(russh::ChannelMsg::Data { data }) if !data.is_empty() => {
+                    return Some(ShellEvent::Data(data.to_vec()));
+                }
+                Some(russh::ChannelMsg::ExtendedData { data, .. }) if !data.is_empty() => {
+                    return Some(ShellEvent::Data(data.to_vec()));
+                }
+                Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
+                    return Some(ShellEvent::Eof);
+                }
+                Some(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
             }
         }
     }

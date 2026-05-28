@@ -413,7 +413,7 @@ impl DaemonState {
             .list_tags_for_session_infos(tags::PREFIX, &sessions)
             .await?;
 
-        let mut monitor_sessions = Vec::new();
+        let mut monitor_targets = Vec::new();
         let hydrated = {
             let mut state = shared.lock().await;
             let mut hydrated = 0usize;
@@ -462,15 +462,15 @@ impl DaemonState {
                         }
                         let workstream = state.workstream_mut(&workstream_name)?;
                         workstream.sessions.insert(target.clone());
-                        monitor_sessions.push(target.session_name().to_string());
+                        monitor_targets.push(target.clone());
                     }
                 }
             }
             hydrated
         };
 
-        for session_name in monitor_sessions {
-            let _ = handle.start_monitoring_session(&session_name).await;
+        for target in monitor_targets {
+            let _ = Self::ensure_monitoring_target_shared(Arc::clone(&shared), &target).await;
         }
 
         Ok(vec![json!({
@@ -508,10 +508,7 @@ impl DaemonState {
             },
         )
         .await?;
-        resolved
-            .host
-            .start_monitoring_session(resolved.spec.session_name())
-            .await?;
+        Self::ensure_monitoring_target_shared(Arc::clone(&shared), &resolved.spec).await?;
         if let Some(task) = &request.task {
             Self::send_text_to_resolved(
                 &resolved,
@@ -595,10 +592,7 @@ impl DaemonState {
             },
         )
         .await?;
-        resolved
-            .host
-            .start_monitoring_session(resolved.spec.session_name())
-            .await?;
+        Self::ensure_monitoring_target_shared(Arc::clone(&shared), &resolved.spec).await?;
         if let Some(task) = &request.task {
             Self::send_text_to_resolved(
                 &resolved,
@@ -1502,10 +1496,7 @@ impl DaemonState {
                 },
             )
             .await?;
-            plan.target
-                .host
-                .start_monitoring_session(plan.target.spec.session_name())
-                .await?;
+            Self::ensure_monitoring_target_shared(Arc::clone(&shared), &plan.target.spec).await?;
             if let Some(task) = &request.task {
                 Self::send_text_to_resolved(
                     &plan.target,
@@ -2138,6 +2129,15 @@ impl DaemonState {
             host: handle,
             target,
         })
+    }
+
+    async fn ensure_monitoring_target_shared(
+        shared: Arc<Mutex<Self>>,
+        target: &SessionTarget,
+    ) -> anyhow::Result<()> {
+        let mut state = shared.lock().await;
+        state.fleet.ensure_monitoring_session(target).await?;
+        Ok(())
     }
 
     async fn touch_resolved_session_shared(
