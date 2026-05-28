@@ -10,8 +10,9 @@ use crate::protocol::{
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
     OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
     SummaryInputRequest, TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
-    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
-    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS,
+    DEFAULT_TIMER_SUBMIT_RETRIES, DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS,
+    DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -435,6 +436,14 @@ pub struct TimerStartArgs {
     pub submit_retries: u8,
     #[arg(long, default_value_t = DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS)]
     pub submit_retry_delay_ms: u64,
+    #[arg(
+        long = "input-quiet-for",
+        value_parser = parse_duration_secs,
+        default_value_t = DEFAULT_TIMER_INPUT_QUIET_FOR_SECS
+    )]
+    pub input_quiet_for_secs: u64,
+    #[arg(long)]
+    pub no_input_guard: bool,
 }
 
 impl TimerStartArgs {
@@ -454,6 +463,11 @@ impl TimerStartArgs {
             enter,
             submit_retries: if enter { self.submit_retries } else { 0 },
             submit_retry_delay_ms: self.submit_retry_delay_ms,
+            input_quiet_for_secs: if self.no_input_guard {
+                None
+            } else {
+                Some(self.input_quiet_for_secs)
+            },
         })
     }
 }
@@ -633,6 +647,10 @@ mod tests {
         assert!(request.enter);
         assert_eq!(request.submit_retries, 1);
         assert_eq!(request.submit_retry_delay_ms, 750);
+        assert_eq!(
+            request.input_quiet_for_secs,
+            Some(DEFAULT_TIMER_INPUT_QUIET_FOR_SECS)
+        );
     }
 
     #[test]
@@ -661,6 +679,55 @@ mod tests {
         };
         assert_eq!(request.submit_retries, 2);
         assert_eq!(request.submit_retry_delay_ms, 1000);
+    }
+
+    #[test]
+    fn timer_start_command_allows_input_guard_override() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+            "--input-quiet-for",
+            "30s",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert_eq!(request.input_quiet_for_secs, Some(30));
+    }
+
+    #[test]
+    fn timer_start_command_allows_disabling_input_guard() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "timer",
+            "start",
+            "issue-337-poll",
+            "--every",
+            "5m",
+            "--target",
+            "local::orchestrator",
+            "--prompt",
+            "Wake up and poll.",
+            "--no-input-guard",
+        ])
+        .expect("timer command parses");
+
+        let request = cli.command.into_request().expect("timer request");
+        let ClientRequest::TimerStart(request) = request else {
+            panic!("expected timer start request");
+        };
+        assert_eq!(request.input_quiet_for_secs, None);
     }
 
     #[test]

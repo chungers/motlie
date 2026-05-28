@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added issue #344 timer input-quiet guard work: timer delivery defers on recent attached-client input and reports deferral state without affecting read-only polling. |
 | 2026-05-28 | @codex | Pulled issue #337 Fleet API improvements into mstream: use Fleet-owned host registration, `FleetTargetSpec`/`ResolvedFleetTarget`, and tmux batch session-tag helpers instead of local target/tag plumbing. |
 | 2026-05-28 | @codex | Removed `session mark self` and `MSTREAM_TARGET`; coordinator marks now require explicit targets. |
 | 2026-05-28 | @codex | Added a daemon-owned timer phase for orchestrator self-wakeup prompts. |
@@ -356,9 +357,18 @@ Tasks:
   Enter keys after a delay without re-sending prompt text. Defaults:
   `--submit-retries 1 --submit-retry-delay-ms 750`; `--no-enter` disables
   submit retries.
-- [ ] 8.16 Add an integration smoke test for timer delivery against a local
+- [x] 8.16 Add timer input-quiet CLI options. Defaults:
+  `--input-quiet-for 10s`; `--no-input-guard` disables the guard for timer
+  delivery.
+- [x] 8.17 Use `motlie-tmux` attached-client activity signals before timer
+  send-key delivery. If recent input is observed, defer without sending prompt
+  text or submit retries.
+- [x] 8.18 Report timer deferrals in JSONL and `timer list` using
+  `defer_count`, `last_deferred_at`, `last_defer_reason`,
+  `last_input_activity_at`, and `input_quiet_for_secs`.
+- [ ] 8.19 Add an integration smoke test for timer delivery against a local
   tmux session.
-- [ ] 8.17 Add tests that silence, prompt heuristics, and missing output do not
+- [ ] 8.20 Add tests that silence, prompt heuristics, and missing output do not
   transition a session to `done`, `blocked`, or `needs-input`.
 
 Validation:
@@ -369,7 +379,7 @@ cargo test -p motlie-mstream handoff
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock send pr-323 local::codex-test --text "Report status." --enter
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock interrupt local::codex-test
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock session mark local::codex-test --state done --summary "manual smoke completed"
-cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer start pr-323-poll --every 5m --target local::codex-test --prompt "Wakeup: poll pr-323." --submit-retries 1 --submit-retry-delay-ms 750
+cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer start pr-323-poll --every 5m --target local::codex-test --prompt "Wakeup: poll pr-323." --input-quiet-for 10s --submit-retries 1 --submit-retry-delay-ms 750
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer list
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer fire pr-323-poll
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock timer stop pr-323-poll
