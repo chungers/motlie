@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Removed `session mark self` and `MSTREAM_TARGET`; coordinator marks now require explicit targets. |
 | 2026-05-28 | @codex | Added a daemon-owned timer phase for orchestrator self-wakeup prompts. |
 | 2026-05-26 | @codex | Addressed PR #330 feedback by replacing the fixed mstream event ring size with a per-workstream `--event-limit` setting and validation coverage. |
 | 2026-05-24 | @codex | Addressed PR #330 re-review: replaced the lock-held request handler with split-phase shared execution, so SSH/tmux awaits happen outside the daemon state mutex. |
@@ -275,8 +276,11 @@ Tasks:
   `exec <agent>` with validated and escaped arguments.
 - [x] 7.4 Start the tmux session with the target session name as the agent's
   operational identity.
-- [x] 7.5 Set initial non-socket environment variables such as
-  `MSTREAM_WORKSTREAM`, `MSTREAM_TARGET`, and `MSTREAM_ROLE` when useful.
+- [x] 7.5 Set initial non-socket environment variables
+  `MSTREAM_WORKSTREAM` and `MSTREAM_ROLE` when useful.
+  - 2026-05-28 @codex: `MSTREAM_TARGET` was removed because managed agents are
+    not mstream clients and state marks are explicit-target coordinator
+    actions.
 - [x] 7.6 Send an initial prompt that explicitly states the agent identity,
   role, workstream, cwd, task, and normal-output reporting contract.
 - [ ] 7.7 Add a design follow-up if `CreateSessionOptions::start_directory`
@@ -314,11 +318,14 @@ Tasks:
   optional `--role` and `--state` filters and one result record per target.
   - 2026-05-24 @codex: broadcast updates `@mstream/updated-at` and the
     in-memory session timestamp after each successful target send.
-- [x] 8.7 Implement `mstream session mark <target|self> --state
+- [x] 8.7 Implement `mstream session mark <target> --state
   done|blocked|needs-input|available|reserved|busy|idle --summary <text>`.
-- [x] 8.8 Make `self` resolve from `MSTREAM_TARGET`; update `@mstream/state`,
-  `@mstream/last-report-kind`, `@mstream/last-report-summary`, and
-  `@mstream/updated-at` on successful marks.
+- [x] 8.8 Require explicit `<host>::<session>` targets for session marks; update
+  `@mstream/state`, `@mstream/last-report-kind`,
+  `@mstream/last-report-summary`, and `@mstream/updated-at` on successful
+  marks.
+  - 2026-05-28 @codex: removed the obsolete `self` alias so the CLI matches the
+    orchestrator-only state model.
 - [x] 8.9 Emit structured events for `message_sent`, `interrupted`,
   `broadcast_sent`, `completed`, `blocked`, and `needs_input`.
   - 2026-05-23 @codex: first implementation emits workstream events for
