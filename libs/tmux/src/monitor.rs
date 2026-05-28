@@ -480,6 +480,11 @@ impl MonitorHandle {
         handle.shutdown().await
     }
 
+    /// Remove a specific session's monitor from aggregate bookkeeping.
+    pub(crate) fn remove_session(&mut self, name: &str) -> Option<SessionMonitorHandle> {
+        self.sessions.remove(name)
+    }
+
     /// Get a session monitor handle by TargetSpec.
     /// Matches on the spec's session name.
     pub fn get_by_spec(&self, spec: &crate::TargetSpec) -> Option<&SessionMonitorHandle> {

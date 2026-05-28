@@ -3,6 +3,7 @@
 <!-- Changelog
 | Date       | Who     | Summary |
 |------------|---------|---------|
+| 2026-05-27 | @gpt55-337-og | Documented issue #337 boundary: Fleet can build generic target-derived timeline filters/scopes, while retained history/timeline storage remains in OutputBus/HistoryHandle consumers. |
 | 2026-03-25 | @claude | Initial design: coalescing, per-source rendering, per-source budgets |
 -->
 
@@ -58,6 +59,15 @@ Each pane is a contiguous block. The agent can reason about each independently.
 ## Design
 
 Three phases, each independently shippable:
+
+### Fleet Target Filter Boundary
+
+Issue #337 adds `ResolvedFleetTarget::sink_filter()` and
+`Fleet::timeline_options_for_targets(...)` as convenience glue. These APIs only
+derive `SinkFilter` values from resolved host/session targets. `HistoryHandle`
+and `OutputBus` remain the owners of retained output, rendering, gaps, and
+discontinuity handling; `Fleet` does not own timeline storage or higher-level
+orchestration concepts.
 
 ### Phase 1: Coalesce consecutive same-source chunks
 
