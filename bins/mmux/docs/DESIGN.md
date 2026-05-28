@@ -8,6 +8,7 @@ Draft.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-342-og | Updated multi-host identity for issue #342: SSH labels and aliases now use endpoint identity and positional `--alias` overrides are removed. |
 | 2026-05-20 | @codex | Added issue #317 host-label override design: `--alias` maps comma-separated display overrides to localhost plus SSH URI order, while empty entries preserve discovered labels. |
 | 2026-05-06 | @codex-tts | Added list-only `$` send-key leader shortcuts so `$0`..`$9` send digits immediately to the highlighted session and `$!` sends `{Esc}` without opening the Send Keys modal. |
 | 2026-05-04 | @codex | Matched attached tmux status-bar background to the selected host's list-pane palette color in multi-host mode. |
@@ -869,8 +870,8 @@ pub(crate) struct HostId(pub(crate) String);  // ssh URI or "localhost"
 
 pub(crate) struct HostEntry {
     pub(crate) id: HostId,
-    pub(crate) label: String,       // tmux #{host} or non-empty --alias override
-    pub(crate) alias: String,       // SSH URI hostname, retained as operator alias
+    pub(crate) label: String,       // SSH endpoint identity or local tmux #{host}
+    pub(crate) alias: String,       // HostHandle alias used for routing/status
     pub(crate) ip_address: String,  // resolved from alias for SSH targets
     pub(crate) handle: motlie_tmux::HostHandle,
 }
@@ -931,16 +932,14 @@ may contain only connected hosts that have matching `hosts` slots, and connected
 sides of this invariant.
 
 `target_host.rs` owns host identity probing. For SSH targets, it parses the URI
-hostname into `HostEntry.alias`, connects the `HostHandle`, then asks tmux for
-`start-server ; display-message -p '#{host}'` through
-`HostHandle::tmux_hostname()` and stores that value in `HostEntry.label`. The
-same tmux query is used for the local host. If the tmux query fails, mmux falls
-back to the local process hostname for localhost or the SSH URI alias for
-remote hosts. A non-empty `--alias` entry overrides only this display label:
-position 0 maps to localhost and SSH URI `i` maps to position `i + 1`; empty
-comma entries preserve the discovered/default label. IP display/resolution
-remains based on the alias, because that is the operator-supplied routable
-name.
+into `SshConfig`, derives `SshConfig::endpoint_alias()`, and uses that endpoint
+identity for both `HostEntry.label` and `HostEntry.alias`. The label includes
+user, host, non-default port, and non-default tmux socket identity, but omits
+`identity-file`. SSH connects use `connect_with_endpoint_alias()` so
+`HostHandle::host_alias()` stays aligned with the displayed endpoint. The
+probed tmux `#{host}` value must not replace the primary SSH endpoint label.
+Localhost continues to use the local tmux hostname probe with a process
+hostname fallback.
 
 `HostContext` is replaced by `HostFleet`; selection-by-id at the row level
 must compose `(host_id, session_id)` to remain stable across rename/reorder.
@@ -1044,27 +1043,25 @@ from `HostFleet::host_marker_width()`. The host-color column is omitted when
 - Single: `<hostname> | <ip>                                     <time>`
 - Multi:  `mmux ■ <host-a> ■ <host-b>                          <time>`
 
-Failed SSH targets remain in the multi-host legend using their non-empty
-`--alias` override when supplied, otherwise the URI hostname, and are
-highlighted in red until a background retry connects successfully.
+Failed SSH targets remain in the multi-host legend using their endpoint
+identity and are highlighted in red until a background retry connects
+successfully.
 
 #### Scope and impact analysis
 
-**Library (`libs/tmux/`):** *No new public API surface required.* The existing
-`HostHandle::list_sessions()`, `session_by_id()`, and
-`Target::attach_current_pty()` cover everything per-host. Multi-host fan-out
-is a binary-side concern (orchestration, not protocol). Optionally, the
-existing `Fleet` type could grow a `list_sessions_all() -> Vec<(HostId, Result<Vec<SessionInfo>>)>`
-convenience method, but this is purely sugar over `tokio::join_all` and is
-not required for v1.
+**Library (`libs/tmux/`):** `SshConfig::endpoint_alias()` provides the shared
+SSH endpoint identity rule for binaries. `connect_with_endpoint_alias()` uses
+that identity as the resulting `HostHandle` alias while keeping `connect()`
+host-only alias behavior unchanged. Multi-host fan-out remains a binary-side
+concern (orchestration, not protocol).
 
 **Binary (`bins/mmux/`):**
 
 | File | Change |
 |---|---|
-| `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`); add optional raw comma-separated `--alias` display-label overrides. |
+| `cli.rs` | `ssh_uri: Option<String>` → `ssh_uris: Vec<String>` (clap `num_args = 0..`); no positional host-label override flag. |
 | `model.rs` | Add `HostId`, `HostEntry`, `HostFleet`, `SessionRow` types. Replace `HostContext` (single host) with `HostFleet`. Change `SessionListState.sessions: Vec<SessionInfo>` to `SessionListState.rows: Vec<SessionRow>`. |
-| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost is connected immediately; SSH URIs become configured host slots and retry specs for background retry; non-empty `--alias` entries override display labels without changing routing identity. |
+| `target_host.rs` | Rename / split: `connect_host(cli) → connect_initial_fleet(cli) -> Result<InitialHostFleet>`. Localhost is connected immediately; SSH URIs become configured host slots and retry specs for background retry; SSH targets use endpoint labels and connect with endpoint aliases. |
 | `controller.rs` | `refresh_sessions` operates on `HostFleet`; uses `join_all` for fan-out; builds merged sorted `Vec<SessionRow>`. New session / kill / attach paths take the highlighted `SessionRow` and dispatch via `fleet.entry(row.host_id).handle`. |
 | `render.rs` | Single render path. `draw_sessions` adds optional host-color square column when `fleet.is_multi()`. `draw_top_status` switches text by mode. Landscape always renders session list left and detail right. Status hint set unchanged. |
 | `detail.rs` | No shape change. Caller passes the row's `&HostHandle`. |

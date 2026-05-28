@@ -12,6 +12,7 @@ host event stream backed by stable-id snapshot reconciliation.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-342-og | Added Phase 15 for issue #342 endpoint identity labels, removal of positional `--alias`, and focused validation. |
 | 2026-05-20 | @codex | Added Phase 14 for issue #317 host alias overrides, covering CLI parsing, host setup threading, docs, and focused tests. |
 | 2026-05-16 | @codex-tmux-tl | Tracked issue #282 and fixed modal text inputs so focused Left/Right move the insertion point inside New Session, Rename Session, Send Keys, and Session Tags fields instead of jumping to modal buttons. |
 | 2026-05-06 | @codex-tts | Added list-only `$` direct-send follow-ons for Send Keys: `$0`..`$9` dispatch digits immediately and `$!` dispatches `{Esc}` to the highlighted session. |
@@ -126,6 +127,24 @@ require an SSH daemon:
 export MOTLIE_MMUX_SSH_URI='ssh://user@host?identity-file=/path/to/key'
 cargo test -p motlie-mmux --test ssh_integration -- --ignored
 ```
+
+## Phase 15: Endpoint Identity Labels (issue #342)
+
+References: [Internal data model](./DESIGN.md#internal-data-model),
+[Top status bar](./DESIGN.md#top-status-bar),
+[CLI Boundary](./API.md#cli-boundary).
+
+- [x] 15.1 Add `SshConfig::endpoint_alias()` and
+  `connect_with_endpoint_alias()` in `motlie-tmux`, keeping `connect()`
+  host-only alias behavior unchanged.
+- [x] 15.2 Remove positional `mmux --alias` parsing and label override
+  threading.
+- [x] 15.3 Use endpoint labels for SSH pending slots, connected entries, host
+  colors, status entries, and routing aliases.
+- [x] 15.4 Keep SSH primary labels from being overwritten by probed tmux
+  hostname values.
+- [x] 15.5 Update docs and focused tests for endpoint labels, socket identity,
+  identity-file omission, and removed `--alias`.
 
 
 ## Phase 14: Host Alias Overrides (issue #317)
