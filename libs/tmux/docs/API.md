@@ -2258,7 +2258,7 @@ use motlie_tmux::{
     TimelineCursor, TimelineMarkerScope, TimelineOptions, TimelineOrdering,
 };
 
-let timeline = bus.create_or_get_timeline(
+let timeline = bus.open_timeline(
     "review-round-17",
     TimelineOptions {
         filters: vec![
@@ -2290,7 +2290,7 @@ Timeline management lives on the bus:
 
 ```rust
 let handle = bus.timeline("review-round-17")?.expect("timeline exists");
-let same = bus.create_or_get_timeline("review-round-17", TimelineOptions::default())?;
+let same = bus.open_timeline("review-round-17", TimelineOptions::default())?;
 // Existing timelines are returned unchanged; create_or_get opts apply only on create.
 let names = bus.timelines()?;
 let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
@@ -2317,7 +2317,7 @@ that old generation return an error instead of silently polling a frozen buffer.
 `Fleet` exposes convenience methods that delegate to its shared bus:
 
 ```rust
-let timeline = fleet.create_or_get_timeline("all-agents", TimelineOptions::default())?;
+let timeline = fleet.open_timeline("all-agents", TimelineOptions::default())?;
 let same = fleet.timeline("all-agents")?;
 let detached = fleet.remove_idle_timelines(Duration::from_secs(300))?;
 fleet.remove_timeline("all-agents")?;

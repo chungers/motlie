@@ -2532,11 +2532,11 @@ impl OutputBus {
         self.make_timeline_handle(name, state)
     }
 
-    /// Return an existing timeline or create it if missing.
+    /// Open a named timeline — return the existing one or create it if missing.
     ///
     /// When the timeline already exists, `opts` are ignored and the existing
     /// generation is returned unchanged.
-    pub fn create_or_get_timeline(
+    pub fn open_timeline(
         &self,
         name: impl Into<String>,
         opts: TimelineOptions,
@@ -3660,10 +3660,10 @@ mod tests {
     async fn bus_timeline_create_or_get_detach_and_stale_handles() {
         let bus = OutputBus::new();
         let first = bus
-            .create_or_get_timeline("workstream", TimelineOptions::default())
+            .open_timeline("workstream", TimelineOptions::default())
             .unwrap();
         let same = bus
-            .create_or_get_timeline(
+            .open_timeline(
                 "workstream",
                 TimelineOptions {
                     max_entries: 1,
@@ -3678,7 +3678,7 @@ mod tests {
         assert!(first.latest(0).await.is_err());
 
         let replacement = bus
-            .create_or_get_timeline("workstream", TimelineOptions::default())
+            .open_timeline("workstream", TimelineOptions::default())
             .unwrap();
         assert_ne!(first.generation(), replacement.generation());
         assert!(first.latest(0).await.is_err());

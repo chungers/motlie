@@ -257,7 +257,7 @@ scoped discontinuity and bus-level gap markers so supervisors can distinguish
 output from continuity loss without injecting unrelated reconnect markers into
 filtered workstream timelines.
 
-Timeline handles now support dynamic workstreams: `create_or_get_timeline`
+Timeline handles now support dynamic workstreams: `open_timeline`
 (existing options are ignored on the get path), `set_filters`, `add_filter`,
 `ingest_historical`, explicit `detach`, stale-handle errors after
 removal/recreate, and `remove_idle_timelines` for TTL-style cleanup. Writes

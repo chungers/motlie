@@ -736,7 +736,7 @@ than implementing its own reorder buffer.
 Delegation to `libs/tmux` is gated on the OutputBus timeline APIs needed by
 workstreams:
 
-- idempotent timeline hydration through `create_or_get_timeline`
+- idempotent timeline hydration through `open_timeline`
 - mutable `TimelineHandle::set_filters` / `add_filter` when a workstream gains
   or loses sessions mid-round
 - scoped continuity/gap markers such as `publish_discontinuity_for` and
