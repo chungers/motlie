@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Pulled issue #337 Fleet API improvements into mstream: use Fleet-owned host registration, `FleetTargetSpec`/`ResolvedFleetTarget`, and tmux batch session-tag helpers instead of local target/tag plumbing. |
 | 2026-05-28 | @codex | Removed `session mark self` and `MSTREAM_TARGET`; coordinator marks now require explicit targets. |
 | 2026-05-28 | @codex | Added a daemon-owned timer phase for orchestrator self-wakeup prompts. |
 | 2026-05-26 | @codex | Addressed PR #330 feedback by replacing the fixed mstream event ring size with a per-workstream `--event-limit` setting and validation coverage. |
@@ -384,11 +385,16 @@ Design references:
 
 Tasks:
 
-- [ ] 9.1 Use `motlie-tmux` Fleet/OutputBus to start monitoring joined
+- [x] 9.1 Use `motlie-tmux` Fleet/OutputBus to start monitoring joined
   sessions.
   - 2026-05-23 @codex: first implementation starts monitoring with
     `HostHandle::start_monitoring_session` and keeps command events locally.
     Fleet/OutputBus timeline ingestion remains a follow-up.
+  - 2026-05-28 @codex: host registration now lives in `motlie_tmux::Fleet`,
+    connected hosts use `SshConfig::connect_with_alias()` to preserve mstream
+    aliases, and mstream target keys/resolved targets use
+    `FleetTargetSpec`/`ResolvedFleetTarget`. Live timeline ingestion still
+    remains a separate follow-up.
 - [x] 9.2 Maintain per-workstream in-memory ring buffers with opaque cursors.
   - 2026-05-26 @codex: ring size is controlled by workstream
     `settings.event_limit`, exposed as `mstream open --event-limit`, defaulting

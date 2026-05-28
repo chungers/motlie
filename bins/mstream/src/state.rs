@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use motlie_tmux::{
-    CreateSessionOptions, HostHandle, KeySequence, SessionEnvVar, SessionInfo, SessionTag,
-    SshConfig, Target,
+    CreateSessionOptions, Fleet, FleetTargetSpec, HostHandle, KeySequence, ResolvedFleetTarget,
+    SessionEnvVar, SessionInfo, SessionTag, SshConfig, Target,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -23,10 +23,13 @@ use crate::protocol::{
     SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
 };
 use crate::tags;
-use crate::target::SessionTarget;
 use crate::timeline::PublicCursor;
 
+type SessionTarget = FleetTargetSpec;
+type ResolvedTarget = ResolvedFleetTarget;
+
 pub struct DaemonState {
+    fleet: Fleet,
     hosts: BTreeMap<String, HostRecord>,
     sessions: BTreeMap<SessionTarget, SessionRecord>,
     workstreams: BTreeMap<String, WorkstreamRecord>,
@@ -39,6 +42,7 @@ pub struct DaemonState {
 impl Default for DaemonState {
     fn default() -> Self {
         Self {
+            fleet: Fleet::new(),
             hosts: BTreeMap::new(),
             sessions: BTreeMap::new(),
             workstreams: BTreeMap::new(),
@@ -55,7 +59,6 @@ struct HostRecord {
     labels: BTreeMap<String, String>,
     capacity: BTreeMap<String, String>,
     work_root: Option<PathBuf>,
-    handle: HostHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -218,12 +221,6 @@ struct WorkstreamMeta {
     domain: Option<String>,
 }
 
-struct ResolvedTarget {
-    logical: SessionTarget,
-    handle: HostHandle,
-    target: Target,
-}
-
 struct BroadcastTarget {
     target: ResolvedTarget,
     state: AgentState,
@@ -353,13 +350,14 @@ impl DaemonState {
         let config = SshConfig::parse(&request.ssh_uri)
             .with_context(|| format!("failed to parse ssh uri for '{}'", request.alias))?;
         let handle = config
-            .connect()
+            .connect_with_alias(&request.alias)
             .await
             .with_context(|| format!("failed to connect host '{}'", request.alias))?;
         let mut state = shared.lock().await;
         if state.hosts.contains_key(&request.alias) {
             bail!("host alias '{}' is already connected", request.alias);
         }
+        state.fleet.register(&request.alias, handle)?;
         state.hosts.insert(
             request.alias.clone(),
             HostRecord {
@@ -367,7 +365,6 @@ impl DaemonState {
                 labels: request.labels,
                 capacity: request.capacity,
                 work_root: request.work_root,
-                handle,
             },
         );
         Ok(vec![json!({
@@ -381,7 +378,7 @@ impl DaemonState {
     async fn scan_shared(shared: Arc<Mutex<Self>>, alias: String) -> anyhow::Result<Vec<Value>> {
         let handle = {
             let state = shared.lock().await;
-            state.host(&alias)?.handle.clone()
+            state.host_handle(&alias)?
         };
         let sessions = handle.list_sessions().await?;
         let tags_by_session = handle
@@ -393,7 +390,7 @@ impl DaemonState {
             let mut state = shared.lock().await;
             let mut hydrated = 0usize;
             for session in sessions {
-                let target = SessionTarget::new(&alias, session.name.clone())?;
+                let target = SessionTarget::session(&alias, session.name.clone())?;
                 let tags = tags_by_session
                     .get(&session.id)
                     .map(Vec::as_slice)
@@ -465,7 +462,7 @@ impl DaemonState {
             let state = shared.lock().await;
             state.ensure_workstream_open(&request.workstream)?;
             (
-                state.host(target.host_alias())?.handle.clone(),
+                state.host_handle(target.host_alias())?,
                 state.workstream_meta(&request.workstream)?,
             )
         };
@@ -484,8 +481,8 @@ impl DaemonState {
         )
         .await?;
         resolved
-            .handle
-            .start_monitoring_session(resolved.logical.session_name())
+            .host
+            .start_monitoring_session(resolved.spec.session_name())
             .await?;
         if let Some(task) = &request.task {
             Self::send_text_to_resolved(
@@ -540,7 +537,7 @@ impl DaemonState {
             let state = shared.lock().await;
             state.ensure_workstream_open(&request.workstream)?;
             (
-                state.host(target.host_alias())?.handle.clone(),
+                state.host_handle(target.host_alias())?,
                 state.workstream_meta(&request.workstream)?,
             )
         };
@@ -553,8 +550,8 @@ impl DaemonState {
         };
         let tmux_target = handle.create_session(target.session_name(), &opts).await?;
         let resolved = ResolvedTarget {
-            logical: target.clone(),
-            handle,
+            spec: target.clone(),
+            host: handle,
             target: tmux_target,
         };
         Self::write_assignment_to_target(
@@ -571,8 +568,8 @@ impl DaemonState {
         )
         .await?;
         resolved
-            .handle
-            .start_monitoring_session(resolved.logical.session_name())
+            .host
+            .start_monitoring_session(resolved.spec.session_name())
             .await?;
         if let Some(task) = &request.task {
             Self::send_text_to_resolved(
@@ -630,10 +627,7 @@ impl DaemonState {
         for target in &sessions {
             let handle = {
                 let state = shared.lock().await;
-                state
-                    .host(target.host_alias())
-                    .map(|host| host.handle.clone())
-                    .ok()
+                state.host_handle(target.host_alias()).ok()
             };
             if let Some(handle) = handle {
                 if let Ok(resolved) = Self::resolve_target(handle, target.clone()).await {
@@ -650,19 +644,25 @@ impl DaemonState {
                     if !request.specialties.is_empty() {
                         pairs.push(("context-specialties", request.specialties.join(",")));
                     }
-                    tags::set_many(&resolved.target, &pairs).await?;
-                    tags::unset_many(
-                        &resolved.target,
-                        &[
+                    resolved
+                        .target
+                        .tags(tags::PREFIX)
+                        .await?
+                        .set_many(pairs)
+                        .await?;
+                    resolved
+                        .target
+                        .tags(tags::PREFIX)
+                        .await?
+                        .unset_many([
                             "workstream",
                             "workstream-title",
                             "workstream-state",
                             "workstream-goal",
                             "workstream-domain",
                             "role",
-                        ],
-                    )
-                    .await?;
+                        ])
+                        .await?;
                     changes.push(
                         Self::apply_session_state_shared(
                             Arc::clone(&shared),
@@ -724,21 +724,22 @@ impl DaemonState {
         let target: SessionTarget = request.target.parse()?;
         let handle = {
             let state = shared.lock().await;
-            state.host(target.host_alias())?.handle.clone()
+            state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
-        tags::unset_many(
-            &resolved.target,
-            &[
+        resolved
+            .target
+            .tags(tags::PREFIX)
+            .await?
+            .unset_many([
                 "workstream",
                 "workstream-title",
                 "workstream-state",
                 "workstream-goal",
                 "workstream-domain",
                 "role",
-            ],
-        )
-        .await?;
+            ])
+            .await?;
         let change = if request.available {
             Some(
                 Self::apply_resolved_session_state_shared(
@@ -783,7 +784,7 @@ impl DaemonState {
         let target: SessionTarget = target.parse()?;
         let handle = {
             let state = shared.lock().await;
-            state.host(target.host_alias())?.handle.clone()
+            state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
         resolved.target.kill().await?;
@@ -822,10 +823,7 @@ impl DaemonState {
                     );
                 }
             }
-            (
-                state.host(target.host_alias())?.handle.clone(),
-                current_state,
-            )
+            (state.host_handle(target.host_alias())?, current_state)
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
         if request.interrupt_first {
@@ -887,7 +885,7 @@ impl DaemonState {
         let target: SessionTarget = request.target.parse()?;
         let (handle, event_context) = {
             let state = shared.lock().await;
-            let handle = state.host(target.host_alias())?.handle.clone();
+            let handle = state.host_handle(target.host_alias())?;
             let event_context = state.sessions.get(&target).and_then(|record| {
                 record
                     .workstream
@@ -940,7 +938,7 @@ impl DaemonState {
             let cursor = shared.lock().await.record_event(
                 &request.workstream,
                 EventDraft::new("broadcast_sent")
-                    .target(&target.target.logical)
+                    .target(&target.target.spec)
                     .text(request.text.clone())
                     .state(target.state),
             )?;
@@ -948,7 +946,7 @@ impl DaemonState {
                 "type": "ok",
                 "op": "broadcast_sent",
                 "workstream": request.workstream,
-                "target": target.target.logical.to_string(),
+                "target": target.target.spec.to_string(),
                 "cursor": cursor,
             }));
         }
@@ -1088,7 +1086,7 @@ impl DaemonState {
             if state.timers.contains_key(&request.name) {
                 bail!("timer '{}' already exists", request.name);
             }
-            state.host(target.host_alias())?.handle.clone()
+            state.host_handle(target.host_alias())?
         };
         Self::resolve_target(handle, target.clone()).await?;
 
@@ -1206,7 +1204,7 @@ impl DaemonState {
             TimerFireSnapshot {
                 name: timer.name.clone(),
                 target: timer.target.clone(),
-                handle: state.host(timer.target.host_alias())?.handle.clone(),
+                handle: state.host_handle(timer.target.host_alias())?,
                 prompt: timer.prompt.clone(),
                 enter: timer.enter,
                 submit_retries: timer.submit_retries,
@@ -1318,7 +1316,7 @@ impl DaemonState {
                 if !hosts.contains_key(target.host_alias()) {
                     hosts.insert(
                         target.host_alias().to_string(),
-                        state.host(target.host_alias())?.handle.clone(),
+                        state.host_handle(target.host_alias())?,
                     );
                 }
             }
@@ -1381,7 +1379,7 @@ impl DaemonState {
                 &meta,
                 AssignmentTags {
                     workstream: &request.workstream,
-                    session_target: &plan.target.logical,
+                    session_target: &plan.target.spec,
                     role: &request.role,
                     agent: plan.agent.as_deref(),
                     cwd: plan.cwd.as_deref(),
@@ -1390,15 +1388,15 @@ impl DaemonState {
             )
             .await?;
             plan.target
-                .handle
-                .start_monitoring_session(plan.target.logical.session_name())
+                .host
+                .start_monitoring_session(plan.target.spec.session_name())
                 .await?;
             if let Some(task) = &request.task {
                 Self::send_text_to_resolved(
                     &plan.target,
                     &managed_prompt(
                         &request.workstream,
-                        &plan.target.logical,
+                        &plan.target.spec,
                         Some(&request.role),
                         plan.cwd.as_deref(),
                         Some(task),
@@ -1412,7 +1410,7 @@ impl DaemonState {
                 let mut state = shared.lock().await;
                 state.add_session_to_workstream(
                     &request.workstream,
-                    plan.target.logical.clone(),
+                    plan.target.spec.clone(),
                     request.role.clone(),
                     plan.agent.clone(),
                     plan.cwd.clone(),
@@ -1431,7 +1429,7 @@ impl DaemonState {
             let cursor = {
                 let mut state = shared.lock().await;
                 let mut event = EventDraft::new("recruited")
-                    .target(&plan.target.logical)
+                    .target(&plan.target.spec)
                     .state(plan.state);
                 if let Some(goal) = request.goal.clone() {
                     event = event.text(goal);
@@ -1442,7 +1440,7 @@ impl DaemonState {
                 "type": "ok",
                 "op": "recruited",
                 "workstream": request.workstream,
-                "target": plan.target.logical.to_string(),
+                "target": plan.target.spec.to_string(),
                 "cursor": cursor,
             }));
         }
@@ -1454,6 +1452,7 @@ impl DaemonState {
         if self.hosts.remove(alias).is_none() {
             bail!("host alias '{alias}' is not connected");
         }
+        self.fleet.unregister(alias)?;
         let removed_timers: Vec<String> = self
             .timers
             .iter()
@@ -1754,9 +1753,9 @@ impl DaemonState {
                 .iter()
                 .filter_map(|target| {
                     state
-                        .hosts
-                        .get(target.host_alias())
-                        .map(|host| (target.clone(), host.handle.clone()))
+                        .host_handle(target.host_alias())
+                        .ok()
+                        .map(|handle| (target.clone(), handle))
                 })
                 .collect::<Vec<_>>()
         };
@@ -1807,7 +1806,7 @@ impl DaemonState {
     ) -> anyhow::Result<(Value, StateChange)> {
         let handle = {
             let state = shared.lock().await;
-            state.host(handoff.to.host_alias())?.handle.clone()
+            state.host_handle(handoff.to.host_alias())?
         };
         let resolved = Self::resolve_target(handle, handoff.to.clone()).await?;
         let change = Self::apply_resolved_session_state_shared(
@@ -1880,7 +1879,7 @@ impl DaemonState {
     ) -> anyhow::Result<StateChange> {
         let handle = {
             let state_guard = shared.lock().await;
-            state_guard.host(target.host_alias())?.handle.clone()
+            state_guard.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
         Self::apply_resolved_session_state_shared(shared, &resolved, state, summary).await
@@ -1901,18 +1900,21 @@ impl DaemonState {
             pairs.push(("last-report-summary", summary.to_string()));
             pairs.push(("last-report-kind", state.as_str().to_string()));
         }
-        tags::set_many(&resolved.target, &pairs).await?;
+        resolved
+            .target
+            .tags(tags::PREFIX)
+            .await?
+            .set_many(pairs)
+            .await?;
         let mut state_guard = shared.lock().await;
         let previous_state = state_guard
             .sessions
-            .get(&resolved.logical)
+            .get(&resolved.spec)
             .map(|record| record.state);
         let record = state_guard
             .sessions
-            .entry(resolved.logical.clone())
-            .or_insert_with(|| {
-                SessionRecord::from_target(&resolved.logical, state, Some(Utc::now()))
-            });
+            .entry(resolved.spec.clone())
+            .or_insert_with(|| SessionRecord::from_target(&resolved.spec, state, Some(Utc::now())));
         record.state = state;
         record.updated_at = Utc::now();
         if let Some(summary) = summary {
@@ -1920,7 +1922,7 @@ impl DaemonState {
             record.last_report_summary = Some(summary.to_string());
         }
         Ok(StateChange {
-            target: resolved.logical.clone(),
+            target: resolved.spec.clone(),
             state,
             previous_state,
         })
@@ -1980,12 +1982,12 @@ impl DaemonState {
         logical: SessionTarget,
     ) -> anyhow::Result<ResolvedTarget> {
         let target = handle
-            .target(&logical.target_spec())
+            .target(logical.target_spec())
             .await?
             .with_context(|| format!("session '{}' not found", logical))?;
         Ok(ResolvedTarget {
-            logical,
-            handle,
+            spec: logical,
+            host: handle,
             target,
         })
     }
@@ -1995,8 +1997,13 @@ impl DaemonState {
         target: &ResolvedTarget,
     ) -> anyhow::Result<()> {
         let now = tags::now_tag();
-        tags::set_many(&target.target, &[("updated-at", now)]).await?;
-        if let Some(record) = shared.lock().await.sessions.get_mut(&target.logical) {
+        target
+            .target
+            .tags(tags::PREFIX)
+            .await?
+            .set_many([("updated-at", now)])
+            .await?;
+        if let Some(record) = shared.lock().await.sessions.get_mut(&target.spec) {
             record.updated_at = Utc::now();
         }
         Ok(())
@@ -2033,7 +2040,8 @@ impl DaemonState {
         if let Some(cwd) = assignment.cwd {
             pairs.push(("cwd", cwd.display().to_string()));
         }
-        tags::set_many(target, &pairs).await
+        target.tags(tags::PREFIX).await?.set_many(pairs).await?;
+        Ok(())
     }
 
     fn add_session_to_workstream(
@@ -2093,9 +2101,10 @@ impl DaemonState {
         Ok(cursor)
     }
 
-    fn host(&self, alias: &str) -> anyhow::Result<&HostRecord> {
-        self.hosts
-            .get(alias)
+    fn host_handle(&self, alias: &str) -> anyhow::Result<HostHandle> {
+        self.fleet
+            .host(alias)
+            .cloned()
             .with_context(|| format!("host alias '{alias}' is not connected"))
     }
 
@@ -2191,7 +2200,7 @@ impl DaemonState {
                 continue;
             }
             selected.push(BroadcastTargetSnapshot {
-                handle: self.host(target.host_alias())?.handle.clone(),
+                handle: self.host_handle(target.host_alias())?,
                 target,
                 state: session.state,
             });
@@ -2263,7 +2272,7 @@ impl DaemonState {
             .map(|target| {
                 let record = self.sessions.get(&target);
                 Ok(RecruitPlanSnapshot {
-                    handle: self.host(target.host_alias())?.handle.clone(),
+                    handle: self.host_handle(target.host_alias())?,
                     agent: request
                         .agent
                         .clone()

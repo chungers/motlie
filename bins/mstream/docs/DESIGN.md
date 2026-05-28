@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Adopted issue #337 tmux Fleet abstractions for host registration, target specs/resolved targets, and batch session tags while keeping workstream business logic in mstream. |
 | 2026-05-28 | @codex | Removed `session mark self`; coordinator state marks now require explicit targets. |
 | 2026-05-28 | @codex | Added daemon-owned self-wakeup timers that send prompts to the orchestrator's tmux session. |
 | 2026-05-23 | @codex | Addressed PR #324 handoff-loop feedback: handoff firing marks the destination busy, already-met handoffs fire immediately by default, and public cursors carry timeline generation for stale-cursor detection. |
@@ -171,8 +172,10 @@ Users and orchestrating agents should think in these terms:
 - poll status, events, snapshots, or summary input
 
 The public CLI should not expose Fleet or OutputBus directly. Internally,
-`mstream` uses Fleet for connected host/session monitoring and OutputBus for
-live output fan-out.
+`mstream` uses Fleet as the connected-host registry and uses
+`FleetTargetSpec` / `ResolvedFleetTarget` for cross-host tmux target addresses.
+OutputBus-backed live timeline ingestion remains a follow-up; the current
+implementation still maintains bounded workstream command events locally.
 
 ### Binary And Layering
 

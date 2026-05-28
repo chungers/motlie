@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @codex | Added `SshConfig::connect_with_alias()` and `Fleet::unregister()` so higher-level orchestrators can use stable routing aliases while keeping Fleet as the host registry; kept timeline lifecycle methods on `OutputBus` instead of duplicating them on `Fleet`; removed historical workstream/short-name aliases in favor of explicit target-alias APIs. |
 | 2026-05-27 | @gpt55-337-og | Added Fleet target APIs for issue #337: `FleetTargetSpec`, target aliases, cross-host session inventory with tags, batch `SessionTags` writes/removals, idempotent target monitoring, and timeline filter/scope helpers. |
 | 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` for variables that must be visible to the first pane process, and documented that `SessionEnvironment::set/unset` only affects future tmux-spawned processes. |
 | 2026-05-02 | @codex | Added scoped session environment APIs: `Target::environment()`, `SessionEnvironment::{set,unset,read,list}`, public `SessionEnvVar`, and `SESSION_ENV_VAR_VALUE_MAX_BYTES`. Tags and environment variables now use scoped helper handles only; the one-off tag wrapper methods were removed from the public `Target` API. |
@@ -2315,13 +2316,15 @@ Removing or detaching a timeline marks outstanding handles stale; subsequent
 `entries_after`, `latest`, `render_after`, filter mutation, or backfill calls on
 that old generation return an error instead of silently polling a frozen buffer.
 
-`Fleet` exposes convenience methods that delegate to its shared bus:
+Timeline lifecycle methods stay on `OutputBus`. `Fleet` exposes the shared bus
+and target-derived filter helpers, but does not duplicate timeline storage APIs:
 
 ```rust
-let timeline = fleet.open_timeline("all-agents", TimelineOptions::default())?;
-let same = fleet.timeline("all-agents")?;
-let detached = fleet.remove_idle_timelines(Duration::from_secs(300))?;
-fleet.remove_timeline("all-agents")?;
+let bus = fleet.output_bus();
+let timeline = bus.open_timeline("all-agents", TimelineOptions::default())?;
+let same = bus.timeline("all-agents")?;
+let detached = bus.remove_idle_timelines(Duration::from_secs(300))?;
+bus.remove_timeline("all-agents")?;
 ```
 
 `TimelineEntry` preserves source metadata for prompt summaries and handoff
@@ -2385,17 +2388,24 @@ use motlie_tmux::{Fleet, SshConfig};
 
 let mut fleet = Fleet::new();
 
-// Hosts must be created with the fleet alias via with_alias()
+// Hosts must be created with the fleet alias.
 let web = SshConfig::parse("ssh://deploy@web-1")?.connect().await?;
-// ^ SshConfig::connect() returns HostHandle with host_alias matching the URI host
+// ^ connect() returns HostHandle with host_alias matching the URI host
 fleet.register("web-1", web)?;
 
-let db = SshConfig::parse("ssh://admin@db-1")?.connect().await?;
-fleet.register("db-1", db)?;
+let local = SshConfig::parse("ssh://localhost")?
+    .connect_with_alias("local")
+    .await?;
+fleet.register("local", local)?;
+
+fleet.unregister("local")?;
 ```
 
 Fleet enforces that the registration alias matches `host.host_alias()`, so output
-labels and routing names stay consistent in external-agent workflows.
+labels and routing names stay consistent in external-agent workflows. Use
+`connect_with_alias()` when the transport host name is not the stable Fleet
+alias. `unregister()` removes the host plus Fleet-owned monitor and target-alias
+bookkeeping for that host.
 
 ### Shared OutputBus
 
@@ -2471,8 +2481,9 @@ target.send_keys(&KeySequence::from_str("C-c")).await?;
 fleet.unbind_target_alias("ci")?;
 ```
 
-The older `bind` / `unbind` / `find` / `workstreams` names remain as
-compatibility aliases for target aliases.
+Fleet intentionally avoids application-specific terms such as workstreams.
+Use target aliases for stable routed control and keep higher-level workflow
+names in the caller.
 
 ### Cross-host session inventory and tags
 
@@ -2704,7 +2715,7 @@ assert!(issues.is_empty());
 | `TransportKind` | Enum: Local, Ssh, Mock — static dispatch |
 | `LocalTransport` | Subprocess exec, configurable timeout |
 | `SshTransport` | russh 0.46, ssh-agent or key-file auth (DC26); `connect()`, `is_closed()` |
-| `SshConfig` | host, port, user, host_key_policy, timeout, inactivity_timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `Display`/`FromStr` |
+| `SshConfig` | host, port, user, host_key_policy, timeout, inactivity_timeout, keepalive_interval, socket; `parse()`, `to_uri_string()`, `connect()`, `connect_with_alias()`, `Display`/`FromStr` |
 | `MockTransport` | Canned responses; `with_response()`, `with_default()`, `with_file()`, `with_dir()`, `with_shell_sequence()` |
 | `HostKeyPolicy` | Enum: Verify (default), TrustFirstUse, Insecure |
 | `TmuxSocket` | Enum: Name(String), Path(String) |
@@ -2744,7 +2755,7 @@ assert!(issues.is_empty());
 | `HistoryOptions` | Config: `max_entries`, `max_render_chars`, `label_format`, `render_mode`, `global_max_render_chars`, `include_omission_marker` |
 | `HistorySnapshot` | Point-in-time snapshot — `entries`, `rendered_chars`, `omitted_entries` |
 | `HistoryEntry` | Enum: `Output { source, text, source_changed }`, `Gap { dropped_events }`, `Discontinuity { reason }` |
-| `Fleet` | Multi-host registry — `register()`, `host()`, `hosts()`, `output_bus()`, monitoring, target aliases, routing |
+| `Fleet` | Multi-host registry — `register()`, `unregister()`, `host()`, `hosts()`, `output_bus()`, monitoring, target aliases, routing |
 | `HostStatus` | Enum: `Connected`, `Monitoring { sessions: Vec<SessionMonitorStatus> }`, `Error(String)` |
 | `SessionMonitorStatus` | Per-session status: `name`, `health: MonitorHealth` |
 | `RenderMode` | Enum: `Interleaved` (default), `PerSource` — controls how `render_text()` groups entries |

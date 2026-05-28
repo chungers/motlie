@@ -5,7 +5,6 @@ mod jsonl;
 mod protocol;
 mod state;
 mod tags;
-mod target;
 mod timeline;
 
 use clap::Parser;

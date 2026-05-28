@@ -1156,12 +1156,13 @@ consumption and routed control pleasant for external LLM/classifier workflows.
 - [x] `Fleet::output_bus()` accessor (owns `OutputBus`, shares via `Arc`)
 - [x] Aggregate monitoring lifecycle: `start_monitoring_session()`, `start_monitoring_host()`,
   `stop_monitoring_host()`, `shutdown()`
-- [x] Workstream registry: `bind()`, `unbind()`, `find()`, `workstreams()`
+- [x] Target-alias registry: `bind_target_alias()`, `unbind_target_alias()`,
+  `resolve_target_alias()`, `require_target_alias()`, `target_aliases()`
 - [x] Convenience routed actions: `send_text`, `send_keys`, `capture`, `target`
 - [x] `HostStatus` enum: `Connected`, `Monitoring { sessions }`, `Error(String)`
 - [x] Delegation contract documented in module-level rustdoc
 - [x] Unit tests: alias conflict detection (`fleet_alias_conflict_detection`),
-  workstream bind/find/unbind (`fleet_workstream_bind_find_unbind`),
+  target alias bind/unbind (`fleet_target_alias_bind_find_unbind`),
   shared bus (`fleet_output_bus_is_shared`), shutdown (`fleet_shutdown_clears_state`)
 
 **Depends on**: 2c.4a ✓
