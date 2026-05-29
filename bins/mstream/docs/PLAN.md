@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-324-330-og | Added issue #349 implementation slice for mmux-visible workstream labels, selected-key preservation, hydration, cleanup, and docs/tests. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #347 follow-up tasks for self-target timers, workstream timer scope, readable events, and closeout ergonomics. |
 | 2026-05-28 | @codex | Added issue #344 timer input-quiet guard work: timer delivery defers on recent attached-client input and reports deferral state without affecting read-only polling. |
 | 2026-05-28 | @codex | Pulled issue #337 Fleet API improvements into mstream: use Fleet-owned host registration, `FleetTargetSpec`/`ResolvedFleetTarget`, and tmux batch session-tag helpers instead of local target/tag plumbing. |
@@ -214,6 +215,18 @@ Tasks:
 - [ ] 5.8 Add tests for state values `available`, `reserved`, `busy`, `idle`,
   `done`, `blocked`, and `needs-input`, including ownership rules that prevent
   output silence from becoming completion.
+- [x] 5.9 Implement issue #349 mmux label ownership tags:
+  `@mstream/mmux-label`, `@mstream/mmux-selected-key`, and
+  `@mstream/mmux-previous-selected-key`.
+- [x] 5.10 Apply `@mmux/mstream=<label>` and
+  `@mmux/__selected-key=mstream` during `join`, `new`, and `recruit` when the
+  workstream has an mmux label.
+- [x] 5.11 Clear mstream-owned mmux labels on `leave` and `close`, restoring
+  the previous `@mmux/__selected-key` when mstream still owns the selected key.
+- [x] 5.12 Hydrate workstream labels from `@mstream/mmux-label` during scan and
+  expose conflicting labels in workstream JSON.
+- [ ] 5.13 Add live tmux integration coverage for selected-key restore once a
+  reusable tmux tag fixture exists.
 
 Validation:
 
@@ -237,6 +250,8 @@ Tasks:
   sessions are joined.
 - [x] 6.2 Implement `mstream list`, `mstream show <workstream>`, and
   `mstream close <workstream>`.
+- [x] 6.2a Implement `mstream open --mmux-label` and
+  `mstream label <workstream> --mmux-label` for issue #349.
 - [x] 6.3 Implement `mstream join <workstream> <target> --role <role>
   [--task <text>]`.
 - [x] 6.4 Make `join` write session tags before sending a task prompt.
