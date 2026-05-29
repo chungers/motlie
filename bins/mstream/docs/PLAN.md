@@ -272,6 +272,11 @@ Tasks:
   - 2026-05-28 @gpt55-324-330-og: `close --stop-timers` removes timers scoped
     to the workstream and `close --standby-agents` sends a final standby
     message before freeing joined sessions.
+- [x] 6.11 Keep closeout publication outside `mstream`.
+  - 2026-05-28 @gpt55-324-330-og: `close` remains workflow-neutral and must not
+    grow GitHub-specific `--pr`, `--issue`, or posting flags. Use `events
+    --readable`, `summary-input`, and `snapshot` as transcript primitives; the
+    orchestrator/project skill constructs any PR or issue comments.
 
 Validation:
 

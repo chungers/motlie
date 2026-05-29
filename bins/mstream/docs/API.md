@@ -248,6 +248,14 @@ freeing them. Standby send attempts are recorded in the workstream timeline as
 `standby_sent` or `standby_failed`; failed standby sends are reported in
 `standby_failed` and do not abort the rest of closeout.
 
+`mstream close` is intentionally workflow-neutral. It does not know about
+GitHub issues, PRs, merges, or external closeout comments, and should not grow
+`--issue`, `--pr`, or posting flags. Use the observation primitives below,
+especially `events --readable`, `summary-input`, and `snapshot`, to dump the
+workstream timeline or transcript. The orchestrator or project skill owns
+turning that material into issue comments, PR comments, or user-facing
+closeout summaries.
+
 ## Observation
 
 ```sh
