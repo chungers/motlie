@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-324-330-og | Added issue #349 mmux-visible workstream labels with `open --mmux-label`, `label --mmux-label`, status/show/list fields, and close/leave cleanup. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #347 closeout ergonomics: `timer --self`, workstream-scoped timers, readable events, and close-time timer/standby flags. |
 | 2026-05-28 | @codex | Added timer input-quiet guards so scheduled prompt delivery defers instead of colliding with recent attached-client input. |
 | 2026-05-28 | @codex | Clarified release-binary installation and removed the obsolete `session mark self` workflow. |
@@ -69,7 +70,8 @@ mstream hosts
 mstream scan local
 mstream disconnect local
 
-mstream open pr-324 --title "mstream implementation" --goal "Implement PR 324" --event-limit 1000
+mstream open pr-324 --title "mstream implementation" --goal "Implement PR 324" --mmux-label "PR 324" --event-limit 1000
+mstream label pr-324 --mmux-label "PR 324"
 mstream list
 mstream show pr-324
 mstream close pr-324 --summary "done" --domain tmux --specialty mstream
@@ -79,8 +81,19 @@ mstream close pr-324 --summary "done" --stop-timers --standby-agents
 Host metadata is daemon memory only. Workstream `settings.event_limit` controls
 the in-memory event ring size and defaults to 1000 when omitted. Re-opening an
 existing workstream can raise or lower this limit; lowering it trims old events
-immediately. After daemon restart, reconnect hosts and run `scan` to hydrate
-tagged sessions from tmux.
+immediately. `--mmux-label` stores a short label that `join`, `new`, and
+`recruit` apply to participating sessions as `@mmux/mstream`, and sets
+`@mmux/__selected-key=mstream` so mmux can group/display the workstream label.
+Labels are enforced as one or two whitespace-separated words, with no control
+or Unicode format characters, and no more than 24 display columns.
+`label <workstream> --mmux-label <label>` changes the label for an open
+workstream and applies it to currently joined sessions. `list`, `show`, and
+`status` include `mmux_label` and `mmux_label_conflicts`.
+
+After daemon restart, reconnect hosts and run `scan` to hydrate tagged sessions
+from tmux. Scan reads `@mstream/mmux-label` from joined sessions to recover the
+workstream label. If joined sessions disagree, `mmux_label_conflicts` reports
+the observed labels.
 
 ## Session Assignment
 
@@ -99,9 +112,25 @@ mstream kill local::codex-worker
 
 `new` validates absolute `--cwd`, creates the directory on the target host, and
 starts the agent through a narrow shell bootstrap. Joined/new sessions receive
-`@mstream/*` tags and a managed-agent reporting prompt when a task is sent.
+`@mstream/*` tags and a managed-agent reporting prompt when a task is sent. If
+the workstream has an mmux label, assignment also writes:
+
+```text
+@mstream/mmux-label=<label>
+@mstream/mmux-selected-key=mstream
+@mstream/mmux-previous-selected-key=<previous @mmux/__selected-key, when any>
+@mmux/mstream=<label>
+@mmux/__selected-key=mstream
+```
+
 Recruited sessions also receive workstream-membership tags before any task is
 sent, so restart plus `scan` can hydrate their assignment.
+
+`leave` and `close` clear mstream-owned mmux labels. If mstream still owns
+`@mmux/__selected-key`, cleanup restores the saved previous selected key or
+unsets the selected key when there was no previous value. If a user or another
+tool changed `@mmux/__selected-key` after mstream applied the label, cleanup
+leaves that selected key unchanged.
 
 ## Communication And Handoff
 
@@ -220,6 +249,14 @@ length without echoing the prompt body.
 freeing them. Standby send attempts are recorded in the workstream timeline as
 `standby_sent` or `standby_failed`; failed standby sends are reported in
 `standby_failed` and do not abort the rest of closeout.
+
+`mstream close` is intentionally workflow-neutral. It does not know about
+GitHub issues, PRs, merges, or external closeout comments, and should not grow
+`--issue`, `--pr`, or posting flags. Use the observation primitives below,
+especially `events --readable`, `summary-input`, and `snapshot`, to dump the
+workstream timeline or transcript. The orchestrator or project skill owns
+turning that material into issue comments, PR comments, or user-facing
+closeout summaries.
 
 ## Observation
 

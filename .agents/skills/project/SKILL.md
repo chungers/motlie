@@ -229,8 +229,25 @@ Open and annotate workstreams with issue-aware names and descriptive titles:
 mstream open issue-337-tmux-fleet-api \
   --title "Issue 337: tmux Fleet API improvements" \
   --goal "Design and implement cross-host Fleet target helpers" \
+  --mmux-label "337 fleet" \
   --event-limit 2000
 ```
+
+When supported by the installed mstream, set `--mmux-label` at open time so
+mmux can display and group the active sessions by workstream. Keep the label
+short: mstream rejects labels that are more than two whitespace-separated words,
+more than 24 display columns, or contain control/Unicode format characters. Use
+labels such as `337 fleet` or `PR 330`. If the label needs to change after
+sessions have joined, use:
+
+```sh
+mstream label issue-337-tmux-fleet-api --mmux-label "337 fleet"
+```
+
+mstream owns the mmux workstream label lifecycle. It writes the display label
+when sessions join the workstream and clears/restores it on `leave` or `close`.
+Do not ask collaborator agents to edit `@mmux/*` tags directly for workstream
+labels.
 
 Before recruiting, propose a staffing plan to the user:
 
@@ -598,3 +615,19 @@ or follow-up issue created, reviewers posted final verdict, agents were told to
 stand by, and active workstream timers are stopped. At closeout, tell the user
 what merged, what remains open, which agents were freed, which timers were
 stopped, and whether any local uncommitted changes remain.
+
+Keep mstream boundaries clean during closeout. `mstream` is responsible for
+workstream/session/timer/timeline primitives; it should not decide which GitHub
+issue or PR to comment on and should not post closeout logs itself. When a
+closeout log is useful, build it as the orchestrator from neutral primitives:
+
+```sh
+mstream events <workstream> --limit 100 --readable
+mstream summary-input <workstream> --max-chars 12000
+mstream snapshot <workstream> --max-chars 12000
+```
+
+Then use your own GitHub context to decide whether to post the synthesized log
+to the PR, the issue, both, or neither. The log should be concise: result,
+agents/roles, important timeline points, validation, remaining risks, and
+follow-up issues. Do not ask collaborator agents to use mstream for this.
