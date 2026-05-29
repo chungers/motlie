@@ -3174,10 +3174,14 @@ fn validate_mmux_label(value: &str) -> anyhow::Result<String> {
     if value.chars().any(char::is_control) {
         bail!("--mmux-label cannot contain control characters");
     }
-    let label = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if label.is_empty() {
+    let words = value.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
         bail!("--mmux-label cannot be empty");
     }
+    if words.len() > 2 {
+        bail!("--mmux-label must be one or two words");
+    }
+    let label = words.join(" ");
     if char_count(&label) > MMUX_LABEL_MAX_CHARS {
         bail!("--mmux-label must be {MMUX_LABEL_MAX_CHARS} characters or fewer");
     }
@@ -3400,6 +3404,7 @@ mod tests {
             "Issue 349"
         );
         assert!(validate_mmux_label("").is_err());
+        assert!(validate_mmux_label("one two three").is_err());
         assert!(validate_mmux_label("abcdefghijklmnopqrstuvwxyz").is_err());
         assert!(validate_mmux_label("bad\nlabel").is_err());
     }
