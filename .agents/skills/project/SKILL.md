@@ -324,6 +324,11 @@ mstream send <workstream> <source-target> \
 - bounded context excerpts from `mstream events --readable`, `summary-input`,
   or `snapshot` when they add information not already captured by durable facts
 
+Do not count a replacement as transferred just because the tmux session exists
+or mstream metadata says it joined the workstream. A created session with no
+source-specific packet is only a standby shell/agent. The successor must receive
+the actual source packet and acknowledge it before ownership moves.
+
 If the source is the project manager or orchestrator, the transfer is not
 complete until the replacement receives the accumulated process context, not
 just session metadata. Include enough context for the replacement to make the
@@ -364,7 +369,37 @@ mstream new <workstream> <host>::<replacement-session> \
   --task "<transfer packet>"
 ```
 
-5. Quarantine the old agent after the replacement has the transfer packet. Keep
+For transfer packets, prefer an explicit post-startup delivery even if `new` or
+`join` accepted `--task`: agent TUIs may still be on the welcome screen when
+mstream sends the initial task, and the packet can be lost. A reliable transfer
+flow is:
+
+1. `mstream new` or `mstream join` the replacement.
+2. Use `mstream snapshot` or `summary-input` to confirm the agent prompt exists.
+3. Send the packet explicitly with `mstream send --enter`.
+4. Send one additional empty `--enter` if the TUI did not submit reliably.
+5. Read `summary-input` and require the exact ACK before marking the source
+   transferred.
+
+```sh
+mstream send <workstream> <replacement-target> \
+  --text "<transfer packet; ask for HANDOFF ACK <replacement-name>>" \
+  --enter \
+  --set-state busy
+mstream send <workstream> <replacement-target> --text "" --enter --set-state busy
+```
+
+When transferring many sessions on one SSH host, avoid broad `scan` plus many
+simultaneous `join` operations during delivery. Current mstream/lib-tmux monitor
+channels can exhaust the host connection and return `SSH: failed to open session
+channel: Failed to open channel (ConnectFailed)`. Use small batches: connect,
+open the workstream, join a few successors, deliver and verify packets, then
+reset only the failed daemon/host handle if channel allocation breaks. Treat
+that error as a mstream connection-lifecycle bug to fix, not as proof the remote
+host or tmux session is gone.
+
+5. Quarantine the old agent after the replacement has ACKed the transfer
+   packet. Keep
    the source out of the available pool until the replacement confirms it can
    continue or the maintainer explicitly clears the source for reuse.
    `blocked` is a deliberate quarantine marker here, not a real blocker that the
@@ -390,6 +425,13 @@ mstream session mark <source-target> \
    playbook and recent issue/PR/workstream context. If the replacement reports
    missing context, use the source only to answer that specific gap while it
    remains quarantined.
+
+If a source cannot provide a complete handoff, for example because it is
+rate-limited, exited, or missing, create the successor only with an explicit
+`INCOMPLETE` transfer packet that names the missing facts. The successor must
+ACK the incomplete state and must not claim full succession until the
+orchestrator obtains the missing source facts or the user explicitly accepts the
+loss/risk.
 
 7. Retire the old agent only after the replacement passes the confirmation gate
    or the user explicitly accepts the loss/risk. Prefer `leave`: it removes the
