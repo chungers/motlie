@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use unicode_width::UnicodeWidthStr;
 
 use crate::jsonl;
 use crate::protocol::{
@@ -240,11 +241,12 @@ struct WorkstreamMeta {
     mmux_label: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct MmuxLabelCleanup {
     cleared: bool,
     restored_previous: bool,
     selected_key_unchanged: bool,
+    skipped_workstream_mismatch: bool,
 }
 
 struct BroadcastTarget {
@@ -490,14 +492,7 @@ impl DaemonState {
                         }
                         let workstream = state.workstream_mut(&workstream_name)?;
                         if let Some(label) = parsed.mmux_label.clone() {
-                            match workstream.mmux_label.as_deref() {
-                                None => workstream.mmux_label = Some(label),
-                                Some(existing) if existing == label => {}
-                                Some(existing) => {
-                                    workstream.mmux_label_conflicts.insert(existing.to_string());
-                                    workstream.mmux_label_conflicts.insert(label);
-                                }
-                            }
+                            workstream.merge_hydrated_mmux_label(label);
                         }
                         workstream.sessions.insert(target.clone());
                         monitor_targets.push(target.clone());
@@ -753,7 +748,9 @@ impl DaemonState {
                             }
                         }
                     }
-                    match Self::clear_mmux_workstream_label(&resolved.target).await {
+                    match Self::clear_mmux_workstream_label(&resolved.target, &request.workstream)
+                        .await
+                    {
                         Ok(cleanup) => {
                             if cleanup.cleared {
                                 mmux_labels_cleared += 1;
@@ -762,6 +759,16 @@ impl DaemonState {
                                     EventDraft::new("mmux_label_cleared")
                                         .target(target)
                                         .summary("mmux workstream label cleared"),
+                                )?;
+                            }
+                            if cleanup.skipped_workstream_mismatch {
+                                shared.lock().await.record_event(
+                                    &request.workstream,
+                                    EventDraft::new("mmux_label_cleanup_skipped")
+                                        .target(target)
+                                        .summary(
+                                            "mmux label cleanup skipped: session belongs to a different workstream",
+                                        ),
                                 )?;
                             }
                         }
@@ -887,18 +894,19 @@ impl DaemonState {
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
-        let mmux_cleanup = match Self::clear_mmux_workstream_label(&resolved.target).await {
-            Ok(cleanup) => cleanup,
-            Err(err) => {
-                shared.lock().await.record_event(
-                    &request.workstream,
-                    EventDraft::new("mmux_label_restore_failed")
-                        .target(&target)
-                        .summary(format!("mmux label cleanup failed: {err}")),
-                )?;
-                MmuxLabelCleanup::default()
-            }
-        };
+        let mmux_cleanup =
+            match Self::clear_mmux_workstream_label(&resolved.target, &request.workstream).await {
+                Ok(cleanup) => cleanup,
+                Err(err) => {
+                    shared.lock().await.record_event(
+                        &request.workstream,
+                        EventDraft::new("mmux_label_restore_failed")
+                            .target(&target)
+                            .summary(format!("mmux label cleanup failed: {err}")),
+                    )?;
+                    MmuxLabelCleanup::default()
+                }
+            };
         resolved
             .target
             .tags(tags::PREFIX)
@@ -945,6 +953,16 @@ impl DaemonState {
                         .summary("mmux workstream label cleared"),
                 )?;
             }
+            if mmux_cleanup.skipped_workstream_mismatch {
+                state.record_event(
+                    &request.workstream,
+                    EventDraft::new("mmux_label_cleanup_skipped")
+                        .target(&target)
+                        .summary(
+                            "mmux label cleanup skipped: session belongs to a different workstream",
+                        ),
+                )?;
+            }
             let workstream = state.workstream_mut(&request.workstream)?;
             workstream.sessions.remove(&target);
             cursor
@@ -958,6 +976,7 @@ impl DaemonState {
             "mmux_label_cleared": mmux_cleanup.cleared,
             "mmux_previous_selected_key_restored": mmux_cleanup.restored_previous,
             "mmux_selected_key_unchanged": mmux_cleanup.selected_key_unchanged,
+            "mmux_label_cleanup_skipped": mmux_cleanup.skipped_workstream_mismatch,
         })];
         if let Some(change) = change {
             records.extend(Self::fire_handoffs_for_changes_shared(shared, vec![change]).await?);
@@ -2516,75 +2535,154 @@ impl DaemonState {
     async fn apply_mmux_workstream_label(target: &Target, label: &str) -> anyhow::Result<()> {
         let mstream_tags = target.tags(tags::PREFIX).await?;
         let mmux_tags = target.tags(MMUX_TAG_PREFIX).await?;
-        let selected_key = mmux_tags.read(MMUX_SELECTED_KEY).await?;
-        match selected_key.as_deref() {
-            Some(MMUX_WORKSTREAM_KEY) => {}
-            Some(previous) => {
-                mstream_tags
-                    .set(MSTREAM_MMUX_PREVIOUS_SELECTED_KEY, previous)
-                    .await?;
+        let mut failures = Vec::new();
+
+        match mmux_tags.read(MMUX_SELECTED_KEY).await {
+            Ok(Some(selected_key)) if selected_key == MMUX_WORKSTREAM_KEY => {}
+            Ok(Some(previous)) => {
+                if let Err(err) = mstream_tags
+                    .set(MSTREAM_MMUX_PREVIOUS_SELECTED_KEY, &previous)
+                    .await
+                {
+                    failures.push(format!(
+                        "set @mstream/{MSTREAM_MMUX_PREVIOUS_SELECTED_KEY}: {err}"
+                    ));
+                }
             }
-            None => {
-                mstream_tags
-                    .unset(MSTREAM_MMUX_PREVIOUS_SELECTED_KEY)
-                    .await?;
+            Ok(None) => {
+                if let Err(err) = mstream_tags.unset(MSTREAM_MMUX_PREVIOUS_SELECTED_KEY).await {
+                    failures.push(format!(
+                        "unset @mstream/{MSTREAM_MMUX_PREVIOUS_SELECTED_KEY}: {err}"
+                    ));
+                }
             }
+            Err(err) => failures.push(format!("read @mmux/{MMUX_SELECTED_KEY}: {err}")),
         }
-        mstream_tags
+
+        if let Err(err) = mstream_tags
             .set_many([
                 (MSTREAM_MMUX_LABEL_KEY, label),
                 (MSTREAM_MMUX_SELECTED_KEY, MMUX_WORKSTREAM_KEY),
             ])
-            .await?;
-        mmux_tags
+            .await
+        {
+            failures.push(format!(
+                "set @mstream/{MSTREAM_MMUX_LABEL_KEY},@mstream/{MSTREAM_MMUX_SELECTED_KEY}: {err}"
+            ));
+        }
+        if let Err(err) = mmux_tags
             .set_many([
                 (MMUX_WORKSTREAM_KEY, label),
                 (MMUX_SELECTED_KEY, MMUX_WORKSTREAM_KEY),
             ])
-            .await?;
-        Ok(())
+            .await
+        {
+            failures.push(format!(
+                "set @mmux/{MMUX_WORKSTREAM_KEY},@mmux/{MMUX_SELECTED_KEY}: {err}"
+            ));
+        }
+
+        mmux_tag_result(failures)
     }
 
-    async fn clear_mmux_workstream_label(target: &Target) -> anyhow::Result<MmuxLabelCleanup> {
+    async fn clear_mmux_workstream_label(
+        target: &Target,
+        workstream: &str,
+    ) -> anyhow::Result<MmuxLabelCleanup> {
         let mstream_tags = target.tags(tags::PREFIX).await?;
-        let owned_label = mstream_tags.read(MSTREAM_MMUX_LABEL_KEY).await?;
-        let owned_selected_key = mstream_tags.read(MSTREAM_MMUX_SELECTED_KEY).await?;
+        let mut read_failures = Vec::new();
+        let owned_label = match mstream_tags.read(MSTREAM_MMUX_LABEL_KEY).await {
+            Ok(value) => value,
+            Err(err) => {
+                read_failures.push(format!("read @mstream/{MSTREAM_MMUX_LABEL_KEY}: {err}"));
+                None
+            }
+        };
+        let owned_selected_key = match mstream_tags.read(MSTREAM_MMUX_SELECTED_KEY).await {
+            Ok(value) => value,
+            Err(err) => {
+                read_failures.push(format!("read @mstream/{MSTREAM_MMUX_SELECTED_KEY}: {err}"));
+                None
+            }
+        };
+        let active_workstream = match mstream_tags.read("workstream").await {
+            Ok(value) => value,
+            Err(err) => {
+                read_failures.push(format!("read @mstream/workstream: {err}"));
+                None
+            }
+        };
+        mmux_tag_result(read_failures)?;
+
         if owned_label.is_none() && owned_selected_key.is_none() {
             return Ok(MmuxLabelCleanup::default());
         }
+        if active_workstream.as_deref() != Some(workstream) {
+            return Ok(MmuxLabelCleanup {
+                skipped_workstream_mismatch: true,
+                ..Default::default()
+            });
+        }
 
-        let previous_selected_key = mstream_tags
-            .read(MSTREAM_MMUX_PREVIOUS_SELECTED_KEY)
-            .await?;
         let mmux_tags = target.tags(MMUX_TAG_PREFIX).await?;
-        let selected_key = mmux_tags.read(MMUX_SELECTED_KEY).await?;
+        let mut failures = Vec::new();
+        let previous_selected_key =
+            match mstream_tags.read(MSTREAM_MMUX_PREVIOUS_SELECTED_KEY).await {
+                Ok(value) => value,
+                Err(err) => {
+                    failures.push(format!(
+                        "read @mstream/{MSTREAM_MMUX_PREVIOUS_SELECTED_KEY}: {err}"
+                    ));
+                    None
+                }
+            };
+        let selected_key = match mmux_tags.read(MMUX_SELECTED_KEY).await {
+            Ok(value) => value,
+            Err(err) => {
+                failures.push(format!("read @mmux/{MMUX_SELECTED_KEY}: {err}"));
+                None
+            }
+        };
         let mut cleanup = MmuxLabelCleanup {
             cleared: true,
             ..Default::default()
         };
 
-        mmux_tags.unset(MMUX_WORKSTREAM_KEY).await?;
+        if let Err(err) = mmux_tags.unset(MMUX_WORKSTREAM_KEY).await {
+            failures.push(format!("unset @mmux/{MMUX_WORKSTREAM_KEY}: {err}"));
+        }
         if selected_key.as_deref() == Some(MMUX_WORKSTREAM_KEY) {
             if let Some(previous_selected_key) = previous_selected_key {
-                mmux_tags
+                if let Err(err) = mmux_tags
                     .set(MMUX_SELECTED_KEY, &previous_selected_key)
-                    .await?;
-                cleanup.restored_previous = true;
-            } else {
-                mmux_tags.unset(MMUX_SELECTED_KEY).await?;
+                    .await
+                {
+                    failures.push(format!(
+                        "restore @mmux/{MMUX_SELECTED_KEY}={previous_selected_key}: {err}"
+                    ));
+                } else {
+                    cleanup.restored_previous = true;
+                }
+            } else if let Err(err) = mmux_tags.unset(MMUX_SELECTED_KEY).await {
+                failures.push(format!("unset @mmux/{MMUX_SELECTED_KEY}: {err}"));
             }
         } else {
             cleanup.selected_key_unchanged = true;
         }
 
-        mstream_tags
+        if let Err(err) = mstream_tags
             .unset_many([
                 MSTREAM_MMUX_LABEL_KEY,
                 MSTREAM_MMUX_SELECTED_KEY,
                 MSTREAM_MMUX_PREVIOUS_SELECTED_KEY,
             ])
-            .await?;
-        Ok(cleanup)
+            .await
+        {
+            failures.push(format!(
+                "unset @mstream/{MSTREAM_MMUX_LABEL_KEY},@mstream/{MSTREAM_MMUX_SELECTED_KEY},@mstream/{MSTREAM_MMUX_PREVIOUS_SELECTED_KEY}: {err}"
+            ));
+        }
+        mmux_tag_result(failures).map(|()| cleanup)
     }
 
     fn add_session_to_workstream(
@@ -3074,6 +3172,23 @@ impl WorkstreamRecord {
         self.handoffs.clear();
     }
 
+    fn merge_hydrated_mmux_label(&mut self, label: String) {
+        if self.mmux_label_conflicts.is_empty() {
+            match self.mmux_label.as_deref() {
+                None => self.mmux_label = Some(label),
+                Some(existing) if existing == label => {}
+                Some(existing) => {
+                    self.mmux_label_conflicts.insert(existing.to_string());
+                    self.mmux_label_conflicts.insert(label);
+                    self.mmux_label = None;
+                }
+            }
+        } else {
+            self.mmux_label_conflicts.insert(label);
+            self.mmux_label = None;
+        }
+    }
+
     fn cursor(&self, workstream: &str) -> anyhow::Result<String> {
         PublicCursor::new(workstream, self.generation, self.next_sequence).encode()
     }
@@ -3170,9 +3285,20 @@ fn split_tag_list(value: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn mmux_tag_result(failures: Vec<String>) -> anyhow::Result<()> {
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("; "))
+    }
+}
+
 fn validate_mmux_label(value: &str) -> anyhow::Result<String> {
     if value.chars().any(char::is_control) {
         bail!("--mmux-label cannot contain control characters");
+    }
+    if value.chars().any(is_unicode_format_char) {
+        bail!("--mmux-label cannot contain Unicode format characters");
     }
     let words = value.split_whitespace().collect::<Vec<_>>();
     if words.is_empty() {
@@ -3182,10 +3308,35 @@ fn validate_mmux_label(value: &str) -> anyhow::Result<String> {
         bail!("--mmux-label must be one or two words");
     }
     let label = words.join(" ");
-    if char_count(&label) > MMUX_LABEL_MAX_CHARS {
-        bail!("--mmux-label must be {MMUX_LABEL_MAX_CHARS} characters or fewer");
+    if UnicodeWidthStr::width(label.as_str()) > MMUX_LABEL_MAX_CHARS {
+        bail!("--mmux-label must be {MMUX_LABEL_MAX_CHARS} display columns or fewer");
     }
     Ok(label)
+}
+
+fn is_unicode_format_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF
+    )
 }
 
 fn bootstrap_command(cwd: &Path, agent: &str) -> String {
@@ -3406,7 +3557,10 @@ mod tests {
         assert!(validate_mmux_label("").is_err());
         assert!(validate_mmux_label("one two three").is_err());
         assert!(validate_mmux_label("abcdefghijklmnopqrstuvwxyz").is_err());
+        assert!(validate_mmux_label("界界界界界界界界界界界界界").is_err());
         assert!(validate_mmux_label("bad\nlabel").is_err());
+        assert!(validate_mmux_label("bad\u{200d}label").is_err());
+        assert!(validate_mmux_label("bad\u{202e}label").is_err());
     }
 
     #[test]
@@ -3439,6 +3593,59 @@ mod tests {
 
         let show = state.show("issue-349").expect("show workstream");
         assert_eq!(show["mmux_label"], "349 labels");
+    }
+
+    #[test]
+    fn scan_hydration_conflicts_do_not_choose_order_dependent_label() {
+        let mut workstream = WorkstreamRecord::new(
+            "Issue 349".to_string(),
+            None,
+            None,
+            None,
+            WorkstreamSettings { event_limit: 10 },
+            1,
+        );
+
+        workstream.merge_hydrated_mmux_label("349 labels".to_string());
+        assert_eq!(workstream.mmux_label.as_deref(), Some("349 labels"));
+        assert!(workstream.mmux_label_conflicts.is_empty());
+
+        workstream.merge_hydrated_mmux_label("349 review".to_string());
+        assert_eq!(workstream.mmux_label, None);
+        assert_eq!(
+            workstream.mmux_label_conflicts,
+            BTreeSet::from(["349 labels".to_string(), "349 review".to_string()])
+        );
+
+        workstream.merge_hydrated_mmux_label("349 labels".to_string());
+        assert_eq!(workstream.mmux_label, None);
+        assert_eq!(workstream.mmux_label_conflicts.len(), 2);
+    }
+
+    #[test]
+    fn mmux_label_requests_round_trip_over_json() {
+        let open = OpenRequest {
+            workstream: "issue-349".to_string(),
+            title: "Issue 349".to_string(),
+            goal: None,
+            domain: None,
+            mmux_label: Some("349 labels".to_string()),
+            settings: WorkstreamSettings { event_limit: 10 },
+        };
+        let decoded: OpenRequest =
+            serde_json::from_value(serde_json::to_value(&open).expect("serialize open"))
+                .expect("deserialize open");
+        assert_eq!(decoded.mmux_label.as_deref(), Some("349 labels"));
+
+        let label = LabelRequest {
+            workstream: "issue-349".to_string(),
+            mmux_label: "349 review".to_string(),
+        };
+        let decoded: LabelRequest =
+            serde_json::from_value(serde_json::to_value(&label).expect("serialize label"))
+                .expect("deserialize label");
+        assert_eq!(decoded.workstream, "issue-349");
+        assert_eq!(decoded.mmux_label, "349 review");
     }
 
     #[test]
@@ -3558,6 +3765,51 @@ mod tests {
         assert!(text.contains("message_sent"));
         assert!(text.contains("amd2::gpt55-342-rv"));
         assert!(text.contains("Please merge PR #346 now."));
+    }
+
+    #[test]
+    fn events_readable_renders_mmux_label_events() {
+        let mut state = DaemonState::default();
+        state
+            .open(OpenRequest {
+                workstream: "issue-349".to_string(),
+                title: "Issue 349".to_string(),
+                goal: None,
+                domain: None,
+                mmux_label: Some("349 labels".to_string()),
+                settings: WorkstreamSettings { event_limit: 10 },
+            })
+            .expect("open workstream");
+        state
+            .record_event(
+                "issue-349",
+                EventDraft::new("mmux_label_applied")
+                    .target("amd2::opus47-349-rv")
+                    .summary("mmux label applied: 349 labels"),
+            )
+            .expect("record apply");
+        state
+            .record_event(
+                "issue-349",
+                EventDraft::new("mmux_label_cleared")
+                    .target("amd2::opus47-349-rv")
+                    .summary("mmux workstream label cleared: 349 labels"),
+            )
+            .expect("record clear");
+
+        let events = state
+            .events(EventsRequest {
+                workstream: "issue-349".to_string(),
+                after: None,
+                limit: 10,
+                readable: true,
+            })
+            .expect("read events");
+        let text = events["text"].as_str().expect("readable text");
+        assert!(text.contains("mmux_label_applied"));
+        assert!(text.contains("mmux_label_cleared"));
+        assert!(text.contains("amd2::opus47-349-rv"));
+        assert!(text.contains("349 labels"));
     }
 
     #[test]

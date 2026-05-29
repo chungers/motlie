@@ -235,8 +235,10 @@ mstream open issue-337-tmux-fleet-api \
 
 When supported by the installed mstream, set `--mmux-label` at open time so
 mmux can display and group the active sessions by workstream. Keep the label
-short, usually one or two words such as `337 fleet` or `PR 330`. If the label
-needs to change after sessions have joined, use:
+short: mstream rejects labels that are more than two whitespace-separated words,
+more than 24 display columns, or contain control/Unicode format characters. Use
+labels such as `337 fleet` or `PR 330`. If the label needs to change after
+sessions have joined, use:
 
 ```sh
 mstream label issue-337-tmux-fleet-api --mmux-label "337 fleet"

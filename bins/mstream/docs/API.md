@@ -84,6 +84,8 @@ existing workstream can raise or lower this limit; lowering it trims old events
 immediately. `--mmux-label` stores a short label that `join`, `new`, and
 `recruit` apply to participating sessions as `@mmux/mstream`, and sets
 `@mmux/__selected-key=mstream` so mmux can group/display the workstream label.
+Labels are enforced as one or two whitespace-separated words, with no control
+or Unicode format characters, and no more than 24 display columns.
 `label <workstream> --mmux-label <label>` changes the label for an open
 workstream and applies it to currently joined sessions. `list`, `show`, and
 `status` include `mmux_label` and `mmux_label_conflicts`.
