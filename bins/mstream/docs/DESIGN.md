@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-28 | @gpt55-324-330-og | Added issue #349 mmux-visible workstream labels owned by mstream tags, with selected-key preservation and leave/close cleanup. |
 | 2026-05-28 | @codex | Added issue #344 input-quiet timer delivery guard: timed prompts defer when attached-client input was recent, while read-only polling remains unaffected. |
 | 2026-05-28 | @codex | Adopted issue #337 tmux Fleet abstractions for host registration, target specs/resolved targets, and batch session tags while keeping workstream business logic in mstream. |
 | 2026-05-28 | @codex | Removed `session mark self`; coordinator state marks now require explicit targets. |
@@ -114,6 +115,8 @@ unstick collaborators.
 - FR20: Guard unattended timer delivery against recent attached-client input so
   a self-wakeup prompt does not corrupt text a human is typing in the target
   session.
+- FR21: Support short mmux-visible workstream labels so mmux can group or
+  display active sessions by the workstream assigned through mstream.
 
 ### State And Recovery Requirements
 
@@ -292,6 +295,9 @@ Initial tags:
 @mstream/last-report-summary=PR feedback addressed; waiting for reviewer.
 @mstream/last-workstream=pr-322
 @mstream/last-workstream-title=OutputBus timelines
+@mstream/mmux-label=PR 322
+@mstream/mmux-selected-key=mstream
+@mstream/mmux-previous-selected-key=owner
 @mstream/updated-at=2026-05-21T12:34:56Z
 ```
 
@@ -329,6 +335,15 @@ State ownership:
 `last-report-*` tags are intentionally small. Detailed reports belong in the
 agent pane transcript or PR/issue comments.
 
+When a workstream has an mmux label, `mstream` also writes `@mmux/mstream=<label>`
+and sets `@mmux/__selected-key=mstream` on joined, new, or recruited sessions.
+Before taking over `@mmux/__selected-key`, it stores the previous selected key
+in `@mstream/mmux-previous-selected-key` unless the selected key is already
+`mstream`. On `leave` or `close`, `mstream` clears `@mmux/mstream`; if the
+selected key is still `mstream`, it restores the previous key or unsets the
+selected key when no previous key existed. If another tool changed the selected
+key after mstream applied the label, cleanup leaves that selection unchanged.
+
 ### Hydration Flow
 
 After connecting hosts, the daemon hydrates by scanning tmux:
@@ -352,7 +367,9 @@ Open an in-memory workstream:
 mstream open pr-322 \
   --title "OutputBus timelines" \
   --goal "Add OutputBus-backed timelines for multi-agent monitoring" \
-  --domain tmux
+  --domain tmux \
+  --mmux-label "PR 322"
+mstream label pr-322 --mmux-label "PR 322"
 mstream list
 mstream show pr-322
 mstream close pr-322
@@ -363,6 +380,13 @@ the daemon-memory workstream handle and any provided title/goal/domain metadata.
 Because `mstream` has no durable local store, an open workstream becomes
 durable only when at least one joined session receives `@mstream/workstream=*`
 tags.
+
+`--mmux-label` is optional. It should be a short one- or two-word label that
+mmux can display beside active sessions. `label <workstream> --mmux-label` can
+update the label for an open workstream and apply it to currently joined
+sessions. Scan rehydrates the label from `@mstream/mmux-label`; if participating
+sessions disagree, status/show/list expose label conflicts for the orchestrator
+to resolve.
 
 Join an existing tmux session:
 

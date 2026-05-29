@@ -7,12 +7,12 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
-    HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LeaveRequest, NewRequest,
-    OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest, SnapshotRequest,
-    SummaryInputRequest, TimerStartRequest, WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS,
-    DEFAULT_STATUS_IDLE_AFTER_SECS, DEFAULT_TIMER_INPUT_QUIET_FOR_SECS,
-    DEFAULT_TIMER_SUBMIT_RETRIES, DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS,
-    DEFAULT_WORKSTREAM_EVENT_LIMIT,
+    HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
+    NewRequest, OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest,
+    SnapshotRequest, SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
+    DEFAULT_STATUS_ACTIVE_WINDOW_SECS, DEFAULT_STATUS_IDLE_AFTER_SECS,
+    DEFAULT_TIMER_INPUT_QUIET_FOR_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
+    DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
 
 #[derive(Debug, Parser)]
@@ -52,6 +52,7 @@ pub enum Command {
         alias: String,
     },
     Open(OpenArgs),
+    Label(LabelArgs),
     List,
     Show {
         workstream: String,
@@ -96,9 +97,14 @@ impl Command {
                 title: args.title,
                 goal: args.goal,
                 domain: args.domain,
+                mmux_label: args.mmux_label,
                 settings: WorkstreamSettings {
                     event_limit: args.event_limit,
                 },
+            })),
+            Command::Label(args) => Ok(ClientRequest::Label(LabelRequest {
+                workstream: args.workstream,
+                mmux_label: args.mmux_label,
             })),
             Command::List => Ok(ClientRequest::List),
             Command::Show { workstream } => Ok(ClientRequest::Show { workstream }),
@@ -240,8 +246,17 @@ pub struct OpenArgs {
     pub goal: Option<String>,
     #[arg(long)]
     pub domain: Option<String>,
+    #[arg(long)]
+    pub mmux_label: Option<String>,
     #[arg(long, default_value_t = DEFAULT_WORKSTREAM_EVENT_LIMIT)]
     pub event_limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct LabelArgs {
+    pub workstream: String,
+    #[arg(long)]
+    pub mmux_label: String,
 }
 
 #[derive(Debug, Args)]
@@ -688,6 +703,46 @@ mod tests {
         assert!(parse_duration_secs("").is_err());
         assert!(parse_duration_secs("0s").is_err());
         assert!(parse_duration_secs("soon").is_err());
+    }
+
+    #[test]
+    fn open_command_allows_mmux_label() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "open",
+            "issue-349-mmux-workstream-labels",
+            "--title",
+            "Issue 349: mmux labels",
+            "--mmux-label",
+            "349 labels",
+        ])
+        .expect("open command parses");
+
+        let request = cli.command.into_request().expect("open request");
+        let ClientRequest::Open(request) = request else {
+            panic!("expected open request");
+        };
+        assert_eq!(request.workstream, "issue-349-mmux-workstream-labels");
+        assert_eq!(request.mmux_label.as_deref(), Some("349 labels"));
+    }
+
+    #[test]
+    fn label_command_builds_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "label",
+            "issue-349-mmux-workstream-labels",
+            "--mmux-label",
+            "349 labels",
+        ])
+        .expect("label command parses");
+
+        let request = cli.command.into_request().expect("label request");
+        let ClientRequest::Label(request) = request else {
+            panic!("expected label request");
+        };
+        assert_eq!(request.workstream, "issue-349-mmux-workstream-labels");
+        assert_eq!(request.mmux_label, "349 labels");
     }
 
     #[test]
