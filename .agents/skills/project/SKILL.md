@@ -232,6 +232,14 @@ the command you tried, and why the existing `send`, `status`, `events`,
 `summary-input`, `snapshot`, `recruit`, `join`, `new`, `session mark`, `leave`,
 `kill`, `handoff`, or timer primitives cannot cover it.
 
+Do not use `mstream handoff` as the primary primitive for linear replacement.
+`handoff` is useful for conditional sequencing between live sessions, such as
+author-to-reviewer flow on `done`, but replacement requires freezing one source,
+capturing a durability checkpoint, packaging self-contained context, quarantining
+the source, and retiring it only after confirmation. Use `handoff` only as an
+optional follow-on automation after the replacement exists and the transfer
+packet has already been delivered.
+
 Transfer is an mstream-only coordination boundary. The orchestrator observes,
 interrupts, recruits, marks state, and retires sessions through mstream. Do not
 bypass mstream with direct `ssh` or `tmux` commands for transfer coordination,
@@ -257,8 +265,15 @@ mstream send <workstream> <source-target> \
    can transfer assignment and context; it cannot recover uncommitted local
    filesystem state from a host or session that disappears.
 
-3. Build a transfer packet from durable facts plus bounded mstream context.
-   Include these fields:
+3. Wait for and capture the source checkpoint output before building or sending
+   the transfer packet. Verify that the checkpoint names the durable artifact
+   that preserves the work, such as a branch/commit, pushed PR update, issue/PR
+   comment, or explicit statement of local-only risk. Then build a
+   self-contained, model-agnostic transfer packet from durable facts, the source
+   checkpoint output, and bounded mstream context. The replacement may be a
+   different model or agent family, so the packet must not rely on source-agent
+   memory, local tmux scrollback, private shorthand, or model-specific
+   assumptions. Include these fields:
 
 - workstream name and transfer reason
 - source target, replacement target if already known, and source risk such as
@@ -284,6 +299,10 @@ mstream recruit <workstream> \
   --agent <agent-kind> \
   --task "<transfer packet>"
 
+mstream join <workstream> <host>::<replacement-session> \
+  --role <role> \
+  --task "<transfer packet>"
+
 mstream new <workstream> <host>::<replacement-session> \
   --role <role> \
   --cwd <absolute-replacement-cwd> \
@@ -294,6 +313,12 @@ mstream new <workstream> <host>::<replacement-session> \
 5. Quarantine the old agent after the replacement has the transfer packet. Keep
    the source out of the available pool until the replacement confirms it can
    continue or the maintainer explicitly clears the source for reuse.
+   `blocked` is a deliberate quarantine marker here, not a real blocker that the
+   monitoring loop should try to unblock. Use it because current recruitment
+   avoids non-available sessions and there is no dedicated quarantined or
+   reserved state in the documented primitive set. Do not use an informal
+   "Reserved" label or summary-only convention; state must be visible to
+   mstream selection and status.
 
 ```sh
 mstream session mark <source-target> \
@@ -302,13 +327,20 @@ mstream session mark <source-target> \
 ```
 
 6. Monitor the replacement with `status`, `events`, `summary-input`, and the
-   workstream timer loop. If the replacement reports missing context, use the
-   source only to answer that specific gap while it remains quarantined.
+   workstream timer loop. Require an explicit replacement-confirmation gate
+   before retiring the source: the replacement must acknowledge the transfer
+   packet, identify the durable artifact it is continuing from, and either start
+   the next concrete action or report the exact missing context. If the
+   replacement reports missing context, use the source only to answer that
+   specific gap while it remains quarantined.
 
-7. Retire the old agent only after the replacement is moving or the user accepts
-   the loss/risk. Use `leave` when the session should no longer be part of the
-   workstream, and use `kill` only when destructive session cleanup is intended
-   and appropriate.
+7. Retire the old agent only after the replacement passes the confirmation gate
+   or the user explicitly accepts the loss/risk. Prefer `leave`: it removes the
+   source from the workstream but keeps the tmux session alive so the
+   orchestrator can re-join or inspect it later through mstream if needed.
+   `kill` is terminal session cleanup; use it only after replacement
+   confirmation, or after explicit user approval to destroy the old session
+   despite unresolved risk.
 
 ```sh
 mstream leave <workstream> <source-target>
