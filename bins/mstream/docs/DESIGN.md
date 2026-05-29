@@ -343,6 +343,8 @@ in `@mstream/mmux-previous-selected-key` unless the selected key is already
 selected key is still `mstream`, it restores the previous key or unsets the
 selected key when no previous key existed. If another tool changed the selected
 key after mstream applied the label, cleanup leaves that selection unchanged.
+Selected-key takeover and restore are best-effort against out-of-band tmux
+edits because the daemon does not hold its internal lock across tmux or SSH I/O.
 
 ### Hydration Flow
 
@@ -381,12 +383,13 @@ Because `mstream` has no durable local store, an open workstream becomes
 durable only when at least one joined session receives `@mstream/workstream=*`
 tags.
 
-`--mmux-label` is optional. It should be a short one- or two-word label that
-mmux can display beside active sessions. `label <workstream> --mmux-label` can
+`--mmux-label` is optional. It must be one or two whitespace-separated words,
+must not contain control or Unicode format characters, and must fit within 24
+display columns. Violations are rejected. `label <workstream> --mmux-label` can
 update the label for an open workstream and apply it to currently joined
 sessions. Scan rehydrates the label from `@mstream/mmux-label`; if participating
 sessions disagree, status/show/list expose label conflicts for the orchestrator
-to resolve.
+to resolve without choosing an order-dependent winner.
 
 Join an existing tmux session:
 
