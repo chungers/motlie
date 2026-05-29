@@ -202,6 +202,19 @@ Use `scan` after connecting or daemon restart to hydrate tagged sessions from tm
 
 If `scan` reports no tmux server or no sessions, do not silently infer available capacity. Tell the user there are no discoverable existing sessions on that host and ask whether to create fresh sessions, unless the latest user instruction already explicitly approved fresh session creation.
 
+Do not treat `mstream scan` as an exhaustive inventory of every tmux session on
+a host. `scan` hydrates sessions visible to the connected tmux socket and may
+only import sessions with mstream metadata. When the user asks for "all
+sessions" on a host, first perform a coverage audit: identify every relevant
+tmux socket/server for that host, connect each socket as a distinct mstream host
+alias when needed, and compare the raw session names against `mstream session
+list`. Prefer mstream/lib-tmux primitives for this inventory; if mstream lacks a
+raw session listing primitive, state the gap and use the smallest diagnostic
+needed to discover socket/session names, then perform transfer and monitoring
+through mstream. Do not declare a host fully transferred until every discovered
+session is either transferred, explicitly excluded, or recorded as needing
+targeted inspection.
+
 If fresh session creation is approved but the remote host has no tmux server,
 try `mstream new`; tmux should create its server as part of creating the
 session. If mstream cannot bootstrap the session, treat that as an mstream
