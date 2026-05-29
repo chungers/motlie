@@ -293,6 +293,14 @@ messages, use the current governing workstream when one exists; otherwise ask
 the user which existing workstream should govern the transfer instead of
 inventing a new transfer workstream.
 
+Never apply a synthetic transfer label, such as `one transfer`, to successor
+sessions. Transfer coordination is not the work. A successor's mmux display
+label and mstream tags must come from the predecessor's actual workstream and
+role. If the predecessor has no workstream/mmux tags, leave the successor
+untagged for workstream display or ask the user which real workstream should own
+it. Do not overwrite useful predecessor tags with labels that describe the
+transfer mechanics.
+
 1. Ask the source to build a succession packet. Do not mark the source blocked,
    quarantined, unavailable, or ready for retirement before this packet exists
    unless the session is already gone. The packet must contain all information a
@@ -371,7 +379,9 @@ corrections to the playbook.
    Always copy the predecessor's mmux tags and mstream tags to the successor when
    mstream can represent them. At minimum preserve workstream, role,
    domain/specialty context, summary, issue/PR references, display label, and
-   transfer lineage in the successor task and session mark summary.
+   transfer lineage in the successor task and session mark summary. Verify with
+   `mstream session list` or `mstream show` that the successor displays the
+   predecessor's real workstream label, not a temporary transfer label.
 
 ```sh
 mstream recruit <workstream> \
