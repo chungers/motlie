@@ -269,6 +269,14 @@ bypass mstream with direct `ssh` or `tmux` commands for transfer coordination,
 and do not ask collaborator agents to run mstream commands, inspect the mstream
 socket, or manage their own mstream state.
 
+Transfer is one-to-one succession. One source session maps to one replacement
+session, and the replacement owns only that source's work and context. Do not
+fan in multiple agents' work, histories, or responsibilities into one successor.
+For a host-wide transfer, create a separate successor for each source, using the
+source-name-plus-suffix rule below. A single orchestrator may keep an audit
+ledger of many sessions, but that ledger is not a transfer of ownership and must
+not be treated as making one agent the successor for multiple sources.
+
 Default transfer sequence:
 
 1. Freeze the source. Stop new work and ask the source agent for a transfer
