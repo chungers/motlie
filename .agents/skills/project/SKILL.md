@@ -167,10 +167,20 @@ agent communication. If mstream lacks a signal needed to manage a workstream,
 extend mstream in the active PR or ask the user before proceeding with a
 temporary manual path.
 
-Keep user-facing progress updates outcome-focused. Do not narrate every command
-or tool call. Report material state changes, blockers, risks, and decisions;
-omit routine command logging unless it explains a failure or a user explicitly
-asks for command-level detail.
+Keep user-facing progress updates outcome-focused and quiet. Do not narrate
+routine tool calls, approval decisions, command starts, polling mechanics, or
+raw console logs. Report only material state changes, blockers, risks, and
+decisions that affect the workstream or require human attention. When command
+output matters, summarize the relevant result instead of pasting the full log.
+If the user explicitly asks for command-level detail, include only the minimal
+commands and output needed to answer.
+
+For timer wakeups, keep responses concise. If a timer is stale, first verify
+`mstream timer list`; if the timer still exists, stop it. If it is already gone,
+treat the wakeup as previously queued input and do not keep re-reporting the
+same stale state unless the user asks. For active workstream timers, report only
+material changes since the last poll, such as a PR update, review verdict,
+blocker, merge, issue closeout, timer change, or agent state change.
 
 Only the orchestrator has access to mstream. Collaborating agents do not have
 mstream access and should never be instructed to run mstream commands, inspect
