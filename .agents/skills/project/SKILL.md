@@ -337,10 +337,13 @@ mstream session mark <source-target> \
 7. Retire the old agent only after the replacement passes the confirmation gate
    or the user explicitly accepts the loss/risk. Prefer `leave`: it removes the
    source from the workstream but keeps the tmux session alive so the
-   orchestrator can re-join or inspect it later through mstream if needed.
-   `kill` is terminal session cleanup; use it only after replacement
-   confirmation, or after explicit user approval to destroy the old session
-   despite unresolved risk.
+   orchestrator can re-join or inspect it later through mstream if needed. After
+   `leave`, workstream-scoped consultation such as `mstream send <workstream>
+   <source-target>` is unavailable until the source is re-joined; if follow-up
+   questions are likely, keep the source joined while quarantined or re-join it
+   before asking. `kill` is terminal session cleanup; use it only after
+   replacement confirmation, or after explicit user approval to destroy the old
+   session despite unresolved risk.
 
 ```sh
 mstream leave <workstream> <source-target>
