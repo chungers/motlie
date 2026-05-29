@@ -282,16 +282,16 @@ Default transfer sequence:
 Process one source completely before moving to the next source. For host-wide
 or multi-session transfer, do not batch-create successors and fill in context
 later. Finish this sequence for source A, including successor readiness and
-ancestor quarantine, before starting source B.
+predecessor quarantine, before starting source B.
 
 Do not create a new workstream solely for transfer. The successor assumes the
-ancestor's current workstream, role, tags, and responsibilities. If the ancestor
-has no workstream or mstream metadata, first ask the ancestor to self-identify
-(for example Codex or Claude), report its current role, and produce a complete
-succession packet. If mstream needs a workstream to send messages, use the
-current governing workstream when one exists; otherwise ask the user which
-existing workstream should govern the transfer instead of inventing a new
-transfer workstream.
+predecessor's current workstream, role, tags, and responsibilities. If the
+predecessor has no workstream or mstream metadata, first ask the predecessor to
+self-identify (for example Codex or Claude), report its current role, and
+produce a complete succession packet. If mstream needs a workstream to send
+messages, use the current governing workstream when one exists; otherwise ask
+the user which existing workstream should govern the transfer instead of
+inventing a new transfer workstream.
 
 1. Ask the source to build a succession packet. Do not mark the source blocked,
    quarantined, unavailable, or ready for retirement before this packet exists
@@ -368,7 +368,7 @@ corrections to the playbook.
    `-2`, for example `gpt55-pm` -> `gpt55-pm-2`. If that name already exists on
    the target host, increment to `-3`, `-4`, and so on. Prefer this suffix over
    punctuation such as apostrophes because it is tmux- and shell-friendly.
-   Always copy the ancestor's mmux tags and mstream tags to the successor when
+   Always copy the predecessor's mmux tags and mstream tags to the successor when
    mstream can represent them. At minimum preserve workstream, role,
    domain/specialty context, summary, issue/PR references, display label, and
    transfer lineage in the successor task and session mark summary.
@@ -400,7 +400,7 @@ flow is:
 3. Send the packet explicitly with `mstream send --enter`.
 4. Send one additional empty `--enter` if the TUI did not submit reliably.
 5. Read `summary-input` and require the exact ACK plus workspace-readiness
-   confirmation before marking the ancestor transferred.
+   confirmation before marking the predecessor transferred.
 
 ```sh
 mstream send <workstream> <replacement-target> \
@@ -425,7 +425,7 @@ ask before taking daemon-level recovery steps.
    or explicitly state the missing workspace/durable artifact. Only then does
    ownership move.
 
-6. Quarantine the ancestor only after successor readiness is confirmed. Keep
+6. Quarantine the predecessor only after successor readiness is confirmed. Keep
    the source out of the available pool until the replacement confirms it can
    continue or the maintainer explicitly clears the source for reuse.
    `blocked` is a deliberate quarantine marker here, not a real blocker that the
@@ -445,7 +445,7 @@ mstream session mark <source-target> \
    workstream timer loop. If the source is an orchestrator, the acknowledgement
    must explicitly confirm it received the operating playbook and recent
    issue/PR/workstream context. If the successor reports missing context, ask
-   the ancestor only for that gap and do not move to the next source until the
+   the predecessor only for that gap and do not move to the next source until the
    gap is resolved or the user accepts the risk.
 
 If a source cannot provide a complete handoff, for example because it is
