@@ -69,7 +69,7 @@ cargo install --path bins/mstream --locked
 
 Ensure Cargo's bin directory, usually `~/.cargo/bin`, is on `PATH`. Use the release binary name `mstream` in orchestration commands, not `cargo run` or `./target/debug/mstream`.
 
-Once assigned as orchestrator for an active workstream, keep the mstream daemon running across turns for the duration of that orchestration assignment. Do not stop and restart it after routine `list`, `status`, `summary-input`, or progress checks. Stop it only when the user tells you to, when the workstream is closed and no active orchestration remains, or when replacing a failed daemon instance.
+Once assigned as orchestrator for an active workstream, keep the mstream daemon running across turns for the duration of that orchestration assignment. Do not stop and restart it after routine `list`, `status`, `summary-input`, progress checks, transfer delivery, or SSH-channel failures. Never stop the daemon unless the user explicitly asks you to stop it. If the daemon appears failed or unreachable, report the symptom and ask before stopping or replacing it.
 
 Use a stable explicit socket for the whole assignment:
 
@@ -109,7 +109,7 @@ tmux new-session -d \
 mstream --socket /tmp/mstream-${USER}.sock daemon status
 ```
 
-Before starting any daemon path, use `mstream daemon status` on the chosen socket. If it is already running, reuse it. Always use the same explicit `--socket` value for the full orchestration run once chosen. Do not stop the daemon just because one user request completes; keep it alive until the orchestration assignment is closed or the user asks you to stop it.
+Before starting any daemon path, use `mstream daemon status` on the chosen socket. If it is already running, reuse it. Always use the same explicit `--socket` value for the full orchestration run once chosen. Do not stop the daemon just because one user request completes; keep it alive until the user asks you to stop it.
 
 When assigned as orchestrator and the harness has no first-class cron, start a
 daemon-owned self-wakeup timer targeted at your own tmux session. The timer
@@ -159,7 +159,7 @@ polling workstreams with `status`, `events`, `snapshot`, `summary-input`, and
 `timer list` even when a timer is deferring because recent user input was
 detected.
 
-If the daemon is unreachable, ask the user to restart it or provide the correct socket. After daemon restart, ask the user for the host aliases and SSH URIs; mstream does not persist the host ledger.
+If the daemon is unreachable, ask the user whether to restart it or provide the correct socket. Do not stop an existing daemon on your own. After daemon restart, ask the user for the host aliases and SSH URIs; mstream does not persist the host ledger.
 
 Use `mstream` as the orchestration boundary. Do not bypass it with direct `ssh`
 plus `tmux` commands for liveness, session listing, snapshots, monitoring, or
@@ -279,29 +279,45 @@ not be treated as making one agent the successor for multiple sources.
 
 Default transfer sequence:
 
-1. Freeze the source. Stop new work and ask the source agent for a transfer
-   checkpoint.
+Process one source completely before moving to the next source. For host-wide
+or multi-session transfer, do not batch-create successors and fill in context
+later. Finish this sequence for source A, including successor readiness and
+ancestor quarantine, before starting source B.
+
+Do not create a new workstream solely for transfer. The successor assumes the
+ancestor's current workstream, role, tags, and responsibilities. If the ancestor
+has no workstream or mstream metadata, first ask the ancestor to self-identify
+(for example Codex or Claude), report its current role, and produce a complete
+succession packet. If mstream needs a workstream to send messages, use the
+current governing workstream when one exists; otherwise ask the user which
+existing workstream should govern the transfer instead of inventing a new
+transfer workstream.
+
+1. Ask the source to build a succession packet. Do not mark the source blocked,
+   quarantined, unavailable, or ready for retirement before this packet exists
+   unless the session is already gone. The packet must contain all information a
+   successor needs to pick up the work.
 
 ```sh
 mstream send <workstream> <source-target> \
   --interrupt-first \
   --set-state busy \
-  --text "Stop taking new work. Prepare transfer: make current work durable; summarize issue/PR/branch/commit/cwd/current state/tests/blockers/next action." \
+  --text "Stop taking new work. Build a succession packet for one-to-one replacement: self-identify, make current work durable, then summarize issue/PR/branch/commit/cwd/remotes/dirty state/tests/blockers/next action/workstream/role/tags." \
   --enter
 ```
 
-2. Require a durability checkpoint before the transfer is considered safe. The
-   source should commit and push, update the PR, post a comment, or otherwise
-   make the relevant state recoverable from durable project artifacts. mstream
-   can transfer assignment and context; it cannot recover uncommitted local
-   filesystem state from a host or session that disappears.
+2. Require durable work facts before succession is considered safe. The source
+   should commit and push, update the PR, post a comment, or clearly identify
+   local-only risk. mstream can transfer assignment and context; it cannot
+   recover uncommitted local filesystem state from a host or session that
+   disappears.
 
-3. Wait for and capture the source checkpoint output before building or sending
-   the transfer packet. Verify that the checkpoint names the durable artifact
+3. Wait for and capture the source succession packet before building or sending
+   anything to the successor. Verify that the packet names the durable artifact
    that preserves the work, such as a branch/commit, pushed PR update, issue/PR
    comment, or explicit statement of local-only risk. Then build a
    self-contained, model-agnostic transfer packet from durable facts, the source
-   checkpoint output, your own accumulated orchestration context, and bounded
+   succession packet, your own accumulated orchestration context, and bounded
    mstream context. The replacement may be a different model or agent family, so
    the packet must not rely on source-agent memory, local tmux scrollback,
    private shorthand, or model-specific assumptions. Include these fields:
@@ -309,7 +325,8 @@ mstream send <workstream> <source-target> \
 - workstream name and transfer reason
 - source target, replacement target if already known, and source risk such as
   planned shutdown, lost session, stale agent, or role change
-- issue(s), PR(s), branch, latest commit, cwd, role, and agent identity
+- issue(s), PR(s), branch, latest commit, cwd, remotes, dirty state, role, and
+  agent identity
 - current implementation, review, or release state
 - durability checkpoint: what was committed, pushed, posted, or otherwise made
   recoverable, plus any known local-only risk
@@ -338,19 +355,23 @@ GitHub issue/PR state, reviewer protocol, timer policy, host SSH URIs and work
 roots, daemon socket, known stale workstreams or timers, and any recent user
 corrections to the playbook.
 
-4. Recruit, join, or create the replacement with the transfer packet as the
-   task. Prefer a fresh cwd for a newly created replacement unless the user
-   explicitly wants it to resume an existing checkout.
+4. Recruit, join, or create the successor. Prefer a fresh cwd for a newly
+   created successor unless the user explicitly wants it to resume an existing
+   checkout. The successor must initialize or prepare its workspace according to
+   the succession packet: check out the named repository, branch, and worktree;
+   verify the expected commit and dirty-state expectations; read `AGENTS.md`
+   and/or `CLAUDE.md`; and report any missing durable artifact before doing new
+   work.
 
    Name newly commissioned replacement sessions as successors of the source
    session. Preserve the source name and append a numeric suffix, starting with
    `-2`, for example `gpt55-pm` -> `gpt55-pm-2`. If that name already exists on
    the target host, increment to `-3`, `-4`, and so on. Prefer this suffix over
-   punctuation such as apostrophes because it is tmux- and shell-friendly. Copy
-   the source's relevant mstream/mmux tags and context metadata when mstream can
-   represent them; at minimum preserve role, domain/specialty context, summary,
-   issue/PR references, and the transfer lineage in the replacement task and
-   session mark summary.
+   punctuation such as apostrophes because it is tmux- and shell-friendly.
+   Always copy the ancestor's mmux tags and mstream tags to the successor when
+   mstream can represent them. At minimum preserve workstream, role,
+   domain/specialty context, summary, issue/PR references, display label, and
+   transfer lineage in the successor task and session mark summary.
 
 ```sh
 mstream recruit <workstream> \
@@ -378,8 +399,8 @@ flow is:
 2. Use `mstream snapshot` or `summary-input` to confirm the agent prompt exists.
 3. Send the packet explicitly with `mstream send --enter`.
 4. Send one additional empty `--enter` if the TUI did not submit reliably.
-5. Read `summary-input` and require the exact ACK before marking the source
-   transferred.
+5. Read `summary-input` and require the exact ACK plus workspace-readiness
+   confirmation before marking the ancestor transferred.
 
 ```sh
 mstream send <workstream> <replacement-target> \
@@ -392,14 +413,19 @@ mstream send <workstream> <replacement-target> --text "" --enter --set-state bus
 When transferring many sessions on one SSH host, avoid broad `scan` plus many
 simultaneous `join` operations during delivery. Current mstream/lib-tmux monitor
 channels can exhaust the host connection and return `SSH: failed to open session
-channel: Failed to open channel (ConnectFailed)`. Use small batches: connect,
-open the workstream, join a few successors, deliver and verify packets, then
-reset only the failed daemon/host handle if channel allocation breaks. Treat
-that error as a mstream connection-lifecycle bug to fix, not as proof the remote
-host or tmux session is gone.
+channel: Failed to open channel (ConnectFailed)`. Treat that error as a
+mstream connection-lifecycle bug to fix, not as proof the remote host or tmux
+session is gone. Do not stop the daemon to work around it unless the user asks
+you to. Continue one-at-a-time, report the failure if delivery is blocked, and
+ask before taking daemon-level recovery steps.
 
-5. Quarantine the old agent after the replacement has ACKed the transfer
-   packet. Keep
+5. Confirm successor readiness. The successor must acknowledge the packet,
+   summarize the inherited context in its own words, identify the durable
+   artifact it will continue from, and confirm that its workspace is initialized
+   or explicitly state the missing workspace/durable artifact. Only then does
+   ownership move.
+
+6. Quarantine the ancestor only after successor readiness is confirmed. Keep
    the source out of the available pool until the replacement confirms it can
    continue or the maintainer explicitly clears the source for reuse.
    `blocked` is a deliberate quarantine marker here, not a real blocker that the
@@ -412,19 +438,15 @@ host or tmux session is gone.
 ```sh
 mstream session mark <source-target> \
   --state blocked \
-  --summary "Transferred to <replacement-target>; do not reuse until replacement confirms progress or maintainer clears it."
+  --summary "Succession packet acknowledged by <replacement-target>; quarantined for retirement; do not reuse until maintainer clears it."
 ```
 
-6. Monitor the replacement with `status`, `events`, `summary-input`, and the
-   workstream timer loop. Require an explicit replacement-confirmation gate
-   before retiring the source: the replacement must acknowledge the transfer
-   packet, summarize the key inherited context in its own words, identify the
-   durable artifact it is continuing from, and either start the next concrete
-   action or report the exact missing context. If the source is an orchestrator,
-   the acknowledgement must explicitly confirm it received the operating
-   playbook and recent issue/PR/workstream context. If the replacement reports
-   missing context, use the source only to answer that specific gap while it
-   remains quarantined.
+7. Monitor the successor with `status`, `events`, `summary-input`, and the
+   workstream timer loop. If the source is an orchestrator, the acknowledgement
+   must explicitly confirm it received the operating playbook and recent
+   issue/PR/workstream context. If the successor reports missing context, ask
+   the ancestor only for that gap and do not move to the next source until the
+   gap is resolved or the user accepts the risk.
 
 If a source cannot provide a complete handoff, for example because it is
 rate-limited, exited, or missing, create the successor only with an explicit
@@ -433,7 +455,7 @@ ACK the incomplete state and must not claim full succession until the
 orchestrator obtains the missing source facts or the user explicitly accepts the
 loss/risk.
 
-7. Retire the old agent only after the replacement passes the confirmation gate
+8. Retire the old agent only after the successor passes the readiness gate
    or the user explicitly accepts the loss/risk. Prefer `leave`: it removes the
    source from the workstream but keeps the tmux session alive so the
    orchestrator can re-join or inspect it later through mstream if needed. After
