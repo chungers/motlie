@@ -349,10 +349,38 @@ mstream send <workstream> <source-target> \
 - bounded context excerpts from `mstream events --readable`, `summary-input`,
   or `snapshot` when they add information not already captured by durable facts
 
+Before delivering the packet, run a completeness gate. The packet must include
+at least:
+
+- source cwd and source repo/worktree path
+- successor cwd or target-host work root where the successor must prepare its
+  own checkout
+- repository URL, remote name, branch, HEAD or latest commit, and dirty state
+- pushed/unpushed commits and any local-only risk
+- issue/PR scope, role, current status, blockers, and exact next action
+- completeness statement: complete, incomplete with named gaps, or user-accepted
+  risk
+
+If any field is missing, ask the predecessor only for the missing field before
+continuing. Do not send a partial packet to a successor unless the packet is
+explicitly marked `INCOMPLETE` and names each missing fact.
+
+For cross-host transfers, source paths are evidence, not instructions. A macOS
+source path such as `/Users/dchung/...` must not be treated as the Linux
+successor workspace path. The successor should create or verify its own checkout
+under the target host work root, such as `/home/dchung/sessions/...`, then use
+the source path only as historical context.
+
 Do not count a replacement as transferred just because the tmux session exists
 or mstream metadata says it joined the workstream. A created session with no
 source-specific packet is only a standby shell/agent. The successor must receive
 the actual source packet and acknowledge it before ownership moves.
+
+Status sweeps are observation only. Asking successors whether they received a
+packet must not create workstreams, invent transfer labels, change ownership,
+or mark predecessors retired. If a sweep exposes an incomplete transfer, switch
+to the incomplete-transfer repair flow below and finish that one source before
+touching another session.
 
 If the source is the project manager or orchestrator, the transfer is not
 complete until the replacement receives the accumulated process context, not
@@ -435,6 +463,17 @@ ask before taking daemon-level recovery steps.
    or explicitly state the missing workspace/durable artifact. Only then does
    ownership move.
 
+Require a strict readiness ACK before quarantining the predecessor:
+
+```text
+READY_SWEEP <successor>: packet=yes; workspace=ready; blocker=none
+```
+
+The surrounding response must also name the actual prepared successor repo path,
+branch, clean/dirty state, and HEAD or expected commit. If the successor reports
+`workspace=unknown`, `workspace=not-ready`, `packet=incomplete`, or any blocker,
+ownership has not moved. Fix the gap first.
+
 6. Quarantine the predecessor only after successor readiness is confirmed. Keep
    the source out of the available pool until the replacement confirms it can
    continue or the maintainer explicitly clears the source for reuse.
@@ -464,6 +503,19 @@ rate-limited, exited, or missing, create the successor only with an explicit
 ACK the incomplete state and must not claim full succession until the
 orchestrator obtains the missing source facts or the user explicitly accepts the
 loss/risk.
+
+Incomplete transfer repair flow:
+
+1. Keep the predecessor joined and quarantined if it still exists.
+2. Ask the predecessor for only the missing fields, for example cwd, repo,
+   branch, dirty state, issue/PR scope, blockers, or next action.
+3. Build a corrected `OFFICIAL SUCCESSION PACKET` from the predecessor reply and
+   durable facts.
+4. Send that packet to the existing successor; do not create another successor
+   unless the current one is gone.
+5. Require the strict readiness ACK and workspace proof above.
+6. Only then mark the predecessor quarantined for retirement and the successor
+   available or busy according to the real workstream state.
 
 8. Retire the old agent only after the successor passes the readiness gate
    or the user explicitly accepts the loss/risk. Prefer `leave`: it removes the
