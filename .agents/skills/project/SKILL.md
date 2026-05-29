@@ -280,10 +280,10 @@ mstream send <workstream> <source-target> \
    that preserves the work, such as a branch/commit, pushed PR update, issue/PR
    comment, or explicit statement of local-only risk. Then build a
    self-contained, model-agnostic transfer packet from durable facts, the source
-   checkpoint output, and bounded mstream context. The replacement may be a
-   different model or agent family, so the packet must not rely on source-agent
-   memory, local tmux scrollback, private shorthand, or model-specific
-   assumptions. Include these fields:
+   checkpoint output, your own accumulated orchestration context, and bounded
+   mstream context. The replacement may be a different model or agent family, so
+   the packet must not rely on source-agent memory, local tmux scrollback,
+   private shorthand, or model-specific assumptions. Include these fields:
 
 - workstream name and transfer reason
 - source target, replacement target if already known, and source risk such as
@@ -296,8 +296,21 @@ mstream send <workstream> <source-target> \
   unanswered questions
 - exact next action for the replacement, including branch/PR target and expected
   deliverable
+- orchestrator operating context: user preferences, standing decisions,
+  project-specific rules, host and daemon conventions, workstream playbook
+  details, known mstream quirks, active/stale timers, and recent issue/PR
+  history that affects future decisions
 - bounded context excerpts from `mstream events --readable`, `summary-input`,
   or `snapshot` when they add information not already captured by durable facts
+
+If the source is the project manager or orchestrator, the transfer is not
+complete until the replacement receives the accumulated process context, not
+just session metadata. Include enough context for the replacement to make the
+same immediate orchestration decisions without asking the user to restate the
+conversation: current branch and commit, open or recently closed workstreams,
+GitHub issue/PR state, reviewer protocol, timer policy, host SSH URIs and work
+roots, daemon socket, known stale workstreams or timers, and any recent user
+corrections to the playbook.
 
 4. Recruit, join, or create the replacement with the transfer packet as the
    task. Prefer a fresh cwd for a newly created replacement unless the user
@@ -339,10 +352,13 @@ mstream session mark <source-target> \
 6. Monitor the replacement with `status`, `events`, `summary-input`, and the
    workstream timer loop. Require an explicit replacement-confirmation gate
    before retiring the source: the replacement must acknowledge the transfer
-   packet, identify the durable artifact it is continuing from, and either start
-   the next concrete action or report the exact missing context. If the
-   replacement reports missing context, use the source only to answer that
-   specific gap while it remains quarantined.
+   packet, summarize the key inherited context in its own words, identify the
+   durable artifact it is continuing from, and either start the next concrete
+   action or report the exact missing context. If the source is an orchestrator,
+   the acknowledgement must explicitly confirm it received the operating
+   playbook and recent issue/PR/workstream context. If the replacement reports
+   missing context, use the source only to answer that specific gap while it
+   remains quarantined.
 
 7. Retire the old agent only after the replacement passes the confirmation gate
    or the user explicitly accepts the loss/risk. Prefer `leave`: it removes the
