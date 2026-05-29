@@ -92,6 +92,7 @@ pub enum ClientRequest {
         alias: String,
     },
     Open(OpenRequest),
+    Label(LabelRequest),
     List,
     Show {
         workstream: String,
@@ -155,7 +156,15 @@ pub struct OpenRequest {
     pub goal: Option<String>,
     pub domain: Option<String>,
     #[serde(default)]
+    pub mmux_label: Option<String>,
+    #[serde(default)]
     pub settings: WorkstreamSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelRequest {
+    pub workstream: String,
+    pub mmux_label: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
