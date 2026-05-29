@@ -437,6 +437,14 @@ closed workstream as `last-workstream`, and merges any provided domain,
 specialty, and summary text into reusable context tags. Closing does not kill
 sessions.
 
+`mstream` treats the workstream name as an opaque handle. The handle may include
+human naming conventions such as `issue-337` or `pr-330`, but the daemon does
+not model GitHub issues, PRs, merge state, or closeout-comment publishing.
+Closeout publication is orchestrator policy. `mstream` should provide only
+neutral primitives: close/free sessions, stop scoped timers, send standby
+messages, and expose bounded timeline/transcript output through `events`,
+`snapshot`, and `summary-input`.
+
 `leave` unsets workstream-specific tags but leaves the session running.
 `kill` is explicit and destructive.
 
@@ -744,6 +752,10 @@ with explicit completion states.
 `summary-input` applies server-side filtering and compaction: strip repeated
 terminal chrome, collapse low-value progress noise, preserve human prompts,
 tool errors, final answers, and obvious stuck states.
+
+These observation commands are the closeout transcript boundary. They can feed
+an orchestrator-authored GitHub issue or PR comment, but `mstream` should not
+take issue/PR identifiers or post to external systems itself.
 
 `last_output_secs`, `--since`, and `@mstream/updated-at` are owned by
 `mstream`. The daemon should derive wall-clock fields from its own clock when
