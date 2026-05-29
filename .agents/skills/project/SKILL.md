@@ -316,6 +316,16 @@ corrections to the playbook.
    task. Prefer a fresh cwd for a newly created replacement unless the user
    explicitly wants it to resume an existing checkout.
 
+   Name newly commissioned replacement sessions as successors of the source
+   session. Preserve the source name and append a numeric suffix, starting with
+   `-2`, for example `gpt55-pm` -> `gpt55-pm-2`. If that name already exists on
+   the target host, increment to `-3`, `-4`, and so on. Prefer this suffix over
+   punctuation such as apostrophes because it is tmux- and shell-friendly. Copy
+   the source's relevant mstream/mmux tags and context metadata when mstream can
+   represent them; at minimum preserve role, domain/specialty context, summary,
+   issue/PR references, and the transfer lineage in the replacement task and
+   session mark summary.
+
 ```sh
 mstream recruit <workstream> \
   --role <role> \
