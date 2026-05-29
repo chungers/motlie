@@ -59,7 +59,9 @@ Decision checkpoint:
 
 ## mstream Daemon And Hosts
 
-Client commands use JSONL stdout. The socket resolves from `--socket`, then `MSTREAM_SOCKET`, then `/tmp/mstream-${USER}.sock`.
+Client commands use JSONL stdout. The socket resolves from `--socket`, then
+`MSTREAM_SOCKET`, then `/tmp/mstream-${USER}.sock`. Use `MSTREAM_SOCKET` for
+normal orchestration so client commands stay short; do not use `MSTREAM_SOCK`.
 
 Install the release `mstream` binary on `PATH` from the Motlie checkout before orchestration:
 
@@ -71,20 +73,22 @@ Ensure Cargo's bin directory, usually `~/.cargo/bin`, is on `PATH`. Use the rele
 
 Once assigned as orchestrator for an active workstream, keep the mstream daemon running across turns for the duration of that orchestration assignment. Do not stop and restart it after routine `list`, `status`, `summary-input`, progress checks, transfer delivery, or SSH-channel failures. Never stop the daemon unless the user explicitly asks you to stop it. If the daemon appears failed or unreachable, report the symptom and ask before stopping or replacing it.
 
-Use a stable explicit socket for the whole assignment:
+Use a stable socket for the whole assignment. In a persistent shell, such as a
+human shell or a dedicated tmux daemon shell, export it once:
 
 ```sh
-mstream --socket /tmp/mstream-${USER}.sock daemon status
+export MSTREAM_SOCKET=/tmp/mstream-${USER}.sock
+mstream daemon status
 ```
 
 Normal rehydration/playbook after daemon start or restart:
 
 ```sh
-mstream --socket /tmp/mstream-${USER}.sock connect <host-alias> '<ssh-uri>' --work-root <host-work-root>
-mstream --socket /tmp/mstream-${USER}.sock scan <host-alias>
-mstream --socket /tmp/mstream-${USER}.sock list
-mstream --socket /tmp/mstream-${USER}.sock status <workstream> --active-window-secs 30 --idle-after-secs 300
-mstream --socket /tmp/mstream-${USER}.sock summary-input <workstream> --max-chars 12000
+mstream connect <host-alias> '<ssh-uri>' --work-root <host-work-root>
+mstream scan <host-alias>
+mstream list
+mstream status <workstream> --active-window-secs 30 --idle-after-secs 300
+mstream summary-input <workstream> --max-chars 12000
 ```
 
 Use the concrete host aliases, SSH URIs, work roots, and workstream names supplied by the user or recovered from durable context. Do not rediscover basic CLI shapes with `--help` during normal orchestration; keep this playbook as the default sequence and inspect help only when a command actually fails because the local binary changed.
@@ -92,10 +96,18 @@ Use the concrete host aliases, SSH URIs, work roots, and workstream names suppli
 Start the daemon when the user asks you to operate mstream and no daemon is running. In Codex/harness sandbox environments, use foreground mode in a managed sandbox exec session as the one normal startup method:
 
 ```sh
-mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground
+MSTREAM_SOCKET=/tmp/mstream-${USER}.sock mstream daemon start --foreground
 ```
 
-Keep that foreground exec session running and issue client commands from separate exec calls. Record the foreground exec session id in your context if available. This was validated locally: daemonized `mstream daemon start` returned success but was immediately unreachable, while foreground mode stayed reachable from separate client commands after a delay.
+Keep that foreground exec session running and issue client commands from
+separate exec calls. Record the foreground exec session id in your context if
+available. In Codex/harness tool calls, `export MSTREAM_SOCKET=...` in one exec
+does not persist to future exec calls. Prefer the default socket path so client
+commands need neither `--socket` nor an env prefix; if using a non-default
+socket, set `MSTREAM_SOCKET=...` inline for each client command or fall back to
+`--socket`. This was validated locally: daemonized `mstream daemon start`
+returned success but was immediately unreachable, while foreground mode stayed
+reachable from separate client commands after a delay.
 
 Do not use `mstream daemon start` or `nohup ... &` as the normal Codex/harness playbook; they may be reaped by the harness even after reporting success. Outside Codex/harness, daemonized `mstream daemon start` is still a valid human/manual mode, but it is not the orchestrator playbook.
 
@@ -105,11 +117,16 @@ Fallback only if the managed foreground exec session is unavailable or lost whil
 tmux new-session -d \
   -s mstream-daemon-${USER} \
   -c '<absolute-motlie-worktree>' \
-  'mstream --socket /tmp/mstream-${USER}.sock daemon start --foreground'
-mstream --socket /tmp/mstream-${USER}.sock daemon status
+  'export MSTREAM_SOCKET=/tmp/mstream-${USER}.sock; mstream daemon start --foreground'
+mstream daemon status
 ```
 
-Before starting any daemon path, use `mstream daemon status` on the chosen socket. If it is already running, reuse it. Always use the same explicit `--socket` value for the full orchestration run once chosen. Do not stop the daemon just because one user request completes; keep it alive until the user asks you to stop it.
+Before starting any daemon path, use `mstream daemon status` on the chosen
+socket. If it is already running, reuse it. Keep the same socket value for the
+full orchestration run once chosen, preferably through `MSTREAM_SOCKET` or the
+default socket path rather than repeated `--socket` flags. Do not stop the
+daemon just because one user request completes; keep it alive until the user
+asks you to stop it.
 
 When assigned as orchestrator and the harness has no first-class cron, start a
 daemon-owned self-wakeup timer targeted at your own tmux session. The timer
@@ -118,7 +135,7 @@ poll and unblock the workstream. Start this timer immediately after agents are
 recruited or joined for an active workstream:
 
 ```sh
-mstream --socket /tmp/mstream-${USER}.sock timer start <workstream>-poll \
+mstream timer start <workstream>-poll \
   --every 5m \
   --workstream <workstream> \
   --self \
@@ -132,7 +149,7 @@ your tmux session name and using an explicit target:
 
 ```sh
 tmux display-message -p '#S'
-mstream --socket /tmp/mstream-${USER}.sock timer start <workstream>-poll \
+mstream timer start <workstream>-poll \
   --every 5m \
   --workstream <workstream> \
   --target <orchestrator-host-alias>::<your-tmux-session> \
