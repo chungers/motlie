@@ -5,11 +5,6 @@ description: Manage Motlie engineering projects and multi-agent workstreams with
 
 # Motlie Project Workstreams
 
-<!-- 2026-05-29 @ops48-orchestrator: Added Core Invariants, Prerequisites To Collect,
-     mstream Command Reference (pinned to v0.1.0 @ b1799d6), and Known mstream Quirks;
-     deduped repeated invariants into back-references; fixed quarantine to use the real
-     `reserved` state instead of abusing `blocked`. -->
-
 Use this skill when acting as project manager, tech lead, or orchestrator for Motlie work. The primary tool is `mstream`: use it to open workstreams, connect hosts, recruit or create agent sessions, communicate tasks, monitor timelines, summarize progress, unblock collaborators, and close workstreams.
 
 Always follow repo process from `AGENTS.md` or `CLAUDE.md` in the target checkout. If both exist, read both and reconcile; if they conflict, ask the user.
@@ -182,10 +177,9 @@ socket, set `MSTREAM_SOCKET=...` inline for each client command or fall back to
 `--socket`.
 
 Do not use `mstream daemon start` or `nohup ... &` as the normal Codex/harness
-playbook; foreground mode is the orchestrator default. Outside Codex/harness,
-daemonized `mstream daemon start` is still a valid human/manual mode. See
-[Known mstream Quirks](#known-mstream-quirks) for the validated behavior behind
-this choice.
+playbook (they can be reaped by the harness even after reporting success);
+foreground mode is the orchestrator default. Outside Codex/harness, daemonized
+`mstream daemon start` is still a valid human/manual mode.
 
 Fallback only if the managed foreground exec session is unavailable or lost while the daemon must survive for timers or cross-turn orchestration: run the same foreground daemon inside a dedicated tmux session.
 
@@ -668,9 +662,8 @@ mstream session mark <synth-target> --state needs-input --summary "decision fork
 
 The workstream closes when the human accepts the issue/PR deliverable; the
 merge-centric checks in Closing Workstreams apply only when there is a
-DESIGN/PLAN PR. mstream fits deep, few-agent deliberation; its SSH-channel limit
-caps wide fan-out — for broad, ephemeral idea generation use Workflow/subagents
-and bring the synthesis back here.
+DESIGN/PLAN PR. mstream fits persistent, long-lived agents; for broad, ephemeral
+idea generation prefer Workflow/subagents and bring the synthesis back here.
 
 ## PR Review Loop
 
@@ -904,21 +897,3 @@ pushes, timer wakeups or orchestrator turns if known, and any follow-up issue
 count. If a timestamp or count is unavailable, omit it or mark it `unknown`
 rather than inventing precision. (Invariant 1: do not ask collaborator agents to
 use mstream for this.)
-
-## Known mstream Quirks
-
-Validated runtime behaviors that explain the playbook choices above. These are
-quirks to work around, not steady-state design; revisit if the binary changes.
-
-- **Daemonized start can report success but be unreachable.** `mstream daemon
-  start` (and `nohup ... &`) returned success yet was immediately unreachable in
-  Codex/harness sandboxes, and may be reaped even after reporting success.
-  Foreground mode in a managed exec session stayed reachable from separate client
-  commands after a short delay. Hence foreground is the orchestrator playbook;
-  daemonized start remains valid only for outside-harness human/manual use.
-- **Many concurrent monitor channels exhaust one SSH host.** Broad `scan` plus
-  many simultaneous `join`/monitor operations on a single SSH host can return
-  `SSH: failed to open session channel: Failed to open channel (ConnectFailed)`.
-  This is an mstream/lib-tmux connection-lifecycle bug, not proof the remote host
-  or tmux session is gone. Work one-at-a-time, do not stop the daemon to work
-  around it (Invariant 3), and report if delivery is blocked.
