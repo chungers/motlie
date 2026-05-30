@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Addressed PR review by making the reorder boundary Telnyx-adapter mapping plus provider-neutral sequenced-frame reorder, correcting Sherpa's current typed input contract to ordered `AudioBuf<i16, 16_000, Mono>`, demoting Fish Speech to a historical rejected candidate, and documenting the missing `i16_to_f32` helper needed by the i16 telephony resampler wrapper. | Media Adaptation Pipeline, Recommended ASR/TTS Stack, Inbound Call Handler Design, Gap Analysis, Open Concerns |
 | 2026-05-30 | @codex-358-research: Rebased the design around the landed `motlie-voice` crate from PR #209, so Telnyx extends existing `motlie_model::typed` and `motlie_voice` media primitives instead of rebuilding them. Added anti-aliased resampling, buffered-vs-transport streaming, and Piper CUDA caveats. | Overview, Goals and Non-Goals, Crate Hierarchy and API Surfaces, Media Adaptation Pipeline, Recommended ASR/TTS Stack, Gap Analysis, Testing Scope for PLAN |
 | 2026-04-17 | @codex-macmini-telnyx: Removed the remaining `Box<dyn>` streaming-response sketch from `ConversationHandler` and replaced it with an associated `TextStream` type so the design remains static-dispatch at the gateway surface. | Closed-Enum Selection, Conversation Handler Contract, Streaming Conversation Responses |
 | 2026-04-17 | @codex-macmini-telnyx: Tightened the execution policy so the first live Telnyx implementation and validation slice is explicitly `Sherpa + Piper`. Other pairings remain documented as follow-on combinations, not peer initial targets. | Overview, Goals and Non-Goals, Concrete Combination Requirements |
@@ -489,6 +490,7 @@ libs/voice_telnyx/src/
 - Telnyx WebSocket event schema
 - Telnyx REST request and response types
 - translation between Telnyx `start.media_format` and `libs/voice` typed transport frames
+- translation from Telnyx `media.chunk` into provider-neutral per-track frame sequence numbers before handing frames to `libs/voice`
 - translation between provider-neutral call actions and Telnyx call-control commands
 - Telnyx-specific hangup/error policy for unsupported codecs or protocol violations
 
@@ -583,8 +585,10 @@ Recommended inbound stages:
 
 ```text
 Telnyx media payload
--> transport decode
+-> Telnyx base64/protocol mapping
+-> EncodedFrame<C> with provider-neutral sequence
 -> reorder / jitter normalization
+-> transport decode
 -> sample-format conversion
 -> resampling
 -> ASR framing adapter
@@ -610,14 +614,15 @@ The gateway should map Telnyx WebSocket fields into typed transport values expli
 - `start.media_format.encoding` selects the inbound transport codec marker, for example `Pcmu`, `Pcma`, or `L16`
 - `start.media_format.sample_rate` selects the inbound transport sample-rate const, for example `8_000` or `16_000`
 - `start.media_format.channels` selects the inbound channel-layout marker; current telephony expectation is mono
-- each `media.payload` becomes one `EncodedFrame<C>`
-- `media.chunk` is the transport ordering key before conversion into gateway-local monotonic sequence numbers
+- each `media.payload` becomes one `EncodedFrame<C>` after base64 decoding and Telnyx protocol mapping
+- `media.chunk` stays in `libs/voice_telnyx`; that adapter maps it to a provider-neutral per-track sequence before a frame enters `libs/voice`
 
 Design rule:
 
 - do not bypass `start.media_format`
 - do not infer codec or sample rate from payload length alone
 - instantiate inbound decode and normalization stages only after the `start` frame is received
+- provider-neutral `libs/voice` reorder stages operate on generic frame sequence metadata, never directly on Telnyx `media.chunk`
 
 ### Concrete Backend Requirements Matrix
 
@@ -625,8 +630,8 @@ The implementation must not leave ASR/TTS media requirements to backend-specific
 
 | Backend | Capability | Runtime-facing Input / Output | Required Gateway Adaptation | Concrete Notes |
 |---------|------------|-------------------------------|-----------------------------|----------------|
-| `sherpa-onnx` streaming Zipformer | ASR | Input stream is normalized to mono `16 kHz` float PCM internally | decode Telnyx transport -> mono mixdown if needed -> resample to `16 kHz` -> feed ordered `AudioBuf<i16, 16_000, Mono>` values into `TranscriptionSession::ingest()` | `TARGET_SAMPLE_RATE_HZ = 16_000`; frame shift is `40 ms`; backend normalizer accepts `S16Le` or `F32Le` and resamples to `16 kHz` internally |
-| Moonshine streaming | ASR | Input stream is normalized to mono `16 kHz`; decode loop processes fixed `1280`-sample chunks | decode Telnyx transport -> mono mixdown if needed -> resample to `16 kHz` -> rechunk into `1280`-sample windows before runtime inference | `CHUNK_SIZE = 1280` samples, which is `80 ms` at `16 kHz`; chunk sequence is strict equality, not just monotonic increase |
+| `sherpa-onnx` streaming Zipformer | ASR | Ordered `AudioBuf<i16, 16_000, Mono>` values passed to `TranscriptionSession::ingest()` | map Telnyx chunk to provider-neutral sequence -> reorder -> decode Telnyx transport -> mono mixdown if needed -> resample to `16 kHz` -> feed ordered `AudioBuf<i16, 16_000, Mono>` values into `TranscriptionSession::ingest()` | current `StreamingTranscriber::Input` is `AudioBuf<i16, 16_000, Mono>`; there is no typed `f32` input and no internal resampler contract; Sherpa converts i16 samples to f32 internally for feature extraction |
+| Moonshine streaming | ASR | Input stream is normalized to mono `16 kHz`; decode loop processes fixed `1280`-sample chunks | map Telnyx chunk to provider-neutral sequence -> reorder -> decode Telnyx transport -> mono mixdown if needed -> resample to `16 kHz` -> rechunk into `1280`-sample windows before runtime inference | `CHUNK_SIZE = 1280` samples, which is `80 ms` at `16 kHz`; chunk sequence is strict equality, not just monotonic increase |
 | Piper `en_US ljspeech medium` | TTS | Output PCM is mono `S16Le`; current curated bundle audio spec is `22.05 kHz` | drain TTS chunks -> resample `22.05 kHz` to Telnyx outbound rate -> packetize -> encode transport codec | emits buffered PCM after full synthesis; output chunks are `40 ms` of PCM at model rate |
 | Qwen3-TTS.cpp `0.6B` | TTS | Output PCM is mono `f32` at config sample rate; current default config is `24 kHz` | drain TTS chunks -> if needed convert `f32` to outbound working PCM format -> resample `24 kHz` to Telnyx outbound rate -> packetize -> encode transport codec | current config default is `24_000 Hz`; current typed stream drains a full synthesized buffer in `40 ms` chunks; reference-audio conditioning path also resamples inbound reference audio to model rate |
 
@@ -651,8 +656,9 @@ Inbound:
 
 ASR behavior:
 
-- Sherpa normalizer accepts `S16Le` or `F32Le`
-- Sherpa internally converts to mono float samples and extracts features at `16 kHz`
+- the gateway delivers ordered `AudioBuf<i16, 16_000, Mono>` values to Sherpa
+- Sherpa does not currently expose a typed `f32` streaming input or an internal resampler contract
+- Sherpa converts i16 samples to f32 internally for feature extraction after the gateway has already normalized to `16 kHz`
 - Sherpa decode cadence is governed by ONNX metadata plus a `40 ms` frame shift
 
 Outbound:
@@ -891,18 +897,18 @@ To avoid implementation drift, the first Telnyx slice should build the following
 
 Inbound mandatory stages:
 
-1. `TelnyxFrameReorder<C>`
+1. `SequencedFrameReorder<C>`
    Input: `EncodedFrame<C>`
    Output: `EncodedFrame<C>`
-   Contract: reorder by Telnyx `media.chunk`, assign gateway-local sequence, reject unbounded gaps after timeout.
+   Contract: reorder by provider-neutral per-track sequence, reject unbounded gaps after timeout. Telnyx `media.chunk` is consumed earlier by `libs/voice_telnyx` and must not appear in this provider-neutral stage.
 2. `G711Decoder<Pcmu, 8_000, Mono, i16>` and `G711Decoder<Pcma, 8_000, Mono, i16>`
-   Contract: decode base64 RTP payload bytes into linear PCM, no RTP header parsing inside this stage.
+   Contract: decode encoded RTP payload bytes into linear PCM, no base64 or RTP header parsing inside this stage.
 3. `L16Decoder<16_000, Mono, i16>`
    Contract: reinterpret Telnyx `L16` payload bytes as linear PCM without codec compression loss.
 4. `MonoNormalizer<R, Ch, E>`
    Contract: collapse multi-channel PCM to mono if ever required; current telephony expectation is mono passthrough.
 5. `PcmResampler<8_000, 16_000, Mono, i16>` and related variants
-   Contract: produce deterministic resampled output, preserve end-of-stream, document buffering.
+   Contract: produce deterministic resampled output, preserve end-of-stream, document buffering. The i16 telephony stage should wrap the existing f32 `Resampler` path internally until an i16-native resampler exists.
 6. `SherpaChunker` or `MoonshineChunker`
    Contract:
    Sherpa path emits ordered `AudioBuf<i16, 16_000, Mono>` values suitable for immediate `TranscriptionSession::ingest()`;
@@ -940,6 +946,8 @@ Resampler:
 - must state whether it buffers internally and when buffered audio is flushed
 - must use anti-alias filtering for telephony live paths, especially downsampling and non-integer-rate conversions such as `22_050 Hz -> 16_000 Hz`
 - must replace or wrap the existing `motlie_voice::pipeline::resample::LinearInterpolator` before any live Telnyx acceptance test
+- i16 telephony resampler stages should wrap the existing f32 `Resampler` implementation as `i16 -> f32 -> resample_f32 -> i16` until the crate has a dedicated i16 implementation
+- `motlie_voice::pipeline::convert` already has `f32_to_i16_clamped`; add the missing provider-neutral `i16_to_f32` helper before wiring the i16 wrapper
 - may use a mature external crate such as `rubato` or `dasp`, or a documented in-tree polyphase/windowed-sinc implementation
 
 Sample converter:
@@ -1019,7 +1027,7 @@ The type system does not replace runtime validation, but it should prevent “ev
 
 ### Static-Dispatch Model Injection
 
-The gateway must not hardcode `sherpa-onnx`, `whisper.cpp`, Piper, Fish Speech, or any other concrete backend. It also should not use `dyn` at the gateway boundary, because the supported model universe is known at build time through Cargo features.
+The gateway must not hardcode `sherpa-onnx`, `whisper.cpp`, Piper, Qwen3-TTS.cpp, or any other concrete backend. It also should not use `dyn` at the gateway boundary, because the supported model universe is known at build time through Cargo features.
 
 Recommended construction rule:
 
@@ -1272,10 +1280,11 @@ Current Piper limitations:
 - less flexibility than future expressive or clone-capable TTS stacks
 - CUDA execution is currently gated by issue #230: Piper defaults to CPU-only ONNX Runtime for shutdown stability on the GB10 validation host, and advanced users can opt back into CUDA probing with `MOTLIE_PIPER_ALLOW_CUDA=1`
 
-Phase 3 status:
+Current TTS status:
 
-- Fish Speech is not yet producing speech in Motlie
+- Piper is the required first-slice TTS backend
 - Qwen3-TTS.cpp is available through the typed TTS surface, but it emits `f32` `24 kHz` audio and remains a follow-on Telnyx pairing rather than part of the first Sherpa + Piper slice
+- Fish Speech was a historical rejected candidate and is not part of the current curated Telnyx plan unless a future backend is reintroduced and validated against the typed TTS contracts
 
 Recommended design rule:
 
@@ -1359,7 +1368,7 @@ Recommended inbound flow:
    - `stream_bidirectional_target_legs=self`
 5. Telnyx opens the WebSocket.
 6. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
-7. Each inbound `media` event is decoded, reordered, converted to normalized PCM, and pushed into the ASR stream.
+7. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
 8. ASR updates are sent to the `ConversationHandler`.
 9. The `ConversationHandler` produces response text.
 10. TTS converts response text into PCM chunks.
@@ -1396,7 +1405,7 @@ pub struct TelnyxCallSession {
 Where:
 
 - `TelnyxAsrRuntime` and `TelnyxTtsRuntime` are concrete, feature-gated runtime wrappers selected from the compiled model set rather than open-ended trait-object slots
-- `InboundPipeline` is a typed composition such as decode -> reorder -> normalize -> chunk
+- `InboundPipeline` is a typed composition such as sequence-map -> reorder -> decode -> normalize -> chunk
 - `OutboundPipeline` is a typed composition such as convert -> resample -> packetize -> encode
 - `AsrStreamRuntime` and `TtsStreamRuntime` are concrete wrappers around the currently selected runtime handles
 
@@ -1408,26 +1417,27 @@ Recommended mapping:
 
 1. Parse the WebSocket `start` frame.
 2. Read `media_format` and instantiate the matching decoder.
-3. Create a reorder buffer keyed by Telnyx `media.chunk` within each track.
-4. For each ordered audio payload:
-   - base64 decode
+3. In `libs/voice_telnyx`, base64 decode each `media.payload`, map Telnyx `media.chunk` to provider-neutral per-track sequence metadata, and create `EncodedFrame<C>` values.
+4. In `libs/voice`, reorder those sequenced encoded frames before codec decode.
+5. For each ordered audio payload:
    - decode from Telnyx codec to linear PCM
    - resample to `16 kHz` if needed
    - convert to the ASR runtime's typed input, such as `AudioBuf<i16, 16_000, Mono>`
-5. Call `TranscriptionSession::ingest()` with each ordered typed audio frame.
-6. If `ingest()` returns `Some(update)`, forward it to the dialog engine.
-7. On WebSocket `stop`, call `finish()`.
+6. Call `TranscriptionSession::ingest()` with each ordered typed audio frame.
+7. If `ingest()` returns `Some(update)`, forward it to the dialog engine.
+8. On WebSocket `stop`, call `finish()`.
 
 Sequence mapping detail:
 
 - Telnyx `sequence_number` is at the event level
 - Telnyx `media.chunk` is specific to media sequencing
-- the gateway needs one monotonic, post-reorder frame sequence for logs, jitter metrics, and deterministic test fixtures even though the current typed ASR input is an `AudioBuf`
+- the gateway needs provider-neutral sequence metadata before reorder and a monotonic post-reorder frame counter for logs, jitter metrics, and deterministic test fixtures even though the current typed ASR input is an `AudioBuf`
 
 Recommended gateway rule:
 
-- reorder by `media.chunk` per track
-- emit a gateway-local `u64` sequence counter after reordering
+- `libs/voice_telnyx` maps `media.chunk` per track to provider-neutral sequence metadata
+- `libs/voice` reorders by that generic sequence before codec decode
+- emit a gateway-local `u64` sequence counter after reordering for logs and deterministic fixtures
 
 This isolates Telnyx transport quirks from the ASR contract.
 
@@ -2082,15 +2092,16 @@ Recommendation:
 
 ### 2. Resampling and Format Normalization
 
-Current Motlie already has the beginning of this layer in `motlie-voice`: `PcmFrame<const RATE_HZ, C, E>`, WAV sample decoding, downmixing, `f32_to_i16_clamped`, and a `Resampler` trait with a `LinearInterpolator` placeholder. The Telnyx gap is not ownership of a new crate; it is production-grade telephony adaptation inside the existing crate.
+Current Motlie already has the beginning of this layer in `motlie-voice`: `PcmFrame<const RATE_HZ, C, E>`, WAV sample decoding, downmixing, `f32_to_i16_clamped`, and a f32-oriented `Resampler` trait with a `LinearInterpolator` placeholder. The Telnyx gap is not ownership of a new crate; it is production-grade telephony adaptation inside the existing crate.
 
 Required gateway utilities:
 
 - `8 kHz` -> `16 kHz` upsampling for PSTN-originated `PCMU` / `PCMA`
 - backend-output resampling from TTS-native rates to Telnyx outbound rate
-- `f32` <-> `s16le` conversion as needed
+- `f32` <-> `s16le` conversion as needed, including a new provider-neutral `i16_to_f32` helper to pair with the existing `f32_to_i16_clamped`
 - reuse of `motlie_voice::frame::PcmFrame<const RATE_HZ, C, E>` so rate, channels, and sample type remain explicit during assembly
 - replacement or wrapping of `LinearInterpolator` with anti-aliased resampling before live telephony
+- i16 telephony resampler wrappers that preserve i16 stage boundaries while using the existing f32 resampler internally until an i16-native implementation is justified
 
 This is a utility-layer gap, not a contract-design gap.
 
@@ -2229,9 +2240,10 @@ Cons:
 - webhook parsing and signature verification tests
 - Telnyx WebSocket protocol parsing tests for `connected`, `start`, `media`, `dtmf`, `error`, `stop`
 - codec tests for `PCMU`, `PCMA`, and `L16`
-- reorder-buffer tests for out-of-order `media.chunk`
+- Telnyx adapter tests that map out-of-order `media.chunk` values into provider-neutral sequence metadata
+- provider-neutral reorder-buffer tests over generic sequenced frames
 - resampler tests for `8 kHz` inbound to `16 kHz` normalized PCM and `22_050 Hz` Piper output to the selected outbound telephony rate, using the anti-aliased Telnyx resampler implementation
-- provider-free media adaptation tests that feed synthetic Telnyx-like `PCMU` / `L16` payloads through decode, normalize, resample, and a fake `StreamingTranscriber<Input = AudioBuf<i16, 16_000, Mono>>`
+- provider-free media adaptation tests that feed generic sequenced `PCMU` / `L16` payloads through reorder, decode, normalize, resample, and a fake `StreamingTranscriber<Input = AudioBuf<i16, 16_000, Mono>>`
 - compile-fail tests proving wrong rate, wrong channel layout, wrong sample type, and wrong stage order fail before live testing
 - end-to-end simulated call tests that feed media frames into the typed ASR session path
 - loopback tests that synthesize TTS and verify outbound `media` frames
@@ -2243,7 +2255,7 @@ Cons:
 - Telnyx documents codec options broadly, but actual inbound codec selection may depend on carrier, destination, and account configuration. Phase 1 should log observed `media_format` values in real calls before broadening codec support.
 - `stream_bidirectional_target_legs=self` is the best current inference for single-leg AI-agent calls, but this should be validated on the first live call because Telnyx defaults to `opposite`.
 - Piper currently defaults to CPU-only ONNX Runtime because of issue #230. Live latency numbers should record whether `MOTLIE_PIPER_ALLOW_CUDA=1` was enabled.
-- If Fish Speech becomes the preferred TTS backend, its native sample rate and chunk cadence need to be measured against Telnyx's RTP pacing requirements before promotion.
+- Fish Speech remains a historical rejected candidate for this Telnyx plan. If a future curated backend revives that path, its native sample rate and chunk cadence must be measured against Telnyx's RTP pacing requirements before promotion.
 - The exact interaction between simultaneous WebSocket media streaming and specific hosted call-control features such as `gather_using_audio` or hosted prompt playback should be validated on a live test call before those mixed modes are promoted.
 - If some carriers deliver audible in-band DTMF energy even when Telnyx emits a separate `dtmf` event, the gateway should log and measure the overlap before finalizing the v1.1 suppression strategy.
 
