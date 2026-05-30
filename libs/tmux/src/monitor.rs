@@ -144,11 +144,12 @@ struct PaneAssemblyState {
 }
 
 impl PaneAssemblyState {
-    fn new(pane_id: &str, session: &str) -> Self {
+    fn new(pane_id: &str, session_id: &str, session: &str) -> Self {
         PaneAssemblyState {
             sequence: 0,
             address: PaneAddress {
                 pane_id: pane_id.to_string(),
+                session_id: SessionId::new(session_id.to_string()).ok(),
                 session: session.to_string(),
                 // Window/pane indices unknown from control mode — use 0.
                 // These are display-only; pane_id is authoritative.
@@ -161,6 +162,7 @@ impl PaneAssemblyState {
 
 /// Monitors a single tmux session via control mode.
 pub struct SessionMonitor {
+    session_id: String,
     session_name: String,
     host_alias: String,
     socket: Option<TmuxSocket>,
@@ -174,6 +176,7 @@ pub struct SessionMonitor {
 impl SessionMonitor {
     pub fn new(session_name: String, host_alias: String) -> Self {
         SessionMonitor {
+            session_id: session_name.clone(),
             session_name,
             host_alias,
             socket: None,
@@ -190,6 +193,24 @@ impl SessionMonitor {
         normalize: CaptureNormalizeMode,
     ) -> Self {
         SessionMonitor {
+            session_id: session_name.clone(),
+            session_name,
+            host_alias,
+            socket: None,
+            tmux_bin: None,
+            normalize,
+            pane_states: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn with_identity(
+        session_id: String,
+        session_name: String,
+        host_alias: String,
+        normalize: CaptureNormalizeMode,
+    ) -> Self {
+        SessionMonitor {
+            session_id,
             session_name,
             host_alias,
             socket: None,
@@ -213,7 +234,7 @@ impl SessionMonitor {
 
     fn attach_command(&self) -> String {
         build_attach_command(
-            &self.session_name,
+            &self.session_id,
             self.socket.as_ref(),
             self.tmux_bin.as_deref(),
         )
@@ -244,7 +265,9 @@ impl SessionMonitor {
         let state = self
             .pane_states
             .entry(pane_id.to_string())
-            .or_insert_with(|| PaneAssemblyState::new(pane_id, &self.session_name));
+            .or_insert_with(|| {
+                PaneAssemblyState::new(pane_id, &self.session_id, &self.session_name)
+            });
 
         state.sequence += 1;
 
@@ -390,6 +413,8 @@ fn build_attach_command(
 /// underlying `Target`.
 pub struct SessionMonitorHandle {
     target: Target,
+    session_id: String,
+    display_name: Arc<std::sync::Mutex<String>>,
     stop_tx: watch::Sender<bool>,
     task: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<MonitorExitReason>>>>,
     health: Arc<std::sync::Mutex<MonitorHealth>>,
@@ -399,12 +424,16 @@ impl SessionMonitorHandle {
     /// Create a new handle. Called internally by HostHandle::start_monitoring_session.
     pub(crate) fn new(
         target: Target,
+        session_id: String,
+        display_name: Arc<std::sync::Mutex<String>>,
         stop_tx: watch::Sender<bool>,
         task: tokio::task::JoinHandle<Result<MonitorExitReason>>,
         health: Arc<std::sync::Mutex<MonitorHealth>>,
     ) -> Self {
         SessionMonitorHandle {
             target,
+            session_id,
+            display_name,
             stop_tx,
             task: std::sync::Mutex::new(Some(task)),
             health,
@@ -439,6 +468,19 @@ impl SessionMonitorHandle {
     pub fn target(&self) -> &Target {
         &self.target
     }
+
+    /// Stable tmux session id for this monitor.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Current best-known display name for this monitor.
+    pub fn display_name(&self) -> String {
+        self.display_name
+            .lock()
+            .expect("display name lock poisoned")
+            .clone()
+    }
 }
 
 impl std::ops::Deref for SessionMonitorHandle {
@@ -468,35 +510,58 @@ impl MonitorHandle {
 
     /// Get a session monitor handle by name.
     pub fn get(&self, session: &str) -> Option<&SessionMonitorHandle> {
-        self.sessions.get(session)
+        self.sessions.get(session).or_else(|| {
+            self.sessions
+                .values()
+                .find(|handle| handle.session_id() == session || handle.display_name() == session)
+        })
     }
 
     /// Stop and remove a specific session's monitor.
     pub async fn stop_session(&mut self, name: &str) -> Result<()> {
-        let handle = self
+        let key = self
             .sessions
-            .remove(name)
+            .keys()
+            .find(|key| {
+                key.as_str() == name
+                    || self
+                        .sessions
+                        .get(*key)
+                        .is_some_and(|handle| handle.display_name() == name)
+            })
+            .cloned()
             .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", name)))?;
+        let handle = self.sessions.remove(&key).expect("key selected from map");
         handle.shutdown().await
     }
 
     /// Remove a specific session's monitor from aggregate bookkeeping.
     pub(crate) fn remove_session(&mut self, name: &str) -> Option<SessionMonitorHandle> {
-        self.sessions.remove(name)
+        if self.sessions.contains_key(name) {
+            return self.sessions.remove(name);
+        }
+        let key = self
+            .sessions
+            .iter()
+            .find_map(|(key, handle)| (handle.display_name() == name).then(|| key.clone()))?;
+        self.sessions.remove(&key)
     }
 
     /// Get a session monitor handle by TargetSpec.
-    /// Matches on the spec's session name.
     pub fn get_by_spec(&self, spec: &crate::TargetSpec) -> Option<&SessionMonitorHandle> {
-        self.sessions.get(spec.session_name())
+        if let Some(id) = spec.session_id_selector() {
+            self.get(id.as_str())
+        } else {
+            self.get(spec.session_name())
+        }
     }
 
     /// List currently active session names.
-    pub fn active_sessions(&self) -> Vec<&str> {
+    pub fn active_sessions(&self) -> Vec<String> {
         self.sessions
-            .iter()
-            .filter(|(_, h)| h.is_active())
-            .map(|(name, _)| name.as_str())
+            .values()
+            .filter(|h| h.is_active())
+            .map(SessionMonitorHandle::display_name)
             .collect()
     }
 
@@ -506,8 +571,11 @@ impl MonitorHandle {
     /// has exited (failed, stopped). Use this when reporting health status —
     /// per-session health is the ground truth (DC29), so terminal states must
     /// remain visible.
-    pub fn all_sessions(&self) -> Vec<&str> {
-        self.sessions.keys().map(|k| k.as_str()).collect()
+    pub fn all_sessions(&self) -> Vec<String> {
+        self.sessions
+            .values()
+            .map(SessionMonitorHandle::display_name)
+            .collect()
     }
 
     /// Number of monitored sessions.
@@ -786,6 +854,20 @@ mod tests {
         Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming))
     }
 
+    fn monitor_handle_for_test(
+        target: crate::host::Target,
+        stop_tx: watch::Sender<bool>,
+        task: tokio::task::JoinHandle<Result<MonitorExitReason>>,
+        health: Arc<std::sync::Mutex<MonitorHealth>>,
+    ) -> SessionMonitorHandle {
+        let session_id = target
+            .session_id()
+            .unwrap_or_else(|| target.session_name())
+            .to_string();
+        let display_name = Arc::new(std::sync::Mutex::new(target.session_name().to_string()));
+        SessionMonitorHandle::new(target, session_id, display_name, stop_tx, task, health)
+    }
+
     #[tokio::test]
     async fn monitor_handle_stop_session() {
         let target1 = crate::host::HostHandle::local().create_target_for_test("s1");
@@ -800,11 +882,11 @@ mod tests {
         let mut sessions = HashMap::new();
         sessions.insert(
             "s1".to_string(),
-            SessionMonitorHandle::new(target1, tx1, task1, default_health()),
+            monitor_handle_for_test(target1, tx1, task1, default_health()),
         );
         sessions.insert(
             "s2".to_string(),
-            SessionMonitorHandle::new(target2, tx2, task2, default_health()),
+            monitor_handle_for_test(target2, tx2, task2, default_health()),
         );
         let mut handle = MonitorHandle::new(sessions);
 
@@ -828,7 +910,7 @@ mod tests {
         let mut sessions = HashMap::new();
         sessions.insert(
             "build".to_string(),
-            SessionMonitorHandle::new(target, tx, task, default_health()),
+            monitor_handle_for_test(target, tx, task, default_health()),
         );
         let handle = MonitorHandle::new(sessions);
 
@@ -839,6 +921,38 @@ mod tests {
         assert!(handle.get_by_spec(&spec2).is_none());
     }
 
+    #[test]
+    fn monitor_handle_display_name_can_update_without_rekeying() {
+        let target = crate::host::HostHandle::local().create_target_for_test("build");
+        let (tx, _) = watch::channel(false);
+        let task = tokio::runtime::Runtime::new()
+            .unwrap()
+            .spawn(async { Ok(MonitorExitReason::Stopped) });
+        let display_name = Arc::new(std::sync::Mutex::new("build".to_string()));
+        let session_id = target.session_id().unwrap().to_string();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            session_id.clone(),
+            SessionMonitorHandle::new(
+                target,
+                session_id.clone(),
+                display_name.clone(),
+                tx,
+                task,
+                default_health(),
+            ),
+        );
+        let handle = MonitorHandle::new(sessions);
+
+        assert!(handle.get(&session_id).is_some());
+        assert_eq!(handle.all_sessions(), vec!["build".to_string()]);
+        *display_name.lock().unwrap() = "renamed".to_string();
+
+        assert!(handle.get(&session_id).is_some());
+        assert!(handle.get("renamed").is_some());
+        assert_eq!(handle.all_sessions(), vec!["renamed".to_string()]);
+    }
+
     // --- SessionMonitorHandle tests ---
 
     #[tokio::test]
@@ -847,7 +961,7 @@ mod tests {
         let (stop_tx, _stop_rx) = watch::channel(false);
         let task = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
-        let handle = SessionMonitorHandle::new(target, stop_tx, task, default_health());
+        let handle = monitor_handle_for_test(target, stop_tx, task, default_health());
         // Shutdown waits for the task to finish
         handle.shutdown().await.unwrap();
         assert!(!handle.is_active());
@@ -913,7 +1027,7 @@ mod tests {
         let (stop_tx, _) = watch::channel(false);
         let task = tokio::spawn(async { Ok::<_, crate::error::Error>(MonitorExitReason::Stopped) });
 
-        let handle = SessionMonitorHandle::new(target, stop_tx, task, health.clone());
+        let handle = monitor_handle_for_test(target, stop_tx, task, health.clone());
         assert_eq!(handle.health(), MonitorHealth::Streaming);
 
         // Simulate health transition

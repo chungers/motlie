@@ -71,7 +71,7 @@ pub const LIST_WINDOWS_FMT: &str =
     "#{q:session_id} #{q:session_name} #{q:window_index} #{q:window_name} #{q:window_active} #{q:window_panes} #{q:window_layout}";
 
 pub const LIST_PANES_FMT: &str =
-    "#{q:pane_id} #{q:session_name} #{q:window_index} #{q:pane_index} #{q:pane_title} #{q:pane_current_command} #{q:pane_pid} #{q:pane_width} #{q:pane_height} #{q:pane_active}";
+    "#{q:pane_id} #{q:session_id} #{q:session_name} #{q:window_index} #{q:pane_index} #{q:pane_title} #{q:pane_current_command} #{q:pane_pid} #{q:pane_width} #{q:pane_height} #{q:pane_active}";
 
 /// List all tmux sessions using a caller-provided prefix (resolved binary + socket).
 pub(crate) async fn list_sessions_with_prefix(
@@ -473,13 +473,15 @@ fn parse_panes(output: &str, filter: Option<&Regex>) -> Result<Vec<PaneInfo>> {
         if line.is_empty() {
             continue;
         }
-        let fields = parse_exact_fields(line, 10, "pane")?;
+        let fields = parse_exact_fields(line, 11, "pane")?;
 
-        // fields: pane_id, session_name, window_index, pane_index, pane_title,
-        //         pane_current_command, pane_pid, pane_width, pane_height, pane_active
-        let session_name = &fields[1];
-        let window_index = parse_u32_field(&fields[2], "window_index", "pane", line)?;
-        let pane_index = parse_u32_field(&fields[3], "pane_index", "pane", line)?;
+        // fields: pane_id, session_id, session_name, window_index, pane_index,
+        //         pane_title, pane_current_command, pane_pid, pane_width,
+        //         pane_height, pane_active
+        let session_id = SessionId::new(fields[1].clone())?;
+        let session_name = &fields[2];
+        let window_index = parse_u32_field(&fields[3], "window_index", "pane", line)?;
+        let pane_index = parse_u32_field(&fields[4], "pane_index", "pane", line)?;
 
         // Construct the address string for filter matching
         let address_str = format!("{}:{}.{}", session_name, window_index, pane_index);
@@ -492,6 +494,7 @@ fn parse_panes(output: &str, filter: Option<&Regex>) -> Result<Vec<PaneInfo>> {
 
         let address = PaneAddress {
             pane_id: fields[0].clone(),
+            session_id: Some(session_id),
             session: session_name.clone(),
             window: window_index,
             pane: pane_index,
@@ -499,12 +502,12 @@ fn parse_panes(output: &str, filter: Option<&Regex>) -> Result<Vec<PaneInfo>> {
 
         panes.push(PaneInfo {
             address,
-            title: fields[4].clone(),
-            current_command: fields[5].clone(),
-            pid: parse_u32_field(&fields[6], "pid", "pane", line)?,
-            width: parse_u32_field(&fields[7], "width", "pane", line)?,
-            height: parse_u32_field(&fields[8], "height", "pane", line)?,
-            active: parse_bool_field(&fields[9], "active", "pane", line)?,
+            title: fields[5].clone(),
+            current_command: fields[6].clone(),
+            pid: parse_u32_field(&fields[7], "pid", "pane", line)?,
+            width: parse_u32_field(&fields[8], "width", "pane", line)?,
+            height: parse_u32_field(&fields[9], "height", "pane", line)?,
+            active: parse_bool_field(&fields[10], "active", "pane", line)?,
         });
     }
     Ok(panes)

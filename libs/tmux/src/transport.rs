@@ -1877,9 +1877,7 @@ impl SshTransport {
     /// slot on drop — hold it for the channel's whole lifetime. The pool lock
     /// is held across channel-open (and a new connect when spilling), which
     /// serializes opens; this matches the prior single-handle behavior.
-    async fn open_channel(
-        &self,
-    ) -> Result<(russh::Channel<russh::client::Msg>, ChannelGuard)> {
+    async fn open_channel(&self) -> Result<(russh::Channel<russh::client::Msg>, ChannelGuard)> {
         let mut pool = self.pool.lock().await;
 
         while let Some(idx) =
@@ -1918,9 +1916,10 @@ impl SshTransport {
 
         // No existing connection had capacity — open another.
         let handle = Self::connect_one(&self.config).await?;
-        let channel = handle.channel_open_session().await.map_err(|e| {
-            Error::Transport(format!("SSH: failed to open session channel: {}", e))
-        })?;
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| Error::Transport(format!("SSH: failed to open session channel: {}", e)))?;
         let open = Arc::new(AtomicUsize::new(1));
         pool.push(PooledConn {
             handle: Arc::new(tokio::sync::Mutex::new(handle)),

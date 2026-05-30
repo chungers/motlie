@@ -9,6 +9,9 @@ use std::path::PathBuf;
 pub struct PaneAddress {
     /// Stable tmux pane id, e.g. "%12"
     pub pane_id: String,
+    /// Stable tmux session id, e.g. "$3", when known.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
     /// Session name (display)
     pub session: String,
     /// Window index (display)
@@ -49,6 +52,7 @@ impl PaneAddress {
 
         Ok(PaneAddress {
             pane_id: pane_id.to_string(),
+            session_id: None,
             session,
             window,
             pane,
@@ -63,7 +67,9 @@ impl fmt::Display for PaneAddress {
 }
 
 /// Stable tmux session identifier using tmux's `#{session_id}` (`$<id>`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct SessionId(String);
 
@@ -520,8 +526,32 @@ impl fmt::Display for TargetLevel {
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
+enum SessionSelector {
+    Name(String),
+    Id(SessionId),
+}
+
+impl SessionSelector {
+    fn as_target_str(&self) -> &str {
+        match self {
+            SessionSelector::Name(name) => name,
+            SessionSelector::Id(id) => id.as_str(),
+        }
+    }
+
+    fn id(&self) -> Option<&SessionId> {
+        match self {
+            SessionSelector::Name(_) => None,
+            SessionSelector::Id(id) => Some(id),
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct TargetSpec {
-    session_name: String,
+    session: SessionSelector,
     window_sel: Option<String>,
     pane_idx: Option<u32>,
 }
@@ -529,10 +559,18 @@ pub struct TargetSpec {
 impl TargetSpec {
     pub fn session(name: &str) -> Self {
         TargetSpec {
-            session_name: name.to_string(),
+            session: SessionSelector::Name(name.to_string()),
             window_sel: None,
             pane_idx: None,
         }
+    }
+
+    pub fn session_id(id: impl Into<String>) -> Result<Self> {
+        Ok(TargetSpec {
+            session: SessionSelector::Id(SessionId::new(id)?),
+            window_sel: None,
+            pane_idx: None,
+        })
     }
 
     pub fn window(mut self, index: u32) -> Self {
@@ -562,7 +600,11 @@ impl TargetSpec {
     // --- Accessors ---
 
     pub fn session_name(&self) -> &str {
-        &self.session_name
+        self.session.as_target_str()
+    }
+
+    pub fn session_id_selector(&self) -> Option<&SessionId> {
+        self.session.id()
     }
 
     pub fn window_selector(&self) -> Option<&str> {
@@ -573,7 +615,10 @@ impl TargetSpec {
         self.pane_idx
     }
 
-    /// Parse a tmux target string: "session", "session:window", "session:window.pane"
+    /// Parse a tmux target string: "session", "session:window", "session:window.pane".
+    ///
+    /// A `$<digits>` session component is treated as a stable tmux session id.
+    /// Use [`TargetSpec::session`] when a literal session name looks like `$7`.
     pub fn parse(target_str: &str) -> Result<Self> {
         if target_str.is_empty() {
             return Err(Error::Parse("empty target string".to_string()));
@@ -600,8 +645,14 @@ impl TargetSpec {
             None => None,
         };
 
+        let session = if looks_like_session_id(session_part) {
+            SessionSelector::Id(SessionId::new(session_part.to_string())?)
+        } else {
+            SessionSelector::Name(session_part.to_string())
+        };
+
         Ok(TargetSpec {
-            session_name: session_part.to_string(),
+            session,
             window_sel: window_part.map(|w| w.to_string()),
             pane_idx: pane,
         })
@@ -609,11 +660,18 @@ impl TargetSpec {
 
     pub fn to_target_string(&self) -> String {
         match (&self.window_sel, self.pane_idx) {
-            (None, _) => self.session_name.clone(),
-            (Some(w), None) => format!("{}:{}", self.session_name, w),
-            (Some(w), Some(p)) => format!("{}:{}.{}", self.session_name, w, p),
+            (None, _) => self.session.as_target_str().to_string(),
+            (Some(w), None) => format!("{}:{}", self.session.as_target_str(), w),
+            (Some(w), Some(p)) => format!("{}:{}.{}", self.session.as_target_str(), w, p),
         }
     }
+}
+
+fn looks_like_session_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('$') else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 impl fmt::Display for TargetSpec {
@@ -1098,6 +1156,7 @@ mod tests {
     fn pane_address_roundtrip() {
         let addr = PaneAddress {
             pane_id: "%5".to_string(),
+            session_id: None,
             session: "build".to_string(),
             window: 0,
             pane: 1,
@@ -1169,6 +1228,16 @@ mod tests {
     fn target_spec_parse_session() {
         let spec = TargetSpec::parse("mysession").unwrap();
         assert_eq!(spec.session_name(), "mysession");
+        assert!(spec.window_selector().is_none());
+        assert!(spec.pane_index().is_none());
+    }
+
+    #[test]
+    fn target_spec_parse_session_id() {
+        let spec = TargetSpec::parse("$7").unwrap();
+        assert_eq!(spec.session_name(), "$7");
+        assert_eq!(spec.session_id_selector().unwrap().as_str(), "$7");
+        assert_eq!(spec.to_target_string(), "$7");
         assert!(spec.window_selector().is_none());
         assert!(spec.pane_index().is_none());
     }

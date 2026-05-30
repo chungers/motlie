@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-355-rv | Added stable session-id target specs and documented that resolved `Target::target_string()` uses tmux ids while names remain display metadata. |
 | 2026-05-28 | @gpt55-342-og | Added `SshConfig::endpoint_alias()` and `connect_with_endpoint_alias()` for stable SSH endpoint display and HostHandle aliases. |
 | 2026-05-28 | @codex | Added attached-client activity fields to `ClientInfo` and `HostHandle::session_client_activity()` for policy-light input-recency consumers such as mstream timer guards. |
 | 2026-05-28 | @codex | Added `SshConfig::connect_with_alias()` and `Fleet::unregister()` so higher-level orchestrators can use stable routing aliases while keeping Fleet as the host registry; kept timeline lifecycle methods on `OutputBus` instead of duplicating them on `Fleet`; removed historical workstream/short-name aliases in favor of explicit target-alias APIs. |
@@ -666,16 +667,17 @@ target.kill().await?;
 
 ```rust
 // rename() returns a new Target with the updated address.
-// For session rename this is critical — the old handle has a stale name.
+// For session rename this refreshes the display name carried by the handle.
 let target = target.rename("new_name").await?;
-target.kill().await?; // uses the renamed handle
+target.kill().await?; // targets the same stable session id
 ```
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10h)*: `rename()` now returns
 > `Result<Target>` with the updated address. The impact by level:
 >
-> - **Session rename** — correctness-significant. `target_string()` uses the
->   session name, so callers **must** use the returned handle.
+> - **Session rename** — id-stable for commands. `target_string()` uses the
+>   stable tmux session id, so the old handle can still target the session;
+>   callers displaying session names should use the returned handle.
 > - **Window rename** — metadata drift only. `target_string()` uses
 >   `session:index` (not the window name), so commands continue to work.
 >   However, the cached `WindowInfo.name` becomes stale — callers displaying
@@ -791,10 +793,12 @@ use motlie_tmux::TargetSpec;
 
 // Session only
 let t = host.target(&TargetSpec::session("build")).await?;
+let t = host.target(&TargetSpec::session_id("$7")?).await?;
 
 // Session + window (by index or name)
 let t = host.target(&TargetSpec::session("build").window(0)).await?;
 let t = host.target(&TargetSpec::session("build").window_name("editor")).await?;
+let t = host.target(&TargetSpec::session_id("$7")?.window(0)).await?;
 
 // Session + window + pane (pane() returns Result)
 let t = host.target(&TargetSpec::session("build").window(0).pane(1)?).await?;
@@ -805,8 +809,12 @@ let t = host.target(&spec).await?;
 
 // Parse from string
 let t = host.target(&TargetSpec::parse("build:0.1")?).await?;
+let t = host.target(&TargetSpec::parse("$7:0.1")?).await?;
 // Returns Option<Target> — None if the entity doesn't exist.
 ```
+
+Name specs remain accepted for operator-facing input. Resolved targets carry
+both display metadata and stable ids; command routing uses tmux ids when known.
 
 > **`@claude NOTE — RESOLVED`** *(PLAN 1.10f)*: `TargetSpec::pane()` now returns
 > `Result<Self>` instead of panicking. Missing `.window()` returns an error:
@@ -896,8 +904,9 @@ It is **not `Clone`**; to share, use `HostHandle::session()` or
 
 ```rust
 target.level();          // TargetLevel::Session | Window | Pane
-target.target_string();  // "build", "build:0", "build:0.1"
-target.session_name();   // available at every level
+target.target_string();  // "$7", "$7:0", "%12" once resolved
+target.session_name();   // display name, available at every level
+target.session_id();     // Some("$7") for resolved session/window/pane targets
 target.session_info();   // Some(&SessionInfo) — session level only
 target.window_info();    // Some(&WindowInfo) — window level only
 target.pane_address();   // Some(&PaneAddress) — pane level only
@@ -1099,7 +1108,8 @@ let logs = session
         ..Default::default()
     })
     .await?;
-assert_eq!(logs.target_string(), "build:1");
+assert_eq!(logs.session_name(), "build");
+// target_string() is the stable session id plus window index, e.g. "$7:1".
 
 let tail = logs
     .split_pane(&SplitPaneOptions {

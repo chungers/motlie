@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-355-rv | Switched daemon session bookkeeping to stable `(host, session_id)` targets while keeping tmux session names as display metadata. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 mmux-visible workstream labels with `open --mmux-label`, `label --mmux-label`, status/show/list fields, and close/leave cleanup. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #347 closeout ergonomics: `timer --self`, workstream-scoped timers, readable events, and close-time timer/standby flags. |
 | 2026-05-28 | @codex | Added timer input-quiet guards so scheduled prompt delivery defers instead of colliding with recent attached-client input. |
@@ -19,8 +20,8 @@
 
 `mstream` is implemented as a `motlie-mstream` package with binary name
 `mstream`. It provides a Unix-domain socket daemon, JSONL client responses,
-strict `<host>::<session>` target parsing, in-memory workstreams, tmux session
-tags, state marking, send/interrupt/broadcast, handoffs, and bounded
+strict `<host>::<session-or-id>` target parsing, in-memory workstreams, tmux
+session tags, state marking, send/interrupt/broadcast, handoffs, and bounded
 observation commands. It also provides daemon-memory self-wakeup timers that
 send a configured prompt to an orchestrator tmux session on an interval, with
 default input-quiet guarding to avoid colliding with attached human typing.
@@ -94,6 +95,13 @@ After daemon restart, reconnect hosts and run `scan` to hydrate tagged sessions
 from tmux. Scan reads `@mstream/mmux-label` from joined sessions to recover the
 workstream label. If joined sessions disagree, `mmux_label_conflicts` reports
 the observed labels.
+
+Daemon records are keyed by `(host, tmux session_id)`, for example
+`local::$7`; tmux session names are display metadata. Commands may still accept
+`<host>::<tmux-session-name>` for convenience, but JSONL responses and events
+use the resolved stable target when the session exists. `scan` reconciles by
+session id, updates display names after rename, and drops a stale in-memory
+record if tmux reuses an id with a different session creation timestamp.
 
 ## Session Assignment
 
@@ -214,9 +222,9 @@ session with `tmux display-message -p '#S'` and targets `local::<session>` by
 default. Use `--self-host <alias>` when the orchestrator host alias is not
 `local`. `--self` and `--target` are mutually exclusive.
 
-Explicit `--target` still accepts normal `<host-alias>::<tmux-session-name>`
-syntax. The host must already be connected and `timer start` validates that the
-target exists before scheduling.
+Explicit `--target` accepts `<host-alias>::<tmux-session-name>` or a stable
+`<host-alias>::$<tmux-session-id>` target. The host must already be connected
+and `timer start` validates that the target exists before scheduling.
 
 `--workstream <name>` associates a timer with a workstream for filtering and
 closeout. `timer list --workstream <name>` returns only scoped timers.
