@@ -8,6 +8,7 @@ Implemented CLI contract for the initial `mmux` binary under `bins/mmux/`.
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex | Added the local macOS release-build install sequence, including re-signing `/usr/local/bin/mmux` before ForceCommand use. |
 | 2026-05-28 | @gpt55-342-og | Removed positional `--alias` overrides; SSH targets now use endpoint identity labels including user, host, non-default port, and non-default tmux socket. |
 | 2026-05-20 | @codex | Added `--alias` host-label overrides for the top status host legend, with positional mapping across localhost and SSH URI targets and empty-entry fallback to discovered labels. |
 | 2026-05-16 | @codex-tmux-tl | Focused modal text fields now keep Left/Right inside the field for cursor movement and mid-string editing; modal buttons only take Left/Right when a button is focused. |
@@ -412,6 +413,22 @@ right-aligned column in the Sessions list. Help
 renders the built-in motlie logo, build date, last 8 characters of the build git
 SHA, key functions, and a single Ok button. All modal content areas are
 separated from the button bar by a horizontal line.
+
+## Local Build And macOS Install
+
+For local host installs, build the release binary and sign the installed path:
+
+```bash
+cargo build --release --locked -p motlie-mmux --bin mmux
+sudo install -o root -g wheel -m 0755 target/release/mmux /usr/local/bin/mmux
+sudo codesign --force --sign - /usr/local/bin/mmux
+rehash
+/usr/local/bin/mmux --version
+```
+
+The installed path must be signed, not only the build artifact under
+`target/release`. If zsh reports `killed`, verify which binary is running with
+`command -v mmux`, then replace and re-sign `/usr/local/bin/mmux`.
 
 ## ForceCommand
 
