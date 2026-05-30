@@ -553,6 +553,7 @@ impl DaemonState {
             )
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
+        Self::prepare_resolved_target_for_adoption_shared(Arc::clone(&shared), &resolved).await?;
         Self::write_assignment_to_target(
             &resolved.target,
             &meta,
@@ -662,6 +663,7 @@ impl DaemonState {
             host: handle,
             target: tmux_target,
         };
+        Self::prepare_resolved_target_for_adoption_shared(Arc::clone(&shared), &resolved).await?;
         Self::write_assignment_to_target(
             &resolved.target,
             &meta,
@@ -2728,6 +2730,30 @@ impl DaemonState {
         Ok(())
     }
 
+    async fn prepare_resolved_target_for_adoption_shared(
+        shared: Arc<Mutex<Self>>,
+        resolved: &ResolvedTarget,
+    ) -> anyhow::Result<()> {
+        let Some(session) = resolved.target.session_info() else {
+            return Ok(());
+        };
+        let tasks = {
+            let mut state = shared.lock().await;
+            if let Some(reason) = state.stale_session_reuse_reason(&resolved.spec, session, None) {
+                state.quarantine_stale_session_target(&resolved.spec, &reason, None)
+            } else {
+                if let Some(record) = state.sessions.get_mut(&resolved.spec) {
+                    record.observe_tmux_session(session);
+                }
+                Vec::new()
+            }
+        };
+        for task in tasks {
+            task.abort();
+        }
+        Ok(())
+    }
+
     async fn ensure_monitoring_target_shared(
         shared: Arc<Mutex<Self>>,
         target: &SessionTarget,
@@ -3956,6 +3982,66 @@ mod tests {
         }
     }
 
+    fn seed_stale_reused_target(state: &mut DaemonState, workstream: &str, target: &SessionTarget) {
+        open_test_workstream(state, workstream);
+        state
+            .add_session_to_workstream(
+                workstream,
+                target.clone(),
+                "reviewer".to_string(),
+                Some("old-agent".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add stale session");
+        state
+            .sessions
+            .get_mut(target)
+            .expect("stale session")
+            .observe_tmux_session(&session_info("old", "$1", 100, 150));
+        state.timers.insert(
+            "poll".to_string(),
+            timer_record("poll", target.clone(), Some(100)),
+        );
+        state
+            .workstream_mut(workstream)
+            .expect("old workstream")
+            .handoffs
+            .insert(
+                "h1".to_string(),
+                handoff_record("h1", target.clone(), Some(100)),
+            );
+    }
+
+    fn assert_stale_target_quarantined(
+        state: &DaemonState,
+        workstream: &str,
+        target: &SessionTarget,
+    ) {
+        assert!(!state
+            .workstream(workstream)
+            .expect("old workstream")
+            .sessions
+            .contains(target));
+        let timer = state.timers.get("poll").expect("timer");
+        assert_eq!(timer.next_fire_at, None);
+        assert!(timer
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
+        assert!(state
+            .workstream(workstream)
+            .expect("old workstream")
+            .handoffs
+            .get("h1")
+            .expect("handoff")
+            .canceled_reason
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
+    }
+
     #[test]
     fn shell_quote_handles_single_quote() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
@@ -4353,6 +4439,94 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("stale tmux session id"));
+    }
+
+    #[tokio::test]
+    async fn join_quarantines_reused_session_id_before_adopting() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ joined $1 200 0 1  250\n")
+            .with_shell_data(vec![b"%output %5 ready\n".to_vec()])
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        seed_stale_reused_target(&mut state, "issue-355-old", &target);
+        open_test_workstream(&mut state, "issue-355-new");
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::join_shared(
+            Arc::clone(&shared),
+            JoinRequest {
+                workstream: "issue-355-new".to_string(),
+                target: target.to_string(),
+                role: "implementer".to_string(),
+                task: None,
+            },
+        )
+        .await
+        .expect("join reused id as fresh session");
+
+        assert_eq!(records[0]["op"], "join");
+        assert_eq!(records[0]["target"], target.to_string());
+        let state = shared.lock().await;
+        assert_stale_target_quarantined(&state, "issue-355-old", &target);
+        assert!(state
+            .workstream("issue-355-new")
+            .expect("new workstream")
+            .sessions
+            .contains(&target));
+        let record = state.sessions.get(&target).expect("fresh record");
+        assert_eq!(record.role.as_deref(), Some("implementer"));
+        assert_eq!(record.agent, None);
+        assert_eq!(record.workstream.as_deref(), Some("issue-355-new"));
+        assert_eq!(record.identity, "joined");
+        assert_eq!(record.tmux_session_created, Some(200));
+    }
+
+    #[tokio::test]
+    async fn new_session_quarantines_reused_session_id_before_adopting() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ fresh $1 200 0 1  250\n")
+            .with_shell_data(vec![b"%output %5 ready\n".to_vec()])
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        seed_stale_reused_target(&mut state, "issue-355-old", &target);
+        open_test_workstream(&mut state, "issue-355-new");
+        let cwd = PathBuf::from("/tmp/issue-355");
+        let shared = Arc::new(Mutex::new(state));
+
+        let records = DaemonState::new_session_shared(
+            Arc::clone(&shared),
+            NewRequest {
+                workstream: "issue-355-new".to_string(),
+                target: "local::fresh".to_string(),
+                role: "implementer".to_string(),
+                cwd: cwd.clone(),
+                agent: "agent-new".to_string(),
+                task: None,
+            },
+        )
+        .await
+        .expect("adopt newly created reused id as fresh session");
+
+        assert_eq!(records[0]["op"], "new");
+        assert_eq!(records[0]["target"], target.to_string());
+        let state = shared.lock().await;
+        assert_stale_target_quarantined(&state, "issue-355-old", &target);
+        assert!(state
+            .workstream("issue-355-new")
+            .expect("new workstream")
+            .sessions
+            .contains(&target));
+        let record = state.sessions.get(&target).expect("fresh record");
+        assert_eq!(record.role.as_deref(), Some("implementer"));
+        assert_eq!(record.agent.as_deref(), Some("agent-new"));
+        assert_eq!(record.cwd.as_ref(), Some(&cwd));
+        assert_eq!(record.workstream.as_deref(), Some("issue-355-new"));
+        assert_eq!(record.identity, "fresh");
+        assert_eq!(record.tmux_session_created, Some(200));
     }
 
     #[test]
