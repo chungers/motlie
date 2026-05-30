@@ -57,8 +57,8 @@ use crate::types::*;
 ///
 /// `Notification` is intentionally retained for the future event-driven host
 /// watcher. The current `HostHandle::watch_host_events()` implementation uses
-/// polling plus snapshot reconciliation; monitor sessions still parse and drop
-/// notifications so the control-mode decoder remains complete.
+/// polling plus snapshot reconciliation; monitor sessions handle live session
+/// rename notifications and otherwise preserve notification parsing coverage.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ControlModeMessage {
     /// `%output %<pane_id> <data>`
@@ -70,6 +70,8 @@ pub(crate) enum ControlModeMessage {
     /// Unrecognized line
     Unknown(String),
 }
+
+type SessionRenameCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Parse a single control mode line.
 pub(crate) fn parse_control_line(line: &str) -> ControlModeMessage {
@@ -98,6 +100,15 @@ pub(crate) fn parse_control_line(line: &str) -> ControlModeMessage {
     } else {
         ControlModeMessage::Unknown(line.to_string())
     }
+}
+
+fn parse_session_renamed_notification(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("%session-renamed ")?;
+    let (session_id, new_name) = rest.split_once(' ')?;
+    if session_id.is_empty() || new_name.is_empty() {
+        return None;
+    }
+    Some((session_id.to_string(), decode_octal_escapes(new_name)))
 }
 
 /// Decode tmux control mode octal escapes (`\ooo`) to actual bytes.
@@ -171,6 +182,7 @@ pub struct SessionMonitor {
     tmux_bin: Option<String>,
     normalize: CaptureNormalizeMode,
     pane_states: HashMap<String, PaneAssemblyState>,
+    session_rename_callback: Option<SessionRenameCallback>,
 }
 
 impl SessionMonitor {
@@ -183,6 +195,7 @@ impl SessionMonitor {
             tmux_bin: None,
             normalize: CaptureNormalizeMode::Raw,
             pane_states: HashMap::new(),
+            session_rename_callback: None,
         }
     }
 
@@ -200,6 +213,7 @@ impl SessionMonitor {
             tmux_bin: None,
             normalize,
             pane_states: HashMap::new(),
+            session_rename_callback: None,
         }
     }
 
@@ -217,6 +231,7 @@ impl SessionMonitor {
             tmux_bin: None,
             normalize,
             pane_states: HashMap::new(),
+            session_rename_callback: None,
         }
     }
 
@@ -229,6 +244,11 @@ impl SessionMonitor {
     /// Set the resolved tmux binary path for the attach command.
     pub fn with_tmux_bin(mut self, tmux_bin: Option<String>) -> Self {
         self.tmux_bin = tmux_bin;
+        self
+    }
+
+    pub(crate) fn with_session_rename_callback(mut self, callback: SessionRenameCallback) -> Self {
+        self.session_rename_callback = Some(callback);
         self
     }
 
@@ -251,6 +271,21 @@ impl SessionMonitor {
             ControlModeMessage::Output { .. } => true,
             ControlModeMessage::Notification(line) => line.starts_with("%session-changed "),
             ControlModeMessage::CommandResponse(_) | ControlModeMessage::Unknown(_) => false,
+        }
+    }
+
+    fn handle_session_renamed(&mut self, session_id: &str, new_name: &str) {
+        if session_id != self.session_id {
+            return;
+        }
+
+        self.session_name = new_name.to_string();
+        for state in self.pane_states.values_mut() {
+            state.address.session = new_name.to_string();
+        }
+
+        if let Some(callback) = &self.session_rename_callback {
+            callback(session_id, new_name);
         }
     }
 
@@ -362,9 +397,14 @@ impl SessionMonitor {
                                             Self::signal_startup_ready(startup_ready);
                                         }
                                     }
-                                    ControlModeMessage::Notification(_) => {
+                                    ControlModeMessage::Notification(line) => {
                                         if signals_startup_ready {
                                             Self::signal_startup_ready(startup_ready);
+                                        }
+                                        if let Some((session_id, new_name)) =
+                                            parse_session_renamed_notification(&line)
+                                        {
+                                            self.handle_session_renamed(&session_id, &new_name);
                                         }
                                     }
                                     ControlModeMessage::Unknown(line) => {
@@ -652,6 +692,22 @@ mod tests {
     fn parse_notification() {
         let msg = parse_control_line("%session-changed $1 mysession");
         assert!(matches!(msg, ControlModeMessage::Notification(_)));
+    }
+
+    #[test]
+    fn parse_session_renamed_notification_extracts_id_and_name() {
+        assert_eq!(
+            parse_session_renamed_notification("%session-renamed $1 renamed"),
+            Some(("$1".to_string(), "renamed".to_string()))
+        );
+        assert_eq!(
+            parse_session_renamed_notification("%session-renamed $1 new\\040name"),
+            Some(("$1".to_string(), "new name".to_string()))
+        );
+        assert_eq!(
+            parse_session_renamed_notification("%session-changed $1 s"),
+            None
+        );
     }
 
     #[test]
@@ -1016,6 +1072,61 @@ mod tests {
         }
         // No more events
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn monitor_updates_display_name_and_existing_panes_on_session_renamed() {
+        use crate::sink::{OutputBus, SinkEvent};
+        use crate::transport::MockTransport;
+
+        let control_output = b"%output %5 before\n%session-renamed $1 new\n%output %5 after\n";
+        let mock = MockTransport::new().with_shell_data(vec![control_output.to_vec()]);
+        let mut shell = mock.open_shell_for_test().await;
+
+        let bus = OutputBus::new();
+        let sub = bus.subscribe(vec![], 16).unwrap();
+        let mut rx = sub.into_receiver();
+
+        let display_name = Arc::new(std::sync::Mutex::new("old".to_string()));
+        let callback_display_name = display_name.clone();
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let mut monitor = SessionMonitor::with_identity(
+            "$1".to_string(),
+            "old".to_string(),
+            "localhost".to_string(),
+            CaptureNormalizeMode::Raw,
+        )
+        .with_session_rename_callback(Arc::new(move |session_id, new_name| {
+            assert_eq!(session_id, "$1");
+            *callback_display_name.lock().unwrap() = new_name.to_string();
+        }));
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut ready = Some(ready_tx);
+        let result = monitor
+            .run(&mut shell, &bus, stop_rx, &mut ready)
+            .await
+            .unwrap();
+        assert_eq!(result, MonitorExitReason::ConnectionLost);
+        ready_rx.await.expect("ready signal should be sent");
+        assert_eq!(*display_name.lock().unwrap(), "new");
+
+        match rx.try_recv().unwrap() {
+            SinkEvent::Data(out) => {
+                assert_eq!(out.content, "before");
+                assert_eq!(out.session_name(), "old");
+                assert_eq!(out.session_id(), Some("$1"));
+            }
+            other => panic!("expected Data, got {:?}", other),
+        }
+        match rx.try_recv().unwrap() {
+            SinkEvent::Data(out) => {
+                assert_eq!(out.content, "after");
+                assert_eq!(out.session_name(), "new");
+                assert_eq!(out.session_id(), Some("$1"));
+            }
+            other => panic!("expected Data, got {:?}", other),
+        }
     }
 
     // --- MonitorHealth tests (DC29, 4.2a) ---

@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-359-og: Split `SinkFilter` session-name and stable session-id routing so id-addressed filters do not match sessions literally named `$N`. | SinkFilter |
 | 2026-05-28 | @codex: Add policy-light attached-client activity signals for orchestrators: `ClientInfo` now includes `client_activity`, `client_readonly`, and `client_tty`, and `HostHandle::session_client_activity()` summarizes input recency for one session without embedding delivery policy in the library. | Discovery, HostHandle |
 | 2026-05-28 | @codex: Add the host-alias integration cleanup from feature/mstream: `SshConfig::connect_with_alias()` creates `HostHandle`s with caller-owned Fleet aliases, `Fleet::unregister()` removes host, monitor, and target-alias bookkeeping together, timeline lifecycle remains on `OutputBus` rather than duplicated on Fleet, and historical workstream/short-name aliases were removed in favor of explicit target-alias APIs. | Fleet, DC21 |
 | 2026-05-27 | @gpt55-337-og: Issue #337 Fleet API follow-up — add cross-host `FleetTargetSpec`, target aliases, fleet-wide session inventory with generic tag prefixing, batch tag writes/removals, idempotent target monitoring, and timeline filter/scope helpers. Keep application/workflow business concepts outside `libs/tmux`. | Fleet |
@@ -1427,6 +1428,7 @@ set is delivered.
 pub struct SinkFilter {
     pub host: Option<String>,      // regex against host alias
     pub session: Option<String>,   // regex against session name
+    pub session_id: Option<String>, // regex against stable tmux session id
     pub window: Option<String>,    // regex against "session:window_index"
     pub pane: Option<String>,      // regex against pane_id or "session:window.pane"
 }
@@ -1435,6 +1437,7 @@ pub struct SinkFilter {
 pub struct CompiledSinkFilter {
     pub host: Option<Regex>,
     pub session: Option<Regex>,
+    pub session_id: Option<Regex>,
     pub window: Option<Regex>,
     pub pane: Option<Regex>,
 }

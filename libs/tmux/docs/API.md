@@ -22,6 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-359-og | Added explicit session-id sink filters, documented that session-name filters no longer match stable `$N` ids, and clarified scoped discontinuity delivery. |
 | 2026-05-30 | @codex-355-rv | Added stable session-id target specs and documented that resolved `Target::target_string()` uses tmux ids while names remain display metadata. |
 | 2026-05-28 | @gpt55-342-og | Added `SshConfig::endpoint_alias()` and `connect_with_endpoint_alias()` for stable SSH endpoint display and HostHandle aliases. |
 | 2026-05-28 | @codex | Added attached-client activity fields to `ClientInfo` and `HostHandle::session_client_activity()` for policy-light input-recency consumers such as mstream timer guards. |
@@ -1843,6 +1844,9 @@ let sub_all = bus.subscribe(vec![], 64)?;
 // Subscribe filtered to a specific session (exact match constructor)
 let sub_build = bus.subscribe(vec![SinkFilter::for_session("build")], 64)?;
 
+// Subscribe filtered to a stable tmux session id
+let sub_id = bus.subscribe(vec![SinkFilter::for_session_id("$1")], 64)?;
+
 // Subscribe filtered to a specific pane (exact match constructor)
 let sub_pane = bus.subscribe(vec![SinkFilter::for_pane("%5")], 64)?;
 
@@ -1886,6 +1890,10 @@ All filter fields are optional regex strings. A filter matches when **all**
 non-None fields match (AND logic). Multiple filters in a subscription are
 OR'd — an event matches if **any** filter matches.
 
+Use `session` for display-name matching and `session_id` for stable tmux
+`$N` identity matching. This keeps an id-addressed filter such as `$1` from
+matching an unrelated session literally named `$1`.
+
 The `pane` filter matches against both the `pane_id` (e.g. `%5`) and the
 tmux target string (e.g. `build:0.1`). Control mode only provides `pane_id`,
 so pane-level filtering by `pane_id` is the canonical approach.
@@ -1894,12 +1902,15 @@ so pane-level filtering by `pane_id` is the canonical approach.
 // Exact-match constructors (preferred for common routing):
 let filter = SinkFilter::for_host("web-1");
 let filter = SinkFilter::for_session("build");
+let filter = SinkFilter::for_session_id("$1");
 let filter = SinkFilter::for_pane("%5");
 let filter = SinkFilter::for_host_session("web-1", "build");
+let filter = SinkFilter::for_host_session_id("web-1", "$1");
 
 // Raw regex fields for advanced routing:
 let filter = SinkFilter {
     session: Some("build|deploy".to_string()),
+    session_id: Some("^\\$[0-9]+$".to_string()),
     window: Some("^build:0$".to_string()),
     ..Default::default()
 };
@@ -1947,8 +1958,11 @@ match event {
 }
 ```
 
-The `OutputBus` broadcasts discontinuity to all subscribers regardless of
-source-routing filters (system-level signal, not content):
+The `OutputBus` broadcasts global discontinuities to all subscribers regardless
+of source-routing filters (system-level signal, not content). Scoped
+discontinuities created with `publish_discontinuity_for()` are delivered only to
+unfiltered subscribers and subscribers whose source filters match the marker
+scope:
 
 ```rust
 bus.publish_discontinuity("stream interrupted: control channel lost");
@@ -2400,7 +2414,8 @@ older entries.
 
 `OutputBus::publish_discontinuity()` and `publish_gap()` record global markers
 only in unfiltered timelines. Use scoped marker APIs for per-workstream
-continuity so unrelated timelines do not receive reconnect or gap markers:
+continuity so unrelated timelines and filtered subscribers do not receive
+reconnect or gap markers:
 
 ```rust
 bus.publish_discontinuity_for(
@@ -2779,7 +2794,7 @@ assert!(issues.is_empty());
 | `PipeHandle` | Lifecycle handle from `pipe()` — `id()` for bus control, `join()` for awaited teardown |
 | `TargetOutput` | Output event — `source_key()` (canonical identity), `target_string()` (display), content, fidelity |
 | `SinkEvent` | Enum: `Data(TargetOutput)`, `Gap { dropped, timestamp }`, `Discontinuity { reason }` |
-| `SinkFilter` | Source routing — `for_session()`, `for_pane()`, `for_host()` exact constructors; raw regex fields for power |
+| `SinkFilter` | Source routing — `for_session()`, `for_session_id()`, `for_pane()`, `for_host()` exact constructors; raw regex fields for power |
 | `SinkId` | Opaque subscription identifier |
 | `SinkKind` | Enum: `Stdio(StdioSink)`, `Callback(CallbackSink)` — static dispatch |
 | `CallbackSink` | User sink — name, state (`Arc<dyn Any>`), on_output, on_flush |

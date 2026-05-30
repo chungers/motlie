@@ -1049,6 +1049,21 @@ impl HostHandle {
             };
 
             loop {
+                let rename_inner = inner_ref.clone();
+                let rename_display = display_name_task.clone();
+                let rename_session_id = session_id.clone();
+                let rename_callback = Arc::new(move |renamed_id: &str, new_name: &str| {
+                    if renamed_id != rename_session_id.as_str() {
+                        return;
+                    }
+                    if let Ok(mut names) = rename_inner.monitor_signal_names.lock() {
+                        names.retain(|_, id| id != renamed_id);
+                        names.insert(new_name.to_string(), renamed_id.to_string());
+                    }
+                    if let Ok(mut display) = rename_display.lock() {
+                        *display = new_name.to_string();
+                    }
+                });
                 let mut monitor = SessionMonitor::with_identity(
                     session_id.clone(),
                     display_session.clone(),
@@ -1056,7 +1071,8 @@ impl HostHandle {
                     normalize,
                 )
                 .with_socket(inner_ref.socket.clone())
-                .with_tmux_bin(Some(resolved_tmux_bin.clone()));
+                .with_tmux_bin(Some(resolved_tmux_bin.clone()))
+                .with_session_rename_callback(rename_callback);
 
                 let exit = monitor
                     .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
@@ -1069,6 +1085,9 @@ impl HostHandle {
                         return Ok(MonitorExitReason::Stopped);
                     }
                     MonitorExitReason::ConnectionLost => {
+                        if let Ok(display) = display_name_task.lock() {
+                            display_session = display.clone();
+                        }
                         // Transition Running execs in this session to Unknown (DC31)
                         inner_ref.notify_exec_discontinuity(
                             &session_id,
@@ -1308,13 +1327,18 @@ impl HostHandle {
         session_name: &str,
         opts: &SessionWatchOptions,
     ) -> Result<SessionWatchHandle> {
+        let sessions = self.list_sessions().await?;
+        let session_info = sessions
+            .into_iter()
+            .find(|s| s.name == session_name)
+            .ok_or_else(|| Error::NotFound(format!("session '{}' not found", session_name)))?;
         let bus = self.output_bus();
-        let filter = SinkFilter::for_session(session_name);
+        let filter = SinkFilter::for_host_session_id(self.host_alias(), session_info.id.as_str());
         let subscription = bus.subscribe(vec![filter], opts.queue_capacity)?;
         let subscription_id = subscription.id();
 
         match self
-            .start_monitoring_session_with_normalize(session_name, opts.normalize)
+            .start_monitoring_session_info_with_normalize(session_info, opts.normalize)
             .await
         {
             Ok(monitor) => {
@@ -3201,6 +3225,97 @@ mod tests {
 
     fn mock_host(mock: MockTransport) -> HostHandle {
         HostHandle::new(TransportKind::Mock(mock), None)
+    }
+
+    #[tokio::test]
+    async fn monitoring_handle_display_name_updates_on_session_renamed_notification() {
+        let mock = MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ old $1 100 0 1  200\n")
+            .with_shell_data(vec![
+                b"%session-changed $1 old\n%session-renamed $1 new\n".to_vec()
+            ]);
+        let host = mock_host(mock);
+        let handle = host.start_monitoring_session_by_id("$1").await.unwrap();
+
+        for _ in 0..20 {
+            if handle.display_name() == "new" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert_eq!(handle.display_name(), "new");
+        assert_eq!(host.monitored_sessions(), vec!["new".to_string()]);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_session_shared_bus_scopes_session_id_filter_by_host() {
+        let bus = Arc::new(OutputBus::new());
+        let host_a = HostHandle::with_alias(
+            TransportKind::Mock(
+                MockTransport::new()
+                    .with_response("list-sessions", "__MOTLIE_S__ alpha $1 100 0 1  200\n")
+                    .with_shell_data(vec![b"%session-changed $1 alpha\n".to_vec()]),
+            ),
+            None,
+            "host-a",
+        );
+        let host_b =
+            HostHandle::with_alias(TransportKind::Mock(MockTransport::new()), None, "host-b");
+        host_a.inject_output_bus(bus.clone()).unwrap();
+        host_b.inject_output_bus(bus).unwrap();
+
+        let watch = host_a
+            .watch_session("alpha", &SessionWatchOptions::default())
+            .await
+            .unwrap();
+
+        let output = |host: &str, session: &str, pane_id: &str, content: &str| TargetOutput {
+            source: TargetAddress::Pane(PaneAddress {
+                pane_id: pane_id.to_string(),
+                session_id: Some(SessionId::for_test("$1")),
+                session: session.to_string(),
+                window: 0,
+                pane: 0,
+            }),
+            host: host.to_string(),
+            content: content.to_string(),
+            raw_content: None,
+            sequence: 1,
+            fidelity: OutputFidelity::default(),
+            timestamp: std::time::Instant::now(),
+        };
+
+        host_b
+            .output_bus()
+            .publish(output("host-b", "beta", "%6", "from-b"));
+        host_b.output_bus().publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session_identity("host-b", "beta", "$1"),
+            "b marker",
+        );
+        host_a
+            .output_bus()
+            .publish(output("host-a", "alpha", "%5", "from-a"));
+        host_a.output_bus().publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session_identity("host-a", "alpha", "$1"),
+            "a marker",
+        );
+
+        let mut text = String::new();
+        for _ in 0..20 {
+            text = watch.render_text().await;
+            if text.contains("from-a") && text.contains("a marker") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(text.contains("from-a"), "{text}");
+        assert!(text.contains("a marker"), "{text}");
+        assert!(!text.contains("from-b"), "{text}");
+        assert!(!text.contains("b marker"), "{text}");
+        watch.shutdown().await.unwrap();
     }
 
     #[tokio::test]
