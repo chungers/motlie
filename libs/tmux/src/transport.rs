@@ -895,6 +895,8 @@ pub struct MockTransport {
     responses: Mutex<Vec<(String, Vec<String>)>>,
     /// Ordered (pattern, error_message) pairs. Checked before `responses`.
     errors: Mutex<Vec<(String, String)>>,
+    /// Commands executed through this mock, in call order.
+    executed_commands: Arc<Mutex<Vec<String>>>,
     default_response: String,
     /// In-memory filesystem for upload/download testing (DC23).
     fs: Mutex<HashMap<std::path::PathBuf, MockFsEntry>>,
@@ -913,12 +915,18 @@ impl MockTransport {
         MockTransport {
             responses: Mutex::new(Vec::new()),
             errors: Mutex::new(Vec::new()),
+            executed_commands: Arc::new(Mutex::new(Vec::new())),
             default_response: String::new(),
             fs: Mutex::new(HashMap::new()),
             transfer_error: Mutex::new(None),
             shell_data: Mutex::new(Vec::new()),
             shell_sequences: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Return a shared command log for assertions after the mock is moved.
+    pub fn command_log(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.executed_commands)
     }
 
     /// Add a canned response for a command pattern.
@@ -953,6 +961,11 @@ impl MockTransport {
     }
 
     async fn exec(&self, command: &str) -> Result<String> {
+        self.executed_commands
+            .lock()
+            .unwrap()
+            .push(command.to_string());
+
         // Check error patterns first (insertion order)
         {
             let errors = self.errors.lock().unwrap();

@@ -1388,10 +1388,18 @@ impl DaemonState {
             state.apply_session_retag_plan(&stable_target, &tmux_target, &plan, renamed)?
         };
 
-        if let Some((workstream, label)) = requested_mmux_apply {
-            Self::apply_mmux_label_to_workstream_shared(Arc::clone(&shared), &workstream, &label)
-                .await?;
-        }
+        let mmux_apply_result = if let Some((workstream, label)) = requested_mmux_apply {
+            Some(
+                Self::apply_mmux_label_to_workstream_shared(
+                    Arc::clone(&shared),
+                    &workstream,
+                    &label,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
 
         Ok(vec![json!({
             "type": "ok",
@@ -1404,6 +1412,8 @@ impl DaemonState {
             "workstream": plan.new_workstream,
             "mmux_label": plan.mmux_label,
             "mmux_label_cleared": plan.clear_mmux_workstream.is_some(),
+            "mmux_labels_applied": mmux_apply_result.as_ref().map(|result| result.applied),
+            "mmux_label_apply_failed": mmux_apply_result.as_ref().map(|result| result.failed),
             "stale_handoffs_canceled": stale_handoffs_canceled,
             "cursor": cursor,
         })])
@@ -1416,12 +1426,7 @@ impl DaemonState {
     ) -> anyhow::Result<MmuxLabelApplyResult> {
         let targets = {
             let state = shared.lock().await;
-            state
-                .workstream(workstream)?
-                .sessions
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
+            state.workstream_session_targets(workstream)?
         };
 
         let mut result = MmuxLabelApplyResult::default();
@@ -1454,8 +1459,18 @@ impl DaemonState {
                 Ok(()) => {
                     result.applied += 1;
                     let mut state = shared.lock().await;
+                    let assigned_to_workstream = state
+                        .sessions
+                        .get(&target)
+                        .is_some_and(|record| record.workstream.as_deref() == Some(workstream));
                     if let Some(record) = state.sessions.get_mut(&target) {
                         record.mmux_label = Some(label.to_string());
+                    }
+                    if assigned_to_workstream {
+                        state
+                            .workstream_mut(workstream)?
+                            .sessions
+                            .insert(target.clone());
                     }
                     state.record_event(
                         workstream,
@@ -3332,6 +3347,10 @@ impl DaemonState {
                     .sessions
                     .insert(target.clone());
             }
+        } else if let Some(new_workstream) = &plan.new_workstream {
+            self.workstream_mut(new_workstream)?
+                .sessions
+                .insert(target.clone());
         }
 
         let record = self
@@ -3496,6 +3515,17 @@ impl DaemonState {
         self.workstreams
             .get_mut(name)
             .with_context(|| format!("workstream '{name}' is not open"))
+    }
+
+    fn workstream_session_targets(&self, name: &str) -> anyhow::Result<Vec<SessionTarget>> {
+        let mut targets = self.workstream(name)?.sessions.clone();
+        targets.extend(
+            self.sessions
+                .iter()
+                .filter(|(_, record)| record.workstream.as_deref() == Some(name))
+                .map(|(target, _)| target.clone()),
+        );
+        Ok(targets.into_iter().collect())
     }
 
     fn workstream_meta(&self, name: &str) -> anyhow::Result<WorkstreamMeta> {
@@ -4876,6 +4906,7 @@ mod tests {
                  __MOTLIE_S__ worker-b $2 101 0 1  151\n",
             )
             .with_default("");
+        let command_log = mock.command_log();
         let mut state = DaemonState::default();
         register_mock_host(&mut state, "local", mock);
         open_test_workstream(&mut state, "issue-360");
@@ -4904,6 +4935,11 @@ mod tests {
             )
             .expect("add session b");
         state
+            .workstream_mut("issue-360")
+            .expect("workstream")
+            .sessions
+            .remove(&target_b);
+        state
             .sessions
             .get_mut(&target_a)
             .expect("session a")
@@ -4931,6 +4967,8 @@ mod tests {
         assert_eq!(records[0]["op"], "session_retag");
         assert_eq!(records[0]["target"], "local::$1");
         assert_eq!(records[0]["mmux_label"], "new ws");
+        assert_eq!(records[0]["mmux_labels_applied"], 2);
+        assert_eq!(records[0]["mmux_label_apply_failed"], 0);
 
         let state = shared.lock().await;
         assert_eq!(
@@ -4959,6 +4997,11 @@ mod tests {
                 .as_deref(),
             Some("new ws")
         );
+        assert!(state
+            .workstream("issue-360")
+            .expect("workstream")
+            .sessions
+            .contains(&target_b));
         let applied_targets = state
             .workstream("issue-360")
             .expect("workstream")
@@ -4970,6 +5013,13 @@ mod tests {
         assert_eq!(
             applied_targets,
             BTreeSet::from(["local::$1".to_string(), "local::$2".to_string()])
+        );
+        let commands = command_log.lock().expect("command log").clone();
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.contains("set-option -t '$2' @mmux/mstream 'new ws'")),
+            "sibling mmux tag was not refreshed; commands: {commands:#?}"
         );
     }
 
