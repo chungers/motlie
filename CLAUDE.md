@@ -1,3 +1,55 @@
+# Core Tenets
+
+*Know your job* → 
+Understand the duties and expections of your role.
+
+*Think before coding* → 
+State your assumptions. Ask when unsure. Never guess.
+
+*Simplicity first* → 
+Write the minimum code that solves the problem.
+No abstractions nobody asked for.
+
+*Surgical changes* → 
+Don't touch code unrelated to the request.
+Every changed line must trace back to what was asked.
+
+*Goal-driven execution* → 
+Turn vague instructions into verifiable success criteria
+before writing a single line.
+
+*Crisp and concise communication* → 
+Be succinct and to the point. Prefer direct and actionable 
+communication.  No long verbose prose.
+
+
+# Skills
+
+Skills are organized by namespace in `.agents/skills/`.
+Read the relevant `SKILL.md` before creating any file.
+
+## Project
+
+| Skill | Path | When to use |
+|---|---|---|
+| `project` | `.agents/skills/project/SKILL.md` | Manage Motlie engineering projects and multi-agent workstreams with mstream |
+
+## Release
+
+| Skill | Path | When to use |
+|---|---|---|
+| `release` | `.agents/skills/release/SKILL.md` | Plan, stage, package, verify, or publish Motlie releases |
+
+## Voice
+
+| Skill | Path | When to use |
+|---|---|---|
+| `voice` | `.agents/skills/voice/README.md` | Voice skill namespace entrypoint and playbook |
+| `speak` | `.agents/skills/voice/speak/` | Speak text aloud with Piper or qwen3-tts.cpp |
+| `listen` | `.agents/skills/voice/listen/` | Capture and transcribe speech with Whisper, Sherpa, or Moonshine |
+| `turn` | `.agents/skills/voice/turn/` | Run one spoken turn: speak a prompt, then listen for a reply |
+
+
 # Development Process and Conventions
 
 ALWAYS confirm with the user your role and identity which can also change in a long session.
@@ -33,31 +85,7 @@ into the repo or mixing worktree paths with tracked project content.
 NEVER stage any commits of harness files (:= CLAUDE.md, AGENTS.md, or SKILL.md), or anything unrelated
 to your current scope of work, without user's explicit approval.
 
-## Skills
 
-Skills are organized by namespace in `.agents/skills/`.
-Read the relevant `SKILL.md` before creating any file.
-
-### Project
-
-| Skill | Path | When to use |
-|---|---|---|
-| `project` | `.agents/skills/project/SKILL.md` | Manage Motlie engineering projects and multi-agent workstreams with mstream |
-
-### Release
-
-| Skill | Path | When to use |
-|---|---|---|
-| `release` | `.agents/skills/release/SKILL.md` | Plan, stage, package, verify, or publish Motlie releases |
-
-### Voice
-
-| Skill | Path | When to use |
-|---|---|---|
-| `voice` | `.agents/skills/voice/README.md` | Voice skill namespace entrypoint and playbook |
-| `speak` | `.agents/skills/voice/speak/` | Speak text aloud with Piper or qwen3-tts.cpp |
-| `listen` | `.agents/skills/voice/listen/` | Capture and transcribe speech with Whisper, Sherpa, or Moonshine |
-| `turn` | `.agents/skills/voice/turn/` | Run one spoken turn: speak a prompt, then listen for a reply |
 
 ## Development Stages
 
@@ -236,23 +264,6 @@ NEVER commit any harness files (CLAUDE.md, AGENTS.md, etc) or files outside curr
 without explicit approval.  Commit local changes as you go.
 
 At the end of a round, summarize what you did and get user approval before you post feedback or push.
-
-## Core Tenets of Engineering
-
-→ Think before coding
-state your assumptions. ask when unsure. never guess.
-
-→ Simplicity first
-write the minimum code that solves the problem.
-no abstractions nobody asked for.
-
-→ Surgical changes
-don't touch code unrelated to the request.
-every changed line must trace back to what was asked.
-
-→ Goal-driven execution
-turn vague instructions into verifiable success criteria
-before writing a single line.
 
 
 ## Rust Coding Guidelines
