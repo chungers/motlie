@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-359-og | Updated sink routing plan notes for the explicit `session_id` filter field added in issue #359 follow-up work. |
 | 2026-05-02 | @codex | Addressed PR API feedback by replacing direct `Target` status methods with `Target::status() -> SessionStatus`, adding snapshot/apply/restore helpers, and making `StatusLeftLength` validated. |
 | 2026-05-02 | @codex | Added `CreateSessionOptions::initial_environment` as the lifecycle-correct API for env vars visible to the initial pane, and documented post-creation session env writes as future-process only. |
 | 2026-05-02 | @codex | Added narrow `StatusStyle` and session-local status APIs for tmux status bar styling without exposing a generic arbitrary-option API. |
@@ -1049,7 +1050,7 @@ via JoinedStream — with no matcher or action dispatch dependency.
 - [x] `SinkEvent` enum: `Data(TargetOutput)` and `Gap { dropped, timestamp }`
 - [x] `TargetOutput` accessors: `session_name()`, `pane_id()`, `target_string()`
 - [x] `OutputFidelity` / `FidelityIssue` enums shared with capture/monitor paths
-- [x] `SinkFilter`: `host`, `session`, `window`, `pane` (all optional regex strings)
+- [x] `SinkFilter`: `host`, `session`, `session_id`, `window`, `pane` (all optional regex strings)
   — routing only, no `content` / `MatcherKind` / `MatcherInput` fields yet
 - [x] `CompiledSinkFilter`: compiled regexes,
   `matches(&self, output: &TargetOutput) -> bool`
