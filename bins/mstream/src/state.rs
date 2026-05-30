@@ -274,6 +274,12 @@ struct MmuxLabelCleanup {
     skipped_workstream_mismatch: bool,
 }
 
+#[derive(Debug, Default)]
+struct MmuxLabelApplyResult {
+    applied: usize,
+    failed: usize,
+}
+
 struct BroadcastTarget {
     target: ResolvedTarget,
     state: AgentState,
@@ -1365,14 +1371,27 @@ impl DaemonState {
             )
             .await?;
         }
-        if let Some(label) = &plan.mmux_label {
-            Self::apply_mmux_workstream_label(&tmux_target, label).await?;
+        if plan.requested_mmux_label.is_none() {
+            if let Some(label) = &plan.mmux_label {
+                Self::apply_mmux_workstream_label(&tmux_target, label).await?;
+            }
         }
+
+        let requested_mmux_apply = plan
+            .requested_mmux_label
+            .as_ref()
+            .zip(plan.new_workstream.as_ref())
+            .map(|(label, workstream)| (workstream.clone(), label.clone()));
 
         let (cursor, stale_handoffs_canceled) = {
             let mut state = shared.lock().await;
             state.apply_session_retag_plan(&stable_target, &tmux_target, &plan, renamed)?
         };
+
+        if let Some((workstream, label)) = requested_mmux_apply {
+            Self::apply_mmux_label_to_workstream_shared(Arc::clone(&shared), &workstream, &label)
+                .await?;
+        }
 
         Ok(vec![json!({
             "type": "ok",
@@ -1388,6 +1407,76 @@ impl DaemonState {
             "stale_handoffs_canceled": stale_handoffs_canceled,
             "cursor": cursor,
         })])
+    }
+
+    async fn apply_mmux_label_to_workstream_shared(
+        shared: Arc<Mutex<Self>>,
+        workstream: &str,
+        label: &str,
+    ) -> anyhow::Result<MmuxLabelApplyResult> {
+        let targets = {
+            let state = shared.lock().await;
+            state
+                .workstream(workstream)?
+                .sessions
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let mut result = MmuxLabelApplyResult::default();
+        for target in targets {
+            let handle = {
+                let state = shared.lock().await;
+                state.host_handle(target.host_alias()).ok()
+            };
+            let apply_result = match handle {
+                Some(handle) => match Self::resolve_target(handle, target.clone()).await {
+                    Ok(resolved) => match Self::ensure_resolved_target_fresh_shared(
+                        Arc::clone(&shared),
+                        &resolved,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(()) => Self::apply_mmux_workstream_label(&resolved.target, label).await,
+                        Err(err) => Err(err),
+                    },
+                    Err(err) => Err(err),
+                },
+                None => Err(anyhow::anyhow!(
+                    "host alias '{}' is not connected",
+                    target.host_alias()
+                )),
+            };
+            match apply_result {
+                Ok(()) => {
+                    result.applied += 1;
+                    let mut state = shared.lock().await;
+                    if let Some(record) = state.sessions.get_mut(&target) {
+                        record.mmux_label = Some(label.to_string());
+                    }
+                    state.record_event(
+                        workstream,
+                        EventDraft::new("mmux_label_applied")
+                            .target(&target)
+                            .summary(format!("mmux label applied: {label}")),
+                    )?;
+                }
+                Err(err) => {
+                    result.failed += 1;
+                    shared.lock().await.record_event(
+                        workstream,
+                        EventDraft::new("mmux_label_apply_failed")
+                            .target(&target)
+                            .summary(format!("mmux label apply failed: {err}")),
+                    )?;
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     async fn session_mark_shared(
@@ -1445,67 +1534,20 @@ impl DaemonState {
         request: LabelRequest,
     ) -> anyhow::Result<Vec<Value>> {
         let label = validate_mmux_label(&request.mmux_label)?;
-        let targets = {
+        {
             let mut state = shared.lock().await;
             state.ensure_workstream_open(&request.workstream)?;
             let workstream = state.workstream_mut(&request.workstream)?;
             workstream.mmux_label = Some(label.clone());
             workstream.mmux_label_conflicts.clear();
-            workstream.sessions.iter().cloned().collect::<Vec<_>>()
-        };
-
-        let mut applied = 0usize;
-        let mut failed = 0usize;
-        for target in targets {
-            let handle = {
-                let state = shared.lock().await;
-                state.host_handle(target.host_alias()).ok()
-            };
-            let result = match handle {
-                Some(handle) => match Self::resolve_target(handle, target.clone()).await {
-                    Ok(resolved) => match Self::ensure_resolved_target_fresh_shared(
-                        Arc::clone(&shared),
-                        &resolved,
-                        None,
-                        None,
-                    )
-                    .await
-                    {
-                        Ok(()) => Self::apply_mmux_workstream_label(&resolved.target, &label).await,
-                        Err(err) => Err(err),
-                    },
-                    Err(err) => Err(err),
-                },
-                None => Err(anyhow::anyhow!(
-                    "host alias '{}' is not connected",
-                    target.host_alias()
-                )),
-            };
-            match result {
-                Ok(()) => {
-                    applied += 1;
-                    let mut state = shared.lock().await;
-                    if let Some(record) = state.sessions.get_mut(&target) {
-                        record.mmux_label = Some(label.clone());
-                    }
-                    state.record_event(
-                        &request.workstream,
-                        EventDraft::new("mmux_label_applied")
-                            .target(&target)
-                            .summary(format!("mmux label applied: {label}")),
-                    )?;
-                }
-                Err(err) => {
-                    failed += 1;
-                    shared.lock().await.record_event(
-                        &request.workstream,
-                        EventDraft::new("mmux_label_apply_failed")
-                            .target(&target)
-                            .summary(format!("mmux label apply failed: {err}")),
-                    )?;
-                }
-            }
         }
+
+        let apply_result = Self::apply_mmux_label_to_workstream_shared(
+            Arc::clone(&shared),
+            &request.workstream,
+            &label,
+        )
+        .await?;
 
         let cursor = shared.lock().await.record_event(
             &request.workstream,
@@ -1516,8 +1558,8 @@ impl DaemonState {
             "op": "label",
             "workstream": request.workstream,
             "mmux_label": label,
-            "applied": applied,
-            "failed": failed,
+            "applied": apply_result.applied,
+            "failed": apply_result.failed,
             "cursor": cursor,
         })])
     }
@@ -4821,6 +4863,114 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("session retagged"));
+    }
+
+    #[tokio::test]
+    async fn session_retag_mmux_label_refreshes_entire_workstream() {
+        let target_a = SessionTarget::session_id("local", "$1").expect("target a");
+        let target_b = SessionTarget::session_id("local", "$2").expect("target b");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response(
+                "list-sessions",
+                "__MOTLIE_S__ worker-a $1 100 0 1  150\n\
+                 __MOTLIE_S__ worker-b $2 101 0 1  151\n",
+            )
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-360");
+        state
+            .workstream_mut("issue-360")
+            .expect("workstream")
+            .mmux_label = Some("old ws".to_string());
+        state
+            .add_session_to_workstream(
+                "issue-360",
+                target_a.clone(),
+                "implementer".to_string(),
+                Some("agent-a".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session a");
+        state
+            .add_session_to_workstream(
+                "issue-360",
+                target_b.clone(),
+                "reviewer".to_string(),
+                Some("agent-b".to_string()),
+                None,
+                AgentState::Idle,
+            )
+            .expect("add session b");
+        state
+            .sessions
+            .get_mut(&target_a)
+            .expect("session a")
+            .observe_tmux_session(&session_info("worker-a", "$1", 100, 150));
+        state
+            .sessions
+            .get_mut(&target_b)
+            .expect("session b")
+            .observe_tmux_session(&session_info("worker-b", "$2", 101, 151));
+
+        let shared = Arc::new(Mutex::new(state));
+        let records = DaemonState::session_retag_shared(
+            Arc::clone(&shared),
+            SessionRetagRequest {
+                target: "local::$1".to_string(),
+                new_name: None,
+                role: None,
+                workstream: None,
+                mmux_label: Some("new ws".to_string()),
+            },
+        )
+        .await
+        .expect("retag mmux label");
+
+        assert_eq!(records[0]["op"], "session_retag");
+        assert_eq!(records[0]["target"], "local::$1");
+        assert_eq!(records[0]["mmux_label"], "new ws");
+
+        let state = shared.lock().await;
+        assert_eq!(
+            state
+                .workstream("issue-360")
+                .expect("workstream")
+                .mmux_label
+                .as_deref(),
+            Some("new ws")
+        );
+        assert_eq!(
+            state
+                .sessions
+                .get(&target_a)
+                .expect("session a")
+                .mmux_label
+                .as_deref(),
+            Some("new ws")
+        );
+        assert_eq!(
+            state
+                .sessions
+                .get(&target_b)
+                .expect("session b")
+                .mmux_label
+                .as_deref(),
+            Some("new ws")
+        );
+        let applied_targets = state
+            .workstream("issue-360")
+            .expect("workstream")
+            .events
+            .iter()
+            .filter(|event| event.kind == "mmux_label_applied")
+            .filter_map(|event| event.target.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            applied_targets,
+            BTreeSet::from(["local::$1".to_string(), "local::$2".to_string()])
+        );
     }
 
     #[tokio::test]
