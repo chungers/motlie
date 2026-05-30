@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_whisper_cpp::WhisperCppTranscriptionAdapter;
+use motlie_model_whisper_cpp::{
+    WhisperCppHandle, WhisperCppTranscriptionBundle, WhisperCppTranscriptionSpec,
+};
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -15,13 +17,8 @@ use crate::{
 pub const SELECTOR: &str = "openai/whisper_base_en";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_ggml_root),
-        Arc::new(WhisperCppTranscriptionAdapter::whisper_base_en()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -29,7 +26,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("whisper_base_en"),
         display_name: "Whisper Base.en".into(),
         family: BundleFamily::Whisper,
-        capabilities: motlie_model::Capabilities::transcription_stream_only(),
+        capabilities: motlie_model::Capabilities::transcription_batch_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -71,19 +68,34 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(WhisperCppTranscriptionAdapter::whisper_base_en()),
-        Arc::new(resolve_local_ggml_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = WhisperCppTranscriptionSpec::whisper_base_en();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::WhisperCpp,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn typed_bundle() -> WhisperCppTranscriptionBundle {
+    WhisperCppTranscriptionBundle::new(WhisperCppTranscriptionSpec::whisper_base_en())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<WhisperCppHandle, ModelError> {
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_ggml_root,
+        )?)
+        .await
 }
 
 fn resolve_local_ggml_root(root: &Path) -> Result<PathBuf, ModelError> {
+    if root.join("ggml-base.en.bin").is_file() {
+        return Ok(root.to_path_buf());
+    }
+
     // For ggml single-file artifacts, the HF cache layout puts files in a
     // snapshot directory. We navigate refs/main → snapshots/{commit}/.
     let repo_folder = "models--ggerganov--whisper.cpp";
@@ -93,7 +105,7 @@ fn resolve_local_ggml_root(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached ggml artifacts for `ggerganov/whisper.cpp` under `{}`; \
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached ggml artifacts for `ggerganov/whisper.cpp` under `{}`; \
              no refs/main found — run the download step first",
             root.display()
         )));
@@ -117,7 +129,7 @@ fn resolve_local_ggml_root(root: &Path) -> Result<PathBuf, ModelError> {
     let model_file = snapshot_dir.join("ggml-base.en.bin");
     if !model_file.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires `ggml-base.en.bin` in cached snapshot for `ggerganov/whisper.cpp` under `{}`",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `ggml-base.en.bin` in cached snapshot for `ggerganov/whisper.cpp` under `{}`",
             root.display()
         )));
     }
@@ -130,6 +142,7 @@ mod tests {
     use super::*;
     use crate::Catalog;
     use motlie_model::CapabilityKind;
+    use motlie_model::ModelBundle;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -140,7 +153,9 @@ mod tests {
         assert_eq!(descriptor.display_name, "Whisper Base.en");
         assert_eq!(descriptor.family, BundleFamily::Whisper);
         assert_eq!(descriptor.backend, BackendKind::WhisperCpp);
-        assert!(descriptor.capabilities.supports(CapabilityKind::Transcription));
+        assert!(descriptor
+            .capabilities
+            .supports(CapabilityKind::Transcription));
         assert!(!descriptor.capabilities.supports(CapabilityKind::Chat));
         assert_eq!(descriptor.eval_tracks, vec![EvalTrack::Transcription]);
 
@@ -164,7 +179,7 @@ mod tests {
 
     #[test]
     fn quantization_is_explicitly_none() {
-        let bundle = bundle();
+        let bundle = typed_bundle();
 
         assert_eq!(
             bundle.metadata().quantization,
@@ -191,8 +206,7 @@ mod tests {
         let root = unique_temp_dir();
         std::fs::create_dir_all(&root).expect("temp root should be creatable");
 
-        let error =
-            resolve_local_ggml_root(&root).expect_err("missing cache should fail closed");
+        let error = resolve_local_ggml_root(&root).expect_err("missing cache should fail closed");
 
         assert!(matches!(
             error,
@@ -212,6 +226,18 @@ mod tests {
 
         assert_eq!(resolved, snapshot);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn local_ggml_resolution_accepts_direct_artifact_dir() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("temp root should be creatable");
+        std::fs::write(root.join("ggml-base.en.bin"), "stub").expect("model should be writable");
+
+        let resolved = resolve_local_ggml_root(&root).expect("direct artifact dir should resolve");
+
+        assert_eq!(resolved, root);
+        std::fs::remove_dir_all(&resolved).ok();
     }
 
     fn unique_temp_dir() -> PathBuf {

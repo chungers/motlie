@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::eval::EvalTrack;
 use motlie_model::{
-    BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    BundleId, CheckpointFormat, ModelCheckpoint, ModelError, ModelIdentity, StartOptions,
 };
-use motlie_model_sherpa_onnx::SherpaOnnxStreamingAdapter;
+use motlie_model_sherpa_onnx::{
+    SherpaOnnxHandle, SherpaOnnxStreamingBundle, SherpaOnnxStreamingSpec,
+};
 
+use crate::LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX;
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor, BundleFamily,
     BundleRequirements, PlatformConstraint,
@@ -21,13 +23,8 @@ const JOINER_FILE: &str = "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx";
 const TOKENS_FILE: &str = "tokens.txt";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_onnx_root),
-        Arc::new(SherpaOnnxStreamingAdapter::zipformer_en_streaming()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -35,7 +32,7 @@ pub(crate) fn identity() -> ModelIdentity {
         id: BundleId::new("sherpa_onnx_streaming_zipformer_en"),
         display_name: "Sherpa ONNX Streaming Zipformer EN".into(),
         family: BundleFamily::Other("SherpaOnnx".into()),
-        capabilities: motlie_model::Capabilities::transcription_stream_only(),
+        capabilities: motlie_model::Capabilities::transcription_stream_partial_only(),
         eval_tracks: vec![EvalTrack::Transcription],
         requirements: BundleRequirements {
             platform: vec![PlatformConstraint::Linux, PlatformConstraint::Macos],
@@ -80,19 +77,37 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(SherpaOnnxStreamingAdapter::zipformer_en_streaming()),
-        Arc::new(resolve_local_onnx_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = SherpaOnnxStreamingSpec::zipformer_en_streaming();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::SherpaOnnx,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn typed_bundle() -> SherpaOnnxStreamingBundle {
+    SherpaOnnxStreamingBundle::new(SherpaOnnxStreamingSpec::zipformer_en_streaming())
+}
+
+pub async fn start_typed(options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
+    typed_bundle()
+        .start_typed(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_onnx_root,
+        )?)
+        .await
 }
 
 fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
+    if [ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE]
+        .into_iter()
+        .all(|filename| root.join(filename).is_file())
+    {
+        return Ok(root.to_path_buf());
+    }
+
     let repo_folder = format!("models--{}", HF_REPO.replace('/', "--"));
     let repo_root = root.join(&repo_folder);
     let refs_dir = repo_root.join("refs");
@@ -100,7 +115,7 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
 
     if !main_ref.exists() {
         return Err(ModelError::InvalidConfiguration(format!(
-            "artifact policy `LocalOnly` requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
+            "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires cached ONNX artifacts for `{HF_REPO}` under `{}`; no refs/main found",
             root.display()
         )));
     }
@@ -124,7 +139,7 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
         let path = snapshot_dir.join(filename);
         if !path.exists() {
             return Err(ModelError::InvalidConfiguration(format!(
-                "artifact policy `LocalOnly` requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
+                "{LOCAL_ONLY_ARTIFACT_POLICY_ERROR_PREFIX} requires `{filename}` in cached snapshot for `{HF_REPO}` under `{}`",
                 root.display()
             )));
         }
@@ -137,6 +152,7 @@ fn resolve_local_onnx_root(root: &Path) -> Result<PathBuf, ModelError> {
 mod tests {
     use super::*;
     use crate::Catalog;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn descriptor_is_reviewable_as_data() {
@@ -165,5 +181,23 @@ mod tests {
                 .bundles_for_track(EvalTrack::Transcription)
                 .any(|bundle| bundle.id == bundle_id));
         }
+    }
+
+    #[test]
+    fn local_root_resolution_accepts_direct_artifact_dir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("sherpa-direct-root-{unique}"));
+        std::fs::create_dir_all(&root).expect("direct root should be creatable");
+        for filename in [ENCODER_FILE, DECODER_FILE, JOINER_FILE, TOKENS_FILE] {
+            std::fs::write(root.join(filename), b"test").expect("artifact should be writable");
+        }
+
+        let resolved = resolve_local_onnx_root(&root).expect("direct artifact dir should resolve");
+
+        assert_eq!(resolved, root);
+        let _ = std::fs::remove_dir_all(resolved);
     }
 }

@@ -130,11 +130,7 @@ pub fn is_tui_chrome(trimmed: &str) -> bool {
 /// Extract new lines from current pane content vs previous.
 /// Uses multiset-based diff (preserves multiplicity) then applies
 /// the content filter to each line.
-pub fn diff_new_lines(
-    previous: &str,
-    current: &str,
-    filter: &dyn ContentFilter,
-) -> Vec<String> {
+pub fn diff_new_lines(previous: &str, current: &str, filter: &dyn ContentFilter) -> Vec<String> {
     // Build a multiset of previous lines so repeated lines are counted correctly.
     // e.g. if previous has "done" twice, only the third "done" in current is new.
     let mut prev_counts: HashMap<String, usize> = HashMap::new();
@@ -246,14 +242,17 @@ impl ContentFilter for AgentTuiFilter {
         let prompt_prefix = format!("{} ", self.prompt_char);
         lines.iter().any(|l| {
             let t = l.trim();
-            t.len() > 2 && !t.starts_with(&prompt_prefix) && !t.starts_with("❯ ") && !t.starts_with("› ")
+            t.len() > 2
+                && !t.starts_with(&prompt_prefix)
+                && !t.starts_with("❯ ")
+                && !t.starts_with("› ")
         })
     }
 
     fn is_prompt(&self, line: &str) -> bool {
         let t = line.trim();
         let prefix = format!("{} ", self.prompt_char);
-        t.starts_with(&prefix) || t == &self.prompt_char.to_string()
+        t.starts_with(&prefix) || t == self.prompt_char.to_string()
     }
 }
 
@@ -302,13 +301,17 @@ mod tests {
         assert!(is_affordance_hint("esc to interrupt"));
         assert!(is_affordance_hint("? for shortcuts"));
         assert!(is_affordance_hint("ctrl+o to expand"));
-        assert!(!is_affordance_hint("This is a normal long sentence with many words"));
+        assert!(!is_affordance_hint(
+            "This is a normal long sentence with many words"
+        ));
     }
 
     #[test]
     fn context_indicator_detection() {
         assert!(is_context_indicator("23% left"));
-        assert!(is_context_indicator("gpt-5.4 default · 23% context remaining"));
+        assert!(is_context_indicator(
+            "gpt-5.4 default · 23% context remaining"
+        ));
         assert!(!is_context_indicator("normal text"));
     }
 
@@ -346,10 +349,9 @@ mod tests {
     fn meaningful_batch_requires_non_prompt_content() {
         let f = AgentTuiFilter::codex();
         assert!(!f.is_meaningful_batch(&["› question".to_string()]));
-        assert!(f.is_meaningful_batch(&[
-            "› question".to_string(),
-            "Here is the answer".to_string(),
-        ]));
+        assert!(
+            f.is_meaningful_batch(&["› question".to_string(), "Here is the answer".to_string(),])
+        );
     }
 
     #[test]

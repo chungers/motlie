@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_llama_cpp::LlamaCppTextAdapter;
+use motlie_model_llama_cpp::{LlamaCppTextBundle, LlamaCppTextHandle, LlamaCppTextSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
@@ -14,13 +14,8 @@ use crate::{
 pub const SELECTOR: &str = "qwen/qwen3_4b_gguf";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_gguf_root),
-        Arc::new(LlamaCppTextAdapter::qwen3()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -61,7 +56,7 @@ pub fn descriptor() -> BundleDescriptor {
         model_id: identity.id,
         display_name: "Qwen3 4B (GGUF/llama.cpp)".into(),
         family: identity.family,
-        capabilities: motlie_model::Capabilities::chat_and_completion(),
+        capabilities: motlie_model::Capabilities::chat_completion_and_tool_use(),
         backend: BackendKind::LlamaCpp,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
@@ -75,16 +70,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(LlamaCppTextAdapter::qwen3()),
-        Arc::new(resolve_local_gguf_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = LlamaCppTextSpec::qwen3_4b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::LlamaCpp,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::Qwen3_4B_Gguf
+}
+
+pub async fn start(options: StartOptions) -> Result<LlamaCppTextHandle, ModelError> {
+    LlamaCppTextBundle::new(LlamaCppTextSpec::qwen3_4b())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_gguf_root,
+        )?)
+        .await
 }
 
 fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -94,8 +100,9 @@ fn resolve_local_gguf_root(root: &Path) -> Result<PathBuf, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motlie_model::eval::EvalTrack;
+    use crate::BundleFamily;
     use motlie_model::CapabilityDescriptor;
+    use motlie_model::eval::EvalTrack;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -108,17 +115,27 @@ mod tests {
         assert_eq!(descriptor.backend, BackendKind::LlamaCpp);
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Chat));
         assert!(descriptor.eval_tracks.contains(&EvalTrack::Reasoning));
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Chat));
-        assert!(descriptor
-            .capabilities
-            .supports(motlie_model::CapabilityKind::Completion));
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Chat)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::Completion)
+        );
+        assert!(
+            descriptor
+                .capabilities
+                .supports(motlie_model::CapabilityKind::ToolUse)
+        );
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
                 CapabilityDescriptor::chat(),
                 CapabilityDescriptor::completion(),
+                CapabilityDescriptor::tool_use(),
             ]
         );
 
@@ -147,7 +164,7 @@ mod tests {
     #[test]
     fn local_gguf_resolution_rejects_cache_without_gguf_files() {
         let root = unique_temp_dir();
-        let snapshot = create_fake_hf_gguf_cache(&root, "Qwen/Qwen3-4B-GGUF");
+        let _snapshot = create_fake_hf_gguf_cache(&root, "Qwen/Qwen3-4B-GGUF");
         // snapshot exists but has no .gguf files
 
         let error = resolve_local_gguf_root(&root).expect_err("cache without .gguf should fail");

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use motlie_model::{ArtifactPolicy, CheckpointFormat, ModelError, ResolvedCheckpoint};
 
 pub(crate) use motlie_model::metrics_runtime::{
-    lock_metrics, observe_latency, observe_memory, RuntimeMetricState,
+    RuntimeMetricState, lock_metrics, observe_latency, observe_memory,
 };
 
 #[derive(Clone, Debug)]

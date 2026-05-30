@@ -30,6 +30,7 @@ impl EvalTrack {
             CapabilityKind::Embeddings => Some(Self::Embeddings),
             CapabilityKind::Speech => Some(Self::Speech),
             CapabilityKind::Transcription => Some(Self::Transcription),
+            CapabilityKind::VoiceClone => Some(Self::Speech),
             _ => None,
         }
     }
@@ -152,6 +153,14 @@ mod tests {
         );
         assert_eq!(
             EvalTrack::primary_for_descriptor(&CapabilityDescriptor::completion()),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_use_capability_does_not_claim_primary_eval_track() {
+        assert_eq!(
+            EvalTrack::primary_for_descriptor(&CapabilityDescriptor::tool_use()),
             None
         );
     }

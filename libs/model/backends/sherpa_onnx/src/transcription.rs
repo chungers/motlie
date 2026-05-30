@@ -7,13 +7,13 @@ use async_trait::async_trait;
 use kaldi_native_fbank::fbank::{FbankComputer, FbankOptions};
 use kaldi_native_fbank::mel::MelOptions;
 use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
+use motlie_model::typed::{AudioBuf, Mono, StreamingTranscriber, TranscriptionSession};
 use motlie_model::{
-    AudioSpec, BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
-    CapabilityKind, ChatModel, CheckpointFormat, CompletionModel, EmbeddingModel,
-    LoadedBundleDescriptor, ModelBundle, ModelError, ModelIdentity, ModelMetricSnapshot, PcmChunk,
-    PcmEncoding, QuantizationSupport, ResolvedCheckpoint, SpeechModel, StartOptions,
-    TranscriptSegment, TranscriptionModel, TranscriptionParams, TranscriptionStream,
-    TranscriptionUpdate,
+    BackendAdapter, BackendKind, BundleHandle, BundleId, BundleMetadata, Capabilities,
+    CapabilityKind, CheckpointFormat, LoadedBundleDescriptor, ModelBundle, ModelError,
+    ModelIdentity, ModelMetricSnapshot, QuantizationSupport, ResolvedCheckpoint, StartOptions,
+    TranscriptSegment, TranscriptionParams, TranscriptionUpdate, UnsupportedChat,
+    UnsupportedCompletion, UnsupportedEmbeddings,
 };
 use motlie_model_ort::build_session;
 use ndarray::ArrayView3;
@@ -52,7 +52,7 @@ impl SherpaOnnxStreamingSpec {
             decoder_filename: "decoder-epoch-99-avg-1-chunk-16-left-64.onnx",
             joiner_filename: "joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx",
             tokens_filename: "tokens.txt",
-            capabilities: Capabilities::transcription_stream_only(),
+            capabilities: Capabilities::transcription_stream_partial_only(),
             quantization: QuantizationSupport::none(),
         }
     }
@@ -82,6 +82,8 @@ impl SherpaOnnxStreamingAdapter {
 
 #[async_trait]
 impl BackendAdapter for SherpaOnnxStreamingAdapter {
+    type Handle = SherpaOnnxHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat] {
         &SHERPA_ONNX_FORMATS
     }
@@ -103,7 +105,7 @@ impl BackendAdapter for SherpaOnnxStreamingAdapter {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError> {
+    ) -> Result<Self::Handle, ModelError> {
         self.spec
             .quantization
             .resolve(options.quantization, &identity.id)?;
@@ -143,6 +145,8 @@ impl SherpaOnnxStreamingBundle {
 
 #[async_trait]
 impl ModelBundle for SherpaOnnxStreamingBundle {
+    type Handle = SherpaOnnxHandle;
+
     fn id(&self) -> &BundleId {
         &self.metadata.id
     }
@@ -155,7 +159,13 @@ impl ModelBundle for SherpaOnnxStreamingBundle {
         &self.metadata.capabilities
     }
 
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError> {
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError> {
+        self.start_typed(options).await
+    }
+}
+
+impl SherpaOnnxStreamingBundle {
+    pub async fn start_typed(&self, options: StartOptions) -> Result<SherpaOnnxHandle, ModelError> {
         self.metadata
             .quantization
             .resolve(options.quantization, &self.metadata.id)?;
@@ -184,10 +194,16 @@ impl ModelBundle for SherpaOnnxStreamingBundle {
     }
 }
 
-struct SherpaOnnxHandle {
+pub struct SherpaOnnxHandle {
     descriptor: LoadedBundleDescriptor,
     runtime: Arc<SherpaOnnxRuntime>,
     metrics: Arc<Mutex<AsrMetrics>>,
+}
+
+impl SherpaOnnxHandle {
+    pub async fn shutdown(self) -> Result<(), ModelError> {
+        <Self as BundleHandle>::shutdown(self).await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -197,6 +213,10 @@ struct AsrMetrics {
 
 #[async_trait]
 impl BundleHandle for SherpaOnnxHandle {
+    type Chat = UnsupportedChat;
+    type Completion = UnsupportedCompletion;
+    type Embeddings = UnsupportedEmbeddings;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor {
         &self.descriptor
     }
@@ -227,59 +247,24 @@ impl BundleHandle for SherpaOnnxHandle {
         })
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+    fn chat(&self) -> Result<&Self::Chat, ModelError> {
         Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
     }
 
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+    fn completion(&self) -> Result<&Self::Completion, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Completion,
         ))
     }
 
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
         Err(ModelError::UnsupportedCapability(
             CapabilityKind::Embeddings,
         ))
     }
 
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-        Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-    }
-
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-        Ok(self)
-    }
-
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+    async fn shutdown(self) -> Result<(), ModelError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl TranscriptionModel for SherpaOnnxHandle {
-    async fn open_stream(
-        &self,
-        spec: AudioSpec,
-        params: TranscriptionParams,
-    ) -> Result<Box<dyn TranscriptionStream>, ModelError> {
-        if spec.channels == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "transcription stream requires at least one channel".into(),
-            ));
-        }
-        if spec.sample_rate_hz == 0 {
-            return Err(ModelError::InvalidConfiguration(
-                "transcription stream requires a non-zero sample rate".into(),
-            ));
-        }
-
-        Ok(Box::new(SherpaOnnxStream::new(
-            Arc::clone(&self.runtime),
-            Arc::clone(&self.metrics),
-            spec,
-            params,
-        )?))
     }
 }
 
@@ -289,14 +274,14 @@ fn new_transcription_handle(
     capabilities: Capabilities,
     quantization: QuantizationSupport,
     runtime: Arc<SherpaOnnxRuntime>,
-) -> Box<dyn BundleHandle> {
+) -> SherpaOnnxHandle {
     let metrics = Arc::new(Mutex::new(AsrMetrics::default()));
     {
         let mut state = lock_metrics(&metrics, "sherpa-onnx-start");
         observe_memory(&mut state.runtime);
     }
 
-    Box::new(SherpaOnnxHandle {
+    SherpaOnnxHandle {
         descriptor: LoadedBundleDescriptor {
             id,
             display_name,
@@ -306,7 +291,7 @@ fn new_transcription_handle(
         },
         runtime,
         metrics,
-    })
+    }
 }
 
 struct SherpaOnnxRuntime {
@@ -736,24 +721,19 @@ fn invalid_metadata(message: impl Into<String>) -> ModelError {
     }
 }
 
-struct SherpaOnnxStream {
+pub struct SherpaOnnxStream {
     runtime: Arc<SherpaOnnxRuntime>,
     metrics: Arc<Mutex<AsrMetrics>>,
-    spec: AudioSpec,
     params: TranscriptionParams,
-    normalizer: NormalizerState,
     features: OnlineFeature,
     decoder_state: DecoderState,
     assembler: SegmentAssembler,
-    last_sequence: Option<u64>,
-    end_of_stream_received: bool,
 }
 
 impl SherpaOnnxStream {
     fn new(
         runtime: Arc<SherpaOnnxRuntime>,
         metrics: Arc<Mutex<AsrMetrics>>,
-        spec: AudioSpec,
         params: TranscriptionParams,
     ) -> Result<Self, ModelError> {
         Ok(Self {
@@ -761,12 +741,8 @@ impl SherpaOnnxStream {
             decoder_state: DecoderState::new(&runtime.config)?,
             runtime,
             metrics,
-            spec,
             params,
-            normalizer: NormalizerState::new(),
             assembler: SegmentAssembler::default(),
-            last_sequence: None,
-            end_of_stream_received: false,
         })
     }
 
@@ -926,40 +902,20 @@ impl SherpaOnnxStream {
     }
 }
 
-#[async_trait]
-impl TranscriptionStream for SherpaOnnxStream {
-    async fn push_chunk(
+impl SherpaOnnxStream {
+    async fn ingest_chunk(
         &mut self,
-        chunk: PcmChunk,
+        audio: AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>,
     ) -> Result<Option<TranscriptionUpdate>, ModelError> {
-        if self.end_of_stream_received {
-            return Err(ModelError::InvalidConfiguration(
-                "push_chunk called after end_of_stream was received".into(),
-            ));
-        }
-
-        if let Some(last) = self.last_sequence {
-            if chunk.sequence <= last {
-                return Err(ModelError::InvalidConfiguration(format!(
-                    "non-monotonic chunk sequence: got {}, last was {last}",
-                    chunk.sequence
-                )));
-            }
-        }
-        self.last_sequence = Some(chunk.sequence);
-
-        if chunk.data.is_empty() && !chunk.end_of_stream {
+        let normalized: Vec<f32> = audio
+            .into_samples()
+            .into_iter()
+            .map(|sample| sample as f32 / 32768.0)
+            .collect();
+        if normalized.is_empty() {
             return Ok(None);
         }
-
-        if !chunk.data.is_empty() {
-            let normalized = self.normalizer.normalize(&chunk.data, &self.spec)?;
-            self.accept_samples(&normalized);
-        }
-
-        if chunk.end_of_stream {
-            self.end_of_stream_received = true;
-        }
+        self.accept_samples(&normalized);
 
         let segments = self.decode_ready_chunks()?;
         if segments.is_empty() {
@@ -969,9 +925,7 @@ impl TranscriptionStream for SherpaOnnxStream {
         Ok(Some(TranscriptionUpdate { segments }))
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<TranscriptionUpdate, ModelError> {
-        let tail = self.normalizer.flush();
-        self.accept_samples(&tail);
+    async fn finish_stream(mut self) -> Result<TranscriptionUpdate, ModelError> {
         self.accept_samples(&vec![0.0; TAIL_PADDING_SAMPLES]);
         self.features.input_finished();
 
@@ -986,6 +940,33 @@ impl TranscriptionStream for SherpaOnnxStream {
         )?);
 
         Ok(TranscriptionUpdate { segments })
+    }
+}
+
+impl StreamingTranscriber for SherpaOnnxHandle {
+    type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
+    type Session = SherpaOnnxStream;
+
+    async fn open_session(&self, params: TranscriptionParams) -> Result<Self::Session, ModelError> {
+        let runtime = Arc::clone(&self.runtime);
+        let metrics = Arc::clone(&self.metrics);
+
+        SherpaOnnxStream::new(runtime, metrics, params)
+    }
+}
+
+impl TranscriptionSession for SherpaOnnxStream {
+    type Input = AudioBuf<i16, TARGET_SAMPLE_RATE_HZ, Mono>;
+
+    async fn ingest(
+        &mut self,
+        audio: Self::Input,
+    ) -> Result<Option<TranscriptionUpdate>, ModelError> {
+        self.ingest_chunk(audio).await
+    }
+
+    async fn finish(self) -> Result<TranscriptionUpdate, ModelError> {
+        self.finish_stream().await
     }
 }
 
@@ -1444,112 +1425,6 @@ fn render_word(pieces: &[PendingPiece], final_segment: bool) -> TranscriptSegmen
         end_ms,
         text,
         final_segment,
-    }
-}
-
-struct NormalizerState {
-    pending_bytes: Vec<u8>,
-    pending_channel_samples: Vec<f32>,
-    resample_cursor: f64,
-    resampling_active: bool,
-    carry_sample: Option<f32>,
-}
-
-impl NormalizerState {
-    fn new() -> Self {
-        Self {
-            pending_bytes: Vec::new(),
-            pending_channel_samples: Vec::new(),
-            resample_cursor: 0.0,
-            resampling_active: false,
-            carry_sample: None,
-        }
-    }
-
-    fn flush(&mut self) -> Vec<f32> {
-        if self.resampling_active {
-            self.carry_sample.take().into_iter().collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn normalize(&mut self, data: &[u8], spec: &AudioSpec) -> Result<Vec<f32>, ModelError> {
-        let mut raw = std::mem::take(&mut self.pending_bytes);
-        raw.extend_from_slice(data);
-
-        let sample_bytes = match spec.encoding {
-            PcmEncoding::S16Le => 2,
-            PcmEncoding::F32Le => 4,
-        };
-        let aligned_len = raw.len() - (raw.len() % sample_bytes);
-        self.pending_bytes = raw[aligned_len..].to_vec();
-        let aligned = &raw[..aligned_len];
-
-        let decoded: Vec<f32> = match spec.encoding {
-            PcmEncoding::S16Le => aligned
-                .chunks_exact(2)
-                .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0)
-                .collect(),
-            PcmEncoding::F32Le => aligned
-                .chunks_exact(4)
-                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-                .collect(),
-        };
-
-        let mono = if spec.channels <= 1 {
-            decoded
-        } else {
-            let channels = spec.channels as usize;
-            let mut samples = std::mem::take(&mut self.pending_channel_samples);
-            samples.extend(decoded);
-
-            let complete_frames = samples.len() / channels;
-            let used = complete_frames * channels;
-            self.pending_channel_samples = samples[used..].to_vec();
-
-            samples[..used]
-                .chunks_exact(channels)
-                .map(|frame| frame.iter().sum::<f32>() / spec.channels as f32)
-                .collect()
-        };
-
-        if spec.sample_rate_hz == TARGET_SAMPLE_RATE_HZ || mono.is_empty() {
-            self.resampling_active = false;
-            if let Some(&last) = mono.last() {
-                self.carry_sample = Some(last);
-            }
-            return Ok(mono);
-        }
-
-        self.resampling_active = true;
-        let samples: Vec<f32> = if let Some(carry) = self.carry_sample {
-            let mut combined = Vec::with_capacity(mono.len() + 1);
-            combined.push(carry);
-            combined.extend_from_slice(&mono);
-            combined
-        } else {
-            mono
-        };
-
-        let ratio = spec.sample_rate_hz as f64 / TARGET_SAMPLE_RATE_HZ as f64;
-        let mut output = Vec::new();
-        let mut cursor = self.resample_cursor;
-
-        while (cursor as usize) + 1 < samples.len() {
-            let index = cursor as usize;
-            let frac = cursor - index as f64;
-            let interpolated =
-                samples[index] as f64 * (1.0 - frac) + samples[index + 1] as f64 * frac;
-            output.push(interpolated as f32);
-            cursor += ratio;
-        }
-
-        let last_index = samples.len().saturating_sub(1) as f64;
-        self.resample_cursor = (cursor - last_index).max(0.0);
-        self.carry_sample = samples.last().copied();
-
-        Ok(output)
     }
 }
 

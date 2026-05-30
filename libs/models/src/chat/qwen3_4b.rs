@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use motlie_model::{
     BundleId, CheckpointFormat, ModelBundle, ModelCheckpoint, ModelError, ModelIdentity,
+    StartOptions,
 };
-use motlie_model_mistral::MistralTextAdapter;
+use motlie_model_mistral::{MistralTextBundle, MistralTextHandle, MistralTextSpec};
 
 use crate::{
     ArtifactRule, ArtifactSource, BackendKind, BuildConstraint, BundleDescriptor,
@@ -14,13 +14,8 @@ use crate::{
 pub const SELECTOR: &str = "qwen/qwen3_4b";
 
 pub(crate) fn register(catalog: &mut crate::Catalog) {
-    catalog.register(descriptor(), bundle);
-    catalog.register_model_variant(
-        identity(),
-        checkpoint(),
-        Arc::new(resolve_local_snapshot_root),
-        Arc::new(MistralTextAdapter::qwen3()),
-    );
+    catalog.register_descriptor(descriptor());
+    catalog.register_model_variant(identity(), variant_descriptor());
 }
 
 pub(crate) fn identity() -> ModelIdentity {
@@ -49,12 +44,13 @@ pub(crate) fn checkpoint() -> ModelCheckpoint {
 pub fn descriptor() -> BundleDescriptor {
     let identity = identity();
     let checkpoint = checkpoint();
+    let spec = MistralTextSpec::qwen3_4b();
     BundleDescriptor {
         id: BundleId::new("qwen3_4b"),
         model_id: identity.id.clone(),
         display_name: identity.display_name.clone(),
         family: identity.family,
-        capabilities: identity.capabilities,
+        capabilities: spec.capabilities,
         backend: BackendKind::MistralRs,
         requirements: BundleRequirements {
             platform: identity.requirements.platform,
@@ -68,16 +64,27 @@ pub fn descriptor() -> BundleDescriptor {
     }
 }
 
-pub fn bundle() -> Box<dyn ModelBundle> {
-    let descriptor = descriptor();
-    crate::adapter_backed_bundle(
-        descriptor.id,
-        descriptor.display_name,
-        identity(),
-        checkpoint(),
-        Arc::new(MistralTextAdapter::qwen3()),
-        Arc::new(resolve_local_snapshot_root),
-    )
+pub(crate) fn variant_descriptor() -> crate::ModelVariantDescriptor {
+    let spec = MistralTextSpec::qwen3_4b();
+    crate::ModelVariantDescriptor {
+        backend: BackendKind::MistralRs,
+        capabilities: spec.capabilities,
+        quantization: spec.quantization,
+        checkpoint: checkpoint(),
+    }
+}
+
+pub fn bundle() -> crate::CuratedBundle {
+    crate::CuratedBundle::Qwen3_4B
+}
+
+pub async fn start(options: StartOptions) -> Result<MistralTextHandle, ModelError> {
+    MistralTextBundle::new(MistralTextSpec::qwen3_4b())
+        .start(crate::resolve_typed_artifact_policy(
+            options,
+            resolve_local_snapshot_root,
+        )?)
+        .await
 }
 
 fn resolve_local_snapshot_root(root: &Path) -> Result<PathBuf, ModelError> {
@@ -108,11 +115,15 @@ mod tests {
         assert!(descriptor
             .capabilities
             .supports(motlie_model::CapabilityKind::Completion));
+        assert!(descriptor
+            .capabilities
+            .supports(motlie_model::CapabilityKind::ToolUse));
         assert_eq!(
             descriptor.capability_descriptors(),
             &[
                 CapabilityDescriptor::chat(),
                 CapabilityDescriptor::completion(),
+                CapabilityDescriptor::tool_use(),
             ]
         );
 

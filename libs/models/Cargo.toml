@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Curated model bundle catalog for the Motlie ecosystem"
+build = "build.rs"
 
 autoexamples = false
 
@@ -18,38 +19,49 @@ model-google-gemma-300m = ["dep:motlie-model-mistral"]
 model-qwen3-embedding-06b = ["dep:motlie-model-mistral"]
 model-qwen3-4b = ["dep:motlie-model-mistral"]
 model-gemma4-e2b = ["dep:motlie-model-mistral"]
+model-gemma4-e4b = ["dep:motlie-model-mistral"]
 model-qwen3-4b-gguf = ["dep:motlie-model-llama-cpp"]
 model-gemma4-e2b-gguf = ["dep:motlie-model-llama-cpp"]
+model-gemma4-e4b-gguf = ["dep:motlie-model-llama-cpp"]
+model-qwen3-6-27b-gguf = ["dep:motlie-model-llama-cpp"]
 model-piper-en-us-ljspeech-medium = ["dep:motlie-model-piper"]
-model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]
+model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]
+model-moonshine-streaming = ["dep:motlie-model-moonshine"]
 model-sherpa-onnx-streaming = ["dep:motlie-model-sherpa-onnx"]
 model-whisper-base-en = ["dep:motlie-model-whisper-cpp"]
 llama-cpp-cuda = ["dep:motlie-model-llama-cpp", "motlie-model-llama-cpp/cuda"]
 piper-cuda = ["dep:motlie-model-piper", "motlie-model-piper/cuda"]
-qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]
+qwen3-tts-cpp-cuda = ["dep:motlie-model-qwen3-tts-cpp", "motlie-model-qwen3-tts-cpp/cuda"]
 sherpa-onnx-cuda = ["dep:motlie-model-sherpa-onnx", "motlie-model-sherpa-onnx/cuda"]
 whisper-cpp-cuda = ["dep:motlie-model-whisper-cpp", "motlie-model-whisper-cpp/cuda"]
 cuda = ["dep:motlie-model-mistral", "motlie-model-mistral/cuda"]
 cudnn = ["dep:motlie-model-mistral", "motlie-model-mistral/cudnn"]
 flash-attn = ["dep:motlie-model-mistral", "motlie-model-mistral/flash-attn"]
-metal = ["dep:motlie-model-mistral", "motlie-model-mistral/metal"]
+metal = []
 accelerate = ["dep:motlie-model-mistral", "motlie-model-mistral/accelerate"]
 
 [dependencies]
 async-trait = "0.1.89"
 hf-hub = "0.5.0"
 motlie-model = { path = "../model" }
+motlie-voice = { path = "../voice" }
 motlie-model-mistral = { path = "../model/backends/mistral", optional = true }
 motlie-model-llama-cpp = { path = "../model/backends/llama_cpp", optional = true }
 motlie-model-piper = { path = "../model/backends/piper", optional = true }
-motlie-model-qwen3-tts = { path = "../model/backends/qwen3_tts", optional = true }
+motlie-model-qwen3-tts-cpp = { path = "../model/backends/qwen3_tts_cpp", optional = true }
+motlie-model-moonshine = { path = "../model/backends/moonshine", optional = true }
 motlie-model-sherpa-onnx = { path = "../model/backends/sherpa_onnx", optional = true }
 motlie-model-whisper-cpp = { path = "../model/backends/whisper_cpp", optional = true }
+schemars.workspace = true
+serde.workspace = true
+serde_json = "1.0.149"
 thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 hound = "3.5"
+libc = "0.2"
+cel-cxx = { version = "0.2.4", default-features = false }
 sysinfo = "0.36.1"
 tokio.workspace = true
 
@@ -58,45 +70,59 @@ name = "motlie-models-download"
 path = "src/bin/download_artifacts.rs"
 
 [[example]]
-name = "models_v0_1"
-path = "examples/v0.1/main.rs"
+name = "embeddings"
+path = "examples/embeddings/main.rs"
 required-features = ["model-google-gemma-300m", "model-qwen3-embedding-06b"]
 
 [[example]]
-name = "models_v0_2"
-path = "examples/v0.2/main.rs"
+name = "chat_mistral_qwen3"
+path = "examples/chat_mistral_qwen3/main.rs"
 required-features = ["model-qwen3-4b"]
 
 [[example]]
-name = "models_v0_3"
-path = "examples/v0.3/main.rs"
+name = "chat_tool_binding"
+path = "examples/chat_tool_binding/main.rs"
+
+[[example]]
+name = "chat_multimodal_gemma4"
+path = "examples/chat_multimodal_gemma4/main.rs"
 required-features = ["model-gemma4-e2b"]
 
 [[example]]
-name = "models_v0_4"
-path = "examples/v0.4/main.rs"
-required-features = ["model-qwen3-4b-gguf"]
+name = "chat_gguf_gwen3_gemma4"
+path = "examples/chat_gguf_gwen3_gemma4/main.rs"
 
 [[example]]
-name = "models_v0_5"
-path = "examples/v0.5/main.rs"
+name = "chat_multimodal_qwen3_6_27b"
+path = "examples/chat_multimodal_qwen3_6_27b/main.rs"
+required-features = ["model-qwen3-6-27b-gguf"]
+
+[[example]]
+name = "asr_whisper"
+path = "examples/asr_whisper/main.rs"
 required-features = ["model-whisper-base-en"]
 
 [[example]]
-name = "models_v0_6"
-path = "examples/v0.6/main.rs"
+name = "asr_sherpa_onnx"
+path = "examples/asr_sherpa_onnx/main.rs"
 required-features = ["model-sherpa-onnx-streaming"]
 
 [[example]]
-name = "models_tts_v0_2"
-path = "examples/tts_v0.2/main.rs"
-required-features = ["model-qwen3-tts-0_6b"]
+name = "asr_moonshine"
+path = "examples/asr_moonshine/main.rs"
+required-features = ["model-moonshine-streaming"]
 
 [[example]]
-name = "models_tts_v0_1"
-path = "examples/tts_v0.1/main.rs"
+name = "tts_qwen3_tts_cpp"
+path = "examples/tts_qwen3_tts_cpp/main.rs"
+required-features = ["model-qwen3-tts-cpp"]
+
+[[example]]
+name = "tts_piper"
+path = "examples/tts_piper/main.rs"
 required-features = ["model-piper-en-us-ljspeech-medium"]
 
 [[example]]
 name = "bench_chat"
 path = "examples/bench_chat.rs"
+required-features = ["model-qwen3-4b"]

@@ -4,16 +4,23 @@ members = [
     "libs/db",
     "libs/mcp",
     "libs/model",
+    "libs/voice",
+    "libs/model/backends/moonshine",
     "libs/model/backends/mistral",
+    "libs/model/backends/espeak_ng",
     "libs/model/backends/llama_cpp",
     "libs/model/backends/ort",
     "libs/model/backends/piper",
-    "libs/model/backends/qwen3_tts",
+    "libs/model/backends/qwen3_tts_cpp",
     "libs/model/backends/sherpa_onnx",
     "libs/model/backends/whisper_cpp",
     "libs/model-eval",
     "libs/models",
     "libs/tmux",
+    "libs/driver",
+    "bins/voice-agent",
+    "bins/tmux/driver",
+    "bins/mmux",
 ]
 resolver = "2"
 
@@ -28,6 +35,7 @@ description = "A Rust workspace for multiple libraries and binaries"
 [workspace.dependencies]
 # Common dependencies that can be shared across workspace members
 serde = { version = "1.0", features = ["derive"] }
+schemars = "1.2.1"
 tokio = { version = "1.51.1", features = ["full"] }
 anyhow = "1.0.102"
 thiserror = "2.0.18"

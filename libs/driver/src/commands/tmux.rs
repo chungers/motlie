@@ -8,10 +8,10 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use regex::Regex;
 
 use motlie_tmux::{
-    CaptureNormalizeMode, CaptureOptions, CreateSessionOptions, CreateWindowOptions, FidelityIssue,
-    HostHandle, KeySequence, MonitorHealth, PaneAddress, ScrollbackQuery, SessionWatchHandle,
-    SessionWatchOptions, SplitDirection, SplitPaneOptions, SplitSize, SshConfig, Target,
-    TransferOptions, has_visible_text, overlap_deduplicate,
+    has_visible_text, overlap_deduplicate, CaptureNormalizeMode, CaptureOptions,
+    CreateSessionOptions, CreateWindowOptions, FidelityIssue, HostHandle, KeySequence,
+    MonitorHealth, PaneAddress, ScrollbackQuery, SessionWatchHandle, SessionWatchOptions,
+    SplitDirection, SplitPaneOptions, SplitSize, SshConfig, Target, TransferOptions,
 };
 
 use crate::completion::{CompletionCandidate, CompletionRequest};
@@ -25,8 +25,8 @@ pub struct TmuxState {
     pub host_uri: String,
     pub host: HostHandle,
     owned_sessions: HashSet<String>,
-    known_sessions: Vec<String>,
-    known_targets: Vec<String>,
+    pub(crate) known_sessions: Vec<String>,
+    pub(crate) known_targets: Vec<String>,
     active_watch: Option<SessionWatchHandle>,
     active_stream: Option<ManagedStream>,
     mirror_text: String,
@@ -359,8 +359,8 @@ impl ManagedStream {
 
 #[derive(Debug, Default, Clone)]
 pub struct TmuxCompletionContext {
-    sessions: Vec<String>,
-    targets: Vec<String>,
+    pub sessions: Vec<String>,
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -377,6 +377,51 @@ pub struct TmuxHistoryEntry {
     pub label: String,
     pub ansi: bool,
     pub watch_health: Option<MonitorHealth>,
+}
+
+#[async_trait]
+pub trait TmuxFrontendState: Send {
+    fn frontend_host_uri(&self) -> String;
+    fn mirror_snapshot(&self) -> TmuxMirrorSnapshot;
+    fn mirror_history_page(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> HistoryPage<TmuxHistoryEntry>;
+    fn has_live_follow(&self) -> bool;
+    async fn refresh_mirror(&mut self) -> DriverResult<()>;
+    async fn shutdown_managed_state(&mut self) -> DriverResult<()>;
+}
+
+#[async_trait]
+impl TmuxFrontendState for TmuxState {
+    fn frontend_host_uri(&self) -> String {
+        self.host_uri.clone()
+    }
+
+    fn mirror_snapshot(&self) -> TmuxMirrorSnapshot {
+        TmuxState::mirror_snapshot(self)
+    }
+
+    fn mirror_history_page(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> HistoryPage<TmuxHistoryEntry> {
+        TmuxState::mirror_history_page(self, after, limit)
+    }
+
+    fn has_live_follow(&self) -> bool {
+        TmuxState::has_live_follow(self)
+    }
+
+    async fn refresh_mirror(&mut self) -> DriverResult<()> {
+        TmuxState::refresh_mirror(self).await
+    }
+
+    async fn shutdown_managed_state(&mut self) -> DriverResult<()> {
+        TmuxState::shutdown_managed_state(self).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -610,6 +655,7 @@ impl FromStr for SizeSpec {
 #[async_trait]
 impl CommandSet<TmuxState> for TmuxCommand {
     type CompletionContext = TmuxCompletionContext;
+    type Resolved = Self;
 
     fn root_command() -> clap::Command {
         TmuxRoot::command().name("tmux")
@@ -627,76 +673,101 @@ impl CommandSet<TmuxState> for TmuxCommand {
     }
 
     fn help(topic: &[String]) -> Option<String> {
-        Some(match topic {
-            [] => tmux_root_help(),
-            [topic] if topic == "stream" => tmux_stream_help(),
-            [topic] if topic == "monitor" => tmux_monitor_help(),
-            [topic] if topic == "mirror" => tmux_mirror_help(),
-            [topic] if topic == "capture" => tmux_capture_help(),
-            [topic] if topic == "history" => tmux_history_help(),
-            [topic] if topic == "tui" => tmux_tui_help(),
-            _ => return None,
-        })
+        tmux_help(topic)
     }
 
     fn complete(
         request: CompletionRequest<'_>,
         context: &Self::CompletionContext,
     ) -> Vec<CompletionCandidate> {
-        match (request.command_path, request.arg_id) {
-            (["new-window"], Some("session"))
-            | (["monitor", "start"], Some("session"))
-            | (["history"], Some("sessions")) => context
-                .sessions
-                .iter()
-                .map(String::as_str)
-                .filter(|name| name.starts_with(request.prefix))
-                .map(CompletionCandidate::new)
-                .collect(),
-
-            (["split-pane"], Some("target"))
-            | (["kill"], Some("target"))
-            | (["send"], Some("target"))
-            | (["keys"], Some("target"))
-            | (["capture"], Some("target"))
-            | (["stream"], Some("target")) => context
-                .targets
-                .iter()
-                .map(String::as_str)
-                .filter(|name| name.starts_with(request.prefix))
-                .map(CompletionCandidate::new)
-                .collect(),
-
-            (["stream"], Some("mode")) => StreamModeArg::value_variants()
-                .iter()
-                .filter_map(|mode| mode.to_possible_value())
-                .map(|value| value.get_name().to_string())
-                .filter(|name| name.starts_with(request.prefix))
-                .map(CompletionCandidate::new)
-                .collect(),
-
-            _ => Vec::new(),
-        }
+        tmux_complete(request, context)
     }
 
-    async fn execute(self, context: &mut TmuxState) -> DriverResult<CommandOutput> {
-        match self {
-            Self::Create(cmd) => execute_create(context, cmd).await,
-            Self::NewWindow(cmd) => execute_new_window(context, cmd).await,
-            Self::SplitPane(cmd) => execute_split_pane(context, cmd).await,
-            Self::Kill(cmd) => execute_kill(context, cmd).await,
-            Self::Mirror(cmd) => execute_mirror(context, cmd),
-            Self::Tui(cmd) => execute_tui(cmd),
-            Self::Targets(_) => execute_targets(context).await,
-            Self::Send(cmd) => execute_send(context, cmd).await,
-            Self::Keys(cmd) => execute_keys(context, cmd).await,
-            Self::Capture(cmd) => execute_capture(context, cmd).await,
-            Self::Monitor(cmd) => execute_monitor(context, cmd).await,
-            Self::History(cmd) => execute_history(context, cmd).await,
-            Self::Stream(cmd) => execute_stream(context, cmd).await,
-            Self::Upload(cmd) => execute_upload(context, cmd).await,
-            Self::Download(cmd) => execute_download(context, cmd).await,
-        }
+    fn resolve_command(self, _context: &TmuxState) -> DriverResult<Self::Resolved> {
+        Ok(self)
+    }
+
+    async fn execute(
+        resolved: Self::Resolved,
+        context: &mut TmuxState,
+    ) -> DriverResult<CommandOutput> {
+        execute_tmux_command(context, resolved).await
+    }
+}
+
+pub(crate) fn tmux_help(topic: &[String]) -> Option<String> {
+    Some(match topic {
+        [] => tmux_root_help(),
+        [topic] if topic == "stream" => tmux_stream_help(),
+        [topic] if topic == "monitor" => tmux_monitor_help(),
+        [topic] if topic == "mirror" => tmux_mirror_help(),
+        [topic] if topic == "capture" => tmux_capture_help(),
+        [topic] if topic == "history" => tmux_history_help(),
+        [topic] if topic == "tui" => tmux_tui_help(),
+        _ => return None,
+    })
+}
+
+pub(crate) fn tmux_complete(
+    request: CompletionRequest<'_>,
+    context: &TmuxCompletionContext,
+) -> Vec<CompletionCandidate> {
+    match (request.command_path, request.arg_id) {
+        (["new-window"], Some("session"))
+        | (["monitor", "start"], Some("session"))
+        | (["history"], Some("sessions")) => context
+            .sessions
+            .iter()
+            .map(String::as_str)
+            .filter(|name| name.starts_with(request.prefix))
+            .map(CompletionCandidate::new)
+            .collect(),
+
+        (["split-pane"], Some("target"))
+        | (["kill"], Some("target"))
+        | (["send"], Some("target"))
+        | (["keys"], Some("target"))
+        | (["capture"], Some("target"))
+        | (["stream"], Some("target")) => context
+            .targets
+            .iter()
+            .map(String::as_str)
+            .filter(|name| name.starts_with(request.prefix))
+            .map(CompletionCandidate::new)
+            .collect(),
+
+        (["stream"], Some("mode")) => StreamModeArg::value_variants()
+            .iter()
+            .filter_map(|mode| mode.to_possible_value())
+            .map(|value| value.get_name().to_string())
+            .filter(|name| name.starts_with(request.prefix))
+            .map(CompletionCandidate::new)
+            .collect(),
+
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) async fn execute_tmux_command(
+    context: &mut TmuxState,
+    command: TmuxCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        TmuxCommand::Create(cmd) => execute_create(context, cmd).await,
+        TmuxCommand::NewWindow(cmd) => execute_new_window(context, cmd).await,
+        TmuxCommand::SplitPane(cmd) => execute_split_pane(context, cmd).await,
+        TmuxCommand::Kill(cmd) => execute_kill(context, cmd).await,
+        TmuxCommand::Mirror(cmd) => execute_mirror(context, cmd),
+        TmuxCommand::Tui(cmd) => execute_tui(cmd),
+        TmuxCommand::Targets(_) => execute_targets(context).await,
+        TmuxCommand::Send(cmd) => execute_send(context, cmd).await,
+        TmuxCommand::Keys(cmd) => execute_keys(context, cmd).await,
+        TmuxCommand::Capture(cmd) => execute_capture(context, cmd).await,
+        TmuxCommand::Monitor(cmd) => execute_monitor(context, cmd).await,
+        TmuxCommand::History(cmd) => execute_history(context, cmd).await,
+        TmuxCommand::Stream(cmd) => execute_stream(context, cmd).await,
+        TmuxCommand::Upload(cmd) => execute_upload(context, cmd).await,
+        TmuxCommand::Download(cmd) => execute_download(context, cmd).await,
     }
 }
 
@@ -1200,8 +1271,7 @@ async fn resolve_target(host: &HostHandle, target_str: &str) -> DriverResult<Tar
 }
 
 fn tmux_history_capacity() -> NonZeroUsize {
-    NonZeroUsize::new(TMUX_HISTORY_CAPACITY)
-        .unwrap_or_else(|| unreachable!("TMUX_HISTORY_CAPACITY must be non-zero"))
+    NonZeroUsize::new(TMUX_HISTORY_CAPACITY).unwrap_or(NonZeroUsize::MIN)
 }
 
 fn render_pane_snapshot(
