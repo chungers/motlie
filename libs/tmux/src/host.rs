@@ -1025,6 +1025,8 @@ impl HostHandle {
         // Shared health state (DC29, 4.2d)
         let health = Arc::new(std::sync::Mutex::new(MonitorHealth::Streaming));
         let health_task = health.clone();
+        let display_name = Arc::new(std::sync::Mutex::new(session.clone()));
+        let display_name_task = display_name.clone();
         let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
 
         // Resolve tmux binary once before spawning the monitor task
@@ -1033,8 +1035,10 @@ impl HostHandle {
         // Spawn the supervised monitor task (4.2a)
         let inner_ref = self.inner.clone();
         let session_for_cleanup = session_id.clone();
+        let session_id_for_task = session_id.clone();
         let mut display_session = session.clone();
         let task = tokio::spawn(async move {
+            let session_id = session_id_for_task;
             let max_retries = 5u32;
             let mut attempt = 0u32;
             let mut shell = shell;
@@ -1073,7 +1077,11 @@ impl HostHandle {
 
                         // Unexpected EOF — emit discontinuity and attempt reconnect
                         bus.publish_discontinuity_for(
-                            TimelineMarkerScope::for_host_session(&host_alias, &display_session),
+                            TimelineMarkerScope::for_host_session_identity(
+                                &host_alias,
+                                &display_session,
+                                &session_id,
+                            ),
                             &format!(
                                 "stream interrupted: control channel lost for {}:{}",
                                 host_alias, display_session
@@ -1130,9 +1138,10 @@ impl HostHandle {
                         else {
                             // Session gone — permanent failure (DC29 session identity)
                             bus.publish_discontinuity_for(
-                                TimelineMarkerScope::for_host_session(
+                                TimelineMarkerScope::for_host_session_identity(
                                     &host_alias,
                                     &display_session,
+                                    &session_id,
                                 ),
                                 &format!(
                                     "stream failed: session '{}' no longer exists on {}",
@@ -1153,6 +1162,9 @@ impl HostHandle {
                             }
                         }
                         display_session = current_session.name.clone();
+                        if let Ok(mut display) = display_name_task.lock() {
+                            *display = display_session.clone();
+                        }
 
                         // Reopen shell channel
                         match inner_ref.transport.open_shell(80, 24).await {
@@ -1164,9 +1176,10 @@ impl HostHandle {
                                 // downstream consumers (history, subscribers) get
                                 // re-anchored with current screen state.
                                 bus.publish_discontinuity_for(
-                                    TimelineMarkerScope::for_host_session(
+                                    TimelineMarkerScope::for_host_session_identity(
                                         &host_alias,
                                         &display_session,
+                                        &session_id,
                                     ),
                                     &format!(
                                         "stream resumed: reattached after reconnect for {}:{}",
@@ -1245,9 +1258,10 @@ impl HostHandle {
                                     )
                                 };
                                 bus.publish_discontinuity_for(
-                                    TimelineMarkerScope::for_host_session(
+                                    TimelineMarkerScope::for_host_session_identity(
                                         &host_alias,
                                         &display_session,
+                                        &session_id,
                                     ),
                                     &snapshot_msg,
                                 );
@@ -1269,7 +1283,14 @@ impl HostHandle {
             ))
         })?;
 
-        Ok(SessionMonitorHandle::new(target, stop_tx, task, health))
+        Ok(SessionMonitorHandle::new(
+            target,
+            session_id,
+            display_name,
+            stop_tx,
+            task,
+            health,
+        ))
     }
 
     /// Start a higher-level session watch with rolling transcript state.

@@ -615,7 +615,10 @@ impl TargetSpec {
         self.pane_idx
     }
 
-    /// Parse a tmux target string: "session", "session:window", "session:window.pane"
+    /// Parse a tmux target string: "session", "session:window", "session:window.pane".
+    ///
+    /// A `$<digits>` session component is treated as a stable tmux session id.
+    /// Use [`TargetSpec::session`] when a literal session name looks like `$7`.
     pub fn parse(target_str: &str) -> Result<Self> {
         if target_str.is_empty() {
             return Err(Error::Parse("empty target string".to_string()));

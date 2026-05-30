@@ -183,12 +183,27 @@ pub struct ResolvedFleetTarget {
 impl ResolvedFleetTarget {
     /// Exact OutputBus filter for this target's host/session.
     pub fn sink_filter(&self) -> SinkFilter {
-        SinkFilter::for_host_session(self.spec.host_alias(), self.target.session_name())
+        SinkFilter::for_host_session(
+            self.spec.host_alias(),
+            self.target
+                .session_id()
+                .unwrap_or_else(|| self.target.session_name()),
+        )
     }
 
     /// Exact marker scope for gap/discontinuity markers for this target.
     pub fn marker_scope(&self) -> TimelineMarkerScope {
-        TimelineMarkerScope::for_host_session(self.spec.host_alias(), self.target.session_name())
+        match self.target.session_id() {
+            Some(id) => TimelineMarkerScope::for_host_session_identity(
+                self.spec.host_alias(),
+                self.target.session_name(),
+                id,
+            ),
+            None => TimelineMarkerScope::for_host_session(
+                self.spec.host_alias(),
+                self.target.session_name(),
+            ),
+        }
     }
 }
 
@@ -340,7 +355,7 @@ impl Fleet {
         if let Some(monitors) = self.session_monitors.get(alias) {
             for (_, handle) in monitors {
                 statuses.push(SessionMonitorStatus {
-                    name: handle.target().session_name().to_string(),
+                    name: handle.display_name(),
                     health: handle.health(),
                 });
             }
@@ -349,7 +364,7 @@ impl Fleet {
         // failed/stopped sessions remain visible in health status (DC29).
         if let Some(monitor) = self.full_monitors.get(alias) {
             for session_name in monitor.all_sessions() {
-                if let Some(handle) = monitor.get(session_name) {
+                if let Some(handle) = monitor.get(&session_name) {
                     statuses.push(SessionMonitorStatus {
                         name: session_name.to_string(),
                         health: handle.health(),
@@ -514,7 +529,7 @@ impl Fleet {
         if let Some(monitors) = self.session_monitors.get_mut(spec.host_alias()) {
             let lookup = session_lookup(spec);
             if let Some(pos) = monitors.iter().position(|(key, handle)| {
-                key == lookup || handle.target().session_name() == spec.session_name()
+                key == lookup || handle.display_name() == spec.session_name()
             }) {
                 monitors.remove(pos);
             }
@@ -591,10 +606,10 @@ impl Fleet {
         if let Some(monitors) = self.session_monitors.get(target.host_alias()) {
             let lookup = session_lookup(target);
             if let Some((_, handle)) = monitors.iter().find(|(key, handle)| {
-                key == lookup || handle.target().session_name() == target.session_name()
+                key == lookup || handle.display_name() == target.session_name()
             }) {
                 return Some(SessionMonitorStatus {
-                    name: handle.target().session_name().to_string(),
+                    name: handle.display_name(),
                     health: handle.health(),
                 });
             }
@@ -604,7 +619,7 @@ impl Fleet {
             .get(target.host_alias())
             .and_then(|monitor| monitor.get(session_lookup(target)))
             .map(|handle| SessionMonitorStatus {
-                name: handle.target().session_name().to_string(),
+                name: handle.display_name(),
                 health: handle.health(),
             })
     }
@@ -822,10 +837,10 @@ impl Fleet {
                 spec.host_alias()
             )));
         }
-        Ok(TimelineMarkerScope::for_host_session(
-            spec.host_alias(),
-            spec.session_name(),
-        ))
+        Ok(match spec.session_id_selector() {
+            Some(id) => TimelineMarkerScope::for_host_session_id(spec.host_alias(), id.as_str()),
+            None => TimelineMarkerScope::for_host_session(spec.host_alias(), spec.session_name()),
+        })
     }
 
     /// Build timeline options with filters for the provided resolved targets.
@@ -1029,6 +1044,52 @@ mod tests {
         assert!(filter.matches(&output));
         output.host = "db-1".to_string();
         assert!(!filter.matches(&output));
+    }
+
+    #[tokio::test]
+    async fn fleet_timeline_helpers_for_id_spec_match_live_name_output_and_markers() {
+        let mut fleet = Fleet::new();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
+        let spec = FleetTargetSpec::session_id("web-1", "$1").unwrap();
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline("id-target", fleet.timeline_options_for_spec(&spec).unwrap())
+            .unwrap();
+
+        bus.publish(crate::sink::TargetOutput {
+            source: TargetAddress::Pane(crate::types::PaneAddress {
+                pane_id: "%5".to_string(),
+                session_id: Some(SessionId::new("$1").unwrap()),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+            host: "web-1".to_string(),
+            content: "live output\n".to_string(),
+            raw_content: None,
+            sequence: 1,
+            fidelity: crate::types::OutputFidelity::default(),
+            timestamp: std::time::Instant::now(),
+        });
+        bus.publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session_identity("web-1", "build", "$1"),
+            "live marker",
+        );
+        bus.publish_discontinuity_for(fleet.timeline_marker_scope(&spec).unwrap(), "manual marker");
+
+        let page = timeline
+            .render_after(
+                crate::sink::TimelineCursor::default(),
+                crate::sink::RenderOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(page.text.contains("live output"), "{}", page.text);
+        assert!(page.text.contains("live marker"), "{}", page.text);
+        assert!(page.text.contains("manual marker"), "{}", page.text);
     }
 
     #[tokio::test]

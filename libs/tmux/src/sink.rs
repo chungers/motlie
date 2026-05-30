@@ -61,6 +61,15 @@ impl TargetOutput {
         }
     }
 
+    /// Stable tmux session id when available.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.source {
+            TargetAddress::Session(s) => Some(s.id.as_str()),
+            TargetAddress::Window(w) => Some(&w.session_id),
+            TargetAddress::Pane(p) => p.session_id.as_ref().map(|id| id.as_str()),
+        }
+    }
+
     /// Pane ID — available when source is pane-level.
     pub fn pane_id(&self) -> Option<&str> {
         match &self.source {
@@ -309,7 +318,7 @@ fn truncate_to_chars(text: &mut String, max_chars: usize) {
 pub struct SinkFilter {
     /// Regex pattern against host alias.
     pub host: Option<String>,
-    /// Regex pattern against session name.
+    /// Regex pattern against session display name or stable session id.
     pub session: Option<String>,
     /// Regex pattern against "session:window_index".
     pub window: Option<String>,
@@ -358,8 +367,10 @@ impl Default for TimelineOptions {
 pub struct TimelineMarkerScope {
     /// Host alias associated with the marker.
     pub host: Option<String>,
-    /// Session name associated with the marker.
+    /// Session display name associated with the marker.
     pub session: Option<String>,
+    /// Stable tmux session id associated with the marker.
+    pub session_id: Option<String>,
     /// Window target string associated with the marker.
     pub window: Option<String>,
     /// Pane id or target string associated with the marker.
@@ -393,6 +404,25 @@ impl TimelineMarkerScope {
         Self {
             host: Some(host.to_string()),
             session: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a host/session id pair.
+    pub fn for_host_session_id(host: &str, session_id: &str) -> Self {
+        Self {
+            host: Some(host.to_string()),
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Marker scoped to a host/session pair with both display and stable id.
+    pub fn for_host_session_identity(host: &str, session: &str, session_id: &str) -> Self {
+        Self {
+            host: Some(host.to_string()),
+            session: Some(session.to_string()),
+            session_id: Some(session_id.to_string()),
             ..Default::default()
         }
     }
@@ -477,7 +507,9 @@ impl CompiledSinkFilter {
             }
         }
         if let Some(ref re) = self.session {
-            if !re.is_match(output.session_name()) {
+            let matches_name = re.is_match(output.session_name());
+            let matches_id = output.session_id().is_some_and(|id| re.is_match(id));
+            if !(matches_name || matches_id) {
                 return false;
             }
         }
@@ -517,9 +549,13 @@ impl CompiledSinkFilter {
             }
         }
         if let Some(ref re) = self.session {
-            match scope.session.as_deref() {
-                Some(session) if re.is_match(session) => {}
-                _ => return false,
+            let matches_name = scope.session.as_deref().is_some_and(|s| re.is_match(s));
+            let matches_id = scope
+                .session_id
+                .as_deref()
+                .is_some_and(|id| re.is_match(id));
+            if !(matches_name || matches_id) {
+                return false;
             }
         }
         if let Some(ref re) = self.window {

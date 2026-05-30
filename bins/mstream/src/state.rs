@@ -3002,7 +3002,7 @@ impl SessionRecord {
         Self {
             role: None,
             agent: None,
-            identity: target.session_name().to_string(),
+            identity: session_identity_seed(target),
             state,
             cwd: None,
             workstream: None,
@@ -3157,6 +3157,14 @@ impl SessionRecord {
             "tmux_activity": self.last_tmux_activity,
             "activity_observed_at": datetime_option_json(self.activity_observed_at),
         })
+    }
+}
+
+fn session_identity_seed(target: &SessionTarget) -> String {
+    if target.session_id_selector().is_some() {
+        String::new()
+    } else {
+        target.session_name().to_string()
     }
 }
 
@@ -3692,6 +3700,14 @@ mod tests {
         let second = SessionTarget::session_id("host-b", "$0").expect("second target");
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn session_record_does_not_seed_display_identity_from_session_id() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let record = SessionRecord::from_target(&target, AgentState::Busy, None);
+
+        assert_eq!(record.identity, "");
     }
 
     #[test]
