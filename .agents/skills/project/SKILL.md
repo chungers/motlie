@@ -5,6 +5,11 @@ description: Manage Motlie engineering projects and multi-agent workstreams with
 
 # Motlie Project Workstreams
 
+<!-- 2026-05-29 @ops48-orchestrator: Added Core Invariants, Prerequisites To Collect,
+     mstream Command Reference (pinned to v0.1.0 @ b1799d6), and Known mstream Quirks;
+     deduped repeated invariants into back-references; fixed quarantine to use the real
+     `reserved` state instead of abusing `blocked`. -->
+
 Use this skill when acting as project manager, tech lead, or orchestrator for Motlie work. The primary tool is `mstream`: use it to open workstreams, connect hosts, recruit or create agent sessions, communicate tasks, monitor timelines, summarize progress, unblock collaborators, and close workstreams.
 
 Always follow repo process from `AGENTS.md` or `CLAUDE.md` in the target checkout. If both exist, read both and reconcile; if they conflict, ask the user.
@@ -21,6 +26,77 @@ Optimize for:
 - low human intervention: solve local, obvious, reversible blockers yourself; escalate only when credentials, product direction, destructive actions, or external decisions are needed
 
 If an agent appears to be doing dangerous work, such as destructive git operations, editing the wrong worktree, using the wrong remote/base, leaking credentials, broadening scope without approval, or ignoring stated safety/review bars, interrupt the session promptly with `mstream interrupt` or `mstream send --interrupt-first`, then report the risk and mitigation to the human.
+
+## Core Invariants
+
+These rules hold across every section below. They are stated once here; later sections reference them by number instead of restating them.
+
+1. **mstream is orchestrator-only.** Only you run mstream. Never tell a collaborator agent to run mstream, inspect the socket, or manage its own session state. Infer agent state from observable evidence: commits, PRs, posted comments, test output, snapshots, and timeline.
+2. **mstream is the coordination boundary.** Do not bypass it with direct `ssh`/`tmux` for liveness, listing, snapshots, monitoring, or messaging. If mstream lacks a needed signal, extend it in the active PR or ask the user before any temporary manual path.
+3. **Keep the daemon alive.** Once assigned, keep one daemon on one stable socket across turns. Do not stop or restart it after routine commands or transient SSH errors. Never stop it unless the user explicitly asks. If it seems unreachable, report and ask before replacing it.
+4. **Durable context outranks runtime state.** tmux and daemon memory are recoverable runtime, not the source of truth. Persist issue/PR/branch/commit/host/session/role facts to durable places (GitHub, worktrees, notes) so resets are survivable.
+5. **Side effects need approval.** Treat `connect`, `open`, `join`/`new`/`recruit`, `send`, `interrupt`, `handoff`, `label`, `leave`, `kill`, `close`, and `daemon start` as side-effecting. If the latest request asks for an outline, staffing, or risk plan, deliver that and wait. Otherwise summarize intended side effects before running them. On failure, stop the sequence, report the exact failure and implication, then decide the next step with the user unless the fix is local and obvious.
+6. **Never invent state.** Do not fabricate credentials, host aliases, SSH URIs, issue numbers, or product direction. Ask the user (see Prerequisites To Collect).
+7. **Report quietly, by outcome.** Surface material state changes, blockers, risks, and decisions needing a human. Do not narrate routine tool calls or paste raw logs; summarize the relevant result.
+8. **TUI submit retry.** Agent TUIs sometimes miss the submit newline. If the timeline shows typed-but-unsubmitted text after a send, wait briefly and send one extra empty `--enter`. This is a targeted retry, not a default double-send.
+
+## Prerequisites To Collect
+
+Before opening a workstream, gather these. Ask the user for anything missing (Invariant 6):
+
+- **Hosts:** alias(es), SSH URI(s), and per-host `--work-root` (`/home/dchung/sessions` on Linux, `/Users/dchung/sessions` on macOS).
+- **Work scope:** GitHub issue number(s), workstream goal, and greenfield vs. brownfield in the product sense.
+- **Repository:** clone/worktree base. Default Motlie URL is `https://github.com/chungers/motlie.git` unless the user specifies otherwise.
+- **Socket:** the `MSTREAM_SOCKET` value for the run (default `/tmp/mstream-${USER}.sock`).
+- **Agent runtime:** executable name or path per agent (`claude`, `codex`, or a workstream-local wrapper) and the approved permission mode.
+- **GitHub auth:** confirm agents can post to GitHub (`gh` auth). Treat missing auth as a foreseeable blocker, not a surprise mid-review.
+
+## mstream Command Reference
+
+Authoritative surface, pinned to mstream **v0.1.0** (motlie `main` @ `b1799d6`). Every command also accepts `--socket <SOCKET>`; prefer `MSTREAM_SOCKET` or the default socket path over repeating the flag. Consult `--help` only if the installed binary differs from this table (Invariant: do not rediscover basic shapes during normal orchestration).
+
+Shared enums:
+
+- **session state** (`--state`, `--set-state`, `--require-state`, `handoff --on`): `available`, `reserved`, `busy`, `idle`, `done`, `blocked`, `needs-input`.
+- **activity_hint** (`status` output, not an input): `active`, `quiet`, `idle`, `missing`, `unknown`.
+- **`--agent`** is a free-form executable name/path, not an enum (e.g. `claude`, `codex`, or a wrapper).
+- **duration args** (`--every`, `--input-quiet-for`) accept suffixes `s`/`sec`/`secs`/`min`/`m` (e.g. `30s`, `5m`) or bare seconds; `*-ms`/`*-secs` integer flags are raw numbers.
+
+| Group | Command | Purpose | Notable args (defaults) |
+|---|---|---|---|
+| Daemon | `daemon start` | Start daemon | `--foreground` |
+| | `daemon status` | Check daemon liveness | |
+| | `daemon stop` | Stop daemon (only on user request) | |
+| Hosts | `connect <alias> <ssh-uri>` | Register a host | `--work-root`, `--label k=v` (repeatable), `--capacity` |
+| | `hosts` | List connected hosts | |
+| | `scan <alias>` | Hydrate tagged tmux sessions | |
+| | `disconnect <alias>` | Drop a host | |
+| Workstream | `open <ws> --title <t>` | Open workstream | `--goal`, `--domain`, `--mmux-label`, `--event-limit` (1000) |
+| | `label <ws> --mmux-label <l>` | Set/replace mmux label | |
+| | `list` | List workstreams | |
+| | `show <ws>` | Workstream detail | |
+| | `close <ws>` | Close workstream | `--summary`, `--domain`, `--specialty` (repeatable), `--stop-timers`, `--standby-agents` |
+| Sessions | `new <ws> <target> --role --cwd --agent` | Create a session | `--task` |
+| | `join <ws> <target> --role` | Join existing session | `--task` |
+| | `recruit <ws> --role` | Recruit tagged agents | `--agent`, `--count` (1), `--goal`, `--selector k=v` (repeatable), `--task` |
+| | `leave <ws> <target>` | Remove from workstream, keep tmux | `--available` |
+| | `kill <target>` | Destroy tmux session (terminal) | |
+| | `session list` | List sessions | |
+| | `session mark <target> --state --summary` | Annotate session state | |
+| Messaging | `send <ws> <target> --text` | Send to one session | `--enter`/`--no-enter`, `--interrupt-first`, `--settle-ms` (500), `--paste-mode bracketed\|literal`, `--require-state`, `--set-state` |
+| | `broadcast <ws> --text` | Send to many | `--enter`/`--no-enter`, `--role`, `--state`, `--paste-mode` |
+| | `interrupt <target>` | Non-destructive interrupt | `--key esc\|ctrl-c` (esc) |
+| Handoff | `handoff arm <ws> --from --to --on <state> --task` | Conditional sequencing | `--only-on-transition` |
+| | `handoff list <ws>` / `handoff cancel ...` | Inspect/cancel armed handoffs | |
+| Timers | `timer start <name> --every <dur> --prompt <p>` | Self-wakeup timer | `--workstream`, `--self`/`--self-host` (local) or `--target`, `--enter`/`--no-enter`, `--submit-retries` (1), `--submit-retry-delay-ms` (750), `--input-quiet-for` (10s), `--no-input-guard` |
+| | `timer list` | List timers | `--workstream` |
+| | `timer stop <name>` / `timer fire <name>` | Stop / test-fire a timer | |
+| Observation | `status <ws>` | Liveness snapshot | `--active-window-secs` (30), `--idle-after-secs` (300) |
+| | `events <ws>` | Timeline | `--limit` (200), `--readable`, `--after` |
+| | `snapshot <ws>` | Pane capture | `--max-chars` (12000), `--after` |
+| | `summary-input <ws>` | Input/activity summary | `--max-chars` (12000), `--since` |
+
+`<target>` is `<host-alias>::<tmux-session>` (e.g. `amd1::opus47-337-rv`).
 
 ## Identity
 
@@ -50,12 +126,10 @@ Workstreams usually map to one or more GitHub issues. Before opening a workstrea
 
 Use issue-first language in the workstream name and agent session names. Prefer names like `issue-337-tmux-fleet-api` or `pr-330-mstream-review`.
 
-Decision checkpoint:
-
-- If the latest user request asks for an outline, staffing proposal, risk assessment, or bars to enforce, provide that first and wait for approval before opening workstreams, connecting hosts, or creating sessions.
-- If the user has explicitly said to proceed with setup, still summarize the proposed side effects before running them: daemon start, host connect, workstream open, session creation, and prompts sent to agents.
-- Treat host connection, workstream open, session join/new/recruit, send, interrupt, handoff, close, and kill as side-effecting operations.
-- If a command fails, stop the setup sequence, report the exact failure and implication, then decide the next step with the user unless the fix is purely local and obvious.
+Decision checkpoint: apply Invariant 5. If the latest request asks for an
+outline, staffing proposal, risk assessment, or bars to enforce, deliver that
+and wait for approval before opening workstreams, connecting hosts, or creating
+sessions.
 
 ## mstream Daemon And Hosts
 
@@ -105,11 +179,13 @@ available. In Codex/harness tool calls, `export MSTREAM_SOCKET=...` in one exec
 does not persist to future exec calls. Prefer the default socket path so client
 commands need neither `--socket` nor an env prefix; if using a non-default
 socket, set `MSTREAM_SOCKET=...` inline for each client command or fall back to
-`--socket`. This was validated locally: daemonized `mstream daemon start`
-returned success but was immediately unreachable, while foreground mode stayed
-reachable from separate client commands after a delay.
+`--socket`.
 
-Do not use `mstream daemon start` or `nohup ... &` as the normal Codex/harness playbook; they may be reaped by the harness even after reporting success. Outside Codex/harness, daemonized `mstream daemon start` is still a valid human/manual mode, but it is not the orchestrator playbook.
+Do not use `mstream daemon start` or `nohup ... &` as the normal Codex/harness
+playbook; foreground mode is the orchestrator default. Outside Codex/harness,
+daemonized `mstream daemon start` is still a valid human/manual mode. See
+[Known mstream Quirks](#known-mstream-quirks) for the validated behavior behind
+this choice.
 
 Fallback only if the managed foreground exec session is unavailable or lost while the daemon must survive for timers or cross-turn orchestration: run the same foreground daemon inside a dedicated tmux session.
 
@@ -124,9 +200,8 @@ mstream daemon status
 Before starting any daemon path, use `mstream daemon status` on the chosen
 socket. If it is already running, reuse it. Keep the same socket value for the
 full orchestration run once chosen, preferably through `MSTREAM_SOCKET` or the
-default socket path rather than repeated `--socket` flags. Do not stop the
-daemon just because one user request completes; keep it alive until the user
-asks you to stop it.
+default socket path rather than repeated `--socket` flags. Keep it alive across
+requests (Invariant 3).
 
 When assigned as orchestrator and the harness has no first-class cron, start a
 daemon-owned self-wakeup timer targeted at your own tmux session. The timer
@@ -178,19 +253,10 @@ detected.
 
 If the daemon is unreachable, ask the user whether to restart it or provide the correct socket. Do not stop an existing daemon on your own. After daemon restart, ask the user for the host aliases and SSH URIs; mstream does not persist the host ledger.
 
-Use `mstream` as the orchestration boundary. Do not bypass it with direct `ssh`
-plus `tmux` commands for liveness, session listing, snapshots, monitoring, or
-agent communication. If mstream lacks a signal needed to manage a workstream,
-extend mstream in the active PR or ask the user before proceeding with a
-temporary manual path.
-
-Keep user-facing progress updates outcome-focused and quiet. Do not narrate
-routine tool calls, approval decisions, command starts, polling mechanics, or
-raw console logs. Report only material state changes, blockers, risks, and
-decisions that affect the workstream or require human attention. When command
-output matters, summarize the relevant result instead of pasting the full log.
-If the user explicitly asks for command-level detail, include only the minimal
-commands and output needed to answer.
+Keep mstream as the orchestration boundary (Invariant 2) and keep user-facing
+updates quiet and outcome-focused (Invariant 7): include command-level detail
+only when the user explicitly asks, and summarize relevant results instead of
+pasting full logs.
 
 For timer wakeups, keep responses concise. If a timer is stale, first verify
 `mstream timer list`; if the timer still exists, stop it. If it is already gone,
@@ -199,9 +265,7 @@ same stale state unless the user asks. For active workstream timers, report only
 material changes since the last poll, such as a PR update, review verdict,
 blocker, merge, issue closeout, timer change, or agent state change.
 
-Only the orchestrator has access to mstream. Collaborating agents do not have
-mstream access and should never be instructed to run mstream commands, inspect
-the mstream socket, or manage their own mstream state.
+Only the orchestrator runs mstream (Invariant 1).
 
 Connect hosts only from human-provided aliases and SSH URIs. Set `--work-root` for the target host filesystem, not the orchestrator's local machine. Common defaults:
 
@@ -263,297 +327,86 @@ As project manager, keep enough durable context to survive these resets. When a 
 
 ## Transferring Or Replacing Work
 
-Use this protocol when an agent must be replaced, a host/session is about to go
-away, or the user asks to transfer ownership of in-flight work. Treat transfer
-as orchestration policy built from existing mstream primitives. Do not create or
-request a new `mstream transfer` command unless a concrete primitive gap blocks
-one of the steps below; if that happens, stop and report the missing primitive,
-the command you tried, and why the existing `send`, `status`, `events`,
-`summary-input`, `snapshot`, `recruit`, `join`, `new`, `session mark`, `leave`,
-`kill`, `handoff`, or timer primitives cannot cover it.
+Use when an agent must be replaced, a host/session is going away, or the user
+asks to move ownership of in-flight work. Build transfer from existing mstream
+primitives (`send`, `new`/`join`/`recruit`, `session mark`, `leave`, `kill`); do
+not request a new `mstream transfer` command — if a primitive gap blocks you,
+stop and report it.
 
-Do not use `mstream handoff` as the primary primitive for linear replacement.
-`handoff` is useful for conditional sequencing between live sessions, such as
-author-to-reviewer flow on `done`, but replacement requires freezing one source,
-capturing a durability checkpoint, packaging self-contained context, quarantining
-the source, and retiring it only after confirmation. Use `handoff` only as an
-optional follow-on automation after the replacement exists and the transfer
-packet has already been delivered.
+The model is simple. **The predecessor writes a packet; you (the orchestrator)
+judge it and may interrogate until it is high quality; you hand it to the
+successor and may interrogate to gauge readiness. Transfer is complete when you
+have determined the successor holds quality context and the correct
+work/artifact state to take over the predecessor's duties.** Agents never run
+mstream (Invariant 1) — you broker the whole exchange.
 
-Transfer is an mstream-only coordination boundary. The orchestrator observes,
-interrupts, recruits, marks state, and retires sessions through mstream. Do not
-bypass mstream with direct `ssh` or `tmux` commands for transfer coordination,
-and do not ask collaborator agents to run mstream commands, inspect the mstream
-socket, or manage their own mstream state.
+Core principles (these always hold; how you get there is flexible):
 
-Transfer is one-to-one succession. One source session maps to one replacement
-session, and the replacement owns only that source's work and context. Do not
-fan in multiple agents' work, histories, or responsibilities into one successor.
-For a host-wide transfer, create a separate successor for each source, using the
-source-name-plus-suffix rule below. A single orchestrator may keep an audit
-ledger of many sessions, but that ledger is not a transfer of ownership and must
-not be treated as making one agent the successor for multiple sources.
+- **One source -> one successor**, no fan-in. Host-wide transfer is one successor
+  per source, finished one at a time.
+- **No new or synthetic workstream just to transfer.** The successor inherits the
+  predecessor's existing workstream, role, and tags; never invent a transfer
+  workstream or label. If the predecessor has none, ask the user which existing
+  workstream governs.
+- **Durable work first.** mstream moves context, not uncommitted files — the
+  predecessor must commit/push, update the PR, or explicitly flag local-only risk
+  before it is safe to retire.
 
-Default transfer sequence:
+Keep names, tags, and state summaries terminal-friendly: ASCII, no spaces, short
+and descriptive (e.g. session `gpt55-337-og`, summary `succeeded by gpt55-337-og-2`).
 
-Process one source completely before moving to the next source. For host-wide
-or multi-session transfer, do not batch-create successors and fill in context
-later. Finish this sequence for source A, including successor readiness and
-predecessor quarantine, before starting source B.
+### Usual flow
 
-Do not create a new workstream solely for transfer. The successor assumes the
-predecessor's current workstream, role, tags, and responsibilities. If the
-predecessor has no workstream or mstream metadata, first ask the predecessor to
-self-identify (for example Codex or Claude), report its current role, and
-produce a complete succession packet. If mstream needs a workstream to send
-messages, use the current governing workstream when one exists; otherwise ask
-the user which existing workstream should govern the transfer instead of
-inventing a new transfer workstream.
+A workable default, not a rigid script — adapt the order, the depth of
+interrogation, and the exact commands to the situation, as long as the core
+principles hold and you retire the predecessor only after judging the successor
+ready.
 
-Never apply a synthetic transfer label, such as `one transfer`, to successor
-sessions. Transfer coordination is not the work. A successor's mmux display
-label and mstream tags must come from the predecessor's actual workstream and
-role. If the predecessor has no workstream/mmux tags, leave the successor
-untagged for workstream display or ask the user which real workstream should own
-it. Do not overwrite useful predecessor tags with labels that describe the
-transfer mechanics.
-
-1. Ask the source to build a succession packet. Do not mark the source blocked,
-   quarantined, unavailable, or ready for retirement before this packet exists
-   unless the session is already gone. The packet must contain all information a
-   successor needs to pick up the work.
+1. **Ask the predecessor for a packet:** its work state (issue/PR, branch,
+   commit, pushed-vs-local, cwd, dirty state, next action) and a context summary
+   a replacement of any model could act on. If the predecessor is itself an
+   orchestrator, the packet must also carry operating context (hosts, sockets,
+   timers, recent decisions). Don't quarantine or retire it yet.
 
 ```sh
-mstream send <workstream> <source-target> \
-  --interrupt-first \
-  --set-state busy \
-  --text "Stop taking new work. Build a succession packet for one-to-one replacement: self-identify, make current work durable, then summarize issue/PR/branch/commit/cwd/remotes/dirty state/tests/blockers/next action/workstream/role/tags." \
-  --enter
+mstream send <workstream> <source-target> --interrupt-first --set-state busy \
+  --text "Stop new work. Make your work durable (commit/push/PR), then write a succession packet: work state (issue/PR/branch/commit/pushed-vs-local/cwd/next action) and a context summary a replacement can act on." --enter
 ```
 
-2. Require durable work facts before succession is considered safe. The source
-   should commit and push, update the PR, post a comment, or clearly identify
-   local-only risk. mstream can transfer assignment and context; it cannot
-   recover uncommitted local filesystem state from a host or session that
-   disappears.
+2. **Interrogate until the packet is high quality.** Read it via `summary-input`;
+   if durability, next action, or where the code lives is thin, ask the
+   predecessor for just that and repeat until satisfied. If the source is gone or
+   rate-limited, assemble the best packet from durable facts and mark it
+   `INCOMPLETE`.
 
-3. Wait for and capture the source succession packet before building or sending
-   anything to the successor. Verify that the packet names the durable artifact
-   that preserves the work, such as a branch/commit, pushed PR update, issue/PR
-   comment, or explicit statement of local-only risk. Then build a
-   self-contained, model-agnostic transfer packet from durable facts, the source
-   succession packet, your own accumulated orchestration context, and bounded
-   mstream context. The replacement may be a different model or agent family, so
-   the packet must not rely on source-agent memory, local tmux scrollback,
-   private shorthand, or model-specific assumptions. Include these fields:
-
-- workstream name and transfer reason
-- source target, replacement target if already known, and source risk such as
-  planned shutdown, lost session, stale agent, or role change
-- issue(s), PR(s), branch, latest commit, cwd, remotes, dirty state, role, and
-  agent identity
-- current implementation, review, or release state
-- durability checkpoint: what was committed, pushed, posted, or otherwise made
-  recoverable, plus any known local-only risk
-- validation already run, known failures, open review feedback, blockers, and
-  unanswered questions
-- exact next action for the replacement, including branch/PR target and expected
-  deliverable
-- orchestrator operating context: user preferences, standing decisions,
-  project-specific rules, host and daemon conventions, workstream playbook
-  details, known mstream quirks, active/stale timers, and recent issue/PR
-  history that affects future decisions
-- bounded context excerpts from `mstream events --readable`, `summary-input`,
-  or `snapshot` when they add information not already captured by durable facts
-
-Before delivering the packet, run a completeness gate. The packet must include
-at least:
-
-- source cwd and source repo/worktree path
-- successor cwd or target-host work root where the successor must prepare its
-  own checkout
-- repository URL, remote name, branch, HEAD or latest commit, and dirty state
-- pushed/unpushed commits and any local-only risk
-- issue/PR scope, role, current status, blockers, and exact next action
-- completeness statement: complete, incomplete with named gaps, or user-accepted
-  risk
-
-If any field is missing, ask the predecessor only for the missing field before
-continuing. Do not send a partial packet to a successor unless the packet is
-explicitly marked `INCOMPLETE` and names each missing fact.
-
-For cross-host transfers, source paths are evidence, not instructions. A macOS
-source path such as `/Users/dchung/...` must not be treated as the Linux
-successor workspace path. The successor should create or verify its own checkout
-under the target host work root, such as `/home/dchung/sessions/...`, then use
-the source path only as historical context.
-
-Do not count a replacement as transferred just because the tmux session exists
-or mstream metadata says it joined the workstream. A created session with no
-source-specific packet is only a standby shell/agent. The successor must receive
-the actual source packet and acknowledge it before ownership moves.
-
-Status sweeps are observation only. Asking successors whether they received a
-packet must not create workstreams, invent transfer labels, change ownership,
-or mark predecessors retired. If a sweep exposes an incomplete transfer, switch
-to the incomplete-transfer repair flow below and finish that one source before
-touching another session.
-
-If the source is the project manager or orchestrator, the transfer is not
-complete until the replacement receives the accumulated process context, not
-just session metadata. Include enough context for the replacement to make the
-same immediate orchestration decisions without asking the user to restate the
-conversation: current branch and commit, open or recently closed workstreams,
-GitHub issue/PR state, reviewer protocol, timer policy, host SSH URIs and work
-roots, daemon socket, known stale workstreams or timers, and any recent user
-corrections to the playbook.
-
-4. Recruit, join, or create the successor. Prefer a fresh cwd for a newly
-   created successor unless the user explicitly wants it to resume an existing
-   checkout. The successor must initialize or prepare its workspace according to
-   the succession packet: check out the named repository, branch, and worktree;
-   verify the expected commit and dirty-state expectations; read `AGENTS.md`
-   and/or `CLAUDE.md`; and report any missing durable artifact before doing new
-   work.
-
-   Name newly commissioned replacement sessions as successors of the source
-   session. Preserve the source name and append a numeric suffix, starting with
-   `-2`, for example `gpt55-pm` -> `gpt55-pm-2`. If that name already exists on
-   the target host, increment to `-3`, `-4`, and so on. Prefer this suffix over
-   punctuation such as apostrophes because it is tmux- and shell-friendly.
-   Always copy the predecessor's mmux tags and mstream tags to the successor when
-   mstream can represent them. At minimum preserve workstream, role,
-   domain/specialty context, summary, issue/PR references, display label, and
-   transfer lineage in the successor task and session mark summary. Verify with
-   `mstream session list` or `mstream show` that the successor displays the
-   predecessor's real workstream label, not a temporary transfer label.
+3. **Create the successor and deliver the packet.** It inherits the predecessor's
+   workstream/role/tags (suffix the name, e.g. `gpt55-pm` -> `gpt55-pm-2`) and
+   prepares its own checkout under the target work-root. TUIs can drop a `--task`
+   sent at the welcome screen, so confirm the prompt with `snapshot` and send the
+   packet explicitly (one extra empty `--enter` if it didn't submit, Invariant 8).
 
 ```sh
-mstream recruit <workstream> \
-  --role <role> \
-  --agent <agent-kind> \
-  --task "<transfer packet>"
-
-mstream join <workstream> <host>::<replacement-session> \
-  --role <role> \
-  --task "<transfer packet>"
-
-mstream new <workstream> <host>::<replacement-session> \
-  --role <role> \
-  --cwd <absolute-replacement-cwd> \
-  --agent <agent> \
-  --task "<transfer packet>"
+mstream new <workstream> <host>::<successor-session> --role <role> --cwd <abs-cwd> --agent <agent>
+mstream send <workstream> <successor-target> --set-state busy --enter \
+  --text "<packet> — check out the named repo/branch, read AGENTS.md/CLAUDE.md in the repo root (e.g. ./motlie/, not your cwd), then confirm your workspace state and how you'll continue."
 ```
 
-For transfer packets, prefer an explicit post-startup delivery even if `new` or
-`join` accepted `--task`: agent TUIs may still be on the welcome screen when
-mstream sends the initial task, and the packet can be lost. A reliable transfer
-flow is:
+4. **Optionally interrogate the successor to gauge readiness:** have it restate
+   the context in its own words and report its prepared repo/branch/commit/dirty
+   state. Declare transfer complete only when you judge it has the context and
+   work state to replace the predecessor.
 
-1. `mstream new` or `mstream join` the replacement.
-2. Use `mstream snapshot` or `summary-input` to confirm the agent prompt exists.
-3. Send the packet explicitly with `mstream send --enter`.
-4. Send one additional empty `--enter` if the TUI did not submit reliably.
-5. Read `summary-input` and require the exact ACK plus workspace-readiness
-   confirmation before marking the predecessor transferred.
+5. **Quarantine, then retire the predecessor** once the successor is ready: mark
+   it `reserved` to keep it out of recruitment, then prefer `leave` (keeps the
+   tmux session for later inspection) over `kill` (terminal).
 
 ```sh
-mstream send <workstream> <replacement-target> \
-  --text "<transfer packet; ask for HANDOFF ACK <replacement-name>>" \
-  --enter \
-  --set-state busy
-mstream send <workstream> <replacement-target> --text "" --enter --set-state busy
+mstream session mark <source-target> --state reserved --summary "succeeded by <successor-target>; retiring"
+mstream leave <workstream> <source-target>   # or: mstream kill <source-target>
 ```
 
-When transferring many sessions on one SSH host, avoid broad `scan` plus many
-simultaneous `join` operations during delivery. Current mstream/lib-tmux monitor
-channels can exhaust the host connection and return `SSH: failed to open session
-channel: Failed to open channel (ConnectFailed)`. Treat that error as a
-mstream connection-lifecycle bug to fix, not as proof the remote host or tmux
-session is gone. Do not stop the daemon to work around it unless the user asks
-you to. Continue one-at-a-time, report the failure if delivery is blocked, and
-ask before taking daemon-level recovery steps.
-
-5. Confirm successor readiness. The successor must acknowledge the packet,
-   summarize the inherited context in its own words, identify the durable
-   artifact it will continue from, and confirm that its workspace is initialized
-   or explicitly state the missing workspace/durable artifact. Only then does
-   ownership move.
-
-Require a strict readiness ACK before quarantining the predecessor:
-
-```text
-READY_SWEEP <successor>: packet=yes; workspace=ready; blocker=none
-```
-
-The surrounding response must also name the actual prepared successor repo path,
-branch, clean/dirty state, and HEAD or expected commit. If the successor reports
-`workspace=unknown`, `workspace=not-ready`, `packet=incomplete`, or any blocker,
-ownership has not moved. Fix the gap first.
-
-6. Quarantine the predecessor only after successor readiness is confirmed. Keep
-   the source out of the available pool until the replacement confirms it can
-   continue or the maintainer explicitly clears the source for reuse.
-   `blocked` is a deliberate quarantine marker here, not a real blocker that the
-   monitoring loop should try to unblock. Use it because current recruitment
-   avoids non-available sessions and there is no dedicated quarantined or
-   reserved state in the documented primitive set. Do not use an informal
-   "Reserved" label or summary-only convention; state must be visible to
-   mstream selection and status.
-
-```sh
-mstream session mark <source-target> \
-  --state blocked \
-  --summary "Succession packet acknowledged by <replacement-target>; quarantined for retirement; do not reuse until maintainer clears it."
-```
-
-7. Monitor the successor with `status`, `events`, `summary-input`, and the
-   workstream timer loop. If the source is an orchestrator, the acknowledgement
-   must explicitly confirm it received the operating playbook and recent
-   issue/PR/workstream context. If the successor reports missing context, ask
-   the predecessor only for that gap and do not move to the next source until the
-   gap is resolved or the user accepts the risk.
-
-If a source cannot provide a complete handoff, for example because it is
-rate-limited, exited, or missing, create the successor only with an explicit
-`INCOMPLETE` transfer packet that names the missing facts. The successor must
-ACK the incomplete state and must not claim full succession until the
-orchestrator obtains the missing source facts or the user explicitly accepts the
-loss/risk.
-
-Incomplete transfer repair flow:
-
-1. Keep the predecessor joined and quarantined if it still exists.
-2. Ask the predecessor for only the missing fields, for example cwd, repo,
-   branch, dirty state, issue/PR scope, blockers, or next action.
-3. Build a corrected `OFFICIAL SUCCESSION PACKET` from the predecessor reply and
-   durable facts.
-4. Send that packet to the existing successor; do not create another successor
-   unless the current one is gone.
-5. Require the strict readiness ACK and workspace proof above.
-6. Only then mark the predecessor quarantined for retirement and the successor
-   available or busy according to the real workstream state.
-
-8. Retire the old agent only after the successor passes the readiness gate
-   or the user explicitly accepts the loss/risk. Prefer `leave`: it removes the
-   source from the workstream but keeps the tmux session alive so the
-   orchestrator can re-join or inspect it later through mstream if needed. After
-   `leave`, workstream-scoped consultation such as `mstream send <workstream>
-   <source-target>` is unavailable until the source is re-joined; if follow-up
-   questions are likely, keep the source joined while quarantined or re-join it
-   before asking. `kill` is terminal session cleanup; use it only after
-   replacement confirmation, or after explicit user approval to destroy the old
-   session despite unresolved risk.
-
-```sh
-mstream leave <workstream> <source-target>
-mstream kill <source-target>
-```
-
-Record the transfer in the workstream closeout log. The final transaction log
-should identify the source, replacement, freeze time if known, durability
-checkpoint, transfer packet facts, quarantine decision, retirement action,
-validation after replacement, remaining risk, and any follow-up issue or PR.
+Record the outcome in the closeout log: source, successor, durable checkpoint,
+and any follow-up.
 
 ## Opening Workstreams
 
@@ -691,7 +544,7 @@ mstream new issue-337-tmux-fleet-api amd1::gpt55-337-og \
   --role implementer \
   --cwd /home/dchung/sessions/issue-337-tmux-fleet-api/gpt55-337-og \
   --agent codex \
-  --task "Read AGENTS.md on main, confirm identity from tmux, then check out Motlie main into ./motlie and prepare the implementation plan for issue #337."
+  --task "Confirm identity from tmux, check out Motlie main into ./motlie, read ./motlie/AGENTS.md (repo root, not your cwd), then prepare the implementation plan for issue #337."
 ```
 
 For an Opus reviewer on the same workstream, use the model in the target/session name but the Claude CLI executable:
@@ -701,7 +554,7 @@ mstream new issue-337-tmux-fleet-api amd1::opus47-337-rv \
   --role reviewer \
   --cwd /home/dchung/sessions/issue-337-tmux-fleet-api/opus47-337-rv \
   --agent claude \
-  --task "Read AGENTS.md on main, confirm identity from tmux, then review issue #337 and wait for the implementation branch."
+  --task "Confirm identity from tmux, check out Motlie main into ./motlie, read ./motlie/AGENTS.md (repo root, not your cwd), then review issue #337 and wait for the implementation branch."
 ```
 
 When starting a new agent, include:
@@ -709,7 +562,11 @@ When starting a new agent, include:
 - the GitHub issue(s), PR(s), and goal
 - the assigned role and expected deliverable
 - whether the work is greenfield or brownfield
-- instruction to read `AGENTS.md` or `CLAUDE.md` from main
+- instruction to read `AGENTS.md` or `CLAUDE.md`, and **the path where they live**.
+  These sit in the repo root, which is the checkout dir under the agent's cwd
+  (e.g. `~/sessions/{workstream}/{session}/motlie/AGENTS.md`), not the agent's
+  workspace root. Never tell an agent to "read AGENTS.md" without naming the path,
+  or it will look in the wrong directory.
 - instruction to check its tmux session name with `tmux display-message -p '#S'`
 - instruction to use `@{session_name}` in comments and submissions
 - working directory and branch naming expectations
@@ -740,6 +597,80 @@ For implementers, include the delivery path explicitly:
 Nudge implementers about this at kickoff and again when they report local completion. Reviewers should wait for the PR or pushed branch unless explicitly asked to review an unpushed local branch through another access path.
 
 After each `new`, `join`, or `recruit`, verify with `mstream status <workstream>` or `mstream events <workstream> --limit 20` before creating the next agent. If one agent creation fails, do not continue creating the remaining agents until the failure is understood.
+
+## Design & Brainstorm Workstreams
+
+For exploration that produces a design, not merged code. The deliverable is
+either a detailed GitHub issue with comments, or a PR carrying `DESIGN.md`
+and/or `PLAN.md` — nothing more. Greenfield work weighs 2-3 alternatives with
+pros/cons; brownfield adds a migration strategy (CLAUDE.md DESIGN rules).
+
+Core principles:
+
+- **No implementation starts until the human gives a tacit greenlight** — even
+  exploratory code. Brainstorms and designs end in docs and comments, not commits
+  to feature logic.
+- **Agents think through you.** They never talk directly or run mstream
+  (Invariant 1); you relay proposals and critiques between them.
+- **Capture is durable.** Discussion lives in GitHub issue/PR comments;
+  substantial alternatives are short docs each proposer writes in its own cwd
+  checkout on a branch like `@gpt55-401-prop/option-a` — never a shared checkout
+  (see Work Directories). You post major decisions to the issue and flag them for
+  the human.
+
+Roles (`<model>-<issue>-<role>`): **proposer** (independent alternatives,
+agent-family diverse), **critic** (adversarial — pitfalls, false assumptions,
+conflicting requirements, user confusion, dependency fit), **synthesizer** (a
+dedicated agent that reads the proposers' branches/comments and folds the chosen
+direction into `DESIGN.md` in its own checkout), optional **researcher**
+(crate/dependency fit, maturity, safety, support). You facilitate and broker
+decisions; the human reviews the synthesizer's output and sends questions and
+feedback back through you.
+
+### Usual flow
+
+A flexible default — adapt depth and rounds to the problem, as long as the
+principles hold.
+
+1. **Frame.** Confirm/create the GH issue, then broadcast the goal, constraints,
+   and bars.
+
+```sh
+mstream broadcast <workstream> --text "Issue #401: <goal>. Constraints: <...>. Each proposer drafts one alternative on its own branch; do not coordinate yet." --enter
+```
+
+2. **Diverge.** Each proposer drafts an alternative independently — an issue
+   comment for a sketch, a branch doc for a substantial one — with no cross-talk
+   yet, to avoid anchoring.
+3. **Harvest & relay.** Collect proposals (`summary-input` / posted comments) and
+   relay them to the critics.
+
+```sh
+mstream send <workstream> <critic-target> --text "Critique these on correctness/perf/resilience/UX/operability/dependency fit; post inline + issue comments: <links>." --enter
+```
+
+4. **Critique.** Critics score each alternative and post inline + issue comments.
+5. **Converge.** The synthesizer tallies pros/cons and recommends a leading
+   alternative, naming the open decision forks.
+6. **Decide.** For genuine forks (product direction, conflicting requirements,
+   irreversible dependency choices), the synthesizer drafts a decision summary
+   with options/tradeoffs; you post it to the issue, flag it for the human, and
+   wait — never fabricate direction (Invariant 6).
+
+```sh
+mstream session mark <synth-target> --state needs-input --summary "decision fork posted to #401; awaiting human pick"
+```
+
+7. **Capture.** On the human's call, the synthesizer writes the deliverable:
+   `DESIGN.md` (body = chosen alternative, appendix = the rest, Changelog entry)
+   and/or `PLAN.md` as a PR, or a fully-commented issue. Iterate via the PR
+   Review Loop.
+
+The workstream closes when the human accepts the issue/PR deliverable; the
+merge-centric checks in Closing Workstreams apply only when there is a
+DESIGN/PLAN PR. mstream fits deep, few-agent deliberation; its SSH-channel limit
+caps wide fan-out — for broad, ephemeral idea generation use Workflow/subagents
+and bring the synthesis back here.
 
 ## PR Review Loop
 
@@ -840,12 +771,12 @@ that matches the risk: about 3-5 minutes for normal active work and 5-10
 minutes for long tests or builds. If a timer wakes you and the workstream is
 complete or waiting on a human decision, stop or lengthen the timer yourself.
 
-Workstream state is coordinator-owned. Do not ask collaborating agents to run
-any mstream command. Determine whether an agent is done, blocked, needs input,
-should continue, should stand by, or should look for feedback from observable
-evidence: pushed commits, PR creation or updates, posted review comments, test
-output, explicit terminal messages, snapshots, and timeline history. Then use
-mstream state commands yourself if they help coordinate handoffs or summaries.
+Workstream state is coordinator-owned (Invariant 1). Determine whether an agent
+is done, blocked, needs input, should continue, should stand by, or should look
+for feedback from observable evidence: pushed commits, PR creation or updates,
+posted review comments, test output, explicit terminal messages, snapshots, and
+timeline history. Then use mstream state commands yourself if they help
+coordinate handoffs or summaries.
 
 Stopping points:
 
@@ -971,5 +902,23 @@ log with a short stats summary: elapsed wall-clock time from first known
 milestone to closeout, agent count by role/model, review rounds, commits or
 pushes, timer wakeups or orchestrator turns if known, and any follow-up issue
 count. If a timestamp or count is unavailable, omit it or mark it `unknown`
-rather than inventing precision. Do not ask collaborator agents to use mstream
-for this.
+rather than inventing precision. (Invariant 1: do not ask collaborator agents to
+use mstream for this.)
+
+## Known mstream Quirks
+
+Validated runtime behaviors that explain the playbook choices above. These are
+quirks to work around, not steady-state design; revisit if the binary changes.
+
+- **Daemonized start can report success but be unreachable.** `mstream daemon
+  start` (and `nohup ... &`) returned success yet was immediately unreachable in
+  Codex/harness sandboxes, and may be reaped even after reporting success.
+  Foreground mode in a managed exec session stayed reachable from separate client
+  commands after a short delay. Hence foreground is the orchestrator playbook;
+  daemonized start remains valid only for outside-harness human/manual use.
+- **Many concurrent monitor channels exhaust one SSH host.** Broad `scan` plus
+  many simultaneous `join`/monitor operations on a single SSH host can return
+  `SSH: failed to open session channel: Failed to open channel (ConnectFailed)`.
+  This is an mstream/lib-tmux connection-lifecycle bug, not proof the remote host
+  or tmux session is gone. Work one-at-a-time, do not stop the daemon to work
+  around it (Invariant 3), and report if delivery is blocked.
