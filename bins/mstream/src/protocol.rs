@@ -107,6 +107,7 @@ pub enum ClientRequest {
     Send(SendRequest),
     Interrupt(InterruptRequest),
     Broadcast(BroadcastRequest),
+    SessionRetag(SessionRetagRequest),
     SessionList,
     SessionMark(SessionMarkRequest),
     HandoffArm(HandoffArmRequest),
@@ -251,6 +252,19 @@ pub struct SessionMarkRequest {
     pub target: String,
     pub state: AgentState,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRetagRequest {
+    pub target: String,
+    #[serde(default)]
+    pub new_name: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub workstream: Option<String>,
+    #[serde(default)]
+    pub mmux_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
