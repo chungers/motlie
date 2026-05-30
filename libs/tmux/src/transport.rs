@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -1749,9 +1750,45 @@ impl russh::client::Handler for SshHandler {
     }
 }
 
-/// SSH transport — executes commands on a remote host via russh (Phase 2a.1).
-pub struct SshTransport {
+/// Maximum channels we optimistically open on one SSH connection before
+/// spilling to a fresh connection. SSH servers cap concurrent channels per
+/// connection (`MaxSessions`, default 10); we start below that and shrink a
+/// connection's learned cap if the server actually rejects a channel-open.
+const INITIAL_CHANNELS_PER_CONN: usize = 8;
+
+/// One pooled SSH connection plus its live channel accounting.
+struct PooledConn {
     handle: Arc<tokio::sync::Mutex<russh::client::Handle<SshHandler>>>,
+    /// Channels currently open on this connection. Shared with `ChannelGuard`,
+    /// which decrements it when the channel is dropped.
+    open: Arc<AtomicUsize>,
+    /// Maximum channels this connection will hold. Starts at
+    /// `INITIAL_CHANNELS_PER_CONN` and shrinks to the observed count if the
+    /// server rejects a channel-open (learned `MaxSessions`).
+    cap: usize,
+}
+
+/// RAII guard that releases a pooled connection's channel slot on drop.
+pub struct ChannelGuard {
+    open: Arc<AtomicUsize>,
+}
+
+impl Drop for ChannelGuard {
+    fn drop(&mut self) {
+        self.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// SSH transport — executes commands on a remote host via russh (Phase 2a.1).
+///
+/// Channels are multiplexed over a pool of SSH connections. A single
+/// connection is capped by the server's `MaxSessions`, so the pool opens
+/// additional connections on demand instead of failing once the cap is hit
+/// (issue #353). Caps are discovered empirically: SSH does not advertise
+/// `MaxSessions`, so a rejected channel-open on a live connection is taken as
+/// that connection's real limit.
+pub struct SshTransport {
+    pool: Arc<tokio::sync::Mutex<Vec<PooledConn>>>,
     config: SshConfig,
 }
 
@@ -1762,6 +1799,20 @@ impl SshTransport {
     /// Returns an error with actionable message if SSH_AUTH_SOCK is not set
     /// or the agent has no identities (OC3).
     pub async fn connect(config: SshConfig) -> Result<Self> {
+        let handle = Self::connect_one(&config).await?;
+        let pool = vec![PooledConn {
+            handle: Arc::new(tokio::sync::Mutex::new(handle)),
+            open: Arc::new(AtomicUsize::new(0)),
+            cap: INITIAL_CHANNELS_PER_CONN,
+        }];
+        Ok(SshTransport {
+            pool: Arc::new(tokio::sync::Mutex::new(pool)),
+            config,
+        })
+    }
+
+    /// Open one authenticated SSH connection to the configured host.
+    async fn connect_one(config: &SshConfig) -> Result<russh::client::Handle<SshHandler>> {
         let ssh_config = russh::client::Config {
             inactivity_timeout: config.inactivity_timeout,
             keepalive_interval: config.keepalive_interval,
@@ -1795,15 +1846,75 @@ impl SshTransport {
 
         // Authenticate: explicit key file (DC26) or ssh-agent (default)
         if let Some(ref key_path) = config.identity_file {
-            Self::authenticate_key_file(&mut handle, &config, key_path).await?;
+            Self::authenticate_key_file(&mut handle, config, key_path).await?;
         } else {
-            Self::authenticate_agent(&mut handle, &config).await?;
+            Self::authenticate_agent(&mut handle, config).await?;
         }
 
-        Ok(SshTransport {
+        Ok(handle)
+    }
+
+    /// Open a session channel on the connection pool, spilling to a fresh
+    /// connection when existing ones are at their (possibly learned) cap.
+    ///
+    /// Returns the channel plus a `ChannelGuard` that releases the connection's
+    /// slot on drop — hold it for the channel's whole lifetime. The pool lock
+    /// is held across channel-open (and a new connect when spilling), which
+    /// serializes opens; this matches the prior single-handle behavior.
+    async fn open_channel(
+        &self,
+    ) -> Result<(russh::Channel<russh::client::Msg>, ChannelGuard)> {
+        let mut pool = self.pool.lock().await;
+
+        let mut idx = 0;
+        while idx < pool.len() {
+            if pool[idx].open.load(Ordering::SeqCst) >= pool[idx].cap {
+                idx += 1;
+                continue;
+            }
+            let open_result = {
+                let handle = pool[idx].handle.lock().await;
+                handle.channel_open_session().await
+            };
+            match open_result {
+                Ok(channel) => {
+                    pool[idx].open.fetch_add(1, Ordering::SeqCst);
+                    let guard = ChannelGuard {
+                        open: pool[idx].open.clone(),
+                    };
+                    return Ok((channel, guard));
+                }
+                Err(_) => {
+                    let closed = {
+                        let handle = pool[idx].handle.lock().await;
+                        handle.is_closed()
+                    };
+                    if closed {
+                        // Dead connection: drop it and retry the remainder.
+                        pool.remove(idx);
+                    } else {
+                        // Live connection refused the channel: treat the
+                        // current count as its real cap (learned MaxSessions)
+                        // and spill to another connection.
+                        pool[idx].cap = pool[idx].open.load(Ordering::SeqCst);
+                        idx += 1;
+                    }
+                }
+            }
+        }
+
+        // No existing connection had capacity — open another.
+        let handle = Self::connect_one(&self.config).await?;
+        let channel = handle.channel_open_session().await.map_err(|e| {
+            Error::Transport(format!("SSH: failed to open session channel: {}", e))
+        })?;
+        let open = Arc::new(AtomicUsize::new(1));
+        pool.push(PooledConn {
             handle: Arc::new(tokio::sync::Mutex::new(handle)),
-            config,
-        })
+            open: open.clone(),
+            cap: INITIAL_CHANNELS_PER_CONN,
+        });
+        Ok((channel, ChannelGuard { open }))
     }
 
     /// Authenticate using ssh-agent keys.
@@ -1930,14 +2041,9 @@ impl SshTransport {
         // Single timeout boundary covering channel open + exec + output
         // collection, so a stalled server at any phase is caught.
         let (stdout, stderr, exit_code) = tokio::time::timeout(self.config.timeout, async {
-            // Lock only to open the channel, then release. The Channel is
-            // self-contained — its read/write operations don't need the Handle.
-            let mut channel = {
-                let handle = self.handle.lock().await;
-                handle.channel_open_session().await.map_err(|e| {
-                    Error::Transport(format!("SSH: failed to open session channel: {}", e))
-                })?
-            };
+            // Acquire a channel from the pool; the guard holds the connection's
+            // slot until the channel is fully drained below, then frees it.
+            let (mut channel, _guard) = self.open_channel().await?;
 
             channel
                 .exec(true, command)
@@ -1983,15 +2089,7 @@ impl SshTransport {
     /// `cols` and `rows` set the initial PTY dimensions. Use the target pane's
     /// geometry for accurate rendering, or pass `(80, 24)` as a safe default.
     async fn open_shell(&self, cols: u32, rows: u32) -> Result<SshShellChannel> {
-        let channel = {
-            let handle = self.handle.lock().await;
-            handle.channel_open_session().await.map_err(|e| {
-                Error::Transport(format!(
-                    "SSH: failed to open session channel for shell: {}",
-                    e
-                ))
-            })?
-        };
+        let (channel, guard) = self.open_channel().await?;
 
         // Request a PTY for interactive shell use
         channel
@@ -2012,14 +2110,24 @@ impl SshTransport {
             .await
             .map_err(|e| Error::Transport(format!("SSH: failed to request shell: {}", e)))?;
 
-        Ok(SshShellChannel { channel })
+        Ok(SshShellChannel {
+            channel,
+            _guard: guard,
+        })
     }
 
     /// Check if the SSH connection is still alive.
     pub fn is_closed(&self) -> bool {
-        // Try to check without blocking — if we can't get the lock, assume alive
-        match self.handle.try_lock() {
-            Ok(handle) => handle.is_closed(),
+        // Non-blocking: if we can't read the pool, assume alive. Closed only
+        // when every pooled connection is closed.
+        match self.pool.try_lock() {
+            Ok(pool) => {
+                !pool.is_empty()
+                    && pool.iter().all(|conn| match conn.handle.try_lock() {
+                        Ok(handle) => handle.is_closed(),
+                        Err(_) => false,
+                    })
+            }
             Err(_) => false,
         }
     }
@@ -2033,16 +2141,8 @@ impl SshTransport {
     ///
     /// Opens a new session channel, requests the SFTP subsystem, and returns
     /// an initialized `SftpSession`. Each transfer gets its own channel.
-    async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession> {
-        let channel = {
-            let handle = self.handle.lock().await;
-            handle.channel_open_session().await.map_err(|e| {
-                Error::Transport(format!(
-                    "SSH: failed to open session channel for SFTP: {}",
-                    e
-                ))
-            })?
-        };
+    async fn open_sftp(&self) -> Result<(russh_sftp::client::SftpSession, ChannelGuard)> {
+        let (channel, guard) = self.open_channel().await?;
 
         channel.request_subsystem(true, "sftp").await.map_err(|e| {
             Error::Transport(format!("SSH: failed to request SFTP subsystem: {}", e))
@@ -2053,7 +2153,7 @@ impl SshTransport {
             .map_err(|e| {
                 Error::Transport(format!("SSH: failed to initialize SFTP session: {}", e))
             })?;
-        Ok(sftp)
+        Ok((sftp, guard))
     }
 
     /// Upload a file or directory to the remote host via SFTP (DC23).
@@ -2078,7 +2178,7 @@ impl SshTransport {
                 )));
             }
 
-            let sftp = self.open_sftp().await?;
+            let (sftp, _guard) = self.open_sftp().await?;
 
             if src_meta.is_dir() {
                 if !opts.recursive {
@@ -2114,7 +2214,7 @@ impl SshTransport {
         opts: &TransferOptions,
     ) -> Result<()> {
         tokio::time::timeout(self.config.timeout, async {
-            let sftp = self.open_sftp().await?;
+            let (sftp, _guard) = self.open_sftp().await?;
 
             let remote_str = remote_path.to_str().ok_or_else(|| {
                 Error::Transport(format!(
@@ -2264,6 +2364,8 @@ impl LocalShellChannel {
 /// SSH shell channel backed by a russh PTY session.
 pub struct SshShellChannel {
     channel: russh::Channel<russh::client::Msg>,
+    /// Releases this channel's pooled-connection slot when the shell is dropped.
+    _guard: ChannelGuard,
 }
 
 impl SshShellChannel {
