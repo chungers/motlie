@@ -183,12 +183,12 @@ pub struct ResolvedFleetTarget {
 impl ResolvedFleetTarget {
     /// Exact OutputBus filter for this target's host/session.
     pub fn sink_filter(&self) -> SinkFilter {
-        SinkFilter::for_host_session(
-            self.spec.host_alias(),
-            self.target
-                .session_id()
-                .unwrap_or_else(|| self.target.session_name()),
-        )
+        match self.target.session_id() {
+            Some(id) => SinkFilter::for_host_session_id(self.spec.host_alias(), id),
+            None => {
+                SinkFilter::for_host_session(self.spec.host_alias(), self.target.session_name())
+            }
+        }
     }
 
     /// Exact marker scope for gap/discontinuity markers for this target.
@@ -820,11 +820,13 @@ impl Fleet {
             )));
         }
 
+        let filter = match spec.session_id_selector() {
+            Some(id) => SinkFilter::for_host_session_id(spec.host_alias(), id.as_str()),
+            None => SinkFilter::for_host_session(spec.host_alias(), spec.session_name()),
+        };
+
         Ok(TimelineOptions {
-            filters: vec![SinkFilter::for_host_session(
-                spec.host_alias(),
-                spec.session_name(),
-            )],
+            filters: vec![filter],
             ..Default::default()
         })
     }
@@ -1073,9 +1075,28 @@ mod tests {
             fidelity: crate::types::OutputFidelity::default(),
             timestamp: std::time::Instant::now(),
         });
+        bus.publish(crate::sink::TargetOutput {
+            source: TargetAddress::Pane(crate::types::PaneAddress {
+                pane_id: "%6".to_string(),
+                session_id: Some(SessionId::new("$2").unwrap()),
+                session: "$1".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+            host: "web-1".to_string(),
+            content: "literal-name output\n".to_string(),
+            raw_content: None,
+            sequence: 1,
+            fidelity: crate::types::OutputFidelity::default(),
+            timestamp: std::time::Instant::now(),
+        });
         bus.publish_discontinuity_for(
             TimelineMarkerScope::for_host_session_identity("web-1", "build", "$1"),
             "live marker",
+        );
+        bus.publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session_identity("web-1", "$1", "$2"),
+            "literal-name marker",
         );
         bus.publish_discontinuity_for(fleet.timeline_marker_scope(&spec).unwrap(), "manual marker");
 
@@ -1090,6 +1111,8 @@ mod tests {
         assert!(page.text.contains("live output"), "{}", page.text);
         assert!(page.text.contains("live marker"), "{}", page.text);
         assert!(page.text.contains("manual marker"), "{}", page.text);
+        assert!(!page.text.contains("literal-name output"), "{}", page.text);
+        assert!(!page.text.contains("literal-name marker"), "{}", page.text);
     }
 
     #[tokio::test]
@@ -1179,10 +1202,26 @@ mod tests {
         assert_eq!(options.filters.len(), 1);
         assert_eq!(options.filters[0].host.as_deref(), Some("^web\\-1$"));
         assert_eq!(options.filters[0].session.as_deref(), Some("^build$"));
+        assert_eq!(options.filters[0].session_id.as_deref(), None);
 
         let scope = fleet.timeline_marker_scope(&spec).unwrap();
         assert_eq!(scope.host.as_deref(), Some("web-1"));
         assert_eq!(scope.session.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn fleet_timeline_options_for_id_spec_use_id_filter() {
+        let mut fleet = Fleet::new();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
+        let spec = FleetTargetSpec::session_id("web-1", "$1").unwrap();
+
+        let options = fleet.timeline_options_for_spec(&spec).unwrap();
+        assert_eq!(options.filters.len(), 1);
+        assert_eq!(options.filters[0].host.as_deref(), Some("^web\\-1$"));
+        assert_eq!(options.filters[0].session.as_deref(), None);
+        assert_eq!(options.filters[0].session_id.as_deref(), Some("^\\$1$"));
     }
 
     #[test]

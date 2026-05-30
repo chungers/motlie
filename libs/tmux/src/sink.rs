@@ -318,8 +318,10 @@ fn truncate_to_chars(text: &mut String, max_chars: usize) {
 pub struct SinkFilter {
     /// Regex pattern against host alias.
     pub host: Option<String>,
-    /// Regex pattern against session display name or stable session id.
+    /// Regex pattern against session display name.
     pub session: Option<String>,
+    /// Regex pattern against stable tmux session id.
+    pub session_id: Option<String>,
     /// Regex pattern against "session:window_index".
     pub window: Option<String>,
     /// Regex pattern against pane_id or "session:window.pane".
@@ -453,6 +455,14 @@ impl SinkFilter {
         }
     }
 
+    /// Filter matching a specific stable tmux session id (exact match).
+    pub fn for_session_id(session_id: &str) -> Self {
+        SinkFilter {
+            session_id: Some(format!("^{}$", regex::escape(session_id))),
+            ..Default::default()
+        }
+    }
+
     /// Filter matching a specific pane by pane_id (exact match, e.g. `%5`).
     pub fn for_pane(pane_id: &str) -> Self {
         SinkFilter {
@@ -469,12 +479,22 @@ impl SinkFilter {
             ..Default::default()
         }
     }
+
+    /// Filter matching a specific host and stable tmux session id.
+    pub fn for_host_session_id(host: &str, session_id: &str) -> Self {
+        SinkFilter {
+            host: Some(format!("^{}$", regex::escape(host))),
+            session_id: Some(format!("^{}$", regex::escape(session_id))),
+            ..Default::default()
+        }
+    }
 }
 
 /// Compiled form of SinkFilter — regexes compiled once at subscribe() time.
 pub struct CompiledSinkFilter {
     host: Option<regex::Regex>,
     session: Option<regex::Regex>,
+    session_id: Option<regex::Regex>,
     window: Option<regex::Regex>,
     pane: Option<regex::Regex>,
 }
@@ -493,6 +513,7 @@ impl CompiledSinkFilter {
         Ok(CompiledSinkFilter {
             host: compile_opt(&filter.host)?,
             session: compile_opt(&filter.session)?,
+            session_id: compile_opt(&filter.session_id)?,
             window: compile_opt(&filter.window)?,
             pane: compile_opt(&filter.pane)?,
         })
@@ -507,9 +528,12 @@ impl CompiledSinkFilter {
             }
         }
         if let Some(ref re) = self.session {
-            let matches_name = re.is_match(output.session_name());
-            let matches_id = output.session_id().is_some_and(|id| re.is_match(id));
-            if !(matches_name || matches_id) {
+            if !re.is_match(output.session_name()) {
+                return false;
+            }
+        }
+        if let Some(ref re) = self.session_id {
+            if !output.session_id().is_some_and(|id| re.is_match(id)) {
                 return false;
             }
         }
@@ -549,12 +573,16 @@ impl CompiledSinkFilter {
             }
         }
         if let Some(ref re) = self.session {
-            let matches_name = scope.session.as_deref().is_some_and(|s| re.is_match(s));
-            let matches_id = scope
+            if !scope.session.as_deref().is_some_and(|s| re.is_match(s)) {
+                return false;
+            }
+        }
+        if let Some(ref re) = self.session_id {
+            if !scope
                 .session_id
                 .as_deref()
-                .is_some_and(|id| re.is_match(id));
-            if !(matches_name || matches_id) {
+                .is_some_and(|id| re.is_match(id))
+            {
                 return false;
             }
         }
@@ -2903,6 +2931,31 @@ mod tests {
         }
     }
 
+    fn make_output_with_session_id(
+        host: &str,
+        session: &str,
+        session_id: &str,
+        pane_id: &str,
+        content: &str,
+        seq: u64,
+    ) -> TargetOutput {
+        TargetOutput {
+            source: TargetAddress::Pane(PaneAddress {
+                pane_id: pane_id.to_string(),
+                session_id: Some(SessionId::for_test(session_id)),
+                session: session.to_string(),
+                window: 0,
+                pane: 0,
+            }),
+            host: host.to_string(),
+            content: content.to_string(),
+            raw_content: None,
+            sequence: seq,
+            fidelity: OutputFidelity::clean(),
+            timestamp: Instant::now(),
+        }
+    }
+
     fn make_session_output(host: &str, session: &str, content: &str) -> TargetOutput {
         TargetOutput {
             source: TargetAddress::Session(SessionInfo {
@@ -3972,6 +4025,34 @@ mod tests {
         assert!(compiled.matches(&make_output("h", "build", "%5", "y", 1)));
         assert!(!compiled.matches(&make_output("h", "build2", "%5", "y", 1)));
         assert!(!compiled.matches(&make_output("h", "rebuild", "%5", "y", 1)));
+    }
+
+    #[test]
+    fn sink_filter_for_session_id_exact_does_not_match_literal_id_name() {
+        let filter = SinkFilter::for_host_session_id("web-1", "$1");
+        let compiled = CompiledSinkFilter::compile(&filter).unwrap();
+
+        assert!(compiled.matches(&make_output_with_session_id(
+            "web-1", "build", "$1", "%5", "y", 1,
+        )));
+        assert!(!compiled.matches(&make_output_with_session_id(
+            "web-1", "$1", "$2", "%6", "wrong", 1,
+        )));
+        assert!(!compiled.matches(&make_output("web-1", "$1", "%7", "wrong", 1)));
+        assert!(!compiled.matches(&make_output_with_session_id(
+            "web-2", "build", "$1", "%8", "wrong", 1,
+        )));
+
+        assert!(
+            compiled.matches_marker_scope(&TimelineMarkerScope::for_host_session_identity(
+                "web-1", "build", "$1"
+            ))
+        );
+        assert!(
+            !compiled.matches_marker_scope(&TimelineMarkerScope::for_host_session_identity(
+                "web-1", "$1", "$2"
+            ))
+        );
     }
 
     #[test]
