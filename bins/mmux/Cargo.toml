@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 description = "TUI tmux session selector"
 
+# macOS host installs for this binary must re-sign the installed path before
+# ForceCommand use. See docs/CLI.md#local-build-and-macos-install.
 [[bin]]
 name = "mmux"
 path = "main.rs"
