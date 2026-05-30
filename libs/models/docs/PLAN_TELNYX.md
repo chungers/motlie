@@ -4,12 +4,13 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Rebased implementation sequencing around the landed `motlie-voice` crate from PR #209. The Telnyx slice now extends existing `PcmFrame`, conversion, and resampling surfaces, adds missing codecs/packetization/stages, requires anti-aliased resampling before live calls, and records Piper buffered/CUDA caveats. |
 | 2026-04-17 | @codex-macmini-telnyx | Tightened the execution policy further so no initial acceptance criteria, examples, or live validation steps can rely on Moonshine or Qwen3-TTS. The first complete Telnyx slice is Sherpa + Piper only. |
 | 2026-04-17 | @codex-macmini-telnyx | Tightened the PLAN so Sherpa + Piper is the explicit first vertical slice. Follow-on pairings such as Sherpa + Qwen3-TTS and Moonshine + Qwen3-TTS are now deferred to a later phase instead of treated as peer initial targets. |
 | 2026-04-16 | @codex-macmini-telnyx | Reworked the PLAN to match the new hierarchy: provider-agnostic `libs/voice`, Telnyx-specific `libs/voice_telnyx`, and a thin `bins/motlie-telnyx-gateway` binary. |
 | 2026-04-15 | @codex-macmini-telnyx | Initial Telnyx integration PLAN derived from `DESIGN_TELNYX.md`. Covers the transport gateway, codec normalization, inbound and outbound call flows, application orchestration, and validation. |
 
-Derived from [DESIGN_TELNYX.md](./DESIGN_TELNYX.md). This PLAN assumes brownfield work against the existing `libs/model` and `libs/models` speech stack and now explicitly separates provider-neutral voice infrastructure from the Telnyx-specific transport adapter.
+Derived from [DESIGN_TELNYX.md](./DESIGN_TELNYX.md). This PLAN assumes brownfield work against the existing `libs/model`, `libs/models`, and landed `libs/voice` (`motlie-voice`) speech stack and now explicitly separates provider-neutral voice infrastructure from the Telnyx-specific transport adapter.
 
 Execution policy for the initial implementation:
 
@@ -21,11 +22,11 @@ Execution policy for the initial implementation:
 
 ## Phase 1: Workspace and Crate Skeleton
 
-Create the provider-neutral voice layer, the Telnyx adapter layer, and the thin deployable binary.
+Extend the existing provider-neutral voice layer, add the Telnyx adapter layer, and add the thin deployable binary.
 
 ### 1.1 - Workspace shape
 
-- [ ] Add a new provider-agnostic voice crate at `libs/voice`.
+- [ ] Confirm `libs/voice` (`motlie-voice`) from PR #209 is the provider-agnostic voice crate to extend; do not add a second voice crate.
   DESIGN reference: `Overview`, `Crate Hierarchy and API Surfaces`
 - [ ] Add a new Telnyx adapter crate at `libs/voice_telnyx`.
   DESIGN reference: `Overview`, `Crate Hierarchy and API Surfaces`
@@ -38,7 +39,9 @@ Create the provider-neutral voice layer, the Telnyx adapter layer, and the thin 
 
 ### 1.2 - `libs/voice` module skeleton
 
-- [ ] Add `app/`, `runtime/`, `pipeline/`, `codec/`, and `telephony/` under `libs/voice/src/`.
+- [ ] Preserve and reuse the landed `libs/voice/src/{frame.rs,wav.rs,pipeline/convert.rs,pipeline/resample.rs}` surfaces.
+  DESIGN reference: `Crate Hierarchy and API Surfaces`, `Typed Media Values`
+- [ ] Add missing Telnyx-slice modules `app/`, `runtime/`, `codec/`, and `telephony/` under `libs/voice/src/`, and extend `pipeline/` with stage composition, reorder, chunk, and packetize modules.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
 - [ ] Add crate-level `error.rs` and `config.rs`.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
@@ -65,7 +68,9 @@ Define the reusable voice application surface in `libs/voice`.
 
 - [ ] Add provider-neutral static-dispatch ASR/TTS runtime wrappers in `libs/voice/src/runtime/`.
   DESIGN reference: `Static-Dispatch Model Injection`, `Crate Hierarchy and API Surfaces`
-- [ ] Map compiled `motlie_models::AsrModels` and `motlie_models::TtsModels` selections into closed runtime enums or generic wrappers.
+- [ ] Reuse `motlie_model::typed::{AudioBuf, StreamingTranscriber, TranscriptionSession, SpeechSynthesizer, SpeechStream, SynthesisRequest}` as the only model boundary for Telnyx ASR/TTS orchestration.
+  DESIGN reference: `Overview`, `Recommended ASR/TTS Stack`
+- [ ] Map compiled `motlie_models::AsrModels` and `motlie_models::TtsModels` selections into closed runtime enums or generic wrappers, reusing the capability-driven selection pattern from `bins/voice-agent`.
   DESIGN reference: `Closed-Enum Selection`, `Build-Time Model Surface`
 - [ ] Document the required `motlie-models` feature flags in code comments or crate docs near the runtime selection layer.
   DESIGN reference: `Build-Time Model Surface`
@@ -76,9 +81,11 @@ Build the provider-neutral media adaptation pipeline with explicit stage contrac
 
 ### 3.1 - Media values and markers
 
-- [ ] Add `EncodedFrame<C>` and `PcmFrame<R, Ch, E>` in `libs/voice/src/pipeline/types.rs`.
+- [ ] Reuse the existing `motlie_voice::frame::PcmFrame<const RATE_HZ, C, E>` over `motlie_model::typed::AudioBuf`; do not define a duplicate `PcmFrame`.
   DESIGN reference: `Typed Media Values`
-- [ ] Add marker types and marker traits in `libs/voice/src/pipeline/markers.rs`.
+- [ ] Add `EncodedFrame<C>` and transport-specific metadata/envelope types without moving sequence or end-of-stream semantics into a parallel PCM frame type.
+  DESIGN reference: `Typed Media Values`
+- [ ] Add only the missing marker types and marker traits in `libs/voice/src/pipeline/markers.rs`, reusing `motlie_model::typed::{Mono,Stereo,ChannelLayout}` for channels and const generics for sample rate.
   DESIGN reference: `Marker Traits`
 - [ ] Add stage traits in `libs/voice/src/pipeline/stage.rs`.
   DESIGN reference: `Stage API Surface`
@@ -92,8 +99,12 @@ Build the provider-neutral media adaptation pipeline with explicit stage contrac
 
 ### 3.3 - Core pipeline stages
 
-- [ ] Implement reorder, convert, resample, chunk, and packetize stages in `libs/voice/src/pipeline/`.
+- [ ] Extend the existing `motlie_voice::pipeline::{convert,resample}` modules rather than copying their decode/downmix/sample-conversion helpers into Telnyx code.
   DESIGN reference: `Media Adaptation Pipeline`, `Required Concrete Stage Inventory`
+- [ ] Implement reorder, chunk, and packetize stages in `libs/voice/src/pipeline/`.
+  DESIGN reference: `Media Adaptation Pipeline`, `Required Concrete Stage Inventory`
+- [ ] Replace or wrap the existing `LinearInterpolator` with an anti-aliased resampler (`rubato`, `dasp`, or a documented polyphase/windowed-sinc implementation) before live Telnyx validation.
+  DESIGN reference: `Behavior Contracts`, `Resampling and Format Normalization`
 - [ ] Implement provider-neutral G.711 and `L16` codecs in `libs/voice/src/codec/`.
   DESIGN reference: `Codec and Container Gaps`, `Crate Hierarchy and API Surfaces`
 - [ ] Keep stage responsibilities split; do not collapse decode, resample, and packetization into one opaque adapter.
@@ -112,8 +123,12 @@ Assemble and validate the first end-to-end Telnyx slice with the most proven rea
 ### 4.2 - Piper outbound assembly
 
 - [ ] Implement the Piper outbound path:
-  `22.05 kHz` `S16Le` -> target-rate resample -> telephony packetize -> Telnyx encode.
+  `AudioBuf<i16, 22_050, Mono>` -> target-rate resample -> telephony packetize -> Telnyx encode.
   DESIGN reference: `Concrete Combination Requirements`
+- [ ] Treat Piper as full-buffer synthesis followed by transport packetization; do not claim incremental TTS audio until the backend actually emits audio incrementally.
+  DESIGN reference: `Transport Streaming vs Incremental TTS`, `Latency Budget`
+- [ ] Record the Piper runtime mode used for validation. By default Piper is CPU-only because of #230; `MOTLIE_PIPER_ALLOW_CUDA=1` must be explicitly documented if enabled.
+  DESIGN reference: `Recommended TTS: Piper`, `Open Concerns`
 
 ### 4.3 - First-slice pairing constraints
 
@@ -123,7 +138,7 @@ Assemble and validate the first end-to-end Telnyx slice with the most proven rea
   DESIGN reference: `Concrete Backend Requirements Matrix`
 - [ ] Keep Moonshine and Qwen3-TTS support out of the first live Telnyx validation path even if the provider-neutral abstractions are designed broadly enough to support them later.
   DESIGN reference: `Recommended ASR/TTS Stack`, `Concrete Combination Requirements`
-- [ ] Do not add first-slice code paths, examples, or acceptance checks that require Moonshine-specific rechunking or Qwen3-TTS-specific `F32Le 24 kHz` conversion.
+- [ ] Do not add first-slice code paths, examples, or acceptance checks that require Moonshine-specific rechunking or Qwen3-TTS-specific `AudioBuf<f32, 24_000, Mono>` conversion.
   DESIGN reference: `Concrete Combination Requirements`
 
 ## Phase 5: Telnyx Protocol and Adapter Layer
@@ -212,8 +227,8 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
 
 - [ ] On Telnyx `start`, instantiate the correct typed inbound pipeline from `start.media_format` and the selected ASR runtime.
   DESIGN reference: `Telnyx Media Schema Mapping`, `Concrete Combination Requirements`
-- [ ] Convert ordered inbound media frames into `PcmChunk` values and call `push_chunk()`.
-  DESIGN reference: `Mapping Telnyx Frames to TranscriptionStream`
+- [ ] Convert ordered inbound media frames into the selected ASR runtime's typed input, such as `AudioBuf<i16, 16_000, Mono>`, and call `TranscriptionSession::ingest()`.
+  DESIGN reference: `Mapping Telnyx Frames to Typed ASR Input`
 - [ ] Forward `TranscriptionUpdate` partials and finals to application logic without exposing Telnyx types.
   DESIGN reference: `Feeding the Conversation Handler`
 
@@ -228,7 +243,7 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
 
 ### 7.3 - TTS to outbound media
 
-- [ ] Open `SpeechStream` from the selected `SpeechModel` when the application requests speech.
+- [ ] Call the selected `SpeechSynthesizer` and drain its returned `SpeechStream` when the application requests speech.
   DESIGN reference: `Returning TTS Audio`
 - [ ] Instantiate the correct typed outbound pipeline from the selected TTS runtime and Telnyx outbound codec.
   DESIGN reference: `Concrete Combination Requirements`
@@ -273,8 +288,14 @@ Make the first slice reviewable and runnable.
   TTS packet emission,
   session teardown.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
+- [ ] Add a provider-free adaptation test that feeds synthetic Telnyx-like `PCMU 8 kHz mono` payloads through G.711 decode, typed PCM, anti-aliased `8 kHz -> 16 kHz` resample, and a fake `StreamingTranscriber<Input = AudioBuf<i16, 16_000, Mono>>`.
+  DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
+- [ ] Add the symmetric outbound adaptation test from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding.
+  DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipeline`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
+- [ ] Add compile-fail or equivalent type-level tests for wrong rate, wrong channel layout, wrong sample type, and wrong stage order.
+  DESIGN reference: `Testing Scope for PLAN`, `Compile-Time Pipeline Assembly`
 
 ### 9.2 - Example and operator docs
 
@@ -298,6 +319,8 @@ Make the first slice reviewable and runnable.
   DESIGN reference: `Open Concerns`
 - [ ] Verify conversational latency is acceptable for the Sherpa + Piper first backend pair and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`
+- [ ] Document first-audio latency separately from outbound transport packet cadence, because Piper currently produces a full buffer before packetized streaming begins.
+  DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
 
 ## Phase 10: Follow-On Backend Pairings
 
@@ -307,8 +330,10 @@ After the Sherpa + Piper slice is implemented and validated end to end, broaden 
 
 - [ ] Implement and validate the Qwen3-TTS outbound path after the first slice is stable.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Measure the added cost of `F32Le` conversion plus `24 kHz` resampling in live telephony conditions.
+- [ ] Measure the added cost of `f32` to `i16` conversion plus `24 kHz` resampling in live telephony conditions.
   DESIGN reference: `Concrete Combination Requirements`, `Real-Time Latency Requirements`
+- [ ] Preserve the buffered-vs-incremental TTS distinction for Qwen3-TTS.cpp; current chunked output drains a completed buffer rather than streaming model generation.
+  DESIGN reference: `Transport Streaming vs Incremental TTS`
 
 ### 10.2 - Moonshine + Qwen3-TTS
 
