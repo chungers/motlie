@@ -74,6 +74,14 @@ impl FleetTargetSpec {
         Self::new(host_alias, TargetSpec::session(&session))
     }
 
+    /// Construct a session-level spec addressed by stable tmux session id.
+    pub fn session_id(
+        host_alias: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<Self> {
+        Self::new(host_alias, TargetSpec::session_id(session_id)?)
+    }
+
     /// Host alias portion of the spec.
     pub fn host_alias(&self) -> &str {
         &self.host_alias
@@ -87,6 +95,11 @@ impl FleetTargetSpec {
     /// Target's session name.
     pub fn session_name(&self) -> &str {
         self.target.session_name()
+    }
+
+    /// Target's stable tmux session id when this spec is id-addressed.
+    pub fn session_id_selector(&self) -> Option<&SessionId> {
+        self.target.session_id_selector()
     }
 
     fn level(&self) -> TargetLevel {
@@ -150,6 +163,12 @@ fn ensure_session_level(spec: &FleetTargetSpec) -> Result<()> {
     Ok(())
 }
 
+fn session_lookup(spec: &FleetTargetSpec) -> &str {
+    spec.session_id_selector()
+        .map(SessionId::as_str)
+        .unwrap_or_else(|| spec.session_name())
+}
+
 /// A cross-host target resolved against the current Fleet registry.
 #[derive(Clone)]
 pub struct ResolvedFleetTarget {
@@ -164,12 +183,27 @@ pub struct ResolvedFleetTarget {
 impl ResolvedFleetTarget {
     /// Exact OutputBus filter for this target's host/session.
     pub fn sink_filter(&self) -> SinkFilter {
-        SinkFilter::for_host_session(self.spec.host_alias(), self.spec.session_name())
+        SinkFilter::for_host_session(
+            self.spec.host_alias(),
+            self.target
+                .session_id()
+                .unwrap_or_else(|| self.target.session_name()),
+        )
     }
 
     /// Exact marker scope for gap/discontinuity markers for this target.
     pub fn marker_scope(&self) -> TimelineMarkerScope {
-        TimelineMarkerScope::for_host_session(self.spec.host_alias(), self.spec.session_name())
+        match self.target.session_id() {
+            Some(id) => TimelineMarkerScope::for_host_session_identity(
+                self.spec.host_alias(),
+                self.target.session_name(),
+                id,
+            ),
+            None => TimelineMarkerScope::for_host_session(
+                self.spec.host_alias(),
+                self.target.session_name(),
+            ),
+        }
     }
 }
 
@@ -319,9 +353,9 @@ impl Fleet {
 
         // Per-session monitors
         if let Some(monitors) = self.session_monitors.get(alias) {
-            for (name, handle) in monitors {
+            for (_, handle) in monitors {
                 statuses.push(SessionMonitorStatus {
-                    name: name.clone(),
+                    name: handle.display_name(),
                     health: handle.health(),
                 });
             }
@@ -330,7 +364,7 @@ impl Fleet {
         // failed/stopped sessions remain visible in health status (DC29).
         if let Some(monitor) = self.full_monitors.get(alias) {
             for session_name in monitor.all_sessions() {
-                if let Some(handle) = monitor.get(session_name) {
+                if let Some(handle) = monitor.get(&session_name) {
                     statuses.push(SessionMonitorStatus {
                         name: session_name.to_string(),
                         health: handle.health(),
@@ -409,10 +443,19 @@ impl Fleet {
             .ok_or_else(|| Error::NotFound(format!("host '{}' not registered", alias)))?
             .clone();
 
+        let target = host
+            .target(&TargetSpec::session(session))
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("session '{}' not found", session)))?;
+        let id = target
+            .session_id()
+            .ok_or_else(|| Error::State(format!("session '{}' has no session id", session)))?
+            .to_string();
+
         if self
             .session_monitors
             .get(alias)
-            .is_some_and(|monitors| monitors.iter().any(|(name, _)| name == session))
+            .is_some_and(|monitors| monitors.iter().any(|(key, _)| key == &id))
         {
             return Ok(());
         }
@@ -420,16 +463,16 @@ impl Fleet {
         if self
             .full_monitors
             .get(alias)
-            .is_some_and(|monitor| monitor.get(session).is_some())
+            .is_some_and(|monitor| monitor.get(&id).is_some() || monitor.get(session).is_some())
         {
             return Ok(());
         }
 
-        let monitor = host.start_monitoring_session(session).await?;
+        let monitor = host.start_monitoring_session_by_id(&id).await?;
         self.session_monitors
             .entry(alias.to_string())
             .or_default()
-            .push((session.to_string(), monitor));
+            .push((id, monitor));
         Ok(())
     }
 
@@ -437,8 +480,39 @@ impl Fleet {
     ///
     /// Window and pane specs monitor their containing session.
     pub async fn start_monitoring_target(&mut self, spec: &FleetTargetSpec) -> Result<()> {
-        self.start_monitoring_session(spec.host_alias(), spec.session_name())
-            .await
+        if let Some(id) = spec.session_id_selector() {
+            let host = self
+                .hosts
+                .get(spec.host_alias())
+                .ok_or_else(|| {
+                    Error::NotFound(format!("host '{}' not registered", spec.host_alias()))
+                })?
+                .clone();
+            let id = id.as_str().to_string();
+            if self
+                .session_monitors
+                .get(spec.host_alias())
+                .is_some_and(|monitors| monitors.iter().any(|(key, _)| key == &id))
+            {
+                return Ok(());
+            }
+            if self
+                .full_monitors
+                .get(spec.host_alias())
+                .is_some_and(|monitor| monitor.get(&id).is_some())
+            {
+                return Ok(());
+            }
+            let monitor = host.start_monitoring_session_by_id(&id).await?;
+            self.session_monitors
+                .entry(spec.host_alias().to_string())
+                .or_default()
+                .push((id, monitor));
+            Ok(())
+        } else {
+            self.start_monitoring_session(spec.host_alias(), spec.session_name())
+                .await
+        }
     }
 
     /// Stop monitoring the session addressed by a cross-host target spec.
@@ -453,19 +527,22 @@ impl Fleet {
         }
 
         if let Some(monitors) = self.session_monitors.get_mut(spec.host_alias()) {
-            if let Some(pos) = monitors
-                .iter()
-                .position(|(name, _)| name == spec.session_name())
-            {
+            let lookup = session_lookup(spec);
+            if let Some(pos) = monitors.iter().position(|(key, handle)| {
+                key == lookup || handle.display_name() == spec.session_name()
+            }) {
                 monitors.remove(pos);
             }
         }
 
         if let Some(host) = self.hosts.get(spec.host_alias()) {
-            let _ = host.stop_monitoring_session(spec.session_name());
+            let _ = match spec.session_id_selector() {
+                Some(id) => host.stop_monitoring_session_by_id(id.as_str()),
+                None => host.stop_monitoring_session(spec.session_name()),
+            };
         }
         if let Some(monitor) = self.full_monitors.get_mut(spec.host_alias()) {
-            monitor.remove_session(spec.session_name());
+            monitor.remove_session(session_lookup(spec));
         }
         Ok(())
     }
@@ -484,11 +561,10 @@ impl Fleet {
             ) {
                 return Ok(status);
             }
-            self.remove_session_monitor(target.host_alias(), target.session_name());
+            self.remove_session_monitor(target.host_alias(), session_lookup(target));
         }
 
-        self.start_monitoring_session(target.host_alias(), target.session_name())
-            .await?;
+        self.start_monitoring_target(target).await?;
         self.monitor_status_for_target(target).ok_or_else(|| {
             Error::State(format!(
                 "monitor for target '{}' was not registered after start",
@@ -528,12 +604,12 @@ impl Fleet {
         }
 
         if let Some(monitors) = self.session_monitors.get(target.host_alias()) {
-            if let Some((name, handle)) = monitors
-                .iter()
-                .find(|(name, _)| name == target.session_name())
-            {
+            let lookup = session_lookup(target);
+            if let Some((_, handle)) = monitors.iter().find(|(key, handle)| {
+                key == lookup || handle.display_name() == target.session_name()
+            }) {
                 return Some(SessionMonitorStatus {
-                    name: name.clone(),
+                    name: handle.display_name(),
                     health: handle.health(),
                 });
             }
@@ -541,9 +617,9 @@ impl Fleet {
 
         self.full_monitors
             .get(target.host_alias())
-            .and_then(|monitor| monitor.get(target.session_name()))
+            .and_then(|monitor| monitor.get(session_lookup(target)))
             .map(|handle| SessionMonitorStatus {
-                name: target.session_name().to_string(),
+                name: handle.display_name(),
                 health: handle.health(),
             })
     }
@@ -654,7 +730,7 @@ impl Fleet {
                     tags.insert(prefix.clone(), prefix_tags);
                 }
 
-                let target = FleetTargetSpec::session(alias.clone(), session.name.clone())?;
+                let target = FleetTargetSpec::session_id(alias.clone(), session.id.as_str())?;
                 snapshots.push(FleetSessionSnapshot {
                     host_alias: alias.clone(),
                     session,
@@ -761,10 +837,10 @@ impl Fleet {
                 spec.host_alias()
             )));
         }
-        Ok(TimelineMarkerScope::for_host_session(
-            spec.host_alias(),
-            spec.session_name(),
-        ))
+        Ok(match spec.session_id_selector() {
+            Some(id) => TimelineMarkerScope::for_host_session_id(spec.host_alias(), id.as_str()),
+            None => TimelineMarkerScope::for_host_session(spec.host_alias(), spec.session_name()),
+        })
     }
 
     /// Build timeline options with filters for the provided resolved targets.
@@ -833,13 +909,18 @@ impl Fleet {
             )));
         }
         let spec = match target.address() {
-            TargetAddress::Session(session) => TargetSpec::session(&session.name),
+            TargetAddress::Session(session) => TargetSpec::session_id(session.id.as_str())?,
             TargetAddress::Window(window) => {
-                TargetSpec::session(&window.session_name).window(window.index)
+                TargetSpec::session_id(window.session_id.clone())?.window(window.index)
             }
-            TargetAddress::Pane(pane) => TargetSpec::session(&pane.session)
-                .window(pane.window)
-                .pane(pane.pane)?,
+            TargetAddress::Pane(pane) => match pane.session_id.as_ref() {
+                Some(id) => TargetSpec::session_id(id.as_str())?
+                    .window(pane.window)
+                    .pane(pane.pane)?,
+                None => TargetSpec::session(&pane.session)
+                    .window(pane.window)
+                    .pane(pane.pane)?,
+            },
         };
         FleetTargetSpec::new(host_alias, spec)
     }
@@ -963,6 +1044,52 @@ mod tests {
         assert!(filter.matches(&output));
         output.host = "db-1".to_string();
         assert!(!filter.matches(&output));
+    }
+
+    #[tokio::test]
+    async fn fleet_timeline_helpers_for_id_spec_match_live_name_output_and_markers() {
+        let mut fleet = Fleet::new();
+        fleet
+            .register("web-1", local_host_aliased("web-1"))
+            .unwrap();
+        let spec = FleetTargetSpec::session_id("web-1", "$1").unwrap();
+        let bus = OutputBus::new();
+        let timeline = bus
+            .create_timeline("id-target", fleet.timeline_options_for_spec(&spec).unwrap())
+            .unwrap();
+
+        bus.publish(crate::sink::TargetOutput {
+            source: TargetAddress::Pane(crate::types::PaneAddress {
+                pane_id: "%5".to_string(),
+                session_id: Some(SessionId::new("$1").unwrap()),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+            host: "web-1".to_string(),
+            content: "live output\n".to_string(),
+            raw_content: None,
+            sequence: 1,
+            fidelity: crate::types::OutputFidelity::default(),
+            timestamp: std::time::Instant::now(),
+        });
+        bus.publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session_identity("web-1", "build", "$1"),
+            "live marker",
+        );
+        bus.publish_discontinuity_for(fleet.timeline_marker_scope(&spec).unwrap(), "manual marker");
+
+        let page = timeline
+            .render_after(
+                crate::sink::TimelineCursor::default(),
+                crate::sink::RenderOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(page.text.contains("live output"), "{}", page.text);
+        assert!(page.text.contains("live marker"), "{}", page.text);
+        assert!(page.text.contains("manual marker"), "{}", page.text);
     }
 
     #[tokio::test]
@@ -1103,8 +1230,9 @@ mod tests {
     async fn fleet_monitor_recovery_publishes_resume_and_snapshot_markers() {
         let mock = crate::transport::MockTransport::new()
             .with_response("list-sessions", "__MOTLIE_S__ build $1 100 0 1  200\n")
+            .with_response("list-sessions", "__MOTLIE_S__ build $1 100 0 1  200\n")
             .with_response("list-sessions", "build $1 100 0 1  200\n")
-            .with_response("list-panes", "%5 build 0 0 title bash 123 80 24 1\n")
+            .with_response("list-panes", "%5 $1 build 0 0 title bash 123 80 24 1\n")
             .with_response("capture-pane", "snapshot\n")
             .with_shell_sequence(vec![b"%output %5 before\n".to_vec()])
             .with_shell_sequence(vec![b"%output %5 after\n".to_vec()]);
@@ -1224,7 +1352,7 @@ mod tests {
         assert_eq!(snapshots[0].host_alias, "web-1");
         assert_eq!(
             snapshots[0].target,
-            FleetTargetSpec::session("web-1", "build").unwrap()
+            FleetTargetSpec::session_id("web-1", "$1").unwrap()
         );
         assert_eq!(
             snapshots[0].tags.get("app").unwrap(),

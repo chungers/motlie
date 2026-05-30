@@ -6,7 +6,7 @@ use crate::keys::KeySequence;
 use crate::transport::{shell_escape_arg, tmux_prefix, TransportKind};
 use crate::types::{
     validate_session_env_var_name, validate_session_env_var_value, validate_session_tag_value,
-    CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionEnvVar, SessionTag,
+    CreateSessionOptions, CreateWindowOptions, PaneAddress, SessionEnvVar, SessionId, SessionTag,
     SessionTagPrefix, SplitDirection, SplitPaneOptions, SplitSize, StatusLeft, StatusLeftLength,
     StatusStyle, TmuxSocket, WindowInfo, WindowStyle,
 };
@@ -56,21 +56,22 @@ fn parse_created_window(output: &str) -> Result<WindowInfo> {
 fn parse_created_pane(output: &str) -> Result<PaneAddress> {
     let line = output.trim();
     let fields = crate::discovery::parse_escaped_fields(line);
-    if fields.len() < 4 {
+    if fields.len() < 5 {
         return Err(Error::Command(format!(
-            "malformed split-pane output (expected 4 fields): {}",
+            "malformed split-pane output (expected 5 fields): {}",
             line
         )));
     }
-    let window: u32 = fields[2]
+    let window: u32 = fields[3]
         .parse()
-        .map_err(|_| Error::Parse(format!("invalid window_index: {}", fields[2])))?;
-    let pane: u32 = fields[3]
+        .map_err(|_| Error::Parse(format!("invalid window_index: {}", fields[3])))?;
+    let pane: u32 = fields[4]
         .parse()
-        .map_err(|_| Error::Parse(format!("invalid pane_index: {}", fields[3])))?;
+        .map_err(|_| Error::Parse(format!("invalid pane_index: {}", fields[4])))?;
     Ok(PaneAddress {
         pane_id: fields[0].clone(),
-        session: fields[1].clone(),
+        session_id: Some(SessionId::new(fields[1].clone())?),
+        session: fields[2].clone(),
         window,
         pane,
     })
@@ -207,7 +208,7 @@ pub async fn split_pane_with_prefix(
     opts: &SplitPaneOptions,
 ) -> Result<PaneAddress> {
     let mut cmd = format!(
-        "{} split-window -P -F '#{{q:pane_id}} #{{q:session_name}} #{{q:window_index}} #{{q:pane_index}}'",
+        "{} split-window -P -F '#{{q:pane_id}} #{{q:session_id}} #{{q:session_name}} #{{q:window_index}} #{{q:pane_index}}'",
         prefix
     );
 
@@ -1387,8 +1388,8 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_with_all_options_builds_expected_command() {
-        let expected = "tmux split-window -P -F '#{q:pane_id} #{q:session_name} #{q:window_index} #{q:pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
-        let mock = MockTransport::new().with_response(expected, "%9 build 1 1");
+        let expected = "tmux split-window -P -F '#{q:pane_id} #{q:session_id} #{q:session_name} #{q:window_index} #{q:pane_index}' -h -l 40% -c '/tmp/project' -t 'build:1.0' 'htop'";
+        let mock = MockTransport::new().with_response(expected, "%9 $0 build 1 1");
         let transport = TransportKind::Mock(mock);
         let opts = SplitPaneOptions {
             direction: SplitDirection::Horizontal,
@@ -1401,6 +1402,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pane.pane_id, "%9");
+        assert_eq!(pane.session_id.as_ref().unwrap().as_str(), "$0");
         assert_eq!(pane.session, "build");
         assert_eq!(pane.window, 1);
         assert_eq!(pane.pane, 1);
