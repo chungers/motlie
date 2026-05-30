@@ -16,6 +16,9 @@ metrics-runtime = ["dep:sysinfo", "dep:tracing"]
 
 [dependencies]
 async-trait = "0.1.89"
+schemars.workspace = true
+serde.workspace = true
+serde_json = { version = "1.0.149", features = ["raw_value"] }
 sysinfo = { version = "0.36.1", optional = true }
 thiserror.workspace = true
 tracing = { version = "0.1", optional = true }

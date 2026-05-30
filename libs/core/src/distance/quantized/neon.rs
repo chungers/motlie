@@ -55,7 +55,7 @@ pub unsafe fn dot_1bit(query: &[f32], code: &[u8]) -> f32 {
         let code_byte = *code.get_unchecked(byte_idx);
 
         // First 4 bits
-        let bit0 = (code_byte >> 0) & 1;
+        let bit0 = code_byte & 1;
         let bit1 = (code_byte >> 1) & 1;
         let bit2 = (code_byte >> 2) & 1;
         let bit3 = (code_byte >> 3) & 1;

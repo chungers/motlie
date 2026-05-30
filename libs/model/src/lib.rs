@@ -15,20 +15,31 @@ pub mod metrics;
 #[cfg(feature = "metrics-runtime")]
 pub mod metrics_runtime;
 pub mod speech;
+pub mod tool;
 pub mod transcription;
+pub mod typed;
 pub mod units;
 
-pub use chat::{ChatMessage, ChatRole, ContentPart};
+pub use chat::{ChatMessage, ChatMessageError, ChatRole, ContentPart};
 pub use embedding::{Embedding, EmbeddingDistance, EmbeddingNormalization, EmbeddingSpec};
 pub use eval::EvalTrack;
 pub use generation::{
-    ChatRequest, ChatResponse, CompletionRequest, CompletionResponse, GenerationParams,
+    ChatFinishReason, ChatRequest, ChatResponse, CompletionRequest, CompletionResponse,
+    GenerationParams, GenerationUsage, ThinkingMode,
 };
 pub use metrics::{EmbeddingMetrics, ModelMetricSnapshot, RuntimeMetrics, TextGenerationMetrics};
-pub use speech::{SpeechModel, SpeechParams, SpeechRequest, SpeechStream, VoiceConditioning};
-pub use transcription::{
-    AudioSpec, PcmChunk, PcmEncoding, TranscriptSegment, TranscriptionModel, TranscriptionParams,
-    TranscriptionStream, TranscriptionUpdate,
+pub use speech::SpeechParams;
+pub use tool::{
+    Tool, ToolArgumentError, ToolArguments, ToolCall, ToolCallError, ToolCallId, ToolCallIdError,
+    ToolChoice, ToolInputSchema, ToolName, ToolNameError, ToolSchemaError, ToolSpec,
+};
+pub use transcription::{TranscriptSegment, TranscriptionParams, TranscriptionUpdate};
+pub use typed::{
+    stream_speech_into_asr, AudioBuf, AudioTransform, BatchTranscriber, BufferedSpeechChunkStream,
+    BufferedSpeechSynthesizer, BufferedVoiceCloneSynthesizer, CloneReference, Compose,
+    I16MonoResampler, I16ToF32, IdentityTransform, Mono, SpeechStream as TypedSpeechStream,
+    SpeechSynthesizer as TypedSpeechSynthesizer, Stereo, StreamingTranscriber, SynthesisRequest,
+    TranscriptionSession, VoiceCloneSynthesizer,
 };
 pub use units::{Bytes, Milliseconds, Tokens, TokensPerSecond};
 
@@ -84,6 +95,7 @@ pub enum BackendKind {
     LlamaCpp,
     MistralRs,
     Ort,
+    Qwen3TtsCpp,
     SherpaOnnx,
     WhisperCpp,
 }
@@ -143,8 +155,10 @@ pub enum CapabilityKind {
     Embeddings,
     Ocr,
     Speech,
+    ToolUse,
     Transcription,
     Vision,
+    VoiceClone,
 }
 
 /// Normalized content kinds used in capability introspection.
@@ -166,6 +180,21 @@ pub enum InteractionStyle {
     Streaming,
 }
 
+/// Delivery shape for transcription capabilities.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TranscriptDelivery {
+    Batch,
+    StreamFinal,
+    StreamPartial,
+}
+
+/// Audio generation shape for speech-synthesis capabilities.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SpeechGeneration {
+    Buffered,
+    Streaming,
+}
+
 /// Introspective description of a supported capability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityDescriptor {
@@ -174,10 +203,12 @@ pub struct CapabilityDescriptor {
     pub inputs: Vec<ContentKind>,
     pub outputs: Vec<ContentKind>,
     pub interaction: InteractionStyle,
+    pub transcription_delivery: Option<TranscriptDelivery>,
+    pub speech_generation: Option<SpeechGeneration>,
 }
 
 impl CapabilityDescriptor {
-    pub fn new(
+    fn new(
         kind: CapabilityKind,
         summary: &'static str,
         inputs: Vec<ContentKind>,
@@ -190,6 +221,8 @@ impl CapabilityDescriptor {
             inputs,
             outputs,
             interaction,
+            transcription_delivery: None,
+            speech_generation: None,
         }
     }
 
@@ -243,24 +276,93 @@ impl CapabilityDescriptor {
         )
     }
 
-    pub fn transcription_stream() -> Self {
+    pub fn tool_use() -> Self {
+        Self::new(
+            CapabilityKind::ToolUse,
+            "Tool definitions, assistant tool calls, and tool-result turns on the chat surface.",
+            vec![ContentKind::Text, ContentKind::StructuredJson],
+            vec![ContentKind::Text, ContentKind::StructuredJson],
+            InteractionStyle::MultiTurn,
+        )
+    }
+
+    pub fn transcription_batch() -> Self {
         Self::new(
             CapabilityKind::Transcription,
-            "Streaming voice-to-text transcription from PCM audio chunks.",
+            "Batch voice-to-text transcription from complete audio input.",
+            vec![ContentKind::Audio],
+            vec![ContentKind::Text],
+            InteractionStyle::Batch,
+        )
+        .with_transcription_delivery(TranscriptDelivery::Batch)
+    }
+
+    pub fn transcription_stream_final_only() -> Self {
+        Self::new(
+            CapabilityKind::Transcription,
+            "Streaming voice-to-text transcription from PCM audio chunks with final transcript delivery on session completion.",
             vec![ContentKind::Audio],
             vec![ContentKind::Text],
             InteractionStyle::Streaming,
         )
+        .with_transcription_delivery(TranscriptDelivery::StreamFinal)
+    }
+
+    pub fn transcription_stream_partial() -> Self {
+        Self::new(
+            CapabilityKind::Transcription,
+            "Streaming voice-to-text transcription from PCM audio chunks with partial transcript updates.",
+            vec![ContentKind::Audio],
+            vec![ContentKind::Text],
+            InteractionStyle::Streaming,
+        )
+        .with_transcription_delivery(TranscriptDelivery::StreamPartial)
+    }
+
+    pub fn transcription_stream() -> Self {
+        Self::transcription_stream_partial()
+    }
+
+    pub fn speech_buffered() -> Self {
+        Self::new(
+            CapabilityKind::Speech,
+            "Buffered text-to-speech synthesis that returns full audio before chunked consumption.",
+            vec![ContentKind::Text],
+            vec![ContentKind::Audio],
+            InteractionStyle::RequestResponse,
+        )
+        .with_speech_generation(SpeechGeneration::Buffered)
     }
 
     pub fn speech_stream() -> Self {
         Self::new(
             CapabilityKind::Speech,
-            "Streaming text-to-speech synthesis with PCM audio output.",
+            "Streaming text-to-speech synthesis with incremental PCM audio output.",
             vec![ContentKind::Text],
             vec![ContentKind::Audio],
             InteractionStyle::Streaming,
         )
+        .with_speech_generation(SpeechGeneration::Streaming)
+    }
+
+    pub fn voice_clone() -> Self {
+        Self::new(
+            CapabilityKind::VoiceClone,
+            "Reference-conditioned voice cloning on the speech synthesis surface.",
+            vec![ContentKind::Text, ContentKind::Audio],
+            vec![ContentKind::Audio],
+            InteractionStyle::RequestResponse,
+        )
+    }
+
+    fn with_transcription_delivery(mut self, delivery: TranscriptDelivery) -> Self {
+        self.transcription_delivery = Some(delivery);
+        self
+    }
+
+    fn with_speech_generation(mut self, generation: SpeechGeneration) -> Self {
+        self.speech_generation = Some(generation);
+        self
     }
 }
 
@@ -292,6 +394,27 @@ impl Capabilities {
         &self.descriptors
     }
 
+    pub fn descriptor_for(&self, capability: CapabilityKind) -> Option<&CapabilityDescriptor> {
+        self.descriptors
+            .iter()
+            .find(|descriptor| descriptor.kind == capability)
+    }
+
+    pub fn interaction_for(&self, capability: CapabilityKind) -> Option<InteractionStyle> {
+        self.descriptor_for(capability)
+            .map(|descriptor| descriptor.interaction)
+    }
+
+    pub fn transcription_delivery_for(&self) -> Option<TranscriptDelivery> {
+        self.descriptor_for(CapabilityKind::Transcription)
+            .and_then(|descriptor| descriptor.transcription_delivery)
+    }
+
+    pub fn speech_generation_for(&self) -> Option<SpeechGeneration> {
+        self.descriptor_for(CapabilityKind::Speech)
+            .and_then(|descriptor| descriptor.speech_generation)
+    }
+
     pub fn supports(&self, capability: CapabilityKind) -> bool {
         self.kinds.contains(&capability)
     }
@@ -315,6 +438,14 @@ impl Capabilities {
         ])
     }
 
+    pub fn chat_completion_and_tool_use() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::chat(),
+            CapabilityDescriptor::completion(),
+            CapabilityDescriptor::tool_use(),
+        ])
+    }
+
     pub fn multimodal_chat_and_vision() -> Self {
         Self::new(vec![
             CapabilityDescriptor::multimodal_chat(),
@@ -322,12 +453,42 @@ impl Capabilities {
         ])
     }
 
-    pub fn transcription_stream_only() -> Self {
-        Self::new(vec![CapabilityDescriptor::transcription_stream()])
+    pub fn multimodal_chat_vision_and_tool_use() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::multimodal_chat(),
+            CapabilityDescriptor::vision(),
+            CapabilityDescriptor::tool_use(),
+        ])
     }
 
-    pub fn speech_stream_only() -> Self {
-        Self::new(vec![CapabilityDescriptor::speech_stream()])
+    pub fn chat_with_tool_use() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::chat(),
+            CapabilityDescriptor::tool_use(),
+        ])
+    }
+
+    pub fn transcription_batch_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::transcription_batch()])
+    }
+
+    pub fn transcription_stream_final_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::transcription_stream_final_only()])
+    }
+
+    pub fn transcription_stream_partial_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::transcription_stream_partial()])
+    }
+
+    pub fn speech_buffered_only() -> Self {
+        Self::new(vec![CapabilityDescriptor::speech_buffered()])
+    }
+
+    pub fn speech_buffered_with_voice_clone() -> Self {
+        Self::new(vec![
+            CapabilityDescriptor::speech_buffered(),
+            CapabilityDescriptor::voice_clone(),
+        ])
     }
 }
 
@@ -406,7 +567,9 @@ pub enum ArtifactPolicy {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum QuantizationBits {
     Four,
+    Five,
     Eight,
+    FloatEight,
 }
 
 /// Bundle-level declaration of which quantization precisions are supported
@@ -551,15 +714,21 @@ pub struct EmbeddingResponse {
 /// Bundle definition that can be started into a loaded handle.
 #[async_trait]
 pub trait ModelBundle: Send + Sync {
+    type Handle: BundleHandle;
+
     fn id(&self) -> &BundleId;
     fn metadata(&self) -> &BundleMetadata;
     fn capabilities(&self) -> &Capabilities;
-    async fn start(&self, options: StartOptions) -> Result<Box<dyn BundleHandle>, ModelError>;
+    async fn start(&self, options: StartOptions) -> Result<Self::Handle, ModelError>;
 }
 
 /// Loaded bundle state that exposes capability adapters.
 #[async_trait]
-pub trait BundleHandle: Send + Sync {
+pub trait BundleHandle: Send + Sync + Sized {
+    type Chat: ChatModel;
+    type Completion: CompletionModel;
+    type Embeddings: EmbeddingModel;
+
     fn descriptor(&self) -> &LoadedBundleDescriptor;
     fn capabilities(&self) -> &Capabilities;
     fn supports(&self, capability: CapabilityKind) -> bool {
@@ -569,18 +738,17 @@ pub trait BundleHandle: Send + Sync {
         None
     }
 
-    fn chat(&self) -> Result<&dyn ChatModel, ModelError>;
-    fn completion(&self) -> Result<&dyn CompletionModel, ModelError>;
-    fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError>;
-    fn speech(&self) -> Result<&dyn SpeechModel, ModelError>;
-    fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError>;
-
-    async fn shutdown(self: Box<Self>) -> Result<(), ModelError>;
+    fn chat(&self) -> Result<&Self::Chat, ModelError>;
+    fn completion(&self) -> Result<&Self::Completion, ModelError>;
+    fn embeddings(&self) -> Result<&Self::Embeddings, ModelError>;
+    async fn shutdown(self) -> Result<(), ModelError>;
 }
 
 /// Backend-specific loader for one or more checkpoint formats.
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
+    type Handle: BundleHandle;
+
     fn supported_formats(&self) -> &[CheckpointFormat];
     fn backend_kind(&self) -> BackendKind;
     fn capabilities(&self) -> &Capabilities;
@@ -590,7 +758,7 @@ pub trait BackendAdapter: Send + Sync {
         identity: &ModelIdentity,
         checkpoint: &ResolvedCheckpoint,
         options: StartOptions,
-    ) -> Result<Box<dyn BundleHandle>, ModelError>;
+    ) -> Result<Self::Handle, ModelError>;
 }
 
 /// Chat generation capability.
@@ -611,6 +779,46 @@ pub trait EmbeddingModel: Send + Sync {
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError>;
 }
 
+/// Marker model used when a bundle does not support chat generation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnsupportedChat;
+
+#[async_trait]
+impl ChatModel for UnsupportedChat {
+    async fn generate(&self, _request: ChatRequest) -> Result<ChatResponse, ModelError> {
+        Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
+    }
+}
+
+/// Marker model used when a bundle does not support text completion.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnsupportedCompletion;
+
+#[async_trait]
+impl CompletionModel for UnsupportedCompletion {
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ModelError> {
+        Err(ModelError::UnsupportedCapability(
+            CapabilityKind::Completion,
+        ))
+    }
+}
+
+/// Marker model used when a bundle does not support embeddings.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnsupportedEmbeddings;
+
+#[async_trait]
+impl EmbeddingModel for UnsupportedEmbeddings {
+    async fn embed(&self, _request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        Err(ModelError::UnsupportedCapability(
+            CapabilityKind::Embeddings,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +829,10 @@ mod tests {
 
     #[async_trait]
     impl BundleHandle for FakeHandle {
+        type Chat = UnsupportedChat;
+        type Completion = UnsupportedCompletion;
+        type Embeddings = Self;
+
         fn descriptor(&self) -> &LoadedBundleDescriptor {
             &self.descriptor
         }
@@ -629,31 +841,21 @@ mod tests {
             &self.descriptor.capabilities
         }
 
-        fn chat(&self) -> Result<&dyn ChatModel, ModelError> {
+        fn chat(&self) -> Result<&Self::Chat, ModelError> {
             Err(ModelError::UnsupportedCapability(CapabilityKind::Chat))
         }
 
-        fn completion(&self) -> Result<&dyn CompletionModel, ModelError> {
+        fn completion(&self) -> Result<&Self::Completion, ModelError> {
             Err(ModelError::UnsupportedCapability(
                 CapabilityKind::Completion,
             ))
         }
 
-        fn embeddings(&self) -> Result<&dyn EmbeddingModel, ModelError> {
+        fn embeddings(&self) -> Result<&Self::Embeddings, ModelError> {
             Ok(self)
         }
 
-        fn speech(&self) -> Result<&dyn SpeechModel, ModelError> {
-            Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-        }
-
-        fn transcription(&self) -> Result<&dyn TranscriptionModel, ModelError> {
-            Err(ModelError::UnsupportedCapability(
-                CapabilityKind::Transcription,
-            ))
-        }
-
-        async fn shutdown(self: Box<Self>) -> Result<(), ModelError> {
+        async fn shutdown(self) -> Result<(), ModelError> {
             Ok(())
         }
     }
@@ -725,6 +927,50 @@ mod tests {
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::EmbeddingVector]);
         assert_eq!(descriptor.interaction, InteractionStyle::Batch);
+    }
+
+    #[test]
+    fn tool_use_builtin_has_expected_shape() {
+        let descriptor = CapabilityDescriptor::tool_use();
+
+        assert_eq!(descriptor.kind, CapabilityKind::ToolUse);
+        assert_eq!(
+            descriptor.inputs,
+            vec![ContentKind::Text, ContentKind::StructuredJson]
+        );
+        assert_eq!(
+            descriptor.outputs,
+            vec![ContentKind::Text, ContentKind::StructuredJson]
+        );
+        assert_eq!(descriptor.interaction, InteractionStyle::MultiTurn);
+    }
+
+    #[test]
+    fn chat_with_tool_use_reports_tool_support() {
+        let capabilities = Capabilities::chat_with_tool_use();
+
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(capabilities.supports(CapabilityKind::ToolUse));
+        assert!(!capabilities.supports(CapabilityKind::Completion));
+    }
+
+    #[test]
+    fn chat_completion_with_tool_use_reports_all_supported_capabilities() {
+        let capabilities = Capabilities::chat_completion_and_tool_use();
+
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(capabilities.supports(CapabilityKind::Completion));
+        assert!(capabilities.supports(CapabilityKind::ToolUse));
+    }
+
+    #[test]
+    fn multimodal_chat_vision_with_tool_use_reports_all_supported_capabilities() {
+        let capabilities = Capabilities::multimodal_chat_vision_and_tool_use();
+
+        assert!(capabilities.supports(CapabilityKind::Chat));
+        assert!(capabilities.supports(CapabilityKind::Vision));
+        assert!(capabilities.supports(CapabilityKind::ToolUse));
+        assert!(!capabilities.supports(CapabilityKind::Completion));
     }
 
     #[test]
@@ -921,7 +1167,7 @@ mod tests {
         let chat = ChatRequest::default();
         let completion = CompletionRequest::default();
         let embeddings = EmbeddingRequest::default();
-        let speech = SpeechRequest::default();
+        let speech = SynthesisRequest::default();
         let multi = EmbeddingRequest {
             inputs: vec!["one".into(), "two".into()],
         };
@@ -933,35 +1179,84 @@ mod tests {
         assert!(completion.prompt.is_empty());
         assert!(embeddings.inputs.is_empty());
         assert!(speech.text.is_empty());
-        assert_eq!(speech.conditioning, None);
+        assert_eq!(speech.params, SpeechParams::default());
         assert!(chat.params.stop_sequences.is_empty());
         assert_eq!(multi.inputs.len(), 2);
         assert_eq!(response.vectors.len(), 2);
     }
 
     #[test]
-    fn speech_descriptor_uses_text_input_and_audio_output() {
+    fn speech_buffered_descriptor_uses_text_input_and_audio_output() {
+        let descriptor = CapabilityDescriptor::speech_buffered();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Speech);
+        assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
+        assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
+        assert_eq!(
+            descriptor.speech_generation,
+            Some(SpeechGeneration::Buffered)
+        );
+    }
+
+    #[test]
+    fn speech_stream_descriptor_uses_streaming_interaction() {
         let descriptor = CapabilityDescriptor::speech_stream();
 
         assert_eq!(descriptor.kind, CapabilityKind::Speech);
         assert_eq!(descriptor.inputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
+        assert_eq!(
+            descriptor.speech_generation,
+            Some(SpeechGeneration::Streaming)
+        );
     }
 
     #[test]
-    fn transcription_descriptor_uses_audio_input_and_streaming_interaction() {
-        let descriptor = CapabilityDescriptor::transcription_stream();
+    fn transcription_batch_descriptor_uses_audio_input_and_batch_interaction() {
+        let descriptor = CapabilityDescriptor::transcription_batch();
+
+        assert_eq!(descriptor.kind, CapabilityKind::Transcription);
+        assert_eq!(descriptor.inputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.outputs, vec![ContentKind::Text]);
+        assert_eq!(descriptor.interaction, InteractionStyle::Batch);
+        assert_eq!(
+            descriptor.transcription_delivery,
+            Some(TranscriptDelivery::Batch)
+        );
+    }
+
+    #[test]
+    fn transcription_stream_descriptor_uses_audio_input_and_streaming_interaction() {
+        let descriptor = CapabilityDescriptor::transcription_stream_partial();
 
         assert_eq!(descriptor.kind, CapabilityKind::Transcription);
         assert_eq!(descriptor.inputs, vec![ContentKind::Audio]);
         assert_eq!(descriptor.outputs, vec![ContentKind::Text]);
         assert_eq!(descriptor.interaction, InteractionStyle::Streaming);
+        assert_eq!(
+            descriptor.transcription_delivery,
+            Some(TranscriptDelivery::StreamPartial)
+        );
     }
 
     #[test]
-    fn transcription_stream_only_capabilities_supports_transcription_but_not_chat() {
-        let capabilities = Capabilities::transcription_stream_only();
+    fn voice_clone_descriptor_is_separate_from_speech_transport() {
+        let descriptor = CapabilityDescriptor::voice_clone();
+
+        assert_eq!(descriptor.kind, CapabilityKind::VoiceClone);
+        assert_eq!(
+            descriptor.inputs,
+            vec![ContentKind::Text, ContentKind::Audio]
+        );
+        assert_eq!(descriptor.outputs, vec![ContentKind::Audio]);
+        assert_eq!(descriptor.interaction, InteractionStyle::RequestResponse);
+    }
+
+    #[test]
+    fn transcription_batch_only_capabilities_supports_transcription_but_not_chat() {
+        let capabilities = Capabilities::transcription_batch_only();
 
         assert!(capabilities.supports(CapabilityKind::Transcription));
         assert!(!capabilities.supports(CapabilityKind::Chat));
@@ -969,52 +1264,58 @@ mod tests {
     }
 
     #[test]
-    fn speech_stream_only_capabilities_supports_speech_but_not_chat() {
-        let capabilities = Capabilities::speech_stream_only();
+    fn transcription_stream_partial_only_capabilities_supports_transcription_but_not_chat() {
+        let capabilities = Capabilities::transcription_stream_partial_only();
 
-        assert!(capabilities.supports(CapabilityKind::Speech));
+        assert!(capabilities.supports(CapabilityKind::Transcription));
         assert!(!capabilities.supports(CapabilityKind::Chat));
         assert!(!capabilities.supports(CapabilityKind::Embeddings));
     }
 
-    #[tokio::test]
-    async fn embedding_handle_rejects_transcription_cleanly() {
-        let handle = FakeHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: BundleId::new("embedder"),
-                display_name: "Embedder".into(),
-                capabilities: Capabilities::embeddings_only(),
-                quantization: QuantizationSupport::none(),
-                resolved_quantization: None,
-            },
-        };
+    #[test]
+    fn speech_buffered_with_voice_clone_supports_both_kinds() {
+        let capabilities = Capabilities::speech_buffered_with_voice_clone();
 
-        assert!(!handle.supports(CapabilityKind::Transcription));
-        assert!(matches!(
-            handle.transcription(),
-            Err(ModelError::UnsupportedCapability(
-                CapabilityKind::Transcription
-            ))
-        ));
+        assert!(capabilities.supports(CapabilityKind::Speech));
+        assert!(capabilities.supports(CapabilityKind::VoiceClone));
+        assert!(!capabilities.supports(CapabilityKind::Chat));
     }
 
-    #[tokio::test]
-    async fn embedding_handle_rejects_speech_cleanly() {
-        let handle = FakeHandle {
-            descriptor: LoadedBundleDescriptor {
-                id: BundleId::new("embedder"),
-                display_name: "Embedder".into(),
-                capabilities: Capabilities::embeddings_only(),
-                quantization: QuantizationSupport::none(),
-                resolved_quantization: None,
-            },
-        };
+    #[test]
+    fn speech_stream_capabilities_supports_speech_but_not_chat() {
+        let capabilities = Capabilities::new(vec![CapabilityDescriptor::speech_stream()]);
 
-        assert!(!handle.supports(CapabilityKind::Speech));
-        assert!(matches!(
-            handle.speech(),
-            Err(ModelError::UnsupportedCapability(CapabilityKind::Speech))
-        ));
+        assert!(capabilities.supports(CapabilityKind::Speech));
+        assert!(!capabilities.supports(CapabilityKind::VoiceClone));
+        assert!(!capabilities.supports(CapabilityKind::Chat));
+        assert!(!capabilities.supports(CapabilityKind::Embeddings));
+    }
+
+    #[test]
+    fn capabilities_can_query_descriptors_by_kind() {
+        let capabilities = Capabilities::speech_buffered_with_voice_clone();
+
+        assert_eq!(
+            capabilities.descriptor_for(CapabilityKind::Speech),
+            Some(&CapabilityDescriptor::speech_buffered())
+        );
+        assert_eq!(
+            capabilities.descriptor_for(CapabilityKind::VoiceClone),
+            Some(&CapabilityDescriptor::voice_clone())
+        );
+        assert_eq!(
+            capabilities.interaction_for(CapabilityKind::Speech),
+            Some(InteractionStyle::RequestResponse)
+        );
+        assert_eq!(
+            capabilities.speech_generation_for(),
+            Some(SpeechGeneration::Buffered)
+        );
+        assert_eq!(capabilities.transcription_delivery_for(), None);
+        assert_eq!(
+            capabilities.descriptor_for(CapabilityKind::Transcription),
+            None
+        );
     }
 
     #[test]

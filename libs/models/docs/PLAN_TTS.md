@@ -4,6 +4,11 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-04-21 | @codex-tts | Removed the non-functional Qwen3-TTS ONNX curated backend per issue `#210`, including the backend crate, `qwen3_tts_12hz_0_6b` bundle wiring, feature flags, and export runbook. Phase 6 is now retired historical context rather than an active supported slice. |
+| 2026-04-20 | @codex-tts | Removed the non-functional `tts_qwen3_onnx` binary from the shipped example set in the example-stream-output PR. The ONNX backend remains tracked separately, but the shipped TTS example set is now Piper plus `qwen3-tts.cpp`. |
+| 2026-04-17 | @codex-asr | Renamed the shipped TTS example targets and paths to `tts_piper`, `tts_qwen3_onnx`, and `tts_qwen3_tts_cpp`, and updated the plan references accordingly. |
+| 2026-04-16 | @codex-tts | Replaced the large `qwen3-tts.cpp` vendor tree with a pinned git submodule at `libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` and tightened the build/docs contract around `git submodule update --init --recursive` for fresh checkouts. |
+| 2026-04-16 | @codex-tts | Implemented the official backup TTS backend `motlie-model-qwen3-tts-cpp` with a submodule-backed C API wrapper, curated GGUF bundle wiring, and the `tts_v0.4` example. Validated real CPU synthesis from local GGUF artifacts, validated the optional CUDA build/clippy path on GB10, and documented the current local CUDA runtime fallback to CPU. |
 | 2026-04-15 | @cld-review-models | Implemented Phase 2 Qwen3-TTS slice: `motlie-model-qwen3-tts` backend with multi-model ONNX pipeline, vocabulary-based tokenizer, proper log-mel reference-audio conditioning, shape-preserving tensor pipeline, curated bundle `qwen3_tts_12hz_0_6b`, and `tts_v0.2` example with voice cloning. Runtime boundary is in-process ONNX via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite. |
 | 2026-04-14 | @codex-tts | Addressed PR #179 review R1 by documenting the Phase 1 batch-then-chunk stream behavior, the Piper-only `SpeechParams.seed` rejection, and the current `ort` RC session-mutability constraint while keeping the validated artifact-policy fix in scope. |
 | 2026-04-14 | @codex-tts | Implemented the Phase 1 Piper slice end to end: additive speech contracts in `libs/model`, shared ONNX helper extraction for Piper and sherpa, the `motlie-model-piper` backend, curated bundle/selector wiring in `libs/models`, the `models_tts_v0_1` example, and env-gated runtime verification. |
@@ -183,11 +188,11 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.1 - `.wav` example
 
-- [x] Add `examples/tts_v0.1/main.rs` as the first TTS example binary.
+- [x] Add `examples/tts_piper/main.rs` as the first TTS example binary.
   DESIGN reference: `API Sketch`, `Output Adapter Boundary`
 - [x] Support `--text <value>` and `--wav <path>` by opening a speech stream and collecting PCM into a `.wav` sink.
   DESIGN reference: `Streaming PCM API Contract`, `Output Adapter Boundary`
-- [x] Document expected preconditions and output in `examples/tts_v0.1/README.md`.
+- [x] Document expected preconditions and output in `examples/tts_piper/README.md`.
   DESIGN reference: `API Sketch`
 
 ### 4.2 - Local playback sink
@@ -211,7 +216,7 @@ Prove the first implementation slice through the simplest end-to-end caller path
 
 ### 4.4 - Example feature wiring
 
-- [x] Add a `models_tts_v0_1` example target with `required-features = ["model-piper-en-us-ljspeech-medium"]`.
+- [x] Add a `tts_piper` example target with `required-features = ["model-piper-en-us-ljspeech-medium"]`.
   DESIGN reference: `Feature Flag Design`
 - [x] Ensure the example builds both with default CPU features and, where available, with `piper-cuda`.
   DESIGN reference: `Feature Flag Design`
@@ -234,7 +239,7 @@ Land the first curated TTS slice with concrete verification commands and env-gat
   DESIGN reference: `Testing Scope for PLAN`
 - [x] `cargo test -p motlie-models --lib --no-default-features --features "model-piper-en-us-ljspeech-medium"`
   DESIGN reference: `Testing Scope for PLAN`
-- [x] `cargo build -p motlie-models --example models_tts_v0_1 --no-default-features --features "model-piper-en-us-ljspeech-medium"`
+- [x] `cargo build -p motlie-models --example tts_piper --no-default-features --features "model-piper-en-us-ljspeech-medium"`
   DESIGN reference: `Testing Scope for PLAN`
 
 ### 5.2 - Env-gated runtime checks
@@ -246,50 +251,62 @@ Land the first curated TTS slice with concrete verification commands and env-gat
 - [x] Record the expected artifact env var names and directory layout in the example README.
   DESIGN reference: `Curated Bundle Design in libs/models`
 
-## Phase 6: Qwen3-TTS Second Vertical Slice
+## Phase 6: Removed Qwen3-TTS ONNX Slice
 
-Only start this after the Piper slice is stable and the speech contract has held up under real usage.
+This phase is retired. The former ONNX-backed Qwen3-TTS slice was removed per
+issue `#210` because it never produced intelligible speech in live playback or
+ASR round-trip validation.
 
-### 6.1 - Backend/runtime boundary
+- [x] Remove `libs/model/backends/qwen3_tts/`.
+  DESIGN reference: `Removed Qwen3-TTS ONNX Slice`
+- [x] Remove `src/tts/qwen3_tts_12hz_0_6b.rs` and the associated catalog wiring.
+  DESIGN reference: `Removed Qwen3-TTS ONNX Slice`
+- [x] Remove `model-qwen3-tts-0_6b` and `qwen3-tts-cuda`.
+  DESIGN reference: `Removed Qwen3-TTS ONNX Slice`
+- [x] Remove the historical ONNX export runbook and exporter script from
+  `libs/models`.
+  DESIGN reference: `Removed Qwen3-TTS ONNX Slice`
 
-- [x] Add `libs/model/backends/qwen3_tts/` as a distinct backend family rather than extending the Piper backend.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
-  @cld-review-models 2026-04-15 — implemented as `motlie-model-qwen3-tts` with multi-model ONNX pipeline.
-- [x] Keep the public `SpeechRequest` / `SpeechStream` contract unchanged; all Qwen3-specific cloning and voice-design behavior must map onto the existing request surface.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Streaming PCM API Contract`
-  @cld-review-models 2026-04-15 — extended `VoiceConditioning::ReferenceAudio` with `reference_text: Option<String>` for prompted cloning.
-- [x] Choose and document the runtime boundary explicitly: in-process ONNX Runtime via `motlie-model-ort` with offline safetensors-to-ONNX export prerequisite.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
-  @cld-review-models 2026-04-15 — documented in DESIGN_TTS.md Phase 2 section and export guide.
+## Phase 7: `qwen3-tts.cpp` Backup Backend
 
-### 6.2 - Curated bundle shape and feature flags
+This phase is the official backup-TTS track attached to issue `#188`.
 
-- [x] Add `src/tts/qwen3_tts_12hz_0_6b.rs` with curated selector, descriptor, bundle, and registration.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
-  @cld-review-models 2026-04-15 — implemented with identity/checkpoint/descriptor/bundle/register pattern.
-- [x] Add `model-qwen3-tts-0_6b = ["dep:motlie-model-qwen3-tts"]`.
-  DESIGN reference: `Feature Flag Design`, `Phase-2 Qwen3-TTS Vertical Slice`
-- [x] Add `qwen3-tts-cuda = ["dep:motlie-model-qwen3-tts", "motlie-model-qwen3-tts/cuda"]`.
-  DESIGN reference: `Feature Flag Design`, `Phase-2 Qwen3-TTS Vertical Slice`
-- [x] Keep the Qwen3-TTS bundle out of `default` features until artifact size and runtime deployment are proven manageable.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+### 7.1 - Backend/runtime boundary
 
-### 6.3 - End-to-end validation
+- [x] Add `libs/model/backends/qwen3_tts_cpp/` as a distinct backend family that wraps the pinned submodule `qwen3tts_c_api.h` boundary rather than extending the ONNX-based Qwen backend.
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
+- [x] Reuse the public `SpeechRequest` / `SpeechStream` contract with buffered PCM chunk emission in front of whole-utterance native synthesis.
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`, `Streaming PCM API Contract`
+- [x] Support `VoiceConditioning::ReferenceAudio` through the native voice-sample cloning entry point.
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`, `Streaming PCM API Contract`
 
-- [x] Add one `.wav` parity example that uses the same sink contract as the Piper example.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Output Adapter Boundary`
-  @cld-review-models 2026-04-15 — `tts_v0.2` example with `--text` and `--wav` flags.
-- [x] Add one reference-audio cloning example using `VoiceConditioning::ReferenceAudio`.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`, `Streaming PCM API Contract`
-  @cld-review-models 2026-04-15 — `--reference-audio` and `--reference-text` flags in `tts_v0.2`.
-- [ ] Add one CUDA-oriented smoke test on GB10-class hardware when such hardware is available in the validation environment.
-  DESIGN reference: `Phase-2 Qwen3-TTS Vertical Slice`
+### 7.2 - Curated bundle shape and feature flags
 
-## Phase 7: Follow-On Breadth After the Vertical Slice
+- [x] Add `src/tts/qwen3_tts_cpp.rs` with curated selector, descriptor, bundle, and registration.
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
+- [x] Add `model-qwen3-tts-cpp = ["dep:motlie-model-qwen3-tts-cpp"]`.
+  DESIGN reference: `Feature Flag Design`, `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
+- [x] Add `qwen3-tts-cpp-cuda = ["dep:motlie-model-qwen3-tts-cpp", "motlie-model-qwen3-tts-cpp/cuda"]`.
+  DESIGN reference: `Feature Flag Design`, `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
+- [x] Resolve GGUF artifacts from the curated `koboldcpp/tts` cache layout or a direct model directory.
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`, `Distribution Considerations`
+
+### 7.3 - End-to-end validation
+
+- [x] Add the `.wav` parity example `tts_qwen3_tts_cpp`.
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`, `Output Adapter Boundary`
+- [x] Validate real CPU synthesis from local GGUF artifacts and confirm that the emitted `.wav` is valid 24 kHz mono output.
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
+- [x] Validate CPU build/test/clippy for `motlie-model-qwen3-tts-cpp` and the curated `motlie-models` example target.
+  DESIGN reference: `Testing Scope for PLAN`
+- [x] Validate the optional `qwen3-tts-cpp-cuda` build/clippy path on GB10-class Linux and document the current local runtime fallback message (`ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected`).
+  DESIGN reference: `Phase-3 qwen3-tts.cpp Backup Vertical Slice`
+
+## Phase 8: Follow-On Breadth After the Vertical Slice
 
 Only broaden after the Piper slice is stable and the speech contract has held up under real usage.
 
-### 7.1 - Higher-value follow-ons
+### 8.1 - Higher-value follow-ons
 
 - [ ] Add a second curated Piper voice, ideally one that exercises speaker selection or a different sample rate.
   DESIGN reference: `Recommended Vertical Slice`, `Distribution Considerations`
@@ -298,7 +315,7 @@ Only broaden after the Piper slice is stable and the speech contract has held up
 - [ ] Evaluate XTTS v2 as a secondary cloning-focused backend family after Qwen3-TTS if the product later prioritizes reference-audio conditioning over CPU-first simplicity.
   DESIGN reference: `Alternatives Considered`
 
-### 7.2 - Doc synchronization
+### 8.2 - Doc synchronization
 
 - [ ] Update `libs/model/docs/DESIGN.md` and `libs/model/docs/PLAN.md` if the implemented speech contract differs materially from this proposal.
   DESIGN reference: `Migration and Compatibility Strategy`
@@ -307,7 +324,7 @@ Only broaden after the Piper slice is stable and the speech contract has held up
 - [ ] Add changelog entries with `@codex-tts` and the implementation date in each modified doc.
   DESIGN reference: `Migration and Compatibility Strategy`
 
-## Phase 8: Commit and PR Hygiene
+## Phase 9: Commit and PR Hygiene
 
 - [ ] Keep commits scoped to the TTS contract, backend, curated bundle, examples, and related docs.
 - [ ] Do not stage harness files such as `AGENTS.md`.

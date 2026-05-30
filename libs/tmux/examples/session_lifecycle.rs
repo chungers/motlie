@@ -27,10 +27,13 @@ async fn main() -> anyhow::Result<()> {
     // 1. Create
     println!("Creating session '{}'...", session_name);
     let target = host
-        .create_session(session_name, &motlie_tmux::CreateSessionOptions {
-            window_name: Some("main".to_string()),
-            ..Default::default()
-        })
+        .create_session(
+            session_name,
+            &motlie_tmux::CreateSessionOptions {
+                window_name: Some("main".to_string()),
+                ..Default::default()
+            },
+        )
         .await?;
     println!(
         "  Created: target={}, level={:?}",

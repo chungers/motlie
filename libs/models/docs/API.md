@@ -6,6 +6,16 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-04-25 | @codex-gpt55: Added the Qwen3.6 27B GGUF example to the documented example set, including its manual validation commands and current text-only image fail-closed behavior. | Example Program, Notes |
+| 2026-04-21 | @codex-tts: Removed the non-functional Qwen3-TTS ONNX curated backend from `libs/models` per issue `#210`, including the `model-qwen3-tts-0_6b` / `qwen3-tts-cuda` feature flags, the curated bundle wiring, and the historical export runbook. The supported TTS catalog now contains only Piper and `qwen3-tts.cpp`. | Overview, Notes |
+| 2026-04-20 | @codex-tts: Added a concrete 2x3 TTS-to-ASR validation report covering the two shipped TTS examples against all three shipped ASR examples, with per-run input/output/WER tables and pipeline-level summary findings. | Example Program, Notes |
+| 2026-04-20 | @codex-tts: Added shell-ready SSH streaming examples for the two shipped TTS binaries (`tts_piper`, `tts_qwen3_tts_cpp`) using Homebrew `sox` via `/opt/homebrew/bin/play` on a remote macOS host, with short/medium/long stdin inputs. | Example Program, Notes |
+| 2026-04-20 | @codex-tts: Removed `tts_qwen3_onnx` from the shipped example set in this PR after reconfirming it is non-functional for real speech output. The documented shell-composition contract now covers only `tts_piper` and `tts_qwen3_tts_cpp` on the TTS side. | Example Program, Notes |
+| 2026-04-21 | @codex-tts: Updated the speech example shell contract so `--quiet` suppresses backend-native stderr as well as example-layer diagnostics by redirecting process stderr during quiet example execution. | Example Program, Notes |
+| 2026-04-20 | @codex-tts: Tightened the shipped speech example shell contract after live pipe validation. ASR examples now default to one final plain-text transcript on stdout, with `--partials` reserved for streaming event output on the streaming backends, and all shipped TTS/ASR examples now accept `--quiet` to suppress example-layer stderr diagnostics. | Example Program, Notes |
+| 2026-04-20 | @codex-tts: Documented the new example-level shell composition contract for speech I/O. Shipped TTS examples now default to stdout WAV when `--wav` is omitted, and shipped ASR examples now default to stdin WAV when `--wav` is omitted, so examples can compose directly through Unix pipes. | Example Program, Notes |
+| 2026-04-17 | @codex-asr: Renamed the shipped example targets from versioned names to capability/model names (`embeddings`, `chat_mistral_qwen3`, `chat_multimodal_gemma4`, `chat_gguf_gwen3_gemma4`, `asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`, `tts_piper`, `tts_qwen3_onnx`, `tts_qwen3_tts_cpp`) and updated the documented commands and paths. | Example Program, Notes |
+| 2026-04-18 | @codex-asr: Added `docs/BUILD_MODELS.md` as the canonical prerequisite/build guide for curated model backends and linked the API surface to the script/CI entry points that enforce those checks. | Overview, Notes |
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/models` catalog and descriptor shapes. Reflects the current scaffold, not the final loaded-bundle runtime API. | All |
 | 2026-04-07 | @codex-researcher: Added explicit curated artifact-control examples and updated the first embedding slice to use the real `mistralrs` builder path with separate pre-download support. | Overview, API Sketch, Notes |
 | 2026-04-07 | @codex-researcher: Added the `examples/v0.1` runnable example for the current curated embedding bundle. | Example Program |
@@ -40,6 +50,11 @@ The first concrete `libs/models` API is an in-memory `Catalog` of curated bundle
 - evaluation-track membership
 - curated bundle instantiation
 - explicit artifact download control separate from backend cache population
+
+For build/runtime prerequisites of the shipped model backends, see
+[`BUILD_MODELS.md`](./BUILD_MODELS.md). That document is the source of truth for
+host dependencies such as `libespeak-ng`, ONNX Runtime, and the `qwen3-tts.cpp`
+submodule.
 
 The goal is to make the product-facing bundle layer tangible before the runtime-facing bundle handle APIs are finalized.
 
@@ -223,8 +238,8 @@ assert_eq!(response.vectors[0].len(), 768);
 
 The runnable realization of this flow is:
 
-- [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
-- [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
+- [main.rs](../examples/embeddings/main.rs)
+- [README.md](../examples/embeddings/README.md)
 
 ### Selecting Bundles for an Evaluation Track
 
@@ -339,42 +354,111 @@ cargo run -p motlie-models --bin motlie-models-download -- --hf-token-env HF_TOK
 
 The runnable examples for this crate are:
 
-- `v0.1` embedding slice
-  - [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/README.md)
-  - [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.1/main.rs)
-- `v0.2` text-only chat slice
-  - [README.md](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.2/README.md)
-  - [main.rs](/Users/dchung/projects/claude-mistral/motlie/libs/models/examples/v0.2/main.rs)
-- `v0.3` Gemma multimodal slice
-  - [README.md](/tmp/motlie-issue142/libs/models/examples/v0.3/README.md)
-  - [main.rs](/tmp/motlie-issue142/libs/models/examples/v0.3/main.rs)
+- `embeddings` embedding slice
+  - [README.md](../examples/embeddings/README.md)
+  - [main.rs](../examples/embeddings/main.rs)
+- `chat_mistral_qwen3` text-only chat slice
+  - [README.md](../examples/chat_mistral_qwen3/README.md)
+  - [main.rs](../examples/chat_mistral_qwen3/main.rs)
+- `chat_multimodal_gemma4` Gemma multimodal slice
+  - [README.md](../examples/chat_multimodal_gemma4/README.md)
+  - [main.rs](../examples/chat_multimodal_gemma4/main.rs)
+- `chat_gguf_gwen3_gemma4` llama.cpp GGUF chat slice
+  - [README.md](../examples/chat_gguf_gwen3_gemma4/README.md)
+  - [main.rs](../examples/chat_gguf_gwen3_gemma4/main.rs)
+- `chat_multimodal_qwen3_6_27b` Qwen3.6 27B llama.cpp GGUF slice
+  - [README.md](../examples/chat_multimodal_qwen3_6_27b/README.md)
+  - [main.rs](../examples/chat_multimodal_qwen3_6_27b/main.rs)
 
-The versioned examples are explicit about which curated bundles are compiled into the binary. `v0.2` and `v0.3` remain single-bundle builds; `v0.1` is the embedding comparison example and is built with both embedding bundles compiled in.
+The examples are explicit about which curated bundles are compiled into the binary. `chat_mistral_qwen3`, `chat_multimodal_gemma4`, and `chat_multimodal_qwen3_6_27b` remain single-bundle builds; `chat_gguf_gwen3_gemma4` is the llama.cpp GGUF switching example; `embeddings` is the embedding comparison example and is built with both embedding bundles compiled in.
 
-Embedding example (`v0.1`):
+The shipped speech examples now also share a simple shell-composition contract:
+
+- TTS examples (`tts_piper`, `tts_qwen3_tts_cpp`) write WAV to `--wav <path>` when provided, or to stdout when `--wav` is omitted.
+- ASR examples (`asr_whisper`, `asr_sherpa_onnx`, `asr_moonshine`) read WAV from `--wav <path>` when provided, or from stdin when `--wav` is omitted.
+- Transcript text stays on stdout for ASR; diagnostics move to stderr in pipeline mode.
+- `--quiet` suppresses whole-process stderr for the active example, including
+  backend-native logs and panic diagnostics.
+
+That means simple pipelines like this are part of the intended example UX:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- "motlie curated model bundle"
-cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example models_v0_1 -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
+echo "hello world" | tts_piper > out.wav
+echo "hello world" | tts_piper | asr_whisper
 ```
 
-Text-only chat example (`v0.2`):
+The two shipped TTS examples are also documented to support remote macOS
+playback over SSH when Homebrew `sox` is installed on the remote host:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example models_v0_2 -- "What is Rust's ownership model?"
+printf '%s\n' "Hello from Piper over SSH." \
+| ./target/release/examples/tts_piper \
+    --quiet \
+    --artifact-root "$PIPER_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
 ```
 
-Gemma multimodal example (`v0.3`) with optional curated download:
+```sh
+printf '%s\n' "This is a medium-length qwen3-tts.cpp synthesis sample streamed over SSH to a macOS host for immediate playback through Homebrew sox." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+```sh
+printf '%s\n' "Piper and qwen3-tts.cpp can both handle longer shell-composed utterances where text arrives on standard input, the example writes a WAV container to standard output, SSH forwards that byte stream to the remote macOS host, and Homebrew sox plays it without any intermediate file staging." \
+| ./target/release/examples/tts_qwen3_tts_cpp \
+    --quiet \
+    --artifact-root "$QWEN3_TTS_CPP_ARTIFACT_ROOT" \
+| ssh motliehost '/opt/homebrew/bin/play -t wav -'
+```
+
+The concrete 2x3 TTS-to-ASR validation results for this shipped shell contract
+live in [VALIDATION_TTS_ASR_PIPELINES.md](./VALIDATION_TTS_ASR_PIPELINES.md).
+
+Embedding example (`embeddings`):
+
+```sh
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- "motlie curated model bundle"
+cargo run -p motlie-models --no-default-features --features "model-google-gemma-300m model-qwen3-embedding-06b" --example embeddings -- --embedding=qwen/qwen3_embedding_06b --precision=q8 "motlie curated model bundle"
+```
+
+Text-only chat example (`chat_mistral_qwen3`):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b --example chat_mistral_qwen3 -- "What is Rust's ownership model?"
+```
+
+Gemma multimodal example (`chat_multimodal_gemma4`) with optional curated download:
 
 ```sh
 cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --bin motlie-models-download -- --hf-token-env HF_TOKEN gemma4_e2b
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- "Describe ownership in one paragraph"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- "Describe ownership in one paragraph"
 ```
 
 Or:
 
 ```sh
-cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example models_v0_3 -- --download-artifacts "Describe ownership in one paragraph"
+cargo run -p motlie-models --no-default-features --features model-gemma4-e2b --example chat_multimodal_gemma4 -- --download-artifacts "Describe ownership in one paragraph"
+```
+
+llama.cpp GGUF chat example (`chat_gguf_gwen3_gemma4`):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-4b-gguf --example chat_gguf_gwen3_gemma4 -- "What is Rust's ownership model?"
+```
+
+Qwen3.6 27B GGUF example (`chat_multimodal_qwen3_6_27b`):
+
+```sh
+cargo run -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf --example chat_multimodal_qwen3_6_27b -- "Describe ownership in one paragraph"
+```
+
+Qwen3.6 CUDA build check:
+
+```sh
+cargo check -p motlie-models --no-default-features --features model-qwen3-6-27b-gguf,llama-cpp-cuda --example chat_multimodal_qwen3_6_27b
 ```
 
 ## Curator Implementation
@@ -408,13 +492,15 @@ For a new curated embedding bundle, the intended implementation checklist is:
 - `Catalog` now also owns curated bundle instantiation through registered constructors.
 - The preferred direct curated path is the bundle-family enum, such as `EmbeddingModels::GoogleGemma300m` or `EmbeddingModels::Qwen3Embedding06B`; `ModelSelector` is the parser-friendly wrapper above that.
 - Known selectors for bundles disabled by Cargo features should return `ModelsError::ModelUnavailable`, not a generic unknown-selector error.
-- The embedding caller path should be understandable by reading the `v0.1` example; the text-only chat caller path by reading `v0.2`; and the multimodal chat caller path by reading `v0.3`. The curator path should be understandable by reading the `google_gemma_300m`, `qwen3_embedding_06b`, `qwen3_4b`, or `gemma4_e2b` bundle modules and the checklist above.
+- The embedding caller path should be understandable by reading the `embeddings` example; the text-only chat caller path by reading `chat_mistral_qwen3`; the llama.cpp GGUF text caller path by reading `chat_gguf_gwen3_gemma4`; and the multimodal chat caller path by reading `chat_multimodal_gemma4`. Qwen3.6 currently follows the GGUF text path in `chat_multimodal_qwen3_6_27b` and fails closed for image input until llama.cpp `mtmd`/mmproj execution is wired and validated.
+- `chat_multimodal_qwen3_6_27b` is build/unit validated, including CPU and CUDA feature checks. Live generation validation with real Qwen3.6 27B artifacts remains a hardware/artifact-gated follow-up because the model is intentionally much larger than the default curated check set.
+- The shipped speech examples are now intentionally composable through Unix pipes. That contract lives at the example layer rather than the model-layer traits: TTS stdout is WAV, ASR stdin is WAV, and transcript text remains stdout-oriented.
 - Current runtime-metrics support in the examples comes from the `libs/model` handle contract and the `mistral` backend implementation. It uses `sysinfo` for current RSS on macOS and Linux and keeps peak RSS as the maximum sample observed by Motlie during the handle lifetime.
 - Curated artifact download is explicit and independent of the backend library's own cache-miss behavior. Backends consume the curated artifact policy through `StartOptions`. For regulated local bundles, `ArtifactPolicy::LocalOnly` is the intended fail-closed mode.
 - `embeddinggemma_300m` local-only startup depends on the full sentence-transformers module stack being present in the curated artifact root. That requirement is part of the bundle contract, not an ambient `mistralrs` cache behavior.
-- `qwen3_embedding_06b` currently advertises `QuantizationSupport::without_recommended([Q8])`, so `v0.1 --precision=q8` is supported for that bundle while omitted precision still means F32.
+- `qwen3_embedding_06b` currently advertises `QuantizationSupport::without_recommended([Q8])`, so `embeddings --precision=q8` is supported for that bundle while omitted precision still means F32.
 - Authentication for protected upstream artifacts belongs only to the out-of-band download/build path. The runtime/bundle startup path does not accept tokens and remains artifact-consumption only.
-- The `v0.1` example is now a two-bundle comparison binary. It prints `catalog-entry-count: 2`, lists the compiled embedding selectors, defaults to Gemma when `--embedding` is omitted, and still allows explicit `--embedding=...` selection for either curated embedder.
+- The `embeddings` example is now a two-bundle comparison binary. It prints `catalog-entry-count: 2`, lists the compiled embedding selectors, defaults to Gemma when `--embedding` is omitted, and still allows explicit `--embedding=...` selection for either curated embedder.
 
 ## Next Step
 

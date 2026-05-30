@@ -62,6 +62,79 @@ cargo run -p motlie-tmux-driver -- \
   ssh://localhost
 ```
 
+## Multi-host Mode
+
+Start the driver with `--multi-host` to manage more than one SSH-backed tmux host
+inside one driver session:
+
+```bash
+cargo run -p motlie-tmux-driver -- --multi-host
+```
+
+Then connect hosts from inside the REPL:
+
+```text
+connect ssh://dchung@motliehost?identity-file=/home/dchung/.ssh/motliehost as prod
+connect ssh://localhost as local
+use prod
+```
+
+Namespace rules:
+- `connect <ssh-uri> as <alias>` registers a host under a namespace alias
+- `use <alias>` sets the current/default alias for later bare tmux names
+- explicit `alias/...` always overrides the current alias
+- `disconnect <alias>` removes that alias from the driver session and shuts down driver-managed watch/stream state for it before dropping the connection
+
+### Namespace Command Matrix
+
+App-level commands:
+- `connect <ssh-uri> as <alias>`
+  - no current alias required
+  - creates a new namespace alias
+- `disconnect <alias>`
+  - no current alias required
+  - removes that namespace alias from the driver session
+- `use <alias>`
+  - no current alias required
+  - sets the default alias for later bare names
+- `connections`
+  - no current alias required
+  - lists registered aliases
+
+Tmux commands that accept an explicit namespaced session argument `alias/<session>`:
+- `new-window <session> <name> [--size <WxH>]`
+- `monitor start <session> [seconds]`
+- `history <session> [session...]`
+
+Tmux commands that accept an explicit namespaced target argument `alias/<target>`:
+- `split-pane <target> [--horizontal|--vertical] [--percent <n>|--cells <n>]`
+- `kill <target>`
+- `send <target> <text...>`
+- `keys <target> <keys...>`
+- `capture <target> <lines>`
+- `stream <target> [--mode <...>] [--lines <n>] [--interval <ms>] [--pattern <regex>]`
+
+Tmux commands that do not take an explicit alias-qualified resource argument and therefore require `use <alias>` first:
+- `create <name> [--size <WxH>] [--history <n>]`
+- `targets`
+- `mirror history [--after N] [--limit N]`
+- `mirror clear`
+- `tui on`
+- `tui off`
+- `monitor stop`
+- `upload <local_path> <remote_path> [--recursive]`
+- `download <remote_path> <local_path> [--recursive]`
+
+History resolution rule:
+- `history alpha/demo demo` resolves both session names against `alpha`
+- `history alpha/demo beta/build` is rejected because one `history` command may only operate within one alias
+- if there is no explicit alias anywhere in the command, bare session names resolve against the current alias from `use`
+
+Practical examples:
+- after `use prod`, `send demo:0.0 echo hi` means `prod/demo:0.0`
+- `send local/demo:0.0 echo hi` still goes to `local`, even if `prod` is current
+- `targets` without `use <alias>` fails with a missing-current-scope error in multi-host mode
+
 ## Behavior
 
 - `tui on` switches from the plain REPL into the split-screen TUI

@@ -1,9 +1,11 @@
 use crate::error::{Error, Result};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::Duration;
 
+use crate::attach::{self, AttachCommand, AttachOptions};
 use crate::capture;
 use crate::control;
 use crate::discovery;
@@ -122,10 +124,52 @@ pub struct HostHandle {
     inner: Arc<HostHandleInner>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEvent {
+    SessionsChanged,
+    SessionAdded {
+        id: String,
+        name: String,
+    },
+    SessionClosed {
+        id: String,
+        name: String,
+    },
+    SessionRenamed {
+        id: String,
+        old: String,
+        new: String,
+    },
+    ClientAttached {
+        session_id: String,
+    },
+    ClientDetached {
+        session_id: String,
+    },
+    Disconnect {
+        reason: String,
+    },
+}
+
+pub struct HostEventStream {
+    rx: mpsc::Receiver<HostEvent>,
+}
+
+impl HostEventStream {
+    pub async fn recv(&mut self) -> Option<HostEvent> {
+        self.rx.recv().await
+    }
+
+    pub fn into_receiver(self) -> mpsc::Receiver<HostEvent> {
+        self.rx
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionWatchOptions {
     pub queue_capacity: usize,
     pub history: HistoryOptions,
+    pub normalize: CaptureNormalizeMode,
 }
 
 impl Default for SessionWatchOptions {
@@ -133,8 +177,133 @@ impl Default for SessionWatchOptions {
         Self {
             queue_capacity: 64,
             history: HistoryOptions::default(),
+            normalize: CaptureNormalizeMode::Raw,
         }
     }
+}
+
+fn session_key(session: &SessionInfo) -> String {
+    session.id.as_str().to_string()
+}
+
+fn sessions_by_key(sessions: Vec<SessionInfo>) -> HashMap<String, SessionInfo> {
+    sessions
+        .into_iter()
+        .map(|session| (session_key(&session), session))
+        .collect()
+}
+
+fn diff_session_events(
+    previous: &HashMap<String, SessionInfo>,
+    current: &HashMap<String, SessionInfo>,
+) -> Vec<HostEvent> {
+    let mut events = Vec::new();
+    let mut changed = false;
+
+    for (id, session) in current {
+        if !previous.contains_key(id) {
+            changed = true;
+            events.push(HostEvent::SessionAdded {
+                id: id.clone(),
+                name: session.name.clone(),
+            });
+        }
+    }
+
+    for (id, session) in previous {
+        if !current.contains_key(id) {
+            changed = true;
+            events.push(HostEvent::SessionClosed {
+                id: id.clone(),
+                name: session.name.clone(),
+            });
+        }
+    }
+
+    for (id, before) in previous {
+        if let Some(after) = current.get(id) {
+            if before.name != after.name {
+                changed = true;
+                events.push(HostEvent::SessionRenamed {
+                    id: id.clone(),
+                    old: before.name.clone(),
+                    new: after.name.clone(),
+                });
+            }
+            let before_attached = before.is_attached();
+            let after_attached = after.is_attached();
+            if before_attached != after_attached {
+                changed = true;
+                if after_attached {
+                    events.push(HostEvent::ClientAttached {
+                        session_id: id.clone(),
+                    });
+                } else {
+                    events.push(HostEvent::ClientDetached {
+                        session_id: id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if changed {
+        events.insert(0, HostEvent::SessionsChanged);
+    }
+    events
+}
+
+async fn read_local_text_file(path: &Path, max_bytes: usize) -> Result<String> {
+    let metadata = tokio::fs::metadata(path).await?;
+    ensure_text_file_size(path, metadata.len(), max_bytes)?;
+    let text = tokio::fs::read_to_string(path).await?;
+    ensure_text_buffer_size(path, text.len(), max_bytes)?;
+    Ok(text)
+}
+
+fn read_local_text_file_blocking(path: &Path, max_bytes: usize) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    ensure_text_file_size(path, metadata.len(), max_bytes)?;
+    let text = std::fs::read_to_string(path)?;
+    ensure_text_buffer_size(path, text.len(), max_bytes)?;
+    Ok(text)
+}
+
+fn ensure_text_file_size(path: &Path, len: u64, max_bytes: usize) -> Result<()> {
+    if len > max_bytes as u64 {
+        return Err(Error::State(format!(
+            "text file {} is {} bytes, exceeding max_bytes {}",
+            path.display(),
+            len,
+            max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_text_buffer_size(path: &Path, len: usize, max_bytes: usize) -> Result<()> {
+    if len > max_bytes {
+        return Err(Error::State(format!(
+            "text file {} is {} bytes, exceeding max_bytes {}",
+            path.display(),
+            len,
+            max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn temporary_download_path(remote_path: &Path) -> PathBuf {
+    let name = remote_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("text");
+    std::env::temp_dir().join(format!(
+        "motlie-tmux-read-{}-{}-{name}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
 }
 
 pub struct SessionWatchHandle {
@@ -298,6 +467,125 @@ impl HostHandle {
         discovery::list_sessions_with_prefix(&self.inner.transport, &prefix).await
     }
 
+    /// Return the hostname reported by the host's tmux server.
+    ///
+    /// This uses `start-server ; display-message -p '#{host}'` through the
+    /// configured transport/socket, so callers get the name tmux itself uses
+    /// rather than an SSH URI alias or shell-level hostname probe.
+    ///
+    /// Note: this starts the tmux server if it is not already running.
+    pub async fn tmux_hostname(&self) -> Result<String> {
+        let prefix = self.inner.tmux_prefix().await;
+        control::tmux_hostname_with_prefix(&self.inner.transport, &prefix).await
+    }
+
+    /// List namespaced metadata tags for several session infos in one tmux call.
+    ///
+    /// This is intended for callers that enrich an existing session listing and
+    /// need to avoid per-session round trips. The returned map contains an entry
+    /// for every provided session id, with an empty vector when no matching tags
+    /// are set.
+    pub async fn list_tags_for_session_infos(
+        &self,
+        prefix: &str,
+        sessions: &[SessionInfo],
+    ) -> Result<HashMap<SessionId, Vec<SessionTag>>> {
+        let tag_prefix = SessionTagPrefix::new(prefix)?;
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        let targets = sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>();
+        let mut tags_by_target = control::list_session_tags_for_targets_with_prefix(
+            &self.inner.transport,
+            &tmux_prefix,
+            &targets,
+            &tag_prefix,
+        )
+        .await?;
+        Ok(sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.id.clone(),
+                    tags_by_target
+                        .remove(session.id.as_str())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
+    /// Read a UTF-8 text file from the host with a caller-provided size cap.
+    ///
+    /// This is intentionally narrower than arbitrary host command execution:
+    /// consumers that need metadata such as `/etc/motd` do not need to embed
+    /// shell syntax or redirection in application code.
+    pub async fn read_text_file(&self, path: &Path, max_bytes: usize) -> Result<String> {
+        match &self.inner.transport {
+            TransportKind::Local(_) => read_local_text_file(path, max_bytes).await,
+            TransportKind::Mock(_) | TransportKind::Ssh(_) => {
+                let local_path = temporary_download_path(path);
+                let opts = TransferOptions::default();
+                let download_result = self
+                    .inner
+                    .transport
+                    .download(path, &local_path, &opts)
+                    .await
+                    .and_then(|_| read_local_text_file_blocking(&local_path, max_bytes));
+                let cleanup_result = tokio::fs::remove_file(&local_path).await;
+                match (download_result, cleanup_result) {
+                    (Err(err), _) => Err(err),
+                    (Ok(_), Err(err)) if err.kind() != std::io::ErrorKind::NotFound => {
+                        Err(Error::Io(err))
+                    }
+                    (Ok(text), _) => Ok(text),
+                }
+            }
+        }
+    }
+
+    /// Watch host-level tmux session changes.
+    ///
+    /// The stream reconciles `list_sessions()` snapshots by stable session id
+    /// and emits typed events. It continues after transient failures by
+    /// reporting `Disconnect` and retrying on the next poll tick.
+    pub async fn watch_host_events(&self) -> Result<HostEventStream> {
+        let initial = self.list_sessions().await?;
+        let host = self.clone();
+        let (tx, rx) = mpsc::channel(128);
+
+        tokio::spawn(async move {
+            let mut previous = sessions_by_key(initial);
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                match host.list_sessions().await {
+                    Ok(current_sessions) => {
+                        let current = sessions_by_key(current_sessions);
+                        let events = diff_session_events(&previous, &current);
+                        previous = current;
+                        for event in events {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let event = HostEvent::Disconnect {
+                            reason: err.to_string(),
+                        };
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(HostEventStream { rx })
+    }
+
     /// List attached clients on this host (DC20, Phase 1.9b).
     pub async fn list_clients(&self) -> Result<Vec<ClientInfo>> {
         let prefix = self.inner.tmux_prefix().await;
@@ -321,7 +609,8 @@ impl HostHandle {
 
     /// Create a new tmux session. Returns a Target at session level (DC22).
     ///
-    /// Use `CreateSessionOptions` to set window size, history limit, etc.
+    /// Use `CreateSessionOptions` to set window size, history limit, initial
+    /// environment, etc.
     /// `CreateSessionOptions::default()` preserves pre-DC22 behavior.
     pub async fn create_session(&self, name: &str, opts: &CreateSessionOptions) -> Result<Target> {
         let prefix = self.inner.tmux_prefix().await;
@@ -332,7 +621,9 @@ impl HostHandle {
         let info = sessions
             .into_iter()
             .find(|s| s.name == name)
-            .ok_or_else(|| Error::State(format!("session '{}' created but not found in list", name)))?;
+            .ok_or_else(|| {
+                Error::State(format!("session '{}' created but not found in list", name))
+            })?;
 
         Ok(Target {
             inner: self.inner.clone(),
@@ -352,6 +643,31 @@ impl HostHandle {
             }))
     }
 
+    /// Get a Target for an existing session by stable tmux session id.
+    pub async fn session_by_id(&self, id: &str) -> Result<Option<Target>> {
+        let sessions = self.list_sessions().await?;
+        Ok(sessions
+            .into_iter()
+            .find(|s| s.id.as_str() == id)
+            .map(|info| Target {
+                inner: self.inner.clone(),
+                address: TargetAddress::Session(info),
+            }))
+    }
+
+    /// Build a session-level target from a [`SessionInfo`] returned by
+    /// [`list_sessions`](Self::list_sessions).
+    ///
+    /// This does not revalidate that the session still exists; callers should
+    /// use it when they are enriching a just-fetched listing and want to avoid
+    /// a second session-list query.
+    pub fn target_for_session_info(&self, session: SessionInfo) -> Target {
+        Target {
+            inner: self.inner.clone(),
+            address: TargetAddress::Session(session),
+        }
+    }
+
     /// Get a Target from a TargetSpec. Verifies the entity exists.
     pub async fn target(&self, spec: &TargetSpec) -> Result<Option<Target>> {
         let prefix = self.inner.tmux_prefix().await;
@@ -363,12 +679,10 @@ impl HostHandle {
         };
 
         match (spec.window_selector(), spec.pane_index()) {
-            (None, Some(_)) => {
-                return Err(Error::Parse(format!(
+            (None, Some(_)) => Err(Error::Parse(format!(
                     "invalid TargetSpec: pane requires window (got session='{}', window=None, pane=Some)",
                     spec.session_name()
-                )));
-            }
+                ))),
             (None, None) => Ok(Some(Target {
                 inner: self.inner.clone(),
                 address: TargetAddress::Session(session_info),
@@ -581,6 +895,15 @@ impl HostHandle {
         &self,
         session_name: &str,
     ) -> Result<SessionMonitorHandle> {
+        self.start_monitoring_session_with_normalize(session_name, CaptureNormalizeMode::Raw)
+            .await
+    }
+
+    async fn start_monitoring_session_with_normalize(
+        &self,
+        session_name: &str,
+        normalize: CaptureNormalizeMode,
+    ) -> Result<SessionMonitorHandle> {
         let bus = self.output_bus();
         let host_alias = self.inner.host_alias.clone();
         let session = session_name.to_string();
@@ -632,9 +955,10 @@ impl HostHandle {
             };
 
             loop {
-                let mut monitor = SessionMonitor::new(session.clone(), host_alias.clone())
-                    .with_socket(inner_ref.socket.clone())
-                    .with_tmux_bin(Some(resolved_tmux_bin.clone()));
+                let mut monitor =
+                    SessionMonitor::with_normalize(session.clone(), host_alias.clone(), normalize)
+                        .with_socket(inner_ref.socket.clone())
+                        .with_tmux_bin(Some(resolved_tmux_bin.clone()));
 
                 let exit = monitor
                     .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
@@ -670,8 +994,7 @@ impl HostHandle {
                             }
                             return Err(Error::State(format!(
                                 "monitor for '{}' exhausted {} reconnect attempts",
-                                session,
-                                max_retries
+                                session, max_retries
                             )));
                         }
 
@@ -853,7 +1176,10 @@ impl HostHandle {
         let subscription = bus.subscribe(vec![filter], opts.queue_capacity)?;
         let subscription_id = subscription.id();
 
-        match self.start_monitoring_session(session_name).await {
+        match self
+            .start_monitoring_session_with_normalize(session_name, opts.normalize)
+            .await
+        {
             Ok(monitor) => {
                 let history = subscription.history(opts.history.clone());
                 Ok(SessionWatchHandle {
@@ -901,9 +1227,9 @@ impl HostHandle {
             .monitor_signals
             .lock()
             .expect("monitor_signals lock poisoned");
-        let tx = signals
-            .get(session_name)
-            .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", session_name)))?;
+        let tx = signals.get(session_name).ok_or_else(|| {
+            Error::NotFound(format!("session '{}' not being monitored", session_name))
+        })?;
         let _ = tx.send(true);
         Ok(())
     }
@@ -961,9 +1287,7 @@ impl ExecHandle {
 
     /// Await completion, consuming the handle. Returns the final `ExecState`.
     pub async fn wait(self) -> Result<ExecState> {
-        self.task
-            .await
-            .map_err(Error::JoinError)?
+        self.task.await.map_err(Error::JoinError)?
     }
 }
 
@@ -971,6 +1295,517 @@ impl ExecHandle {
 pub struct Target {
     inner: Arc<HostHandleInner>,
     address: TargetAddress,
+}
+
+/// Prefix-scoped session metadata API.
+///
+/// Construct with [`Target::tags`]. The helper validates the tag namespace once
+/// and dispatches all operations against the target's stable session id.
+pub struct SessionTags<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+    prefix: SessionTagPrefix,
+}
+
+impl<'a> SessionTags<'a> {
+    /// Namespace prefix for this metadata scope.
+    pub fn prefix(&self) -> &str {
+        self.prefix.as_str()
+    }
+
+    /// Set one metadata tag in this namespace.
+    pub async fn set(&self, key: &str, value: &str) -> Result<()> {
+        control::set_session_tag_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+            key,
+            value,
+        )
+        .await
+    }
+
+    /// Remove one metadata tag from this namespace.
+    pub async fn unset(&self, key: &str) -> Result<()> {
+        control::unset_session_tag_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+            key,
+        )
+        .await
+    }
+
+    /// Read one metadata tag from this namespace.
+    ///
+    /// Returns `Ok(None)` when the tag is not present.
+    pub async fn read(&self, key: &str) -> Result<Option<String>> {
+        control::read_session_tag_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+            key,
+        )
+        .await
+    }
+
+    /// List all metadata tags in this namespace.
+    pub async fn list(&self) -> Result<Vec<SessionTag>> {
+        control::list_session_tags_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            &self.prefix,
+        )
+        .await
+    }
+}
+
+/// Post-creation session environment variable API.
+///
+/// Construct with [`Target::environment`]. The helper dispatches all operations
+/// against the target's stable session id.
+///
+/// tmux uses this environment for processes it starts after the write, such as
+/// new panes or windows. It cannot mutate shell processes that are already
+/// running in existing panes. Use [`CreateSessionOptions::initial_environment`]
+/// for variables that must be visible to the first pane process created by
+/// `new-session`.
+pub struct SessionEnvironment<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+}
+
+impl<'a> SessionEnvironment<'a> {
+    /// Set one environment variable in this session for future tmux-spawned
+    /// processes.
+    ///
+    /// This updates tmux's session environment table. It does not modify
+    /// already-running pane processes.
+    pub async fn set(&self, name: &str, value: &str) -> Result<()> {
+        control::set_session_env_var_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            name,
+            value,
+        )
+        .await
+    }
+
+    /// Remove one environment variable from this session for future
+    /// tmux-spawned processes.
+    ///
+    /// This updates tmux's session environment table. It does not modify
+    /// already-running pane processes.
+    pub async fn unset(&self, name: &str) -> Result<()> {
+        control::unset_session_env_var_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            name,
+        )
+        .await
+    }
+
+    /// Read one environment variable from this session.
+    ///
+    /// Returns `Ok(None)` when the variable is not present.
+    pub async fn read(&self, name: &str) -> Result<Option<String>> {
+        control::read_session_env_var_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            name,
+        )
+        .await
+    }
+
+    /// List all environment variables in this session.
+    pub async fn list(&self) -> Result<Vec<SessionEnvVar>> {
+        control::list_session_env_vars_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+}
+
+/// Local tmux status-bar override snapshot for one session.
+///
+/// This records only session-local values. `None` means the session did not
+/// have a local override and inherited a global/default value at snapshot time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatusSnapshot {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+/// Session-local tmux status-bar overrides to apply.
+///
+/// `None` means "leave this option unchanged"; use [`SessionStatus::restore`]
+/// with a [`SessionStatusSnapshot`] to unset options that were absent before a
+/// temporary override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionStatusOverrides {
+    pub style: Option<StatusStyle>,
+    pub left: Option<StatusLeft>,
+    pub left_length: Option<StatusLeftLength>,
+}
+
+/// Local tmux window-style override snapshot for one window.
+///
+/// This records only window-local values. `None` means the window inherited a
+/// global/default value at snapshot time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowStyleSnapshot {
+    pub window_id: String,
+    pub style: Option<WindowStyle>,
+    pub active_style: Option<WindowStyle>,
+}
+
+/// Local tmux window-style override snapshot for all windows in one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionWindowStylesSnapshot {
+    pub windows: Vec<WindowStyleSnapshot>,
+}
+
+/// Window-local tmux style overrides to apply to every current window in a session.
+///
+/// `None` means "leave this option unchanged"; use [`SessionWindowStyles::restore`]
+/// with a [`SessionWindowStylesSnapshot`] to unset options that were absent
+/// before a temporary override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionWindowStyleOverrides {
+    pub style: Option<WindowStyle>,
+    pub active_style: Option<WindowStyle>,
+}
+
+/// Session-local tmux status-bar API.
+///
+/// Construct with [`Target::status`]. The helper dispatches all operations
+/// against the target's stable session id and keeps snapshot/restore semantics
+/// in the library rather than in each application.
+pub struct SessionStatus<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+}
+
+impl<'a> SessionStatus<'a> {
+    /// Set this session's local tmux status bar style.
+    pub async fn set_style(&self, style: &StatusStyle) -> Result<()> {
+        control::set_session_status_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            style,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status bar style override.
+    ///
+    /// After this, inherited/global tmux status style applies.
+    pub async fn unset_style(&self) -> Result<()> {
+        control::unset_session_status_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Read this session's local status-style override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux style values.
+    pub async fn read_local_style(&self) -> Result<Option<StatusStyle>> {
+        control::read_local_session_status_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Set this session's local tmux status-left format.
+    pub async fn set_left(&self, status_left: &StatusLeft) -> Result<()> {
+        control::set_session_status_left_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            status_left,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status-left override.
+    pub async fn unset_left(&self) -> Result<()> {
+        control::unset_session_status_left_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Read this session's local status-left override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux status-left values.
+    pub async fn read_local_left(&self) -> Result<Option<StatusLeft>> {
+        control::read_local_session_status_left_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Set this session's local tmux status-left-length value.
+    pub async fn set_left_length(&self, length: StatusLeftLength) -> Result<()> {
+        control::set_session_status_left_length_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+            length,
+        )
+        .await
+    }
+
+    /// Remove this session's local tmux status-left-length override.
+    pub async fn unset_left_length(&self) -> Result<()> {
+        control::unset_session_status_left_length_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Read this session's local status-left-length override only.
+    ///
+    /// Returns `Ok(None)` when no session-local override is set; it does not
+    /// resolve inherited/global tmux status-left-length values.
+    pub async fn read_local_left_length(&self) -> Result<Option<StatusLeftLength>> {
+        control::read_local_session_status_left_length_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    /// Snapshot this session's local status-bar overrides.
+    pub async fn snapshot(&self) -> Result<SessionStatusSnapshot> {
+        Ok(SessionStatusSnapshot {
+            style: self.read_local_style().await?,
+            left_length: self.read_local_left_length().await?,
+            left: self.read_local_left().await?,
+        })
+    }
+
+    /// Apply the provided local status-bar overrides.
+    ///
+    /// Only fields set to `Some` are written; `None` leaves the corresponding
+    /// option unchanged. All requested writes are attempted and the first error,
+    /// if any, is returned.
+    pub async fn apply(&self, overrides: &SessionStatusOverrides) -> Result<()> {
+        let mut first_error = None;
+        if let Some(style) = &overrides.style {
+            remember_first_error(&mut first_error, self.set_style(style).await);
+        }
+        if let Some(length) = overrides.left_length {
+            remember_first_error(&mut first_error, self.set_left_length(length).await);
+        }
+        if let Some(left) = &overrides.left {
+            remember_first_error(&mut first_error, self.set_left(left).await);
+        }
+        first_error_result(first_error)
+    }
+
+    /// Restore a prior local status-bar snapshot.
+    ///
+    /// `Some` values are written back; `None` unsets the local option so the
+    /// inherited/global value applies again. All restore operations are
+    /// attempted and the first error, if any, is returned.
+    pub async fn restore(&self, snapshot: &SessionStatusSnapshot) -> Result<()> {
+        let mut first_error = None;
+        let style_result = match &snapshot.style {
+            Some(style) => self.set_style(style).await,
+            None => self.unset_style().await,
+        };
+        remember_first_error(&mut first_error, style_result);
+
+        let left_length_result = match snapshot.left_length {
+            Some(length) => self.set_left_length(length).await,
+            None => self.unset_left_length().await,
+        };
+        remember_first_error(&mut first_error, left_length_result);
+
+        let left_result = match &snapshot.left {
+            Some(left) => self.set_left(left).await,
+            None => self.unset_left().await,
+        };
+        remember_first_error(&mut first_error, left_result);
+        first_error_result(first_error)
+    }
+}
+
+/// Window-local tmux style API for all windows in one session.
+///
+/// Construct with [`Target::window_styles`]. Snapshot/apply/restore operates
+/// over the current window ids in the session using tmux's stable `@<id>`
+/// window targets.
+pub struct SessionWindowStyles<'a> {
+    transport: &'a TransportKind,
+    tmux_prefix: String,
+    session_id: String,
+}
+
+impl<'a> SessionWindowStyles<'a> {
+    /// Snapshot every current window's local `window-style` and
+    /// `window-active-style` overrides.
+    pub async fn snapshot(&self) -> Result<SessionWindowStylesSnapshot> {
+        let window_ids = self.window_ids().await?;
+        let mut windows = Vec::with_capacity(window_ids.len());
+        for window_id in window_ids {
+            windows.push(WindowStyleSnapshot {
+                style: self.read_local_style_for_window(&window_id).await?,
+                active_style: self.read_local_active_style_for_window(&window_id).await?,
+                window_id,
+            });
+        }
+        Ok(SessionWindowStylesSnapshot { windows })
+    }
+
+    /// Apply the provided window-local style overrides to every current window.
+    ///
+    /// Only fields set to `Some` are written; `None` leaves the corresponding
+    /// option unchanged. All requested writes are attempted and the first error,
+    /// if any, is returned.
+    pub async fn apply(&self, overrides: &SessionWindowStyleOverrides) -> Result<()> {
+        let mut first_error = None;
+        let window_ids = self.window_ids().await?;
+        for window_id in window_ids {
+            if let Some(style) = &overrides.style {
+                remember_first_error(
+                    &mut first_error,
+                    self.set_style_for_window(&window_id, style).await,
+                );
+            }
+            if let Some(style) = &overrides.active_style {
+                remember_first_error(
+                    &mut first_error,
+                    self.set_active_style_for_window(&window_id, style).await,
+                );
+            }
+        }
+        first_error_result(first_error)
+    }
+
+    /// Restore a prior local window-style snapshot.
+    ///
+    /// `Some` values are written back; `None` unsets the local option so the
+    /// inherited/global value applies again. All restore operations are
+    /// attempted and the first error, if any, is returned.
+    pub async fn restore(&self, snapshot: &SessionWindowStylesSnapshot) -> Result<()> {
+        let mut first_error = None;
+        for window in &snapshot.windows {
+            let style_result = match &window.style {
+                Some(style) => self.set_style_for_window(&window.window_id, style).await,
+                None => self.unset_style_for_window(&window.window_id).await,
+            };
+            remember_first_error(&mut first_error, style_result);
+
+            let active_style_result = match &window.active_style {
+                Some(style) => {
+                    self.set_active_style_for_window(&window.window_id, style)
+                        .await
+                }
+                None => self.unset_active_style_for_window(&window.window_id).await,
+            };
+            remember_first_error(&mut first_error, active_style_result);
+        }
+        first_error_result(first_error)
+    }
+
+    async fn window_ids(&self) -> Result<Vec<String>> {
+        control::list_session_window_ids_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            &self.session_id,
+        )
+        .await
+    }
+
+    async fn set_style_for_window(&self, window_id: &str, style: &WindowStyle) -> Result<()> {
+        control::set_window_style_with_prefix(self.transport, &self.tmux_prefix, window_id, style)
+            .await
+    }
+
+    async fn unset_style_for_window(&self, window_id: &str) -> Result<()> {
+        control::unset_window_style_with_prefix(self.transport, &self.tmux_prefix, window_id).await
+    }
+
+    async fn read_local_style_for_window(&self, window_id: &str) -> Result<Option<WindowStyle>> {
+        control::read_local_window_style_with_prefix(self.transport, &self.tmux_prefix, window_id)
+            .await
+    }
+
+    async fn set_active_style_for_window(
+        &self,
+        window_id: &str,
+        style: &WindowStyle,
+    ) -> Result<()> {
+        control::set_window_active_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            window_id,
+            style,
+        )
+        .await
+    }
+
+    async fn unset_active_style_for_window(&self, window_id: &str) -> Result<()> {
+        control::unset_window_active_style_with_prefix(self.transport, &self.tmux_prefix, window_id)
+            .await
+    }
+
+    async fn read_local_active_style_for_window(
+        &self,
+        window_id: &str,
+    ) -> Result<Option<WindowStyle>> {
+        control::read_local_window_active_style_with_prefix(
+            self.transport,
+            &self.tmux_prefix,
+            window_id,
+        )
+        .await
+    }
+}
+
+fn remember_first_error(first_error: &mut Option<Error>, result: Result<()>) {
+    if let Err(err) = result {
+        if first_error.is_none() {
+            *first_error = Some(err);
+        }
+    }
+}
+
+fn first_error_result(first_error: Option<Error>) -> Result<()> {
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 impl Target {
@@ -1064,6 +1899,127 @@ impl Target {
     /// The underlying TargetAddress.
     pub fn address(&self) -> &TargetAddress {
         &self.address
+    }
+
+    /// Return a prefix-scoped session metadata helper.
+    ///
+    /// Session tags are stored as tmux user-defined session options. For
+    /// `prefix = "mmux"` and `key = "role"`, the underlying option name is
+    /// `@mmux/role`.
+    ///
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
+    pub async fn tags(&self, prefix: &str) -> Result<SessionTags<'_>> {
+        self.tags_with_operation(prefix, "tags").await
+    }
+
+    /// Access this session's post-creation tmux environment.
+    ///
+    /// Writes affect processes tmux starts after the write. They do not mutate
+    /// shells already running in panes.
+    ///
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
+    pub async fn environment(&self) -> Result<SessionEnvironment<'_>> {
+        self.environment_with_operation("environment").await
+    }
+
+    /// Access this session's local tmux status-bar overrides.
+    ///
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
+    pub async fn status(&self) -> Result<SessionStatus<'_>> {
+        self.status_with_operation("status").await
+    }
+
+    /// Access window-local style overrides for every current window in this session.
+    ///
+    /// This resolves and captures the tmux command prefix up front, so it is
+    /// async when the host must discover the tmux binary for the transport.
+    pub async fn window_styles(&self) -> Result<SessionWindowStyles<'_>> {
+        self.window_styles_with_operation("window_styles").await
+    }
+
+    async fn tags_with_operation(
+        &self,
+        prefix: &str,
+        operation: &'static str,
+    ) -> Result<SessionTags<'_>> {
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
+        let prefix = SessionTagPrefix::new(prefix)?;
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        Ok(SessionTags {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
+            prefix,
+        })
+    }
+
+    async fn environment_with_operation(
+        &self,
+        operation: &'static str,
+    ) -> Result<SessionEnvironment<'_>> {
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        Ok(SessionEnvironment {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
+        })
+    }
+
+    async fn status_with_operation(&self, operation: &'static str) -> Result<SessionStatus<'_>> {
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        Ok(SessionStatus {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
+        })
+    }
+
+    async fn window_styles_with_operation(
+        &self,
+        operation: &'static str,
+    ) -> Result<SessionWindowStyles<'_>> {
+        let session_id = self
+            .session_for_operation(operation)?
+            .id
+            .as_str()
+            .to_string();
+        let tmux_prefix = self.inner.tmux_prefix().await;
+        Ok(SessionWindowStyles {
+            transport: &self.inner.transport,
+            tmux_prefix,
+            session_id,
+        })
+    }
+
+    fn session_for_operation(&self, operation: &'static str) -> Result<&SessionInfo> {
+        match &self.address {
+            TargetAddress::Session(session) => Ok(session),
+            TargetAddress::Window(_) => Err(Error::UnsupportedTarget {
+                operation,
+                level: TargetLevel::Window,
+            }),
+            TargetAddress::Pane(_) => Err(Error::UnsupportedTarget {
+                operation,
+                level: TargetLevel::Pane,
+            }),
+        }
     }
 
     // --- Navigation ---
@@ -1172,7 +2128,7 @@ impl Target {
         .await?;
 
         let pane = panes.into_iter().find(|p| {
-            p.address.pane == index && window_filter.map_or(true, |wi| p.address.window == wi)
+            p.address.pane == index && window_filter.is_none_or(|wi| p.address.window == wi)
         });
 
         Ok(pane.map(|p| Target {
@@ -1205,9 +2161,9 @@ impl Target {
             TargetAddress::Window(_) => Err(Error::Parse(
                 "new_window() requires a session target, got window".to_string(),
             )),
-            TargetAddress::Pane(_) => {
-                Err(Error::Parse("new_window() requires a session target, got pane".to_string()))
-            }
+            TargetAddress::Pane(_) => Err(Error::Parse(
+                "new_window() requires a session target, got pane".to_string(),
+            )),
         }
     }
 
@@ -1423,7 +2379,8 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                control::kill_session_with_prefix(&self.inner.transport, &prefix, &s.name).await
+                control::kill_session_with_prefix(&self.inner.transport, &prefix, s.id.as_str())
+                    .await
             }
             TargetAddress::Window(_) => {
                 control::kill_window_with_prefix(
@@ -1441,6 +2398,64 @@ impl Target {
                 )
                 .await
             }
+        }
+    }
+
+    /// Attach the current process PTY to this tmux session.
+    pub async fn attach_current_pty(&self) -> Result<crate::AttachExit> {
+        self.attach_current_pty_with_options(&AttachOptions::default())
+            .await
+    }
+
+    /// Attach the current process PTY to this tmux session with explicit
+    /// attach options.
+    pub async fn attach_current_pty_with_options(
+        &self,
+        options: &AttachOptions,
+    ) -> Result<crate::AttachExit> {
+        let command = self.attach_command_with_options(options).await?;
+        let options = *options;
+        tokio::task::spawn_blocking(move || {
+            attach::run_attach_command_with_options(command, options)
+        })
+        .await?
+    }
+
+    async fn attach_command_with_options(&self, options: &AttachOptions) -> Result<AttachCommand> {
+        let session = match &self.address {
+            TargetAddress::Session(session) => session,
+            TargetAddress::Window(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_current_pty",
+                    level: TargetLevel::Window,
+                });
+            }
+            TargetAddress::Pane(_) => {
+                return Err(Error::UnsupportedTarget {
+                    operation: "attach_current_pty",
+                    level: TargetLevel::Pane,
+                });
+            }
+        };
+        let target = session.id.as_str();
+        let tmux_bin = self.inner.resolve_tmux_bin().await;
+
+        match &self.inner.transport {
+            TransportKind::Local(_) => Ok(attach::local_attach_command(
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+            )),
+            TransportKind::Ssh(ssh) => Ok(attach::ssh_attach_command_with_options(
+                ssh.config(),
+                &tmux_bin,
+                self.inner.socket.as_ref(),
+                target,
+                options,
+            )),
+            TransportKind::Mock(_) => Err(Error::State(
+                "attach_current_pty is not supported for mock transports".to_string(),
+            )),
         }
     }
 
@@ -1462,7 +2477,7 @@ impl Target {
                 control::rename_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &s.name,
+                    s.id.as_str(),
                     new_name,
                 )
                 .await?;
@@ -1769,8 +2784,12 @@ impl Target {
         let handle = self.start_exec(command, timeout).await?;
         match handle.wait().await? {
             ExecState::Completed(output) => Ok(output),
-            ExecState::Unknown { reason } => Err(Error::State(format!("exec result unknown: {}", reason))),
-            ExecState::Running => Err(Error::State("internal error: Running after wait".to_string())),
+            ExecState::Unknown { reason } => {
+                Err(Error::State(format!("exec result unknown: {}", reason)))
+            }
+            ExecState::Running => Err(Error::State(
+                "internal error: Running after wait".to_string(),
+            )),
         }
     }
 }
@@ -1927,11 +2946,12 @@ impl HostHandle {
             inner: self.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: session_name.to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         }
     }
@@ -1964,10 +2984,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tmux_hostname_uses_tmux_host_format() {
+        let mock = MockTransport::new().with_response(
+            "tmux start-server \\; display-message -p '#{host}'",
+            "alpha\n",
+        );
+        let host = mock_host(mock);
+
+        let hostname = host.tmux_hostname().await.unwrap();
+
+        assert_eq!(hostname, "alpha");
+    }
+
+    #[tokio::test]
     async fn create_session_returns_target() {
-        let mock = MockTransport::new()
-            .with_default("")
-            .with_response("list-sessions", "test $0 1700000000 0 1 \n");
+        let mock = MockTransport::new().with_default("").with_response(
+            "list-sessions",
+            "__MOTLIE_S__ test $0 1700000000 0 1  1700000005\n",
+        );
         let host = mock_host(mock);
         let target = host
             .create_session("test", &Default::default())
@@ -1980,7 +3014,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_not_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "other $0 0 0 1 \n");
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ other $0 0 0 1  0\n");
         let host = mock_host(mock);
         let result = host.session("nonexistent").await.unwrap();
         assert!(result.is_none());
@@ -1988,7 +3023,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_found() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 1 2 \n");
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ build $0 0 1 2  0\n");
         let host = mock_host(mock);
         let target = host.session("build").await.unwrap();
         assert!(target.is_some());
@@ -1998,8 +3034,230 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_by_id_found() {
+        let mock = MockTransport::new().with_response(
+            "list-sessions",
+            "__MOTLIE_S__ build $7 0 1 2  0\n__MOTLIE_S__ other $8 0 0 1  0\n",
+        );
+        let host = mock_host(mock);
+        let target = host.session_by_id("$7").await.unwrap();
+        assert!(target.is_some());
+        let t = target.unwrap();
+        assert_eq!(t.level(), TargetLevel::Session);
+        assert_eq!(t.target_string(), "build");
+        assert_eq!(t.session_info().unwrap().id.as_str(), "$7");
+    }
+
+    #[tokio::test]
+    async fn session_by_id_not_found() {
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ build $0 0 1 2  0\n");
+        let host = mock_host(mock);
+        let target = host.session_by_id("$1").await.unwrap();
+        assert!(target.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_text_file_reads_mock_transport_file() {
+        let mock = MockTransport::new().with_file("/etc/motd", b"hello\n".to_vec());
+        let host = mock_host(mock);
+
+        let text = host
+            .read_text_file(Path::new("/etc/motd"), 64)
+            .await
+            .unwrap();
+
+        assert_eq!(text, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_enforces_size_cap() {
+        let mock = MockTransport::new().with_file("/etc/motd", b"too large".to_vec());
+        let host = mock_host(mock);
+
+        let err = host
+            .read_text_file(Path::new("/etc/motd"), 3)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("exceeding max_bytes"));
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("motlie-tmux-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    async fn write_test_file(name: &str, content: impl AsRef<[u8]>) -> PathBuf {
+        let path = unique_test_path(name);
+        tokio::fs::write(&path, content).await.unwrap();
+        path
+    }
+
+    async fn remove_test_file(path: &Path) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_missing_local_file() {
+        let host = HostHandle::local();
+        let missing = unique_test_path("missing");
+
+        let err = host.read_text_file(&missing, 64).await.unwrap_err();
+
+        assert!(err.to_string().contains("No such file"));
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_ok_for_empty_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("empty", b"").await;
+
+        let text = host.read_text_file(&path, 64).await.unwrap();
+        remove_test_file(&path).await;
+
+        assert_eq!(text, "");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_ok_for_normal_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("normal", b"hello\n").await;
+
+        let text = host.read_text_file(&path, 64).await.unwrap();
+        remove_test_file(&path).await;
+
+        assert_eq!(text, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_oversized_local_file() {
+        let host = HostHandle::local();
+        let path = write_test_file("oversized", vec![b'x'; 128]).await;
+
+        let err = host.read_text_file(&path, 64).await.unwrap_err();
+        remove_test_file(&path).await;
+
+        assert!(err.to_string().contains("max_bytes"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_text_file_returns_err_for_unreadable_local_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let host = HostHandle::local();
+        let path = write_test_file("unreadable", b"secret").await;
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let result = host.read_text_file(&path, 64).await;
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        remove_test_file(&path).await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn diff_session_events_reports_add_close_rename_and_client_state() {
+        let previous = sessions_by_key(vec![
+            SessionInfo {
+                name: "old".to_string(),
+                id: SessionId::for_test("$1"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+            SessionInfo {
+                name: "gone".to_string(),
+                id: SessionId::for_test("$2"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+        ]);
+        let current = sessions_by_key(vec![
+            SessionInfo {
+                name: "new".to_string(),
+                id: SessionId::for_test("$1"),
+                created: 0,
+                attached_count: 1,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+            SessionInfo {
+                name: "added".to_string(),
+                id: SessionId::for_test("$3"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            },
+        ]);
+
+        let events = diff_session_events(&previous, &current);
+        assert_eq!(events[0], HostEvent::SessionsChanged);
+        assert!(events.contains(&HostEvent::SessionAdded {
+            id: "$3".to_string(),
+            name: "added".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::SessionClosed {
+            id: "$2".to_string(),
+            name: "gone".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::SessionRenamed {
+            id: "$1".to_string(),
+            old: "old".to_string(),
+            new: "new".to_string(),
+        }));
+        assert!(events.contains(&HostEvent::ClientAttached {
+            session_id: "$1".to_string(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn kill_session_uses_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("kill-session -t 'build'", "used display name")
+            .with_response("kill-session -t '$7'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target.kill().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn target_spec_session_level() {
-        let mock = MockTransport::new().with_response("list-sessions", "build $0 0 0 1 \n");
+        let mock =
+            MockTransport::new().with_response("list-sessions", "__MOTLIE_S__ build $0 0 0 1  0\n");
         let host = mock_host(mock);
         let spec = TargetSpec::session("build");
         let t = host.target(&spec).await.unwrap();
@@ -2010,7 +3268,7 @@ mod tests {
     #[tokio::test]
     async fn children_session_lists_windows() {
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2 \n")
+            .with_response("list-sessions", "__MOTLIE_S__ build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 1 1 layout\n$0 build 1 editor 0 1 layout\n",
@@ -2114,6 +3372,447 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_tags_set_read_and_list() {
+        let mock = MockTransport::new()
+            .with_response("set-option -t '$0' @mmux/foo 'bar'", "")
+            .with_response(
+                "show-option -q -t '$0' @mmux/foo",
+                "@mmux/foo \"hello world\"\n",
+            )
+            .with_response(
+                "show-options -t '$0'",
+                "@mmux/foo \"hello world\"\n@other/foo nope\n@mmux/empty ''\n",
+            );
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let tags = target.tags("mmux").await.unwrap();
+
+        assert_eq!(tags.prefix(), "mmux");
+        tags.set("foo", "bar").await.unwrap();
+        let value = tags.read("foo").await.unwrap();
+        let listed = tags.list().await.unwrap();
+
+        assert_eq!(value, Some("hello world".to_string()));
+        assert_eq!(
+            listed,
+            vec![
+                SessionTag::new("mmux", "foo", "hello world").unwrap(),
+                SessionTag::new("mmux", "empty", "").unwrap(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_tags_unset() {
+        let mock = MockTransport::new().with_response("set-option -u -t '$0' @mmux/foo", "");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let tags = target.tags("mmux").await.unwrap();
+
+        tags.unset("foo").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_tag_read_missing_returns_none() {
+        let mock = MockTransport::new().with_response("show-option -q -t '$0' @mmux/missing", "");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let tags = target.tags("mmux").await.unwrap();
+
+        assert_eq!(tags.read("missing").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn session_tags_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("set-option -t '$7' @mmux/foo 'bar'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target
+            .tags("mmux")
+            .await
+            .unwrap()
+            .set("foo", "bar")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_environment_set_read_and_list() {
+        let mock = MockTransport::new()
+            .with_response("set-environment -t '$0' FOO 'bar'", "")
+            .with_response("show-environment -t '$0' FOO", "FOO=hello world\n")
+            .with_response(
+                "show-environment -t '$0'",
+                "FOO=hello world\n-REMOVED\nEMPTY=\nEQ=a=b\n",
+            );
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let env = target.environment().await.unwrap();
+
+        env.set("FOO", "bar").await.unwrap();
+        let value = env.read("FOO").await.unwrap();
+        let listed = env.list().await.unwrap();
+
+        assert_eq!(value, Some("hello world".to_string()));
+        assert_eq!(
+            listed,
+            vec![
+                SessionEnvVar::new("FOO", "hello world").unwrap(),
+                SessionEnvVar::new("EMPTY", "").unwrap(),
+                SessionEnvVar::new("EQ", "a=b").unwrap(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_environment_unset() {
+        let mock = MockTransport::new().with_response("set-environment -u -t '$0' FOO", "");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let env = target.environment().await.unwrap();
+
+        env.unset("FOO").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_environment_read_missing_returns_none() {
+        let mock = MockTransport::new().with_error(
+            "show-environment -t '$0' MISSING",
+            "unknown variable: MISSING",
+        );
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+        let env = target.environment().await.unwrap();
+
+        assert_eq!(env.read("MISSING").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn session_environment_uses_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-environment -t 'build'", "used display name")
+            .with_response("set-environment -t '$7' FOO 'bar'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+
+        target
+            .environment()
+            .await
+            .unwrap()
+            .set("FOO", "bar")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_status_style_set_read_and_unset_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("set-option -t '$7' status-style 'bg=blue,fg=white'", "")
+            .with_response(
+                "show-option -q -t '$7' status-style",
+                "status-style bg=green,fg=black\n",
+            )
+            .with_response("set-option -u -t '$7' status-style", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+        let status = target.status().await.unwrap();
+
+        status
+            .set_style(&StatusStyle::new("bg=blue,fg=white").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            status.read_local_style().await.unwrap(),
+            Some(StatusStyle::new("bg=green,fg=black").unwrap())
+        );
+        status.unset_style().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_status_left_set_read_and_unset_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("set-option -t '$7' status-left '#{=40:session_name}'", "")
+            .with_response("set-option -t '$7' status-left-length 40", "")
+            .with_response(
+                "show-option -q -t '$7' status-left-length",
+                "status-left-length 32\n",
+            )
+            .with_response("set-option -u -t '$7' status-left-length", "")
+            .with_response(
+                "show-option -q -t '$7' status-left",
+                "status-left \"#{session_name}\"\n",
+            )
+            .with_response("set-option -u -t '$7' status-left", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+        let status = target.status().await.unwrap();
+
+        status
+            .set_left(&StatusLeft::new("#{=40:session_name}").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            status.read_local_left().await.unwrap(),
+            Some(StatusLeft::new("#{session_name}").unwrap())
+        );
+        status.unset_left().await.unwrap();
+        status
+            .set_left_length(StatusLeftLength::new(40).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            status.read_local_left_length().await.unwrap(),
+            Some(StatusLeftLength::new(32).unwrap())
+        );
+        status.unset_left_length().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_status_snapshot_apply_and_restore_use_stable_session_id() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response(
+                "show-option -q -t '$7' status-style",
+                "status-style bg=green,fg=black\n",
+            )
+            .with_response(
+                "show-option -q -t '$7' status-left-length",
+                "status-left-length 32\n",
+            )
+            .with_response(
+                "show-option -q -t '$7' status-left",
+                "status-left \"#{session_name}\"\n",
+            )
+            .with_response("set-option -t '$7' status-style 'bg=blue,fg=white'", "")
+            .with_response("set-option -t '$7' status-left-length 50", "")
+            .with_response("set-option -t '$7' status-left '#{=50:session_name}'", "")
+            .with_response("set-option -t '$7' status-style 'bg=green,fg=black'", "")
+            .with_response("set-option -t '$7' status-left-length 32", "")
+            .with_response("set-option -t '$7' status-left '#{session_name}'", "");
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 1,
+                group: None,
+                activity: 0,
+            }),
+        };
+        let status = target.status().await.unwrap();
+
+        let snapshot = status.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot,
+            SessionStatusSnapshot {
+                style: Some(StatusStyle::new("bg=green,fg=black").unwrap()),
+                left: Some(StatusLeft::new("#{session_name}").unwrap()),
+                left_length: Some(StatusLeftLength::new(32).unwrap()),
+            }
+        );
+
+        let overrides = SessionStatusOverrides {
+            style: Some(StatusStyle::new("bg=blue,fg=white").unwrap()),
+            left: Some(StatusLeft::new("#{=50:session_name}").unwrap()),
+            left_length: Some(StatusLeftLength::new(50).unwrap()),
+        };
+        status.apply(&overrides).await.unwrap();
+        status.restore(&snapshot).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_window_styles_snapshot_apply_and_restore_use_stable_window_ids() {
+        let mock = MockTransport::new()
+            .with_error("set-option -t 'build'", "used display name")
+            .with_response("list-windows -t '$7'", "@2\n@5\n")
+            .with_response(
+                "show-option -q -t '@2' window-style",
+                "window-style bg=green,fg=black\n",
+            )
+            .with_response("show-option -q -t '@2' window-active-style", "")
+            .with_response("show-option -q -t '@5' window-style", "")
+            .with_response(
+                "show-option -q -t '@5' window-active-style",
+                "window-active-style bg=yellow,fg=black\n",
+            )
+            .with_response("list-windows -t '$7'", "@2\n@5\n")
+            .with_response("set-option -t '@2' window-style 'bg=black,fg=white'", "")
+            .with_response(
+                "set-option -t '@2' window-active-style 'bg=black,fg=white'",
+                "",
+            )
+            .with_response("set-option -t '@5' window-style 'bg=black,fg=white'", "")
+            .with_response(
+                "set-option -t '@5' window-active-style 'bg=black,fg=white'",
+                "",
+            )
+            .with_response("set-option -t '@2' window-style 'bg=green,fg=black'", "")
+            .with_response("set-option -u -t '@2' window-active-style", "")
+            .with_response("set-option -u -t '@5' window-style", "")
+            .with_response(
+                "set-option -t '@5' window-active-style 'bg=yellow,fg=black'",
+                "",
+            );
+        let host = mock_host(mock);
+        let target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Session(SessionInfo {
+                name: "build".to_string(),
+                id: SessionId::for_test("$7"),
+                created: 0,
+                attached_count: 0,
+                window_count: 2,
+                group: None,
+                activity: 0,
+            }),
+        };
+        let window_styles = target.window_styles().await.unwrap();
+
+        let snapshot = window_styles.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot,
+            SessionWindowStylesSnapshot {
+                windows: vec![
+                    WindowStyleSnapshot {
+                        window_id: "@2".to_string(),
+                        style: Some(WindowStyle::new("bg=green,fg=black").unwrap()),
+                        active_style: None,
+                    },
+                    WindowStyleSnapshot {
+                        window_id: "@5".to_string(),
+                        style: None,
+                        active_style: Some(WindowStyle::new("bg=yellow,fg=black").unwrap()),
+                    },
+                ],
+            }
+        );
+
+        let overrides = SessionWindowStyleOverrides {
+            style: Some(WindowStyle::new("bg=black,fg=white").unwrap()),
+            active_style: Some(WindowStyle::new("bg=black,fg=white").unwrap()),
+        };
+        window_styles.apply(&overrides).await.unwrap();
+        window_styles.restore(&snapshot).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_tags_reject_invalid_inputs_before_exec() {
+        let mock = MockTransport::new()
+            .with_error("set-option", "validation should run before exec")
+            .with_error("show-option", "validation should run before exec")
+            .with_error("set-environment", "validation should run before exec")
+            .with_error("show-environment", "validation should run before exec");
+        let host = mock_host(mock);
+        let target = host.create_target_for_test("build");
+
+        assert!(target.tags("mmux/team").await.is_err());
+        let tags = target.tags("mmux").await.unwrap();
+        assert!(tags.set("foo/bar", "bar").await.is_err());
+        assert!(tags.unset("foo/bar").await.is_err());
+        assert!(tags.read("foo/bar").await.is_err());
+
+        let large = "x".repeat(SESSION_TAG_VALUE_MAX_BYTES + 1);
+        assert!(tags.set("large", &large).await.is_err());
+        assert!(tags.set("newline", "line1\nline2").await.is_err());
+
+        let env = target.environment().await.unwrap();
+        assert!(env.set("1BAD", "value").await.is_err());
+        assert!(env.unset("BAD-NAME").await.is_err());
+        assert!(env.read("BAD-NAME").await.is_err());
+
+        let large_env = "x".repeat(SESSION_ENV_VAR_VALUE_MAX_BYTES + 1);
+        assert!(env.set("FOO", &large_env).await.is_err());
+        assert!(env.set("FOO", "line1\nline2").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn session_tags_reject_non_session_targets() {
+        let host = mock_host(MockTransport::new().with_default(""));
+        let window_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Window(WindowInfo {
+                session_id: "$0".to_string(),
+                session_name: "build".to_string(),
+                index: 0,
+                name: "main".to_string(),
+                active: true,
+                pane_count: 1,
+                layout: "layout".to_string(),
+            }),
+        };
+        let pane_target = Target {
+            inner: host.inner.clone(),
+            address: TargetAddress::Pane(PaneAddress {
+                pane_id: "%1".to_string(),
+                session: "build".to_string(),
+                window: 0,
+                pane: 0,
+            }),
+        };
+
+        assert!(window_target.tags("mmux").await.is_err());
+        assert!(window_target.environment().await.is_err());
+        assert!(window_target.status().await.is_err());
+        assert!(window_target.window_styles().await.is_err());
+        assert!(pane_target.tags("mmux").await.is_err());
+        assert!(pane_target.environment().await.is_err());
+        assert!(pane_target.status().await.is_err());
+        assert!(pane_target.window_styles().await.is_err());
+    }
+
+    #[tokio::test]
     async fn rename_pane_fails() {
         let addr = PaneAddress {
             pane_id: "%0".to_string(),
@@ -2138,11 +3837,12 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: "old".to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         let new_target = target.rename("new").await.unwrap();
@@ -2223,7 +3923,7 @@ mod tests {
         // Session with 2 windows: window 0 (inactive) and window 1 (active).
         // Both have pane 0. Session-level pane(0) should return window 1's pane.
         let mock = MockTransport::new()
-            .with_response("list-sessions", "build $0 0 0 2 \n")
+            .with_response("list-sessions", "__MOTLIE_S__ build $0 0 0 2  0\n")
             .with_response(
                 "list-windows",
                 "$0 build 0 main 0 1 layout\n$0 build 1 editor 1 1 layout\n",
@@ -2484,11 +4184,12 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Session(SessionInfo {
                 name: "build".to_string(),
-                id: "$0".to_string(),
+                id: SessionId::for_test("$0"),
                 created: 0,
-                attached: false,
+                attached_count: 0,
                 window_count: 1,
                 group: None,
+                activity: 0,
             }),
         };
         let pane_target = Target {
