@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Replaced stale absolute local references with repo-relative links to the current ASR/TTS design docs and model contract source files. | References |
 | 2026-05-30 | @codex-358-research: Addressed PR review by making the reorder boundary Telnyx-adapter mapping plus provider-neutral sequenced-frame reorder, correcting Sherpa's current typed input contract to ordered `AudioBuf<i16, 16_000, Mono>`, demoting Fish Speech to a historical rejected candidate, and documenting the missing `i16_to_f32` helper needed by the i16 telephony resampler wrapper. | Media Adaptation Pipeline, Recommended ASR/TTS Stack, Inbound Call Handler Design, Gap Analysis, Open Concerns |
 | 2026-05-30 | @codex-358-research: Rebased the design around the landed `motlie-voice` crate from PR #209, so Telnyx extends existing `motlie_model::typed` and `motlie_voice` media primitives instead of rebuilding them. Added anti-aliased resampling, buffered-vs-transport streaming, and Piper CUDA caveats. | Overview, Goals and Non-Goals, Crate Hierarchy and API Surfaces, Media Adaptation Pipeline, Recommended ASR/TTS Stack, Gap Analysis, Testing Scope for PLAN |
 | 2026-04-17 | @codex-macmini-telnyx: Removed the remaining `Box<dyn>` streaming-response sketch from `ConversationHandler` and replaced it with an associated `TextStream` type so the design remains static-dispatch at the gateway surface. | Closed-Enum Selection, Conversation Handler Contract, Streaming Conversation Responses |
@@ -2273,6 +2274,7 @@ Cons:
 - Telnyx `call.initiated` webhook: https://developers.telnyx.com/api-reference/callbacks/call-initiated
 - Tailscale Funnel docs: https://tailscale.com/kb/1223/tailscale-funnel/
 - ngrok localhost sharing docs: https://ngrok.com/docs/guides/share-localhost/overview
-- Existing ASR design: [DESIGN_ASR.md](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/models/docs/DESIGN_ASR.md)
-- Existing TTS design: [DESIGN_TTS.md](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/models/docs/DESIGN_TTS.md)
-- Existing API contracts: [transcription.rs](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/model/src/transcription.rs), [speech.rs](/Users/dchung/sessions/codex-macmini-telnyx/motlie/libs/model/src/speech.rs)
+- Existing ASR design: [DESIGN_ASR.md](./DESIGN_ASR.md)
+- Existing TTS design: [DESIGN_TTS.md](./DESIGN_TTS.md)
+- Existing transcription contracts: [transcription.rs](../../model/src/transcription.rs)
+- Existing speech contracts: [speech.rs](../../model/src/speech.rs)

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Aligned the remaining PLAN reorder tasks with the DESIGN boundary: Telnyx maps `media.chunk` to provider-neutral sequence metadata, `libs/voice` reorders generic sequenced frames before decode, and phase 3 now explicitly includes the i16 resampler wrapper plus missing `i16_to_f32` helper. |
 | 2026-05-30 | @codex-358-research | Rebased implementation sequencing around the landed `motlie-voice` crate from PR #209. The Telnyx slice now extends existing `PcmFrame`, conversion, and resampling surfaces, adds missing codecs/packetization/stages, requires anti-aliased resampling before live calls, and records Piper buffered/CUDA caveats. |
 | 2026-04-17 | @codex-macmini-telnyx | Tightened the execution policy further so no initial acceptance criteria, examples, or live validation steps can rely on Moonshine or Qwen3-TTS. The first complete Telnyx slice is Sherpa + Piper only. |
 | 2026-04-17 | @codex-macmini-telnyx | Tightened the PLAN so Sherpa + Piper is the explicit first vertical slice. Follow-on pairings such as Sherpa + Qwen3-TTS and Moonshine + Qwen3-TTS are now deferred to a later phase instead of treated as peer initial targets. |
@@ -105,6 +106,8 @@ Build the provider-neutral media adaptation pipeline with explicit stage contrac
   DESIGN reference: `Media Adaptation Pipeline`, `Required Concrete Stage Inventory`
 - [ ] Replace or wrap the existing `LinearInterpolator` with an anti-aliased resampler (`rubato`, `dasp`, or a documented polyphase/windowed-sinc implementation) before live Telnyx validation.
   DESIGN reference: `Behavior Contracts`, `Resampling and Format Normalization`
+- [ ] Add the provider-neutral `i16_to_f32` conversion helper in `motlie_voice::pipeline::convert` and implement i16 telephony resampler wrappers as `i16 -> f32 -> resample_f32 -> i16` over the f32 `Resampler` path until an i16-native resampler is justified.
+  DESIGN reference: `Behavior Contracts`, `Resampling and Format Normalization`
 - [ ] Implement provider-neutral G.711 and `L16` codecs in `libs/voice/src/codec/`.
   DESIGN reference: `Codec and Container Gaps`, `Crate Hierarchy and API Surfaces`
 - [ ] Keep stage responsibilities split; do not collapse decode, resample, and packetization into one opaque adapter.
@@ -117,7 +120,7 @@ Assemble and validate the first end-to-end Telnyx slice with the most proven rea
 ### 4.1 - Sherpa inbound assembly
 
 - [ ] Implement the Sherpa inbound path:
-  Telnyx decode -> mono normalize -> `16 kHz` resample -> Sherpa chunk flow.
+  Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> Sherpa ingest flow.
   DESIGN reference: `Concrete Combination Requirements`
 
 ### 4.2 - Piper outbound assembly
@@ -171,7 +174,9 @@ Wire the Telnyx-specific schema and adapter crate on top of `libs/voice`.
 
 - [ ] Map Telnyx `start.media_format` into provider-neutral typed transport frames.
   DESIGN reference: `Telnyx Media Schema Mapping`
-- [ ] Implement per-track reordering using Telnyx `media.chunk` before handing frames to `libs/voice` pipeline stages.
+- [ ] In `libs/voice_telnyx`, map Telnyx `media.chunk` into provider-neutral per-track sequence metadata and create `EncodedFrame<C>` values.
+  DESIGN reference: `Telnyx Media Schema Mapping`
+- [ ] In `libs/voice`, run `SequencedFrameReorder<C>` over generic sequenced frames before codec decode.
   DESIGN reference: `Required Concrete Stage Inventory`
 - [ ] Emit one gateway-local monotonic sequence for provider-neutral frames and model chunks.
   DESIGN reference: `Telnyx Media Schema Mapping`
@@ -338,7 +343,7 @@ After the Sherpa + Piper slice is implemented and validated end to end, broaden 
 ### 10.2 - Moonshine + Qwen3-TTS
 
 - [ ] Implement the Moonshine inbound path:
-  Telnyx decode -> mono normalize -> `16 kHz` resample -> fixed `1280`-sample rechunking.
+  Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> fixed `1280`-sample rechunking.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Validate that Moonshine's fixed `1280`-sample cadence remains acceptable under Telnyx media pacing and jitter conditions.
   DESIGN reference: `Concrete Combination Requirements`
