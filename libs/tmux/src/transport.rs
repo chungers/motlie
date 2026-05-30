@@ -1769,7 +1769,10 @@ struct PooledConn {
 }
 
 /// RAII guard that releases a pooled connection's channel slot on drop.
-pub struct ChannelGuard {
+///
+/// Internal SSH pool bookkeeping — `pub(crate)` so it does not leak into the
+/// public `transport` module API.
+pub(crate) struct ChannelGuard {
     open: Arc<AtomicUsize>,
 }
 
@@ -1777,6 +1780,19 @@ impl Drop for ChannelGuard {
     fn drop(&mut self) {
         self.open.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Pick the first pooled connection that still has a free channel slot, given
+/// each connection's `(open, cap)` counts. Returns `None` when every
+/// connection is at capacity, signalling the caller to open a new connection.
+///
+/// Pure so the pool's spill/learned-cap decision is unit-testable without a
+/// live SSH server (the actual server-refusal path is exercised by the
+/// integration scenario documented on issue #353).
+fn first_available_slot(slots: impl Iterator<Item = (usize, usize)>) -> Option<usize> {
+    slots
+        .enumerate()
+        .find_map(|(idx, (open, cap))| (open < cap).then_some(idx))
 }
 
 /// SSH transport — executes commands on a remote host via russh (Phase 2a.1).
@@ -1866,12 +1882,9 @@ impl SshTransport {
     ) -> Result<(russh::Channel<russh::client::Msg>, ChannelGuard)> {
         let mut pool = self.pool.lock().await;
 
-        let mut idx = 0;
-        while idx < pool.len() {
-            if pool[idx].open.load(Ordering::SeqCst) >= pool[idx].cap {
-                idx += 1;
-                continue;
-            }
+        while let Some(idx) =
+            first_available_slot(pool.iter().map(|c| (c.open.load(Ordering::SeqCst), c.cap)))
+        {
             let open_result = {
                 let handle = pool[idx].handle.lock().await;
                 handle.channel_open_session().await
@@ -1893,11 +1906,11 @@ impl SshTransport {
                         // Dead connection: drop it and retry the remainder.
                         pool.remove(idx);
                     } else {
-                        // Live connection refused the channel: treat the
-                        // current count as its real cap (learned MaxSessions)
-                        // and spill to another connection.
+                        // Live connection refused the channel: treat the current
+                        // count as its real cap (learned MaxSessions) so the next
+                        // iteration skips it (and spills to a new connection once
+                        // every connection is full).
                         pool[idx].cap = pool[idx].open.load(Ordering::SeqCst);
-                        idx += 1;
                     }
                 }
             }
@@ -2471,6 +2484,38 @@ fn is_shell_safe_word(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- connection-pool slot selection (issue #353) ---
+
+    #[test]
+    fn first_available_slot_picks_first_under_cap() {
+        // First connection full (8/8), second has room (3/8).
+        assert_eq!(first_available_slot([(8, 8), (3, 8)].into_iter()), Some(1));
+    }
+
+    #[test]
+    fn first_available_slot_spills_when_all_full() {
+        // Every connection at capacity -> None tells the pool to open another.
+        assert_eq!(first_available_slot([(8, 8), (8, 8)].into_iter()), None);
+        assert_eq!(first_available_slot(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn first_available_slot_skips_learned_cap() {
+        // A connection whose cap was shrunk to its open count (learned
+        // MaxSessions after a server refusal) is treated as full and skipped.
+        assert_eq!(first_available_slot([(5, 5), (2, 8)].into_iter()), Some(1));
+    }
+
+    #[test]
+    fn channel_guard_releases_slot_on_drop() {
+        let open = Arc::new(AtomicUsize::new(3));
+        {
+            let _guard = ChannelGuard { open: open.clone() };
+            assert_eq!(open.load(Ordering::SeqCst), 3);
+        }
+        assert_eq!(open.load(Ordering::SeqCst), 2);
+    }
 
     #[tokio::test]
     async fn mock_transport_canned_response() {
