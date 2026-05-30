@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag design using stable tmux session ids, existing freshness checks, and mmux label lifecycle refresh. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 mmux-visible workstream labels owned by mstream tags, with selected-key preservation and leave/close cleanup. |
 | 2026-05-28 | @codex | Added issue #344 input-quiet timer delivery guard: timed prompts defer when attached-client input was recent, while read-only polling remains unaffected. |
 | 2026-05-28 | @codex | Adopted issue #337 tmux Fleet abstractions for host registration, target specs/resolved targets, and batch session tags while keeping workstream business logic in mstream. |
@@ -117,6 +118,8 @@ unstick collaborators.
   session.
 - FR21: Support short mmux-visible workstream labels so mmux can group or
   display active sessions by the workstream assigned through mstream.
+- FR22: Rename and retag live sessions without recreating them, while keeping
+  daemon tracking keyed by stable tmux session id.
 
 ### State And Recovery Requirements
 
@@ -561,6 +564,32 @@ structured event:
 ```jsonl
 {"type":"event","kind":"completed","workstream":"pr-322","target":"amd1::gpt55-mmux-reviewer","state":"done","summary":"Implemented requested fixes."}
 ```
+
+#### Rename And Retag
+
+Session rename and retag commands are coordinator-owned live metadata updates:
+
+```sh
+mstream rename amd1::gpt55-mmux-reviewer gpt55-360-reviewer
+mstream rename amd1::gpt55-mmux-reviewer gpt55-360-reviewer --role reviewer --workstream issue-360 --mmux-label "360 review"
+mstream session retag amd1::$7 --role implementer --workstream issue-360 --mmux-label "360 impl"
+```
+
+The daemon resolves friendly names or `host::$id` inputs with the existing
+target resolver, freshness-checks the resolved live target, and calls
+`Target::rename(new_name)` so tmux is renamed by stable `session_id`. After
+tmux succeeds, the daemon updates the existing `SessionRecord` display metadata
+and durable `@mstream/identity` tag in place. It must not remove and reinsert a
+session record just because the display name changed.
+
+Retagging updates durable role/workstream/mmux metadata without recreating the
+session. Moving to another workstream requires an open destination workstream
+and an effective role. The stable target is removed from the old workstream set
+and inserted into the destination set; timers and handoff endpoints remain
+id-keyed. Handoffs owned by the old workstream that reference the moved target
+are canceled so they cannot later fire against a session that left that
+workstream. Existing mmux label ownership helpers clear the old label and apply
+the destination/current label.
 
 All project workflow marks are made by the orchestrator after observing
 evidence. A future JSONL extension may add `source:"coordinator"` for

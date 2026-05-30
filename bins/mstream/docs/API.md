@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-360-og | Added issue #360 live session rename/retag commands with id-stable tmux rename, role/workstream retagging, and mmux label refresh. |
 | 2026-05-30 | @codex-355-rv | Switched daemon session bookkeeping to stable `(host, session_id)` targets while keeping tmux session names as display metadata. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 mmux-visible workstream labels with `open --mmux-label`, `label --mmux-label`, status/show/list fields, and close/leave cleanup. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #347 closeout ergonomics: `timer --self`, workstream-scoped timers, readable events, and close-time timer/standby flags. |
@@ -21,8 +22,9 @@
 `mstream` is implemented as a `motlie-mstream` package with binary name
 `mstream`. It provides a Unix-domain socket daemon, JSONL client responses,
 strict `<host>::<session-or-id>` target parsing, in-memory workstreams, tmux
-session tags, state marking, send/interrupt/broadcast, handoffs, and bounded
-observation commands. It also provides daemon-memory self-wakeup timers that
+session tags, state marking, live rename/retag, send/interrupt/broadcast,
+handoffs, and bounded observation commands. It also provides daemon-memory
+self-wakeup timers that
 send a configured prompt to an orchestrator tmux session on an interval, with
 default input-quiet guarding to avoid colliding with attached human typing.
 
@@ -116,6 +118,10 @@ mstream new pr-324 local::codex-worker \
 
 mstream leave pr-324 local::codex-worker --available
 mstream kill local::codex-worker
+
+mstream rename local::codex-worker codex-reviewer
+mstream rename local::codex-worker codex-reviewer --role reviewer --workstream pr-324 --mmux-label "PR 324"
+mstream session retag local::$7 --role reviewer --workstream pr-324 --mmux-label "PR 324"
 ```
 
 `new` validates absolute `--cwd`, creates the directory on the target host, and
@@ -133,6 +139,21 @@ the workstream has an mmux label, assignment also writes:
 
 Recruited sessions also receive workstream-membership tags before any task is
 sent, so restart plus `scan` can hydrate their assignment.
+
+`rename <target> <new-name>` resolves the target to the stable `(host,
+session_id)` record, runs `tmux rename-session -t $id <new-name>`, and updates
+the existing daemon record's display name without rekeying timers, handoffs, or
+workstream membership. `<new-name>` is trimmed and must not be empty, contain
+`:` or `::`, contain control/Unicode format characters, or look like a tmux
+session id such as `$7`.
+
+`rename` also accepts `--role`, `--workstream`, and `--mmux-label` for a
+single-step rename plus retag. `session retag <target>` exposes the same
+metadata path without changing the tmux session name. Retagging to another
+workstream requires an existing open destination workstream and an effective
+role. The daemon clears the previous workstream's mmux label, applies the
+destination/current label, updates durable `@mstream/*` tags, and cancels stale
+handoffs owned by the old workstream while preserving the stable session target.
 
 `leave` and `close` clear mstream-owned mmux labels. If mstream still owns
 `@mmux/__selected-key`, cleanup restores the saved previous selected key or

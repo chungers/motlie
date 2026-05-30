@@ -21,7 +21,8 @@ use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
     NewRequest, OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest,
-    SnapshotRequest, SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
+    SessionRetagRequest, SnapshotRequest, SummaryInputRequest, TimerStartRequest,
+    WorkstreamSettings,
 };
 use crate::tags;
 use crate::timeline::PublicCursor;
@@ -249,6 +250,22 @@ struct WorkstreamMeta {
     mmux_label: Option<String>,
 }
 
+struct SessionRetagPlan {
+    old_name: String,
+    new_name: String,
+    old_workstream: Option<String>,
+    new_workstream: Option<String>,
+    role: Option<String>,
+    agent: Option<String>,
+    cwd: Option<PathBuf>,
+    state: AgentState,
+    workstream_meta: Option<WorkstreamMeta>,
+    mmux_label: Option<String>,
+    clear_mmux_workstream: Option<String>,
+    requested_mmux_label: Option<String>,
+    metadata_requested: bool,
+}
+
 #[derive(Debug, Default)]
 struct MmuxLabelCleanup {
     cleared: bool,
@@ -352,6 +369,9 @@ impl DaemonState {
             ClientRequest::Send(request) => Self::send_shared(shared, request).await,
             ClientRequest::Interrupt(request) => Self::interrupt_shared(shared, request).await,
             ClientRequest::Broadcast(request) => Self::broadcast_shared(shared, request).await,
+            ClientRequest::SessionRetag(request) => {
+                Self::session_retag_shared(shared, request).await
+            }
             ClientRequest::SessionMark(request) => Self::session_mark_shared(shared, request).await,
             ClientRequest::HandoffArm(request) => Self::handoff_arm_shared(shared, request).await,
             ClientRequest::TimerStart(request) => Self::timer_start_shared(shared, request).await,
@@ -1244,6 +1264,130 @@ impl DaemonState {
             "sent": sent,
         }));
         Ok(records)
+    }
+
+    async fn session_retag_shared(
+        shared: Arc<Mutex<Self>>,
+        request: SessionRetagRequest,
+    ) -> anyhow::Result<Vec<Value>> {
+        let op = if request.new_name.is_some() {
+            "rename"
+        } else {
+            "session_retag"
+        };
+        let requested_new_name = request
+            .new_name
+            .as_deref()
+            .map(validate_session_display_name)
+            .transpose()?;
+        let requested_role = request
+            .role
+            .as_deref()
+            .map(|role| validate_retag_text("--role", role))
+            .transpose()?;
+        let requested_workstream = request
+            .workstream
+            .as_deref()
+            .map(|workstream| validate_retag_text("--workstream", workstream))
+            .transpose()?;
+        let requested_mmux_label = request
+            .mmux_label
+            .as_deref()
+            .map(validate_mmux_label)
+            .transpose()?;
+
+        let target: SessionTarget = request.target.parse()?;
+        ensure_session_target(&target)?;
+        let handle = {
+            let state = shared.lock().await;
+            state.host_handle(target.host_alias())?
+        };
+        let resolved = Self::resolve_target(handle, target).await?;
+        ensure_session_target(&resolved.spec)?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
+
+        let stable_target = resolved.spec.clone();
+        let plan = {
+            let state = shared.lock().await;
+            state.session_retag_plan(
+                &stable_target,
+                &resolved.target,
+                requested_new_name.as_deref(),
+                requested_role.clone(),
+                requested_workstream.clone(),
+                requested_mmux_label.clone(),
+            )?
+        };
+        let renamed = requested_new_name
+            .as_deref()
+            .is_some_and(|name| name != plan.old_name.as_str());
+        let tmux_target = if renamed {
+            resolved.target.rename(&plan.new_name).await?
+        } else {
+            resolved.target.clone()
+        };
+        if renamed {
+            Self::observe_resolved_session_shared(
+                Arc::clone(&shared),
+                &stable_target,
+                &tmux_target,
+            )
+            .await;
+        }
+
+        if let Some(workstream) = &plan.clear_mmux_workstream {
+            Self::clear_mmux_workstream_label(&tmux_target, workstream).await?;
+        }
+        if let (Some(workstream), Some(meta), Some(role)) = (
+            plan.new_workstream.as_deref(),
+            plan.workstream_meta.as_ref(),
+            plan.role.as_deref(),
+        ) {
+            Self::write_assignment_to_target(
+                &tmux_target,
+                meta,
+                AssignmentTags {
+                    workstream,
+                    role,
+                    identity: &plan.new_name,
+                    agent: plan.agent.as_deref(),
+                    cwd: plan.cwd.as_deref(),
+                    state: plan.state,
+                },
+            )
+            .await?;
+        } else {
+            Self::write_session_identity_to_target(
+                &tmux_target,
+                &plan.new_name,
+                plan.role.as_deref(),
+            )
+            .await?;
+        }
+        if let Some(label) = &plan.mmux_label {
+            Self::apply_mmux_workstream_label(&tmux_target, label).await?;
+        }
+
+        let (cursor, stale_handoffs_canceled) = {
+            let mut state = shared.lock().await;
+            state.apply_session_retag_plan(&stable_target, &tmux_target, &plan, renamed)?
+        };
+
+        Ok(vec![json!({
+            "type": "ok",
+            "op": op,
+            "target": stable_target.to_string(),
+            "renamed": renamed,
+            "old_name": plan.old_name,
+            "new_name": plan.new_name,
+            "role": plan.role,
+            "workstream": plan.new_workstream,
+            "mmux_label": plan.mmux_label,
+            "mmux_label_cleared": plan.clear_mmux_workstream.is_some(),
+            "stale_handoffs_canceled": stale_handoffs_canceled,
+            "cursor": cursor,
+        })])
     }
 
     async fn session_mark_shared(
@@ -2780,6 +2924,21 @@ impl DaemonState {
         Ok(())
     }
 
+    async fn observe_resolved_session_shared(
+        shared: Arc<Mutex<Self>>,
+        target: &SessionTarget,
+        observed: &Target,
+    ) {
+        let Some(session) = observed.session_info() else {
+            return;
+        };
+        let mut state = shared.lock().await;
+        if let Some(record) = state.sessions.get_mut(target) {
+            record.observe_tmux_session(session);
+            record.updated_at = Utc::now();
+        }
+    }
+
     async fn write_assignment_to_target(
         target: &Target,
         meta: &WorkstreamMeta,
@@ -2807,6 +2966,34 @@ impl DaemonState {
         }
         if let Some(cwd) = assignment.cwd {
             pairs.push(("cwd", cwd.display().to_string()));
+        }
+        let tags = target.tags(tags::PREFIX).await?;
+        tags.set_many(pairs).await?;
+        let mut unset = Vec::new();
+        if meta.goal.is_none() {
+            unset.push("workstream-goal");
+        }
+        if meta.domain.is_none() {
+            unset.push("workstream-domain");
+        }
+        if unset.is_empty() {
+            return Ok(());
+        }
+        tags.unset_many(unset).await?;
+        Ok(())
+    }
+
+    async fn write_session_identity_to_target(
+        target: &Target,
+        identity: &str,
+        role: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut pairs = vec![
+            ("identity", identity.to_string()),
+            ("updated-at", tags::now_tag()),
+        ];
+        if let Some(role) = role {
+            pairs.push(("role", role.to_string()));
         }
         target.tags(tags::PREFIX).await?.set_many(pairs).await?;
         Ok(())
@@ -2994,6 +3181,181 @@ impl DaemonState {
         record.mmux_label = mmux_label;
         record.updated_at = Utc::now();
         Ok(())
+    }
+
+    fn session_retag_plan(
+        &self,
+        target: &SessionTarget,
+        resolved_target: &Target,
+        requested_new_name: Option<&str>,
+        requested_role: Option<String>,
+        requested_workstream: Option<String>,
+        requested_mmux_label: Option<String>,
+    ) -> anyhow::Result<SessionRetagPlan> {
+        let session = resolved_target
+            .session_info()
+            .with_context(|| format!("target '{target}' is not a session"))?;
+        let metadata_requested = requested_role.is_some()
+            || requested_workstream.is_some()
+            || requested_mmux_label.is_some();
+        let record = self.sessions.get(target);
+        let old_workstream = record.and_then(|record| record.workstream.clone());
+        let new_workstream = requested_workstream
+            .clone()
+            .or_else(|| old_workstream.clone());
+
+        if let Some(workstream) = &requested_workstream {
+            self.ensure_workstream_open(workstream)?;
+        }
+        if requested_mmux_label.is_some() && new_workstream.is_none() {
+            bail!("--mmux-label requires --workstream or an existing workstream assignment");
+        }
+        if requested_mmux_label.is_some() {
+            if let Some(workstream) = &new_workstream {
+                self.ensure_workstream_open(workstream)?;
+            }
+        }
+
+        let workstream_meta = new_workstream
+            .as_deref()
+            .map(|workstream| self.workstream_meta(workstream))
+            .transpose()?;
+        let role = requested_role.or_else(|| record.and_then(|record| record.role.clone()));
+        if new_workstream.is_some() && role.is_none() {
+            bail!("--role is required when assigning a session to a workstream");
+        }
+        let mmux_label = requested_mmux_label.clone().or_else(|| {
+            workstream_meta
+                .as_ref()
+                .and_then(|meta| meta.mmux_label.clone())
+        });
+        let clear_mmux_workstream = if old_workstream.is_some() && old_workstream != new_workstream
+        {
+            old_workstream.clone()
+        } else {
+            None
+        };
+
+        Ok(SessionRetagPlan {
+            old_name: session.name.clone(),
+            new_name: requested_new_name
+                .map(ToString::to_string)
+                .unwrap_or_else(|| session.name.clone()),
+            old_workstream,
+            new_workstream,
+            role,
+            agent: record.and_then(|record| record.agent.clone()),
+            cwd: record.and_then(|record| record.cwd.clone()),
+            state: record
+                .map(|record| record.state)
+                .unwrap_or(AgentState::Idle),
+            workstream_meta,
+            mmux_label,
+            clear_mmux_workstream,
+            requested_mmux_label,
+            metadata_requested,
+        })
+    }
+
+    fn apply_session_retag_plan(
+        &mut self,
+        target: &SessionTarget,
+        observed: &Target,
+        plan: &SessionRetagPlan,
+        renamed: bool,
+    ) -> anyhow::Result<(Option<String>, usize)> {
+        if let (Some(workstream), Some(label)) = (
+            plan.new_workstream.as_deref(),
+            plan.requested_mmux_label.as_ref(),
+        ) {
+            let workstream = self.workstream_mut(workstream)?;
+            workstream.mmux_label = Some(label.clone());
+            workstream.mmux_label_conflicts.clear();
+        }
+
+        let mut stale_handoffs_canceled = 0usize;
+        if plan.old_workstream != plan.new_workstream {
+            if let Some(old_workstream) = &plan.old_workstream {
+                if let Some(workstream) = self.workstreams.get_mut(old_workstream) {
+                    workstream.sessions.remove(target);
+                }
+                stale_handoffs_canceled += self.cancel_handoffs_for_target_in_workstream(
+                    old_workstream,
+                    target,
+                    "session retagged to a different workstream",
+                );
+            }
+            if let Some(new_workstream) = &plan.new_workstream {
+                self.workstream_mut(new_workstream)?
+                    .sessions
+                    .insert(target.clone());
+            }
+        }
+
+        let record = self
+            .sessions
+            .entry(target.clone())
+            .or_insert_with(|| SessionRecord::from_target(target, plan.state, Some(Utc::now())));
+        if let Some(session) = observed.session_info() {
+            record.observe_tmux_session(session);
+        }
+        record.role = plan.role.clone();
+        record.agent = plan.agent.clone();
+        record.cwd = plan.cwd.clone();
+        record.state = plan.state;
+        record.workstream = plan.new_workstream.clone();
+        record.mmux_label = plan.mmux_label.clone();
+        record.updated_at = Utc::now();
+
+        let mut cursor = None;
+        if let Some(workstream) = &plan.new_workstream {
+            if renamed {
+                cursor = Some(self.record_event(
+                    workstream,
+                    EventDraft::new("renamed").target(target).summary(format!(
+                        "renamed session: {} -> {}",
+                        plan.old_name, plan.new_name
+                    )),
+                )?);
+            }
+            if plan.old_workstream != plan.new_workstream
+                || plan.requested_mmux_label.is_some()
+                || plan.metadata_requested
+            {
+                cursor = Some(
+                    self.record_event(
+                        workstream,
+                        EventDraft::new("retagged")
+                            .target(target)
+                            .state(plan.state)
+                            .summary("session retagged"),
+                    )?,
+                );
+            }
+        }
+
+        Ok((cursor, stale_handoffs_canceled))
+    }
+
+    fn cancel_handoffs_for_target_in_workstream(
+        &mut self,
+        workstream: &str,
+        target: &SessionTarget,
+        reason: &str,
+    ) -> usize {
+        let Some(workstream) = self.workstreams.get_mut(workstream) else {
+            return 0;
+        };
+        let mut canceled = 0usize;
+        for handoff in workstream.handoffs.values_mut() {
+            if handoff.canceled_reason.is_none()
+                && (handoff.from == *target || handoff.to == *target)
+            {
+                handoff.canceled_reason = Some(reason.to_string());
+                canceled += 1;
+            }
+        }
+        canceled
     }
 
     fn record_event(&mut self, workstream: &str, draft: EventDraft) -> anyhow::Result<String> {
@@ -3679,6 +4041,59 @@ fn validate_mmux_label(value: &str) -> anyhow::Result<String> {
     Ok(label)
 }
 
+fn validate_session_display_name(value: &str) -> anyhow::Result<String> {
+    if value.chars().any(char::is_control) {
+        bail!("<new-name> cannot contain control characters");
+    }
+    if value.chars().any(is_unicode_format_char) {
+        bail!("<new-name> cannot contain Unicode format characters");
+    }
+    let name = value.trim();
+    if name.is_empty() {
+        bail!("<new-name> cannot be empty");
+    }
+    if name.contains("::") {
+        bail!("<new-name> cannot contain '::'");
+    }
+    if name.contains(':') {
+        bail!("<new-name> cannot contain ':'");
+    }
+    if looks_like_tmux_session_id(name) {
+        bail!("<new-name> cannot look like a tmux session id");
+    }
+    Ok(name.to_string())
+}
+
+fn validate_retag_text(flag: &str, value: &str) -> anyhow::Result<String> {
+    if value.chars().any(char::is_control) {
+        bail!("{flag} cannot contain control characters");
+    }
+    if value.chars().any(is_unicode_format_char) {
+        bail!("{flag} cannot contain Unicode format characters");
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{flag} cannot be empty");
+    }
+    Ok(value.to_string())
+}
+
+fn looks_like_tmux_session_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('$') else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn ensure_session_target(target: &SessionTarget) -> anyhow::Result<()> {
+    if target.target_spec().window_selector().is_some()
+        || target.target_spec().pane_index().is_some()
+    {
+        bail!("target '{target}' must identify a tmux session");
+    }
+    Ok(())
+}
+
 fn is_unicode_format_char(ch: char) -> bool {
     matches!(
         ch as u32,
@@ -4209,6 +4624,306 @@ mod tests {
             .contains(&target));
     }
 
+    #[test]
+    fn validate_session_display_name_rejects_ambiguous_names() {
+        assert_eq!(
+            validate_session_display_name("  renamed  ").expect("valid name"),
+            "renamed"
+        );
+        assert!(validate_session_display_name("").is_err());
+        assert!(validate_session_display_name("work:0").is_err());
+        assert!(validate_session_display_name("local::work").is_err());
+        assert!(validate_session_display_name("$7").is_err());
+        assert!(validate_session_display_name("bad\nname").is_err());
+        assert!(validate_session_display_name("bad\u{200d}name").is_err());
+    }
+
+    #[tokio::test]
+    async fn session_rename_round_trip_keeps_stable_id_key() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ old-name $1 100 0 1  150\n")
+            .with_response("rename-session -t '$1' 'new-name'", "")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        state
+            .workstream_mut("issue-355")
+            .expect("workstream")
+            .mmux_label = Some("355 work".to_string());
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("old-name", "$1", 100, 150));
+        state.timers.insert(
+            "poll".to_string(),
+            timer_record("poll", target.clone(), Some(100)),
+        );
+        state
+            .workstream_mut("issue-355")
+            .expect("workstream")
+            .handoffs
+            .insert(
+                "h1".to_string(),
+                handoff_record("h1", target.clone(), Some(100)),
+            );
+
+        let shared = Arc::new(Mutex::new(state));
+        let records = DaemonState::session_retag_shared(
+            Arc::clone(&shared),
+            SessionRetagRequest {
+                target: "local::old-name".to_string(),
+                new_name: Some("new-name".to_string()),
+                role: None,
+                workstream: None,
+                mmux_label: None,
+            },
+        )
+        .await
+        .expect("rename");
+
+        assert_eq!(records[0]["op"], "rename");
+        assert_eq!(records[0]["target"], "local::$1");
+        assert_eq!(records[0]["renamed"], true);
+        assert_eq!(records[0]["old_name"], "old-name");
+        assert_eq!(records[0]["new_name"], "new-name");
+        assert_eq!(records[0]["mmux_label"], "355 work");
+
+        let state = shared.lock().await;
+        assert_eq!(state.sessions.len(), 1);
+        let record = state.sessions.get(&target).expect("stable keyed record");
+        assert_eq!(record.identity, "new-name");
+        assert_eq!(record.role.as_deref(), Some("reviewer"));
+        assert_eq!(record.mmux_label.as_deref(), Some("355 work"));
+        assert!(state
+            .workstream("issue-355")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+        assert_eq!(
+            state.timers.get("poll").expect("timer").target,
+            target,
+            "timer stays keyed by stable target"
+        );
+        let handoff = state
+            .workstream("issue-355")
+            .expect("workstream")
+            .handoffs
+            .get("h1")
+            .expect("handoff");
+        assert_eq!(handoff.from, target);
+        assert!(handoff.canceled_reason.is_none());
+        let events = &state.workstream("issue-355").expect("workstream").events;
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "renamed" && event.target.as_deref() == Some("local::$1")));
+    }
+
+    #[tokio::test]
+    async fn session_retag_moves_workstream_role_and_mmux_label() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ worker $1 100 0 1  150\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        open_test_workstream(&mut state, "issue-360");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                Some(PathBuf::from("/tmp/agent")),
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("worker", "$1", 100, 150));
+        state
+            .workstream_mut("issue-355")
+            .expect("old workstream")
+            .handoffs
+            .insert(
+                "h1".to_string(),
+                handoff_record("h1", target.clone(), Some(100)),
+            );
+
+        let shared = Arc::new(Mutex::new(state));
+        let records = DaemonState::session_retag_shared(
+            Arc::clone(&shared),
+            SessionRetagRequest {
+                target: "local::$1".to_string(),
+                new_name: None,
+                role: Some("implementer".to_string()),
+                workstream: Some("issue-360".to_string()),
+                mmux_label: Some("360 impl".to_string()),
+            },
+        )
+        .await
+        .expect("retag");
+
+        assert_eq!(records[0]["op"], "session_retag");
+        assert_eq!(records[0]["target"], "local::$1");
+        assert_eq!(records[0]["role"], "implementer");
+        assert_eq!(records[0]["workstream"], "issue-360");
+        assert_eq!(records[0]["mmux_label"], "360 impl");
+        assert_eq!(records[0]["mmux_label_cleared"], true);
+        assert_eq!(records[0]["stale_handoffs_canceled"], 1);
+
+        let state = shared.lock().await;
+        assert!(!state
+            .workstream("issue-355")
+            .expect("old workstream")
+            .sessions
+            .contains(&target));
+        assert!(state
+            .workstream("issue-360")
+            .expect("new workstream")
+            .sessions
+            .contains(&target));
+        assert_eq!(
+            state
+                .workstream("issue-360")
+                .expect("new workstream")
+                .mmux_label
+                .as_deref(),
+            Some("360 impl")
+        );
+        let record = state.sessions.get(&target).expect("session");
+        assert_eq!(record.identity, "worker");
+        assert_eq!(record.role.as_deref(), Some("implementer"));
+        assert_eq!(record.workstream.as_deref(), Some("issue-360"));
+        assert_eq!(record.mmux_label.as_deref(), Some("360 impl"));
+        assert!(state
+            .workstream("issue-355")
+            .expect("old workstream")
+            .handoffs
+            .get("h1")
+            .expect("handoff")
+            .canceled_reason
+            .as_deref()
+            .unwrap()
+            .contains("session retagged"));
+    }
+
+    #[tokio::test]
+    async fn session_rename_quarantines_reused_session_id_before_mutating() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ reused $1 200 0 1  250\n")
+            .with_error("rename-session", "rename should not be attempted")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("old", "$1", 100, 150));
+
+        let shared = Arc::new(Mutex::new(state));
+        let err = DaemonState::session_retag_shared(
+            Arc::clone(&shared),
+            SessionRetagRequest {
+                target: "local::$1".to_string(),
+                new_name: Some("new".to_string()),
+                role: None,
+                workstream: None,
+                mmux_label: None,
+            },
+        )
+        .await
+        .expect_err("reused id should fail");
+
+        assert!(err.to_string().contains("stale tmux session id"));
+        let state = shared.lock().await;
+        assert!(!state.sessions.contains_key(&target));
+        assert!(!state
+            .workstream("issue-355")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+    }
+
+    #[tokio::test]
+    async fn session_rename_error_leaves_state_unchanged() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ old $1 100 0 1  150\n")
+            .with_error("rename-session", "duplicate session")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("old", "$1", 100, 150));
+
+        let shared = Arc::new(Mutex::new(state));
+        let err = DaemonState::session_retag_shared(
+            Arc::clone(&shared),
+            SessionRetagRequest {
+                target: "local::old".to_string(),
+                new_name: Some("new".to_string()),
+                role: None,
+                workstream: None,
+                mmux_label: None,
+            },
+        )
+        .await
+        .expect_err("rename collision should fail");
+
+        assert!(err.to_string().contains("duplicate session"));
+        let state = shared.lock().await;
+        let record = state.sessions.get(&target).expect("session");
+        assert_eq!(record.identity, "old");
+        assert!(state
+            .workstream("issue-355")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+    }
+
     #[tokio::test]
     async fn status_quarantines_reused_session_id_instead_of_reporting_present() {
         let target = SessionTarget::session_id("local", "$1").expect("target");
@@ -4553,6 +5268,26 @@ mod tests {
                 .expect("deserialize label");
         assert_eq!(decoded.workstream, "issue-349");
         assert_eq!(decoded.mmux_label, "349 review");
+    }
+
+    #[test]
+    fn session_retag_request_round_trips_over_json() {
+        let request = SessionRetagRequest {
+            target: "local::$1".to_string(),
+            new_name: Some("renamed".to_string()),
+            role: Some("reviewer".to_string()),
+            workstream: Some("issue-360".to_string()),
+            mmux_label: Some("360 review".to_string()),
+        };
+        let decoded: SessionRetagRequest =
+            serde_json::from_value(serde_json::to_value(&request).expect("serialize retag"))
+                .expect("deserialize retag");
+
+        assert_eq!(decoded.target, "local::$1");
+        assert_eq!(decoded.new_name.as_deref(), Some("renamed"));
+        assert_eq!(decoded.role.as_deref(), Some("reviewer"));
+        assert_eq!(decoded.workstream.as_deref(), Some("issue-360"));
+        assert_eq!(decoded.mmux_label.as_deref(), Some("360 review"));
     }
 
     #[test]
