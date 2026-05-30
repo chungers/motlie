@@ -1377,11 +1377,16 @@ impl DaemonState {
             }
         }
 
-        let requested_mmux_apply = plan
-            .requested_mmux_label
-            .as_ref()
-            .zip(plan.new_workstream.as_ref())
-            .map(|(label, workstream)| (workstream.clone(), label.clone()));
+        let requested_mmux_apply = if let Some(label) = &plan.requested_mmux_label {
+            let workstream = plan
+                .new_workstream
+                .as_ref()
+                .or(plan.old_workstream.as_ref())
+                .with_context(|| "--mmux-label requires an effective workstream")?;
+            Some((workstream.clone(), label.clone()))
+        } else {
+            None
+        };
 
         let (cursor, stale_handoffs_canceled) = {
             let mut state = shared.lock().await;
@@ -4896,7 +4901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_retag_mmux_label_refreshes_entire_workstream() {
+    async fn session_retag_mmux_label_refreshes_same_workstream_sibling() {
         let target_a = SessionTarget::session_id("local", "$1").expect("target a");
         let target_b = SessionTarget::session_id("local", "$2").expect("target b");
         let mock = motlie_tmux::transport::MockTransport::new()
@@ -4966,6 +4971,7 @@ mod tests {
 
         assert_eq!(records[0]["op"], "session_retag");
         assert_eq!(records[0]["target"], "local::$1");
+        assert_eq!(records[0]["workstream"], "issue-360");
         assert_eq!(records[0]["mmux_label"], "new ws");
         assert_eq!(records[0]["mmux_labels_applied"], 2);
         assert_eq!(records[0]["mmux_label_apply_failed"], 0);
