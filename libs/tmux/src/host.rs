@@ -31,11 +31,13 @@ struct HostHandleInner {
     /// Shared output bus (DC24). Lazily created on first `start_monitoring`.
     output_bus: std::sync::Mutex<Option<Arc<OutputBus>>>,
     /// Per-host tracking of active monitor stop signals (DC13).
-    /// Keyed by session name. The `watch::Sender<bool>` fires the stop signal;
+    /// Keyed by stable session id. The `watch::Sender<bool>` fires the stop signal;
     /// the actual `JoinHandle` is owned by the returned `SessionMonitorHandle`.
     monitor_signals: std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// Best-effort display-name lookup for compatibility with name-based stop APIs.
+    monitor_signal_names: std::sync::Mutex<HashMap<String, String>>,
     /// Per-pane active exec state tracking (DC31).
-    /// Keyed by `session_name:pane_id` for session-scoped discontinuity invalidation.
+    /// Keyed by `session_id:pane_id` for session-scoped discontinuity invalidation.
     /// Each entry holds Arc refs to ExecState for running execs.
     active_execs: std::sync::Mutex<HashMap<String, Vec<Arc<std::sync::Mutex<ExecState>>>>>,
     /// Resolved tmux binary path (e.g. "/opt/homebrew/bin/tmux").
@@ -98,10 +100,10 @@ impl HostHandleInner {
     /// Transition Running exec states to Unknown for a specific session (DC31).
     ///
     /// Called on connection loss / discontinuity. Only affects execs whose
-    /// `active_execs` key starts with `session_name:`, preserving execs in
+    /// `active_execs` key starts with `session_id:`, preserving execs in
     /// unrelated sessions. Leaves Completed and already-Unknown states unchanged.
-    fn notify_exec_discontinuity(&self, session_name: &str, reason: &str) {
-        let prefix = format!("{}:", session_name);
+    fn notify_exec_discontinuity(&self, session_id: &str, reason: &str) {
+        let prefix = format!("{}:", session_id);
         let active = self.active_execs.lock().expect("active_execs poisoned");
         for (key, states) in active.iter() {
             if !key.starts_with(&prefix) {
@@ -115,6 +117,15 @@ impl HostHandleInner {
                     };
                 }
             }
+        }
+    }
+
+    fn remove_monitor_signal(&self, session_id: &str) {
+        if let Ok(mut signals) = self.monitor_signals.lock() {
+            signals.remove(session_id);
+        }
+        if let Ok(mut names) = self.monitor_signal_names.lock() {
+            names.retain(|_, id| id != session_id);
         }
     }
 }
@@ -380,6 +391,7 @@ impl HostHandle {
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                monitor_signal_names: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
                 tmux_bin: std::sync::Mutex::new(None),
             }),
@@ -402,6 +414,7 @@ impl HostHandle {
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                monitor_signal_names: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
                 tmux_bin: std::sync::Mutex::new(None),
             }),
@@ -418,6 +431,7 @@ impl HostHandle {
                 host_alias: "localhost".to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                monitor_signal_names: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
                 tmux_bin: std::sync::Mutex::new(None),
             }),
@@ -434,6 +448,7 @@ impl HostHandle {
                 host_alias: alias.to_string(),
                 output_bus: std::sync::Mutex::new(None),
                 monitor_signals: std::sync::Mutex::new(HashMap::new()),
+                monitor_signal_names: std::sync::Mutex::new(HashMap::new()),
                 active_execs: std::sync::Mutex::new(HashMap::new()),
                 tmux_bin: std::sync::Mutex::new(None),
             }),
@@ -704,10 +719,15 @@ impl HostHandle {
         let prefix = self.inner.tmux_prefix().await;
         // Check session exists
         let sessions = self.list_sessions().await?;
-        let session_info = match sessions.into_iter().find(|s| s.name == spec.session_name()) {
+        let session_info = match spec.session_id_selector() {
+            Some(id) => sessions.into_iter().find(|s| s.id.as_str() == id.as_str()),
+            None => sessions.into_iter().find(|s| s.name == spec.session_name()),
+        };
+        let session_info = match session_info {
             Some(s) => s,
             None => return Ok(None),
         };
+        let session_target = session_info.id.as_str();
 
         match (spec.window_selector(), spec.pane_index()) {
             (None, Some(_)) => Err(Error::Parse(format!(
@@ -722,7 +742,7 @@ impl HostHandle {
                 let windows = discovery::list_windows_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    spec.session_name(),
+                    session_target,
                 )
                 .await?;
                 let win = windows
@@ -752,7 +772,7 @@ impl HostHandle {
                 let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    spec.session_name(),
+                    session_target,
                 )
                 .await?;
                 let pane = panes
@@ -930,21 +950,51 @@ impl HostHandle {
             .await
     }
 
+    pub async fn start_monitoring_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionMonitorHandle> {
+        self.start_monitoring_session_by_id_with_normalize(session_id, CaptureNormalizeMode::Raw)
+            .await
+    }
+
     async fn start_monitoring_session_with_normalize(
         &self,
         session_name: &str,
         normalize: CaptureNormalizeMode,
     ) -> Result<SessionMonitorHandle> {
-        let bus = self.output_bus();
-        let host_alias = self.inner.host_alias.clone();
-        let session = session_name.to_string();
-
-        // Resolve the session first — fail before any registration
         let sessions = self.list_sessions().await?;
         let session_info = sessions
             .into_iter()
-            .find(|s| s.name == session)
-            .ok_or_else(|| Error::NotFound(format!("session '{}' not found", session)))?;
+            .find(|s| s.name == session_name)
+            .ok_or_else(|| Error::NotFound(format!("session '{}' not found", session_name)))?;
+        self.start_monitoring_session_info_with_normalize(session_info, normalize)
+            .await
+    }
+
+    async fn start_monitoring_session_by_id_with_normalize(
+        &self,
+        session_id: &str,
+        normalize: CaptureNormalizeMode,
+    ) -> Result<SessionMonitorHandle> {
+        let sessions = self.list_sessions().await?;
+        let session_info = sessions
+            .into_iter()
+            .find(|s| s.id.as_str() == session_id)
+            .ok_or_else(|| Error::NotFound(format!("session id '{}' not found", session_id)))?;
+        self.start_monitoring_session_info_with_normalize(session_info, normalize)
+            .await
+    }
+
+    async fn start_monitoring_session_info_with_normalize(
+        &self,
+        session_info: SessionInfo,
+        normalize: CaptureNormalizeMode,
+    ) -> Result<SessionMonitorHandle> {
+        let bus = self.output_bus();
+        let host_alias = self.inner.host_alias.clone();
+        let session = session_info.name.clone();
+        let session_id = session_info.id.as_str().to_string();
         let target = Target {
             inner: self.inner.clone(),
             address: TargetAddress::Session(session_info),
@@ -961,7 +1011,15 @@ impl HostHandle {
                 .monitor_signals
                 .lock()
                 .expect("monitor_signals lock poisoned");
-            signals.insert(session_name.to_string(), stop_tx.clone());
+            signals.insert(session_id.clone(), stop_tx.clone());
+        }
+        {
+            let mut names = self
+                .inner
+                .monitor_signal_names
+                .lock()
+                .expect("monitor_signal_names lock poisoned");
+            names.insert(session.clone(), session_id.clone());
         }
 
         // Shared health state (DC29, 4.2d)
@@ -974,7 +1032,8 @@ impl HostHandle {
 
         // Spawn the supervised monitor task (4.2a)
         let inner_ref = self.inner.clone();
-        let session_for_cleanup = session_name.to_string();
+        let session_for_cleanup = session_id.clone();
+        let mut display_session = session.clone();
         let task = tokio::spawn(async move {
             let max_retries = 5u32;
             let mut attempt = 0u32;
@@ -986,10 +1045,14 @@ impl HostHandle {
             };
 
             loop {
-                let mut monitor =
-                    SessionMonitor::with_normalize(session.clone(), host_alias.clone(), normalize)
-                        .with_socket(inner_ref.socket.clone())
-                        .with_tmux_bin(Some(resolved_tmux_bin.clone()));
+                let mut monitor = SessionMonitor::with_identity(
+                    session_id.clone(),
+                    display_session.clone(),
+                    host_alias.clone(),
+                    normalize,
+                )
+                .with_socket(inner_ref.socket.clone())
+                .with_tmux_bin(Some(resolved_tmux_bin.clone()));
 
                 let exit = monitor
                     .run(&mut shell, &bus, stop_rx.clone(), &mut startup_ready)
@@ -998,24 +1061,22 @@ impl HostHandle {
                 match exit {
                     MonitorExitReason::Stopped => {
                         set_health(MonitorHealth::Stopped);
-                        if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
-                            signals.remove(&session_for_cleanup);
-                        }
+                        inner_ref.remove_monitor_signal(&session_for_cleanup);
                         return Ok(MonitorExitReason::Stopped);
                     }
                     MonitorExitReason::ConnectionLost => {
                         // Transition Running execs in this session to Unknown (DC31)
                         inner_ref.notify_exec_discontinuity(
-                            &session,
-                            &format!("connection lost for {}:{}", host_alias, session),
+                            &session_id,
+                            &format!("connection lost for {}:{}", host_alias, display_session),
                         );
 
                         // Unexpected EOF — emit discontinuity and attempt reconnect
                         bus.publish_discontinuity_for(
-                            TimelineMarkerScope::for_host_session(&host_alias, &session),
+                            TimelineMarkerScope::for_host_session(&host_alias, &display_session),
                             &format!(
                                 "stream interrupted: control channel lost for {}:{}",
-                                host_alias, session
+                                host_alias, display_session
                             ),
                         );
                         set_health(MonitorHealth::Reconnecting);
@@ -1023,12 +1084,10 @@ impl HostHandle {
                         attempt += 1;
                         if attempt > max_retries {
                             set_health(MonitorHealth::Failed);
-                            if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
-                                signals.remove(&session_for_cleanup);
-                            }
+                            inner_ref.remove_monitor_signal(&session_for_cleanup);
                             return Err(Error::State(format!(
                                 "monitor for '{}' exhausted {} reconnect attempts",
-                                session, max_retries
+                                display_session, max_retries
                             )));
                         }
 
@@ -1043,9 +1102,7 @@ impl HostHandle {
                             _ = stop_clone.changed() => {
                                 if *stop_rx.borrow() {
                                     set_health(MonitorHealth::Stopped);
-                                    if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
-                                        signals.remove(&session_for_cleanup);
-                                    }
+                                    inner_ref.remove_monitor_signal(&session_for_cleanup);
                                     return Ok(MonitorExitReason::Stopped);
                                 }
                             }
@@ -1068,24 +1125,34 @@ impl HostHandle {
                             Err(_) => continue, // Can't reach host, retry after next backoff
                         };
 
-                        if !sessions.iter().any(|s| s.name == session) {
+                        let Some(current_session) =
+                            sessions.iter().find(|s| s.id.as_str() == session_id)
+                        else {
                             // Session gone — permanent failure (DC29 session identity)
                             bus.publish_discontinuity_for(
-                                TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                TimelineMarkerScope::for_host_session(
+                                    &host_alias,
+                                    &display_session,
+                                ),
                                 &format!(
                                     "stream failed: session '{}' no longer exists on {}",
-                                    session, host_alias
+                                    display_session, host_alias
                                 ),
                             );
                             set_health(MonitorHealth::Failed);
-                            if let Ok(mut signals) = inner_ref.monitor_signals.lock() {
-                                signals.remove(&session_for_cleanup);
-                            }
+                            inner_ref.remove_monitor_signal(&session_for_cleanup);
                             return Err(Error::NotFound(format!(
-                                "session '{}' no longer exists after reconnect",
-                                session
+                                "session '{}' ({}) no longer exists after reconnect",
+                                display_session, session_id
                             )));
+                        };
+                        if current_session.name != display_session {
+                            if let Ok(mut names) = inner_ref.monitor_signal_names.lock() {
+                                names.retain(|_, id| id != &session_id);
+                                names.insert(current_session.name.clone(), session_id.clone());
+                            }
                         }
+                        display_session = current_session.name.clone();
 
                         // Reopen shell channel
                         match inner_ref.transport.open_shell(80, 24).await {
@@ -1097,10 +1164,13 @@ impl HostHandle {
                                 // downstream consumers (history, subscribers) get
                                 // re-anchored with current screen state.
                                 bus.publish_discontinuity_for(
-                                    TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                    TimelineMarkerScope::for_host_session(
+                                        &host_alias,
+                                        &display_session,
+                                    ),
                                     &format!(
                                         "stream resumed: reattached after reconnect for {}:{}",
-                                        host_alias, session
+                                        host_alias, display_session
                                     ),
                                 );
 
@@ -1110,13 +1180,13 @@ impl HostHandle {
                                 match discovery::list_panes_in_session_with_prefix(
                                     &inner_ref.transport,
                                     &reconnect_pfx,
-                                    &session,
+                                    &session_id,
                                 )
                                 .await
                                 {
                                     Ok(panes) => {
                                         for pane in &panes {
-                                            let target = pane.address.to_string();
+                                            let target = pane.address.pane_id.clone();
                                             if let Ok(content) = capture::capture_pane_with_prefix(
                                                 &inner_ref.transport,
                                                 &reconnect_pfx,
@@ -1154,14 +1224,14 @@ impl HostHandle {
                                         "stream snapshot failed: could not discover panes \
                                          after reconnect for {}:{}; \
                                          intermediate output may be missing",
-                                        host_alias, session
+                                        host_alias, display_session
                                     )
                                 } else if snapshot_panes == 0 {
                                     format!(
                                         "stream snapshot empty: no pane content captured \
                                          after reconnect for {}:{}; \
                                          intermediate output may be missing",
-                                        host_alias, session
+                                        host_alias, display_session
                                     )
                                 } else {
                                     format!(
@@ -1169,13 +1239,16 @@ impl HostHandle {
                                          after reconnect for {}:{} ({} pane{}); \
                                          intermediate output may be missing",
                                         host_alias,
-                                        session,
+                                        display_session,
                                         snapshot_panes,
                                         if snapshot_panes == 1 { "" } else { "s" }
                                     )
                                 };
                                 bus.publish_discontinuity_for(
-                                    TimelineMarkerScope::for_host_session(&host_alias, &session),
+                                    TimelineMarkerScope::for_host_session(
+                                        &host_alias,
+                                        &display_session,
+                                    ),
                                     &snapshot_msg,
                                 );
 
@@ -1192,7 +1265,7 @@ impl HostHandle {
         startup_ready_rx.await.map_err(|_| {
             Error::State(format!(
                 "monitor for '{}' exited before control mode became ready",
-                session_name
+                session
             ))
         })?;
 
@@ -1251,9 +1324,11 @@ impl HostHandle {
                     continue;
                 }
             }
-            let name = session.name.clone();
-            let handle = self.start_monitoring_session(&name).await?;
-            handles.insert(name, handle);
+            let id = session.id.as_str().to_string();
+            let handle = self
+                .start_monitoring_session_info_with_normalize(session, CaptureNormalizeMode::Raw)
+                .await?;
+            handles.insert(id, handle);
         }
 
         Ok(MonitorHandle::new(handles))
@@ -1265,13 +1340,38 @@ impl HostHandle {
     /// The monitor task will exit asynchronously and clean up its registration.
     /// For awaited teardown guarantees, use `SessionMonitorHandle::shutdown()`.
     pub fn stop_monitoring_session(&self, session_name: &str) -> Result<()> {
+        let id = {
+            let signals = self
+                .inner
+                .monitor_signals
+                .lock()
+                .expect("monitor_signals lock poisoned");
+            if signals.contains_key(session_name) {
+                session_name.to_string()
+            } else {
+                drop(signals);
+                self.inner
+                    .monitor_signal_names
+                    .lock()
+                    .expect("monitor_signal_names lock poisoned")
+                    .get(session_name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Error::NotFound(format!("session '{}' not being monitored", session_name))
+                    })?
+            }
+        };
+        self.stop_monitoring_session_by_id(&id)
+    }
+
+    pub fn stop_monitoring_session_by_id(&self, session_id: &str) -> Result<()> {
         let signals = self
             .inner
             .monitor_signals
             .lock()
             .expect("monitor_signals lock poisoned");
-        let tx = signals.get(session_name).ok_or_else(|| {
-            Error::NotFound(format!("session '{}' not being monitored", session_name))
+        let tx = signals.get(session_id).ok_or_else(|| {
+            Error::NotFound(format!("session id '{}' not being monitored", session_id))
         })?;
         let _ = tx.send(true);
         Ok(())
@@ -1299,7 +1399,20 @@ impl HostHandle {
             .monitor_signals
             .lock()
             .expect("monitor_signals lock poisoned");
-        signals.keys().cloned().collect()
+        let names = self
+            .inner
+            .monitor_signal_names
+            .lock()
+            .expect("monitor_signal_names lock poisoned");
+        signals
+            .keys()
+            .map(|id| {
+                names
+                    .iter()
+                    .find_map(|(name, mapped_id)| (mapped_id == id).then(|| name.clone()))
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect()
     }
 
     pub fn host_alias(&self) -> &str {
@@ -1929,9 +2042,9 @@ impl Target {
     /// The tmux target string for commands.
     pub fn target_string(&self) -> String {
         match &self.address {
-            TargetAddress::Session(s) => s.name.clone(),
-            TargetAddress::Window(w) => format!("{}:{}", w.session_name, w.index),
-            TargetAddress::Pane(p) => p.to_tmux_target(),
+            TargetAddress::Session(s) => s.id.as_str().to_string(),
+            TargetAddress::Window(w) => format!("{}:{}", w.session_id, w.index),
+            TargetAddress::Pane(p) => p.pane_id.clone(),
         }
     }
 
@@ -1951,6 +2064,19 @@ impl Target {
             TargetAddress::Window(w) => &w.session_name,
             TargetAddress::Pane(p) => &p.session,
         }
+    }
+
+    /// Stable session id when it is available for this target.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.address {
+            TargetAddress::Session(s) => Some(s.id.as_str()),
+            TargetAddress::Window(w) => Some(&w.session_id),
+            TargetAddress::Pane(p) => p.session_id.as_ref().map(SessionId::as_str),
+        }
+    }
+
+    fn session_target(&self) -> &str {
+        self.session_id().unwrap_or_else(|| self.session_name())
     }
 
     /// Full window info (only available at window level).
@@ -2104,9 +2230,12 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let windows =
-                    discovery::list_windows_with_prefix(&self.inner.transport, &prefix, &s.name)
-                        .await?;
+                let windows = discovery::list_windows_with_prefix(
+                    &self.inner.transport,
+                    &prefix,
+                    s.id.as_str(),
+                )
+                .await?;
                 Ok(windows
                     .into_iter()
                     .map(|w| Target {
@@ -2119,7 +2248,7 @@ impl Target {
                 let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &w.session_name,
+                    &w.session_id,
                 )
                 .await?;
                 Ok(panes
@@ -2138,9 +2267,9 @@ impl Target {
     /// Navigate to a window by index (from session level).
     pub async fn window(&self, index: u32) -> Result<Option<Target>> {
         let prefix = self.inner.tmux_prefix().await;
-        let session_name = self.session_name().to_string();
+        let session_target = self.session_target().to_string();
         let windows =
-            discovery::list_windows_with_prefix(&self.inner.transport, &prefix, &session_name)
+            discovery::list_windows_with_prefix(&self.inner.transport, &prefix, &session_target)
                 .await?;
         Ok(windows
             .into_iter()
@@ -2164,7 +2293,7 @@ impl Target {
     /// At pane level: only matches if the current pane has the given index.
     pub async fn pane(&self, index: u32) -> Result<Option<Target>> {
         let prefix = self.inner.tmux_prefix().await;
-        let session_name = self.session_name().to_string();
+        let session_target = self.session_target().to_string();
 
         let window_filter = match &self.address {
             TargetAddress::Session(_) => {
@@ -2172,7 +2301,7 @@ impl Target {
                 let windows = discovery::list_windows_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &session_name,
+                    &session_target,
                 )
                 .await?;
                 let active_window = windows.into_iter().find(|w| w.active);
@@ -2198,7 +2327,7 @@ impl Target {
         let panes = discovery::list_panes_in_session_with_prefix(
             &self.inner.transport,
             &prefix,
-            &session_name,
+            &session_target,
         )
         .await?;
 
@@ -2225,9 +2354,13 @@ impl Target {
         let prefix = self.inner.tmux_prefix().await;
         match &self.address {
             TargetAddress::Session(s) => {
-                let window =
-                    control::new_window_with_prefix(&self.inner.transport, &prefix, &s.name, opts)
-                        .await?;
+                let window = control::new_window_with_prefix(
+                    &self.inner.transport,
+                    &prefix,
+                    s.id.as_str(),
+                    opts,
+                )
+                .await?;
                 Ok(Target {
                     inner: self.inner.clone(),
                     address: TargetAddress::Window(window),
@@ -2360,7 +2493,7 @@ impl Target {
                 capture::capture_session_with_tmux_prefix(
                     &self.inner.transport,
                     &prefix,
-                    self.session_name(),
+                    self.session_target(),
                 )
                 .await
             }
@@ -2368,12 +2501,12 @@ impl Target {
                 let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &w.session_name,
+                    &w.session_id,
                 )
                 .await?;
                 let mut result = HashMap::new();
                 for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
-                    let target = pane.address.to_tmux_target();
+                    let target = pane.address.pane_id.clone();
                     let content =
                         capture::capture_pane_with_prefix(&self.inner.transport, &prefix, &target)
                             .await?;
@@ -2382,12 +2515,9 @@ impl Target {
                 Ok(result)
             }
             TargetAddress::Pane(p) => {
-                let content = capture::capture_pane_with_prefix(
-                    &self.inner.transport,
-                    &prefix,
-                    &p.to_tmux_target(),
-                )
-                .await?;
+                let content =
+                    capture::capture_pane_with_prefix(&self.inner.transport, &prefix, &p.pane_id)
+                        .await?;
                 let mut result = HashMap::new();
                 result.insert(p.clone(), content);
                 Ok(result)
@@ -2406,7 +2536,7 @@ impl Target {
                 capture::capture_session_with_options_prefix(
                     &self.inner.transport,
                     &prefix,
-                    self.session_name(),
+                    self.session_target(),
                     opts,
                 )
                 .await
@@ -2415,12 +2545,12 @@ impl Target {
                 let panes = discovery::list_panes_in_session_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &w.session_name,
+                    &w.session_id,
                 )
                 .await?;
                 let mut result = HashMap::new();
                 for pane in panes.into_iter().filter(|p| p.address.window == w.index) {
-                    let target = pane.address.to_tmux_target();
+                    let target = pane.address.pane_id.clone();
                     let cr = capture::capture_pane_with_options_prefix(
                         &self.inner.transport,
                         &prefix,
@@ -2436,7 +2566,7 @@ impl Target {
                 let cr = capture::capture_pane_with_options_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &p.to_tmux_target(),
+                    &p.pane_id,
                     opts,
                 )
                 .await?;
@@ -2536,9 +2666,9 @@ impl Target {
 
     /// Rename this entity and return a new `Target` with the updated address.
     ///
-    /// **Session rename** is a correctness concern: the old `Target` holds a
-    /// stale session name, so all subsequent commands (which use `target_string()`)
-    /// would fail. Always use the returned `Target` after renaming a session.
+    /// **Session rename** changes display metadata while the stable tmux
+    /// session id remains targetable. Use the returned `Target` when rendering
+    /// the updated display name.
     ///
     /// **Window rename** is metadata-only: tmux windows are addressed by index,
     /// not name, so the old `Target` continues to work. The returned `Target`
@@ -2567,7 +2697,7 @@ impl Target {
                 control::rename_window_with_prefix(
                     &self.inner.transport,
                     &prefix,
-                    &w.session_name,
+                    &w.session_id,
                     w.index,
                     new_name,
                 )
@@ -2601,7 +2731,13 @@ impl Target {
         let host = HostHandle {
             inner: self.inner.clone(),
         };
-        host.start_monitoring_session(self.session_name()).await
+        match &self.address {
+            TargetAddress::Session(session) => {
+                host.start_monitoring_session_by_id(session.id.as_str())
+                    .await
+            }
+            _ => unreachable!("checked session target above"),
+        }
     }
 
     /// Signal this session's monitor to stop (fire-and-forget).
@@ -2621,7 +2757,12 @@ impl Target {
         let host = HostHandle {
             inner: self.inner.clone(),
         };
-        host.stop_monitoring_session(self.session_name())
+        match &self.address {
+            TargetAddress::Session(session) => {
+                host.stop_monitoring_session_by_id(session.id.as_str())
+            }
+            _ => unreachable!("checked session target above"),
+        }
     }
 
     // --- Geometry & history (DC20, Phase 1.9b) ---
@@ -2657,7 +2798,7 @@ impl Target {
         control::set_history_limit_with_prefix(
             &self.inner.transport,
             &prefix,
-            Some(self.session_name()),
+            Some(self.session_target()),
             limit,
         )
         .await
@@ -2673,7 +2814,7 @@ impl Target {
         control::get_history_limit_with_prefix(
             &self.inner.transport,
             &prefix,
-            Some(self.session_name()),
+            Some(self.session_target()),
         )
         .await
     }
@@ -2703,10 +2844,10 @@ impl Target {
         };
         let marker = format!("__ML{}__", exec_id.short_hex());
         let command = command.to_string();
-        let session_name = self.session_name().to_string();
+        let session_id = self.session_target().to_string();
 
         // Key includes session for session-scoped discontinuity invalidation
-        let active_key = format!("{}:{}", session_name, pane_id);
+        let active_key = format!("{}:{}", session_id, pane_id);
 
         // Register in active_execs before spawning
         {
@@ -3083,7 +3224,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(target.level(), TargetLevel::Session);
-        assert_eq!(target.target_string(), "test");
+        assert_eq!(target.target_string(), "$0");
         assert_eq!(target.session_name(), "test");
     }
 
@@ -3105,7 +3246,7 @@ mod tests {
         assert!(target.is_some());
         let t = target.unwrap();
         assert_eq!(t.level(), TargetLevel::Session);
-        assert_eq!(t.target_string(), "build");
+        assert_eq!(t.target_string(), "$0");
     }
 
     #[tokio::test]
@@ -3119,7 +3260,7 @@ mod tests {
         assert!(target.is_some());
         let t = target.unwrap();
         assert_eq!(t.level(), TargetLevel::Session);
-        assert_eq!(t.target_string(), "build");
+        assert_eq!(t.target_string(), "$7");
         assert_eq!(t.session_info().unwrap().id.as_str(), "$7");
     }
 
@@ -3385,8 +3526,8 @@ mod tests {
         let children = target.children().await.unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].level(), TargetLevel::Window);
-        assert_eq!(children[0].target_string(), "build:0");
-        assert_eq!(children[1].target_string(), "build:1");
+        assert_eq!(children[0].target_string(), "$0:0");
+        assert_eq!(children[1].target_string(), "$0:1");
     }
 
     #[tokio::test]
@@ -3430,6 +3571,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Pane(PaneAddress {
                 pane_id: "%1".to_string(),
+                session_id: None,
                 session: "build".to_string(),
                 window: 0,
                 pane: 0,
@@ -3442,7 +3584,7 @@ mod tests {
 
     #[tokio::test]
     async fn split_pane_returns_pane_target_from_window() {
-        let mock = MockTransport::new().with_response("split-window -P", "%9 build 0 1");
+        let mock = MockTransport::new().with_response("split-window -P", "%9 $0 build 0 1");
         let host = mock_host(mock);
         let window_target = Target {
             inner: host.inner.clone(),
@@ -3461,6 +3603,7 @@ mod tests {
         assert_eq!(pane.level(), TargetLevel::Pane);
         let addr = pane.pane_address().unwrap();
         assert_eq!(addr.pane_id, "%9");
+        assert_eq!(addr.session_id.as_ref().unwrap().as_str(), "$0");
         assert_eq!(addr.session, "build");
         assert_eq!(addr.window, 0);
         assert_eq!(addr.pane, 1);
@@ -3920,6 +4063,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Pane(PaneAddress {
                 pane_id: "%1".to_string(),
+                session_id: None,
                 session: "build".to_string(),
                 window: 0,
                 pane: 0,
@@ -3940,6 +4084,7 @@ mod tests {
     async fn rename_pane_fails() {
         let addr = PaneAddress {
             pane_id: "%0".to_string(),
+            session_id: None,
             session: "test".to_string(),
             window: 0,
             pane: 0,
@@ -3971,7 +4116,7 @@ mod tests {
         };
         let new_target = target.rename("new").await.unwrap();
         assert_eq!(new_target.session_name(), "new");
-        assert_eq!(new_target.target_string(), "new");
+        assert_eq!(new_target.target_string(), "$0");
     }
 
     #[test]
@@ -4054,7 +4199,7 @@ mod tests {
             )
             .with_response(
                 "list-panes",
-                "%0 build 0 0  bash 100 80 24 1\n%1 build 1 0  vim 101 80 24 1\n",
+                "%0 $0 build 0 0  bash 100 80 24 1\n%1 $0 build 1 0  vim 101 80 24 1\n",
             );
         let host = mock_host(mock);
         let session = host.session("build").await.unwrap().unwrap();
@@ -4072,6 +4217,7 @@ mod tests {
         // should share the same exec lock via HostHandleInner.
         let addr = PaneAddress {
             pane_id: "%5".to_string(),
+            session_id: None,
             session: "test".to_string(),
             window: 0,
             pane: 0,
@@ -4107,6 +4253,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Pane(PaneAddress {
                 pane_id: "%5".to_string(),
+                session_id: None,
                 session: "test".to_string(),
                 window: 0,
                 pane: 0,
@@ -4116,6 +4263,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Pane(PaneAddress {
                 pane_id: "%6".to_string(),
+                session_id: None,
                 session: "test".to_string(),
                 window: 0,
                 pane: 1,
@@ -4320,6 +4468,7 @@ mod tests {
             inner: host.inner.clone(),
             address: TargetAddress::Pane(PaneAddress {
                 pane_id: "%5".to_string(),
+                session_id: None,
                 session: "build".to_string(),
                 window: 0,
                 pane: 0,

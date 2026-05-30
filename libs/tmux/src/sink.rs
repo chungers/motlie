@@ -2853,6 +2853,7 @@ mod tests {
         TargetOutput {
             source: TargetAddress::Pane(PaneAddress {
                 pane_id: pane_id.to_string(),
+                session_id: None,
                 session: session.to_string(),
                 window: 0,
                 pane: 0,
@@ -3868,6 +3869,7 @@ mod tests {
             host: "web-1".to_string(),
             target: TargetAddress::Pane(PaneAddress {
                 pane_id: "%5".to_string(),
+                session_id: None,
                 session: "build".to_string(),
                 window: 0,
                 pane: 1,
@@ -3905,6 +3907,7 @@ mod tests {
             host: "h".to_string(),
             target: TargetAddress::Pane(PaneAddress {
                 pane_id: "%5".to_string(),
+                session_id: None,
                 session: "build".to_string(),
                 window: 0,
                 pane: 0,
@@ -3914,6 +3917,7 @@ mod tests {
             host: "h".to_string(),
             target: TargetAddress::Pane(PaneAddress {
                 pane_id: "%6".to_string(),
+                session_id: None,
                 session: "build".to_string(),
                 window: 0,
                 pane: 0,

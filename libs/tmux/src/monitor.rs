@@ -144,11 +144,12 @@ struct PaneAssemblyState {
 }
 
 impl PaneAssemblyState {
-    fn new(pane_id: &str, session: &str) -> Self {
+    fn new(pane_id: &str, session_id: &str, session: &str) -> Self {
         PaneAssemblyState {
             sequence: 0,
             address: PaneAddress {
                 pane_id: pane_id.to_string(),
+                session_id: SessionId::new(session_id.to_string()).ok(),
                 session: session.to_string(),
                 // Window/pane indices unknown from control mode — use 0.
                 // These are display-only; pane_id is authoritative.
@@ -161,6 +162,7 @@ impl PaneAssemblyState {
 
 /// Monitors a single tmux session via control mode.
 pub struct SessionMonitor {
+    session_id: String,
     session_name: String,
     host_alias: String,
     socket: Option<TmuxSocket>,
@@ -174,6 +176,7 @@ pub struct SessionMonitor {
 impl SessionMonitor {
     pub fn new(session_name: String, host_alias: String) -> Self {
         SessionMonitor {
+            session_id: session_name.clone(),
             session_name,
             host_alias,
             socket: None,
@@ -190,6 +193,24 @@ impl SessionMonitor {
         normalize: CaptureNormalizeMode,
     ) -> Self {
         SessionMonitor {
+            session_id: session_name.clone(),
+            session_name,
+            host_alias,
+            socket: None,
+            tmux_bin: None,
+            normalize,
+            pane_states: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn with_identity(
+        session_id: String,
+        session_name: String,
+        host_alias: String,
+        normalize: CaptureNormalizeMode,
+    ) -> Self {
+        SessionMonitor {
+            session_id,
             session_name,
             host_alias,
             socket: None,
@@ -213,7 +234,7 @@ impl SessionMonitor {
 
     fn attach_command(&self) -> String {
         build_attach_command(
-            &self.session_name,
+            &self.session_id,
             self.socket.as_ref(),
             self.tmux_bin.as_deref(),
         )
@@ -244,7 +265,9 @@ impl SessionMonitor {
         let state = self
             .pane_states
             .entry(pane_id.to_string())
-            .or_insert_with(|| PaneAssemblyState::new(pane_id, &self.session_name));
+            .or_insert_with(|| {
+                PaneAssemblyState::new(pane_id, &self.session_id, &self.session_name)
+            });
 
         state.sequence += 1;
 
@@ -468,35 +491,58 @@ impl MonitorHandle {
 
     /// Get a session monitor handle by name.
     pub fn get(&self, session: &str) -> Option<&SessionMonitorHandle> {
-        self.sessions.get(session)
+        self.sessions.get(session).or_else(|| {
+            self.sessions.values().find(|handle| {
+                handle.target().session_name() == session
+                    || handle.target().session_id() == Some(session)
+            })
+        })
     }
 
     /// Stop and remove a specific session's monitor.
     pub async fn stop_session(&mut self, name: &str) -> Result<()> {
-        let handle = self
+        let key = self
             .sessions
-            .remove(name)
+            .keys()
+            .find(|key| {
+                key.as_str() == name
+                    || self
+                        .sessions
+                        .get(*key)
+                        .is_some_and(|handle| handle.target().session_name() == name)
+            })
+            .cloned()
             .ok_or_else(|| Error::NotFound(format!("session '{}' not being monitored", name)))?;
+        let handle = self.sessions.remove(&key).expect("key selected from map");
         handle.shutdown().await
     }
 
     /// Remove a specific session's monitor from aggregate bookkeeping.
     pub(crate) fn remove_session(&mut self, name: &str) -> Option<SessionMonitorHandle> {
-        self.sessions.remove(name)
+        if self.sessions.contains_key(name) {
+            return self.sessions.remove(name);
+        }
+        let key = self.sessions.iter().find_map(|(key, handle)| {
+            (handle.target().session_name() == name).then(|| key.clone())
+        })?;
+        self.sessions.remove(&key)
     }
 
     /// Get a session monitor handle by TargetSpec.
-    /// Matches on the spec's session name.
     pub fn get_by_spec(&self, spec: &crate::TargetSpec) -> Option<&SessionMonitorHandle> {
-        self.sessions.get(spec.session_name())
+        if let Some(id) = spec.session_id_selector() {
+            self.get(id.as_str())
+        } else {
+            self.get(spec.session_name())
+        }
     }
 
     /// List currently active session names.
     pub fn active_sessions(&self) -> Vec<&str> {
         self.sessions
-            .iter()
-            .filter(|(_, h)| h.is_active())
-            .map(|(name, _)| name.as_str())
+            .values()
+            .filter(|h| h.is_active())
+            .map(|handle| handle.target().session_name())
             .collect()
     }
 
@@ -507,7 +553,10 @@ impl MonitorHandle {
     /// per-session health is the ground truth (DC29), so terminal states must
     /// remain visible.
     pub fn all_sessions(&self) -> Vec<&str> {
-        self.sessions.keys().map(|k| k.as_str()).collect()
+        self.sessions
+            .values()
+            .map(|handle| handle.target().session_name())
+            .collect()
     }
 
     /// Number of monitored sessions.

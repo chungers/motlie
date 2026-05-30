@@ -88,6 +88,7 @@ struct SessionRecord {
     last_workstream_title: Option<String>,
     mmux_label: Option<String>,
     mmux_previous_selected_key: Option<String>,
+    tmux_session_created: Option<u64>,
     last_tmux_activity: Option<u64>,
     activity_observed_at: Option<DateTime<Utc>>,
 }
@@ -226,8 +227,8 @@ struct StateChange {
 
 struct AssignmentTags<'a> {
     workstream: &'a str,
-    session_target: &'a SessionTarget,
     role: &'a str,
+    identity: &'a str,
     agent: Option<&'a str>,
     cwd: Option<&'a Path>,
     state: AgentState,
@@ -445,7 +446,7 @@ impl DaemonState {
             let mut state = shared.lock().await;
             let mut hydrated = 0usize;
             for session in sessions {
-                let target = SessionTarget::session(&alias, session.name.clone())?;
+                let target = SessionTarget::session_id(&alias, session.id.as_str())?;
                 let tags = tags_by_session
                     .get(&session.id)
                     .map(Vec::as_slice)
@@ -454,9 +455,21 @@ impl DaemonState {
                 if parsed.managed || parsed.workstream.is_some() || parsed.state.is_some() {
                     hydrated += 1;
                     let state_value = parsed.state.unwrap_or(AgentState::Idle);
+                    let reused_id = state
+                        .sessions
+                        .get(&target)
+                        .and_then(|record| record.tmux_session_created)
+                        .is_some_and(|created| created != session.created);
+                    if reused_id {
+                        state.sessions.remove(&target);
+                        for workstream in state.workstreams.values_mut() {
+                            workstream.sessions.remove(&target);
+                        }
+                    }
                     let record = state.sessions.entry(target.clone()).or_insert_with(|| {
                         SessionRecord::from_target(&target, state_value, parsed.updated_at)
                     });
+                    record.observe_tmux_session(&session);
                     record.state = state_value;
                     record.role = parsed.role.clone();
                     record.agent = parsed.agent.clone();
@@ -533,8 +546,8 @@ impl DaemonState {
             &meta,
             AssignmentTags {
                 workstream: &request.workstream,
-                session_target: &target,
                 role: &request.role,
+                identity: resolved.target.session_name(),
                 agent: None,
                 cwd: None,
                 state: AgentState::Busy,
@@ -550,7 +563,7 @@ impl DaemonState {
                 &resolved,
                 &managed_prompt(
                     &request.workstream,
-                    &target,
+                    &resolved.spec,
                     Some(&request.role),
                     None,
                     Some(task),
@@ -561,26 +574,33 @@ impl DaemonState {
             .await?;
         }
         let cursor = {
+            let stable_target = resolved.spec.clone();
             let mut state = shared.lock().await;
             state.add_session_to_workstream(
                 &request.workstream,
-                target.clone(),
+                stable_target.clone(),
                 request.role,
                 None,
                 None,
                 AgentState::Busy,
             )?;
+            if let (Some(record), Some(session)) = (
+                state.sessions.get_mut(&stable_target),
+                resolved.target.session_info(),
+            ) {
+                record.observe_tmux_session(session);
+            }
             let mut cursor = state.record_event(
                 &request.workstream,
                 EventDraft::new("joined")
-                    .target(&target)
+                    .target(&stable_target)
                     .state(AgentState::Busy),
             )?;
             if let Some(label) = &meta.mmux_label {
                 cursor = state.record_event(
                     &request.workstream,
                     EventDraft::new("mmux_label_applied")
-                        .target(&target)
+                        .target(&stable_target)
                         .summary(format!("mmux label applied: {label}")),
                 )?;
             }
@@ -590,7 +610,7 @@ impl DaemonState {
             "type": "ok",
             "op": "join",
             "workstream": request.workstream,
-            "target": target.to_string(),
+            "target": resolved.spec.to_string(),
             "cursor": cursor,
         })])
     }
@@ -619,8 +639,14 @@ impl DaemonState {
             ..Default::default()
         };
         let tmux_target = handle.create_session(target.session_name(), &opts).await?;
+        let stable_target = SessionTarget::session_id(
+            target.host_alias(),
+            tmux_target
+                .session_id()
+                .with_context(|| "created session target missing session id")?,
+        )?;
         let resolved = ResolvedTarget {
-            spec: target.clone(),
+            spec: stable_target.clone(),
             host: handle,
             target: tmux_target,
         };
@@ -629,8 +655,8 @@ impl DaemonState {
             &meta,
             AssignmentTags {
                 workstream: &request.workstream,
-                session_target: &target,
                 role: &request.role,
+                identity: resolved.target.session_name(),
                 agent: Some(&request.agent),
                 cwd: Some(&request.cwd),
                 state: AgentState::Busy,
@@ -646,7 +672,7 @@ impl DaemonState {
                 &resolved,
                 &managed_prompt(
                     &request.workstream,
-                    &target,
+                    &stable_target,
                     Some(&request.role),
                     Some(&request.cwd),
                     Some(task),
@@ -660,23 +686,29 @@ impl DaemonState {
             let mut state = shared.lock().await;
             state.add_session_to_workstream(
                 &request.workstream,
-                target.clone(),
+                stable_target.clone(),
                 request.role,
                 Some(request.agent),
                 Some(request.cwd.clone()),
                 AgentState::Busy,
             )?;
+            if let (Some(record), Some(session)) = (
+                state.sessions.get_mut(&stable_target),
+                resolved.target.session_info(),
+            ) {
+                record.observe_tmux_session(session);
+            }
             let mut cursor = state.record_event(
                 &request.workstream,
                 EventDraft::new("created")
-                    .target(&target)
+                    .target(&stable_target)
                     .state(AgentState::Busy),
             )?;
             if let Some(label) = &meta.mmux_label {
                 cursor = state.record_event(
                     &request.workstream,
                     EventDraft::new("mmux_label_applied")
-                        .target(&target)
+                        .target(&stable_target)
                         .summary(format!("mmux label applied: {label}")),
                 )?;
             }
@@ -686,7 +718,7 @@ impl DaemonState {
             "type": "ok",
             "op": "new",
             "workstream": request.workstream,
-            "target": target.to_string(),
+            "target": stable_target.to_string(),
             "cursor": cursor,
         })])
     }
@@ -894,6 +926,7 @@ impl DaemonState {
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
+        let stable_target = resolved.spec.clone();
         let mmux_cleanup =
             match Self::clear_mmux_workstream_label(&resolved.target, &request.workstream).await {
                 Ok(cleanup) => cleanup,
@@ -901,7 +934,7 @@ impl DaemonState {
                     shared.lock().await.record_event(
                         &request.workstream,
                         EventDraft::new("mmux_label_restore_failed")
-                            .target(&target)
+                            .target(&stable_target)
                             .summary(format!("mmux label cleanup failed: {err}")),
                     )?;
                     MmuxLabelCleanup::default()
@@ -935,12 +968,12 @@ impl DaemonState {
         };
         let cursor = {
             let mut state = shared.lock().await;
-            if let Some(record) = state.sessions.get_mut(&target) {
+            if let Some(record) = state.sessions.get_mut(&stable_target) {
                 record.workstream = None;
                 record.mmux_label = None;
                 record.mmux_previous_selected_key = None;
             }
-            let mut event = EventDraft::new("left").target(&target);
+            let mut event = EventDraft::new("left").target(&stable_target);
             if request.available {
                 event = event.state(AgentState::Available);
             }
@@ -949,7 +982,7 @@ impl DaemonState {
                 state.record_event(
                     &request.workstream,
                     EventDraft::new("mmux_label_cleared")
-                        .target(&target)
+                        .target(&stable_target)
                         .summary("mmux workstream label cleared"),
                 )?;
             }
@@ -957,21 +990,21 @@ impl DaemonState {
                 state.record_event(
                     &request.workstream,
                     EventDraft::new("mmux_label_cleanup_skipped")
-                        .target(&target)
+                        .target(&stable_target)
                         .summary(
                             "mmux label cleanup skipped: session belongs to a different workstream",
                         ),
                 )?;
             }
             let workstream = state.workstream_mut(&request.workstream)?;
-            workstream.sessions.remove(&target);
+            workstream.sessions.remove(&stable_target);
             cursor
         };
         let mut records = vec![json!({
             "type": "ok",
             "op": "leave",
             "workstream": request.workstream,
-            "target": target.to_string(),
+            "target": stable_target.to_string(),
             "cursor": cursor,
             "mmux_label_cleared": mmux_cleanup.cleared,
             "mmux_previous_selected_key_restored": mmux_cleanup.restored_previous,
@@ -992,15 +1025,16 @@ impl DaemonState {
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
         resolved.target.kill().await?;
+        let stable_target = resolved.spec;
         let mut state = shared.lock().await;
-        state.sessions.remove(&target);
+        state.sessions.remove(&stable_target);
         for workstream in state.workstreams.values_mut() {
-            workstream.sessions.remove(&target);
+            workstream.sessions.remove(&stable_target);
         }
         Ok(vec![json!({
             "type": "ok",
             "op": "kill",
-            "target": target.to_string(),
+            "target": stable_target.to_string(),
         })])
     }
 
@@ -1009,27 +1043,32 @@ impl DaemonState {
         request: SendRequest,
     ) -> anyhow::Result<Vec<Value>> {
         let target: SessionTarget = request.target.parse()?;
-        let (handle, current_state) = {
+        let handle = {
             let state = shared.lock().await;
-            state.ensure_target_in_workstream(&request.workstream, &target)?;
+            state.host_handle(target.host_alias())?
+        };
+        let resolved = Self::resolve_target(handle, target.clone()).await?;
+        let stable_target = resolved.spec.clone();
+        let current_state = {
+            let state = shared.lock().await;
+            state.ensure_target_in_workstream(&request.workstream, &stable_target)?;
             let current_state = state
                 .sessions
-                .get(&target)
+                .get(&stable_target)
                 .map(|record| record.state)
                 .unwrap_or(AgentState::Idle);
             if let Some(required) = request.require_state {
                 if current_state != required {
                     bail!(
                         "target {} is {}, not required state {}",
-                        target,
+                        stable_target,
                         current_state.as_str(),
                         required.as_str()
                     );
                 }
             }
-            (state.host_handle(target.host_alias())?, current_state)
+            current_state
         };
-        let resolved = Self::resolve_target(handle, target.clone()).await?;
         if request.interrupt_first {
             Self::send_interrupt_to_resolved(&resolved, InterruptKey::Esc).await?;
             sleep(Duration::from_millis(request.settle_ms)).await;
@@ -1053,13 +1092,13 @@ impl DaemonState {
             let mut state = shared.lock().await;
             let state_after = state
                 .sessions
-                .get(&target)
+                .get(&stable_target)
                 .map(|record| record.state)
                 .unwrap_or(current_state);
             let cursor = state.record_event(
                 &request.workstream,
                 EventDraft::new("message_sent")
-                    .target(&target)
+                    .target(&stable_target)
                     .text(request.text)
                     .state(state_after),
             )?;
@@ -1069,7 +1108,7 @@ impl DaemonState {
             "type": "ok",
             "op": "send",
             "workstream": request.workstream,
-            "target": target.to_string(),
+            "target": stable_target.to_string(),
             "target_state": state_after.as_str(),
             "mid_generation_risk": current_state == AgentState::Busy && !request.interrupt_first,
             "paste_mode": request.paste_mode.as_str(),
@@ -1087,30 +1126,33 @@ impl DaemonState {
         request: InterruptRequest,
     ) -> anyhow::Result<Vec<Value>> {
         let target: SessionTarget = request.target.parse()?;
-        let (handle, event_context) = {
+        let handle = {
             let state = shared.lock().await;
-            let handle = state.host_handle(target.host_alias())?;
-            let event_context = state.sessions.get(&target).and_then(|record| {
+            state.host_handle(target.host_alias())?
+        };
+        let resolved = Self::resolve_target(handle, target.clone()).await?;
+        let stable_target = resolved.spec.clone();
+        let event_context = {
+            let state = shared.lock().await;
+            state.sessions.get(&stable_target).and_then(|record| {
                 record
                     .workstream
                     .clone()
                     .map(|workstream| (workstream, record.state))
-            });
-            (handle, event_context)
+            })
         };
-        let resolved = Self::resolve_target(handle, target.clone()).await?;
         Self::send_interrupt_to_resolved(&resolved, request.key).await?;
         let mut record = json!({
             "type": "ok",
             "op": "interrupt",
-            "target": target.to_string(),
+            "target": stable_target.to_string(),
             "key": request.key.as_str(),
         });
         if let Some((workstream, state_value)) = event_context {
             let cursor = shared.lock().await.record_event(
                 &workstream,
                 EventDraft::new("interrupted")
-                    .target(&target)
+                    .target(&stable_target)
                     .text(request.key.as_str())
                     .state(state_value),
             )?;
@@ -1180,7 +1222,7 @@ impl DaemonState {
             let state = shared.lock().await;
             state
                 .sessions
-                .get(&target)
+                .get(&change.target)
                 .and_then(|record| record.workstream.clone())
         };
         if let Some(workstream) = workstream {
@@ -1188,7 +1230,7 @@ impl DaemonState {
             let cursor = shared.lock().await.record_event(
                 &workstream,
                 EventDraft::new(kind)
-                    .target(&target)
+                    .target(&change.target)
                     .state(request.state)
                     .summary(request.summary.clone()),
             )?;
@@ -1196,7 +1238,7 @@ impl DaemonState {
                 "type": "event",
                 "kind": kind,
                 "workstream": workstream,
-                "target": target.to_string(),
+                "target": change.target.to_string(),
                 "state": request.state.as_str(),
                 "summary": request.summary,
                 "cursor": cursor,
@@ -1205,7 +1247,7 @@ impl DaemonState {
             records.push(json!({
                 "type": "ok",
                 "op": "session_mark",
-                "target": target.to_string(),
+                "target": change.target.to_string(),
                 "state": request.state.as_str(),
             }));
         }
@@ -1291,8 +1333,17 @@ impl DaemonState {
         shared: Arc<Mutex<Self>>,
         request: HandoffArmRequest,
     ) -> anyhow::Result<Vec<Value>> {
-        let from: SessionTarget = request.from.parse()?;
-        let to: SessionTarget = request.to.parse()?;
+        let from_input: SessionTarget = request.from.parse()?;
+        let to_input: SessionTarget = request.to.parse()?;
+        let (from_handle, to_handle) = {
+            let state = shared.lock().await;
+            (
+                state.host_handle(from_input.host_alias())?,
+                state.host_handle(to_input.host_alias())?,
+            )
+        };
+        let from = Self::resolve_target(from_handle, from_input).await?.spec;
+        let to = Self::resolve_target(to_handle, to_input).await?.spec;
         let immediate = {
             let mut state = shared.lock().await;
             state.ensure_target_in_workstream(&request.workstream, &from)?;
@@ -1366,7 +1417,8 @@ impl DaemonState {
             }
             state.host_handle(target.host_alias())?
         };
-        Self::resolve_target(handle, target.clone()).await?;
+        let resolved = Self::resolve_target(handle, target.clone()).await?;
+        let stable_target = resolved.spec;
 
         let (generation, next_fire_at) = {
             let mut state = shared.lock().await;
@@ -1382,7 +1434,7 @@ impl DaemonState {
                 TimerRecord {
                     name: request.name.clone(),
                     workstream: request.workstream.clone(),
-                    target: target.clone(),
+                    target: stable_target.clone(),
                     every_secs: request.every_secs,
                     prompt: request.prompt,
                     enter: request.enter,
@@ -1424,7 +1476,7 @@ impl DaemonState {
             "op": "timer_start",
             "name": request.name,
             "workstream": request.workstream,
-            "target": target.to_string(),
+            "target": stable_target.to_string(),
             "every_secs": request.every_secs,
             "enter": request.enter,
             "submit_retries": submit_retries,
@@ -1699,13 +1751,14 @@ impl DaemonState {
                 .collect::<Vec<_>>();
             match handle.list_sessions().await {
                 Ok(sessions) => {
-                    let mut by_name = sessions
+                    let mut by_id = sessions
                         .into_iter()
-                        .map(|session| (session.name.clone(), session))
+                        .map(|session| (session.id.as_str().to_string(), session))
                         .collect::<BTreeMap<_, _>>();
                     for target in host_targets {
-                        let activity = by_name
-                            .remove(target.session_name())
+                        let activity = target
+                            .session_id_selector()
+                            .and_then(|id| by_id.remove(id.as_str()))
                             .map(LiveActivity::Present)
                             .unwrap_or(LiveActivity::Missing);
                         live.insert(target, activity);
@@ -1746,8 +1799,8 @@ impl DaemonState {
                 &meta,
                 AssignmentTags {
                     workstream: &request.workstream,
-                    session_target: &plan.target.spec,
                     role: &request.role,
+                    identity: plan.target.target.session_name(),
                     agent: plan.agent.as_deref(),
                     cwd: plan.cwd.as_deref(),
                     state: plan.state,
@@ -2362,6 +2415,9 @@ impl DaemonState {
             .sessions
             .entry(resolved.spec.clone())
             .or_insert_with(|| SessionRecord::from_target(&resolved.spec, state, Some(Utc::now())));
+        if let Some(session) = resolved.target.session_info() {
+            record.observe_tmux_session(session);
+        }
         record.state = state;
         record.updated_at = Utc::now();
         if let Some(summary) = summary {
@@ -2431,7 +2487,7 @@ impl DaemonState {
     ) -> anyhow::Result<InputGuardDecision> {
         let activity = target
             .host
-            .session_client_activity(target.spec.session_name())
+            .session_client_activity(target.target.session_name())
             .await?;
         let Some(latest_client_activity) = activity.latest_client_activity else {
             return Ok(InputGuardDecision {
@@ -2464,8 +2520,12 @@ impl DaemonState {
             .target(logical.target_spec())
             .await?
             .with_context(|| format!("session '{}' not found", logical))?;
+        let stable = match target.session_id() {
+            Some(session_id) => SessionTarget::session_id(logical.host_alias(), session_id)?,
+            None => logical,
+        };
         Ok(ResolvedTarget {
-            spec: logical,
+            spec: stable,
             host: handle,
             target,
         })
@@ -2509,10 +2569,7 @@ impl DaemonState {
             ("workstream-title", meta.title.clone()),
             ("workstream-state", "open".to_string()),
             ("role", assignment.role.to_string()),
-            (
-                "identity",
-                assignment.session_target.session_name().to_string(),
-            ),
+            ("identity", assignment.identity.to_string()),
             ("state", tags::state_value(assignment.state)),
             ("updated-at", tags::now_tag()),
         ];
@@ -2959,9 +3016,15 @@ impl SessionRecord {
             last_workstream_title: None,
             mmux_label: None,
             mmux_previous_selected_key: None,
+            tmux_session_created: None,
             last_tmux_activity: None,
             activity_observed_at: None,
         }
+    }
+
+    fn observe_tmux_session(&mut self, session: &SessionInfo) {
+        self.identity = session.name.clone();
+        self.tmux_session_created = Some(session.created);
     }
 
     fn observe_activity(&mut self, tmux_activity: u64, now: DateTime<Utc>) -> u64 {
@@ -3090,6 +3153,7 @@ impl SessionRecord {
             "last_workstream_title": self.last_workstream_title,
             "mmux_label": self.mmux_label,
             "mmux_previous_selected_key": self.mmux_previous_selected_key,
+            "tmux_session_created": self.tmux_session_created,
             "tmux_activity": self.last_tmux_activity,
             "activity_observed_at": datetime_option_json(self.activity_observed_at),
         })
@@ -3620,6 +3684,80 @@ mod tests {
         workstream.merge_hydrated_mmux_label("349 labels".to_string());
         assert_eq!(workstream.mmux_label, None);
         assert_eq!(workstream.mmux_label_conflicts.len(), 2);
+    }
+
+    #[test]
+    fn stable_session_targets_are_host_scoped() {
+        let first = SessionTarget::session_id("host-a", "$0").expect("first target");
+        let second = SessionTarget::session_id("host-b", "$0").expect("second target");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn session_record_display_name_updates_without_rekeying() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mut state = DaemonState::default();
+        state
+            .open(OpenRequest {
+                workstream: "issue-355".to_string(),
+                title: "Issue 355".to_string(),
+                goal: None,
+                domain: None,
+                mmux_label: None,
+                settings: WorkstreamSettings { event_limit: 10 },
+            })
+            .expect("open workstream");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+
+        let old_session = SessionInfo {
+            name: "old-name".to_string(),
+            id: "$1".try_into().expect("old session id"),
+            created: 100,
+            attached_count: 0,
+            window_count: 1,
+            group: None,
+            activity: 200,
+        };
+        let renamed_session = SessionInfo {
+            name: "new-name".to_string(),
+            id: "$1".try_into().expect("new session id"),
+            created: 100,
+            attached_count: 0,
+            window_count: 1,
+            group: None,
+            activity: 300,
+        };
+
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session record")
+            .observe_tmux_session(&old_session);
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session record")
+            .observe_tmux_session(&renamed_session);
+
+        assert_eq!(state.sessions.len(), 1);
+        let record = state.sessions.get(&target).expect("stable keyed record");
+        assert_eq!(record.identity, "new-name");
+        assert_eq!(record.role.as_deref(), Some("reviewer"));
+        assert!(state
+            .workstream("issue-355")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
     }
 
     #[test]
