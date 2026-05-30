@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-360-og | Added and completed issue #360 tasks for id-stable live session rename/retag, mmux refresh, stale-id safety, and test coverage. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #349 implementation slice for mmux-visible workstream labels, selected-key preservation, hydration, cleanup, and docs/tests. |
 | 2026-05-28 | @gpt55-324-330-og | Added issue #347 follow-up tasks for self-target timers, workstream timer scope, readable events, and closeout ergonomics. |
 | 2026-05-28 | @codex | Added issue #344 timer input-quiet guard work: timer delivery defers on recent attached-client input and reports deferral state without affecting read-only polling. |
@@ -516,11 +517,31 @@ Tasks:
   information are explicitly available in the daemon's current memory.
 - [x] 10.7 Return actionable JSONL errors when recruiting cannot proceed because
   host metadata is unknown after restart.
+- [x] 10.8 Implement `mstream rename <target> <new-name>
+  [--role <role>] [--workstream <workstream>] [--mmux-label <label>]` using
+  `Target::rename` on the resolved stable tmux session id.
+- [x] 10.9 Implement `mstream session retag <target> [--role <role>]
+  [--workstream <workstream>] [--mmux-label <label>]` on the same daemon
+  request path as rename.
+- [x] 10.10 Validate new names so they are non-empty display names and cannot
+  contain `:`, `::`, control/Unicode format characters, or `$<digits>` tmux id
+  syntax.
+- [x] 10.11 Keep rename id-stable: freshness-check before mutation, update the
+  existing `SessionRecord` and durable tags after tmux succeeds, and do not
+  rekey timers or handoffs.
+- [x] 10.12 Retag role/workstream/mmux metadata in place; moving workstreams
+  clears the old mmux label, applies the destination/current label, and cancels
+  old-workstream handoffs that reference the moved target.
+- [x] 10.13 Cover rename/retag CLI parsing, protocol serde, rename round-trip
+  id-stability, retag role/workstream/mmux behavior, reused-id safety, and
+  validation/name-collision failures.
 
 Validation:
 
 ```sh
 cargo test -p motlie-mstream recruit
+cargo test -p motlie-mstream rename
+cargo test -p motlie-mstream retag
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock session list
 cargo run -p motlie-mstream -- --socket /tmp/mstream-test.sock recruit pr-323 --role reviewer --agent codex --count 1 --goal "clean up vmm examples" --task "Review the current branch."
 ```

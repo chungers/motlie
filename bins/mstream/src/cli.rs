@@ -9,8 +9,8 @@ use crate::protocol::{
     AgentState, BroadcastRequest, ClientRequest, CloseRequest, ConnectRequest, EventsRequest,
     HandoffArmRequest, InterruptKey, InterruptRequest, JoinRequest, LabelRequest, LeaveRequest,
     NewRequest, OpenRequest, PasteMode, RecruitRequest, SendRequest, SessionMarkRequest,
-    SnapshotRequest, SummaryInputRequest, TimerStartRequest, WorkstreamSettings,
-    DEFAULT_STATUS_ACTIVE_WINDOW_SECS, DEFAULT_STATUS_IDLE_AFTER_SECS,
+    SessionRetagRequest, SnapshotRequest, SummaryInputRequest, TimerStartRequest,
+    WorkstreamSettings, DEFAULT_STATUS_ACTIVE_WINDOW_SECS, DEFAULT_STATUS_IDLE_AFTER_SECS,
     DEFAULT_TIMER_INPUT_QUIET_FOR_SECS, DEFAULT_TIMER_SUBMIT_RETRIES,
     DEFAULT_TIMER_SUBMIT_RETRY_DELAY_MS, DEFAULT_WORKSTREAM_EVENT_LIMIT,
 };
@@ -67,6 +67,7 @@ pub enum Command {
     Send(SendArgs),
     Interrupt(InterruptArgs),
     Broadcast(BroadcastArgs),
+    Rename(RenameArgs),
     #[command(subcommand)]
     Session(SessionCommand),
     #[command(subcommand)]
@@ -142,9 +143,13 @@ impl Command {
                 key: args.key,
             })),
             Command::Broadcast(args) => Ok(ClientRequest::Broadcast(args.into_request()?)),
+            Command::Rename(args) => Ok(ClientRequest::SessionRetag(args.into_request()?)),
             Command::Session(SessionCommand::List) => Ok(ClientRequest::SessionList),
             Command::Session(SessionCommand::Mark(args)) => {
                 Ok(ClientRequest::SessionMark(args.into_request()?))
+            }
+            Command::Session(SessionCommand::Retag(args)) => {
+                Ok(ClientRequest::SessionRetag(args.into_request()?))
             }
             Command::Handoff(HandoffCommand::Arm(args)) => {
                 Ok(ClientRequest::HandoffArm(HandoffArmRequest {
@@ -383,10 +388,35 @@ impl BroadcastArgs {
     }
 }
 
+#[derive(Debug, Args)]
+pub struct RenameArgs {
+    pub target: String,
+    pub new_name: String,
+    #[arg(long)]
+    pub role: Option<String>,
+    #[arg(long)]
+    pub workstream: Option<String>,
+    #[arg(long)]
+    pub mmux_label: Option<String>,
+}
+
+impl RenameArgs {
+    fn into_request(self) -> anyhow::Result<SessionRetagRequest> {
+        Ok(SessionRetagRequest {
+            target: self.target,
+            new_name: Some(self.new_name),
+            role: self.role,
+            workstream: self.workstream,
+            mmux_label: self.mmux_label,
+        })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
     List,
     Mark(SessionMarkArgs),
+    Retag(SessionRetagArgs),
 }
 
 #[derive(Debug, Args)]
@@ -404,6 +434,29 @@ impl SessionMarkArgs {
             target: self.target,
             state: self.state,
             summary: self.summary,
+        })
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct SessionRetagArgs {
+    pub target: String,
+    #[arg(long)]
+    pub role: Option<String>,
+    #[arg(long)]
+    pub workstream: Option<String>,
+    #[arg(long)]
+    pub mmux_label: Option<String>,
+}
+
+impl SessionRetagArgs {
+    fn into_request(self) -> anyhow::Result<SessionRetagRequest> {
+        Ok(SessionRetagRequest {
+            target: self.target,
+            new_name: None,
+            role: self.role,
+            workstream: self.workstream,
+            mmux_label: self.mmux_label,
         })
     }
 }
@@ -743,6 +796,60 @@ mod tests {
         };
         assert_eq!(request.workstream, "issue-349-mmux-workstream-labels");
         assert_eq!(request.mmux_label, "349 labels");
+    }
+
+    #[test]
+    fn rename_command_builds_session_retag_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "rename",
+            "local::old-agent",
+            "new-agent",
+            "--role",
+            "reviewer",
+            "--workstream",
+            "issue-360",
+            "--mmux-label",
+            "360 review",
+        ])
+        .expect("rename command parses");
+
+        let request = cli.command.into_request().expect("rename request");
+        let ClientRequest::SessionRetag(request) = request else {
+            panic!("expected session retag request");
+        };
+        assert_eq!(request.target, "local::old-agent");
+        assert_eq!(request.new_name.as_deref(), Some("new-agent"));
+        assert_eq!(request.role.as_deref(), Some("reviewer"));
+        assert_eq!(request.workstream.as_deref(), Some("issue-360"));
+        assert_eq!(request.mmux_label.as_deref(), Some("360 review"));
+    }
+
+    #[test]
+    fn session_retag_command_builds_metadata_only_request() {
+        let cli = Cli::try_parse_from([
+            "mstream",
+            "session",
+            "retag",
+            "local::$1",
+            "--role",
+            "implementer",
+            "--workstream",
+            "issue-360",
+            "--mmux-label",
+            "360 impl",
+        ])
+        .expect("session retag command parses");
+
+        let request = cli.command.into_request().expect("session retag request");
+        let ClientRequest::SessionRetag(request) = request else {
+            panic!("expected session retag request");
+        };
+        assert_eq!(request.target, "local::$1");
+        assert_eq!(request.new_name, None);
+        assert_eq!(request.role.as_deref(), Some("implementer"));
+        assert_eq!(request.workstream.as_deref(), Some("issue-360"));
+        assert_eq!(request.mmux_label.as_deref(), Some("360 impl"));
     }
 
     #[test]
