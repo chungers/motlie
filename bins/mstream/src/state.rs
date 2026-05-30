@@ -113,6 +113,7 @@ struct TimerRecord {
     name: String,
     workstream: Option<String>,
     target: SessionTarget,
+    tmux_session_created: Option<u64>,
     every_secs: u64,
     prompt: String,
     enter: bool,
@@ -211,10 +212,16 @@ struct HandoffRecord {
     id: String,
     from: SessionTarget,
     to: SessionTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_tmux_session_created: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to_tmux_session_created: Option<u64>,
     on: AgentState,
     task: String,
     only_on_transition: bool,
     fired: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    canceled_reason: Option<String>,
     created_at: String,
 }
 
@@ -279,6 +286,7 @@ struct RecruitPlanSnapshot {
 struct TimerFireSnapshot {
     name: String,
     target: SessionTarget,
+    tmux_session_created: Option<u64>,
     handle: HostHandle,
     prompt: String,
     enter: bool,
@@ -308,6 +316,11 @@ struct InputGuardDecision {
     latest_client_activity: Option<u64>,
     latest_client_activity_age_secs: Option<u64>,
     retry_after_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveTimer {
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -442,11 +455,18 @@ impl DaemonState {
             .await?;
 
         let mut monitor_targets = Vec::new();
-        let hydrated = {
+        let (hydrated, abort_tasks) = {
             let mut state = shared.lock().await;
             let mut hydrated = 0usize;
+            let mut abort_tasks = Vec::new();
             for session in sessions {
                 let target = SessionTarget::session_id(&alias, session.id.as_str())?;
+                if let Some(reason) = state.stale_session_reuse_reason(&target, &session, None) {
+                    abort_tasks
+                        .extend(state.quarantine_stale_session_target(&target, &reason, None));
+                } else if let Some(record) = state.sessions.get_mut(&target) {
+                    record.observe_tmux_session(&session);
+                }
                 let tags = tags_by_session
                     .get(&session.id)
                     .map(Vec::as_slice)
@@ -455,17 +475,6 @@ impl DaemonState {
                 if parsed.managed || parsed.workstream.is_some() || parsed.state.is_some() {
                     hydrated += 1;
                     let state_value = parsed.state.unwrap_or(AgentState::Idle);
-                    let reused_id = state
-                        .sessions
-                        .get(&target)
-                        .and_then(|record| record.tmux_session_created)
-                        .is_some_and(|created| created != session.created);
-                    if reused_id {
-                        state.sessions.remove(&target);
-                        for workstream in state.workstreams.values_mut() {
-                            workstream.sessions.remove(&target);
-                        }
-                    }
                     let record = state.sessions.entry(target.clone()).or_insert_with(|| {
                         SessionRecord::from_target(&target, state_value, parsed.updated_at)
                     });
@@ -512,8 +521,11 @@ impl DaemonState {
                     }
                 }
             }
-            hydrated
+            (hydrated, abort_tasks)
         };
+        for task in abort_tasks {
+            task.abort();
+        }
 
         for target in monitor_targets {
             let _ = Self::ensure_monitoring_target_shared(Arc::clone(&shared), &target).await;
@@ -746,6 +758,25 @@ impl DaemonState {
             };
             if let Some(handle) = handle {
                 if let Ok(resolved) = Self::resolve_target(handle, target.clone()).await {
+                    if let Err(err) = Self::ensure_resolved_target_fresh_shared(
+                        Arc::clone(&shared),
+                        &resolved,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        if request.standby_agents {
+                            standby_failed += 1;
+                        }
+                        shared.lock().await.record_event(
+                            &request.workstream,
+                            EventDraft::new("session_stale")
+                                .target(target)
+                                .summary(format!("session skipped during closeout: {err}")),
+                        )?;
+                        continue;
+                    }
                     if request.standby_agents {
                         let message = format!(
                             "Orchestrator closeout: workstream '{}' is closed. Please stand by and do not start new work unless assigned.",
@@ -926,6 +957,8 @@ impl DaemonState {
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
         let stable_target = resolved.spec.clone();
         let mmux_cleanup =
             match Self::clear_mmux_workstream_label(&resolved.target, &request.workstream).await {
@@ -1024,6 +1057,8 @@ impl DaemonState {
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
         resolved.target.kill().await?;
         let stable_target = resolved.spec;
         let mut state = shared.lock().await;
@@ -1048,6 +1083,8 @@ impl DaemonState {
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
         let stable_target = resolved.spec.clone();
         let current_state = {
             let state = shared.lock().await;
@@ -1131,6 +1168,8 @@ impl DaemonState {
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
         let stable_target = resolved.spec.clone();
         let event_context = {
             let state = shared.lock().await;
@@ -1278,9 +1317,17 @@ impl DaemonState {
             };
             let result = match handle {
                 Some(handle) => match Self::resolve_target(handle, target.clone()).await {
-                    Ok(resolved) => {
-                        Self::apply_mmux_workstream_label(&resolved.target, &label).await
-                    }
+                    Ok(resolved) => match Self::ensure_resolved_target_fresh_shared(
+                        Arc::clone(&shared),
+                        &resolved,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(()) => Self::apply_mmux_workstream_label(&resolved.target, &label).await,
+                        Err(err) => Err(err),
+                    },
                     Err(err) => Err(err),
                 },
                 None => Err(anyhow::anyhow!(
@@ -1342,8 +1389,22 @@ impl DaemonState {
                 state.host_handle(to_input.host_alias())?,
             )
         };
-        let from = Self::resolve_target(from_handle, from_input).await?.spec;
-        let to = Self::resolve_target(to_handle, to_input).await?.spec;
+        let from_resolved = Self::resolve_target(from_handle, from_input).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &from_resolved, None, None)
+            .await?;
+        let to_resolved = Self::resolve_target(to_handle, to_input).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &to_resolved, None, None)
+            .await?;
+        let from = from_resolved.spec.clone();
+        let to = to_resolved.spec.clone();
+        let from_tmux_session_created = from_resolved
+            .target
+            .session_info()
+            .map(|session| session.created);
+        let to_tmux_session_created = to_resolved
+            .target
+            .session_info()
+            .map(|session| session.created);
         let immediate = {
             let mut state = shared.lock().await;
             state.ensure_target_in_workstream(&request.workstream, &from)?;
@@ -1354,10 +1415,13 @@ impl DaemonState {
                 id: id.clone(),
                 from: from.clone(),
                 to,
+                from_tmux_session_created,
+                to_tmux_session_created,
                 on: request.on,
                 task: request.task,
                 only_on_transition: request.only_on_transition,
                 fired: false,
+                canceled_reason: None,
                 created_at: tags::now_tag(),
             };
             state
@@ -1418,6 +1482,12 @@ impl DaemonState {
             state.host_handle(target.host_alias())?
         };
         let resolved = Self::resolve_target(handle, target.clone()).await?;
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+            .await?;
+        let tmux_session_created = resolved
+            .target
+            .session_info()
+            .map(|session| session.created);
         let stable_target = resolved.spec;
 
         let (generation, next_fire_at) = {
@@ -1435,6 +1505,7 @@ impl DaemonState {
                     name: request.name.clone(),
                     workstream: request.workstream.clone(),
                     target: stable_target.clone(),
+                    tmux_session_created,
                     every_secs: request.every_secs,
                     prompt: request.prompt,
                     enter: request.enter,
@@ -1505,10 +1576,11 @@ impl DaemonState {
                 if timer.generation != generation {
                     break;
                 }
+                let Some(next_fire_at) = timer.next_fire_at else {
+                    break;
+                };
                 let now = Utc::now();
-                timer
-                    .next_fire_at
-                    .unwrap_or(now)
+                next_fire_at
                     .signed_duration_since(now)
                     .to_std()
                     .unwrap_or(Duration::ZERO)
@@ -1541,6 +1613,7 @@ impl DaemonState {
             TimerFireSnapshot {
                 name: timer.name.clone(),
                 target: timer.target.clone(),
+                tmux_session_created: timer.tmux_session_created,
                 handle: state.host_handle(timer.target.host_alias())?,
                 prompt: timer.prompt.clone(),
                 enter: timer.enter,
@@ -1566,6 +1639,18 @@ impl DaemonState {
                     return Err(err);
                 }
             };
+        Self::ensure_resolved_target_fresh_shared(
+            Arc::clone(&shared),
+            &resolved,
+            snapshot.tmux_session_created,
+            Some((
+                name,
+                ActiveTimer {
+                    generation: snapshot.generation,
+                },
+            )),
+        )
+        .await?;
         let now = Utc::now();
         if let Some(quiet_for_secs) = snapshot.input_quiet_for_secs {
             let decision = match Self::evaluate_input_guard(&resolved, quiet_for_secs, now).await {
@@ -1728,10 +1813,18 @@ impl DaemonState {
             let targets = workstream_record
                 .sessions
                 .iter()
-                .cloned()
+                .map(|target| {
+                    (
+                        target.clone(),
+                        state
+                            .sessions
+                            .get(target)
+                            .and_then(|record| record.tmux_session_created),
+                    )
+                })
                 .collect::<Vec<_>>();
             let mut hosts = BTreeMap::new();
-            for target in &targets {
+            for (target, _) in &targets {
                 if !hosts.contains_key(target.host_alias()) {
                     hosts.insert(
                         target.host_alias().to_string(),
@@ -1743,10 +1836,11 @@ impl DaemonState {
         };
 
         let mut live = BTreeMap::new();
+        let mut stale_targets = Vec::new();
         for (alias, handle) in hosts {
             let host_targets = targets
                 .iter()
-                .filter(|target| target.host_alias() == alias)
+                .filter(|(target, _)| target.host_alias() == alias)
                 .cloned()
                 .collect::<Vec<_>>();
             match handle.list_sessions().await {
@@ -1755,18 +1849,25 @@ impl DaemonState {
                         .into_iter()
                         .map(|session| (session.id.as_str().to_string(), session))
                         .collect::<BTreeMap<_, _>>();
-                    for target in host_targets {
-                        let activity = target
-                            .session_id_selector()
-                            .and_then(|id| by_id.remove(id.as_str()))
-                            .map(LiveActivity::Present)
-                            .unwrap_or(LiveActivity::Missing);
-                        live.insert(target, activity);
+                    for (target, expected_created) in host_targets {
+                        let activity = target.session_id_selector().and_then(|id| {
+                            by_id.remove(id.as_str()).map(|session| {
+                                if let Some(reason) = expected_created.and_then(|created| {
+                                    session_reuse_reason(&target, created, session.created)
+                                }) {
+                                    stale_targets.push((target.clone(), reason));
+                                    LiveActivity::Missing
+                                } else {
+                                    LiveActivity::Present(session)
+                                }
+                            })
+                        });
+                        live.insert(target, activity.unwrap_or(LiveActivity::Missing));
                     }
                 }
                 Err(err) => {
                     let message = err.to_string();
-                    for target in host_targets {
+                    for (target, _) in host_targets {
                         live.insert(target, LiveActivity::Error(message.clone()));
                     }
                 }
@@ -1774,12 +1875,19 @@ impl DaemonState {
         }
 
         let now = Utc::now();
-        Ok(vec![shared.lock().await.status(
-            &workstream,
-            &live,
-            options,
-            now,
-        )?])
+        let (status, abort_tasks) = {
+            let mut state = shared.lock().await;
+            let mut abort_tasks = Vec::new();
+            for (target, reason) in stale_targets {
+                abort_tasks.extend(state.quarantine_stale_session_target(&target, &reason, None));
+            }
+            let status = state.status(&workstream, &live, options, now)?;
+            (status, abort_tasks)
+        };
+        for task in abort_tasks {
+            task.abort();
+        }
+        Ok(vec![status])
     }
 
     async fn recruit_shared(
@@ -2262,7 +2370,17 @@ impl DaemonState {
         let mut text = String::new();
         for (logical, handle) in targets {
             let capture = match Self::resolve_target(handle, logical.clone()).await {
-                Ok(target_handle) => target_handle.target.capture().await.unwrap_or_default(),
+                Ok(target_handle) => match Self::ensure_resolved_target_fresh_shared(
+                    Arc::clone(&shared),
+                    &target_handle,
+                    None,
+                    None,
+                )
+                .await
+                {
+                    Ok(()) => target_handle.target.capture().await.unwrap_or_default(),
+                    Err(_) => String::new(),
+                },
                 Err(_) => String::new(),
             };
             text.push_str(&format!("=== {} ===\n", logical));
@@ -2309,6 +2427,13 @@ impl DaemonState {
             state.host_handle(handoff.to.host_alias())?
         };
         let resolved = Self::resolve_target(handle, handoff.to.clone()).await?;
+        Self::ensure_resolved_target_fresh_shared(
+            Arc::clone(&shared),
+            &resolved,
+            handoff.to_tmux_session_created,
+            None,
+        )
+        .await?;
         let change = Self::apply_resolved_session_state_shared(
             Arc::clone(&shared),
             &resolved,
@@ -2343,9 +2468,43 @@ impl DaemonState {
     fn claim_matching_handoffs(&mut self, change: &StateChange) -> Vec<(String, HandoffRecord)> {
         let mut handoffs = Vec::new();
         let is_transition = change.previous_state != Some(change.state);
+        let session_created = self
+            .sessions
+            .iter()
+            .filter_map(|(target, record)| {
+                record
+                    .tmux_session_created
+                    .map(|created| (target.clone(), created))
+            })
+            .collect::<BTreeMap<_, _>>();
         for (workstream_name, workstream) in &mut self.workstreams {
             for handoff in workstream.handoffs.values_mut() {
+                let stale_endpoint = handoff
+                    .from_tmux_session_created
+                    .and_then(|created| {
+                        (session_created.get(&handoff.from) != Some(&created)).then(|| {
+                            format!(
+                                "handoff source {} no longer matches stored session_created={created}",
+                                handoff.from
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        handoff.to_tmux_session_created.and_then(|created| {
+                            (session_created.get(&handoff.to) != Some(&created)).then(|| {
+                                format!(
+                                    "handoff destination {} no longer matches stored session_created={created}",
+                                    handoff.to
+                                )
+                            })
+                        })
+                    });
+                if let Some(reason) = stale_endpoint {
+                    handoff.canceled_reason = Some(reason);
+                    continue;
+                }
                 if !handoff.fired
+                    && handoff.canceled_reason.is_none()
                     && handoff.from == change.target
                     && handoff.on == change.state
                     && (!handoff.only_on_transition || is_transition)
@@ -2367,6 +2526,9 @@ impl DaemonState {
         let Some(handoff) = workstream_record.handoffs.get_mut(handoff_id) else {
             bail!("handoff '{handoff_id}' not found in workstream '{workstream}'");
         };
+        if let Some(reason) = &handoff.canceled_reason {
+            bail!("handoff '{handoff_id}' is canceled: {reason}");
+        }
         handoff.fired = true;
         Ok(handoff.clone())
     }
@@ -2391,6 +2553,8 @@ impl DaemonState {
         state: AgentState,
         summary: Option<&str>,
     ) -> anyhow::Result<StateChange> {
+        Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), resolved, None, None)
+            .await?;
         let now = tags::now_tag();
         let mut pairs = vec![
             ("state", tags::state_value(state)),
@@ -2529,6 +2693,39 @@ impl DaemonState {
             host: handle,
             target,
         })
+    }
+
+    async fn ensure_resolved_target_fresh_shared(
+        shared: Arc<Mutex<Self>>,
+        resolved: &ResolvedTarget,
+        expected_created: Option<u64>,
+        active_timer: Option<(&str, ActiveTimer)>,
+    ) -> anyhow::Result<()> {
+        let Some(session) = resolved.target.session_info() else {
+            return Ok(());
+        };
+        let (reason, tasks) = {
+            let mut state = shared.lock().await;
+            if let Some(reason) =
+                state.stale_session_reuse_reason(&resolved.spec, session, expected_created)
+            {
+                let tasks =
+                    state.quarantine_stale_session_target(&resolved.spec, &reason, active_timer);
+                (Some(reason), tasks)
+            } else {
+                if let Some(record) = state.sessions.get_mut(&resolved.spec) {
+                    record.observe_tmux_session(session);
+                }
+                (None, Vec::new())
+            }
+        };
+        for task in tasks {
+            task.abort();
+        }
+        if let Some(reason) = reason {
+            bail!(reason);
+        }
+        Ok(())
     }
 
     async fn ensure_monitoring_target_shared(
@@ -2808,6 +3005,57 @@ impl DaemonState {
             .with_context(|| format!("host alias '{alias}' is not connected"))
     }
 
+    fn stale_session_reuse_reason(
+        &self,
+        target: &SessionTarget,
+        observed: &SessionInfo,
+        expected_created: Option<u64>,
+    ) -> Option<String> {
+        let expected_created = expected_created.or_else(|| {
+            self.sessions
+                .get(target)
+                .and_then(|record| record.tmux_session_created)
+        })?;
+        session_reuse_reason(target, expected_created, observed.created)
+    }
+
+    fn quarantine_stale_session_target(
+        &mut self,
+        target: &SessionTarget,
+        reason: &str,
+        active_timer: Option<(&str, ActiveTimer)>,
+    ) -> Vec<JoinHandle<()>> {
+        self.sessions.remove(target);
+        for workstream in self.workstreams.values_mut() {
+            workstream.sessions.remove(target);
+            for handoff in workstream.handoffs.values_mut() {
+                if handoff.canceled_reason.is_none()
+                    && (handoff.from == *target || handoff.to == *target)
+                {
+                    handoff.canceled_reason = Some(reason.to_string());
+                }
+            }
+        }
+
+        let mut tasks = Vec::new();
+        for timer in self.timers.values_mut() {
+            if timer.target != *target {
+                continue;
+            }
+            timer.next_fire_at = None;
+            timer.last_error = Some(reason.to_string());
+            let is_active_timer = active_timer.is_some_and(|(name, active)| {
+                timer.name == name && timer.generation == active.generation
+            });
+            if !is_active_timer {
+                if let Some(task) = timer.task.take() {
+                    tasks.push(task);
+                }
+            }
+        }
+        tasks
+    }
+
     fn workstream(&self, name: &str) -> anyhow::Result<&WorkstreamRecord> {
         self.workstreams
             .get(name)
@@ -2872,8 +3120,11 @@ impl DaemonState {
         };
         let mut selected = Vec::new();
         for snapshot in snapshots {
+            let resolved = Self::resolve_target(snapshot.handle, snapshot.target).await?;
+            Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &resolved, None, None)
+                .await?;
             selected.push(BroadcastTarget {
-                target: Self::resolve_target(snapshot.handle, snapshot.target).await?,
+                target: resolved,
                 state: snapshot.state,
             });
         }
@@ -2919,8 +3170,11 @@ impl DaemonState {
         };
         let mut plans = Vec::new();
         for snapshot in snapshots {
+            let target = Self::resolve_target(snapshot.handle, snapshot.target).await?;
+            Self::ensure_resolved_target_fresh_shared(Arc::clone(&shared), &target, None, None)
+                .await?;
             plans.push(RecruitPlan {
-                target: Self::resolve_target(snapshot.handle, snapshot.target).await?,
+                target,
                 agent: snapshot.agent,
                 cwd: snapshot.cwd,
                 state: snapshot.state,
@@ -3168,12 +3422,25 @@ fn session_identity_seed(target: &SessionTarget) -> String {
     }
 }
 
+fn session_reuse_reason(
+    target: &SessionTarget,
+    expected_created: u64,
+    observed_created: u64,
+) -> Option<String> {
+    (expected_created != observed_created).then(|| {
+        format!(
+            "stale tmux session id for {target}: stored session_created={expected_created}, observed session_created={observed_created}"
+        )
+    })
+}
+
 impl TimerRecord {
     fn to_json(&self) -> Value {
         json!({
             "name": &self.name,
             "workstream": &self.workstream,
             "target": self.target.to_string(),
+            "tmux_session_created": self.tmux_session_created,
             "every_secs": self.every_secs,
             "enter": self.enter,
             "submit_retries": self.submit_retries,
@@ -3609,6 +3876,86 @@ fn add_secs(timestamp: DateTime<Utc>, seconds: u64) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
 
+    fn mock_host(alias: &str, mock: motlie_tmux::transport::MockTransport) -> HostHandle {
+        HostHandle::with_alias(motlie_tmux::TransportKind::Mock(mock), None, alias)
+    }
+
+    fn register_mock_host(
+        state: &mut DaemonState,
+        alias: &str,
+        mock: motlie_tmux::transport::MockTransport,
+    ) {
+        state.fleet.register(alias, mock_host(alias, mock)).unwrap();
+    }
+
+    fn session_info(name: &str, id: &str, created: u64, activity: u64) -> SessionInfo {
+        SessionInfo {
+            name: name.to_string(),
+            id: id.try_into().expect("session id"),
+            created,
+            attached_count: 0,
+            window_count: 1,
+            group: None,
+            activity,
+        }
+    }
+
+    fn open_test_workstream(state: &mut DaemonState, workstream: &str) {
+        state
+            .open(OpenRequest {
+                workstream: workstream.to_string(),
+                title: workstream.to_string(),
+                goal: None,
+                domain: None,
+                mmux_label: None,
+                settings: WorkstreamSettings { event_limit: 10 },
+            })
+            .expect("open workstream");
+    }
+
+    fn timer_record(name: &str, target: SessionTarget, created: Option<u64>) -> TimerRecord {
+        let started_at = DateTime::<Utc>::from_timestamp(1_000, 0).expect("timestamp");
+        TimerRecord {
+            name: name.to_string(),
+            workstream: Some("issue-355".to_string()),
+            target,
+            tmux_session_created: created,
+            every_secs: 60,
+            prompt: "Wake up.".to_string(),
+            enter: true,
+            submit_retries: 0,
+            submit_retry_delay_ms: 0,
+            input_quiet_for_secs: None,
+            generation: 1,
+            started_at,
+            next_fire_at: Some(started_at),
+            last_fired_at: None,
+            fire_count: 0,
+            defer_count: 0,
+            last_deferred_at: None,
+            last_defer_reason: None,
+            last_input_activity: None,
+            last_error: None,
+            task: None,
+        }
+    }
+
+    fn handoff_record(id: &str, target: SessionTarget, created: Option<u64>) -> HandoffRecord {
+        HandoffRecord {
+            id: id.to_string(),
+            from: target.clone(),
+            to: target,
+            from_tmux_session_created: created,
+            to_tmux_session_created: created,
+            on: AgentState::Done,
+            task: "Take over.".to_string(),
+            only_on_transition: false,
+            fired: false,
+            canceled_reason: None,
+            created_at: tags::now_tag(),
+        }
+    }
+
     #[test]
     fn shell_quote_handles_single_quote() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
@@ -3774,6 +4121,238 @@ mod tests {
             .expect("workstream")
             .sessions
             .contains(&target));
+    }
+
+    #[tokio::test]
+    async fn status_quarantines_reused_session_id_instead_of_reporting_present() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ new $1 200 0 1  250\n");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("old", "$1", 100, 150));
+        state.timers.insert(
+            "poll".to_string(),
+            timer_record("poll", target.clone(), Some(100)),
+        );
+        state
+            .workstream_mut("issue-355")
+            .expect("workstream")
+            .handoffs
+            .insert(
+                "h1".to_string(),
+                handoff_record("h1", target.clone(), Some(100)),
+            );
+
+        let shared = Arc::new(Mutex::new(state));
+        let records =
+            DaemonState::status_shared(Arc::clone(&shared), "issue-355".to_string(), 30, 300)
+                .await
+                .expect("status");
+
+        assert_eq!(records[0]["agents"].as_array().expect("agents").len(), 0);
+        let state = shared.lock().await;
+        assert!(!state.sessions.contains_key(&target));
+        assert!(!state
+            .workstream("issue-355")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+        let timer = state.timers.get("poll").expect("timer");
+        assert_eq!(timer.next_fire_at, None);
+        assert!(timer
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
+        assert!(state
+            .workstream("issue-355")
+            .expect("workstream")
+            .handoffs
+            .get("h1")
+            .expect("handoff")
+            .canceled_reason
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
+    }
+
+    #[tokio::test]
+    async fn scan_quarantines_untagged_reused_session_id() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ new $1 200 0 1  250\n")
+            .with_default("");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                None,
+                AgentState::Busy,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("old", "$1", 100, 150));
+        state.timers.insert(
+            "poll".to_string(),
+            timer_record("poll", target.clone(), Some(100)),
+        );
+        state
+            .workstream_mut("issue-355")
+            .expect("workstream")
+            .handoffs
+            .insert(
+                "h1".to_string(),
+                handoff_record("h1", target.clone(), Some(100)),
+            );
+
+        let shared = Arc::new(Mutex::new(state));
+        let records = DaemonState::scan_shared(Arc::clone(&shared), "local".to_string())
+            .await
+            .expect("scan");
+
+        assert_eq!(records[0]["hydrated_sessions"], 0);
+        let state = shared.lock().await;
+        assert!(!state.sessions.contains_key(&target));
+        assert!(!state
+            .workstream("issue-355")
+            .expect("workstream")
+            .sessions
+            .contains(&target));
+        let timer = state.timers.get("poll").expect("timer");
+        assert_eq!(timer.next_fire_at, None);
+        assert!(timer
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
+        assert!(state
+            .workstream("issue-355")
+            .expect("workstream")
+            .handoffs
+            .get("h1")
+            .expect("handoff")
+            .canceled_reason
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
+    }
+
+    #[tokio::test]
+    async fn timer_fire_aborts_before_sending_to_reused_session_id() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ new $1 200 0 1  250\n")
+            .with_error("send-keys", "should not send to reused session id");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        state.sessions.insert(
+            target.clone(),
+            SessionRecord::from_target(&target, AgentState::Busy, None),
+        );
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("old", "$1", 100, 150));
+        state.timers.insert(
+            "poll".to_string(),
+            timer_record("poll", target.clone(), Some(100)),
+        );
+        let shared = Arc::new(Mutex::new(state));
+
+        let err =
+            match DaemonState::timer_fire_once_shared(Arc::clone(&shared), "poll", Some(1), true)
+                .await
+            {
+                Ok(_) => panic!("stale timer should fail"),
+                Err(err) => err,
+            };
+
+        assert!(err.to_string().contains("stale tmux session id"));
+        let state = shared.lock().await;
+        let timer = state.timers.get("poll").expect("timer");
+        assert_eq!(timer.next_fire_at, None);
+        assert!(timer
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
+    }
+
+    #[tokio::test]
+    async fn handoff_fire_cancels_before_sending_to_reused_session_id() {
+        let target = SessionTarget::session_id("local", "$1").expect("target");
+        let mock = motlie_tmux::transport::MockTransport::new()
+            .with_response("list-sessions", "__MOTLIE_S__ new $1 200 0 1  250\n")
+            .with_error("send-keys", "should not send handoff to reused session id");
+        let mut state = DaemonState::default();
+        register_mock_host(&mut state, "local", mock);
+        open_test_workstream(&mut state, "issue-355");
+        state
+            .add_session_to_workstream(
+                "issue-355",
+                target.clone(),
+                "reviewer".to_string(),
+                Some("agent".to_string()),
+                None,
+                AgentState::Done,
+            )
+            .expect("add session");
+        state
+            .sessions
+            .get_mut(&target)
+            .expect("session")
+            .observe_tmux_session(&session_info("old", "$1", 100, 150));
+        let handoff = handoff_record("h1", target.clone(), Some(100));
+        state
+            .workstream_mut("issue-355")
+            .expect("workstream")
+            .handoffs
+            .insert("h1".to_string(), handoff.clone());
+        let shared = Arc::new(Mutex::new(state));
+
+        let err =
+            DaemonState::fire_claimed_handoff_shared(Arc::clone(&shared), "issue-355", handoff)
+                .await
+                .expect_err("stale handoff should fail");
+
+        assert!(err.to_string().contains("stale tmux session id"));
+        let state = shared.lock().await;
+        assert!(!state.sessions.contains_key(&target));
+        assert!(state
+            .workstream("issue-355")
+            .expect("workstream")
+            .handoffs
+            .get("h1")
+            .expect("handoff")
+            .canceled_reason
+            .as_deref()
+            .unwrap()
+            .contains("stale tmux session id"));
     }
 
     #[test]
@@ -4041,6 +4620,7 @@ mod tests {
             name: "poll".to_string(),
             workstream: Some("pr-324".to_string()),
             target,
+            tmux_session_created: None,
             every_secs: 60,
             prompt: "Wake up.".to_string(),
             enter: true,
@@ -4086,6 +4666,7 @@ mod tests {
                     name: name.to_string(),
                     workstream: workstream.map(ToString::to_string),
                     target: "local::worker".parse().expect("target"),
+                    tmux_session_created: None,
                     every_secs: 60,
                     prompt: "Wake up.".to_string(),
                     enter: true,
@@ -4129,6 +4710,7 @@ mod tests {
                     name: name.to_string(),
                     workstream: workstream.map(ToString::to_string),
                     target: "local::worker".parse().expect("target"),
+                    tmux_session_created: None,
                     every_secs: 60,
                     prompt: "Wake up.".to_string(),
                     enter: true,
