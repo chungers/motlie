@@ -22,7 +22,7 @@ in [`examples/README.md`](../examples/README.md).
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-30 | @codex-359-og | Added explicit session-id sink filters and documented that session-name filters no longer match stable `$N` ids. |
+| 2026-05-30 | @codex-359-og | Added explicit session-id sink filters, documented that session-name filters no longer match stable `$N` ids, and clarified scoped discontinuity delivery. |
 | 2026-05-30 | @codex-355-rv | Added stable session-id target specs and documented that resolved `Target::target_string()` uses tmux ids while names remain display metadata. |
 | 2026-05-28 | @gpt55-342-og | Added `SshConfig::endpoint_alias()` and `connect_with_endpoint_alias()` for stable SSH endpoint display and HostHandle aliases. |
 | 2026-05-28 | @codex | Added attached-client activity fields to `ClientInfo` and `HostHandle::session_client_activity()` for policy-light input-recency consumers such as mstream timer guards. |
@@ -1958,8 +1958,11 @@ match event {
 }
 ```
 
-The `OutputBus` broadcasts discontinuity to all subscribers regardless of
-source-routing filters (system-level signal, not content):
+The `OutputBus` broadcasts global discontinuities to all subscribers regardless
+of source-routing filters (system-level signal, not content). Scoped
+discontinuities created with `publish_discontinuity_for()` are delivered only to
+unfiltered subscribers and subscribers whose source filters match the marker
+scope:
 
 ```rust
 bus.publish_discontinuity("stream interrupted: control channel lost");
@@ -2411,7 +2414,8 @@ older entries.
 
 `OutputBus::publish_discontinuity()` and `publish_gap()` record global markers
 only in unfiltered timelines. Use scoped marker APIs for per-workstream
-continuity so unrelated timelines do not receive reconnect or gap markers:
+continuity so unrelated timelines and filtered subscribers do not receive
+reconnect or gap markers:
 
 ```rust
 bus.publish_discontinuity_for(

@@ -2539,6 +2539,12 @@ struct SubEntry {
     missed_discontinuities: usize,
 }
 
+impl SubEntry {
+    fn matches_marker_scope(&self, scope: &TimelineMarkerScope) -> bool {
+        self.filters.is_empty() || self.filters.iter().any(|f| f.matches_marker_scope(scope))
+    }
+}
+
 /// Central fan-out dispatcher (DC12, DC24).
 ///
 /// Uses interior mutability so it can be shared via `Arc<OutputBus>`.
@@ -2846,19 +2852,22 @@ impl OutputBus {
     /// unfiltered retained timelines.
     ///
     /// Unlike `publish()`, subscriber discontinuity events bypass source-routing
-    /// filters because they are system-level signals, not content. Scoped
-    /// timeline markers should use [`OutputBus::publish_discontinuity_for`].
+    /// filters because they are system-level signals, not content.
     pub fn publish_discontinuity(&self, reason: &str) {
         self.publish_discontinuity_for(TimelineMarkerScope::global(), reason);
     }
 
-    /// Broadcast a discontinuity event and retain it in timelines whose filters
-    /// match the supplied scope.
+    /// Broadcast a scoped discontinuity event and retain it in timelines whose
+    /// filters match the supplied scope.
     pub fn publish_discontinuity_for(&self, scope: TimelineMarkerScope, reason: &str) {
         self.publish_timeline_discontinuity(&scope, reason);
 
+        let global = scope == TimelineMarkerScope::global();
         let mut subs = self.subscribers.lock().expect("bus lock poisoned");
         for sub in subs.iter_mut() {
+            if !global && !sub.matches_marker_scope(&scope) {
+                continue;
+            }
             let event = SinkEvent::Discontinuity {
                 reason: reason.to_string(),
             };

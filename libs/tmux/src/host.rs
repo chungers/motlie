@@ -1333,7 +1333,7 @@ impl HostHandle {
             .find(|s| s.name == session_name)
             .ok_or_else(|| Error::NotFound(format!("session '{}' not found", session_name)))?;
         let bus = self.output_bus();
-        let filter = SinkFilter::for_session_id(session_info.id.as_str());
+        let filter = SinkFilter::for_host_session_id(self.host_alias(), session_info.id.as_str());
         let subscription = bus.subscribe(vec![filter], opts.queue_capacity)?;
         let subscription_id = subscription.id();
 
@@ -3247,6 +3247,75 @@ mod tests {
         assert_eq!(handle.display_name(), "new");
         assert_eq!(host.monitored_sessions(), vec!["new".to_string()]);
         handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_session_shared_bus_scopes_session_id_filter_by_host() {
+        let bus = Arc::new(OutputBus::new());
+        let host_a = HostHandle::with_alias(
+            TransportKind::Mock(
+                MockTransport::new()
+                    .with_response("list-sessions", "__MOTLIE_S__ alpha $1 100 0 1  200\n")
+                    .with_shell_data(vec![b"%session-changed $1 alpha\n".to_vec()]),
+            ),
+            None,
+            "host-a",
+        );
+        let host_b =
+            HostHandle::with_alias(TransportKind::Mock(MockTransport::new()), None, "host-b");
+        host_a.inject_output_bus(bus.clone()).unwrap();
+        host_b.inject_output_bus(bus).unwrap();
+
+        let watch = host_a
+            .watch_session("alpha", &SessionWatchOptions::default())
+            .await
+            .unwrap();
+
+        let output = |host: &str, session: &str, pane_id: &str, content: &str| TargetOutput {
+            source: TargetAddress::Pane(PaneAddress {
+                pane_id: pane_id.to_string(),
+                session_id: Some(SessionId::for_test("$1")),
+                session: session.to_string(),
+                window: 0,
+                pane: 0,
+            }),
+            host: host.to_string(),
+            content: content.to_string(),
+            raw_content: None,
+            sequence: 1,
+            fidelity: OutputFidelity::default(),
+            timestamp: std::time::Instant::now(),
+        };
+
+        host_b
+            .output_bus()
+            .publish(output("host-b", "beta", "%6", "from-b"));
+        host_b.output_bus().publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session_identity("host-b", "beta", "$1"),
+            "b marker",
+        );
+        host_a
+            .output_bus()
+            .publish(output("host-a", "alpha", "%5", "from-a"));
+        host_a.output_bus().publish_discontinuity_for(
+            TimelineMarkerScope::for_host_session_identity("host-a", "alpha", "$1"),
+            "a marker",
+        );
+
+        let mut text = String::new();
+        for _ in 0..20 {
+            text = watch.render_text().await;
+            if text.contains("from-a") && text.contains("a marker") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(text.contains("from-a"), "{text}");
+        assert!(text.contains("a marker"), "{text}");
+        assert!(!text.contains("from-b"), "{text}");
+        assert!(!text.contains("b marker"), "{text}");
+        watch.shutdown().await.unwrap();
     }
 
     #[tokio::test]
