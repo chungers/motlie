@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Clarified that "gateway emits" means an outbound HTTP `POST` from the gateway to a registered application webhook URL; event delivery is acknowledgement-based, asynchronous, retried on failure, and separate from the application server calling the Gateway Control API back into the gateway. | Application Webhooks and Gateway Control API |
 | 2026-05-30 | @codex-358-research: Added an external automation surface: gateway-emitted application webhooks plus an authenticated Gateway Control API so another server can receive inbound-call events, answer calls programmatically, receive transcript events, and use the gateway as an outbound dialer/TTS service. | Application Webhooks and Gateway Control API, Staged Build Strategy, Inbound Call Handler Design, Outbound Call Handler Design |
 | 2026-05-30 | @codex-358-research: Reframed `bins/telnyx-gateway` as an operator-driven TUI/REPL application that starts an idle HTTP/WebSocket listener, uses `motlie-driver` commands for Telnyx provisioning and call control, and only answers inbound calls after explicit operator or mode selection. | Operator REPL and TUI Control Surface, Staged Build Strategy, Inbound Call Handler Design, Outbound Call Handler Design |
 | 2026-05-30 | @codex-358-research: Added staged implementation milestones and composable contracts for inbound transcription sinks, outbound dial/say control through `motlie-driver`, reusable ASR/TTS pipelines, opaque provider-neutral call handles, and the later conversation-handler bridge. | Staged Build Strategy, Provider Adapter Boundary, Conversation Handler Contract, Inbound Call Handler Design, Outbound Call Handler Design |
@@ -789,6 +790,8 @@ Transcript event payloads should include the text, whether it is partial or fina
 
 The TUI should be able to configure subscriptions, but external automation needs an HTTP API too.
 
+"Gateway emits an event" means the gateway makes an outbound HTTP `POST` to the subscription URL with the JSON event envelope as the request body. It should not use `GET` for event delivery because the event has a body, signature, retry identity, and acknowledgement semantics. The receiving application server acknowledges delivery by returning any `2xx` response. Non-`2xx`, timeout, or connection failure means delivery failed and should be retried according to policy.
+
 Recommended endpoints:
 
 ```text
@@ -816,10 +819,38 @@ Create request:
 
 Delivery policy:
 
+- deliver events with `POST <subscription.url>` and `Content-Type: application/json`
+- treat `2xx` as acknowledgement; treat non-`2xx`, timeout, or connection failure as retryable delivery failure
 - retry non-2xx responses with bounded exponential backoff
 - disable or quarantine a subscription after repeated failures
 - never block Telnyx webhook handling on application webhook delivery
 - include enough IDs for the receiving server to call the Gateway Control API later
+
+Example delivery request:
+
+```http
+POST /motlie/events HTTP/1.1
+Host: app.example.com
+Content-Type: application/json
+X-Motlie-Event-Id: evt_01HZ...
+X-Motlie-Timestamp: 2026-05-30T18:30:00Z
+X-Motlie-Signature: v1=<hmac-sha256>
+
+{
+  "id": "evt_01HZ...",
+  "type": "call.inbound.pending",
+  "call": {
+    "id": "call_01HZ...",
+    "direction": "inbound",
+    "state": "pending",
+    "from": "+15551234567",
+    "to": "+15557654321"
+  },
+  "data": {}
+}
+```
+
+The app server should verify the HMAC signature, persist or enqueue the event idempotently by `id`, then return `204 No Content` or another `2xx`. If it wants to answer the call, that is a second HTTP request in the opposite direction: the app server calls `POST /api/v1/calls/{call_id}/answer` on the gateway.
 
 ### Gateway Control API
 
