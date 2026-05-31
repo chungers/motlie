@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Clarified application webhook delivery: gateway events are outbound HTTP `POST` requests to registered app-server URLs, acknowledged by `2xx`, retried on failure, and separate from app-server Control API calls back into the gateway. |
 | 2026-05-30 | @codex-358-research | Added the external automation surface: gateway-emitted application webhooks plus an authenticated Gateway Control API for programmatic inbound answer/transcription and outbound dial/say TTS service flows. |
 | 2026-05-30 | @codex-358-research | Reframed `bins/telnyx-gateway` as an operator-driven TUI/REPL app: it starts an idle listener, uses `motlie-driver` commands for Telnyx app/number setup, surfaces pending inbound calls in the right pane, and only answers after explicit operator or inbound-mode selection. |
 | 2026-05-30 | @codex-358-research | Reworked sequencing around three composable milestones: inbound transcription to `TranscriptSink`, outbound `motlie-driver` dial/say to TTS, opaque provider-neutral call handles, and a later conversation bridge connecting transcript events to outbound speech commands. |
@@ -290,7 +291,9 @@ Wire call-control operations for inbound and outbound calls.
 
 - [ ] Add subscription CRUD endpoints: `POST /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions/{subscription_id}`, `DELETE /api/v1/webhook-subscriptions/{subscription_id}`, and `POST /api/v1/webhook-subscriptions/{subscription_id}/test`.
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Implement the gateway event envelope and HMAC delivery headers for outbound application webhooks.
+- [ ] Implement outbound application webhook delivery as HTTP `POST <subscription.url>` with `Content-Type: application/json`, the gateway event envelope as the body, and HMAC delivery headers.
+  DESIGN reference: `Application Webhooks and Gateway Control API`
+- [ ] Treat any `2xx` webhook response as delivery acknowledgement; treat non-`2xx`, timeout, and connection failure as retryable delivery failure.
   DESIGN reference: `Application Webhooks and Gateway Control API`
 - [ ] Emit milestone 1 events: `call.inbound.pending`, `call.answering`, `call.answered`, `media.started`, `transcript.partial`, `transcript.final`, `call.ended`, and `call.failed`.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
