@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Reframed `bins/telnyx-gateway` as an operator-driven TUI/REPL app: it starts an idle listener, uses `motlie-driver` commands for Telnyx app/number setup, surfaces pending inbound calls in the right pane, and only answers after explicit operator or inbound-mode selection. |
 | 2026-05-30 | @codex-358-research | Reworked sequencing around three composable milestones: inbound transcription to `TranscriptSink`, outbound `motlie-driver` dial/say to TTS, opaque provider-neutral call handles, and a later conversation bridge connecting transcript events to outbound speech commands. |
 | 2026-05-30 | @codex-358-research | Split provider-neutral application control from telephony vocabulary: `motlie_voice::app` owns `ConversationHandler`, `DtmfHandler`, `IvrNavigator`, and `ConversationContext`, while `motlie_voice::telephony` owns `DtmfDigit`, `CallAction`, provider-neutral events, and track/direction vocabulary. |
 | 2026-05-30 | @codex-358-research | Moved the Telnyx PLAN under `bins/telnyx-gateway/docs/PLAN.md`, renamed its paired design link to `DESIGN.md`, and collapsed the former Telnyx adapter-crate tasks into `bins/telnyx-gateway` module and binary work. |
@@ -18,6 +19,7 @@ Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against
 
 Execution policy for the initial implementation:
 
+- the gateway starts as an idle TUI/REPL application with an HTTP/WebSocket listener; it does not answer inbound calls until the operator enables inbound mode or runs `answer`
 - milestone 1 is inbound calls with ASR-only transcription to a `TranscriptSink`
 - milestone 2 is outbound dialing plus TTS driven by `motlie-driver` commands such as `dial <number>` and `say <text>`
 - milestone 3 connects inbound transcript events to outbound speech through a `ConversationHandler`
@@ -53,8 +55,12 @@ Extend the existing provider-neutral voice layer and add the Telnyx-specific dep
 
 ### 1.3 - `bins/telnyx-gateway` module skeleton
 
-- [ ] Add `Cargo.toml`, `src/{main.rs,lib.rs,error.rs,cli.rs,serve.rs,logging.rs}`, and Telnyx-specific `webhook/`, `call_control/`, `media/`, and `adapter.rs` modules under `bins/telnyx-gateway/`.
+- [ ] Add `Cargo.toml`, `src/{main.rs,lib.rs,error.rs,cli.rs,serve.rs,logging.rs}`, `operator/`, and Telnyx-specific `webhook/`, `call_control/`, `media/`, and `adapter.rs` modules under `bins/telnyx-gateway/`.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
+- [ ] Add `operator/{commands.rs,state.rs,tui.rs}` for the `motlie-driver` command family, two-pane TUI, shared gateway REPL state, and command/status routing.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
+- [ ] Start the gateway as an idle listener by default; do not register Telnyx apps, bind numbers, answer inbound calls, or dial outbound calls until a REPL command does so.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Staged Build Strategy`
 - [ ] Keep `bins/telnyx-gateway` focused on Telnyx protocol mapping, Telnyx call control, process configuration, and wiring.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
 
@@ -222,6 +228,8 @@ Wire call-control operations for inbound and outbound calls.
 
 - [ ] Add a small Telnyx REST client for `answer`, `dial`, `hangup`, and `streaming_start`.
   DESIGN reference: `Call Control and Media Transport`
+- [ ] Extend the Telnyx REST client with the provisioning calls needed by the REPL: list/create/select Call Control Applications, update the application webhook URL, list phone numbers, and bind a phone number to a connection ID.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Make the outbound `dial` request support:
   `stream_url`,
   `stream_track`,
@@ -241,10 +249,23 @@ Wire call-control operations for inbound and outbound calls.
   DESIGN reference: `Inbound Call Handling`
 - [ ] Add optional webhook signature verification if available in the chosen Telnyx app configuration.
   DESIGN reference: `Gap Analysis`
-- [ ] On `call.initiated`, create a pending inbound session and issue `answer` with the recommended stream parameters.
-  DESIGN reference: `Inbound Call Handler Design`
+- [ ] On `call.initiated`, create a pending inbound session and render it in the TUI; do not issue `answer` while inbound mode is disabled or manual without an operator `answer` command.
+  DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
+- [ ] Implement inbound modes `Disabled`, `Manual`, and `AutoTranscribe`; make `Manual` the first milestone default after `inbound enable --manual`.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] On streaming failure or terminal call events, tear down session state and release model resources.
   DESIGN reference: `Recommended Integration Shape`, `Open Concerns`
+
+### 6.3 - Operator provisioning and call-control commands
+
+- [ ] Add `motlie-driver` commands for gateway status and config: `status`, `listener status`, `config show`, `config set webhook-url <https-url>`, `config set media-url <wss-url>`, and `config set from-number <e164>`.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add Telnyx provisioning commands: `telnyx app list`, `telnyx app create <name>`, `telnyx app use <connection-id>`, `telnyx app webhook set <https-url>`, `telnyx number list`, `telnyx number use <e164>`, and `telnyx number bind <e164> <connection-id>`.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add inbound call commands: `inbound status`, `inbound enable --manual`, `inbound enable --auto-transcribe`, `inbound disable`, `calls`, `call use <call>`, `answer [call] [--sink tui|stdout]`, `reject [call]`, `hangup [call]`, and transcript follow/clear commands.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
+- [ ] Route all command results, Telnyx API responses, pending/active call state, media metadata, and transcript events to the right TUI pane.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
 
 ## Phase 7: Pipeline Orchestration
 
@@ -295,8 +316,12 @@ Close the loop on independently useful product flows before combining them.
 
 ### 8.1 - Milestone 1 inbound transcription flow
 
-- [ ] Implement `call.initiated` -> `answer + streaming` -> WebSocket media -> ASR -> `StdoutTranscriptSink` -> hangup flow.
-  DESIGN reference: `Inbound Call Handler Design`
+- [ ] Implement startup into an idle listener plus two-pane TUI; left pane is the REPL and right pane is command status, logs, pending/active calls, media status, and transcripts.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Implement `inbound enable --manual` -> `call.initiated` -> pending TUI call -> `answer <call>` -> `answer + streaming` -> WebSocket media -> ASR -> `TuiTranscriptSink` or `StdoutTranscriptSink` -> hangup flow.
+  DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
+- [ ] Keep inbound disabled by default at process startup; incoming webhooks must not be answered until the operator enables inbound handling.
+  DESIGN reference: `Staged Build Strategy`, `Operator REPL and TUI Control Surface`
 - [ ] Validate that `stream_bidirectional_target_legs=self` is correct for the initial single-leg AI call pattern.
   DESIGN reference: `Open Concerns`
 - [ ] Add structured logs for `call_control_id`, `stream_id`, codec, and observed sample rate.
@@ -308,8 +333,10 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Outbound Call Handler Design`
 - [ ] Use `stream_establish_before_call_originate=true` in the first outbound implementation.
   DESIGN reference: `Outbound Call Handler Design`
-- [ ] Add a `motlie-driver` command family for `dial <phone-or-sip-uri>`, `say <text...>`, and `hangup`.
+- [ ] Add outbound `motlie-driver` commands for `dial <phone-or-sip-uri>`, `say [call] <text...>`, `hangup [call]`, `tts status`, and `tts model use <model>`.
   DESIGN reference: `Driver REPL Dialer Surface`
+- [ ] Render outbound call state, media session state, TTS synthesis status, and packet-send status in the right TUI pane.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Driver REPL Dialer Surface`
 - [ ] Keep Telnyx `connection_id`, stream URL, credentials, and bidirectional media flags in gateway configuration rather than adding them to provider-neutral outbound call requests.
   DESIGN reference: `Staged Build Strategy`, `Provider Adapter Boundary`
 - [ ] Keep the REPL as one utterance source only; mstream send-keys/broadcast bridges and fixture replay should call the same `OutboundSpeechController::say()` path.
@@ -321,6 +348,8 @@ Close the loop on independently useful product flows before combining them.
 
 - [ ] Implement `TranscriptSink` adapter that forwards selected final transcript events to `ConversationHandler`.
   DESIGN reference: `Staged Build Strategy`, `Conversation Handler Contract`
+- [ ] Add conversation bridge commands `conversation status`, `conversation attach [call]`, `conversation detach [call]`, and `conversation mode <manual|auto>`.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Conversation Handler Contract`
 - [ ] Route `ConversationCommand::Say { text }` to `OutboundSpeechController::say()`.
   DESIGN reference: `Staged Build Strategy`, `Returning TTS Audio`
 - [ ] Route `ConversationCommand::Call(action)` through the Telnyx call-control mapping.
@@ -346,6 +375,8 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
+- [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, `answer` command transition, and right-pane event emission.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Add compile-fail or equivalent type-level tests for wrong rate, wrong channel layout, wrong sample type, and wrong stage order.
   DESIGN reference: `Testing Scope for PLAN`, `Compile-Time Pipeline Assembly`
 
@@ -356,10 +387,15 @@ Make each milestone reviewable and runnable independently before combining them.
   webhook URL,
   WSS endpoint,
   environment variables,
+  REPL command sequence for app creation/selection,
+  phone-number binding,
+  inbound enablement,
   chosen ASR/TTS bundles.
-  DESIGN reference: `Overview`, `Open Concerns`
+  DESIGN reference: `Overview`, `Operator REPL and TUI Control Surface`, `Open Concerns`
 - [ ] Add one milestone 1 inbound transcription example configuration for Sherpa ASR to `StdoutTranscriptSink`.
   DESIGN reference: `Staged Build Strategy`, `Concrete Combination Requirements`
+- [ ] Add one milestone 1 TUI walkthrough: `telnyx app create/use`, `telnyx number bind`, `inbound enable --manual`, incoming call, `answer <call>`, transcript in right pane.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Add one milestone 2 outbound dial/say example configuration for Piper TTS through `OutboundSpeechController::say()`.
   DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
 - [ ] Add one milestone 3 end-to-end example configuration for Sherpa + Piper only after the inbound ASR and outbound TTS milestones are independently stable.
