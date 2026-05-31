@@ -634,6 +634,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b52af3cb4058c895d37317bb27508dccc8e5f2d39454016b297bf4a400597b8"
 dependencies = [
  "axum-core 0.5.6",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -652,8 +653,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
@@ -5545,6 +5548,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "motlie-telnyx-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.8",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "crossterm 0.29.0",
+ "futures-util",
+ "motlie-driver",
+ "motlie-model",
+ "motlie-model-sherpa-onnx",
+ "motlie-models",
+ "motlie-voice",
+ "ratatui",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "shlex",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid 1.23.0",
+]
+
+[[package]]
 name = "motlie-tmux"
 version = "0.1.0"
 dependencies = [
@@ -5585,6 +5619,7 @@ dependencies = [
 name = "motlie-voice"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "hound",
  "motlie-model",
  "thiserror 2.0.18",

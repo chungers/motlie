@@ -11,6 +11,7 @@ description = "Reusable audio pipeline helpers for Motlie examples and adapters"
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = "0.1"
 hound = "3.5"
 motlie-model = { path = "../model" }
 thiserror.workspace = true
