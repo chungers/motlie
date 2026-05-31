@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Switched operator examples to assume Tailscale Funnel public URLs by default; ngrok remains only an alternate tunnel option. |
 | 2026-05-30 | @codex-358-research | Added replayable state persistence: `state dump [path]`, `shutdown [dump_path]`, and startup `--load <dump_path>` rehydrate durable Telnyx/app-server configuration by replaying idempotent gateway commands. |
 | 2026-05-30 | @codex-358-research | Clarified application webhook delivery: gateway events are outbound HTTP `POST` requests to registered app-server URLs, acknowledged by `2xx`, retried on failure, and separate from app-server Control API calls back into the gateway. |
 | 2026-05-30 | @codex-358-research | Added the external automation surface: gateway-emitted application webhooks plus an authenticated Gateway Control API for programmatic inbound answer/transcription and outbound dial/say TTS service flows. |
@@ -447,8 +448,8 @@ Make each milestone reviewable and runnable independently before combining them.
 
 - [ ] Add an operator-focused doc or example showing:
   required Telnyx app settings,
-  webhook URL,
-  WSS endpoint,
+  Tailscale Funnel webhook URL,
+  Tailscale Funnel WSS endpoint,
   environment variables,
   REPL command sequence for app creation/selection,
   phone-number binding,

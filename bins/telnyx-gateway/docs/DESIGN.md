@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Switched local deployment examples to assume Tailscale Funnel as the default public URL path, keeping ngrok only as an alternate tunnel option. | Deployment: Private Host, Getting Started: Local Deployment, Replayable State Dumps |
 | 2026-05-30 | @codex-358-research: Added replayable gateway state dumps: `shutdown [dump_path]` writes durable Telnyx/app-server configuration as idempotent REPL commands, and startup `--load <dump_path>` replays that file to rehydrate configuration before accepting work. | Operator REPL and TUI Control Surface, Gateway Configuration Requirement, Getting Started: Local Deployment |
 | 2026-05-30 | @codex-358-research: Clarified that "gateway emits" means an outbound HTTP `POST` from the gateway to a registered application webhook URL; event delivery is acknowledgement-based, asynchronous, retried on failure, and separate from the application server calling the Gateway Control API back into the gateway. | Application Webhooks and Gateway Control API |
 | 2026-05-30 | @codex-358-research: Added an external automation surface: gateway-emitted application webhooks plus an authenticated Gateway Control API so another server can receive inbound-call events, answer calls programmatically, receive transcript events, and use the gateway as an outbound dialer/TTS service. | Application Webhooks and Gateway Control API, Staged Build Strategy, Inbound Call Handler Design, Outbound Call Handler Design |
@@ -109,7 +110,7 @@ Execution policy for v1:
 - Keep codec and transport adaptation outside `libs/model`
 - Support interruption and barge-in at the gateway layer
 - Keep room for multiple ASR/TTS backend combinations behind the same gateway
-- Support private-host deployment behind ngrok or Tailscale Funnel for v1
+- Support private-host deployment behind Tailscale Funnel for v1, with ngrok as an alternate tunnel option
 - Make Sherpa inbound ASR the only required live milestone 1 backend, Piper the only required live milestone 2 TTS backend, and `Sherpa + Piper` the only required complete duplex backend pairing for milestone 3
 
 ### Non-Goals
@@ -674,12 +675,12 @@ Recommended dump format:
 ```text
 # motlie telnyx-gateway state v1
 # generated_at 2026-05-30T18:35:00Z
-config set webhook-url https://example.ngrok.app/telnyx/webhooks
-config set media-url wss://example.ngrok.app/telnyx/media
+config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
 config set from-number +15557654321
 config set state-path ./telnyx-gateway.state.repl
 telnyx app use <connection-id>
-telnyx app webhook set https://example.ngrok.app/telnyx/webhooks
+telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
 telnyx number use +15557654321
 telnyx number bind +15557654321 <connection-id>
 webhook subscription upsert whsub_01HZ... https://app.example.com/motlie/events --events call.inbound.pending,transcript.final,call.ended --secret-ref env:MOTLIE_APP_WEBHOOK_SECRET
@@ -719,10 +720,10 @@ Replay commands should be idempotent wherever possible. In particular, dump outp
 
 ```text
 status
-config set webhook-url https://example.ngrok.app/telnyx/webhooks
-config set media-url wss://example.ngrok.app/telnyx/media
+config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
 telnyx app create motlie-local
-telnyx app webhook set https://example.ngrok.app/telnyx/webhooks
+telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
 telnyx number bind +15551234567 <connection-id>
 inbound enable --manual
 calls
@@ -2630,9 +2631,9 @@ The initial Telnyx integration must support running on a private host behind a t
 
 Supported v1 deployment shapes:
 
-- a private DGX host with an ngrok tunnel
-- a private mac mini with an ngrok tunnel
-- a private Tailscale-connected host using Tailscale Funnel
+- a private Tailscale-connected DGX host using Tailscale Funnel
+- a private Tailscale-connected mac mini using Tailscale Funnel
+- an ngrok tunnel as an alternate local-development path
 
 Not assumed in v1:
 
@@ -2650,27 +2651,9 @@ Telnyx requires reachable external URLs for:
 
 If the gateway runs on a private host, an external tunnel must expose those endpoints.
 
-### Option 1: ngrok
+### Option 1: Tailscale Funnel
 
-ngrok is the simpler and more disposable option.
-
-Current documented behavior from ngrok:
-
-- `ngrok http <port>` creates a public HTTPS endpoint to a local HTTP service
-- HTTP/S endpoints support WebSockets out of the box
-- the agent establishes outbound TLS connections; no inbound port opening is required
-
-Recommended v1 ngrok workflow:
-
-1. run the gateway locally on a private host
-2. start `ngrok http <gateway-port>`
-3. use the generated `https://...ngrok.app` URL for Telnyx webhooks
-4. use the matching `wss://...ngrok.app/...` URL for Telnyx media streaming
-5. update the Telnyx application webhook URL whenever the ngrok hostname changes
-
-### Option 2: Tailscale Funnel
-
-Tailscale Funnel is the more persistent mesh-native option.
+Tailscale Funnel is the default documented v1 option because it fits private-host development and can provide a stable public HTTPS endpoint.
 
 Current documented behavior from Tailscale:
 
@@ -2684,6 +2667,24 @@ Recommended v1 Funnel workflow:
 2. expose it with `tailscale funnel`
 3. use the resulting `https://<node>.<tailnet>.ts.net` URL for Telnyx webhooks
 4. use the matching `wss://<node>.<tailnet>.ts.net/...` URL for Telnyx media streaming
+
+### Option 2: ngrok
+
+ngrok remains a useful disposable fallback, but examples in this design assume Tailscale Funnel.
+
+Current documented behavior from ngrok:
+
+- `ngrok http <port>` creates a public HTTPS endpoint to a local HTTP service
+- HTTP/S endpoints support WebSockets out of the box
+- the agent establishes outbound TLS connections; no inbound port opening is required
+
+Recommended fallback ngrok workflow:
+
+1. run the gateway locally on a private host
+2. start `ngrok http <gateway-port>`
+3. use the generated `https://...ngrok.app` URL for Telnyx webhooks
+4. use the matching `wss://...ngrok.app/...` URL for Telnyx media streaming
+5. update the Telnyx application webhook URL whenever the ngrok hostname changes
 
 ### Gateway Configuration Requirement
 
@@ -2702,8 +2703,8 @@ telnyx-gateway \
 Then in the REPL:
 
 ```text
-config set webhook-url https://example.ngrok.app/telnyx/webhooks
-config set media-url wss://example.ngrok.app/telnyx/media
+config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
 config set state-path ./telnyx-gateway.state.repl
 ```
 
@@ -2712,7 +2713,7 @@ This matters because the process may listen on `127.0.0.1:8080` while Telnyx nee
 ### Recommended v1 Dev Workflow
 
 1. start the gateway on the private host
-2. start ngrok or Tailscale Funnel
+2. start Tailscale Funnel
 3. use the gateway REPL to set the public URLs
 4. use the gateway REPL to create/select the Telnyx application and bind the phone number
 5. run `inbound enable --manual`, then make or receive calls
@@ -2770,12 +2771,12 @@ This returns the application `id`, which is also the `connection_id` used for ou
 
 #### 4. Configure public webhook and media URLs from the gateway REPL
 
-If your tunnel URL changes, update the application:
+With Tailscale Funnel, use your public Funnel hostname:
 
 ```text
-config set webhook-url https://example.ngrok.app/telnyx/webhooks
-config set media-url wss://example.ngrok.app/telnyx/media
-telnyx app webhook set https://example.ngrok.app/telnyx/webhooks
+config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
+telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
 ```
 
 #### 5. Assign the phone number to the application from the gateway REPL
@@ -2828,23 +2829,21 @@ The exact model configuration flags can evolve, but the binary should always sep
 - Telnyx application/number selection, which can be driven from the REPL
 - optional replayable state file loaded with `--load`
 
-#### 9. Start ngrok or Tailscale Funnel
-
-ngrok example:
-
-```bash
-ngrok http 8080
-```
-
-Tailscale Funnel example:
+#### 9. Start Tailscale Funnel
 
 ```bash
 tailscale funnel 8080
 ```
 
-#### 10. Configure the public URLs in the REPL if using ngrok
+#### 10. Configure the Tailscale Funnel public URLs in the REPL
 
-If you use a randomly assigned ngrok hostname, repeat the `config set` and `telnyx app webhook set` commands every time ngrok restarts with a different public URL.
+Use the Funnel hostname assigned to this node:
+
+```text
+config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
+config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
+telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
+```
 
 ### First Call Test
 
