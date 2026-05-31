@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Added replayable gateway state dumps: `shutdown [dump_path]` writes durable Telnyx/app-server configuration as idempotent REPL commands, and startup `--load <dump_path>` replays that file to rehydrate configuration before accepting work. | Operator REPL and TUI Control Surface, Gateway Configuration Requirement, Getting Started: Local Deployment |
 | 2026-05-30 | @codex-358-research: Clarified that "gateway emits" means an outbound HTTP `POST` from the gateway to a registered application webhook URL; event delivery is acknowledgement-based, asynchronous, retried on failure, and separate from the application server calling the Gateway Control API back into the gateway. | Application Webhooks and Gateway Control API |
 | 2026-05-30 | @codex-358-research: Added an external automation surface: gateway-emitted application webhooks plus an authenticated Gateway Control API so another server can receive inbound-call events, answer calls programmatically, receive transcript events, and use the gateway as an outbound dialer/TTS service. | Application Webhooks and Gateway Control API, Staged Build Strategy, Inbound Call Handler Design, Outbound Call Handler Design |
 | 2026-05-30 | @codex-358-research: Reframed `bins/telnyx-gateway` as an operator-driven TUI/REPL application that starts an idle HTTP/WebSocket listener, uses `motlie-driver` commands for Telnyx provisioning and call control, and only answers inbound calls after explicit operator or mode selection. | Operator REPL and TUI Control Surface, Staged Build Strategy, Inbound Call Handler Design, Outbound Call Handler Design |
@@ -554,6 +555,7 @@ pub struct GatewayReplState<C> {
     pub listener: ListenerStatus,
     pub telnyx: TelnyxProvisioningState,
     pub webhook_subscriptions: WebhookSubscriptionStore,
+    pub persistence: GatewayPersistenceState,
     pub inbound_mode: InboundMode,
     pub selected_call: Option<CallHandle>,
     pub calls: SessionRegistry,
@@ -573,10 +575,13 @@ General gateway commands:
 help [command]
 status
 listener status
+state dump [path]
+shutdown [dump_path]
 config show
 config set webhook-url <https-url>
 config set media-url <wss-url>
 config set from-number <e164>
+config set state-path <path>
 log clear
 log level <trace|debug|info|warn|error>
 ```
@@ -588,6 +593,7 @@ api token create <name>
 api token revoke <token-id>
 webhook subscription list
 webhook subscription add <url> --events <event,...>
+webhook subscription upsert <subscription-id> <url> --events <event,...> --secret-ref <secret-ref>
 webhook subscription remove <subscription-id>
 webhook subscription test <subscription-id>
 ```
@@ -647,6 +653,68 @@ conversation mode <manual|auto>
 
 These belong after milestone 1 and milestone 2 are independently useful. `conversation attach` should wire selected transcript events to `ConversationHandler`; it should not change the Telnyx media or model contracts.
 
+### Replayable State Dumps
+
+The gateway should persist durable configuration as a replayable command script, not as an opaque binary snapshot. This makes restart behavior auditable, editable, and compatible with the same `motlie-driver` command path used by the TUI.
+
+Supported entry points:
+
+```text
+state dump [path]
+shutdown [dump_path]
+telnyx-gateway --load <dump_path>
+```
+
+`state dump [path]` writes the current durable gateway state and keeps running. `shutdown [dump_path]` writes the same dump, then exits cleanly after refusing new work and draining or terminating active sessions according to normal shutdown policy. If the path is omitted, `shutdown` uses `config state-path` if set; otherwise it should use a documented default such as `./telnyx-gateway.state.repl`.
+
+`--load <dump_path>` replays the command file during startup before the gateway enables inbound handling or accepts Control API mutations. Replay should be deterministic and should fail closed: if a command fails, the gateway should report the failing line, leave inbound mode disabled, and require operator action.
+
+Recommended dump format:
+
+```text
+# motlie telnyx-gateway state v1
+# generated_at 2026-05-30T18:35:00Z
+config set webhook-url https://example.ngrok.app/telnyx/webhooks
+config set media-url wss://example.ngrok.app/telnyx/media
+config set from-number +15557654321
+config set state-path ./telnyx-gateway.state.repl
+telnyx app use <connection-id>
+telnyx app webhook set https://example.ngrok.app/telnyx/webhooks
+telnyx number use +15557654321
+telnyx number bind +15557654321 <connection-id>
+webhook subscription upsert whsub_01HZ... https://app.example.com/motlie/events --events call.inbound.pending,transcript.final,call.ended --secret-ref env:MOTLIE_APP_WEBHOOK_SECRET
+inbound enable --manual
+```
+
+The dump should include durable configuration:
+
+- public webhook and media URLs
+- selected Telnyx application / connection ID
+- selected and bound Telnyx phone number
+- default caller ID / from number
+- inbound mode
+- webhook subscriptions and event filters
+- application webhook secret references
+- Control API token metadata or secret references
+- selected ASR/TTS model names if they are set through the REPL
+
+The dump should not include transient runtime state:
+
+- active calls
+- pending calls
+- media WebSocket sessions
+- transcript history
+- in-flight TTS playback
+- retry queues, except optionally durable undelivered webhook events in a separate event journal
+
+Secret handling rule:
+
+- do not dump raw Telnyx API keys, application webhook HMAC secrets, or bearer tokens
+- dump secret references such as `env:TELNYX_API_KEY`, `env:MOTLIE_APP_WEBHOOK_SECRET`, or `file:/run/secrets/...`
+- if token persistence is required, dump only hashed token material or a command that imports a hash/reference, never the bearer token itself
+
+Replay commands should be idempotent wherever possible. In particular, dump output should prefer `use`, `bind`, and `upsert` forms over commands that blindly create duplicates. Commands that touch Telnyx remotely, such as `telnyx app webhook set` or `telnyx number bind`, should tolerate replay when the remote object is already in the desired state.
+
 ### Example Milestone 1 Operator Flow
 
 ```text
@@ -660,6 +728,7 @@ inbound enable --manual
 calls
 answer <call>
 transcript follow <call>
+shutdown ./telnyx-gateway.state.repl
 ```
 
 The gateway should log every API request, selected app/number, webhook update, inbound call event, answer action, media `start`, observed codec, and transcript event in the right pane.
@@ -997,6 +1066,7 @@ bins/
         mod.rs
         commands.rs
         state.rs
+        persistence.rs
         tui.rs
       api/
       events/
@@ -1149,6 +1219,7 @@ bins/telnyx-gateway/src/
     mod.rs
     commands.rs
     state.rs
+    persistence.rs
     tui.rs
 
   api/
@@ -1171,6 +1242,7 @@ bins/telnyx-gateway/src/
 - CLI parsing
 - `motlie-driver` command registration and execution
 - two-pane TUI state, rendering, and command/status routing
+- replayable command dump generation and startup `--load` replay
 - Gateway Control API routing and authentication
 - application webhook subscription storage, event envelope construction, and delivery retries
 - environment loading
@@ -2615,7 +2687,7 @@ Recommended v1 Funnel workflow:
 
 ### Gateway Configuration Requirement
 
-The gateway binary should accept a `--listen` flag for the local bind address. The external public URLs can be provided either as startup flags or through the REPL after a tunnel starts.
+The gateway binary should accept a `--listen` flag for the local bind address and a `--load <dump_path>` flag for replaying durable gateway state. The external public URLs can be provided either as startup flags or through the REPL after a tunnel starts, and then persisted with `state dump` or `shutdown <dump_path>`.
 
 Example shape:
 
@@ -2623,7 +2695,8 @@ Example shape:
 telnyx-gateway \
   --listen 127.0.0.1:8080 \
   --media-path /telnyx/media \
-  --webhook-path /telnyx/webhooks
+  --webhook-path /telnyx/webhooks \
+  --load ./telnyx-gateway.state.repl
 ```
 
 Then in the REPL:
@@ -2631,6 +2704,7 @@ Then in the REPL:
 ```text
 config set webhook-url https://example.ngrok.app/telnyx/webhooks
 config set media-url wss://example.ngrok.app/telnyx/media
+config set state-path ./telnyx-gateway.state.repl
 ```
 
 This matters because the process may listen on `127.0.0.1:8080` while Telnyx needs the externally reachable tunnel URL, not the private bind address.
@@ -2642,6 +2716,8 @@ This matters because the process may listen on `127.0.0.1:8080` while Telnyx nee
 3. use the gateway REPL to set the public URLs
 4. use the gateway REPL to create/select the Telnyx application and bind the phone number
 5. run `inbound enable --manual`, then make or receive calls
+6. exit with `shutdown ./telnyx-gateway.state.repl`
+7. restart later with `telnyx-gateway --load ./telnyx-gateway.state.repl ...`
 
 ## Getting Started: Local Deployment
 
@@ -2738,6 +2814,7 @@ Recommended v1 defaults:
   --listen 127.0.0.1:8080 \
   --webhook-path /telnyx/webhooks \
   --media-path /telnyx/media \
+  --load ./telnyx-gateway.state.repl \
   --telnyx-api-key "$TELNYX_API_KEY" \
   --asr-model sherpa-onnx \
   --tts-model piper
@@ -2749,6 +2826,7 @@ The exact model configuration flags can evolve, but the binary should always sep
 - externally reachable webhook and media URLs
 - injected ASR/TTS backend choice
 - Telnyx application/number selection, which can be driven from the REPL
+- optional replayable state file loaded with `--load`
 
 #### 9. Start ngrok or Tailscale Funnel
 
