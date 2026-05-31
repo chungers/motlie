@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-31 | @codex-364-impl | Clarified ONNX Runtime host preparation: operators provide only build tools, while the ONNX Runtime source build owns ORT third-party dependency builds through FetchContent. |
 | 2026-05-31 | @codex-364-impl | Added the static ONNX Runtime requirement for Sherpa/Piper runbooks: build ONNX Runtime from the matching release tag, point `ORT_LIB_PATH` at the static build output, and reject dynamic-link startup guidance. |
 | 2026-05-30 | @codex-358-research | Addressed review round 1 by co-locating M4 with M1-M3, marking Control API/webhook Phase 6 work as M4 definition/stub work, adding M3 conversation webhook events, aligning M1 structured-log acceptance with #364, and updating operator module trees. |
 | 2026-05-30 | @codex-358-research | Reviewed the design and split product tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). |
@@ -168,7 +169,8 @@ Assemble and validate the first useful Telnyx slice: inbound call handling plus 
 - [ ] Implement the Sherpa inbound path:
   Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> Sherpa ingest flow.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Require static ONNX Runtime linkage for the Sherpa live-test path: install/build ONNX Runtime from the matching release tag, point `ORT_LIB_PATH` at the static build directory, keep `ORT_PREFER_DYNAMIC_LINK` unset, and do not make `LD_LIBRARY_PATH` part of the operator runbook.
+- [ ] Require static ONNX Runtime linkage for the Sherpa live-test path: build ONNX Runtime from the matching release tag, point `ORT_LIB_PATH` at the static build directory, keep `ORT_PREFER_DYNAMIC_LINK` unset, and do not make `LD_LIBRARY_PATH` part of the operator runbook.
+  The runbook may verify host build tools (`git`, Python, CMake, GCC), but ONNX Runtime must build its own third-party C/C++ dependencies from source instead of requiring operators to install ORT internal libraries as host packages.
   DESIGN reference: `Recommended ASR/TTS Stack`
 
 ### 4.2 - Transcript sinks
