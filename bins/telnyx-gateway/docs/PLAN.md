@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Split provider-neutral application control from telephony vocabulary: `motlie_voice::app` owns `ConversationHandler`, `DtmfHandler`, `IvrNavigator`, and `ConversationContext`, while `motlie_voice::telephony` owns `DtmfDigit`, `CallAction`, provider-neutral events, and track/direction vocabulary. |
 | 2026-05-30 | @codex-358-research | Moved the Telnyx PLAN under `bins/telnyx-gateway/docs/PLAN.md`, renamed its paired design link to `DESIGN.md`, and collapsed the former Telnyx adapter-crate tasks into `bins/telnyx-gateway` module and binary work. |
 | 2026-05-30 | @codex-358-research | Aligned the remaining PLAN reorder tasks with the DESIGN boundary: Telnyx maps `media.chunk` to provider-neutral sequence metadata, `libs/voice` reorders generic sequenced frames before decode, and phase 3 now explicitly includes the i16 resampler wrapper plus missing `i16_to_f32` helper. |
 | 2026-05-30 | @codex-358-research | Rebased implementation sequencing around the landed `motlie-voice` crate from PR #209. The Telnyx slice now extends existing `PcmFrame`, conversion, and resampling surfaces, adds missing codecs/packetization/stages, requires anti-aliased resampling before live calls, and records Piper buffered/CUDA caveats. |
@@ -57,11 +58,13 @@ Extend the existing provider-neutral voice layer and add the Telnyx-specific dep
 
 Define the reusable voice application surface in `libs/voice`.
 
-### 2.1 - Application contracts
+### 2.1 - Application contracts and telephony vocabulary
 
-- [ ] Add `ConversationContext`, `ConversationHandler`, `DtmfHandler`, `IvrNavigator`, `DtmfDigit`, and provider-neutral `CallAction` in `libs/voice/src/app/`.
+- [ ] Add application-level control traits and state in `libs/voice/src/app/`: `ConversationContext`, `ConversationHandler`, `DtmfHandler`, and `IvrNavigator`.
   DESIGN reference: `Conversation Handler Contract`, `v1.1: DTMF and Call Control`, `Crate Hierarchy and API Surfaces`
-- [ ] Keep these contracts provider-neutral so they can be reused by future Twilio or SIP adapters.
+- [ ] Add provider-neutral telephony vocabulary in `libs/voice/src/telephony/`: `DtmfDigit`, `CallAction`, `IvrEvent`, call/media lifecycle events, and track/direction markers.
+  DESIGN reference: `motlie_voice::telephony Surface`, `v1.1: DTMF and Call Control`, `Crate Hierarchy and API Surfaces`
+- [ ] Keep these contracts and vocabulary provider-neutral so they can be reused by future Twilio or SIP adapters.
   DESIGN reference: `Provider-Neutral API Rule`
 
 ### 2.2 - Static runtime selection
@@ -244,6 +247,8 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
   DESIGN reference: `v1.1: DTMF and Call Control`
 - [ ] Keep dialog and keypad policy out of `bins/telnyx-gateway`.
   DESIGN reference: `Provider-Neutral API Rule`
+- [ ] Keep Telnyx-specific call-control translation in `bins/telnyx-gateway`; `motlie_voice::telephony::CallAction` is the provider-neutral command vocabulary, not a provider REST client.
+  DESIGN reference: `motlie_voice::telephony Surface`, `Provider-Neutral API Rule`
 
 ### 7.3 - TTS to outbound media
 

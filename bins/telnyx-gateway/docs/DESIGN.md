@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Clarified that `motlie_voice::app` owns application-level voice control traits while `motlie_voice::telephony` owns provider-neutral telephony vocabulary and events, not provider-specific transports or call-control clients. | Crate Hierarchy and API Surfaces, Provider-Neutral API Rule, v1.1: DTMF and Call Control |
 | 2026-05-30 | @codex-358-research: Moved the Telnyx design docs under `bins/telnyx-gateway/docs`, collapsed the previously separate Telnyx adapter crate into Telnyx-specific modules owned by `bins/telnyx-gateway`, and standardized the gateway path on `bins/telnyx-gateway`. | Overview, Crate Hierarchy and API Surfaces, Media Adaptation Pipeline, Inbound Call Handler Design, Deployment, Getting Started, References |
 | 2026-05-30 | @codex-358-research: Replaced stale absolute local references with repo-relative links to the current ASR/TTS design docs and model contract source files. | References |
 | 2026-05-30 | @codex-358-research: Addressed PR review by making the reorder boundary Telnyx-adapter mapping plus provider-neutral sequenced-frame reorder, correcting Sherpa's current typed input contract to ordered `AudioBuf<i16, 16_000, Mono>`, demoting Fish Speech to a historical rejected candidate, and documenting the missing `i16_to_f32` helper needed by the i16 telephony resampler wrapper. | Media Adaptation Pipeline, Recommended ASR/TTS Stack, Inbound Call Handler Design, Gap Analysis, Open Concerns |
@@ -399,7 +400,6 @@ libs/voice/src/
   app/
     mod.rs
     context.rs
-    actions.rs
     conversation.rs
     dtmf.rs
     ivr.rs
@@ -430,13 +430,15 @@ libs/voice/src/
   telephony/
     mod.rs
     digits.rs
+    actions.rs
     events.rs
+    tracks.rs
 ```
 
 `libs/voice` owns:
 
-- `ConversationHandler`, `DtmfHandler`, `IvrNavigator`
-- `ConversationContext` and provider-neutral call actions
+- application-level control traits and state in `motlie_voice::app`, including `ConversationHandler`, `DtmfHandler`, `IvrNavigator`, and `ConversationContext`
+- provider-neutral telephony vocabulary in `motlie_voice::telephony`, including `DtmfDigit`, `CallAction`, call/media events, and track/direction markers
 - typed media values such as new `EncodedFrame<C>` and the existing `PcmFrame<const RATE_HZ, C, E>`
 - stage traits and compile-time stage composition
 - provider-neutral codecs such as `PCMU`, `PCMA`, and `L16`
@@ -450,6 +452,35 @@ libs/voice/src/
 - Telnyx `call_control_id`
 - Telnyx WebSocket message enums
 - Telnyx REST command payloads
+
+### `motlie_voice::telephony` Surface
+
+`motlie_voice::telephony` is the provider-neutral telephony vocabulary layer. It is not a `TelephonyProvider` abstraction and it should not hide Telnyx, Twilio, SIP, or any other provider behind a generic call-control client.
+
+It owns reusable telephony concepts that application logic and provider adapters can share:
+
+- `DtmfDigit`
+- `CallAction`
+- provider-neutral call and media lifecycle events
+- track, direction, leg, and pacing vocabulary where the concept is not provider-specific
+- correlation metadata needed by provider-neutral tests, logs, and jitter/reorder policy
+
+It must not own:
+
+- provider webhook schemas
+- provider WebSocket message enums
+- provider REST command payloads or clients
+- provider credentials, connection IDs, webhook URLs, or transport servers
+- application policy about what to say or which action to take
+
+The intended layering is:
+
+```text
+provider adapter, e.g. bins/telnyx-gateway
+-> motlie_voice::telephony events/actions
+-> motlie_voice::app handlers
+-> provider adapter maps CallAction back to provider commands
+```
 
 ### `bins/telnyx-gateway` Surface
 
@@ -522,9 +553,11 @@ Examples that belong in `libs/voice`:
 
 - `EncodedFrame<C>`
 - existing `PcmFrame<const RATE_HZ, C, E>`
-- `ConversationHandler`
-- `DtmfDigit`
-- `CallAction`
+- `motlie_voice::app::ConversationHandler`
+- `motlie_voice::app::DtmfHandler`
+- `motlie_voice::app::IvrNavigator`
+- `motlie_voice::telephony::DtmfDigit`
+- `motlie_voice::telephony::CallAction`
 - `Resampler`
 - `Packetizer`
 
@@ -1686,34 +1719,7 @@ Recommended Rust shapes:
 
 ```rust
 use async_trait::async_trait;
-
-pub enum DtmfDigit {
-    D0,
-    D1,
-    D2,
-    D3,
-    D4,
-    D5,
-    D6,
-    D7,
-    D8,
-    D9,
-    Star,
-    Hash,
-    A,
-    B,
-    C,
-    D,
-}
-
-pub enum CallAction {
-    Continue,
-    Transfer { destination: String },
-    Hold,
-    Hangup,
-    PlayAudio { path: String },
-    GatherMore { timeout_ms: u64 },
-}
+use motlie_voice::telephony::{CallAction, DtmfDigit};
 
 #[async_trait]
 pub trait DtmfHandler: Send + Sync {
@@ -1746,6 +1752,8 @@ Example behavior:
 Recommended abstraction:
 
 ```rust
+use motlie_voice::telephony::{CallAction, IvrEvent};
+
 #[async_trait]
 pub trait IvrNavigator: Send + Sync {
     async fn on_event(
