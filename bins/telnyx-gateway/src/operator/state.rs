@@ -78,6 +78,10 @@ impl CallStatus {
             Self::Failed => "failed",
         }
     }
+
+    pub fn allows_media_start(self) -> bool {
+        matches!(self, Self::Answering | Self::Answered)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -192,6 +196,18 @@ pub struct GatewayState {
     pub shutdown_requested: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamAttachOutcome {
+    Attached {
+        gateway_call_id: String,
+    },
+    NotAnswered {
+        gateway_call_id: String,
+        status: CallStatus,
+    },
+    UnknownCallControl,
+}
+
 impl GatewayState {
     pub fn new(bind: SocketAddr) -> Self {
         Self {
@@ -270,16 +286,25 @@ impl GatewayState {
         call_control_id: &str,
         stream_id: String,
         media: MediaMetadata,
-    ) -> Option<String> {
-        let gateway_call_id = self.call_control_index.get(call_control_id)?.clone();
-        if let Some(call) = self.calls.get_mut(&gateway_call_id) {
-            call.ids.stream_id = Some(stream_id.clone());
-            call.media = media;
-            call.status = CallStatus::MediaStarted;
-            call.push_timeline("media stream started");
+    ) -> StreamAttachOutcome {
+        let Some(gateway_call_id) = self.call_control_index.get(call_control_id).cloned() else {
+            return StreamAttachOutcome::UnknownCallControl;
+        };
+        let Some(call) = self.calls.get_mut(&gateway_call_id) else {
+            return StreamAttachOutcome::UnknownCallControl;
+        };
+        if !call.status.allows_media_start() {
+            return StreamAttachOutcome::NotAnswered {
+                gateway_call_id,
+                status: call.status,
+            };
         }
+        call.ids.stream_id = Some(stream_id.clone());
+        call.media = media;
+        call.status = CallStatus::MediaStarted;
+        call.push_timeline("media stream started");
         self.stream_index.insert(stream_id, gateway_call_id.clone());
-        Some(gateway_call_id)
+        StreamAttachOutcome::Attached { gateway_call_id }
     }
 
     pub fn add_transcript(&mut self, gateway_call_id: &str, kind: TranscriptKind, text: String) {
