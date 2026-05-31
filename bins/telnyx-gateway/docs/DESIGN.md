@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Addressed PR #363 review round 1 by moving M4, the design-quality assessment, and the recommended v1 pipelines under the staged build strategy; marking Control API and application webhook flows as milestone 4 work; aligning M1 structured logging with #364; adding operator session/socket/mux modules; and matching M3 prose to `ConversationCommand::{Say, Call, Noop}`. | Staged Build Strategy, Application Webhooks and Gateway Control API, Operator REPL and TUI Control Surface, Inbound Call Handler Design, Crate Hierarchy and API Surfaces |
 | 2026-05-30 | @codex-358-research: Reviewed the overall design quality and split tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). | Staged Build Strategy, Recommended Telnyx v1 Pipelines, Operator REPL and TUI Control Surface |
 | 2026-05-30 | @codex-358-research: Added startup-selected operator input modes: `--tui` enables the local TUI, `--socket <path>` enables a Unix-domain command socket for headless control, and both sources are multiplexed through one command dispatcher when enabled together. | Operator REPL and TUI Control Surface, Staged Build Strategy, Gateway Configuration Requirement |
 | 2026-05-30 | @codex-358-research: Added the app-server call read/attach API: `GET /api/v1/calls` and `GET /api/v1/calls/{call_id}` expose current gateway call state, while per-call attachments bind an app webhook subscription to call transcripts/events without replacing webhook delivery. | Application Webhooks and Gateway Control API |
@@ -383,6 +384,8 @@ operator provisions Telnyx application and phone number
 
 No TTS, outbound audio, external appserver, socket client, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane.
 
+Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
+
 Recommended inbound surface:
 
 ```rust
@@ -517,7 +520,7 @@ The third milestone composes milestone 1 and milestone 2 into a TUI-driven conve
 selected-call chat interface
 -> TranscriptSink
 -> ConversationHandler
--> ConversationCommand::Say(...)
+-> ConversationCommand::Say { text }
 -> OutboundSpeechController::say(...)
 -> assistant response and playback status in the chat/detail pane
 ```
@@ -528,8 +531,86 @@ Recommended composition rule:
 
 - inbound handlers emit `TranscriptEvent`
 - transcript consumers decide whether to log, send to tmux, or call a conversation handler
-- conversation handlers emit provider-neutral commands such as `Say`, `Hangup`, or `Transfer`
+- conversation handlers emit provider-neutral commands such as `Say { text }`, `Call(CallAction::Hangup)`, `Call(CallAction::Transfer { ... })`, or `Noop`
 - `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
+
+### Milestone 4: External Integration Harness
+
+The fourth milestone proves that non-TUI integrations can drive the same gateway safely:
+
+```text
+Unix-domain socket client and harness appserver
+-> command-source mux and Gateway Control API
+-> application webhook subscription
+-> call list/detail and per-call attachment APIs
+-> inbound answer/transcript service flow
+-> outbound dial/say service flow
+```
+
+This milestone owns the Unix-domain command socket, command-source mux validation, application webhooks, authenticated Gateway Control API read/attach flows, and a harness appserver. It should not be required for milestone 1 inbound TUI transcription, milestone 2 outbound TUI TTS, or milestone 3 TUI chat conversation. The harness appserver should register a webhook subscription, verify signatures, reconcile call state through `GET /api/v1/calls/{call_id}`, attach to a call, answer inbound calls, drive outbound dial/say, and record observed events.
+
+### Design Quality Assessment
+
+Overall quality: viable and coherent, provided the four milestone gates are enforced. The strongest parts of the design are the reuse-first boundary around `motlie_model::typed` and `motlie_voice`, the separation of Telnyx schema/control into `bins/telnyx-gateway`, and the staged ASR-only -> TTS-only -> conversation -> external integration progression.
+
+Primary design risks:
+
+- scope creep: socket, webhooks, Control API, and harness appserver should stay in milestone 4 instead of blocking the first TUI slices
+- media quality: the placeholder linear resampler must be replaced with an anti-aliased resampler before live telephony validation
+- UI state complexity: call roster, selected-call detail, TTS composer, and chat mode need source-local selection and clear state transitions
+- latency expectations: transport streaming is available before model-level incremental TTS; Piper can still synthesize a full buffer before packet streaming
+- operational safety: socket permissions, webhook HMAC, Control API auth, replayable state dumps, and secret redaction need explicit tests
+
+### Recommended Telnyx v1 Pipelines
+
+The recommended build order is four narrower milestone slices.
+
+Milestone 1 inbound TUI transcription (#364):
+
+```text
+Inbound Telnyx audio
+-> G.711 decode
+-> resample 8 kHz to 16 kHz
+-> sherpa-onnx streaming ASR
+-> TuiTranscriptSink
+-> selected-call detail transcript
+```
+
+Milestone 2 outbound TUI dialer/TTS (#365):
+
+```text
+TUI dial/say command or selected-call detail text composer
+-> OutboundSpeechController
+-> Piper TTS
+-> PCM at about 22 kHz
+-> resample to 16 kHz
+-> encode G.711 or L16
+-> outbound Telnyx media
+```
+
+Milestone 3 full-duplex TUI chat conversation (#366):
+
+```text
+selected-call chat interface
+-> TranscriptSink
+-> ConversationHandler
+-> ConversationCommand::Say { text }
+-> OutboundSpeechController
+-> selected-call chat/detail playback status
+```
+
+Milestone 4 external integration harness (#367):
+
+```text
+Unix-domain socket and harness appserver
+-> command-source mux / Gateway Control API
+-> application webhooks
+-> call list/detail and per-call attachments
+-> inbound answer/transcript service flow
+-> outbound dial/say service flow
+```
+
+These pipelines align with what currently works while allowing useful validation before the full duplex conversation path exists.
 
 ## Operator REPL and TUI Control Surface
 
@@ -851,7 +932,7 @@ transcript follow <call>
 shutdown ./telnyx-gateway.state.repl
 ```
 
-The gateway should log every API request, selected app/number, webhook update, inbound call event, answer action, media `start`, observed codec, and transcript event into the global status stream, call roster, or selected-call detail pane as appropriate.
+The gateway should log every API request, selected app/number, webhook update, inbound call event, answer action, media `start`, gateway call id, Telnyx diagnostic ids, stream id, observed codec/sample rate, and transcript partial/final event into the global status stream, call roster, or selected-call detail pane as appropriate.
 
 ### Why This Belongs Above `libs/model`
 
@@ -875,7 +956,7 @@ Those are telephony concerns, not model capability concerns.
 
 ## Application Webhooks and Gateway Control API
 
-The gateway should support external automation in addition to the operator TUI. This is a separate surface from Telnyx voice webhooks:
+The gateway should support external automation in addition to the operator TUI. This surface belongs to milestone 4 (#367); it is designed here so contracts are clear, but implementation and validation must not block the M1 inbound TUI, M2 outbound TUI, or M3 TUI chat milestones. This is a separate surface from Telnyx voice webhooks:
 
 - Telnyx webhooks come into `bins/telnyx-gateway` from Telnyx.
 - Gateway application webhooks go out from `bins/telnyx-gateway` to a user's application server.
@@ -1222,7 +1303,7 @@ external app registers webhook subscription
 -> gateway emits transcript.partial / transcript.final events
 ```
 
-This is the service form of milestone 1. The TUI can still show the same call and transcript stream, but it is no longer the only consumer.
+This is the milestone 4 service analogue of the milestone 1 inbound TUI flow. The TUI can still show the same call and transcript stream, but Control API, webhook delivery, and app-server attachment are milestone 4 integration work and must not block milestone 1.
 
 ### Programmatic Outbound Flow
 
@@ -1235,7 +1316,7 @@ external app POSTs /api/v1/calls
 -> gateway emits tts.playback.started / tts.playback.finished
 ```
 
-This is the service form of milestone 2. The gateway becomes a dialer and TTS transport service while still hiding Telnyx call-control details and media adaptation from the calling application.
+This is the milestone 4 service analogue of the milestone 2 outbound TUI flow. The gateway becomes a dialer and TTS transport service while still hiding Telnyx call-control details and media adaptation from the calling application, but the Control API and webhook service path must not block milestone 2.
 
 ### Auth and Exposure
 
@@ -1291,7 +1372,10 @@ bins/
         mod.rs
         commands.rs
         state.rs
+        session.rs
         persistence.rs
+        socket.rs
+        mux.rs
         tui.rs
       api/
       events/
@@ -1444,7 +1528,10 @@ bins/telnyx-gateway/src/
     mod.rs
     commands.rs
     state.rs
+    session.rs
     persistence.rs
+    socket.rs
+    mux.rs
     tui.rs
 
   api/
@@ -2330,84 +2417,6 @@ Design implications:
 - `ConversationHandler` streaming text can reduce text-decision latency, but it does not by itself make Piper or Qwen3-TTS.cpp produce incremental audio
 - latency validation must measure the actual first-audio time of the selected backend, not only WebSocket packet cadence
 
-### Milestone 4: External Integration Harness
-
-The fourth milestone proves that non-TUI integrations can drive the same gateway safely:
-
-```text
-Unix-domain socket client and harness appserver
--> command-source mux and Gateway Control API
--> application webhook subscription
--> call list/detail and per-call attachment APIs
--> inbound answer/transcript service flow
--> outbound dial/say service flow
-```
-
-This milestone owns the Unix-domain command socket, command-source mux validation, application webhooks, authenticated Gateway Control API read/attach flows, and a harness appserver. It should not be required for milestone 1 inbound TUI transcription, milestone 2 outbound TUI TTS, or milestone 3 TUI chat conversation. The harness appserver should register a webhook subscription, verify signatures, reconcile call state through `GET /api/v1/calls/{call_id}`, attach to a call, answer inbound calls, drive outbound dial/say, and record observed events.
-
-### Design Quality Assessment
-
-Overall quality: viable and coherent, provided the four milestone gates are enforced. The strongest parts of the design are the reuse-first boundary around `motlie_model::typed` and `motlie_voice`, the separation of Telnyx schema/control into `bins/telnyx-gateway`, and the staged ASR-only -> TTS-only -> conversation -> external integration progression.
-
-Primary design risks:
-
-- scope creep: socket, webhooks, Control API, and harness appserver should stay in milestone 4 instead of blocking the first TUI slices
-- media quality: the placeholder linear resampler must be replaced with an anti-aliased resampler before live telephony validation
-- UI state complexity: call roster, selected-call detail, TTS composer, and chat mode need source-local selection and clear state transitions
-- latency expectations: transport streaming is available before model-level incremental TTS; Piper can still synthesize a full buffer before packet streaming
-- operational safety: socket permissions, webhook HMAC, Control API auth, replayable state dumps, and secret redaction need explicit tests
-
-### Recommended Telnyx v1 Pipelines
-
-The recommended build order is four narrower milestone slices.
-
-Milestone 1 inbound TUI transcription (#364):
-
-```text
-Inbound Telnyx audio
--> G.711 decode
--> resample 8 kHz to 16 kHz
--> sherpa-onnx streaming ASR
--> TuiTranscriptSink
--> selected-call detail transcript
-```
-
-Milestone 2 outbound TUI dialer/TTS (#365):
-
-```text
-TUI dial/say command or selected-call detail text composer
--> OutboundSpeechController
--> Piper TTS
--> PCM at about 22 kHz
--> resample to 16 kHz
--> encode G.711 or L16
--> outbound Telnyx media
-```
-
-Milestone 3 full-duplex TUI chat conversation (#366):
-
-```text
-selected-call chat interface
--> TranscriptSink
--> ConversationHandler
--> ConversationCommand::Say
--> OutboundSpeechController
--> selected-call chat/detail playback status
-```
-
-Milestone 4 external integration harness (#367):
-
-```text
-Unix-domain socket and harness appserver
--> command-source mux / Gateway Control API
--> application webhooks
--> call list/detail and per-call attachments
--> inbound answer/transcript service flow
--> outbound dial/say service flow
-```
-
-These pipelines align with what currently works while allowing useful validation before the full duplex conversation path exists.
-
 ### Latency Budget
 
 Recommended conversational target:
@@ -2438,11 +2447,11 @@ Design implications:
 Recommended inbound flow:
 
 1. Gateway starts and listens on the configured HTTP/WebSocket bind address, defaulting to `127.0.0.1:8080` for local development.
-2. Operator or external application uses a configured command source or Control API to provision/select the Telnyx application, set the public webhook/media URLs, bind a phone number, and enable the desired inbound mode.
+2. For milestone 1, the operator uses the TUI command source to provision/select the Telnyx application, set the public webhook/media URLs, bind a phone number, and enable the desired inbound mode. Milestone 4 may expose the same setup/control path through the socket, Control API, and harness appserver.
 3. Telnyx sends `call.initiated` webhook.
-4. HTTP handler verifies signature, parses `call_control_id`, allocates a `PendingCallSession`, renders the pending call as a highlighted row in the top call roster, updates the selected-call detail pane when selected, and emits `call.inbound.pending` to matching application webhook subscriptions.
+4. HTTP handler verifies signature, parses `call_control_id`, allocates a `PendingCallSession`, renders the pending call as a highlighted row in the top call roster, and updates the selected-call detail pane when selected. In milestone 4, the same state transition also emits `call.inbound.pending` to matching application webhook subscriptions.
 5. If inbound mode is `Disabled`, the gateway must not answer. It may log the event and return `200 OK`, or reject the call if the operator configured reject-on-disabled behavior.
-6. If inbound mode is `Manual`, the gateway waits for `answer <call>` from a configured command source or `POST /api/v1/calls/{call_id}/answer` from an authenticated application server.
+6. If inbound mode is `Manual`, the gateway waits for `answer <call>` from a configured operator command source. In milestone 4, an authenticated application server may request the same transition with `POST /api/v1/calls/{call_id}/answer`.
 7. If inbound mode is `AutoTranscribe`, the gateway behaves as if a trusted controller immediately requested answer with a configured transcript sink.
 8. The answer action attaches media streaming with:
    - `stream_url=wss://.../telnyx/media`
@@ -2455,8 +2464,8 @@ Recommended inbound flow:
 10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
 11. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
 12. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
-13. In milestone 1, a sink such as `TuiTranscriptSink`, `WebhookTranscriptSink`, or `StdoutTranscriptSink` emits transcripts and returns no call-control actions.
-14. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say` values to outbound TTS.
+13. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
+14. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
 15. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
 
 The inbound handler should therefore be ASR-first. It must not require outbound TTS or a conversation handler to be useful.
@@ -2599,7 +2608,7 @@ That would degrade ASR and complicate turn-taking. `both_tracks` should be reser
 
 Recommended outbound flow:
 
-1. Operator runs `dial <phone-or-sip-uri>` from a configured command source, or an external application calls `POST /api/v1/calls`, optionally after selecting a default `from` number.
+1. For milestone 2, the operator runs `dial <phone-or-sip-uri>` from the TUI command source. In milestone 4, an external application may request the same transition with `POST /api/v1/calls`, optionally after selecting a default `from` number.
 2. Gateway looks up the selected Telnyx application/connection, public media URL, caller ID, and outbound stream defaults from `GatewayRuntimeState`.
 3. Gateway issues `POST /v2/calls`.
 4. The Telnyx dial request includes:
@@ -2615,7 +2624,7 @@ Recommended outbound flow:
    - `stream_establish_before_call_originate=true`
 5. Telnyx establishes the WebSocket.
 6. The gateway starts the outbound media session on `start` and renders call state in the roster/detail panes.
-7. Once the callee answers, the operator may run `say <text...>`, or an external application may call `POST /api/v1/calls/{call_id}/say`, to synthesize outbound audio.
+7. Once the callee answers, the operator may run `say <text...>` to synthesize outbound audio. In milestone 4, an external application may request the same action with `POST /api/v1/calls/{call_id}/say`.
 8. The rest of the session uses the same media path as inbound calls.
 
 ### Why Streaming Should Be Attached at Dial Time
