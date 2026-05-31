@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Reviewed the overall design quality and split tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). | Staged Build Strategy, Recommended Telnyx v1 Pipelines, Operator REPL and TUI Control Surface |
 | 2026-05-30 | @codex-358-research: Added startup-selected operator input modes: `--tui` enables the local TUI, `--socket <path>` enables a Unix-domain command socket for headless control, and both sources are multiplexed through one command dispatcher when enabled together. | Operator REPL and TUI Control Surface, Staged Build Strategy, Gateway Configuration Requirement |
 | 2026-05-30 | @codex-358-research: Added the app-server call read/attach API: `GET /api/v1/calls` and `GET /api/v1/calls/{call_id}` expose current gateway call state, while per-call attachments bind an app webhook subscription to call transcripts/events without replacing webhook delivery. | Application Webhooks and Gateway Control API |
 | 2026-05-30 | @codex-358-research: Refined the TUI layout so the right side is split into a top call roster and bottom selected-call detail pane; inbound calls appear as highlighted pending rows, can become the selected call, and drive detail/transcript/action hints without stealing REPL input. | Operator REPL and TUI Control Surface |
@@ -92,9 +93,10 @@ This keeps telephony transport concerns out of the model contracts while also pr
 
 Execution policy for v1:
 
-- milestone 1 is inbound calls with Sherpa ASR-only transcription to a `TranscriptSink`
-- milestone 2 is outbound dialing plus Piper TTS driven by `motlie-driver` commands such as `dial <number>` and `say <text>`
-- milestone 3 connects inbound transcript events to outbound speech through a `ConversationHandler`
+- milestone 1 is inbound calls answered and managed in the TUI, with Sherpa ASR transcription in the selected-call detail pane
+- milestone 2 is outbound dialing plus Piper TTS driven by the TUI command surface and selected-call detail text input
+- milestone 3 is full-duplex conversation driven by a TUI chat interface over the selected call
+- milestone 4 is external integration: Unix-domain socket mux, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` remain supported design targets for follow-on slices, not peer initial implementation targets
 - provider-neutral abstractions in `libs/voice` must be broad enough to support those later pairings without redesign, but milestone 1 and milestone 2 acceptance must not depend on them
@@ -115,6 +117,7 @@ Execution policy for v1:
 - Keep room for multiple ASR/TTS backend combinations behind the same gateway
 - Support private-host deployment behind Tailscale Funnel for v1, with ngrok as an alternate tunnel option
 - Make Sherpa inbound ASR the only required live milestone 1 backend, Piper the only required live milestone 2 TTS backend, and `Sherpa + Piper` the only required complete duplex backend pairing for milestone 3
+- Defer external socket/webhook/appserver integration validation to milestone 4 so the first three TUI product slices stay narrow
 
 ### Non-Goals
 
@@ -342,7 +345,12 @@ Primary gateway subsystems:
 
 ## Staged Build Strategy
 
-Build the gateway in three independently useful milestones. Each milestone should expose a narrow control surface that can later compose with the others.
+Build the gateway in four independently useful milestones. Each milestone should expose a narrow control surface that can later compose with the others. Tracking issues:
+
+- M1 inbound TUI transcription: #364
+- M2 outbound TUI dialer/TTS: #365
+- M3 full-duplex TUI chat conversation: #366
+- M4 external integration socket/webhook/appserver harness: #367
 
 The gateway process itself starts before any milestone-specific call behavior is enabled:
 
@@ -355,23 +363,25 @@ telnyx-gateway
 
 Startup state is intentionally idle. The process may accept health checks, webhook delivery, and media WebSocket connections at the configured address, but it does not register Telnyx applications, bind numbers, answer inbound calls, or dial outbound calls until the operator drives those actions from a configured command source such as the TUI, Unix-domain socket, replay file, or authenticated Control API.
 
-### Milestone 1: Inbound Transcription
+### Milestone 1: Inbound TUI Transcription
 
-The first runnable milestone is inbound call handling plus ASR only:
+The first runnable milestone is inbound call handling plus ASR in the operator TUI only:
 
 ```text
 operator provisions Telnyx application and phone number
 -> inbound enable --manual
 -> Telnyx inbound call
--> pending call appears in TUI and/or application webhook
--> answer <call> or POST /api/v1/calls/{call_id}/answer
+-> pending call appears in the TUI call roster
+-> operator selects the call
+-> answer [call]
 -> answer with media stream
 -> Telnyx media WebSocket
 -> inbound ASR pipeline
--> TranscriptSink
+-> TuiTranscriptSink
+-> selected-call detail pane transcript
 ```
 
-No TTS, outbound audio, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls, answer on operator command, stream, normalize, transcribe, and deliver transcript events to an injected sink.
+No TTS, outbound audio, external appserver, socket client, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane.
 
 Recommended inbound surface:
 
@@ -418,20 +428,20 @@ pub trait TranscriptSink: Send + Sync {
 
 The first sink can be `StdoutTranscriptSink`, which logs partials/finals. A later `TmuxTranscriptSink` can map final transcript text to `motlie_tmux::KeySequence` and call `Target::send_keys()`. This keeps the ASR call path the same while swapping what consumes transcripts.
 
-For the TUI milestone, `TuiTranscriptSink` should append partial/final transcript events to the selected-call detail pane. `WebhookTranscriptSink` should emit `transcript.partial` and `transcript.final` events to subscribed application servers. `StdoutTranscriptSink` remains useful for non-TUI tests and log-only runs.
+For milestone 1, `TuiTranscriptSink` should append partial/final transcript events to the selected-call detail pane. `StdoutTranscriptSink` remains useful for non-TUI tests and log-only runs. `WebhookTranscriptSink` belongs to milestone 4 external integration, where the same transcript events are delivered to subscribed application servers.
 
 For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` maps to `call_session_id`, and `media_stream_id` maps to Telnyx `stream_id`. Those raw Telnyx field names should stay in `bins/telnyx-gateway`.
 
-### Milestone 2: Outbound Dialer and TTS
+### Milestone 2: Outbound TUI Dialer and TTS
 
-The second milestone is outbound call control plus TTS only:
+The second milestone is outbound call control plus TTS from the operator TUI only:
 
 ```text
 motlie-driver command source
-or Gateway Control API
 -> dial <number>
 -> Telnyx outbound call with media stream
--> say <text>
+-> selected-call detail pane shows outbound state
+-> operator enters say text through REPL or selected-call detail text composer
 -> outbound TTS pipeline
 -> Telnyx media WebSocket
 ```
@@ -486,7 +496,7 @@ pub trait OutboundSpeechController: Send {
 }
 ```
 
-The TUI REPL and Unix-domain socket are only two possible sources of utterances. Any source that can produce text, including an mstream send-keys or broadcast bridge, should be able to call the same `say()` surface:
+The TUI REPL and selected-call detail text composer are the milestone 2 utterance sources. Any later source that can produce text, including a Unix-domain socket client, mstream send-keys, or broadcast bridge, should be able to call the same `say()` surface:
 
 ```rust
 #[async_trait]
@@ -495,22 +505,24 @@ pub trait OutboundUtteranceSource: Send {
 }
 ```
 
-This makes the outbound TTS path testable without needing a conversation loop: a TUI REPL, socket client, mstream bridge, fixture replay, or scripted test can all feed text into the same outbound speech controller.
+This makes the outbound TTS path testable without needing a conversation loop: a TUI REPL, selected-call detail composer, socket client, mstream bridge, fixture replay, or scripted test can all feed text into the same outbound speech controller.
 
 Telnyx-specific dial configuration such as `connection_id`, stream URL, credentials, and bidirectional media flags belongs in `bins/telnyx-gateway` configuration and adapter code, not in the provider-neutral `VoiceDialRequest`.
 
-### Milestone 3: Conversation Bridge
+### Milestone 3: Full-Duplex TUI Chat Conversation
 
-The third milestone composes milestone 1 and milestone 2:
+The third milestone composes milestone 1 and milestone 2 into a TUI-driven conversation experience:
 
 ```text
-TranscriptSink
+selected-call chat interface
+-> TranscriptSink
 -> ConversationHandler
 -> ConversationCommand::Say(...)
 -> OutboundSpeechController::say(...)
+-> assistant response and playback status in the chat/detail pane
 ```
 
-In this milestone, `ConversationHandler` is a bridge between transcript events and outbound commands. It should not own Telnyx REST details, ASR model details, or TTS packetization. Those remain in the inbound/outbound controllers and media pipelines.
+In this milestone, `ConversationHandler` is a bridge between transcript events and outbound commands, surfaced through a selected-call chat interface. The chat interface should show user transcript, assistant response state, outbound `say` activity, playback status, and call lifecycle. `ConversationHandler` should not own Telnyx REST details, ASR model details, or TTS packetization. Those remain in the inbound/outbound controllers and media pipelines.
 
 Recommended composition rule:
 
@@ -2318,24 +2330,52 @@ Design implications:
 - `ConversationHandler` streaming text can reduce text-decision latency, but it does not by itself make Piper or Qwen3-TTS.cpp produce incremental audio
 - latency validation must measure the actual first-audio time of the selected backend, not only WebSocket packet cadence
 
+### Milestone 4: External Integration Harness
+
+The fourth milestone proves that non-TUI integrations can drive the same gateway safely:
+
+```text
+Unix-domain socket client and harness appserver
+-> command-source mux and Gateway Control API
+-> application webhook subscription
+-> call list/detail and per-call attachment APIs
+-> inbound answer/transcript service flow
+-> outbound dial/say service flow
+```
+
+This milestone owns the Unix-domain command socket, command-source mux validation, application webhooks, authenticated Gateway Control API read/attach flows, and a harness appserver. It should not be required for milestone 1 inbound TUI transcription, milestone 2 outbound TUI TTS, or milestone 3 TUI chat conversation. The harness appserver should register a webhook subscription, verify signatures, reconcile call state through `GET /api/v1/calls/{call_id}`, attach to a call, answer inbound calls, drive outbound dial/say, and record observed events.
+
+### Design Quality Assessment
+
+Overall quality: viable and coherent, provided the four milestone gates are enforced. The strongest parts of the design are the reuse-first boundary around `motlie_model::typed` and `motlie_voice`, the separation of Telnyx schema/control into `bins/telnyx-gateway`, and the staged ASR-only -> TTS-only -> conversation -> external integration progression.
+
+Primary design risks:
+
+- scope creep: socket, webhooks, Control API, and harness appserver should stay in milestone 4 instead of blocking the first TUI slices
+- media quality: the placeholder linear resampler must be replaced with an anti-aliased resampler before live telephony validation
+- UI state complexity: call roster, selected-call detail, TTS composer, and chat mode need source-local selection and clear state transitions
+- latency expectations: transport streaming is available before model-level incremental TTS; Piper can still synthesize a full buffer before packet streaming
+- operational safety: socket permissions, webhook HMAC, Control API auth, replayable state dumps, and secret redaction need explicit tests
+
 ### Recommended Telnyx v1 Pipelines
 
-The recommended build order is three narrower pipelines.
+The recommended build order is four narrower milestone slices.
 
-Milestone 1 inbound transcription:
+Milestone 1 inbound TUI transcription (#364):
 
 ```text
 Inbound Telnyx audio
 -> G.711 decode
 -> resample 8 kHz to 16 kHz
 -> sherpa-onnx streaming ASR
--> TranscriptSink
+-> TuiTranscriptSink
+-> selected-call detail transcript
 ```
 
-Milestone 2 outbound dialer/TTS:
+Milestone 2 outbound TUI dialer/TTS (#365):
 
 ```text
-motlie-driver dial/say command or other text source
+TUI dial/say command or selected-call detail text composer
 -> OutboundSpeechController
 -> Piper TTS
 -> PCM at about 22 kHz
@@ -2344,13 +2384,26 @@ motlie-driver dial/say command or other text source
 -> outbound Telnyx media
 ```
 
-Milestone 3 connected conversation:
+Milestone 3 full-duplex TUI chat conversation (#366):
 
 ```text
-TranscriptSink
+selected-call chat interface
+-> TranscriptSink
 -> ConversationHandler
 -> ConversationCommand::Say
 -> OutboundSpeechController
+-> selected-call chat/detail playback status
+```
+
+Milestone 4 external integration harness (#367):
+
+```text
+Unix-domain socket and harness appserver
+-> command-source mux / Gateway Control API
+-> application webhooks
+-> call list/detail and per-call attachments
+-> inbound answer/transcript service flow
+-> outbound dial/say service flow
 ```
 
 These pipelines align with what currently works while allowing useful validation before the full duplex conversation path exists.
