@@ -122,6 +122,13 @@ pub fn f32_to_i16_clamped(samples: &[f32]) -> Vec<i16> {
         .collect()
 }
 
+pub fn i16_to_f32(samples: &[i16]) -> Vec<f32> {
+    samples
+        .iter()
+        .map(|sample| *sample as f32 / 32768.0)
+        .collect()
+}
+
 fn normalize_signed_int(sample: i32, bits_per_sample: u16) -> f32 {
     let scale = (1i64 << (bits_per_sample - 1)) as f32;
     sample as f32 / scale
@@ -208,5 +215,13 @@ mod tests {
         let bytes = sample.to_le_bytes();
         let samples = decode_wav_data_bytes(&spec, &bytes).expect("decode should succeed");
         assert!((samples[0] - 0.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn i16_to_f32_normalizes_full_range() {
+        let samples = i16_to_f32(&[i16::MIN, 0, i16::MAX]);
+        assert!((samples[0] + 1.0).abs() < 0.0001);
+        assert_eq!(samples[1], 0.0);
+        assert!(samples[2] > 0.99);
     }
 }
