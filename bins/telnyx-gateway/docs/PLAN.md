@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Added replayable state persistence: `state dump [path]`, `shutdown [dump_path]`, and startup `--load <dump_path>` rehydrate durable Telnyx/app-server configuration by replaying idempotent gateway commands. |
 | 2026-05-30 | @codex-358-research | Clarified application webhook delivery: gateway events are outbound HTTP `POST` requests to registered app-server URLs, acknowledged by `2xx`, retried on failure, and separate from app-server Control API calls back into the gateway. |
 | 2026-05-30 | @codex-358-research | Added the external automation surface: gateway-emitted application webhooks plus an authenticated Gateway Control API for programmatic inbound answer/transcription and outbound dial/say TTS service flows. |
 | 2026-05-30 | @codex-358-research | Reframed `bins/telnyx-gateway` as an operator-driven TUI/REPL app: it starts an idle listener, uses `motlie-driver` commands for Telnyx app/number setup, surfaces pending inbound calls in the right pane, and only answers after explicit operator or inbound-mode selection. |
@@ -60,7 +61,7 @@ Extend the existing provider-neutral voice layer and add the Telnyx-specific dep
 
 - [ ] Add `Cargo.toml`, `src/{main.rs,lib.rs,error.rs,cli.rs,serve.rs,logging.rs}`, `operator/`, `api/`, `events/`, and Telnyx-specific `webhook/`, `call_control/`, `media/`, and `adapter.rs` modules under `bins/telnyx-gateway/`.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
-- [ ] Add `operator/{commands.rs,state.rs,tui.rs}` for the `motlie-driver` command family, two-pane TUI, shared gateway REPL state, and command/status routing.
+- [ ] Add `operator/{commands.rs,state.rs,persistence.rs,tui.rs}` for the `motlie-driver` command family, two-pane TUI, shared gateway REPL state, replayable state dumps, and command/status routing.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
 - [ ] Add `api/{control.rs,auth.rs,subscriptions.rs}` and `events/{envelope.rs,dispatcher.rs,delivery.rs}` for the external Control API and gateway application webhook delivery.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Crate Hierarchy and API Surfaces`
@@ -265,9 +266,9 @@ Wire call-control operations for inbound and outbound calls.
 
 ### 6.3 - Operator provisioning and call-control commands
 
-- [ ] Add `motlie-driver` commands for gateway status and config: `status`, `listener status`, `config show`, `config set webhook-url <https-url>`, `config set media-url <wss-url>`, and `config set from-number <e164>`.
+- [ ] Add `motlie-driver` commands for gateway status, config, and persistence: `status`, `listener status`, `state dump [path]`, `shutdown [dump_path]`, `config show`, `config set webhook-url <https-url>`, `config set media-url <wss-url>`, `config set from-number <e164>`, and `config set state-path <path>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Add `motlie-driver` commands for external automation: `api token create`, `api token revoke`, `webhook subscription list`, `webhook subscription add <url> --events <event,...>`, `webhook subscription remove <subscription-id>`, and `webhook subscription test <subscription-id>`.
+- [ ] Add `motlie-driver` commands for external automation: `api token create`, `api token revoke`, `webhook subscription list`, `webhook subscription add <url> --events <event,...>`, `webhook subscription upsert <subscription-id> <url> --events <event,...> --secret-ref <secret-ref>`, `webhook subscription remove <subscription-id>`, and `webhook subscription test <subscription-id>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Application Webhooks and Gateway Control API`
 - [ ] Add Telnyx provisioning commands: `telnyx app list`, `telnyx app create <name>`, `telnyx app use <connection-id>`, `telnyx app webhook set <https-url>`, `telnyx number list`, `telnyx number use <e164>`, and `telnyx number bind <e164> <connection-id>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`
@@ -276,7 +277,22 @@ Wire call-control operations for inbound and outbound calls.
 - [ ] Route all command results, Telnyx API responses, pending/active call state, media metadata, and transcript events to the right TUI pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 
-### 6.4 - Gateway Control API
+### 6.4 - Replayable gateway state
+
+- [ ] Add startup `--load <dump_path>` support that replays a gateway command dump before enabling inbound handling or accepting Control API mutations.
+  DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
+- [ ] Implement replayable dump generation as command text, not an opaque binary snapshot.
+  DESIGN reference: `Replayable State Dumps`
+- [ ] Include durable state in dumps: public webhook/media URLs, selected Telnyx app/connection, selected/bound phone number, default from number, inbound mode, webhook subscriptions/event filters, secret references, token metadata or token hash references, and selected ASR/TTS model names when configured through the REPL.
+  DESIGN reference: `Replayable State Dumps`
+- [ ] Exclude transient state from dumps: active calls, pending calls, media sessions, transcript history, in-flight TTS playback, and retry queues unless a later event journal explicitly persists them.
+  DESIGN reference: `Replayable State Dumps`
+- [ ] Ensure replay commands are idempotent and prefer `use`, `bind`, and `upsert` forms over create-only commands that would duplicate remote or local objects.
+  DESIGN reference: `Replayable State Dumps`
+- [ ] Never dump raw Telnyx API keys, application webhook HMAC secrets, or bearer tokens; persist only secret references or hashed token material.
+  DESIGN reference: `Replayable State Dumps`
+
+### 6.5 - Gateway Control API
 
 - [ ] Add authenticated call-control endpoints: `GET /api/v1/calls`, `GET /api/v1/calls/{call_id}`, `POST /api/v1/calls/{call_id}/answer`, `POST /api/v1/calls/{call_id}/reject`, and `POST /api/v1/calls/{call_id}/hangup`.
   DESIGN reference: `Application Webhooks and Gateway Control API`
@@ -287,7 +303,7 @@ Wire call-control operations for inbound and outbound calls.
 - [ ] Require authentication for the Control API and support `Idempotency-Key` on mutating requests.
   DESIGN reference: `Application Webhooks and Gateway Control API`
 
-### 6.5 - Gateway application webhooks
+### 6.6 - Gateway application webhooks
 
 - [ ] Add subscription CRUD endpoints: `POST /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions/{subscription_id}`, `DELETE /api/v1/webhook-subscriptions/{subscription_id}`, and `POST /api/v1/webhook-subscriptions/{subscription_id}/test`.
   DESIGN reference: `Application Webhooks and Gateway Control API`
@@ -420,6 +436,10 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Application Webhooks and Gateway Control API`
 - [ ] Add application webhook delivery tests for event envelope shape, HMAC signature verification, retry behavior, event filtering, and duplicate-event deduplication by event ID.
   DESIGN reference: `Application Webhooks and Gateway Control API`
+- [ ] Add persistence tests that dump state, restart with `--load <dump_path>`, and assert the replayed gateway state matches durable Telnyx/app-server configuration without resurrecting active calls or media sessions.
+  DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
+- [ ] Add secret-safety tests that generated dumps contain secret references or hashes, not raw Telnyx API keys, application webhook HMAC secrets, or bearer tokens.
+  DESIGN reference: `Replayable State Dumps`
 - [ ] Add compile-fail or equivalent type-level tests for wrong rate, wrong channel layout, wrong sample type, and wrong stage order.
   DESIGN reference: `Testing Scope for PLAN`, `Compile-Time Pipeline Assembly`
 
@@ -433,8 +453,9 @@ Make each milestone reviewable and runnable independently before combining them.
   REPL command sequence for app creation/selection,
   phone-number binding,
   inbound enablement,
+  `state dump`, `shutdown [dump_path]`, and `--load <dump_path>`,
   chosen ASR/TTS bundles.
-  DESIGN reference: `Overview`, `Operator REPL and TUI Control Surface`, `Open Concerns`
+  DESIGN reference: `Overview`, `Operator REPL and TUI Control Surface`, `Replayable State Dumps`, `Open Concerns`
 - [ ] Add one milestone 1 inbound transcription example configuration for Sherpa ASR to `StdoutTranscriptSink`.
   DESIGN reference: `Staged Build Strategy`, `Concrete Combination Requirements`
 - [ ] Add one milestone 1 TUI walkthrough: `telnyx app create/use`, `telnyx number bind`, `inbound enable --manual`, incoming call, `answer <call>`, transcript in right pane.
