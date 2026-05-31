@@ -27,9 +27,11 @@ pub trait InboundAsrSession: Send {
 
 #[async_trait]
 pub trait InboundAsrFactory: Send + Sync {
+    // justification: the gateway chooses the concrete ASR backend at process startup while media handlers need a shared backend-independent session factory.
     async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>>;
 }
 
+// justification: media WebSocket tasks share one process-selected ASR factory without coupling Telnyx wiring to a concrete model backend.
 pub type SharedAsrFactory = Arc<dyn InboundAsrFactory>;
 
 pub struct UnavailableAsrFactory {

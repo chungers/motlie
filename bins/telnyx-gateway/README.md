@@ -24,6 +24,10 @@ Milestone 1 is inbound call transcription in the operator TUI.
    ```
 
    The gateway starts idle. Inbound handling is disabled until the operator enables it.
+   The M1 command surface intentionally keeps public webhook/media URLs in
+   REPL state via `config set`; startup flags for `--webhook-url`,
+   `--webhook-path`, and `--media-path` remain deferred until the external
+   integration milestone.
 
 3. In the left TUI pane, configure Telnyx:
 
@@ -66,6 +70,11 @@ Structured logs include:
 - transcript partial/final events
 
 Use `RUST_LOG=debug` for more detail.
+
+Media frame reordering starts from the first observed Telnyx `media.chunk` for
+each stream instead of assuming a fixed initial chunk number. If a live call
+shows stale chunk warnings, preserve the structured logs so the stream-order
+assumption can be revisited with observed Telnyx payloads.
 
 ## ASR Artifacts
 

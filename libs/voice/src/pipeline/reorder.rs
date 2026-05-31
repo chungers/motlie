@@ -10,7 +10,7 @@ pub struct SequencedFrame<T> {
 
 #[derive(Clone, Debug)]
 pub struct SequencedFrameReorder<T> {
-    next_expected: u64,
+    next_expected: Option<u64>,
     capacity: usize,
     pending: BTreeMap<u64, T>,
 }
@@ -18,25 +18,41 @@ pub struct SequencedFrameReorder<T> {
 impl<T> SequencedFrameReorder<T> {
     pub fn new(first_sequence: u64, capacity: usize) -> Self {
         Self {
-            next_expected: first_sequence,
+            next_expected: Some(first_sequence),
+            capacity,
+            pending: BTreeMap::new(),
+        }
+    }
+
+    pub fn new_lazily(capacity: usize) -> Self {
+        Self {
+            next_expected: None,
             capacity,
             pending: BTreeMap::new(),
         }
     }
 
     pub fn push(&mut self, frame: SequencedFrame<T>) -> Result<Vec<SequencedFrame<T>>> {
-        if frame.sequence < self.next_expected {
+        let next_expected = match self.next_expected {
+            Some(sequence) => sequence,
+            None => {
+                self.next_expected = Some(frame.sequence);
+                frame.sequence
+            }
+        };
+
+        if frame.sequence < next_expected {
             return Err(VoiceError::StaleFrameSequence {
                 sequence: frame.sequence,
-                next_expected: self.next_expected,
+                next_expected,
             });
         }
 
-        let distance = frame.sequence.saturating_sub(self.next_expected) as usize;
+        let distance = frame.sequence.saturating_sub(next_expected) as usize;
         if distance > self.capacity {
             return Err(VoiceError::ReorderCapacityExceeded {
                 sequence: frame.sequence,
-                next_expected: self.next_expected,
+                next_expected,
                 capacity: self.capacity,
             });
         }
@@ -54,12 +70,15 @@ impl<T> SequencedFrameReorder<T> {
 
     fn drain_ready(&mut self) -> Vec<SequencedFrame<T>> {
         let mut ready = Vec::new();
-        while let Some(payload) = self.pending.remove(&self.next_expected) {
+        while let Some(next_expected) = self.next_expected {
+            let Some(payload) = self.pending.remove(&next_expected) else {
+                break;
+            };
             ready.push(SequencedFrame {
-                sequence: self.next_expected,
+                sequence: next_expected,
                 payload,
             });
-            self.next_expected += 1;
+            self.next_expected = Some(next_expected + 1);
         }
         ready
     }
@@ -127,5 +146,24 @@ mod tests {
                 next_expected: 2
             }
         ));
+    }
+
+    #[test]
+    fn lazy_reorder_starts_from_first_observed_sequence() {
+        let mut reorder = SequencedFrameReorder::new_lazily(4);
+        let ready = reorder
+            .push(SequencedFrame {
+                sequence: 7,
+                payload: "first",
+            })
+            .expect("first observed frame should establish sequence base");
+
+        assert_eq!(
+            ready,
+            vec![SequencedFrame {
+                sequence: 7,
+                payload: "first"
+            }]
+        );
     }
 }

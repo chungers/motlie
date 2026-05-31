@@ -857,4 +857,38 @@ mod tests {
         let call = guard.calls.values().next().expect("call exists");
         assert_eq!(call.status, CallStatus::Answering);
     }
+
+    #[tokio::test]
+    async fn answer_rejects_non_pending_call() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        {
+            let mut guard = state.write().await;
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            let gateway_call_id = guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::Answered,
+            );
+            guard.selected_call = Some(gateway_call_id);
+        }
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let error = engine
+            .run_line("answer")
+            .await
+            .expect_err("non-pending answer should be rejected");
+
+        assert!(error.to_string().contains("expected waiting"));
+        let guard = state.read().await;
+        let call = guard.calls.values().next().expect("call exists");
+        assert_eq!(call.status, CallStatus::Answered);
+    }
 }

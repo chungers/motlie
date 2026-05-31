@@ -8,10 +8,13 @@ use motlie_voice::app::TranscriptEvent;
 use motlie_voice::codec::{g711, l16};
 use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
 use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
+use motlie_voice::VoiceError;
 use serde::Deserialize;
 
 use crate::adapter::{InboundAsrSession, SharedAsrFactory};
-use crate::operator::state::{CallStatus, LogLevel, MediaMetadata, SharedState, TranscriptKind};
+use crate::operator::state::{
+    CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EncodedMediaFrame {
@@ -73,7 +76,7 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
     let mut session: Option<Box<dyn InboundAsrSession>> = None;
     let mut gateway_call_id: Option<String> = None;
     let mut media_format: Option<MediaFormat> = None;
-    let mut reorder = SequencedFrameReorder::new(1, 32);
+    let mut reorder = SequencedFrameReorder::new_lazily(32);
 
     while let Some(message) = socket.next().await {
         match message {
@@ -108,7 +111,9 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
 
     if let (Some(call_id), Some(asr_session)) = (gateway_call_id.as_deref(), session.take()) {
         match asr_session.finish().await {
-            Ok(events) => record_transcript_events(&state, call_id, None, None, events).await,
+            Ok(events) => {
+                record_transcript_events(&state, call_id, None, media_format.as_ref(), events).await
+            }
             Err(error) => log_media_error(&state, Some(call_id), error).await,
         }
         let mut guard = state.write().await;
@@ -135,8 +140,12 @@ async fn handle_text(
         "start" => {
             let event: StartEvent = serde_json::from_str(text).context("parse start event")?;
             let format = map_media_format(event.start.media_format.as_ref());
+            validate_media_format(&format)?;
+            let Some(call_id) = register_start(state, &event, &format).await else {
+                return Ok(());
+            };
             *media_format = Some(format.clone());
-            *gateway_call_id = register_start(state, &event, &format).await;
+            *gateway_call_id = Some(call_id);
             *session = Some(asr.open_session().await?);
             Ok(())
         }
@@ -150,13 +159,20 @@ async fn handle_text(
             let payload = STANDARD
                 .decode(event.media.payload.as_bytes())
                 .context("decode Telnyx media payload base64")?;
-            let ready = reorder.push(SequencedFrame {
+            let ready = match reorder.push(SequencedFrame {
                 sequence,
                 payload: EncodedMediaFrame {
                     payload,
                     track: event.media.track,
                 },
-            })?;
+            }) {
+                Ok(ready) => ready,
+                Err(VoiceError::StaleFrameSequence { .. }) => {
+                    tracing::warn!(stream_id = event.stream_id, sequence, "media.frame.stale");
+                    return Ok(());
+                }
+                Err(error) => return Err(anyhow::Error::from(error)),
+            };
             for frame in ready {
                 ingest_frame(
                     state,
@@ -172,7 +188,14 @@ async fn handle_text(
         }
         "stop" => {
             let event: StopEvent = serde_json::from_str(text).context("parse stop event")?;
-            finish_stream(state, session, gateway_call_id.as_deref(), event.stream_id).await
+            finish_stream(
+                state,
+                session,
+                gateway_call_id.as_deref(),
+                event.stream_id,
+                media_format.as_ref(),
+            )
+            .await
         }
         "mark" | "clear" | "dtmf" => Ok(()),
         "error" => bail!("Telnyx media error event: {text}"),
@@ -195,34 +218,62 @@ async fn register_start(
     };
     let gateway_call_id =
         guard.set_call_stream(&event.start.call_control_id, event.stream_id.clone(), media);
-    if let Some(gateway_call_id) = gateway_call_id.as_deref() {
-        guard.log(
-            LogLevel::Info,
-            format!(
-                "media started for {gateway_call_id}: {} {} Hz {}ch",
-                format.encoding, format.sample_rate_hz, format.channels
-            ),
-        );
-        tracing::info!(
+    match gateway_call_id {
+        StreamAttachOutcome::Attached { gateway_call_id } => {
+            guard.log(
+                LogLevel::Info,
+                format!(
+                    "media started for {gateway_call_id}: {} {} Hz {}ch",
+                    format.encoding, format.sample_rate_hz, format.channels
+                ),
+            );
+            tracing::info!(
+                gateway_call_id,
+                call_control_id = event.start.call_control_id,
+                call_session_id = event.start.call_session_id.as_deref(),
+                stream_id = event.stream_id,
+                codec = format.encoding,
+                sample_rate_hz = format.sample_rate_hz,
+                channels = format.channels,
+                "media.started"
+            );
+            Some(gateway_call_id)
+        }
+        StreamAttachOutcome::NotAnswered {
             gateway_call_id,
-            call_control_id = event.start.call_control_id,
-            call_session_id = event.start.call_session_id.as_deref(),
-            stream_id = event.stream_id,
-            codec = format.encoding,
-            sample_rate_hz = format.sample_rate_hz,
-            channels = format.channels,
-            "media.started"
-        );
-    } else {
-        guard.log(
-            LogLevel::Warn,
-            format!(
-                "media start for unknown call_control_id {}",
-                event.start.call_control_id
-            ),
-        );
+            status,
+        } => {
+            guard.log(
+                LogLevel::Warn,
+                format!(
+                    "ignored media start for {gateway_call_id}; call is {} and was not answered by operator",
+                    status.label()
+                ),
+            );
+            tracing::warn!(
+                gateway_call_id,
+                call_control_id = event.start.call_control_id,
+                status = status.label(),
+                "media.start.rejected_not_answered"
+            );
+            None
+        }
+        StreamAttachOutcome::UnknownCallControl => {
+            guard.log(
+                LogLevel::Warn,
+                format!(
+                    "media start for unknown call_control_id {}",
+                    event.start.call_control_id
+                ),
+            );
+            tracing::warn!(
+                call_control_id = event.start.call_control_id,
+                stream_id = event.stream_id,
+                "media.start.rejected_unknown_call"
+            );
+            None
+        }
     }
-    gateway_call_id
 }
 
 async fn ingest_frame(
@@ -268,6 +319,7 @@ async fn ingest_frame(
 }
 
 fn decode_payload(format: &MediaFormat, payload: &[u8]) -> anyhow::Result<Vec<i16>> {
+    validate_media_format(format)?;
     match format.encoding.as_str() {
         "L16" => Ok(l16::decode_l16_be(payload)?),
         "PCMU" => Ok(g711::decode_pcmu(payload)),
@@ -281,10 +333,11 @@ async fn finish_stream(
     session: &mut Option<Box<dyn InboundAsrSession>>,
     gateway_call_id: Option<&str>,
     stream_id: Option<String>,
+    media_format: Option<&MediaFormat>,
 ) -> anyhow::Result<()> {
     if let (Some(call_id), Some(asr_session)) = (gateway_call_id, session.take()) {
         let events = asr_session.finish().await?;
-        record_transcript_events(state, call_id, stream_id.as_deref(), None, events).await;
+        record_transcript_events(state, call_id, stream_id.as_deref(), media_format, events).await;
         let mut guard = state.write().await;
         if let Some(call) = guard.calls.get_mut(call_id) {
             call.status = CallStatus::Ended;
@@ -316,14 +369,22 @@ async fn record_transcript_events(
         let text = event.text().to_string();
         guard.add_transcript(gateway_call_id, kind, text.clone());
         let call = guard.calls.get(gateway_call_id);
+        let effective_stream_id =
+            stream_id.or_else(|| call.and_then(|call| call.ids.stream_id.as_deref()));
+        let codec = media_format
+            .map(|format| format.encoding.as_str())
+            .or_else(|| call.and_then(|call| call.media.encoding.as_deref()));
+        let sample_rate_hz = media_format
+            .map(|format| format.sample_rate_hz)
+            .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
         tracing::info!(
             gateway_call_id,
             call_control_id = call.map(|call| call.ids.call_control_id.as_str()),
             call_session_id = call.and_then(|call| call.ids.call_session_id.as_deref()),
             call_leg_id = call.and_then(|call| call.ids.call_leg_id.as_deref()),
-            stream_id,
-            codec = media_format.map(|format| format.encoding.as_str()),
-            sample_rate_hz = media_format.map(|format| format.sample_rate_hz),
+            stream_id = effective_stream_id,
+            codec,
+            sample_rate_hz,
             transcript_kind = kind_label,
             transcript_text = text,
             "{kind_label}"
@@ -356,12 +417,23 @@ fn map_media_format(input: Option<&MediaFormatPayload>) -> MediaFormat {
     }
 }
 
+fn validate_media_format(format: &MediaFormat) -> anyhow::Result<()> {
+    match format.encoding.as_str() {
+        "L16" | "PCMU" | "PCMA" => Ok(()),
+        other => bail!("unsupported inbound media encoding {other}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use crate::adapter::EchoAsrFactory;
+    use async_trait::async_trait;
+    use motlie_model::typed::{AudioBuf, Mono};
+
+    use crate::adapter::{EchoAsrFactory, InboundAsrFactory};
     use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
 
     #[test]
@@ -403,14 +475,14 @@ mod tests {
                 },
                 Some("+15550000001".to_string()),
                 Some("+15550000002".to_string()),
-                CallStatus::PendingInbound,
+                CallStatus::Answering,
             )
         };
         let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
         let mut session = None;
         let mut selected_call = None;
         let mut media_format = None;
-        let mut reorder = SequencedFrameReorder::new(1, 32);
+        let mut reorder = SequencedFrameReorder::new_lazily(32);
 
         let start = serde_json::json!({
             "event": "start",
@@ -439,9 +511,9 @@ mod tests {
         .expect("start event should open ASR session");
 
         let chunk = STANDARD.encode(l16_samples(8_000));
-        let media_two = media_event("stream-1", "2", &chunk);
+        let media_one = media_event("stream-1", "7", &chunk);
         handle_text(
-            &media_two,
+            &media_one,
             &state,
             &asr,
             &mut session,
@@ -450,7 +522,7 @@ mod tests {
             &mut reorder,
         )
         .await
-        .expect("out-of-order media should buffer");
+        .expect("first non-one media chunk should establish reorder base");
         assert!(state
             .read()
             .await
@@ -460,9 +532,9 @@ mod tests {
             .transcripts
             .is_empty());
 
-        let media_one = media_event("stream-1", "1", &chunk);
+        let media_two = media_event("stream-1", "8", &chunk);
         handle_text(
-            &media_one,
+            &media_two,
             &state,
             &asr,
             &mut session,
@@ -502,6 +574,108 @@ mod tests {
         assert_eq!(call.transcripts[1].text, "received 16000 samples");
     }
 
+    #[tokio::test]
+    async fn media_start_requires_operator_answer_gate() {
+        for status in [CallStatus::IgnoredInbound, CallStatus::PendingInbound] {
+            let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+            let gateway_call_id = seed_call(&state, "call-1", status).await;
+            let counting_asr = Arc::new(CountingAsrFactory::default());
+            let asr: SharedAsrFactory = counting_asr.clone();
+            let mut session = None;
+            let mut selected_call = None;
+            let mut media_format = None;
+            let mut reorder = SequencedFrameReorder::new_lazily(32);
+
+            handle_text(
+                &start_event("call-1", "stream-1", "L16"),
+                &state,
+                &asr,
+                &mut session,
+                &mut selected_call,
+                &mut media_format,
+                &mut reorder,
+            )
+            .await
+            .expect("start should be ignored before operator answer");
+
+            assert!(session.is_none());
+            assert!(selected_call.is_none());
+            assert!(media_format.is_none());
+            assert_eq!(counting_asr.opens(), 0);
+            let guard = state.read().await;
+            let call = guard.calls.get(&gateway_call_id).expect("call exists");
+            assert_eq!(call.status, status);
+            assert!(call.ids.stream_id.is_none());
+            assert!(call.transcripts.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn media_start_for_unknown_call_does_not_allocate_asr() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let counting_asr = Arc::new(CountingAsrFactory::default());
+        let asr: SharedAsrFactory = counting_asr.clone();
+        let mut session = None;
+        let mut selected_call = None;
+        let mut media_format = None;
+        let mut reorder = SequencedFrameReorder::new_lazily(32);
+
+        handle_text(
+            &start_event("missing-call", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut session,
+            &mut selected_call,
+            &mut media_format,
+            &mut reorder,
+        )
+        .await
+        .expect("unknown start should be ignored");
+
+        assert!(session.is_none());
+        assert!(selected_call.is_none());
+        assert!(media_format.is_none());
+        assert_eq!(counting_asr.opens(), 0);
+        assert!(state.read().await.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_codec_is_rejected_before_asr_allocates() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let counting_asr = Arc::new(CountingAsrFactory::default());
+        let asr: SharedAsrFactory = counting_asr.clone();
+        let mut session = None;
+        let mut selected_call = None;
+        let mut media_format = None;
+        let mut reorder = SequencedFrameReorder::new_lazily(32);
+
+        let error = handle_text(
+            &start_event("call-1", "stream-1", "OPUS"),
+            &state,
+            &asr,
+            &mut session,
+            &mut selected_call,
+            &mut media_format,
+            &mut reorder,
+        )
+        .await
+        .expect_err("unsupported codec should fail at start");
+
+        assert!(error
+            .to_string()
+            .contains("unsupported inbound media encoding"));
+        assert!(session.is_none());
+        assert!(selected_call.is_none());
+        assert!(media_format.is_none());
+        assert_eq!(counting_asr.opens(), 0);
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.status, CallStatus::Answering);
+        assert!(call.ids.stream_id.is_none());
+        assert!(call.transcripts.is_empty());
+    }
+
     fn l16_samples(count: usize) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(count * 2);
         for _ in 0..count {
@@ -521,5 +695,72 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    fn start_event(call_control_id: &str, stream_id: &str, encoding: &str) -> String {
+        serde_json::json!({
+            "event": "start",
+            "stream_id": stream_id,
+            "start": {
+                "call_control_id": call_control_id,
+                "call_session_id": "sess-1",
+                "media_format": {
+                    "encoding": encoding,
+                    "sample_rate": 16000,
+                    "channels": 1
+                }
+            }
+        })
+        .to_string()
+    }
+
+    async fn seed_call(state: &SharedState, call_control_id: &str, status: CallStatus) -> String {
+        let mut guard = state.write().await;
+        guard.add_or_update_inbound_call(
+            TelnyxIds {
+                call_control_id: call_control_id.to_string(),
+                call_session_id: Some("sess-1".to_string()),
+                call_leg_id: Some("leg-1".to_string()),
+                stream_id: None,
+            },
+            Some("+15550000001".to_string()),
+            Some("+15550000002".to_string()),
+            status,
+        )
+    }
+
+    #[derive(Default)]
+    struct CountingAsrFactory {
+        opens: AtomicUsize,
+    }
+
+    impl CountingAsrFactory {
+        fn opens(&self) -> usize {
+            self.opens.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl InboundAsrFactory for CountingAsrFactory {
+        async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(CountingAsrSession))
+        }
+    }
+
+    struct CountingAsrSession;
+
+    #[async_trait]
+    impl InboundAsrSession for CountingAsrSession {
+        async fn ingest(
+            &mut self,
+            _audio: AudioBuf<i16, 16_000, Mono>,
+        ) -> anyhow::Result<Vec<TranscriptEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn finish(self: Box<Self>) -> anyhow::Result<Vec<TranscriptEvent>> {
+            Ok(Vec::new())
+        }
     }
 }
