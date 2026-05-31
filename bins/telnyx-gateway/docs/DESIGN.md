@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Refined the TUI layout so the right side is split into a top call roster and bottom selected-call detail pane; inbound calls appear as highlighted pending rows, can become the selected call, and drive detail/transcript/action hints without stealing REPL input. | Operator REPL and TUI Control Surface |
 | 2026-05-30 | @codex-358-research: Switched local deployment examples to assume Tailscale Funnel as the default public URL path, keeping ngrok only as an alternate tunnel option. | Deployment: Private Host, Getting Started: Local Deployment, Replayable State Dumps |
 | 2026-05-30 | @codex-358-research: Added replayable gateway state dumps: `shutdown [dump_path]` writes durable Telnyx/app-server configuration as idempotent REPL commands, and startup `--load <dump_path>` replays that file to rehydrate configuration before accepting work. | Operator REPL and TUI Control Surface, Gateway Configuration Requirement, Getting Started: Local Deployment |
 | 2026-05-30 | @codex-358-research: Clarified that "gateway emits" means an outbound HTTP `POST` from the gateway to a registered application webhook URL; event delivery is acknowledgement-based, asynchronous, retried on failure, and separate from the application server calling the Gateway Control API back into the gateway. | Application Webhooks and Gateway Control API |
@@ -319,7 +320,7 @@ Primary gateway subsystems:
 2. `call_control_client`
    Thin REST client for `answer`, `dial`, `hangup`, `streaming_start`, and optional metadata updates.
 3. `media_server`
-   HTTP/WebSocket server that listens on the configured address, defaulting to `127.0.0.1:8080` for local development. The bind address is runtime configuration; the public webhook/media URL may be an ngrok, Funnel, or deployed URL.
+   HTTP/WebSocket server that listens on the configured address, defaulting to `127.0.0.1:8080` for local development. The bind address is runtime configuration; the public webhook/media URL should usually be a Tailscale Funnel URL for v1, with other tunnels or deployed URLs as alternatives.
 4. `session_registry`
    Maps `call_control_id` and `stream_id` to live session state.
 5. `control_api`
@@ -335,7 +336,7 @@ Primary gateway subsystems:
 10. `conversation_handler`
    The application-specific async text-processing stage where LLM calls, business logic, RAG, policy checks, or workflow actions run.
 11. `operator_ui`
-   Owns the `motlie-driver` command set, two-pane TUI, command status, and operator-visible event/transcript log.
+   Owns the `motlie-driver` command set, left REPL pane, right call roster/detail area, command status, and operator-visible event/transcript log.
 
 ## Staged Build Strategy
 
@@ -346,7 +347,7 @@ The gateway process itself starts before any milestone-specific call behavior is
 ```text
 telnyx-gateway
 -> bind configured HTTP/WebSocket listener, default 127.0.0.1:8080
--> open two-pane TUI
+-> open TUI with left REPL and right call roster/detail area
 -> wait for motlie-driver commands
 ```
 
@@ -415,7 +416,7 @@ pub trait TranscriptSink: Send + Sync {
 
 The first sink can be `StdoutTranscriptSink`, which logs partials/finals. A later `TmuxTranscriptSink` can map final transcript text to `motlie_tmux::KeySequence` and call `Target::send_keys()`. This keeps the ASR call path the same while swapping what consumes transcripts.
 
-For the TUI milestone, `TuiTranscriptSink` should append partial/final transcript events to the right pane. `WebhookTranscriptSink` should emit `transcript.partial` and `transcript.final` events to subscribed application servers. `StdoutTranscriptSink` remains useful for non-TUI tests and log-only runs.
+For the TUI milestone, `TuiTranscriptSink` should append partial/final transcript events to the selected-call detail pane. `WebhookTranscriptSink` should emit `transcript.partial` and `transcript.final` events to subscribed application servers. `StdoutTranscriptSink` remains useful for non-TUI tests and log-only runs.
 
 For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` maps to `call_session_id`, and `media_stream_id` maps to Telnyx `stream_id`. Those raw Telnyx field names should stay in `bins/telnyx-gateway`.
 
@@ -522,12 +523,38 @@ Recommended composition rule:
 
 ### TUI Layout
 
-The TUI should have two stable panes:
+The TUI should have one command pane and one call/status area:
 
 - left pane: `motlie-driver` REPL input, command history, and completions/help
-- right pane: command results, Telnyx API status, gateway listener status, pending/active calls, media events, ASR partials/finals, TTS playback status, and errors
+- right area: split vertically into a top call roster and a bottom selected-call detail pane
 
-The right pane is the first visual validation surface. During milestone 1, an answered inbound call should show codec/media metadata plus live transcript updates there.
+Right top call roster:
+
+- lists every pending, active, dialing, held, failed, and recently ended call
+- highlights new inbound calls as `PENDING INBOUND` / `WAITING`
+- shows compact columns: short call id, direction, from, to, state, media state, transcript state, TTS state, age, and unread event count
+- supports selection through `call use <call>` and keyboard navigation in the TUI
+
+Right bottom selected-call detail:
+
+- shows the currently selected call's full state, provider IDs, webhook/media status, codec, sample rate, and latest errors
+- shows timeline events for that call
+- shows milestone 1 ASR partials/finals as a transcript stream
+- shows milestone 2 TTS playback state and the latest `say` requests
+- shows context-aware action hints such as `answer`, `reject`, `hangup`, `say <text>`, `transcript follow`, or `conversation attach`
+
+Inbound call notification behavior:
+
+- when `call.initiated` arrives, insert or update a call roster row in `PendingInbound`
+- mark the row highlighted and increment its unread event count
+- append a global status event so the operator sees that a call arrived even if another call is selected
+- if no call is selected, or the selected call is ended, auto-select the new pending call and show its detail pane
+- if another active call is selected, do not steal selection; leave the new call highlighted until the operator selects it
+- optionally emit a terminal bell or desktop notification when enabled, but the roster highlight must be sufficient by itself
+
+The right bottom pane is not a second command input by default. The left REPL remains the single input path. Selected-call context should make commands ergonomic: if a call is selected, `answer`, `reject`, `hangup`, and `say <text>` apply to that call unless the command names a different call id.
+
+The right panes are the first visual validation surface. During milestone 1, an answered inbound call should show codec/media metadata plus live transcript updates in the selected-call detail pane.
 
 ### Gateway Runtime State
 
@@ -543,12 +570,17 @@ pub enum InboundMode {
 
 pub enum CallState {
     PendingInbound,
+    WaitingForAnswer,
     Answering,
+    Answered,
     MediaStarting,
     Transcribing,
     Dialing,
+    Ringing,
     Speaking,
+    Held,
     Active,
+    Failed,
     Ended,
 }
 
@@ -565,6 +597,24 @@ pub struct GatewayReplState<C> {
 ```
 
 This state is gateway-local. `TelnyxProvisioningState` can store Telnyx application IDs, connection IDs, selected phone numbers, public webhook URL, public media WebSocket URL, and credential source. Those values should not leak into provider-neutral `motlie_voice::app` traits.
+
+The TUI should derive its call roster from `SessionRegistry` plus a small view model:
+
+```rust
+pub struct CallRosterItem {
+    pub call: CallHandle,
+    pub direction: CallDirection,
+    pub from: Option<VoiceAddress>,
+    pub to: Option<VoiceAddress>,
+    pub state: CallState,
+    pub media_state: MediaState,
+    pub transcript_state: TranscriptState,
+    pub tts_state: TtsState,
+    pub unread_events: u32,
+}
+```
+
+The selected-call detail pane should be a view over the selected `CallHandle`, not a separate source of truth.
 
 ### Command Groups
 
@@ -629,7 +679,7 @@ transcript follow [call]
 transcript clear [call]
 ```
 
-Milestone 1 should implement `inbound enable --manual` first. In that mode, `call.initiated` creates a `PendingInbound` session and renders it in the right pane. The gateway answers only after the operator runs `answer`.
+Milestone 1 should implement `inbound enable --manual` first. In that mode, `call.initiated` creates a `PendingInbound` session, renders a highlighted row in the top call roster, and shows detail/transcript state in the bottom pane when selected. The gateway answers only after the operator runs `answer`.
 
 Outbound call commands:
 
@@ -732,7 +782,7 @@ transcript follow <call>
 shutdown ./telnyx-gateway.state.repl
 ```
 
-The gateway should log every API request, selected app/number, webhook update, inbound call event, answer action, media `start`, observed codec, and transcript event in the right pane.
+The gateway should log every API request, selected app/number, webhook update, inbound call event, answer action, media `start`, observed codec, and transcript event into the global status stream, call roster, or selected-call detail pane as appropriate.
 
 ### Why This Belongs Above `libs/model`
 
@@ -1021,9 +1071,9 @@ The Control API and application webhook subscription API are powerful. For local
 - HMAC signatures for emitted webhooks
 - per-subscription event filters
 - optional allowlist for webhook destination hosts
-- audit logging in the right TUI pane and structured logs
+- audit logging in the global status stream and structured logs
 
-Do not expose the Control API publicly without authentication. If the Telnyx webhook/media listener is tunneled with ngrok or Funnel, the Control API should either remain bound to localhost, require a separate authenticated route, or be disabled on that public listener.
+Do not expose the Control API publicly without authentication. If the Telnyx webhook/media listener is exposed with Tailscale Funnel or another tunnel, the Control API should either remain bound to localhost, require a separate authenticated route, or be disabled on that public listener.
 
 ## Crate Hierarchy and API Surfaces
 
@@ -1242,7 +1292,7 @@ bins/telnyx-gateway/src/
 
 - CLI parsing
 - `motlie-driver` command registration and execution
-- two-pane TUI state, rendering, and command/status routing
+- left REPL pane plus right call roster/detail TUI state, rendering, and command/status routing
 - replayable command dump generation and startup `--load` replay
 - Gateway Control API routing and authentication
 - application webhook subscription storage, event envelope construction, and delivery retries
@@ -2174,7 +2224,7 @@ Recommended inbound flow:
 1. Gateway starts and listens on the configured HTTP/WebSocket bind address, defaulting to `127.0.0.1:8080` for local development.
 2. Operator or external application uses the REPL or Control API to provision/select the Telnyx application, set the public webhook/media URLs, bind a phone number, and enable the desired inbound mode.
 3. Telnyx sends `call.initiated` webhook.
-4. HTTP handler verifies signature, parses `call_control_id`, allocates a `PendingCallSession`, renders the pending call in the right TUI pane, and emits `call.inbound.pending` to matching application webhook subscriptions.
+4. HTTP handler verifies signature, parses `call_control_id`, allocates a `PendingCallSession`, renders the pending call as a highlighted row in the top call roster, updates the selected-call detail pane when selected, and emits `call.inbound.pending` to matching application webhook subscriptions.
 5. If inbound mode is `Disabled`, the gateway must not answer. It may log the event and return `200 OK`, or reject the call if the operator configured reject-on-disabled behavior.
 6. If inbound mode is `Manual`, the gateway waits for `answer <call>` from the REPL or `POST /api/v1/calls/{call_id}/answer` from an authenticated application server.
 7. If inbound mode is `AutoTranscribe`, the gateway behaves as if a trusted controller immediately requested answer with a configured transcript sink.
@@ -2348,7 +2398,7 @@ Recommended outbound flow:
    - `stream_bidirectional_sampling_rate=16000`
    - `stream_establish_before_call_originate=true`
 5. Telnyx establishes the WebSocket.
-6. The gateway starts the outbound media session on `start` and renders call state in the right pane.
+6. The gateway starts the outbound media session on `start` and renders call state in the roster/detail panes.
 7. Once the callee answers, the operator may run `say <text...>`, or an external application may call `POST /api/v1/calls/{call_id}/say`, to synthesize outbound audio.
 8. The rest of the session uses the same media path as inbound calls.
 
@@ -2789,7 +2839,7 @@ telnyx number use +13125551234
 telnyx number bind +13125551234 <connection-id>
 ```
 
-The right pane should show the Telnyx API request status and the currently selected application/number.
+The right status area should show the Telnyx API request status and the currently selected application/number.
 
 ### Local Host Setup
 
@@ -2853,7 +2903,7 @@ telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
 inbound enable --manual
 ```
 
-Place an inbound call to the purchased number assigned to the Call Control Application. The call should appear as pending in the right pane.
+Place an inbound call to the purchased number assigned to the Call Control Application. The call should appear as a highlighted pending row in the top call roster.
 
 #### 12. Answer and verify WebSocket media connected
 
@@ -2869,9 +2919,9 @@ Confirm in gateway logs that:
 - the call was answered
 - the Telnyx WebSocket `start` event connected
 
-#### 13. Speak and verify ASR transcript appears in the right pane
+#### 13. Speak and verify ASR transcript appears in the selected-call detail pane
 
-Speak into the call and verify transcript text appears in gateway logs, tracing output, or the right TUI pane.
+Speak into the call and verify transcript text appears in gateway logs, tracing output, or the selected-call detail pane.
 
 #### 14. Optional: attach conversation or TTS after later milestones
 
