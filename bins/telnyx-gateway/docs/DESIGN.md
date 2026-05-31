@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Added startup-selected operator input modes: `--tui` enables the local TUI, `--socket <path>` enables a Unix-domain command socket for headless control, and both sources are multiplexed through one command dispatcher when enabled together. | Operator REPL and TUI Control Surface, Staged Build Strategy, Gateway Configuration Requirement |
 | 2026-05-30 | @codex-358-research: Added the app-server call read/attach API: `GET /api/v1/calls` and `GET /api/v1/calls/{call_id}` expose current gateway call state, while per-call attachments bind an app webhook subscription to call transcripts/events without replacing webhook delivery. | Application Webhooks and Gateway Control API |
 | 2026-05-30 | @codex-358-research: Refined the TUI layout so the right side is split into a top call roster and bottom selected-call detail pane; inbound calls appear as highlighted pending rows, can become the selected call, and drive detail/transcript/action hints without stealing REPL input. | Operator REPL and TUI Control Surface |
 | 2026-05-30 | @codex-358-research: Switched local deployment examples to assume Tailscale Funnel as the default public URL path, keeping ngrok only as an alternate tunnel option. | Deployment: Private Host, Getting Started: Local Deployment, Replayable State Dumps |
@@ -336,8 +337,8 @@ Primary gateway subsystems:
    Owns ASR stream, `ConversationHandler`, TTS stream, barge-in rules, and shutdown.
 10. `conversation_handler`
    The application-specific async text-processing stage where LLM calls, business logic, RAG, policy checks, or workflow actions run.
-11. `operator_ui`
-   Owns the `motlie-driver` command set, left REPL pane, right call roster/detail area, command status, and operator-visible event/transcript log.
+11. `operator_control`
+   Owns the `motlie-driver` command set, startup-selected command sources, command-source mux, optional TUI, optional Unix-domain command socket, command status, and operator-visible event/transcript log.
 
 ## Staged Build Strategy
 
@@ -348,11 +349,11 @@ The gateway process itself starts before any milestone-specific call behavior is
 ```text
 telnyx-gateway
 -> bind configured HTTP/WebSocket listener, default 127.0.0.1:8080
--> open TUI with left REPL and right call roster/detail area
--> wait for motlie-driver commands
+-> enable configured operator inputs, such as --tui and/or --socket <path>
+-> command-source mux waits for motlie-driver commands
 ```
 
-Startup state is intentionally idle. The process may accept health checks, webhook delivery, and media WebSocket connections at the configured address, but it does not register Telnyx applications, bind numbers, answer inbound calls, or dial outbound calls until the operator drives those actions from the REPL.
+Startup state is intentionally idle. The process may accept health checks, webhook delivery, and media WebSocket connections at the configured address, but it does not register Telnyx applications, bind numbers, answer inbound calls, or dial outbound calls until the operator drives those actions from a configured command source such as the TUI, Unix-domain socket, replay file, or authenticated Control API.
 
 ### Milestone 1: Inbound Transcription
 
@@ -426,7 +427,7 @@ For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` 
 The second milestone is outbound call control plus TTS only:
 
 ```text
-motlie-driver REPL
+motlie-driver command source
 or Gateway Control API
 -> dial <number>
 -> Telnyx outbound call with media stream
@@ -435,7 +436,7 @@ or Gateway Control API
 -> Telnyx media WebSocket
 ```
 
-This should use the existing `motlie-driver` pattern: define a Telnyx command family implementing `CommandSet<TelnyxDialerState>`, then run it through the existing REPL frontend. The minimum command surface is:
+This should use the existing `motlie-driver` pattern: define a Telnyx command family implementing `CommandSet<TelnyxDialerState>`, then run it through the operator command dispatcher. The minimum command surface is:
 
 ```text
 dial <phone-or-sip-uri>
@@ -485,7 +486,7 @@ pub trait OutboundSpeechController: Send {
 }
 ```
 
-The REPL is only one source of utterances. Any source that can produce text, including an mstream send-keys or broadcast bridge, should be able to call the same `say()` surface:
+The TUI REPL and Unix-domain socket are only two possible sources of utterances. Any source that can produce text, including an mstream send-keys or broadcast bridge, should be able to call the same `say()` surface:
 
 ```rust
 #[async_trait]
@@ -494,7 +495,7 @@ pub trait OutboundUtteranceSource: Send {
 }
 ```
 
-This makes the outbound TTS path testable without needing a conversation loop: a REPL, mstream bridge, fixture replay, or scripted test can all feed text into the same outbound speech controller.
+This makes the outbound TTS path testable without needing a conversation loop: a TUI REPL, socket client, mstream bridge, fixture replay, or scripted test can all feed text into the same outbound speech controller.
 
 Telnyx-specific dial configuration such as `connection_id`, stream URL, credentials, and bidirectional media flags belongs in `bins/telnyx-gateway` configuration and adapter code, not in the provider-neutral `VoiceDialRequest`.
 
@@ -520,11 +521,60 @@ Recommended composition rule:
 
 ## Operator REPL and TUI Control Surface
 
-`bins/telnyx-gateway` should be an interactive operator application, not a daemon that immediately activates all call flows at startup.
+`bins/telnyx-gateway` should be an operator-controlled gateway, not a daemon that immediately activates all call flows at startup. The operator chooses the local control mode at process start.
+
+### Operator Input Modes
+
+The gateway should expose the same `motlie-driver` command family through startup-selected input sources:
+
+- `--tui` enables the local terminal UI with a left REPL pane and right call roster/detail area
+- `--socket <path>` enables a Unix-domain command socket for headless local control
+- `--load <dump_path>` replays durable configuration commands during startup before live command sources are accepted
+- the authenticated HTTP Control API remains the remote application-server control surface for call reads, attachments, answer/reject/hangup, dial, and say
+
+`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still operator-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--load` and/or the authenticated HTTP Control API for configuration and control.
+
+The Unix-domain socket should use the same command grammar as the TUI REPL. A simple v1 protocol can be newline-delimited UTF-8 command text with one structured response per command; later versions can add a JSON request envelope if multiple clients need request IDs, capabilities, or event streaming:
+
+```text
+/run/motlie/telnyx-gateway.sock
+> status
+< {"ok":true,"command_id":"cmd_01HZ...","summary":"listener ready"}
+> answer call_01HZ...
+< {"ok":true,"command_id":"cmd_01HZ...","summary":"answering call_01HZ..."}
+```
+
+The socket is a local privileged control surface. It should bind only to a filesystem path chosen by `--socket`, set restrictive permissions by default, unlink stale socket files only after verifying they are sockets, and avoid accepting remote TCP traffic. Authentication can be filesystem-permission based for v1, with optional peer credential checks where available.
+
+The command-source mux should convert every command into a common envelope:
+
+```rust
+pub enum OperatorCommandSource {
+    Tui,
+    UnixSocket { client_id: OperatorClientId, path: PathBuf },
+    ReplayFile { path: PathBuf },
+    ControlApi { principal: ApiPrincipal },
+}
+
+pub struct OperatorCommandEnvelope {
+    pub id: CommandId,
+    pub source: OperatorCommandSource,
+    pub received_at: SystemTime,
+    pub text: String,
+}
+```
+
+Mux rules:
+
+- all command sources dispatch to the same command parser and controller layer
+- commands receive a total order at the mux before mutating shared gateway state
+- each command response is routed back to the source that submitted it
+- shared state changes are published to the gateway event/status stream so the TUI reflects socket-originated changes
+- source-local interactive state, such as `selected_call`, must not leak across sources
 
 ### TUI Layout
 
-The TUI should have one command pane and one call/status area:
+When `--tui` is enabled, the TUI should have one command pane and one call/status area:
 
 - left pane: `motlie-driver` REPL input, command history, and completions/help
 - right area: split vertically into a top call roster and a bottom selected-call detail pane
@@ -553,13 +603,13 @@ Inbound call notification behavior:
 - if another active call is selected, do not steal selection; leave the new call highlighted until the operator selects it
 - optionally emit a terminal bell or desktop notification when enabled, but the roster highlight must be sufficient by itself
 
-The right bottom pane is not a second command input by default. The left REPL remains the single input path. Selected-call context should make commands ergonomic: if a call is selected, `answer`, `reject`, `hangup`, and `say <text>` apply to that call unless the command names a different call id.
+The right bottom pane is not a second command input by default. The left REPL remains the TUI input path. Selected-call context should make TUI commands ergonomic: if a call is selected in that TUI session, `answer`, `reject`, `hangup`, and `say <text>` apply to that call unless the command names a different call id. Socket and Control API clients should prefer explicit call IDs; if they support `call use <call>`, that selection is scoped to that socket session or API principal and must not change the TUI selection.
 
 The right panes are the first visual validation surface. During milestone 1, an answered inbound call should show codec/media metadata plus live transcript updates in the selected-call detail pane.
 
 ### Gateway Runtime State
 
-The REPL should mutate one shared gateway state object:
+The command dispatcher should mutate one shared gateway runtime state object. Interactive cursor state belongs to the command source session, not the shared gateway state:
 
 ```rust
 pub enum InboundMode {
@@ -585,15 +635,21 @@ pub enum CallState {
     Ended,
 }
 
-pub struct GatewayReplState<C> {
+pub struct GatewayRuntimeState<C> {
     pub listener: ListenerStatus,
     pub telnyx: TelnyxProvisioningState,
     pub webhook_subscriptions: WebhookSubscriptionStore,
     pub persistence: GatewayPersistenceState,
     pub inbound_mode: InboundMode,
-    pub selected_call: Option<CallHandle>,
     pub calls: SessionRegistry,
+    pub operator_sessions: OperatorSessionRegistry,
     pub outbound: C,
+}
+
+pub struct OperatorSessionState {
+    pub source: OperatorCommandSource,
+    pub selected_call: Option<CallHandle>,
+    pub last_command_id: Option<CommandId>,
 }
 ```
 
@@ -692,7 +748,7 @@ tts status
 tts model use <model>
 ```
 
-The `dial` command creates or selects the active outbound call. The `say` command routes text through `OutboundSpeechController::say()`. Non-REPL sources such as mstream broadcast, scripted fixtures, or tmux-driven tests should call the same controller instead of creating another TTS pathway.
+The `dial` command creates or selects the active outbound call for the command source that ran it. The `say` command routes text through `OutboundSpeechController::say()`. Non-REPL sources such as mstream broadcast, scripted fixtures, socket clients, or tmux-driven tests should call the same controller instead of creating another TTS pathway.
 
 Conversation bridge commands:
 
@@ -707,7 +763,7 @@ These belong after milestone 1 and milestone 2 are independently useful. `conver
 
 ### Replayable State Dumps
 
-The gateway should persist durable configuration as a replayable command script, not as an opaque binary snapshot. This makes restart behavior auditable, editable, and compatible with the same `motlie-driver` command path used by the TUI.
+The gateway should persist durable configuration as a replayable command script, not as an opaque binary snapshot. This makes restart behavior auditable, editable, and compatible with the same `motlie-driver` command dispatcher used by the TUI, socket, and Control API surfaces.
 
 Supported entry points:
 
@@ -748,7 +804,7 @@ The dump should include durable configuration:
 - webhook subscriptions and event filters
 - application webhook secret references
 - Control API token metadata or secret references
-- selected ASR/TTS model names if they are set through the REPL
+- selected ASR/TTS model names if they are set through the operator command surface
 
 The dump should not include transient runtime state:
 
@@ -975,7 +1031,7 @@ The app server should verify the HMAC signature, persist or enqueue the event id
 
 ### Gateway Control API
 
-The Gateway Control API should expose the same actions as the REPL. Both surfaces should dispatch into the same internal command/controller layer so they cannot drift.
+The Gateway Control API should expose the same actions as the operator command surface. The TUI, Unix-domain socket, replay loader, and Control API should dispatch into the same internal command/controller layer so they cannot drift.
 
 Recommended call read endpoints:
 
@@ -1171,7 +1227,7 @@ This is the service form of milestone 2. The gateway becomes a dialer and TTS tr
 
 ### Auth and Exposure
 
-The Control API and application webhook subscription API are powerful. For local development they can bind to the same listener as the TUI server, but production deployment should require:
+The Control API and application webhook subscription API are powerful. For local development they can bind to the same listener as the gateway server, but production deployment should require:
 
 - bearer token or mTLS for the Control API
 - HMAC signatures for emitted webhooks
@@ -1398,13 +1454,14 @@ bins/telnyx-gateway/src/
 
 - CLI parsing
 - `motlie-driver` command registration and execution
-- left REPL pane plus right call roster/detail TUI state, rendering, and command/status routing
+- optional left REPL pane plus right call roster/detail TUI state, rendering, and command/status routing
+- Unix-domain command socket serving, client session tracking, and command-source mux routing
 - replayable command dump generation and startup `--load` replay
 - Gateway Control API routing and authentication
 - application webhook subscription storage, event envelope construction, and delivery retries
 - environment loading
 - model selection flags
-- listen address, webhook path, media path, and REPL-configured public URLs
+- listen address, webhook path, media path, command socket path, TUI enablement, and operator-configured public URLs
 - tunnel-friendly startup wiring
 - logging and tracing
 - Telnyx webhook JSON schema
@@ -2328,11 +2385,11 @@ Design implications:
 Recommended inbound flow:
 
 1. Gateway starts and listens on the configured HTTP/WebSocket bind address, defaulting to `127.0.0.1:8080` for local development.
-2. Operator or external application uses the REPL or Control API to provision/select the Telnyx application, set the public webhook/media URLs, bind a phone number, and enable the desired inbound mode.
+2. Operator or external application uses a configured command source or Control API to provision/select the Telnyx application, set the public webhook/media URLs, bind a phone number, and enable the desired inbound mode.
 3. Telnyx sends `call.initiated` webhook.
 4. HTTP handler verifies signature, parses `call_control_id`, allocates a `PendingCallSession`, renders the pending call as a highlighted row in the top call roster, updates the selected-call detail pane when selected, and emits `call.inbound.pending` to matching application webhook subscriptions.
 5. If inbound mode is `Disabled`, the gateway must not answer. It may log the event and return `200 OK`, or reject the call if the operator configured reject-on-disabled behavior.
-6. If inbound mode is `Manual`, the gateway waits for `answer <call>` from the REPL or `POST /api/v1/calls/{call_id}/answer` from an authenticated application server.
+6. If inbound mode is `Manual`, the gateway waits for `answer <call>` from a configured command source or `POST /api/v1/calls/{call_id}/answer` from an authenticated application server.
 7. If inbound mode is `AutoTranscribe`, the gateway behaves as if a trusted controller immediately requested answer with a configured transcript sink.
 8. The answer action attaches media streaming with:
    - `stream_url=wss://.../telnyx/media`
@@ -2489,8 +2546,8 @@ That would degrade ASR and complicate turn-taking. `both_tracks` should be reser
 
 Recommended outbound flow:
 
-1. Operator runs `dial <phone-or-sip-uri>` from the REPL, or an external application calls `POST /api/v1/calls`, optionally after selecting a default `from` number.
-2. Gateway looks up the selected Telnyx application/connection, public media URL, caller ID, and outbound stream defaults from `GatewayReplState`.
+1. Operator runs `dial <phone-or-sip-uri>` from a configured command source, or an external application calls `POST /api/v1/calls`, optionally after selecting a default `from` number.
+2. Gateway looks up the selected Telnyx application/connection, public media URL, caller ID, and outbound stream defaults from `GatewayRuntimeState`.
 3. Gateway issues `POST /v2/calls`.
 4. The Telnyx dial request includes:
    - `connection_id`
@@ -2539,7 +2596,7 @@ impl TelnyxGateway {
         // 1. allocate session id
         // 2. call Telnyx /v2/calls with inline streaming params
         // 3. wait for websocket start
-        // 4. select the returned call as the active REPL call
+        // 4. select the returned call for the command source that requested it
         todo!()
     }
 }
@@ -2547,7 +2604,7 @@ impl TelnyxGateway {
 
 ### Driver REPL Dialer Surface
 
-The outbound product surface should be the shared operator `motlie-driver` command family described above, not a separate dialer REPL. The command family owns parsing and REPL state; the gateway owns call and media execution.
+The outbound product surface should be the shared operator `motlie-driver` command family described above, not a separate dialer REPL. The command family owns parsing and source-local operator session state; the gateway owns call and media execution.
 
 Recommended command family:
 
@@ -2844,7 +2901,7 @@ Recommended fallback ngrok workflow:
 
 ### Gateway Configuration Requirement
 
-The gateway binary should accept a `--listen` flag for the local bind address and a `--load <dump_path>` flag for replaying durable gateway state. The external public URLs can be provided either as startup flags or through the REPL after a tunnel starts, and then persisted with `state dump` or `shutdown <dump_path>`.
+The gateway binary should accept a `--listen` flag for the local bind address, a `--load <dump_path>` flag for replaying durable gateway state, a `--tui` flag for the local TUI, and a `--socket <path>` flag for a Unix-domain operator command socket. The external public URLs can be provided either as startup flags or through any configured operator command source after a tunnel starts, and then persisted with `state dump` or `shutdown <dump_path>`.
 
 Example shape:
 
@@ -2853,10 +2910,23 @@ telnyx-gateway \
   --listen 127.0.0.1:8080 \
   --media-path /telnyx/media \
   --webhook-path /telnyx/webhooks \
+  --tui \
+  --socket /tmp/motlie-telnyx-gateway.sock \
   --load ./telnyx-gateway.state.repl
 ```
 
-Then in the REPL:
+For headless operation, omit `--tui` and keep `--socket`:
+
+```text
+telnyx-gateway \
+  --listen 127.0.0.1:8080 \
+  --media-path /telnyx/media \
+  --webhook-path /telnyx/webhooks \
+  --socket /run/motlie/telnyx-gateway.sock \
+  --load ./telnyx-gateway.state.repl
+```
+
+Then use either the TUI REPL or a local socket client to send the same command text:
 
 ```text
 config set webhook-url https://motlie-gateway.example.ts.net/telnyx/webhooks
@@ -2870,8 +2940,8 @@ This matters because the process may listen on `127.0.0.1:8080` while Telnyx nee
 
 1. start the gateway on the private host
 2. start Tailscale Funnel
-3. use the gateway REPL to set the public URLs
-4. use the gateway REPL to create/select the Telnyx application and bind the phone number
+3. use the TUI REPL or local command socket to set the public URLs
+4. use the TUI REPL or local command socket to create/select the Telnyx application and bind the phone number
 5. run `inbound enable --manual`, then make or receive calls
 6. exit with `shutdown ./telnyx-gateway.state.repl`
 7. restart later with `telnyx-gateway --load ./telnyx-gateway.state.repl ...`
@@ -2912,11 +2982,11 @@ curl -X POST \
   "https://api.telnyx.com/v2/number_orders"
 ```
 
-#### 3. Create or select a Call Control Application from the gateway REPL
+#### 3. Create or select a Call Control Application from an operator command source
 
 For Motlie's Telnyx gateway, prefer a Call Control Application over TeXML because the design depends on programmable voice webhooks plus media streaming commands.
 
-Preferred gateway REPL flow:
+Preferred gateway command flow:
 
 ```text
 telnyx app create motlie-telnyx-local
@@ -2925,7 +2995,7 @@ telnyx app use <connection-id>
 
 This returns the application `id`, which is also the `connection_id` used for outbound calls.
 
-#### 4. Configure public webhook and media URLs from the gateway REPL
+#### 4. Configure public webhook and media URLs from an operator command source
 
 With Tailscale Funnel, use your public Funnel hostname:
 
@@ -2935,7 +3005,7 @@ config set media-url wss://motlie-gateway.example.ts.net/telnyx/media
 telnyx app webhook set https://motlie-gateway.example.ts.net/telnyx/webhooks
 ```
 
-#### 5. Assign the phone number to the application from the gateway REPL
+#### 5. Assign the phone number to the application from an operator command source
 
 Telnyx phone numbers carry a `connection_id`. Set that to the Call Control Application ID.
 
@@ -2971,6 +3041,8 @@ Recommended v1 defaults:
   --listen 127.0.0.1:8080 \
   --webhook-path /telnyx/webhooks \
   --media-path /telnyx/media \
+  --tui \
+  --socket /tmp/motlie-telnyx-gateway.sock \
   --load ./telnyx-gateway.state.repl \
   --telnyx-api-key "$TELNYX_API_KEY" \
   --asr-model sherpa-onnx \
@@ -2982,7 +3054,8 @@ The exact model configuration flags can evolve, but the binary should always sep
 - local listen address
 - externally reachable webhook and media URLs
 - injected ASR/TTS backend choice
-- Telnyx application/number selection, which can be driven from the REPL
+- operator input mode: `--tui`, `--socket <path>`, both, or neither when only HTTP Control API and loaded configuration are desired
+- Telnyx application/number selection, which can be driven from any configured operator command source
 - optional replayable state file loaded with `--load`
 
 #### 9. Start Tailscale Funnel
@@ -2991,7 +3064,7 @@ The exact model configuration flags can evolve, but the binary should always sep
 tailscale funnel 8080
 ```
 
-#### 10. Configure the Tailscale Funnel public URLs in the REPL
+#### 10. Configure the Tailscale Funnel public URLs through an operator command source
 
 Use the Funnel hostname assigned to this node:
 
@@ -3035,7 +3108,7 @@ Milestone 1 stops at transcription. TTS playback belongs to milestone 2 outbound
 
 ### Outbound Call Test
 
-#### 15. Use the gateway REPL to initiate an outbound call
+#### 15. Use the gateway command surface to initiate an outbound call
 
 ```text
 dial +1234567890

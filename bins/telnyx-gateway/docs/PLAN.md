@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Added startup-selected operator input modes: `--tui` for the local terminal UI, `--socket <path>` for headless Unix-domain command control, and a command-source mux that serializes both sources through one dispatcher when enabled together. |
 | 2026-05-30 | @codex-358-research | Added explicit Control API work for app-server call discovery and per-call attachment: `GET /api/v1/calls`, `GET /api/v1/calls/{call_id}`, and call attachments that bind a registered webhook subscription to one call's events/transcripts. |
 | 2026-05-30 | @codex-358-research | Refined the TUI work items around a right-side call roster plus selected-call detail pane; inbound calls create highlighted pending/waiting rows, preserve selection when another call is active, and expose transcript/status/action hints for the selected call. |
 | 2026-05-30 | @codex-358-research | Switched operator examples to assume Tailscale Funnel public URLs by default; ngrok remains only an alternate tunnel option. |
@@ -25,7 +26,7 @@ Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against
 
 Execution policy for the initial implementation:
 
-- the gateway starts as an idle TUI/REPL application with an HTTP/WebSocket listener; it does not answer inbound calls until the operator enables inbound mode or runs `answer`
+- the gateway starts as an idle operator-controlled application with an HTTP/WebSocket listener; `--tui` enables the local TUI, `--socket <path>` enables headless Unix-domain command control, and the gateway does not answer inbound calls until an operator command source enables inbound mode or runs `answer`
 - the same call-control actions must also be available through an authenticated Gateway Control API, and gateway application webhooks must allow external servers to receive call/transcript/TTS events
 - milestone 1 is inbound calls with ASR-only transcription to a `TranscriptSink`
 - milestone 2 is outbound dialing plus TTS driven by `motlie-driver` commands such as `dial <number>` and `say <text>`
@@ -64,13 +65,15 @@ Extend the existing provider-neutral voice layer and add the Telnyx-specific dep
 
 - [ ] Add `Cargo.toml`, `src/{main.rs,lib.rs,error.rs,cli.rs,serve.rs,logging.rs}`, `operator/`, `api/`, `events/`, and Telnyx-specific `webhook/`, `call_control/`, `media/`, and `adapter.rs` modules under `bins/telnyx-gateway/`.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
-- [ ] Add `operator/{commands.rs,state.rs,persistence.rs,tui.rs}` for the `motlie-driver` command family, left REPL pane, right split call roster/detail TUI, shared gateway REPL state, replayable state dumps, and command/status routing.
+- [ ] Add `operator/{commands.rs,state.rs,session.rs,persistence.rs,tui.rs,socket.rs,mux.rs}` for the `motlie-driver` command family, source-local operator sessions, optional TUI, optional Unix-domain command socket, command-source mux, shared gateway runtime state, replayable state dumps, and command/status routing.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
 - [ ] Add TUI view models for `CallRosterItem`, selected-call detail, unread event counts, and selection state derived from `SessionRegistry`.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
+- [ ] Add startup flags `--tui` and `--socket <path>`; allow either, both, or neither when the process relies only on `--load` and/or authenticated HTTP Control API, and route both live local input sources through one serialized command dispatcher when both are enabled.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Gateway Configuration Requirement`
 - [ ] Add `api/{control.rs,auth.rs,subscriptions.rs}` and `events/{envelope.rs,dispatcher.rs,delivery.rs}` for the external Control API and gateway application webhook delivery.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Crate Hierarchy and API Surfaces`
-- [ ] Start the gateway as an idle listener by default; do not register Telnyx apps, bind numbers, answer inbound calls, or dial outbound calls until a REPL command does so.
+- [ ] Start the gateway as an idle listener by default; do not register Telnyx apps, bind numbers, answer inbound calls, or dial outbound calls until a configured command source or authenticated Control API request does so.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Staged Build Strategy`
 - [ ] Keep `bins/telnyx-gateway` focused on Telnyx protocol mapping, Telnyx call control, process configuration, and wiring.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
@@ -109,9 +112,9 @@ Define the reusable voice application surface in `libs/voice`.
 
 - [ ] Add `InboundAsrPipeline` as the high-level controller consumed by inbound call handlers.
   DESIGN reference: `Pipeline Controller Contracts`, `Inbound Call Handler Design`
-- [ ] Add `OutboundTtsPipeline` and `OutboundSpeechController` as the high-level controller consumed by REPL commands, mstream/broadcast bridges, tests, and conversation handlers.
+- [ ] Add `OutboundTtsPipeline` and `OutboundSpeechController` as the high-level controller consumed by operator commands, socket clients, mstream/broadcast bridges, tests, and conversation handlers.
   DESIGN reference: `Pipeline Controller Contracts`, `Driver REPL Dialer Surface`
-- [ ] Keep these controllers source-agnostic: REPL commands, mstream broadcast, fixture replay, and conversation handlers should all call the same outbound `say()` path.
+- [ ] Keep these controllers source-agnostic: TUI commands, socket commands, mstream broadcast, fixture replay, and conversation handlers should all call the same outbound `say()` path.
   DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
 
 ## Phase 3: Typed Media Pipeline in `libs/voice`
@@ -241,7 +244,7 @@ Wire call-control operations for inbound and outbound calls.
 
 - [ ] Add a small Telnyx REST client for `answer`, `dial`, `hangup`, and `streaming_start`.
   DESIGN reference: `Call Control and Media Transport`
-- [ ] Extend the Telnyx REST client with the provisioning calls needed by the REPL: list/create/select Call Control Applications, update the application webhook URL, list phone numbers, and bind a phone number to a connection ID.
+- [ ] Extend the Telnyx REST client with the provisioning calls needed by the operator command surface: list/create/select Call Control Applications, update the application webhook URL, list phone numbers, and bind a phone number to a connection ID.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Make the outbound `dial` request support:
   `stream_url`,
@@ -283,16 +286,20 @@ Wire call-control operations for inbound and outbound calls.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Route command results, Telnyx API responses, pending/active call state, media metadata, and transcript events to the global status stream, top call roster, or selected-call detail pane as appropriate.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Make `call use <call>` update `selected_call`; allow `answer`, `reject`, `hangup`, and `say <text>` to target `selected_call` when no call id is supplied.
+- [ ] Make `call use <call>` update source-local `selected_call`; allow `answer`, `reject`, `hangup`, and `say <text>` to target that source-local selection when no call id is supplied, without changing another source's selection.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Implement the Unix-domain socket command protocol as newline-delimited `motlie-driver` command text with one structured response per command, restrictive filesystem permissions, stale-socket safety, and optional peer credential checks where available.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Implement command-source mux ordering so TUI, socket, replay, and Control API commands enter the shared controller through one total-order dispatcher while responses route back to the source that submitted each command.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 
 ### 6.4 - Replayable gateway state
 
-- [ ] Add startup `--load <dump_path>` support that replays a gateway command dump before enabling inbound handling or accepting Control API mutations.
+- [ ] Add startup `--load <dump_path>` support that replays a gateway command dump before enabling inbound handling or accepting live TUI, socket, or Control API mutations.
   DESIGN reference: `Replayable State Dumps`, `Gateway Configuration Requirement`
 - [ ] Implement replayable dump generation as command text, not an opaque binary snapshot.
   DESIGN reference: `Replayable State Dumps`
-- [ ] Include durable state in dumps: public webhook/media URLs, selected Telnyx app/connection, selected/bound phone number, default from number, inbound mode, webhook subscriptions/event filters, secret references, token metadata or token hash references, and selected ASR/TTS model names when configured through the REPL.
+- [ ] Include durable state in dumps: public webhook/media URLs, selected Telnyx app/connection, selected/bound phone number, default from number, inbound mode, webhook subscriptions/event filters, secret references, token metadata or token hash references, and selected ASR/TTS model names when configured through the operator command surface.
   DESIGN reference: `Replayable State Dumps`
 - [ ] Exclude transient state from dumps: active calls, pending calls, media sessions, transcript history, in-flight TTS playback, and retry queues unless a later event journal explicitly persists them.
   DESIGN reference: `Replayable State Dumps`
@@ -313,7 +320,7 @@ Wire call-control operations for inbound and outbound calls.
   DESIGN reference: `Application Webhooks and Gateway Control API`
 - [ ] Add outbound dialer/TTS endpoints: `POST /api/v1/calls`, `POST /api/v1/calls/{call_id}/say`, and `POST /api/v1/calls/{call_id}/interrupt`.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
-- [ ] Route Control API requests through the same internal command/controller layer as REPL commands so answer, dial, hangup, and say behavior cannot drift.
+- [ ] Route Control API requests through the same internal command/controller layer as operator commands so answer, dial, hangup, and say behavior cannot drift.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Operator REPL and TUI Control Surface`
 - [ ] Require authentication for the Control API and support `Idempotency-Key` on mutating requests, including call attachment create/delete operations.
   DESIGN reference: `Application Webhooks and Gateway Control API`
@@ -382,7 +389,7 @@ Close the loop on independently useful product flows before combining them.
 
 ### 8.1 - Milestone 1 inbound transcription flow
 
-- [ ] Implement startup into an idle listener plus a TUI where the left pane is the REPL and the right side is split into a top call roster plus bottom selected-call detail; the roster shows pending, active, dialing, held, failed, and recently ended calls, while the detail pane shows status, timeline, media, transcript, TTS state, and action hints for the selected call.
+- [ ] Implement startup into an idle listener with startup-selected operator inputs: `--tui` opens a left REPL plus right split call roster/detail TUI, `--socket <path>` opens a headless Unix-domain command socket, and both can run together through the command-source mux.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Implement `inbound enable --manual` -> `call.initiated` -> highlighted pending/waiting call roster row -> optional `call use <call>` -> `answer [call]` -> `answer + streaming` -> WebSocket media -> ASR -> `TuiTranscriptSink` selected-call detail or `StdoutTranscriptSink` -> hangup flow.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
@@ -409,7 +416,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Driver REPL Dialer Surface`
 - [ ] Keep Telnyx `connection_id`, stream URL, credentials, and bidirectional media flags in gateway configuration rather than adding them to provider-neutral outbound call requests.
   DESIGN reference: `Staged Build Strategy`, `Provider Adapter Boundary`
-- [ ] Keep the REPL as one utterance source only; mstream send-keys/broadcast bridges and fixture replay should call the same `OutboundSpeechController::say()` path.
+- [ ] Keep the TUI REPL and socket command surface as utterance sources only; mstream send-keys/broadcast bridges and fixture replay should call the same `OutboundSpeechController::say()` path.
   DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
 - [ ] Support optional initial greeting once the media session is ready, implemented as a normal `say()` call.
   DESIGN reference: `Outbound Call Handler Design`, `Driver REPL Dialer Surface`
@@ -445,7 +452,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
-- [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, highlighted roster rows, unread event counts, auto-selection only when no active call is selected, selected-call default command targets, `answer` command transition, and selected-call detail event emission.
+- [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, highlighted roster rows, unread event counts, auto-selection only when no active call is selected, source-local selected-call default command targets, TUI/socket selection isolation, command-source mux ordering, `answer` command transition, and selected-call detail event emission.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Add Control API tests for authenticated call list/detail reads, call attachment create/list/delete, attach-before-answer and attach-after-answer behavior, answer/reject/hangup, outbound dial/say, idempotency handling, and refusal of unauthenticated mutating requests.
   DESIGN reference: `Application Webhooks and Gateway Control API`
@@ -465,7 +472,8 @@ Make each milestone reviewable and runnable independently before combining them.
   Tailscale Funnel webhook URL,
   Tailscale Funnel WSS endpoint,
   environment variables,
-  REPL command sequence for app creation/selection,
+  `--tui` and `--socket <path>` startup modes,
+  TUI and headless command sequence for app creation/selection,
   phone-number binding,
   inbound enablement,
   `state dump`, `shutdown [dump_path]`, and `--load <dump_path>`,
