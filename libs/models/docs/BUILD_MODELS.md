@@ -83,6 +83,9 @@ statically. Build ONNX Runtime from the release tag that matches the checked-in
 `ort`/`ort-sys` bindings, set `ORT_LIB_PATH` to the static build output, and
 leave `ORT_PREFER_DYNAMIC_LINK` unset.
 
+The canonical backend-family policy lives in
+[`../../model/docs/ORT_ONNX_POLICY.md`](../../model/docs/ORT_ONNX_POLICY.md).
+
 Ubuntu static build for the current `ort-sys 2.0.0-rc.12` binding generation:
 
 ```bash

@@ -9,6 +9,9 @@ deployments. Build ONNX Runtime `v1.24.2`, matching the `ort` crate generation
 used by this workspace, from an official release tag and point `ORT_LIB_PATH` at
 the static build output.
 
+This follows the general Motlie ORT/ONNX backend policy in
+[`../../libs/model/docs/ORT_ONNX_POLICY.md`](../../libs/model/docs/ORT_ONNX_POLICY.md).
+
 Do not set `ORT_PREFER_DYNAMIC_LINK=1`, and do not rely on `LD_LIBRARY_PATH` or
 the downloaded ONNX Runtime `.tgz` shared-library package for the gateway.
 
