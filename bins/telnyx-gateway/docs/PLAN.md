@@ -4,14 +4,15 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Moved the Telnyx PLAN under `bins/telnyx-gateway/docs/PLAN.md`, renamed its paired design link to `DESIGN.md`, and collapsed the former Telnyx adapter-crate tasks into `bins/telnyx-gateway` module and binary work. |
 | 2026-05-30 | @codex-358-research | Aligned the remaining PLAN reorder tasks with the DESIGN boundary: Telnyx maps `media.chunk` to provider-neutral sequence metadata, `libs/voice` reorders generic sequenced frames before decode, and phase 3 now explicitly includes the i16 resampler wrapper plus missing `i16_to_f32` helper. |
 | 2026-05-30 | @codex-358-research | Rebased implementation sequencing around the landed `motlie-voice` crate from PR #209. The Telnyx slice now extends existing `PcmFrame`, conversion, and resampling surfaces, adds missing codecs/packetization/stages, requires anti-aliased resampling before live calls, and records Piper buffered/CUDA caveats. |
 | 2026-04-17 | @codex-macmini-telnyx | Tightened the execution policy further so no initial acceptance criteria, examples, or live validation steps can rely on Moonshine or Qwen3-TTS. The first complete Telnyx slice is Sherpa + Piper only. |
 | 2026-04-17 | @codex-macmini-telnyx | Tightened the PLAN so Sherpa + Piper is the explicit first vertical slice. Follow-on pairings such as Sherpa + Qwen3-TTS and Moonshine + Qwen3-TTS are now deferred to a later phase instead of treated as peer initial targets. |
-| 2026-04-16 | @codex-macmini-telnyx | Reworked the PLAN to match the new hierarchy: provider-agnostic `libs/voice`, Telnyx-specific `libs/voice_telnyx`, and a thin `bins/motlie-telnyx-gateway` binary. |
-| 2026-04-15 | @codex-macmini-telnyx | Initial Telnyx integration PLAN derived from `DESIGN_TELNYX.md`. Covers the transport gateway, codec normalization, inbound and outbound call flows, application orchestration, and validation. |
+| 2026-04-16 | @codex-macmini-telnyx | Reworked the PLAN to match the hierarchy separating provider-agnostic `libs/voice` from Telnyx-specific gateway modules. |
+| 2026-04-15 | @codex-macmini-telnyx | Initial Telnyx integration PLAN derived from `DESIGN.md`. Covers the transport gateway, codec normalization, inbound and outbound call flows, application orchestration, and validation. |
 
-Derived from [DESIGN_TELNYX.md](./DESIGN_TELNYX.md). This PLAN assumes brownfield work against the existing `libs/model`, `libs/models`, and landed `libs/voice` (`motlie-voice`) speech stack and now explicitly separates provider-neutral voice infrastructure from the Telnyx-specific transport adapter.
+Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against the existing `libs/model`, `libs/models`, and landed `libs/voice` (`motlie-voice`) speech stack and now explicitly separates provider-neutral voice infrastructure from the Telnyx-specific transport adapter.
 
 Execution policy for the initial implementation:
 
@@ -23,17 +24,15 @@ Execution policy for the initial implementation:
 
 ## Phase 1: Workspace and Crate Skeleton
 
-Extend the existing provider-neutral voice layer, add the Telnyx adapter layer, and add the thin deployable binary.
+Extend the existing provider-neutral voice layer and add the Telnyx-specific deployable gateway under `bins/telnyx-gateway`.
 
 ### 1.1 - Workspace shape
 
 - [ ] Confirm `libs/voice` (`motlie-voice`) from PR #209 is the provider-agnostic voice crate to extend; do not add a second voice crate.
   DESIGN reference: `Overview`, `Crate Hierarchy and API Surfaces`
-- [ ] Add a new Telnyx adapter crate at `libs/voice_telnyx`.
+- [ ] Add the deployable Telnyx gateway crate at `bins/telnyx-gateway`.
   DESIGN reference: `Overview`, `Crate Hierarchy and API Surfaces`
-- [ ] Add the deployable binary at `bins/motlie-telnyx-gateway`.
-  DESIGN reference: `Overview`, `Crate Hierarchy and API Surfaces`
-- [ ] Keep provider-neutral media, runtime, and application traits out of `libs/voice_telnyx`.
+- [ ] Keep provider-neutral media, runtime, and application traits out of `bins/telnyx-gateway`.
   DESIGN reference: `Provider-Neutral API Rule`
 - [ ] Keep Telnyx webhook, WebSocket, and REST schema types out of `libs/voice`.
   DESIGN reference: `Provider-Neutral API Rule`
@@ -47,11 +46,11 @@ Extend the existing provider-neutral voice layer, add the Telnyx adapter layer, 
 - [ ] Add crate-level `error.rs` and `config.rs`.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
 
-### 1.3 - `libs/voice_telnyx` module skeleton
+### 1.3 - `bins/telnyx-gateway` module skeleton
 
-- [ ] Add `webhook/`, `call_control/`, `media/`, and `adapter.rs` under `libs/voice_telnyx/src/`.
+- [ ] Add `Cargo.toml`, `src/{main.rs,lib.rs,error.rs,cli.rs,serve.rs,logging.rs}`, and Telnyx-specific `webhook/`, `call_control/`, `media/`, and `adapter.rs` modules under `bins/telnyx-gateway/`.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
-- [ ] Keep `libs/voice_telnyx` focused on protocol mapping and Telnyx call control.
+- [ ] Keep `bins/telnyx-gateway` focused on Telnyx protocol mapping, Telnyx call control, process configuration, and wiring.
   DESIGN reference: `Crate Hierarchy and API Surfaces`
 
 ## Phase 2: Provider-Neutral Application and Runtime Contracts
@@ -174,7 +173,7 @@ Wire the Telnyx-specific schema and adapter crate on top of `libs/voice`.
 
 - [ ] Map Telnyx `start.media_format` into provider-neutral typed transport frames.
   DESIGN reference: `Telnyx Media Schema Mapping`
-- [ ] In `libs/voice_telnyx`, map Telnyx `media.chunk` into provider-neutral per-track sequence metadata and create `EncodedFrame<C>` values.
+- [ ] In `bins/telnyx-gateway`, map Telnyx `media.chunk` into provider-neutral per-track sequence metadata and create `EncodedFrame<C>` values.
   DESIGN reference: `Telnyx Media Schema Mapping`
 - [ ] In `libs/voice`, run `SequencedFrameReorder<C>` over generic sequenced frames before codec decode.
   DESIGN reference: `Required Concrete Stage Inventory`
@@ -243,7 +242,7 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
   DESIGN reference: `Conversation Handler Contract`
 - [ ] Wire `DtmfHandler` and provider-neutral `CallAction` mapping through the Telnyx adapter.
   DESIGN reference: `v1.1: DTMF and Call Control`
-- [ ] Keep dialog and keypad policy out of `libs/voice_telnyx`.
+- [ ] Keep dialog and keypad policy out of `bins/telnyx-gateway`.
   DESIGN reference: `Provider-Neutral API Rule`
 
 ### 7.3 - TTS to outbound media
