@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Added staged implementation milestones and composable contracts for inbound transcription sinks, outbound dial/say control through `motlie-driver`, reusable ASR/TTS pipelines, opaque provider-neutral call handles, and the later conversation-handler bridge. | Staged Build Strategy, Provider Adapter Boundary, Conversation Handler Contract, Inbound Call Handler Design, Outbound Call Handler Design |
 | 2026-05-30 | @codex-358-research: Clarified that `motlie_voice::app` owns application-level voice control traits while `motlie_voice::telephony` owns provider-neutral telephony vocabulary and events, not provider-specific transports or call-control clients. | Crate Hierarchy and API Surfaces, Provider-Neutral API Rule, v1.1: DTMF and Call Control |
 | 2026-05-30 | @codex-358-research: Moved the Telnyx design docs under `bins/telnyx-gateway/docs`, collapsed the previously separate Telnyx adapter crate into Telnyx-specific modules owned by `bins/telnyx-gateway`, and standardized the gateway path on `bins/telnyx-gateway`. | Overview, Crate Hierarchy and API Surfaces, Media Adaptation Pipeline, Inbound Call Handler Design, Deployment, Getting Started, References |
 | 2026-05-30 | @codex-358-research: Replaced stale absolute local references with repo-relative links to the current ASR/TTS design docs and model contract source files. | References |
@@ -27,6 +28,7 @@ This document defines a brownfield design for integrating Telnyx programmable vo
 - [Goals and Non-Goals](#goals-and-non-goals)
 - [Telnyx API Research](#telnyx-api-research)
 - [Recommended Integration Shape](#recommended-integration-shape)
+- [Staged Build Strategy](#staged-build-strategy)
 - [Crate Hierarchy and API Surfaces](#crate-hierarchy-and-api-surfaces)
 - [Media Adaptation Pipeline](#media-adaptation-pipeline)
 - [Recommended ASR/TTS Stack](#recommended-asrtts-stack)
@@ -80,9 +82,12 @@ This keeps telephony transport concerns out of the model contracts while also pr
 
 Execution policy for v1:
 
-- the first implemented, validated, and operator-documented live path must be `Sherpa + Piper`
+- milestone 1 is inbound calls with Sherpa ASR-only transcription to a `TranscriptSink`
+- milestone 2 is outbound dialing plus Piper TTS driven by `motlie-driver` commands such as `dial <number>` and `say <text>`
+- milestone 3 connects inbound transcript events to outbound speech through a `ConversationHandler`
+- `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` remain supported design targets for follow-on slices, not peer initial implementation targets
-- provider-neutral abstractions in `libs/voice` must be broad enough to support those later pairings without redesign, but first-slice acceptance must not depend on them
+- provider-neutral abstractions in `libs/voice` must be broad enough to support those later pairings without redesign, but milestone 1 and milestone 2 acceptance must not depend on them
 
 ## Goals and Non-Goals
 
@@ -99,7 +104,7 @@ Execution policy for v1:
 - Support interruption and barge-in at the gateway layer
 - Keep room for multiple ASR/TTS backend combinations behind the same gateway
 - Support private-host deployment behind ngrok or Tailscale Funnel for v1
-- Make `Sherpa + Piper` the only required end-to-end backend pairing for the first live Telnyx slice
+- Make Sherpa inbound ASR the only required live milestone 1 backend, Piper the only required live milestone 2 TTS backend, and `Sherpa + Piper` the only required complete duplex backend pairing for milestone 3
 
 ### Non-Goals
 
@@ -319,6 +324,167 @@ Primary gateway subsystems:
 8. `conversation_handler`
    The application-specific async text-processing stage where LLM calls, business logic, RAG, policy checks, or workflow actions run.
 
+## Staged Build Strategy
+
+Build the gateway in three independently useful milestones. Each milestone should expose a narrow control surface that can later compose with the others.
+
+### Milestone 1: Inbound Transcription
+
+The first runnable milestone is inbound call handling plus ASR only:
+
+```text
+Telnyx inbound call
+-> answer with media stream
+-> Telnyx media WebSocket
+-> inbound ASR pipeline
+-> TranscriptSink
+```
+
+No TTS, outbound audio, or `ConversationHandler` is required for this milestone. The gateway should answer, stream, normalize, transcribe, and deliver transcript events to an injected sink.
+
+Recommended inbound surface:
+
+```rust
+use async_trait::async_trait;
+use motlie_model::typed::TranscriptionUpdate;
+use motlie_voice::telephony::CallAction;
+
+pub struct CallIds {
+    pub provider_call_id: String,
+    pub provider_session_id: Option<String>,
+    pub media_stream_id: Option<String>,
+}
+
+pub struct CallContext {
+    pub ids: CallIds,
+    pub custom_state: std::collections::BTreeMap<String, String>,
+}
+
+pub enum TranscriptEvent {
+    Partial {
+        text: String,
+        update: TranscriptionUpdate,
+    },
+    Final {
+        text: String,
+        update: TranscriptionUpdate,
+    },
+}
+
+pub struct VoiceAppError {
+    pub message: String,
+}
+
+#[async_trait]
+pub trait TranscriptSink: Send + Sync {
+    async fn on_transcript(
+        &self,
+        event: TranscriptEvent,
+        context: &mut CallContext,
+    ) -> Result<Vec<CallAction>, VoiceAppError>;
+}
+```
+
+The first sink can be `StdoutTranscriptSink`, which logs partials/finals. A later `TmuxTranscriptSink` can map final transcript text to `motlie_tmux::KeySequence` and call `Target::send_keys()`. This keeps the ASR call path the same while swapping what consumes transcripts.
+
+For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` maps to `call_session_id`, and `media_stream_id` maps to Telnyx `stream_id`. Those raw Telnyx field names should stay in `bins/telnyx-gateway`.
+
+### Milestone 2: Outbound Dialer and TTS
+
+The second milestone is outbound call control plus TTS only:
+
+```text
+motlie-driver REPL
+-> dial <number>
+-> Telnyx outbound call with media stream
+-> say <text>
+-> outbound TTS pipeline
+-> Telnyx media WebSocket
+```
+
+This should use the existing `motlie-driver` pattern: define a Telnyx command family implementing `CommandSet<TelnyxDialerState>`, then run it through the existing REPL frontend. The minimum command surface is:
+
+```text
+dial <phone-or-sip-uri>
+say <text...>
+hangup
+```
+
+Recommended controller surface:
+
+```rust
+use async_trait::async_trait;
+
+pub struct VoiceDialRequest {
+    pub target: VoiceAddress,
+    pub caller_id: Option<VoiceAddress>,
+    pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CallHandle {
+    pub provider_call_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum VoiceAddress {
+    PhoneE164(String),
+    SipUri(String),
+}
+
+pub struct SpeechPlaybackHandle {
+    pub sequence: u64,
+}
+
+pub struct VoiceControlError {
+    pub message: String,
+}
+
+#[async_trait]
+pub trait OutboundSpeechController: Send {
+    async fn dial(&mut self, request: VoiceDialRequest) -> Result<CallHandle, VoiceControlError>;
+    async fn say(
+        &mut self,
+        call: &CallHandle,
+        text: String,
+    ) -> Result<SpeechPlaybackHandle, VoiceControlError>;
+    async fn hangup(&mut self, call: &CallHandle) -> Result<(), VoiceControlError>;
+}
+```
+
+The REPL is only one source of utterances. Any source that can produce text, including an mstream send-keys or broadcast bridge, should be able to call the same `say()` surface:
+
+```rust
+#[async_trait]
+pub trait OutboundUtteranceSource: Send {
+    async fn next_utterance(&mut self) -> Result<Option<String>, VoiceControlError>;
+}
+```
+
+This makes the outbound TTS path testable without needing a conversation loop: a REPL, mstream bridge, fixture replay, or scripted test can all feed text into the same outbound speech controller.
+
+Telnyx-specific dial configuration such as `connection_id`, stream URL, credentials, and bidirectional media flags belongs in `bins/telnyx-gateway` configuration and adapter code, not in the provider-neutral `VoiceDialRequest`.
+
+### Milestone 3: Conversation Bridge
+
+The third milestone composes milestone 1 and milestone 2:
+
+```text
+TranscriptSink
+-> ConversationHandler
+-> ConversationCommand::Say(...)
+-> OutboundSpeechController::say(...)
+```
+
+In this milestone, `ConversationHandler` is a bridge between transcript events and outbound commands. It should not own Telnyx REST details, ASR model details, or TTS packetization. Those remain in the inbound/outbound controllers and media pipelines.
+
+Recommended composition rule:
+
+- inbound handlers emit `TranscriptEvent`
+- transcript consumers decide whether to log, send to tmux, or call a conversation handler
+- conversation handlers emit provider-neutral commands such as `Say`, `Hangup`, or `Transfer`
+- `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
+
 ### Why This Belongs Above `libs/model`
 
 `libs/model` contracts are already correct for model I/O:
@@ -481,6 +647,17 @@ provider adapter, e.g. bins/telnyx-gateway
 -> motlie_voice::app handlers
 -> provider adapter maps CallAction back to provider commands
 ```
+
+### Provider Adapter Boundary
+
+Do not introduce a broad `TelephonyProvider` trait in the first implementation. The provider boundary should be modeled by a small set of composable surfaces:
+
+- Telnyx event/schema mapping in `bins/telnyx-gateway`, which translates webhook/WebSocket/REST payloads into provider-neutral `motlie_voice::telephony` events, actions, track markers, and sequence metadata
+- inbound call handling in `bins/telnyx-gateway`, which owns answer/stream lifecycle and feeds a provider-neutral `InboundAsrPipeline`
+- outbound call control in `bins/telnyx-gateway`, which owns Telnyx `dial`, `hangup`, streaming setup, and provider-specific IDs while implementing or delegating to the provider-neutral `OutboundSpeechController`
+- application policy in `motlie_voice::app`, including `TranscriptSink`, `ConversationHandler`, `DtmfHandler`, `IvrNavigator`, `ConversationContext`, and provider-neutral conversation commands
+
+This avoids an over-wide provider abstraction while still making the useful pieces testable and reusable. A future Twilio or SIP adapter should reuse the same `telephony` vocabulary, `app` traits, and media pipeline stages, but it can own its provider-specific transport and call-control mapping in its own gateway crate.
 
 ### `bins/telnyx-gateway` Surface
 
@@ -665,9 +842,11 @@ The design documents multiple pairings because the media adaptation requirements
 
 Execution rule:
 
-- `Sherpa + Piper` is the first and only required live v1 implementation slice
+- Sherpa inbound ASR is the first required live milestone
+- Piper outbound TTS is the second required live milestone
+- `Sherpa + Piper` is the first and only required complete duplex backend pairing once the conversation bridge exists
 - all other pairings in this section are specified so the generic pipeline can be designed correctly up front
-- no first-slice acceptance criteria, examples, or operator docs may depend on `Moonshine` or `Qwen3-TTS`
+- no first-milestone acceptance criteria, examples, or operator docs may depend on `Moonshine` or `Qwen3-TTS`
 
 #### Sherpa + Piper
 
@@ -695,7 +874,7 @@ Outbound:
 
 Status:
 
-- follow-on pairing, not part of the first live Telnyx acceptance slice
+- follow-on pairing, not part of milestone 1 inbound ASR, milestone 2 outbound TTS, or the first required duplex milestone
 
 Inbound:
 
@@ -716,7 +895,7 @@ Design implication:
 
 Status:
 
-- follow-on pairing, not part of the first live Telnyx acceptance slice
+- follow-on pairing, not part of milestone 1 inbound ASR, milestone 2 outbound TTS, or the first required duplex milestone
 
 Inbound:
 
@@ -1037,6 +1216,42 @@ where
 
 That enforces stage compatibility through `S2::In = S1::Out` and `S3::In = S2::Out`.
 
+### Pipeline Controller Contracts
+
+The low-level `Stage` contracts should compose into two higher-level controllers. These controllers are what the call handlers use; they should hide codec/reorder/resample details without hiding provider identity.
+
+Inbound ASR pipeline:
+
+```rust
+#[async_trait]
+pub trait InboundAsrPipeline: Send {
+    type TransportFrame;
+
+    async fn ingest_transport_frame(
+        &mut self,
+        frame: Self::TransportFrame,
+    ) -> Result<Vec<TranscriptEvent>, PipelineError>;
+
+    async fn finish(self) -> Result<Option<TranscriptEvent>, PipelineError>;
+}
+```
+
+Outbound TTS pipeline:
+
+```rust
+#[async_trait]
+pub trait OutboundTtsPipeline: Send {
+    async fn speak_text(
+        &mut self,
+        text: String,
+    ) -> Result<SpeechPlaybackHandle, PipelineError>;
+
+    async fn interrupt(&mut self) -> Result<(), PipelineError>;
+}
+```
+
+For Telnyx, `TransportFrame` is created in `bins/telnyx-gateway` from WebSocket `media` events after base64 decoding and `media.chunk` to generic sequence mapping. The reusable pipeline stages after that point remain in `libs/voice`.
+
 ### Recommended Safety Properties
 
 The pipeline design should make these bugs impossible or very obvious:
@@ -1156,11 +1371,10 @@ Recommended conversational pipeline:
 ```text
 Inbound audio
 -> ASR
--> transcript text
+-> TranscriptEvent
 -> ConversationHandler
--> response text
--> TTS
--> outbound audio
+-> ConversationCommand
+-> OutboundSpeechController / CallAction mapping
 ```
 
 Recommended Rust shapes:
@@ -1169,6 +1383,8 @@ Recommended Rust shapes:
 use async_trait::async_trait;
 use futures_core::Stream;
 use std::collections::BTreeMap;
+
+use motlie_voice::telephony::CallAction;
 
 pub struct ConversationTurn {
     pub speaker: TurnSpeaker,
@@ -1191,21 +1407,27 @@ pub struct ConversationError {
     pub message: String,
 }
 
+pub enum ConversationCommand {
+    Say { text: String },
+    Call(CallAction),
+    Noop,
+}
+
 #[async_trait]
 pub trait ConversationHandler: Send + Sync {
-    type TextStream: Stream<Item = Result<String, ConversationError>> + Send;
+    type CommandStream: Stream<Item = Result<ConversationCommand, ConversationError>> + Send;
 
-    async fn handle(
-        &self,
-        transcript: &str,
+    async fn on_transcript(
+        &mut self,
+        event: TranscriptEvent,
         context: &mut ConversationContext,
-    ) -> String;
+    ) -> Result<Vec<ConversationCommand>, ConversationError>;
 
-    async fn handle_streaming(
-        &self,
-        transcript: &str,
+    async fn on_transcript_streaming(
+        &mut self,
+        event: TranscriptEvent,
         context: &mut ConversationContext,
-    ) -> Self::TextStream;
+    ) -> Self::CommandStream;
 }
 ```
 
@@ -1217,7 +1439,7 @@ This is the main extensibility point for:
 - workflow integrations
 - deterministic rule engines
 
-The transport and speech stack stay reusable infrastructure. The handler is the application-specific component.
+The transport and speech stack stay reusable infrastructure. The handler is the application-specific component. A simple handler may emit `ConversationCommand::Say { text }`; a deterministic test handler may emit canned responses; a tmux-backed handler may turn transcript text into `motlie_tmux::KeySequence` send-keys operations instead of speech.
 
 ### Streaming Conversation Responses
 
@@ -1230,23 +1452,23 @@ use futures_core::Stream;
 
 #[async_trait]
 pub trait ConversationHandler: Send + Sync {
-    type TextStream: Stream<Item = Result<String, ConversationError>> + Send;
+    type CommandStream: Stream<Item = Result<ConversationCommand, ConversationError>> + Send;
 
-    async fn handle(
-        &self,
-        transcript: &str,
+    async fn on_transcript(
+        &mut self,
+        event: TranscriptEvent,
         context: &mut ConversationContext,
-    ) -> String;
+    ) -> Result<Vec<ConversationCommand>, ConversationError>;
 
-    async fn handle_streaming(
-        &self,
-        transcript: &str,
+    async fn on_transcript_streaming(
+        &mut self,
+        event: TranscriptEvent,
         context: &mut ConversationContext,
-    ) -> Self::TextStream;
+    ) -> Self::CommandStream;
 }
 ```
 
-The exact chunking policy should remain gateway-local so the handler returns text fragments and the gateway decides when those fragments are stable enough to synthesize.
+The exact chunking policy should remain gateway-local. The handler returns commands or command fragments; the gateway decides when text is stable enough to synthesize and how to pace outbound telephony packets.
 
 ## Recommended ASR/TTS Stack
 
@@ -1282,7 +1504,7 @@ Recommended design rule:
 
 ### Recommended TTS: Piper
 
-Piper is the recommended Telnyx v1 TTS backend because it is the simplest stable first-slice TTS target in Motlie and already matches the Sherpa + Piper acceptance path.
+Piper is the recommended Telnyx v1 TTS backend because it is the simplest stable outbound TTS target in Motlie and provides the TTS half of the first complete Sherpa + Piper duplex pairing.
 
 Current evidence from Motlie's implementation status:
 
@@ -1306,13 +1528,13 @@ Current Piper limitations:
 
 Current TTS status:
 
-- Piper is the required first-slice TTS backend
-- Qwen3-TTS.cpp is available through the typed TTS surface, but it emits `f32` `24 kHz` audio and remains a follow-on Telnyx pairing rather than part of the first Sherpa + Piper slice
+- Piper is the required milestone 2 outbound TTS backend
+- Qwen3-TTS.cpp is available through the typed TTS surface, but it emits `f32` `24 kHz` audio and remains a follow-on Telnyx pairing rather than part of the first Sherpa + Piper duplex milestone
 - Fish Speech was a historical rejected candidate and is not part of the current curated Telnyx plan unless a future backend is reintroduced and validated against the typed TTS contracts
 
 Recommended design rule:
 
-- Telnyx v1 should standardize on Piper as the default recommended backend and defer richer voice-selection work until the first telephony slice is stable
+- Telnyx v1 should standardize on Piper as the default recommended TTS backend and defer richer voice-selection work until the outbound TTS milestone is stable
 - the gateway itself should still accept any injected typed TTS that implements `SpeechSynthesizer`
 
 ### Transport Streaming vs Incremental TTS
@@ -1330,18 +1552,25 @@ Design implications:
 - `ConversationHandler` streaming text can reduce text-decision latency, but it does not by itself make Piper or Qwen3-TTS.cpp produce incremental audio
 - latency validation must measure the actual first-audio time of the selected backend, not only WebSocket packet cadence
 
-### Recommended Telnyx v1 Pipeline
+### Recommended Telnyx v1 Pipelines
 
-The recommended end-to-end voice path is:
+The recommended build order is three narrower pipelines.
+
+Milestone 1 inbound transcription:
 
 ```text
 Inbound Telnyx audio
 -> G.711 decode
 -> resample 8 kHz to 16 kHz
 -> sherpa-onnx streaming ASR
--> transcript
--> ConversationHandler
--> response text
+-> TranscriptSink
+```
+
+Milestone 2 outbound dialer/TTS:
+
+```text
+motlie-driver dial/say command or other text source
+-> OutboundSpeechController
 -> Piper TTS
 -> PCM at about 22 kHz
 -> resample to 16 kHz
@@ -1349,7 +1578,16 @@ Inbound Telnyx audio
 -> outbound Telnyx media
 ```
 
-This pipeline aligns with what currently works instead of over-optimizing for future model combinations that are not yet production-viable.
+Milestone 3 connected conversation:
+
+```text
+TranscriptSink
+-> ConversationHandler
+-> ConversationCommand::Say
+-> OutboundSpeechController
+```
+
+These pipelines align with what currently works while allowing useful validation before the full duplex conversation path exists.
 
 ### Latency Budget
 
@@ -1393,11 +1631,38 @@ Recommended inbound flow:
 5. Telnyx opens the WebSocket.
 6. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
 7. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
-8. ASR updates are sent to the `ConversationHandler`.
-9. The `ConversationHandler` produces response text.
-10. TTS converts response text into PCM chunks.
-11. Gateway encodes outbound audio into the configured Telnyx format and sends `media` events back on the same WebSocket.
-12. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
+8. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
+9. In milestone 1, a sink such as `StdoutTranscriptSink` logs transcripts and returns no call-control actions.
+10. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say` values to outbound TTS.
+11. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
+
+The inbound handler should therefore be ASR-first. It must not require outbound TTS or a conversation handler to be useful.
+
+### Inbound Handler Surface
+
+Recommended minimal inbound handler shape:
+
+```rust
+pub struct InboundCallConfig<Sink> {
+    pub transcript_sink: Sink,
+    pub stream_track: StreamTrack,
+    pub preferred_codec: TelnyxCodec,
+    pub preferred_sample_rate_hz: u32,
+}
+
+pub struct InboundCallHandler<A, Sink> {
+    pub asr: A,
+    pub transcript_sink: Sink,
+    pub sessions: SessionRegistry,
+}
+```
+
+The handler owns the inbound call lifecycle and ASR session. `TranscriptSink` owns what happens to transcript updates. That allows:
+
+- stdout logging for milestone 1
+- tmux `send_keys` integration for interactive workflows
+- fixture sinks for tests
+- a conversation bridge for milestone 3
 
 ### Rust Session Types
 
@@ -1470,10 +1735,12 @@ This isolates Telnyx transport quirks from the ASR contract.
 The gateway should not bake dialog policy into the Telnyx crate. Instead:
 
 - ASR partials and finals are converted into transcript text events
-- transcript text is delivered to an injected `ConversationHandler`
+- transcript events are delivered to an injected `TranscriptSink`
+- simple sinks log or forward transcripts without TTS
+- a conversation sink forwards selected transcript events to a `ConversationHandler`
 - the handler reads and mutates `ConversationContext`
-- the handler returns response text or a streaming text response
-- the gateway turns that text into TTS audio
+- the handler returns provider-neutral conversation commands
+- the gateway maps `ConversationCommand::Say` to TTS and `ConversationCommand::Call` to call-control actions
 
 This is the cleanest seam for integrating Motlie-specific agent logic later.
 
@@ -1565,6 +1832,31 @@ impl TelnyxGateway {
     }
 }
 ```
+
+### Driver REPL Dialer Surface
+
+The first outbound product surface should be a `motlie-driver` command family rather than a bespoke REPL. The command family owns parsing and REPL state; the gateway owns call and media execution.
+
+Recommended command family:
+
+```text
+dial <phone-or-sip-uri>
+say <text...>
+hangup
+```
+
+Recommended driver state:
+
+```rust
+pub struct TelnyxDialerState<C> {
+    pub controller: C,
+    pub active_call: Option<CallHandle>,
+}
+```
+
+`dial` stores the active `CallHandle`. `say` sends text to the active call through `OutboundSpeechController::say()`. `hangup` terminates the active call.
+
+The same controller should also accept text from non-REPL sources. A future mstream bridge, broadcast command, fixture replay, or tmux-driven test should not need a second TTS pathway; it should produce text and call the same outbound controller.
 
 The call-control client should remain explicit instead of hiding Telnyx behavior behind a generic telephony abstraction too early.
 

@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Reworked sequencing around three composable milestones: inbound transcription to `TranscriptSink`, outbound `motlie-driver` dial/say to TTS, opaque provider-neutral call handles, and a later conversation bridge connecting transcript events to outbound speech commands. |
 | 2026-05-30 | @codex-358-research | Split provider-neutral application control from telephony vocabulary: `motlie_voice::app` owns `ConversationHandler`, `DtmfHandler`, `IvrNavigator`, and `ConversationContext`, while `motlie_voice::telephony` owns `DtmfDigit`, `CallAction`, provider-neutral events, and track/direction vocabulary. |
 | 2026-05-30 | @codex-358-research | Moved the Telnyx PLAN under `bins/telnyx-gateway/docs/PLAN.md`, renamed its paired design link to `DESIGN.md`, and collapsed the former Telnyx adapter-crate tasks into `bins/telnyx-gateway` module and binary work. |
 | 2026-05-30 | @codex-358-research | Aligned the remaining PLAN reorder tasks with the DESIGN boundary: Telnyx maps `media.chunk` to provider-neutral sequence metadata, `libs/voice` reorders generic sequenced frames before decode, and phase 3 now explicitly includes the i16 resampler wrapper plus missing `i16_to_f32` helper. |
@@ -17,7 +18,10 @@ Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against
 
 Execution policy for the initial implementation:
 
-- the first complete implementation, operator example, and live validation path is `Sherpa + Piper`
+- milestone 1 is inbound calls with ASR-only transcription to a `TranscriptSink`
+- milestone 2 is outbound dialing plus TTS driven by `motlie-driver` commands such as `dial <number>` and `say <text>`
+- milestone 3 connects inbound transcript events to outbound speech through a `ConversationHandler`
+- `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
 
@@ -62,8 +66,14 @@ Define the reusable voice application surface in `libs/voice`.
 
 - [ ] Add application-level control traits and state in `libs/voice/src/app/`: `ConversationContext`, `ConversationHandler`, `DtmfHandler`, and `IvrNavigator`.
   DESIGN reference: `Conversation Handler Contract`, `v1.1: DTMF and Call Control`, `Crate Hierarchy and API Surfaces`
+- [ ] Add `TranscriptEvent` and `TranscriptSink` so milestone 1 can deliver ASR partials/finals to stdout, tests, tmux, or a later conversation bridge without requiring TTS.
+  DESIGN reference: `Staged Build Strategy`, `Inbound Handler Surface`
+- [ ] Add provider-neutral conversation outputs such as `ConversationCommand::Say` and `ConversationCommand::Call` so milestone 3 can route handler decisions into outbound speech or call-control actions.
+  DESIGN reference: `Conversation Handler Contract`, `Staged Build Strategy`
 - [ ] Add provider-neutral telephony vocabulary in `libs/voice/src/telephony/`: `DtmfDigit`, `CallAction`, `IvrEvent`, call/media lifecycle events, and track/direction markers.
   DESIGN reference: `motlie_voice::telephony Surface`, `v1.1: DTMF and Call Control`, `Crate Hierarchy and API Surfaces`
+- [ ] Keep call handles and call context provider-neutral: raw Telnyx fields such as `call_control_id`, `call_session_id`, `stream_id`, and `connection_id` stay in `bins/telnyx-gateway` mapping/configuration.
+  DESIGN reference: `Staged Build Strategy`, `Provider Adapter Boundary`, `motlie_voice::telephony Surface`
 - [ ] Keep these contracts and vocabulary provider-neutral so they can be reused by future Twilio or SIP adapters.
   DESIGN reference: `Provider-Neutral API Rule`
 
@@ -77,6 +87,15 @@ Define the reusable voice application surface in `libs/voice`.
   DESIGN reference: `Closed-Enum Selection`, `Build-Time Model Surface`
 - [ ] Document the required `motlie-models` feature flags in code comments or crate docs near the runtime selection layer.
   DESIGN reference: `Build-Time Model Surface`
+
+### 2.3 - Pipeline controller contracts
+
+- [ ] Add `InboundAsrPipeline` as the high-level controller consumed by inbound call handlers.
+  DESIGN reference: `Pipeline Controller Contracts`, `Inbound Call Handler Design`
+- [ ] Add `OutboundTtsPipeline` and `OutboundSpeechController` as the high-level controller consumed by REPL commands, mstream/broadcast bridges, tests, and conversation handlers.
+  DESIGN reference: `Pipeline Controller Contracts`, `Driver REPL Dialer Surface`
+- [ ] Keep these controllers source-agnostic: REPL commands, mstream broadcast, fixture replay, and conversation handlers should all call the same outbound `say()` path.
+  DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
 
 ## Phase 3: Typed Media Pipeline in `libs/voice`
 
@@ -115,9 +134,9 @@ Build the provider-neutral media adaptation pipeline with explicit stage contrac
 - [ ] Keep stage responsibilities split; do not collapse decode, resample, and packetization into one opaque adapter.
   DESIGN reference: `Required Concrete Stage Inventory`
 
-## Phase 4: First Vertical Slice - Sherpa + Piper
+## Phase 4: Milestone 1 - Inbound Transcription
 
-Assemble and validate the first end-to-end Telnyx slice with the most proven real-time stack: Sherpa ONNX streaming ASR plus Piper TTS.
+Assemble and validate the first useful Telnyx slice: inbound call handling plus Sherpa ONNX streaming ASR into a transcript sink. This phase deliberately does not require outbound TTS or a conversation handler.
 
 ### 4.1 - Sherpa inbound assembly
 
@@ -125,34 +144,33 @@ Assemble and validate the first end-to-end Telnyx slice with the most proven rea
   Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> Sherpa ingest flow.
   DESIGN reference: `Concrete Combination Requirements`
 
-### 4.2 - Piper outbound assembly
+### 4.2 - Transcript sinks
 
-- [ ] Implement the Piper outbound path:
-  `AudioBuf<i16, 22_050, Mono>` -> target-rate resample -> telephony packetize -> Telnyx encode.
-  DESIGN reference: `Concrete Combination Requirements`
-- [ ] Treat Piper as full-buffer synthesis followed by transport packetization; do not claim incremental TTS audio until the backend actually emits audio incrementally.
-  DESIGN reference: `Transport Streaming vs Incremental TTS`, `Latency Budget`
-- [ ] Record the Piper runtime mode used for validation. By default Piper is CPU-only because of #230; `MOTLIE_PIPER_ALLOW_CUDA=1` must be explicitly documented if enabled.
-  DESIGN reference: `Recommended TTS: Piper`, `Open Concerns`
+- [ ] Implement `StdoutTranscriptSink` for the first live inbound validation.
+  DESIGN reference: `Staged Build Strategy`, `Inbound Handler Surface`
+- [ ] Add a test sink that records transcript events for assertions.
+  DESIGN reference: `Staged Build Strategy`, `Testing Scope for PLAN`
+- [ ] Add a documented extension point for a future tmux sink that maps final transcripts to `motlie_tmux::KeySequence` and `Target::send_keys()`.
+  DESIGN reference: `Staged Build Strategy`, `Inbound Handler Surface`
 
-### 4.3 - First-slice pairing constraints
+### 4.3 - First-milestone constraints
 
-- [ ] Add explicit assembly coverage for Sherpa + Piper only in the first implementation slice.
+- [ ] Add explicit assembly coverage for Sherpa inbound ASR only in the first implementation slice.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Reject undeclared pairings cleanly instead of falling back to guessed pipeline behavior.
   DESIGN reference: `Concrete Backend Requirements Matrix`
-- [ ] Keep Moonshine and Qwen3-TTS support out of the first live Telnyx validation path even if the provider-neutral abstractions are designed broadly enough to support them later.
+- [ ] Keep outbound TTS, conversation handlers, Moonshine, and Qwen3-TTS support out of the first live inbound-transcription validation path even if the abstractions are designed broadly enough to support them later.
   DESIGN reference: `Recommended ASR/TTS Stack`, `Concrete Combination Requirements`
-- [ ] Do not add first-slice code paths, examples, or acceptance checks that require Moonshine-specific rechunking or Qwen3-TTS-specific `AudioBuf<f32, 24_000, Mono>` conversion.
+- [ ] Do not add first-milestone code paths, examples, or acceptance checks that require Piper, Moonshine-specific rechunking, or Qwen3-TTS-specific `AudioBuf<f32, 24_000, Mono>` conversion.
   DESIGN reference: `Concrete Combination Requirements`
 
 ## Phase 5: Telnyx Protocol and Adapter Layer
 
-Wire the Telnyx-specific schema and adapter crate on top of `libs/voice`.
+Wire the Telnyx-specific schema and gateway adapter modules on top of `libs/voice`.
 
 ### 5.1 - Telnyx protocol types
 
-- [ ] Add Rust types for Telnyx webhook payloads needed by the first slice:
+- [ ] Add Rust types for Telnyx webhook payloads needed by the first milestone:
   `call.initiated`,
   `call.answered`,
   `streaming.started`,
@@ -178,6 +196,8 @@ Wire the Telnyx-specific schema and adapter crate on top of `libs/voice`.
   DESIGN reference: `Telnyx Media Schema Mapping`
 - [ ] In `bins/telnyx-gateway`, map Telnyx `media.chunk` into provider-neutral per-track sequence metadata and create `EncodedFrame<C>` values.
   DESIGN reference: `Telnyx Media Schema Mapping`
+- [ ] In `bins/telnyx-gateway`, map Telnyx call IDs to provider-neutral call/session/media-stream IDs before passing context into `motlie_voice::app` handlers.
+  DESIGN reference: `Staged Build Strategy`, `Provider Adapter Boundary`
 - [ ] In `libs/voice`, run `SequencedFrameReorder<C>` over generic sequenced frames before codec decode.
   DESIGN reference: `Required Concrete Stage Inventory`
 - [ ] Emit one gateway-local monotonic sequence for provider-neutral frames and model chunks.
@@ -226,7 +246,7 @@ Wire call-control operations for inbound and outbound calls.
 - [ ] On streaming failure or terminal call events, tear down session state and release model resources.
   DESIGN reference: `Recommended Integration Shape`, `Open Concerns`
 
-## Phase 7: Voice Orchestration
+## Phase 7: Pipeline Orchestration
 
 Connect the Telnyx adapter and the provider-neutral voice pipeline to the existing Motlie speech contracts.
 
@@ -236,24 +256,20 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
   DESIGN reference: `Telnyx Media Schema Mapping`, `Concrete Combination Requirements`
 - [ ] Convert ordered inbound media frames into the selected ASR runtime's typed input, such as `AudioBuf<i16, 16_000, Mono>`, and call `TranscriptionSession::ingest()`.
   DESIGN reference: `Mapping Telnyx Frames to Typed ASR Input`
-- [ ] Forward `TranscriptionUpdate` partials and finals to application logic without exposing Telnyx types.
-  DESIGN reference: `Feeding the Conversation Handler`
+- [ ] Forward `TranscriptionUpdate` partials and finals as `TranscriptEvent` values to `TranscriptSink` without exposing Telnyx types.
+  DESIGN reference: `Staged Build Strategy`, `Feeding the Conversation Handler`
 
-### 7.2 - Conversation, DTMF, and IVR control
+### 7.2 - Outbound text to TTS
 
-- [ ] Wire `ConversationHandler` into the main voice loop.
-  DESIGN reference: `Conversation Handler Contract`
-- [ ] Wire `DtmfHandler` and provider-neutral `CallAction` mapping through the Telnyx adapter.
-  DESIGN reference: `v1.1: DTMF and Call Control`
-- [ ] Keep dialog and keypad policy out of `bins/telnyx-gateway`.
-  DESIGN reference: `Provider-Neutral API Rule`
-- [ ] Keep Telnyx-specific call-control translation in `bins/telnyx-gateway`; `motlie_voice::telephony::CallAction` is the provider-neutral command vocabulary, not a provider REST client.
-  DESIGN reference: `motlie_voice::telephony Surface`, `Provider-Neutral API Rule`
-
-### 7.3 - TTS to outbound media
-
-- [ ] Call the selected `SpeechSynthesizer` and drain its returned `SpeechStream` when the application requests speech.
-  DESIGN reference: `Returning TTS Audio`
+- [ ] Implement the Piper outbound path:
+  `AudioBuf<i16, 22_050, Mono>` -> target-rate resample -> telephony packetize -> Telnyx encode.
+  DESIGN reference: `Concrete Combination Requirements`
+- [ ] Treat Piper as full-buffer synthesis followed by transport packetization; do not claim incremental TTS audio until the backend actually emits audio incrementally.
+  DESIGN reference: `Transport Streaming vs Incremental TTS`, `Latency Budget`
+- [ ] Record the Piper runtime mode used for validation. By default Piper is CPU-only because of #230; `MOTLIE_PIPER_ALLOW_CUDA=1` must be explicitly documented if enabled.
+  DESIGN reference: `Recommended TTS: Piper`, `Open Concerns`
+- [ ] Call the selected `SpeechSynthesizer` and drain its returned `SpeechStream` when `OutboundSpeechController::say()` receives text.
+  DESIGN reference: `Returning TTS Audio`, `Driver REPL Dialer Surface`
 - [ ] Instantiate the correct typed outbound pipeline from the selected TTS runtime and Telnyx outbound codec.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Add interruption handling:
@@ -262,45 +278,72 @@ Connect the Telnyx adapter and the provider-neutral voice pipeline to the existi
   send `clear` only for MP3 mode.
   DESIGN reference: `Returning TTS Audio`
 
-## Phase 8: Inbound and Outbound Product Flows
+### 7.3 - Conversation, DTMF, and IVR control
 
-Close the loop on complete call lifecycle behavior.
+- [ ] Wire `ConversationHandler` as a bridge from selected `TranscriptEvent` values to `ConversationCommand` values.
+  DESIGN reference: `Conversation Handler Contract`, `Staged Build Strategy`
+- [ ] Wire `DtmfHandler` and provider-neutral `CallAction` mapping through the Telnyx adapter.
+  DESIGN reference: `v1.1: DTMF and Call Control`
+- [ ] Keep dialog and keypad policy out of `bins/telnyx-gateway`.
+  DESIGN reference: `Provider-Neutral API Rule`
+- [ ] Keep Telnyx-specific call-control translation in `bins/telnyx-gateway`; `motlie_voice::telephony::CallAction` is the provider-neutral command vocabulary, not a provider REST client.
+  DESIGN reference: `motlie_voice::telephony Surface`, `Provider-Neutral API Rule`
 
-### 8.1 - Inbound voice agent flow
+## Phase 8: Product Milestones
 
-- [ ] Implement `call.initiated` -> `answer + streaming` -> WebSocket media -> ASR -> app -> TTS -> hangup flow.
+Close the loop on independently useful product flows before combining them.
+
+### 8.1 - Milestone 1 inbound transcription flow
+
+- [ ] Implement `call.initiated` -> `answer + streaming` -> WebSocket media -> ASR -> `StdoutTranscriptSink` -> hangup flow.
   DESIGN reference: `Inbound Call Handler Design`
 - [ ] Validate that `stream_bidirectional_target_legs=self` is correct for the initial single-leg AI call pattern.
   DESIGN reference: `Open Concerns`
 - [ ] Add structured logs for `call_control_id`, `stream_id`, codec, and observed sample rate.
   DESIGN reference: `Open Concerns`
 
-### 8.2 - Outbound voice agent flow
+### 8.2 - Milestone 2 outbound dialer/TTS flow
 
 - [ ] Implement application-triggered `POST /v2/calls` with inline streaming parameters.
   DESIGN reference: `Outbound Call Handler Design`
 - [ ] Use `stream_establish_before_call_originate=true` in the first outbound implementation.
   DESIGN reference: `Outbound Call Handler Design`
-- [ ] Support optional initial greeting once the media session is ready.
-  DESIGN reference: `Outbound Call Handler Design`
+- [ ] Add a `motlie-driver` command family for `dial <phone-or-sip-uri>`, `say <text...>`, and `hangup`.
+  DESIGN reference: `Driver REPL Dialer Surface`
+- [ ] Keep Telnyx `connection_id`, stream URL, credentials, and bidirectional media flags in gateway configuration rather than adding them to provider-neutral outbound call requests.
+  DESIGN reference: `Staged Build Strategy`, `Provider Adapter Boundary`
+- [ ] Keep the REPL as one utterance source only; mstream send-keys/broadcast bridges and fixture replay should call the same `OutboundSpeechController::say()` path.
+  DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
+- [ ] Support optional initial greeting once the media session is ready, implemented as a normal `say()` call.
+  DESIGN reference: `Outbound Call Handler Design`, `Driver REPL Dialer Surface`
+
+### 8.3 - Milestone 3 connected conversation flow
+
+- [ ] Implement `TranscriptSink` adapter that forwards selected final transcript events to `ConversationHandler`.
+  DESIGN reference: `Staged Build Strategy`, `Conversation Handler Contract`
+- [ ] Route `ConversationCommand::Say { text }` to `OutboundSpeechController::say()`.
+  DESIGN reference: `Staged Build Strategy`, `Returning TTS Audio`
+- [ ] Route `ConversationCommand::Call(action)` through the Telnyx call-control mapping.
+  DESIGN reference: `motlie_voice::telephony Surface`, `v1.1: DTMF and Call Control`
+- [ ] Add barge-in policy only after milestone 1 and milestone 2 are independently stable.
+  DESIGN reference: `Returning TTS Audio`, `Real-Time Latency Requirements`
 
 ## Phase 9: Verification, Examples, and Operational Docs
 
-Make the first slice reviewable and runnable.
+Make each milestone reviewable and runnable independently before combining them.
 
 ### 9.1 - Local and simulated verification
 
 - [ ] Add JSON fixtures for Telnyx webhook and WebSocket messages.
   DESIGN reference: `Testing Scope for PLAN`
-- [ ] Add loopback harnesses that replay captured inbound media frames through the typed provider-neutral pipeline and verify:
+- [ ] Add milestone 1 loopback harnesses that replay captured inbound media frames through the typed provider-neutral pipeline and verify:
   transcript updates,
-  TTS packet emission,
   session teardown.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
 - [ ] Add a provider-free adaptation test that feeds synthetic Telnyx-like `PCMU 8 kHz mono` payloads through G.711 decode, typed PCM, anti-aliased `8 kHz -> 16 kHz` resample, and a fake `StreamingTranscriber<Input = AudioBuf<i16, 16_000, Mono>>`.
   DESIGN reference: `Testing Scope for PLAN`, `Media Adaptation Pipeline`
-- [ ] Add the symmetric outbound adaptation test from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding.
-  DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipeline`
+- [ ] Add milestone 2 outbound loopback tests from Piper-shaped `AudioBuf<i16, 22_050, Mono>` through anti-aliased resample, packetization, and `L16` or `PCMU` transport encoding, verifying TTS packet emission and session teardown.
+  DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
 - [ ] Add compile-fail or equivalent type-level tests for wrong rate, wrong channel layout, wrong sample type, and wrong stage order.
@@ -315,29 +358,33 @@ Make the first slice reviewable and runnable.
   environment variables,
   chosen ASR/TTS bundles.
   DESIGN reference: `Overview`, `Open Concerns`
-- [ ] Add one end-to-end example configuration for Sherpa + Piper as the first and only required example in the initial slice.
+- [ ] Add one milestone 1 inbound transcription example configuration for Sherpa ASR to `StdoutTranscriptSink`.
+  DESIGN reference: `Staged Build Strategy`, `Concrete Combination Requirements`
+- [ ] Add one milestone 2 outbound dial/say example configuration for Piper TTS through `OutboundSpeechController::say()`.
+  DESIGN reference: `Staged Build Strategy`, `Driver REPL Dialer Surface`
+- [ ] Add one milestone 3 end-to-end example configuration for Sherpa + Piper only after the inbound ASR and outbound TTS milestones are independently stable.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Document the first live-call checklist, including observed codec logging and `stream_bidirectional_target_legs` validation.
   DESIGN reference: `Open Concerns`
 
 ### 9.3 - Live validation
 
-- [ ] Place at least one inbound test call and one outbound test call against a real Telnyx application after local simulation passes.
+- [ ] Place at least one inbound test call for milestone 1 and one outbound test call for milestone 2 against a real Telnyx application after local simulation passes.
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] Capture and review the exact observed `start.media_format` values from Telnyx.
   DESIGN reference: `Open Concerns`
-- [ ] Verify conversational latency is acceptable for the Sherpa + Piper first backend pair and document measured numbers nearby in this PLAN or a follow-up note.
+- [ ] Verify conversational latency for the Sherpa + Piper duplex path once milestone 3 exists, and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`
 - [ ] Document first-audio latency separately from outbound transport packet cadence, because Piper currently produces a full buffer before packetized streaming begins.
   DESIGN reference: `Transport Streaming vs Incremental TTS`, `Real-Time Latency Requirements`
 
 ## Phase 10: Follow-On Backend Pairings
 
-After the Sherpa + Piper slice is implemented and validated end to end, broaden the backend menu.
+After the Sherpa + Piper duplex milestone is implemented and validated end to end, broaden the backend menu.
 
 ### 10.1 - Sherpa + Qwen3-TTS
 
-- [ ] Implement and validate the Qwen3-TTS outbound path after the first slice is stable.
+- [ ] Implement and validate the Qwen3-TTS outbound path after the Piper outbound milestone is stable.
   DESIGN reference: `Concrete Combination Requirements`
 - [ ] Measure the added cost of `f32` to `i16` conversion plus `24 kHz` resampling in live telephony conditions.
   DESIGN reference: `Concrete Combination Requirements`, `Real-Time Latency Requirements`
@@ -358,5 +405,5 @@ After the Sherpa + Piper slice is implemented and validated end to end, broaden 
   DESIGN reference: `Concrete Backend Requirements Matrix`
 - [ ] Reuse `libs/voice` for future provider adapters without backfilling provider-specific assumptions into the generic pipeline.
   DESIGN reference: `Provider-Neutral API Rule`
-- [ ] Treat all non-`Sherpa + Piper` combinations as explicit follow-on slices with their own validation notes rather than opportunistic add-ons to the first slice.
+- [ ] Treat all non-`Sherpa + Piper` combinations as explicit follow-on slices with their own validation notes rather than opportunistic add-ons to the first duplex milestone.
   DESIGN reference: `Concrete Combination Requirements`
