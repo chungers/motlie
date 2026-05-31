@@ -65,24 +65,13 @@ find_espeak_dir() {
 
 find_ort_dir() {
   if [[ -n "${ORT_LIB_PATH:-}" ]]; then
-    [[ -e "${ORT_LIB_PATH}/libonnxruntime.so" || -e "${ORT_LIB_PATH}/libonnxruntime.so.1" || -e "${ORT_LIB_PATH}/libonnxruntime.dylib" ]] && {
-      printf '%s\n' "${ORT_LIB_PATH}"
-      return 0
-    }
-  fi
-
-  if command -v ldconfig >/dev/null 2>&1; then
-    local match
-    match="$(ldconfig -p 2>/dev/null | grep 'libonnxruntime\.so' | head -n1 | awk '{print $NF}')"
-    if [[ -n "${match}" ]]; then
-      dirname "${match}"
-      return 0
-    fi
-  fi
-
-  if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
-    pkg-config --variable=libdir onnxruntime
-    return 0
+    local dir
+    for dir in "${ORT_LIB_PATH}" "${ORT_LIB_PATH}/Release" "${ORT_LIB_PATH}/RelWithDebInfo" "${ORT_LIB_PATH}/MinSizeRel" "${ORT_LIB_PATH}/Debug"; do
+      [[ -e "${dir}/libonnxruntime.a" || -e "${dir}/libonnxruntime_common.a" ]] && {
+        printf '%s\n' "${dir}"
+        return 0
+      }
+    done
   fi
 
   return 1
@@ -95,9 +84,15 @@ check_espeak() {
 }
 
 check_ort() {
+  case "${ORT_PREFER_DYNAMIC_LINK:-}" in
+    1|true|TRUE|True)
+      fail "ORT_PREFER_DYNAMIC_LINK must not be set for Motlie model checks; build static ONNX Runtime and set ORT_LIB_PATH to its build output."
+      ;;
+  esac
+
   local dir
-  dir="$(find_ort_dir)" || fail "ONNX Runtime not found. Set ORT_LIB_PATH or install a system onnxruntime with pkg-config metadata."
-  note "found ONNX Runtime in ${dir}"
+  dir="$(find_ort_dir)" || fail "Static ONNX Runtime not found. Build ONNX Runtime from source and set ORT_LIB_PATH to a directory containing libonnxruntime.a or libonnxruntime_common.a."
+  note "found static ONNX Runtime in ${dir}"
 }
 
 check_qwen_submodule() {

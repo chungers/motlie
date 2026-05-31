@@ -35,9 +35,8 @@ cat /path/to/audio.wav | cargo run -p motlie-models --example asr_sherpa_onnx \
   default HF cache root, or `--artifact-root` may point directly at the
   resolved artifact directory that contains the ONNX files.
 - A compatible ONNX Runtime installation must be provided explicitly for the
-  `ort` crate. Set `ORT_LIB_PATH` to the ONNX Runtime library directory unless
-  the runtime is already discoverable via `pkg-config` or another explicit
-  system installation path.
+  `ort` crate. Set `ORT_LIB_PATH` to a source-built static ONNX Runtime release
+  directory and leave `ORT_PREFER_DYNAMIC_LINK` unset.
 - The `.wav` file must be PCM audio (`i16` or `f32`).
 - For transcript-quality checks, prefer recorded speech. Synthetic TTS WAVs are
   useful for plumbing validation, but they are not representative of sherpa's

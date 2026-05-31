@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-31 | @codex-364-impl: Made static ONNX Runtime linkage the required Sherpa/Piper operational policy for gateway live tests and deployments; dynamic `ORT_PREFER_DYNAMIC_LINK` runbooks are explicitly rejected. | Recommended ASR/TTS Stack, Getting Started: Local Deployment |
 | 2026-05-30 | @codex-358-research: Addressed PR #363 review round 1 by moving M4, the design-quality assessment, and the recommended v1 pipelines under the staged build strategy; marking Control API and application webhook flows as milestone 4 work; aligning M1 structured logging with #364; adding operator session/socket/mux modules; and matching M3 prose to `ConversationCommand::{Say, Call, Noop}`. | Staged Build Strategy, Application Webhooks and Gateway Control API, Operator REPL and TUI Control Surface, Inbound Call Handler Design, Crate Hierarchy and API Surfaces |
 | 2026-05-30 | @codex-358-research: Reviewed the overall design quality and split tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). | Staged Build Strategy, Recommended Telnyx v1 Pipelines, Operator REPL and TUI Control Surface |
 | 2026-05-30 | @codex-358-research: Added startup-selected operator input modes: `--tui` enables the local TUI, `--socket <path>` enables a Unix-domain command socket for headless control, and both sources are multiplexed through one command dispatcher when enabled together. | Operator REPL and TUI Control Surface, Staged Build Strategy, Gateway Configuration Requirement |
@@ -2366,6 +2367,7 @@ Recommended design rule:
 
 - Telnyx v1 should treat `sherpa-onnx` as the default recommended ASR backend for the real-time conversational flow
 - the gateway itself should still accept any injected typed ASR that implements `StreamingTranscriber`
+- gateway live-test and deployment runbooks must use static ONNX Runtime linkage for Sherpa: `ORT_LIB_PATH` points at a source-built static ONNX Runtime release directory, `ORT_PREFER_DYNAMIC_LINK` is unset, and `LD_LIBRARY_PATH` is not part of the required ASR startup path
 
 ### Recommended TTS: Piper
 
@@ -2390,6 +2392,7 @@ Current Piper limitations:
 - one pre-trained voice per model
 - less flexibility than future expressive or clone-capable TTS stacks
 - CUDA execution is currently gated by issue #230: Piper defaults to CPU-only ONNX Runtime for shutdown stability on the GB10 validation host, and advanced users can opt back into CUDA probing with `MOTLIE_PIPER_ALLOW_CUDA=1`
+- gateway live-test and deployment runbooks must use the same static ONNX Runtime linkage policy for Piper once outbound TTS is enabled; dynamic ONNX Runtime linkage is not an accepted operator path
 
 Current TTS status:
 

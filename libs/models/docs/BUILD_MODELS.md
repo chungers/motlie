@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-31 | @codex-364-impl | Changed ONNX Runtime provisioning guidance from shared-library discovery to static source-built linkage through `ORT_LIB_PATH`; dynamic `ORT_PREFER_DYNAMIC_LINK` runbooks are no longer accepted. |
 | 2026-04-24 | @codex-gpt55 | Added Qwen3.6 27B GGUF build guidance for the new llama.cpp curated example, including the feature gate, CUDA gate, and current FP8 GGUF limitation. |
 | 2026-04-22 | @codex-tts | Added a dedicated `smoke-qwen3-whisper` mode to `scripts/check_curated_model_examples.sh` for issue `#211`. This exercises `tts_qwen3_tts_cpp | asr_whisper` under the same feature set to catch Linux `ggml` symbol-interposition regressions around `-Wl,-Bsymbolic`. |
 | 2026-04-21 | @codex-tts | Removed the non-functional Qwen3-TTS ONNX curated backend per issue `#210`. The ONNX Runtime prerequisite list now covers only the surviving ORT-backed bundles: Piper, sherpa-onnx, and Moonshine. |
@@ -27,7 +28,7 @@ The main principles are:
 |--------|-------------|--------------------|
 | Piper | System `libespeak-ng` shared library | `motlie-model-espeak-ng/build.rs` fails explicitly if the library cannot be found. |
 | Piper | `espeak-ng-data` runtime assets | Runtime prerequisite. Set `PIPER_ESPEAKNG_DATA_DIRECTORY` if the data is not installed in a standard system location. |
-| sherpa-onnx / Moonshine / Piper | ONNX Runtime shared library | Provide `ORT_LIB_PATH`, `pkg-config` metadata, or another explicit system installation path. |
+| sherpa-onnx / Moonshine / Piper | Static ONNX Runtime build | `scripts/check_models_build_prereqs.sh --require-ort` requires `ORT_LIB_PATH` to point at a directory containing `libonnxruntime.a` or `libonnxruntime_common.a`, and rejects `ORT_PREFER_DYNAMIC_LINK`. |
 | qwen3-tts.cpp | Vendored submodule checkout | `git submodule update --init --recursive libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` |
 | llama.cpp GGUF | Optional CUDA build | Add `llama-cpp-cuda` to the `motlie-models` feature set. Runtime GPU offload can be disabled with `MOTLIE_MODEL_FORCE_CPU=1` or controlled with `MOTLIE_MODEL_GPU_LAYERS=<n>`. |
 
@@ -37,7 +38,7 @@ The main principles are:
 |----------|---------|
 | `ESPEAK_NG_LIB_DIR` | Directory containing `libespeak-ng.so`, `libespeak-ng.so.1`, or `libespeak-ng.dylib` when the library is not in a standard linker path. |
 | `PIPER_ESPEAKNG_DATA_DIRECTORY` | Directory containing `espeak-ng-data/` for Piper phonemization runtime assets. |
-| `ORT_LIB_PATH` | Directory containing the ONNX Runtime shared library used by ORT-backed backends and examples. |
+| `ORT_LIB_PATH` | Directory containing the static ONNX Runtime build used by ORT-backed backends and examples, such as `$HOME/src/onnxruntime-1.24.2/build/Linux/Release`. |
 | `MOTLIE_MODEL_FORCE_CPU` | Set to `1` to force llama.cpp-backed bundles to use zero GPU-offloaded layers. |
 | `MOTLIE_MODEL_GPU_LAYERS` | Explicit llama.cpp GPU layer count. When unset, llama.cpp-backed bundles request full offload and the compiled backend decides what is available. |
 
@@ -73,6 +74,38 @@ Full local build path when ONNX Runtime is available:
 ```bash
 ./scripts/check_curated_model_examples.sh --mode build
 ```
+
+## Static ONNX Runtime Policy
+
+ORT-backed Motlie examples and gateway flows should link ONNX Runtime
+statically. Build ONNX Runtime from the release tag that matches the checked-in
+`ort`/`ort-sys` bindings, set `ORT_LIB_PATH` to the static build output, and
+leave `ORT_PREFER_DYNAMIC_LINK` unset.
+
+Ubuntu static build for the current `ort-sys 2.0.0-rc.12` binding generation:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git build-essential python3 python3-pip python3-dev
+python3 -m pip install --user "cmake>=3.28"
+export PATH="$HOME/.local/bin:$PATH"
+
+export ORT_VERSION=v1.24.2
+export ORT_SRC="$HOME/src/onnxruntime-${ORT_VERSION#v}"
+git clone --branch "$ORT_VERSION" --depth 1 --recursive --shallow-submodules \
+  https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
+cd "$ORT_SRC"
+./build.sh --config Release --parallel --compile_no_warning_as_error \
+  --skip_submodule_sync --skip_tests
+
+export ORT_LIB_PATH="$ORT_SRC/build/Linux/Release"
+test -f "$ORT_LIB_PATH/libonnxruntime.a" || test -f "$ORT_LIB_PATH/libonnxruntime_common.a"
+unset ORT_PREFER_DYNAMIC_LINK
+```
+
+Do not use `ORT_PREFER_DYNAMIC_LINK=1`, `LD_LIBRARY_PATH`, or an extracted
+`onnxruntime-linux-*.tgz` shared-library package as the documented path for
+local validation, CI, live tests, or deployment.
 
 Dedicated qwen3-tts.cpp / whisper co-link smoke for Linux symbol-interposition regressions:
 

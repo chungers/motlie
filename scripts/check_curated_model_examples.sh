@@ -33,7 +33,8 @@ note() {
 
 run_with_optional_ort() {
   if [[ -n "${ORT_LIB_PATH:-}" ]]; then
-    ORT_LIB_PATH="${ORT_LIB_PATH}" "$@"
+    ./scripts/check_models_build_prereqs.sh --require-ort
+    env -u ORT_PREFER_DYNAMIC_LINK ORT_LIB_PATH="${ORT_LIB_PATH}" "$@"
   else
     "$@"
   fi
@@ -47,7 +48,7 @@ case "${mode}" in
     ;;
   build)
     ./scripts/check_models_build_prereqs.sh --require-espeak --require-qwen-submodule --require-ort
-    ORT_LIB_PATH="${ORT_LIB_PATH}" cargo build -p motlie-models \
+    env -u ORT_PREFER_DYNAMIC_LINK ORT_LIB_PATH="${ORT_LIB_PATH}" cargo build -p motlie-models \
       --example tts_piper \
       --example tts_qwen3_tts_cpp \
       --example asr_whisper \
