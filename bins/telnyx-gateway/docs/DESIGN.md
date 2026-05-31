@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Reframed `bins/telnyx-gateway` as an operator-driven TUI/REPL application that starts an idle HTTP/WebSocket listener, uses `motlie-driver` commands for Telnyx provisioning and call control, and only answers inbound calls after explicit operator or mode selection. | Operator REPL and TUI Control Surface, Staged Build Strategy, Inbound Call Handler Design, Outbound Call Handler Design |
 | 2026-05-30 | @codex-358-research: Added staged implementation milestones and composable contracts for inbound transcription sinks, outbound dial/say control through `motlie-driver`, reusable ASR/TTS pipelines, opaque provider-neutral call handles, and the later conversation-handler bridge. | Staged Build Strategy, Provider Adapter Boundary, Conversation Handler Contract, Inbound Call Handler Design, Outbound Call Handler Design |
 | 2026-05-30 | @codex-358-research: Clarified that `motlie_voice::app` owns application-level voice control traits while `motlie_voice::telephony` owns provider-neutral telephony vocabulary and events, not provider-specific transports or call-control clients. | Crate Hierarchy and API Surfaces, Provider-Neutral API Rule, v1.1: DTMF and Call Control |
 | 2026-05-30 | @codex-358-research: Moved the Telnyx design docs under `bins/telnyx-gateway/docs`, collapsed the previously separate Telnyx adapter crate into Telnyx-specific modules owned by `bins/telnyx-gateway`, and standardized the gateway path on `bins/telnyx-gateway`. | Overview, Crate Hierarchy and API Surfaces, Media Adaptation Pipeline, Inbound Call Handler Design, Deployment, Getting Started, References |
@@ -29,6 +30,7 @@ This document defines a brownfield design for integrating Telnyx programmable vo
 - [Telnyx API Research](#telnyx-api-research)
 - [Recommended Integration Shape](#recommended-integration-shape)
 - [Staged Build Strategy](#staged-build-strategy)
+- [Operator REPL and TUI Control Surface](#operator-repl-and-tui-control-surface)
 - [Crate Hierarchy and API Surfaces](#crate-hierarchy-and-api-surfaces)
 - [Media Adaptation Pipeline](#media-adaptation-pipeline)
 - [Recommended ASR/TTS Stack](#recommended-asrtts-stack)
@@ -308,11 +310,11 @@ Telnyx media WebSocket -> telnyx_gateway::media
 Primary gateway subsystems:
 
 1. `webhook`
-   Validates webhook signatures, routes call events, answers inbound calls, and starts or stops sessions.
+   Validates webhook signatures, routes call events, records pending inbound calls, and starts or stops sessions. It must not answer inbound calls unless the operator has enabled an inbound mode or issued `answer`.
 2. `call_control_client`
    Thin REST client for `answer`, `dial`, `hangup`, `streaming_start`, and optional metadata updates.
 3. `media_server`
-   WebSocket server that accepts Telnyx stream connections.
+   HTTP/WebSocket server that listens on the configured address, defaulting to `127.0.0.1:8080` for local development. The bind address is runtime configuration; the public webhook/media URL may be an ngrok, Funnel, or deployed URL.
 4. `session_registry`
    Maps `call_control_id` and `stream_id` to live session state.
 5. `voice transport adapter`
@@ -323,24 +325,41 @@ Primary gateway subsystems:
    Owns ASR stream, `ConversationHandler`, TTS stream, barge-in rules, and shutdown.
 8. `conversation_handler`
    The application-specific async text-processing stage where LLM calls, business logic, RAG, policy checks, or workflow actions run.
+9. `operator_ui`
+   Owns the `motlie-driver` command set, two-pane TUI, command status, and operator-visible event/transcript log.
 
 ## Staged Build Strategy
 
 Build the gateway in three independently useful milestones. Each milestone should expose a narrow control surface that can later compose with the others.
+
+The gateway process itself starts before any milestone-specific call behavior is enabled:
+
+```text
+telnyx-gateway
+-> bind configured HTTP/WebSocket listener, default 127.0.0.1:8080
+-> open two-pane TUI
+-> wait for motlie-driver commands
+```
+
+Startup state is intentionally idle. The process may accept health checks, webhook delivery, and media WebSocket connections at the configured address, but it does not register Telnyx applications, bind numbers, answer inbound calls, or dial outbound calls until the operator drives those actions from the REPL.
 
 ### Milestone 1: Inbound Transcription
 
 The first runnable milestone is inbound call handling plus ASR only:
 
 ```text
-Telnyx inbound call
+operator provisions Telnyx application and phone number
+-> inbound enable --manual
+-> Telnyx inbound call
+-> pending call appears in TUI
+-> answer <call>
 -> answer with media stream
 -> Telnyx media WebSocket
 -> inbound ASR pipeline
 -> TranscriptSink
 ```
 
-No TTS, outbound audio, or `ConversationHandler` is required for this milestone. The gateway should answer, stream, normalize, transcribe, and deliver transcript events to an injected sink.
+No TTS, outbound audio, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls, answer on operator command, stream, normalize, transcribe, and deliver transcript events to an injected sink.
 
 Recommended inbound surface:
 
@@ -386,6 +405,8 @@ pub trait TranscriptSink: Send + Sync {
 ```
 
 The first sink can be `StdoutTranscriptSink`, which logs partials/finals. A later `TmuxTranscriptSink` can map final transcript text to `motlie_tmux::KeySequence` and call `Target::send_keys()`. This keeps the ASR call path the same while swapping what consumes transcripts.
+
+For the TUI milestone, `TuiTranscriptSink` should append partial/final transcript events to the right pane. `StdoutTranscriptSink` remains useful for non-TUI tests and log-only runs.
 
 For Telnyx, `provider_call_id` maps to `call_control_id`, `provider_session_id` maps to `call_session_id`, and `media_stream_id` maps to Telnyx `stream_id`. Those raw Telnyx field names should stay in `bins/telnyx-gateway`.
 
@@ -485,6 +506,144 @@ Recommended composition rule:
 - conversation handlers emit provider-neutral commands such as `Say`, `Hangup`, or `Transfer`
 - `bins/telnyx-gateway` maps those commands to Telnyx call-control and outbound media operations
 
+## Operator REPL and TUI Control Surface
+
+`bins/telnyx-gateway` should be an interactive operator application, not a daemon that immediately activates all call flows at startup.
+
+### TUI Layout
+
+The TUI should have two stable panes:
+
+- left pane: `motlie-driver` REPL input, command history, and completions/help
+- right pane: command results, Telnyx API status, gateway listener status, pending/active calls, media events, ASR partials/finals, TTS playback status, and errors
+
+The right pane is the first visual validation surface. During milestone 1, an answered inbound call should show codec/media metadata plus live transcript updates there.
+
+### Gateway Runtime State
+
+The REPL should mutate one shared gateway state object:
+
+```rust
+pub enum InboundMode {
+    Disabled,
+    Manual,
+    AutoTranscribe { sink: TranscriptSinkKind },
+    AutoConversation,
+}
+
+pub enum CallState {
+    PendingInbound,
+    Answering,
+    MediaStarting,
+    Transcribing,
+    Dialing,
+    Speaking,
+    Active,
+    Ended,
+}
+
+pub struct GatewayReplState<C> {
+    pub listener: ListenerStatus,
+    pub telnyx: TelnyxProvisioningState,
+    pub inbound_mode: InboundMode,
+    pub selected_call: Option<CallHandle>,
+    pub calls: SessionRegistry,
+    pub outbound: C,
+}
+```
+
+This state is gateway-local. `TelnyxProvisioningState` can store Telnyx application IDs, connection IDs, selected phone numbers, public webhook URL, public media WebSocket URL, and credential source. Those values should not leak into provider-neutral `motlie_voice::app` traits.
+
+### Command Groups
+
+The command set should be grouped by operator intent.
+
+General gateway commands:
+
+```text
+help [command]
+status
+listener status
+config show
+config set webhook-url <https-url>
+config set media-url <wss-url>
+config set from-number <e164>
+log clear
+log level <trace|debug|info|warn|error>
+```
+
+Telnyx provisioning commands:
+
+```text
+telnyx app list
+telnyx app create <name>
+telnyx app use <connection-id>
+telnyx app show
+telnyx app webhook set <https-url>
+telnyx number list
+telnyx number use <e164>
+telnyx number bind <e164> <connection-id>
+telnyx number unbind <e164>
+```
+
+Inbound call commands:
+
+```text
+inbound status
+inbound enable --manual
+inbound enable --auto-transcribe
+inbound disable
+calls
+call use <call>
+answer [call] [--sink tui|stdout]
+reject [call]
+hangup [call]
+transcript follow [call]
+transcript clear [call]
+```
+
+Milestone 1 should implement `inbound enable --manual` first. In that mode, `call.initiated` creates a `PendingInbound` session and renders it in the right pane. The gateway answers only after the operator runs `answer`.
+
+Outbound call commands:
+
+```text
+dial <phone-or-sip-uri> [--from <e164>]
+say [call] <text...>
+hangup [call]
+tts status
+tts model use <model>
+```
+
+The `dial` command creates or selects the active outbound call. The `say` command routes text through `OutboundSpeechController::say()`. Non-REPL sources such as mstream broadcast, scripted fixtures, or tmux-driven tests should call the same controller instead of creating another TTS pathway.
+
+Conversation bridge commands:
+
+```text
+conversation status
+conversation attach [call]
+conversation detach [call]
+conversation mode <manual|auto>
+```
+
+These belong after milestone 1 and milestone 2 are independently useful. `conversation attach` should wire selected transcript events to `ConversationHandler`; it should not change the Telnyx media or model contracts.
+
+### Example Milestone 1 Operator Flow
+
+```text
+status
+config set webhook-url https://example.ngrok.app/telnyx/webhooks
+config set media-url wss://example.ngrok.app/telnyx/media
+telnyx app create motlie-local
+telnyx app webhook set https://example.ngrok.app/telnyx/webhooks
+telnyx number bind +15551234567 <connection-id>
+inbound enable --manual
+calls
+answer <call>
+transcript follow <call>
+```
+
+The gateway should log every API request, selected app/number, webhook update, inbound call event, answer action, media `start`, observed codec, and transcript event in the right pane.
+
 ### Why This Belongs Above `libs/model`
 
 `libs/model` contracts are already correct for model I/O:
@@ -543,6 +702,11 @@ bins/
       cli.rs
       serve.rs
       logging.rs
+      operator/
+        mod.rs
+        commands.rs
+        state.rs
+        tui.rs
       webhook/
       call_control/
       media/
@@ -688,15 +852,23 @@ bins/telnyx-gateway/src/
     websocket.rs
     session.rs
 
+  operator/
+    mod.rs
+    commands.rs
+    state.rs
+    tui.rs
+
   adapter.rs
 ```
 
 `bins/telnyx-gateway` owns:
 
 - CLI parsing
+- `motlie-driver` command registration and execution
+- two-pane TUI state, rendering, and command/status routing
 - environment loading
 - model selection flags
-- listen address and `--webhook-url`
+- listen address, webhook path, media path, and REPL-configured public URLs
 - tunnel-friendly startup wiring
 - logging and tracing
 - Telnyx webhook JSON schema
@@ -1618,23 +1790,27 @@ Design implications:
 
 Recommended inbound flow:
 
-1. Telnyx sends `call.initiated` webhook.
-2. HTTP handler verifies signature and parses `call_control_id`.
-3. The handler allocates a `PendingCallSession` keyed by `call_control_id`.
-4. The handler answers the call with:
+1. Gateway starts and listens on the configured HTTP/WebSocket bind address, defaulting to `127.0.0.1:8080` for local development.
+2. Operator uses the REPL to provision/select the Telnyx application, set the public webhook/media URLs, bind a phone number, and run `inbound enable --manual`.
+3. Telnyx sends `call.initiated` webhook.
+4. HTTP handler verifies signature, parses `call_control_id`, allocates a `PendingCallSession`, and renders the pending call in the right TUI pane.
+5. If inbound mode is `Disabled`, the gateway must not answer. It may log the event and return `200 OK`, or reject the call if the operator configured reject-on-disabled behavior.
+6. If inbound mode is `Manual`, the gateway waits for `answer <call>`.
+7. If inbound mode is `AutoTranscribe`, the gateway behaves as if the operator immediately ran `answer <call> --sink tui`.
+8. The answer action attaches media streaming with:
    - `stream_url=wss://.../telnyx/media`
    - `stream_track=inbound_track`
    - `stream_bidirectional_mode=rtp`
    - `stream_bidirectional_codec=L16`
    - `stream_bidirectional_sampling_rate=16000`
    - `stream_bidirectional_target_legs=self`
-5. Telnyx opens the WebSocket.
-6. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
-7. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
-8. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
-9. In milestone 1, a sink such as `StdoutTranscriptSink` logs transcripts and returns no call-control actions.
-10. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say` values to outbound TTS.
-11. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
+9. Telnyx opens the WebSocket.
+10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
+11. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
+12. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
+13. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` logs transcripts and returns no call-control actions.
+14. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say` values to outbound TTS.
+15. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
 
 The inbound handler should therefore be ASR-first. It must not require outbound TTS or a conversation handler to be useful.
 
@@ -1776,9 +1952,10 @@ That would degrade ASR and complicate turn-taking. `both_tracks` should be reser
 
 Recommended outbound flow:
 
-1. Application requests a call to a destination number or SIP URI.
-2. Gateway issues `POST /v2/calls`.
-3. The dial request includes:
+1. Operator runs `dial <phone-or-sip-uri>` from the REPL, optionally after selecting a default `from` number.
+2. Gateway looks up the selected Telnyx application/connection, public media URL, caller ID, and outbound stream defaults from `GatewayReplState`.
+3. Gateway issues `POST /v2/calls`.
+4. The Telnyx dial request includes:
    - `connection_id`
    - `to`
    - `from`
@@ -1789,12 +1966,10 @@ Recommended outbound flow:
    - `stream_bidirectional_codec=L16`
    - `stream_bidirectional_sampling_rate=16000`
    - `stream_establish_before_call_originate=true`
-4. Telnyx establishes the WebSocket.
-5. The gateway starts the conversation session on `start`.
-6. Once the callee answers, the application may:
-   - play an initial greeting via TTS
-   - wait for the callee to speak first
-7. The rest of the session uses the same duplex media path as inbound calls.
+5. Telnyx establishes the WebSocket.
+6. The gateway starts the outbound media session on `start` and renders call state in the right pane.
+7. Once the callee answers, the operator may run `say <text...>` to synthesize outbound audio, or wait for the callee to speak first.
+8. The rest of the session uses the same media path as inbound calls.
 
 ### Why Streaming Should Be Attached at Dial Time
 
@@ -1812,22 +1987,22 @@ Recommendation: use the first pattern for voice agents because:
 ### Outbound Session API Sketch
 
 ```rust
-pub struct OutboundCallRequest {
+pub struct TelnyxOutboundDial {
     pub to: String,
     pub from: String,
     pub connection_id: String,
-    pub initial_prompt: Option<String>,
+    pub stream_url: String,
 }
 
 impl TelnyxGateway {
     pub async fn start_outbound_call(
         &self,
-        request: OutboundCallRequest,
+        request: TelnyxOutboundDial,
     ) -> Result<CallHandle, GatewayError> {
         // 1. allocate session id
         // 2. call Telnyx /v2/calls with inline streaming params
         // 3. wait for websocket start
-        // 4. optionally queue initial TTS greeting
+        // 4. select the returned call as the active REPL call
         todo!()
     }
 }
@@ -1835,7 +2010,7 @@ impl TelnyxGateway {
 
 ### Driver REPL Dialer Surface
 
-The first outbound product surface should be a `motlie-driver` command family rather than a bespoke REPL. The command family owns parsing and REPL state; the gateway owns call and media execution.
+The outbound product surface should be the shared operator `motlie-driver` command family described above, not a separate dialer REPL. The command family owns parsing and REPL state; the gateway owns call and media execution.
 
 Recommended command family:
 
@@ -2132,16 +2307,22 @@ Recommended v1 Funnel workflow:
 
 ### Gateway Configuration Requirement
 
-The gateway binary should accept a `--webhook-url` flag so the external public URL can be configured independently of the local listen address.
+The gateway binary should accept a `--listen` flag for the local bind address. The external public URLs can be provided either as startup flags or through the REPL after a tunnel starts.
 
 Example shape:
 
 ```text
 telnyx-gateway \
   --listen 127.0.0.1:8080 \
-  --webhook-url https://example.ngrok.app \
   --media-path /telnyx/media \
   --webhook-path /telnyx/webhooks
+```
+
+Then in the REPL:
+
+```text
+config set webhook-url https://example.ngrok.app/telnyx/webhooks
+config set media-url wss://example.ngrok.app/telnyx/media
 ```
 
 This matters because the process may listen on `127.0.0.1:8080` while Telnyx needs the externally reachable tunnel URL, not the private bind address.
@@ -2150,8 +2331,9 @@ This matters because the process may listen on `127.0.0.1:8080` while Telnyx nee
 
 1. start the gateway on the private host
 2. start ngrok or Tailscale Funnel
-3. configure the Telnyx webhook URL to the tunnel URL
-4. make or receive calls
+3. use the gateway REPL to set the public URLs
+4. use the gateway REPL to create/select the Telnyx application and bind the phone number
+5. run `inbound enable --manual`, then make or receive calls
 
 ## Getting Started: Local Deployment
 
@@ -2189,62 +2371,40 @@ curl -X POST \
   "https://api.telnyx.com/v2/number_orders"
 ```
 
-#### 3. Create a Call Control Application
+#### 3. Create or select a Call Control Application from the gateway REPL
 
 For Motlie's Telnyx gateway, prefer a Call Control Application over TeXML because the design depends on programmable voice webhooks plus media streaming commands.
 
-Current Telnyx create call control application request:
+Preferred gateway REPL flow:
 
-```bash
-curl -X POST \
-  --header "Content-Type: application/json" \
-  --header "Authorization: Bearer $TELNYX_API_KEY" \
-  --data '{
-    "application_name": "motlie-telnyx-local",
-    "webhook_event_url": "https://example.ngrok.app/telnyx/webhooks",
-    "webhook_api_version": "2"
-  }' \
-  "https://api.telnyx.com/v2/call_control_applications"
+```text
+telnyx app create motlie-telnyx-local
+telnyx app use <connection-id>
 ```
 
 This returns the application `id`, which is also the `connection_id` used for outbound calls.
 
-#### 4. Configure the webhook URL
+#### 4. Configure public webhook and media URLs from the gateway REPL
 
 If your tunnel URL changes, update the application:
 
-```bash
-curl -X PATCH \
-  --header "Content-Type: application/json" \
-  --header "Authorization: Bearer $TELNYX_API_KEY" \
-  --data '{
-    "webhook_event_url": "https://example.ngrok.app/telnyx/webhooks",
-    "webhook_api_version": "2"
-  }' \
-  "https://api.telnyx.com/v2/call_control_applications/$TELNYX_CONNECTION_ID"
+```text
+config set webhook-url https://example.ngrok.app/telnyx/webhooks
+config set media-url wss://example.ngrok.app/telnyx/media
+telnyx app webhook set https://example.ngrok.app/telnyx/webhooks
 ```
 
-#### 5. Assign the phone number to the application
+#### 5. Assign the phone number to the application from the gateway REPL
 
 Telnyx phone numbers carry a `connection_id`. Set that to the Call Control Application ID.
 
-```bash
-curl -X PATCH \
-  --header "Content-Type: application/json" \
-  --header "Authorization: Bearer $TELNYX_API_KEY" \
-  --data "{
-    \"connection_id\": \"$TELNYX_CONNECTION_ID\"
-  }" \
-  "https://api.telnyx.com/v2/phone_numbers/$TELNYX_PHONE_NUMBER_ID"
+```text
+telnyx number list
+telnyx number use +13125551234
+telnyx number bind +13125551234 <connection-id>
 ```
 
-You can verify the current voice settings with:
-
-```bash
-curl -X GET \
-  --header "Authorization: Bearer $TELNYX_API_KEY" \
-  "https://api.telnyx.com/v2/phone_numbers/$TELNYX_PHONE_NUMBER_ID/voice"
-```
+The right pane should show the Telnyx API request status and the currently selected application/number.
 
 ### Local Host Setup
 
@@ -2268,12 +2428,9 @@ Recommended v1 defaults:
 ```bash
 ./target/release/telnyx-gateway \
   --listen 127.0.0.1:8080 \
-  --webhook-url https://example.ngrok.app \
   --webhook-path /telnyx/webhooks \
   --media-path /telnyx/media \
   --telnyx-api-key "$TELNYX_API_KEY" \
-  --connection-id "$TELNYX_CONNECTION_ID" \
-  --phone-number "+13125551234" \
   --asr-model sherpa-onnx \
   --tts-model piper
 ```
@@ -2281,8 +2438,9 @@ Recommended v1 defaults:
 The exact model configuration flags can evolve, but the binary should always separate:
 
 - local listen address
-- externally reachable webhook URL
+- externally reachable webhook and media URLs
 - injected ASR/TTS backend choice
+- Telnyx application/number selection, which can be driven from the REPL
 
 #### 9. Start ngrok or Tailscale Funnel
 
@@ -2298,51 +2456,50 @@ Tailscale Funnel example:
 tailscale funnel 8080
 ```
 
-#### 10. Update the Telnyx webhook URL if using ngrok
+#### 10. Configure the public URLs in the REPL if using ngrok
 
-If you use a randomly assigned ngrok hostname, repeat step 4 every time ngrok restarts with a different public URL.
+If you use a randomly assigned ngrok hostname, repeat the `config set` and `telnyx app webhook set` commands every time ngrok restarts with a different public URL.
 
 ### First Call Test
 
-#### 11. Call the Telnyx number from a phone
+#### 11. Enable inbound manual mode and call the Telnyx number from a phone
 
-Place an inbound call to the purchased number assigned to the Call Control Application.
+```text
+inbound enable --manual
+```
 
-#### 12. Verify webhook received and WebSocket media connected
+Place an inbound call to the purchased number assigned to the Call Control Application. The call should appear as pending in the right pane.
+
+#### 12. Answer and verify WebSocket media connected
+
+```text
+calls
+answer <call>
+```
 
 Confirm in gateway logs that:
 
 - `call.initiated` arrived
+- the pending call appeared in the TUI
 - the call was answered
 - the Telnyx WebSocket `start` event connected
 
-#### 13. Speak and verify ASR transcript appears in gateway logs
+#### 13. Speak and verify ASR transcript appears in the right pane
 
-Speak into the call and verify transcript text appears in gateway logs or tracing output.
+Speak into the call and verify transcript text appears in gateway logs, tracing output, or the right TUI pane.
 
-#### 14. Verify TTS response plays back through the phone
+#### 14. Optional: attach conversation or TTS after later milestones
 
-Confirm the response audio plays back to the phone and that the transcript-to-response path is working.
+Milestone 1 stops at transcription. TTS playback belongs to milestone 2 outbound calls and milestone 3 connected conversation.
 
 ### Outbound Call Test
 
-#### 15. Use the gateway CLI or REST to initiate an outbound call
+#### 15. Use the gateway REPL to initiate an outbound call
 
-If calling Telnyx directly for a manual smoke test, the documented outbound API shape is:
-
-```bash
-curl --location 'https://api.telnyx.com/v2/calls' \
-  --header 'Accept: application/json' \
-  --header 'Content-Type: application/json' \
-  --header "Authorization: Bearer $TELNYX_API_KEY" \
-  --data "{
-    \"connection_id\": \"$TELNYX_CONNECTION_ID\",
-    \"to\": \"+1234567890\",
-    \"from\": \"+13125551234\"
-  }"
+```text
+dial +1234567890
+say hello from motlie
 ```
-
-For the Motlie gateway, the preferred implementation is that the gateway issues this request itself and attaches the media streaming parameters described earlier in this design.
 
 #### 16. Same verification as inbound
 
@@ -2350,8 +2507,7 @@ Confirm:
 
 - outbound call connects
 - WebSocket media starts
-- ASR transcripts appear
-- `ConversationHandler` generates text
+- `say` generates TTS audio
 - TTS audio is sent back over the call
 
 ## Gap Analysis
