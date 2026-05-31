@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Added the app-server call read/attach API: `GET /api/v1/calls` and `GET /api/v1/calls/{call_id}` expose current gateway call state, while per-call attachments bind an app webhook subscription to call transcripts/events without replacing webhook delivery. | Application Webhooks and Gateway Control API |
 | 2026-05-30 | @codex-358-research: Refined the TUI layout so the right side is split into a top call roster and bottom selected-call detail pane; inbound calls appear as highlighted pending rows, can become the selected call, and drive detail/transcript/action hints without stealing REPL input. | Operator REPL and TUI Control Surface |
 | 2026-05-30 | @codex-358-research: Switched local deployment examples to assume Tailscale Funnel as the default public URL path, keeping ngrok only as an alternate tunnel option. | Deployment: Private Host, Getting Started: Local Deployment, Replayable State Dumps |
 | 2026-05-30 | @codex-358-research: Added replayable gateway state dumps: `shutdown [dump_path]` writes durable Telnyx/app-server configuration as idempotent REPL commands, and startup `--load <dump_path>` replays that file to rehydrate configuration before accepting work. | Operator REPL and TUI Control Surface, Gateway Configuration Requirement, Getting Started: Local Deployment |
@@ -810,9 +811,9 @@ The gateway should support external automation in addition to the operator TUI. 
 
 - Telnyx webhooks come into `bins/telnyx-gateway` from Telnyx.
 - Gateway application webhooks go out from `bins/telnyx-gateway` to a user's application server.
-- The Gateway Control API is called by that application server to answer, reject, hang up, dial, and say text.
+- The Gateway Control API is called by that application server to list current calls, inspect one call, attach to a call's event/transcript stream, answer, reject, hang up, dial, and say text.
 
-This lets the gateway act as a telephony edge service. Another server can subscribe to call events, decide what to do, then call back into the gateway without embedding Telnyx protocol logic, media adaptation, ASR, or TTS.
+This lets the gateway act as a telephony edge service. Another server can subscribe to call events, decide what to do, reconcile current state through `GET` endpoints, then call back into the gateway without embedding Telnyx protocol logic, media adaptation, ASR, or TTS.
 
 ### Event Envelope
 
@@ -976,11 +977,105 @@ The app server should verify the HMAC signature, persist or enqueue the event id
 
 The Gateway Control API should expose the same actions as the REPL. Both surfaces should dispatch into the same internal command/controller layer so they cannot drift.
 
-Recommended call-control endpoints:
+Recommended call read endpoints:
 
 ```text
 GET  /api/v1/calls
 GET  /api/v1/calls/{call_id}
+```
+
+`GET /api/v1/calls` returns the gateway's current in-memory call registry. It is the app server's reconciliation API, not an event stream. It should support narrow filters and stable pagination:
+
+```text
+GET /api/v1/calls?state=pending,active&direction=inbound&limit=50&cursor=...
+```
+
+Example response:
+
+```json
+{
+  "calls": [
+    {
+      "id": "call_01HZ...",
+      "direction": "inbound",
+      "state": "pending",
+      "from": "+15551234567",
+      "to": "+15557654321",
+      "media": { "state": "not_started" },
+      "transcription": { "state": "not_started" },
+      "tts": { "state": "idle" },
+      "attachments": [],
+      "created_at": "2026-05-30T18:30:00Z",
+      "updated_at": "2026-05-30T18:30:02Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+`GET /api/v1/calls/{call_id}` returns the same resource at full detail, including provider diagnostic IDs, last error, currently attached webhook subscriptions, media state, transcript state, TTS state, and recent timeline entries. Provider IDs remain diagnostic; app servers should use the gateway call ID for control.
+
+Recommended call attachment endpoints:
+
+```text
+POST   /api/v1/calls/{call_id}/attachments
+GET    /api/v1/calls/{call_id}/attachments
+DELETE /api/v1/calls/{call_id}/attachments/{attachment_id}
+```
+
+A call attachment binds an application-side consumer to one gateway call. In v1 this should usually mean "send this call's selected events/transcripts to this already-registered webhook subscription." It does not replace application webhooks; it scopes webhook delivery to a specific call and records which app server is observing or driving the call.
+
+Attach request:
+
+```json
+{
+  "subscription_id": "whsub_01HZ...",
+  "role": "observer",
+  "events": [
+    "call.answered",
+    "media.started",
+    "transcript.partial",
+    "transcript.final",
+    "call.ended",
+    "call.failed"
+  ],
+  "transcription": {
+    "enabled": true,
+    "partials": true,
+    "finals": true
+  }
+}
+```
+
+Attach response:
+
+```json
+{
+  "attachment_id": "att_01HZ...",
+  "call_id": "call_01HZ...",
+  "subscription_id": "whsub_01HZ...",
+  "role": "observer",
+  "state": "attached",
+  "events": [
+    "transcript.partial",
+    "transcript.final",
+    "call.ended",
+    "call.failed"
+  ]
+}
+```
+
+Attachment semantics:
+
+- attaching before `answer` stores the requested event/transcript sinks and applies them when media starts
+- attaching after media has started adds the sinks to the active call session without restarting Telnyx streaming
+- deleting an attachment stops delivery to that subscription for that call, but does not hang up the call
+- attachments must be idempotent under `Idempotency-Key`; duplicate requests for the same call/subscription/role should return the existing attachment
+- initial roles should include `observer`; milestone 3 can add `conversation_controller` when app-server-driven conversation handling is ready
+
+Recommended call-control endpoints:
+
+```text
 POST /api/v1/calls/{call_id}/answer
 POST /api/v1/calls/{call_id}/reject
 POST /api/v1/calls/{call_id}/hangup
@@ -1008,6 +1103,8 @@ Inbound answer request:
 }
 ```
 
+The answer request may either include a sink directly, as above, or rely on a prior call attachment. The prior-attachment form is better when an app server wants to acknowledge a pending inbound webhook, attach its transcript/event subscription, then answer as a separate, retryable control step.
+
 Outbound dial request:
 
 ```json
@@ -1034,6 +1131,13 @@ TTS request:
 
 All mutating control API requests should support `Idempotency-Key` so external servers can retry safely.
 
+GET endpoints complement, but do not replace, application webhooks:
+
+- webhooks are push notifications for transitions and transcript/TTS events
+- `GET /api/v1/calls` and `GET /api/v1/calls/{call_id}` are pull-based snapshots for startup, reconnect, missed-webhook recovery, and UI reconciliation
+- `POST /api/v1/calls/{call_id}/attachments` converts a global webhook subscription into a per-call consumer relationship
+- call-control mutations such as `answer`, `hangup`, and `say` remain explicit API calls; receiving or attaching to webhooks must not implicitly answer a call
+
 ### Programmatic Inbound Flow
 
 ```text
@@ -1042,6 +1146,8 @@ external app registers webhook subscription
 -> Telnyx sends call.initiated to gateway
 -> gateway records PendingInbound and emits call.inbound.pending
 -> external app receives event
+-> external app GETs /api/v1/calls/{call_id} to reconcile current state
+-> external app POSTs /api/v1/calls/{call_id}/attachments to receive that call's transcript/events
 -> external app POSTs /api/v1/calls/{call_id}/answer
 -> gateway answers with media stream
 -> gateway emits media.started
