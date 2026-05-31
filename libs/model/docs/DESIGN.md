@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-31 | @codex-364-impl: Added the general ORT/ONNX backend policy: all ONNX Runtime model backends use static source-built ONNX Runtime, leave `ORT_PREFER_DYNAMIC_LINK` unset, and let ONNX Runtime build its own third-party C/C++ dependencies. | Architecture, Backend Operational Policies, Artifact and Packaging Contracts |
 | 2026-04-07 | @codex-researcher: Initial greenfield design for `libs/model` as the stable contract/lifecycle crate for packaged model bundles. Migration and backward compatibility are explicitly out of scope for this first cut. | All |
 | 2026-04-07 | @codex-researcher: Clarified that curated artifact download is explicit in `libs/models`, while backends consume artifact roots through `StartOptions` and artifact contracts. | Overview, Architecture, Artifact and Packaging Contracts |
 | 2026-04-07 | @codex-researcher: Added `ArtifactPolicy` to the startup contract so regulated local-only deployments can fail closed while permissive deployments may still allow runtime fetch. | Core Abstractions, Lifecycle, Artifact and Packaging Contracts |
@@ -32,6 +33,7 @@ The governing framework principle is curated sustainability: Motlie maintains op
 - [Goals and Non-Goals](#goals-and-non-goals)
 - [Architecture](#architecture)
 - [Framework Principles](#framework-principles)
+- [Backend Operational Policies](#backend-operational-policies)
 - [Core Abstractions](#core-abstractions)
 - [Lifecycle](#lifecycle)
 - [Capability Surfaces](#capability-surfaces)
@@ -129,6 +131,11 @@ Build note:
 - `libs/models` may expose only a subset of curated bundles in a given build, based on per-bundle feature flags and higher-level profile features
 - callers should therefore treat curated selector/catalog surfaces as build-dependent, while still relying on the stable trait contracts defined here
 
+Backend operational note:
+
+- all ORT/ONNX model backends in `libs/model/backends/*` must follow
+  [ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md)
+
 ### High-Level Data Flow
 
 1. Caller selects a `BundleId` or receives one from configuration
@@ -186,6 +193,26 @@ Implications:
 - error variants should carry enough context for operators and callers to distinguish configuration problems from capability mismatches and internal failures
 - non-test runtime code should not use `panic!`, `unwrap()`, or `expect()` as normal control flow
 - examples and downloader binaries may use `anyhow` to attach CLI context without weakening the library API surface
+
+## Backend Operational Policies
+
+Backend implementation crates may have host-level runtime requirements, but
+those requirements must be documented at the `libs/model` layer when they affect
+all backends in a family.
+
+For ORT/ONNX backends, the general policy is:
+
+- use static ONNX Runtime linkage for validation, CI, live tests, and deployment
+- set `ORT_LIB_PATH` to a source-built static ONNX Runtime release directory
+- keep `ORT_PREFER_DYNAMIC_LINK` unset
+- do not rely on `LD_LIBRARY_PATH` or extracted ONNX Runtime shared-library
+  release packages
+- do not install ORT internal libraries as host packages; ONNX Runtime's source
+  build owns dependencies such as protobuf, FlatBuffers, Abseil, re2, nsync, and
+  cpuinfo through CMake FetchContent
+- require only host build tools such as `git`, Python, CMake, and a C++ compiler
+
+The canonical runbook lives in [ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md).
 
 ## Core Abstractions
 
@@ -535,6 +562,11 @@ In the current implemented contract, that vocabulary is intentionally small:
 - `StartOptions::artifact_policy`
 
 Richer curated artifact manifests, inclusion rules, and provenance controls currently live in `libs/models`, not `libs/model`.
+
+ORT/ONNX artifacts add one backend-family operational requirement: the model
+artifact may be a normal curated sidecar, but ONNX Runtime itself is a host
+runtime dependency governed by [ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md). This
+keeps `.onnx` artifact layout separate from ORT linkage and host preparation.
 
 Potential future extensions, if they become necessary, include:
 

@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-31 | @codex-364-impl: Added the general ORT/ONNX backend policy link so API implementers treat static ONNX Runtime linkage as a model-backend requirement, not a Telnyx-specific runbook detail. | Notes |
 | 2026-04-24 | @codex-gpt55: Added `QuantizationBits::Five` and `QuantizationBits::FloatEight` so GGUF Q5 and FP8 can be represented without overloading Q8. | Core Types, Bundle API Sketch |
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/model` and `libs/model::eval`. Reflects the current scaffold and keeps the focus on stable contract shapes. | All |
 | 2026-04-07 | @codex-researcher: Updated the API sketch to reflect capability introspection helpers and the explicit separation between curated artifact staging and backend startup. | Overview, Bundle API Sketch, Notes |
@@ -26,6 +27,11 @@
 This document sketches the concrete contract shapes currently introduced in `libs/model`. It covers both the core bundle lifecycle/capability contracts and the lightweight `model::eval` vocabulary that higher-level harness tooling should build on.
 
 For implementers, this document should be read as the current contract specification for `libs/model`, not merely aspirational pseudocode. DESIGN explains why these shapes exist; this API document captures what downstream crates are expected to implement against.
+
+ORT/ONNX backend implementers must also follow
+[ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md): static ONNX Runtime linkage,
+`ORT_LIB_PATH` pointed at a source-built static ORT release directory,
+`ORT_PREFER_DYNAMIC_LINK` unset, and ONNX Runtime-owned C/C++ dependency builds.
 
 ## Overview
 
