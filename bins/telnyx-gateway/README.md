@@ -12,13 +12,19 @@ the static build output.
 Do not set `ORT_PREFER_DYNAMIC_LINK=1`, and do not rely on `LD_LIBRARY_PATH` or
 the downloaded ONNX Runtime `.tgz` shared-library package for the gateway.
 
+Host requirements are build tools only: `git`, Python `3.10+`, CMake `3.28+`,
+and a Linux C++ compiler such as GCC `8+`. ONNX Runtime should build its own
+third-party C/C++ dependencies from source; do not install ORT internals such as
+protobuf, FlatBuffers, Abseil, re2, nsync, or cpuinfo as host packages for this
+runbook.
+
 Ubuntu static build:
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y git build-essential python3 python3-pip python3-dev
-python3 -m pip install --user "cmake>=3.28"
-export PATH="$HOME/.local/bin:$PATH"
+command -v git
+python3 -c 'import sys; assert sys.version_info >= (3, 10), sys.version'
+cmake --version
+${CXX:-c++} --version
 
 export ORT_VERSION=v1.24.2
 export ORT_SRC="$HOME/src/onnxruntime-${ORT_VERSION#v}"
@@ -26,7 +32,8 @@ git clone --branch "$ORT_VERSION" --depth 1 --recursive --shallow-submodules \
   https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
 cd "$ORT_SRC"
 ./build.sh --config Release --parallel --compile_no_warning_as_error \
-  --skip_submodule_sync --skip_tests
+  --skip_submodule_sync --skip_tests \
+  --cmake_extra_defines FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
 
 export ORT_LIB_PATH="$ORT_SRC/build/Linux/Release"
 test -f "$ORT_LIB_PATH/libonnxruntime.a" || test -f "$ORT_LIB_PATH/libonnxruntime_common.a"

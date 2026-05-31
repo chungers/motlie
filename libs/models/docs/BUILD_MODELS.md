@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-31 | @codex-364-impl | Clarified that ONNX Runtime source builds own their third-party C/C++ dependencies through FetchContent; Motlie runbooks should verify host build tools, not install ORT internal dependency packages. |
 | 2026-05-31 | @codex-364-impl | Changed ONNX Runtime provisioning guidance from shared-library discovery to static source-built linkage through `ORT_LIB_PATH`; dynamic `ORT_PREFER_DYNAMIC_LINK` runbooks are no longer accepted. |
 | 2026-04-24 | @codex-gpt55 | Added Qwen3.6 27B GGUF build guidance for the new llama.cpp curated example, including the feature gate, CUDA gate, and current FP8 GGUF limitation. |
 | 2026-04-22 | @codex-tts | Added a dedicated `smoke-qwen3-whisper` mode to `scripts/check_curated_model_examples.sh` for issue `#211`. This exercises `tts_qwen3_tts_cpp | asr_whisper` under the same feature set to catch Linux `ggml` symbol-interposition regressions around `-Wl,-Bsymbolic`. |
@@ -85,10 +86,10 @@ leave `ORT_PREFER_DYNAMIC_LINK` unset.
 Ubuntu static build for the current `ort-sys 2.0.0-rc.12` binding generation:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y git build-essential python3 python3-pip python3-dev
-python3 -m pip install --user "cmake>=3.28"
-export PATH="$HOME/.local/bin:$PATH"
+command -v git
+python3 -c 'import sys; assert sys.version_info >= (3, 10), sys.version'
+cmake --version
+${CXX:-c++} --version
 
 export ORT_VERSION=v1.24.2
 export ORT_SRC="$HOME/src/onnxruntime-${ORT_VERSION#v}"
@@ -96,7 +97,8 @@ git clone --branch "$ORT_VERSION" --depth 1 --recursive --shallow-submodules \
   https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
 cd "$ORT_SRC"
 ./build.sh --config Release --parallel --compile_no_warning_as_error \
-  --skip_submodule_sync --skip_tests
+  --skip_submodule_sync --skip_tests \
+  --cmake_extra_defines FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
 
 export ORT_LIB_PATH="$ORT_SRC/build/Linux/Release"
 test -f "$ORT_LIB_PATH/libonnxruntime.a" || test -f "$ORT_LIB_PATH/libonnxruntime_common.a"
@@ -106,6 +108,11 @@ unset ORT_PREFER_DYNAMIC_LINK
 Do not use `ORT_PREFER_DYNAMIC_LINK=1`, `LD_LIBRARY_PATH`, or an extracted
 `onnxruntime-linux-*.tgz` shared-library package as the documented path for
 local validation, CI, live tests, or deployment.
+
+Do not install ORT internal dependencies such as protobuf, FlatBuffers, Abseil,
+re2, nsync, or cpuinfo as host packages for this path. The
+`FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER` CMake define keeps the source build
+from preferring system packages for FetchContent-managed dependencies.
 
 Dedicated qwen3-tts.cpp / whisper co-link smoke for Linux symbol-interposition regressions:
 
