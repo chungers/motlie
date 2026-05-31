@@ -30,8 +30,8 @@ echo "Hello from Motlie." | cargo run -p motlie-models --example tts_piper \
 - The env-gated test path uses `MOTLIE_TEST_PIPER_ARTIFACT_ROOT` to point at
   the same Hugging Face cache root.
 - A compatible ONNX Runtime installation must be provided explicitly for the
-  `ort` crate. Set `ORT_LIB_PATH` unless ONNX Runtime is already discoverable
-  via `pkg-config` or another explicit system installation path.
+  `ort` crate. Set `ORT_LIB_PATH` to a source-built static ONNX Runtime release
+  directory and leave `ORT_PREFER_DYNAMIC_LINK` unset.
 - A system `libespeak-ng` installation must be available at build and runtime.
   Motlie no longer vendors or bootstraps `espeak-ng` during `cargo build`.
   If the library is installed in a non-standard location, set
