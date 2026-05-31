@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-05-30 | @codex-358-research | Addressed review round 1 by co-locating M4 with M1-M3, marking Control API/webhook Phase 6 work as M4 definition/stub work, adding M3 conversation webhook events, aligning M1 structured-log acceptance with #364, and updating operator module trees. |
 | 2026-05-30 | @codex-358-research | Reviewed the design and split product tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). |
 | 2026-05-30 | @codex-358-research | Added startup-selected operator input modes: `--tui` for the local terminal UI, `--socket <path>` for headless Unix-domain command control, and a command-source mux that serializes both sources through one dispatcher when enabled together. |
 | 2026-05-30 | @codex-358-research | Added explicit Control API work for app-server call discovery and per-call attachment: `GET /api/v1/calls`, `GET /api/v1/calls/{call_id}`, and call attachments that bind a registered webhook subscription to one call's events/transcripts. |
@@ -28,7 +29,7 @@ Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against
 Execution policy for the initial implementation:
 
 - the gateway starts as an idle operator-controlled application with an HTTP/WebSocket listener; `--tui` enables the local TUI, `--socket <path>` enables headless Unix-domain command control, and the gateway does not answer inbound calls until an operator command source enables inbound mode or runs `answer`
-- the same call-control actions must also be available through an authenticated Gateway Control API, and gateway application webhooks must allow external servers to receive call/transcript/TTS events
+- in milestone 4 (#367), the same call-control actions must also be available through an authenticated Gateway Control API, and gateway application webhooks must allow external servers to receive call/transcript/TTS events
 - milestone 1 (#364) is inbound calls answered and managed in the TUI, with ASR transcription in the selected-call detail pane
 - milestone 2 (#365) is outbound dialing plus TTS driven by the TUI command surface and selected-call detail text input
 - milestone 3 (#366) is full-duplex conversation driven by a TUI chat interface over the selected call
@@ -36,6 +37,7 @@ Execution policy for the initial implementation:
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
+- phases are capability layers; milestones #364-#367 are shippable increments gated in Phase 8, so Phase 6 API/webhook tasks define contracts and stubs until their milestone 4 implementation gate
 
 ---
 
@@ -73,7 +75,7 @@ Extend the existing provider-neutral voice layer and add the Telnyx-specific dep
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Crate Hierarchy and API Surfaces`
 - [ ] Add startup flags `--tui` and `--socket <path>`; allow either, both, or neither when the process relies only on `--load` and/or authenticated HTTP Control API, and route both live local input sources through one serialized command dispatcher when both are enabled.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Gateway Configuration Requirement`
-- [ ] Add `api/{control.rs,auth.rs,subscriptions.rs}` and `events/{envelope.rs,dispatcher.rs,delivery.rs}` for the external Control API and gateway application webhook delivery.
+- [ ] Add `api/{control.rs,auth.rs,subscriptions.rs}` and `events/{envelope.rs,dispatcher.rs,delivery.rs}` scaffolding for the external Control API and gateway application webhook delivery; implement and validate these surfaces in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Crate Hierarchy and API Surfaces`
 - [ ] Start the gateway as an idle listener by default; do not register Telnyx apps, bind numbers, answer inbound calls, or dial outbound calls until a configured command source or authenticated Control API request does so.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Staged Build Strategy`
@@ -280,7 +282,7 @@ Wire call-control operations for inbound and outbound calls.
 
 - [ ] Add `motlie-driver` commands for gateway status, config, and persistence: `status`, `listener status`, `state dump [path]`, `shutdown [dump_path]`, `config show`, `config set webhook-url <https-url>`, `config set media-url <wss-url>`, `config set from-number <e164>`, and `config set state-path <path>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Add `motlie-driver` commands for external automation: `api token create`, `api token revoke`, `webhook subscription list`, `webhook subscription add <url> --events <event,...>`, `webhook subscription upsert <subscription-id> <url> --events <event,...> --secret-ref <secret-ref>`, `webhook subscription remove <subscription-id>`, and `webhook subscription test <subscription-id>`.
+- [ ] Define `motlie-driver` commands for external automation: `api token create`, `api token revoke`, `webhook subscription list`, `webhook subscription add <url> --events <event,...>`, `webhook subscription upsert <subscription-id> <url> --events <event,...> --secret-ref <secret-ref>`, `webhook subscription remove <subscription-id>`, and `webhook subscription test <subscription-id>`; implement and validate them in milestone 4 (#367).
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Application Webhooks and Gateway Control API`
 - [ ] Add Telnyx provisioning commands: `telnyx app list`, `telnyx app create <name>`, `telnyx app use <connection-id>`, `telnyx app webhook set <https-url>`, `telnyx number list`, `telnyx number use <e164>`, and `telnyx number bind <e164> <connection-id>`.
   DESIGN reference: `Operator REPL and TUI Control Surface`
@@ -312,34 +314,40 @@ Wire call-control operations for inbound and outbound calls.
 
 ### 6.5 - Gateway Control API
 
-- [ ] Add authenticated call read endpoints: `GET /api/v1/calls` with state/direction filters and cursor pagination, plus `GET /api/v1/calls/{call_id}` with full call detail, media/transcript/TTS state, provider diagnostic IDs, attachments, last error, and recent timeline entries.
+Phase 6.5 defines the HTTP Control API contract and lightweight routing stubs only. Full implementation and validation belong to milestone 4 (#367), not M1, M2, or M3.
+
+- [ ] Define authenticated call read endpoints: `GET /api/v1/calls` with state/direction filters and cursor pagination, plus `GET /api/v1/calls/{call_id}` with full call detail, media/transcript/TTS state, provider diagnostic IDs, attachments, last error, and recent timeline entries; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Add authenticated call attachment endpoints: `POST /api/v1/calls/{call_id}/attachments`, `GET /api/v1/calls/{call_id}/attachments`, and `DELETE /api/v1/calls/{call_id}/attachments/{attachment_id}`.
+- [ ] Define authenticated call attachment endpoints: `POST /api/v1/calls/{call_id}/attachments`, `GET /api/v1/calls/{call_id}/attachments`, and `DELETE /api/v1/calls/{call_id}/attachments/{attachment_id}`; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Implement attachment semantics so an app server can bind an existing webhook subscription to one call's transcript/events before or after answer; deleting the attachment stops delivery for that subscription without hanging up the call.
+- [ ] Define attachment semantics so an app server can bind an existing webhook subscription to one call's transcript/events before or after answer; deleting the attachment stops delivery for that subscription without hanging up the call. Implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Add authenticated call-control endpoints: `POST /api/v1/calls/{call_id}/answer`, `POST /api/v1/calls/{call_id}/reject`, and `POST /api/v1/calls/{call_id}/hangup`.
+- [ ] Define authenticated call-control endpoints: `POST /api/v1/calls/{call_id}/answer`, `POST /api/v1/calls/{call_id}/reject`, and `POST /api/v1/calls/{call_id}/hangup`; implement and validate the HTTP API in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Add outbound dialer/TTS endpoints: `POST /api/v1/calls`, `POST /api/v1/calls/{call_id}/say`, and `POST /api/v1/calls/{call_id}/interrupt`.
+- [ ] Define outbound dialer/TTS endpoints: `POST /api/v1/calls`, `POST /api/v1/calls/{call_id}/say`, and `POST /api/v1/calls/{call_id}/interrupt`; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
-- [ ] Route Control API requests through the same internal command/controller layer as operator commands so answer, dial, hangup, and say behavior cannot drift.
+- [ ] Define routing so Control API requests enter the same internal command/controller layer as operator commands and answer, dial, hangup, and say behavior cannot drift; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Operator REPL and TUI Control Surface`
-- [ ] Require authentication for the Control API and support `Idempotency-Key` on mutating requests, including call attachment create/delete operations.
+- [ ] Define authentication and `Idempotency-Key` requirements for mutating Control API requests, including call attachment create/delete operations; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
 
 ### 6.6 - Gateway application webhooks
 
-- [ ] Add subscription CRUD endpoints: `POST /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions/{subscription_id}`, `DELETE /api/v1/webhook-subscriptions/{subscription_id}`, and `POST /api/v1/webhook-subscriptions/{subscription_id}/test`.
+Phase 6.6 defines the application webhook contract and event taxonomy only. Full subscription storage, delivery, retries, and harness validation belong to milestone 4 (#367).
+
+- [ ] Define subscription CRUD endpoints: `POST /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions`, `GET /api/v1/webhook-subscriptions/{subscription_id}`, `DELETE /api/v1/webhook-subscriptions/{subscription_id}`, and `POST /api/v1/webhook-subscriptions/{subscription_id}/test`; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Implement outbound application webhook delivery as HTTP `POST <subscription.url>` with `Content-Type: application/json`, the gateway event envelope as the body, and HMAC delivery headers.
+- [ ] Define outbound application webhook delivery as HTTP `POST <subscription.url>` with `Content-Type: application/json`, the gateway event envelope as the body, and HMAC delivery headers; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Treat any `2xx` webhook response as delivery acknowledgement; treat non-`2xx`, timeout, and connection failure as retryable delivery failure.
+- [ ] Define delivery acknowledgement and retry semantics: treat any `2xx` webhook response as acknowledgement, and treat non-`2xx`, timeout, and connection failure as retryable delivery failure; implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
-- [ ] Emit milestone 1 events: `call.inbound.pending`, `call.answering`, `call.answered`, `media.started`, `transcript.partial`, `transcript.final`, `call.ended`, and `call.failed`.
+- [ ] Define inbound service event types for milestone 4 delivery: `call.inbound.pending`, `call.answering`, `call.answered`, `media.started`, `transcript.partial`, `transcript.final`, `call.ended`, and `call.failed`.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
-- [ ] Emit milestone 2 events: `call.outbound.created`, `call.dialing`, `call.ringing`, `call.answered`, `media.started`, `tts.playback.started`, `tts.playback.finished`, `tts.playback.failed`, `call.ended`, and `call.failed`.
+- [ ] Define outbound service event types for milestone 4 delivery: `call.outbound.created`, `call.dialing`, `call.ringing`, `call.answered`, `media.started`, `tts.playback.started`, `tts.playback.finished`, `tts.playback.failed`, `call.ended`, and `call.failed`.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
-- [ ] Deliver application webhooks asynchronously with bounded retries; never block Telnyx webhook handling on subscriber delivery.
+- [ ] Define milestone 3 conversation event types for milestone 4 delivery: `conversation.attached`, `conversation.command.created`, `conversation.command.completed`, and `conversation.detached`.
+  DESIGN reference: `Application Webhooks and Gateway Control API`, `Conversation Handler Contract`
+- [ ] Deliver application webhooks asynchronously with bounded retries; never block Telnyx webhook handling on subscriber delivery. Implement and validate in milestone 4 (#367).
   DESIGN reference: `Application Webhooks and Gateway Control API`
 
 ## Phase 7: Pipeline Orchestration
@@ -401,7 +409,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Staged Build Strategy`, `Operator REPL and TUI Control Surface`
 - [ ] Validate that `stream_bidirectional_target_legs=self` is correct for the initial single-leg AI call pattern.
   DESIGN reference: `Open Concerns`
-- [ ] Add structured logs for `call_control_id`, `stream_id`, codec, and observed sample rate.
+- [ ] Add structured logs for the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
   DESIGN reference: `Open Concerns`
 
 ### 8.2 - Milestone 2 outbound TUI dialer/TTS flow (#365)
@@ -471,6 +479,8 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
 - [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, highlighted roster rows, unread event counts, auto-selection only when no active call is selected, source-local selected-call default command targets, TUI/socket selection isolation, command-source mux ordering, `answer` command transition, and selected-call detail event emission.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
+- [ ] Add a milestone 1 structured-log check that verifies gateway call id, Telnyx diagnostic ids, stream id, observed codec, observed sample rate, and transcript partial/final events are logged during an inbound transcription session.
+  DESIGN reference: `Inbound Call Handler Design`, `Open Concerns`
 - [ ] Add Control API tests for authenticated call list/detail reads, call attachment create/list/delete, attach-before-answer and attach-after-answer behavior, answer/reject/hangup, outbound dial/say, idempotency handling, and refusal of unauthenticated mutating requests.
   DESIGN reference: `Application Webhooks and Gateway Control API`
 - [ ] Add application webhook delivery tests for event envelope shape, HMAC signature verification, retry behavior, event filtering, and duplicate-event deduplication by event ID.
