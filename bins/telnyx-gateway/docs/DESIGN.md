@@ -6,12 +6,13 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-30 | @codex-358-research: Moved the Telnyx design docs under `bins/telnyx-gateway/docs`, collapsed the previously separate Telnyx adapter crate into Telnyx-specific modules owned by `bins/telnyx-gateway`, and standardized the gateway path on `bins/telnyx-gateway`. | Overview, Crate Hierarchy and API Surfaces, Media Adaptation Pipeline, Inbound Call Handler Design, Deployment, Getting Started, References |
 | 2026-05-30 | @codex-358-research: Replaced stale absolute local references with repo-relative links to the current ASR/TTS design docs and model contract source files. | References |
 | 2026-05-30 | @codex-358-research: Addressed PR review by making the reorder boundary Telnyx-adapter mapping plus provider-neutral sequenced-frame reorder, correcting Sherpa's current typed input contract to ordered `AudioBuf<i16, 16_000, Mono>`, demoting Fish Speech to a historical rejected candidate, and documenting the missing `i16_to_f32` helper needed by the i16 telephony resampler wrapper. | Media Adaptation Pipeline, Recommended ASR/TTS Stack, Inbound Call Handler Design, Gap Analysis, Open Concerns |
 | 2026-05-30 | @codex-358-research: Rebased the design around the landed `motlie-voice` crate from PR #209, so Telnyx extends existing `motlie_model::typed` and `motlie_voice` media primitives instead of rebuilding them. Added anti-aliased resampling, buffered-vs-transport streaming, and Piper CUDA caveats. | Overview, Goals and Non-Goals, Crate Hierarchy and API Surfaces, Media Adaptation Pipeline, Recommended ASR/TTS Stack, Gap Analysis, Testing Scope for PLAN |
 | 2026-04-17 | @codex-macmini-telnyx: Removed the remaining `Box<dyn>` streaming-response sketch from `ConversationHandler` and replaced it with an associated `TextStream` type so the design remains static-dispatch at the gateway surface. | Closed-Enum Selection, Conversation Handler Contract, Streaming Conversation Responses |
 | 2026-04-17 | @codex-macmini-telnyx: Tightened the execution policy so the first live Telnyx implementation and validation slice is explicitly `Sherpa + Piper`. Other pairings remain documented as follow-on combinations, not peer initial targets. | Overview, Goals and Non-Goals, Concrete Combination Requirements |
-| 2026-04-16 | @codex-macmini-telnyx: Split the proposed implementation into provider-agnostic `libs/voice` and Telnyx-specific `libs/voice_telnyx`, and documented the crate hierarchy plus API surfaces explicitly in both DESIGN and PLAN. | Overview, Recommended Integration Shape, Crate Hierarchy and API Surfaces, Deployment: Private Host, Getting Started: Local Deployment |
+| 2026-04-16 | @codex-macmini-telnyx: Split the proposed implementation into provider-agnostic `libs/voice` and Telnyx-specific `bins/telnyx-gateway`, and documented the crate hierarchy plus API surfaces explicitly in both DESIGN and PLAN. | Overview, Recommended Integration Shape, Crate Hierarchy and API Surfaces, Deployment: Private Host, Getting Started: Local Deployment |
 | 2026-04-16 | @codex-macmini-telnyx: Added an explicit media-adaptation pipeline design with typed stage contracts, marker types, and compile-time pipeline assembly guidance for codecs, resampling, framing, and model-specific normalization. | Recommended Integration Shape, Media Adaptation Pipeline, Inbound Call Handler Design, Gap Analysis |
 | 2026-04-15 | @codex-macmini-telnyx: Added the pluggable `ConversationHandler` stage, made ASR/TTS injection explicit, and documented private-host deployment plus a local getting-started flow using ngrok or Tailscale Funnel. | Overview, Recommended Integration Shape, Recommended ASR/TTS Stack, Inbound Call Handler Design, Deployment: Private Host, Getting Started: Local Deployment, Open Concerns |
 | 2026-04-15 | @codex-macmini-telnyx: Added the recommended v1 ASR/TTS stack, concrete telephony pipeline, and latency budget based on current Motlie benchmark results and backend readiness. | Recommended ASR/TTS Stack, Gap Analysis, Open Concerns |
@@ -71,10 +72,8 @@ Recommended deployment shape:
    Remains the curated bundle layer for Piper, Qwen3-TTS, `whisper.cpp`, `sherpa-onnx`, and Moonshine.
 3. existing provider-agnostic Rust voice crate: `libs/voice` (`motlie-voice`)
    Already owns `PcmFrame`, WAV stream helpers, conversion helpers, downmixing, and a placeholder resampler. The Telnyx slice extends it with provider-neutral codecs, packetization, stage composition, conversation and DTMF handler traits, and runtime orchestration.
-4. new Telnyx adapter crate, recommended name: `libs/voice_telnyx`
-   Owns Telnyx webhook handling, WebSocket message schema, call-control client, and mapping between Telnyx transport messages and `libs/voice` types.
-5. optional deployable service binary, recommended name: `bins/motlie-telnyx-gateway`
-   Hosts the HTTP webhook endpoint and WebSocket media endpoint and wires them to application logic.
+4. Telnyx-specific gateway crate and deployable binary: `bins/telnyx-gateway`
+   Owns Telnyx webhook handling, WebSocket message schema, call-control client, mapping between Telnyx transport messages and `libs/voice` types, HTTP/WebSocket serving, configuration, and process wiring.
 
 This keeps telephony transport concerns out of the model contracts while also preventing Telnyx-specific protocol types from leaking into the reusable media pipeline.
 
@@ -286,17 +285,17 @@ Those are useful products, but they bypass Motlie's local ASR/TTS stack. They sh
 ### High-Level Architecture
 
 ```text
-Telnyx webhook -> motlie-telnyx-gateway HTTP handler
-               -> libs/voice_telnyx::call_control
+Telnyx webhook -> telnyx-gateway HTTP handler
+               -> telnyx_gateway::call_control
                -> Telnyx REST answer/dial/streaming_start
 
-Telnyx media WebSocket -> libs/voice_telnyx::media
+Telnyx media WebSocket -> telnyx_gateway::media
                        -> libs/voice pipeline stages
                        -> StreamingTranscriber session
                        -> ConversationHandler
                        -> SpeechSynthesizer / SpeechStream
                        -> libs/voice pipeline stages
-                       -> libs/voice_telnyx::media
+                       -> telnyx_gateway::media
                        -> Telnyx media WebSocket
 ```
 
@@ -343,7 +342,7 @@ Those are telephony concerns, not model capability concerns.
 
 ### Crate Split
 
-The implementation should extend the landed provider-agnostic crate and add a Telnyx-specific adapter crate. The rule is reuse first: do not create a second voice/media hierarchy when `motlie-voice` already owns the shared primitives from PR #209.
+The implementation should extend the landed provider-agnostic crate and keep Telnyx-specific adapter modules inside the `bins/telnyx-gateway` executable crate. The rule is reuse first: do not create a second voice/media hierarchy when `motlie-voice` already owns the shared primitives from PR #209.
 
 Recommended hierarchy:
 
@@ -364,24 +363,23 @@ libs/
         resample.rs              # already has Resampler + LinearInterpolator placeholder
       codec/
       telephony/
-  voice_telnyx/
+bins/
+  telnyx-gateway/
     Cargo.toml
+    docs/
+      DESIGN.md
+      PLAN.md
     src/
       lib.rs
       error.rs
-      webhook/
-      call_control/
-      media/
-      adapter.rs
-
-bins/
-  motlie-telnyx-gateway/
-    Cargo.toml
-    src/
       main.rs
       cli.rs
       serve.rs
       logging.rs
+      webhook/
+      call_control/
+      media/
+      adapter.rs
 ```
 
 ### `libs/voice` Surface
@@ -453,14 +451,14 @@ libs/voice/src/
 - Telnyx WebSocket message enums
 - Telnyx REST command payloads
 
-### `libs/voice_telnyx` Surface
+### `bins/telnyx-gateway` Surface
 
-`libs/voice_telnyx` should be a transport and control adapter over `libs/voice`.
+`bins/telnyx-gateway` should be the Telnyx-specific executable crate over `libs/voice`. It owns Telnyx protocol/control modules and process wiring, but it must not become a second provider-neutral voice library.
 
 Recommended modules:
 
 ```text
-libs/voice_telnyx/src/
+bins/telnyx-gateway/src/
   lib.rs
   error.rs
 
@@ -485,8 +483,14 @@ libs/voice_telnyx/src/
   adapter.rs
 ```
 
-`libs/voice_telnyx` owns:
+`bins/telnyx-gateway` owns:
 
+- CLI parsing
+- environment loading
+- model selection flags
+- listen address and `--webhook-url`
+- tunnel-friendly startup wiring
+- logging and tracing
 - Telnyx webhook JSON schema
 - Telnyx WebSocket event schema
 - Telnyx REST request and response types
@@ -495,38 +499,24 @@ libs/voice_telnyx/src/
 - translation between provider-neutral call actions and Telnyx call-control commands
 - Telnyx-specific hangup/error policy for unsupported codecs or protocol violations
 
-`libs/voice_telnyx` must not own:
+It should assemble:
+
+- concrete `libs/models` bundle selections
+- concrete `libs/voice` runtime and pipeline selections
+- Telnyx protocol modules that map transport events into provider-neutral voice stages
+
+`bins/telnyx-gateway` must not own:
 
 - generic resamplers
 - generic PCM frame types
 - generic chunkers or packetizers
 - provider-neutral telephony codecs such as G.711 or L16
 - application conversation traits
-
-### `bins/motlie-telnyx-gateway` Surface
-
-The binary should stay thin.
-
-It owns:
-
-- CLI parsing
-- environment loading
-- model selection flags
-- listen address and `--webhook-url`
-- tunnel-friendly startup wiring
-- logging and tracing
-
-It should assemble:
-
-- concrete `libs/models` bundle selections
-- concrete `libs/voice` runtime and pipeline selections
-- one `libs/voice_telnyx` adapter instance
-
-It should not own codec implementations, Telnyx schema structs, conversation policy, or reusable runtime abstractions.
+- reusable runtime abstractions
 
 ### Provider-Neutral API Rule
 
-If a type or module could be reused for Twilio or another telephony provider, it belongs in `libs/voice`, not `libs/voice_telnyx`.
+If a type or module could be reused for Twilio or another telephony provider, it belongs in `libs/voice`, not `bins/telnyx-gateway`.
 
 Examples that belong in `libs/voice`:
 
@@ -538,7 +528,7 @@ Examples that belong in `libs/voice`:
 - `Resampler`
 - `Packetizer`
 
-Examples that belong in `libs/voice_telnyx`:
+Examples that belong in `bins/telnyx-gateway`:
 
 - `TelnyxWebhookEvent`
 - `TelnyxWsMessage`
@@ -616,7 +606,7 @@ The gateway should map Telnyx WebSocket fields into typed transport values expli
 - `start.media_format.sample_rate` selects the inbound transport sample-rate const, for example `8_000` or `16_000`
 - `start.media_format.channels` selects the inbound channel-layout marker; current telephony expectation is mono
 - each `media.payload` becomes one `EncodedFrame<C>` after base64 decoding and Telnyx protocol mapping
-- `media.chunk` stays in `libs/voice_telnyx`; that adapter maps it to a provider-neutral per-track sequence before a frame enters `libs/voice`
+- `media.chunk` stays in `bins/telnyx-gateway`; that adapter maps it to a provider-neutral per-track sequence before a frame enters `libs/voice`
 
 Design rule:
 
@@ -901,7 +891,7 @@ Inbound mandatory stages:
 1. `SequencedFrameReorder<C>`
    Input: `EncodedFrame<C>`
    Output: `EncodedFrame<C>`
-   Contract: reorder by provider-neutral per-track sequence, reject unbounded gaps after timeout. Telnyx `media.chunk` is consumed earlier by `libs/voice_telnyx` and must not appear in this provider-neutral stage.
+   Contract: reorder by provider-neutral per-track sequence, reject unbounded gaps after timeout. Telnyx `media.chunk` is consumed earlier by `bins/telnyx-gateway` and must not appear in this provider-neutral stage.
 2. `G711Decoder<Pcmu, 8_000, Mono, i16>` and `G711Decoder<Pcma, 8_000, Mono, i16>`
    Contract: decode encoded RTP payload bytes into linear PCM, no base64 or RTP header parsing inside this stage.
 3. `L16Decoder<16_000, Mono, i16>`
@@ -1077,11 +1067,11 @@ The relevant `motlie-models` feature flags are:
 Examples:
 
 ```bash
-cargo build --release -p motlie-telnyx-gateway \
+cargo build --release -p telnyx-gateway \
   --no-default-features \
   --features "model-sherpa-onnx-streaming model-piper-en-us-ljspeech-medium"
 
-cargo build --release -p motlie-telnyx-gateway \
+cargo build --release -p telnyx-gateway \
   --no-default-features \
   --features "model-moonshine-streaming model-qwen3-tts-cpp"
 ```
@@ -1418,7 +1408,7 @@ Recommended mapping:
 
 1. Parse the WebSocket `start` frame.
 2. Read `media_format` and instantiate the matching decoder.
-3. In `libs/voice_telnyx`, base64 decode each `media.payload`, map Telnyx `media.chunk` to provider-neutral per-track sequence metadata, and create `EncodedFrame<C>` values.
+3. In `bins/telnyx-gateway`, base64 decode each `media.payload`, map Telnyx `media.chunk` to provider-neutral per-track sequence metadata, and create `EncodedFrame<C>` values.
 4. In `libs/voice`, reorder those sequenced encoded frames before codec decode.
 5. For each ordered audio payload:
    - decode from Telnyx codec to linear PCM
@@ -1436,7 +1426,7 @@ Sequence mapping detail:
 
 Recommended gateway rule:
 
-- `libs/voice_telnyx` maps `media.chunk` per track to provider-neutral sequence metadata
+- `bins/telnyx-gateway` maps `media.chunk` per track to provider-neutral sequence metadata
 - `libs/voice` reorders by that generic sequence before codec decode
 - emit a gateway-local `u64` sequence counter after reordering for logs and deterministic fixtures
 
@@ -1847,7 +1837,7 @@ The gateway binary should accept a `--webhook-url` flag so the external public U
 Example shape:
 
 ```text
-motlie-telnyx-gateway \
+telnyx-gateway \
   --listen 127.0.0.1:8080 \
   --webhook-url https://example.ngrok.app \
   --media-path /telnyx/media \
@@ -1961,7 +1951,7 @@ curl -X GET \
 #### 6. Build the gateway binary
 
 ```bash
-cargo build --release -p motlie-telnyx-gateway
+cargo build --release -p telnyx-gateway
 ```
 
 #### 7. Download model artifacts
@@ -1976,7 +1966,7 @@ Recommended v1 defaults:
 #### 8. Start the gateway with model paths and listen address
 
 ```bash
-./target/release/motlie-telnyx-gateway \
+./target/release/telnyx-gateway \
   --listen 127.0.0.1:8080 \
   --webhook-url https://example.ngrok.app \
   --webhook-path /telnyx/webhooks \
@@ -2274,7 +2264,7 @@ Cons:
 - Telnyx `call.initiated` webhook: https://developers.telnyx.com/api-reference/callbacks/call-initiated
 - Tailscale Funnel docs: https://tailscale.com/kb/1223/tailscale-funnel/
 - ngrok localhost sharing docs: https://ngrok.com/docs/guides/share-localhost/overview
-- Existing ASR design: [DESIGN_ASR.md](./DESIGN_ASR.md)
-- Existing TTS design: [DESIGN_TTS.md](./DESIGN_TTS.md)
-- Existing transcription contracts: [transcription.rs](../../model/src/transcription.rs)
-- Existing speech contracts: [speech.rs](../../model/src/speech.rs)
+- Existing ASR design: [DESIGN_ASR.md](../../../libs/models/docs/DESIGN_ASR.md)
+- Existing TTS design: [DESIGN_TTS.md](../../../libs/models/docs/DESIGN_TTS.md)
+- Existing transcription contracts: [transcription.rs](../../../libs/model/src/transcription.rs)
+- Existing speech contracts: [speech.rs](../../../libs/model/src/speech.rs)
