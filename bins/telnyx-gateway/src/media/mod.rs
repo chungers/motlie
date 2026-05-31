@@ -359,6 +359,10 @@ fn map_media_format(input: Option<&MediaFormatPayload>) -> MediaFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::adapter::EchoAsrFactory;
+    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
 
     #[test]
     fn pcma_and_pcmu_decode_to_i16_audio() {
@@ -383,5 +387,139 @@ mod tests {
         )
         .expect("pcma should decode");
         assert_eq!(pcma.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn telnyx_media_replay_feeds_echo_asr_transcripts() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                Some("+15550000001".to_string()),
+                Some("+15550000002".to_string()),
+                CallStatus::PendingInbound,
+            )
+        };
+        let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
+        let mut session = None;
+        let mut selected_call = None;
+        let mut media_format = None;
+        let mut reorder = SequencedFrameReorder::new(1, 32);
+
+        let start = serde_json::json!({
+            "event": "start",
+            "stream_id": "stream-1",
+            "start": {
+                "call_control_id": "call-1",
+                "call_session_id": "sess-1",
+                "media_format": {
+                    "encoding": "L16",
+                    "sample_rate": 16000,
+                    "channels": 1
+                }
+            }
+        })
+        .to_string();
+        handle_text(
+            &start,
+            &state,
+            &asr,
+            &mut session,
+            &mut selected_call,
+            &mut media_format,
+            &mut reorder,
+        )
+        .await
+        .expect("start event should open ASR session");
+
+        let chunk = STANDARD.encode(l16_samples(8_000));
+        let media_two = media_event("stream-1", "2", &chunk);
+        handle_text(
+            &media_two,
+            &state,
+            &asr,
+            &mut session,
+            &mut selected_call,
+            &mut media_format,
+            &mut reorder,
+        )
+        .await
+        .expect("out-of-order media should buffer");
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
+
+        let media_one = media_event("stream-1", "1", &chunk);
+        handle_text(
+            &media_one,
+            &state,
+            &asr,
+            &mut session,
+            &mut selected_call,
+            &mut media_format,
+            &mut reorder,
+        )
+        .await
+        .expect("contiguous media should feed ASR");
+
+        let stop = serde_json::json!({
+            "event": "stop",
+            "stream_id": "stream-1"
+        })
+        .to_string();
+        handle_text(
+            &stop,
+            &state,
+            &asr,
+            &mut session,
+            &mut selected_call,
+            &mut media_format,
+            &mut reorder,
+        )
+        .await
+        .expect("stop should finish ASR session");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(selected_call.as_deref(), Some(gateway_call_id.as_str()));
+        assert_eq!(call.status, CallStatus::Ended);
+        assert_eq!(call.ids.stream_id.as_deref(), Some("stream-1"));
+        assert_eq!(call.media.encoding.as_deref(), Some("L16"));
+        assert_eq!(call.media.sample_rate_hz, Some(16_000));
+        assert_eq!(call.transcripts.len(), 2);
+        assert_eq!(call.transcripts[0].text, "received 16000 samples");
+        assert_eq!(call.transcripts[1].text, "received 16000 samples");
+    }
+
+    fn l16_samples(count: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(count * 2);
+        for _ in 0..count {
+            bytes.extend_from_slice(&0_i16.to_be_bytes());
+        }
+        bytes
+    }
+
+    fn media_event(stream_id: &str, chunk: &str, payload: &str) -> String {
+        serde_json::json!({
+            "event": "media",
+            "stream_id": stream_id,
+            "media": {
+                "track": "inbound",
+                "chunk": chunk,
+                "payload": payload
+            }
+        })
+        .to_string()
     }
 }
