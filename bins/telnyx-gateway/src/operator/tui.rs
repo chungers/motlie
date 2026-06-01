@@ -280,7 +280,13 @@ fn selected_detail_lines(state: &GatewayState) -> Vec<Line<'static>> {
     if let Some(reason) = &call.terminal_reason {
         lines.push(Line::from(format!("ended: {reason}")));
     }
-    lines.extend([Line::from(""), Line::from("transcript:")]);
+    lines.extend([
+        Line::from(""),
+        Line::from("assembled transcript:"),
+        Line::from(assembled_transcript_text(call)),
+        Line::from(""),
+        Line::from("recent events:"),
+    ]);
 
     for transcript in call.transcripts.iter().rev().take(12).rev() {
         let prefix = match transcript.kind {
@@ -294,6 +300,20 @@ fn selected_detail_lines(state: &GatewayState) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("error: {error}")));
     }
     lines
+}
+
+fn assembled_transcript_text(call: &crate::operator::state::CallSession) -> String {
+    match (
+        call.final_transcript.trim(),
+        call.current_partial.as_deref().map(str::trim),
+    ) {
+        ("", Some(partial)) if !partial.is_empty() => partial.to_string(),
+        (final_text, Some(partial)) if !final_text.is_empty() && !partial.is_empty() => {
+            format!("{final_text} {partial}")
+        }
+        (final_text, _) if !final_text.is_empty() => final_text.to_string(),
+        _ => "<none>".to_string(),
+    }
 }
 
 fn status_lines(state: &GatewayState) -> Vec<Line<'static>> {

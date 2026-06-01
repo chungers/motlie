@@ -4,12 +4,13 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Updated milestone 1 live behavior to answer with bidirectional PCMU RTP and send outbound silence keepalive after Telnyx reported normal caller-side hangups in receive-only mode; added assembled transcript display above raw partial/final events. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 live-call termination diagnostics: preserve Telnyx hangup/source/SIP fields in call state, selected-call detail, structured logs, and webhook tests. |
 | 2026-06-01 | @codex-364-impl | Refined milestone 1 live handling: suppress initial silence and sustained low-energy tails before Sherpa, suppress repeated-token transcript hallucinations from the TUI transcript stream while logging them as suppressed events, and align the shell cursor by rendered rows when output wraps. |
 | 2026-06-01 | @codex-364-impl | Merged the TUI command input and REPL history into one shell-style left pane. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 ASR start-of-speech gating: low-energy initial telephony frames are logged and withheld from Sherpa until speech energy is detected. |
 | 2026-06-01 | @codex-364-impl | Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path. |
-| 2026-06-01 | @codex-364-impl | Adjusted milestone 1 live validation to request inbound-only `PCMU` media and defer `stream_bidirectional_target_legs`/bidirectional `L16` validation to later outbound or duplex milestones. |
+| 2026-06-01 | @codex-364-impl | Recorded the now-superseded receive-only `PCMU` live-test attempt; later live evidence moved milestone 1 to bidirectional `PCMU` RTP silence keepalive. |
 | 2026-05-31 | @codex-364-impl | Clarified socket mode as the local agent-tooling surface: NDJSON command execution, structured snapshots, cursor-based event polling, and optional tmux/mstream wake-up notifications are socket responsibilities, while webhooks/Control API remain appserver integration surfaces. |
 | 2026-05-31 | @codex-364-impl | Updated gateway ORT guidance to use `ort/download-binaries`: Cargo downloads and statically links `libonnxruntime.a`; no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source build. |
 | 2026-05-31 | @codex-364-impl | Superseded earlier manual ONNX Runtime provisioning guidance with the `ort/download-binaries` static-link policy above. |
@@ -423,15 +424,17 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Implement `inbound enable --manual` -> `call.initiated` -> highlighted pending/waiting call roster row -> optional `call use <call>` -> `answer [call]` -> `answer + streaming` -> WebSocket media -> ASR -> `TuiTranscriptSink` selected-call detail -> hangup flow.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
-- [ ] Show call state, media metadata, partial/final transcript text, errors, and terminal call state in the selected-call detail pane.
+- [ ] Show call state, media metadata, assembled transcript text, recent partial/final transcript events, errors, and terminal call state in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
+- [ ] Answer milestone 1 calls with bidirectional `PCMU` RTP and send outbound PCMU silence keepalive frames until milestone 2/M3 replaces that path with real TTS audio.
+  DESIGN reference: `Inbound Call Handler Design`, `Audio Codecs and Formats`
 - [ ] Preserve Telnyx termination details from `streaming.stopped`, `streaming.failed`, `call.hangup`, and `call.ended` webhooks in selected-call detail and structured logs so live drops can be classified as caller hangup, provider timeout, media failure, or another carrier/SIP cause.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing only a short post-speech low-energy hangover, suppressing sustained low-energy tails, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata.
   DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
 - [ ] Keep inbound disabled by default at process startup; incoming webhooks must not be answered until the operator enables inbound handling.
   DESIGN reference: `Staged Build Strategy`, `Operator REPL and TUI Control Surface`
-- [ ] Validate that `stream_bidirectional_target_legs=self` is correct for the initial single-leg AI call pattern.
+- [ ] Validate during live testing that `stream_bidirectional_target_legs=self` plus outbound PCMU silence keepalive prevents provider-normal early call termination in the initial single-leg ASR-only pattern.
   DESIGN reference: `Open Concerns`
 - [ ] Add structured logs for the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
   DESIGN reference: `Open Concerns`
@@ -546,7 +549,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Outbound Call Handler Design`
 - [ ] Add one milestone 3 end-to-end example configuration for Sherpa + Piper only after the inbound ASR and outbound TTS milestones are independently stable.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Document the first live-call checklist, including observed codec logging. Defer `stream_bidirectional_target_legs` validation to milestone 2 or milestone 3, because milestone 1 inbound-only transcription should not request bidirectional media.
+- [ ] Document the first live-call checklist, including observed codec logging, Telnyx termination reason logging, and bidirectional PCMU silence keepalive validation.
   DESIGN reference: `Open Concerns`
 
 ### 9.3 - Live validation

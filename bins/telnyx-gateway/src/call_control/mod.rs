@@ -136,12 +136,7 @@ impl TelnyxClient {
     }
 
     pub async fn answer_call(&self, request: &AnswerRequest<'_>) -> anyhow::Result<()> {
-        let body = json!({
-            "stream_url": request.stream_url,
-            "stream_track": "inbound_track",
-            "stream_codec": "PCMU",
-            "command_id": format!("motlie-answer-{}", Uuid::new_v4()),
-        });
+        let body = answer_request_body(request);
         self.post_command(
             &format!(
                 "calls/{}/actions/answer",
@@ -293,6 +288,19 @@ pub struct AnswerRequest<'a> {
     pub stream_url: &'a str,
 }
 
+fn answer_request_body(request: &AnswerRequest<'_>) -> serde_json::Value {
+    json!({
+        "stream_url": request.stream_url,
+        "stream_track": "inbound_track",
+        "stream_codec": "PCMU",
+        "stream_bidirectional_mode": "rtp",
+        "stream_bidirectional_codec": "PCMU",
+        "stream_bidirectional_sampling_rate": 8000,
+        "stream_bidirectional_target_legs": "self",
+        "command_id": format!("motlie-answer-{}", Uuid::new_v4()),
+    })
+}
+
 async fn decode_response<T>(response: reqwest::Response) -> anyhow::Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -306,4 +314,25 @@ where
         bail!("Telnyx request failed with {status}: {text}");
     }
     serde_json::from_str(&text).with_context(|| format!("decode Telnyx response: {text}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answer_request_body_enables_bidirectional_pcmu_rtp() {
+        let body = answer_request_body(&AnswerRequest {
+            call_control_id: "call-1",
+            stream_url: "wss://example.test/telnyx/media",
+        });
+
+        assert_eq!(body["stream_url"], "wss://example.test/telnyx/media");
+        assert_eq!(body["stream_track"], "inbound_track");
+        assert_eq!(body["stream_codec"], "PCMU");
+        assert_eq!(body["stream_bidirectional_mode"], "rtp");
+        assert_eq!(body["stream_bidirectional_codec"], "PCMU");
+        assert_eq!(body["stream_bidirectional_sampling_rate"], 8000);
+        assert_eq!(body["stream_bidirectional_target_legs"], "self");
+    }
 }
