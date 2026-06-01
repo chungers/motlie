@@ -16,6 +16,9 @@ use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
 };
 
+const SPEECH_RMS_THRESHOLD: f32 = 180.0;
+const SPEECH_PEAK_THRESHOLD: i16 = 900;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EncodedMediaFrame {
     pub payload: Vec<u8>,
@@ -72,29 +75,36 @@ struct StopEvent {
     stream_id: Option<String>,
 }
 
+struct MediaSocketState {
+    session: Option<Box<dyn InboundAsrSession>>,
+    gateway_call_id: Option<String>,
+    media_format: Option<MediaFormat>,
+    reorder: SequencedFrameReorder<EncodedMediaFrame>,
+    decoded_frame_count: usize,
+    asr_gate: AsrGate,
+}
+
+impl MediaSocketState {
+    fn new() -> Self {
+        Self {
+            session: None,
+            gateway_call_id: None,
+            media_format: None,
+            reorder: SequencedFrameReorder::new_lazily(32),
+            decoded_frame_count: 0,
+            asr_gate: AsrGate::default(),
+        }
+    }
+}
+
 pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: SharedAsrFactory) {
-    let mut session: Option<Box<dyn InboundAsrSession>> = None;
-    let mut gateway_call_id: Option<String> = None;
-    let mut media_format: Option<MediaFormat> = None;
-    let mut reorder = SequencedFrameReorder::new_lazily(32);
-    let mut decoded_frame_count = 0usize;
+    let mut media_state = MediaSocketState::new();
 
     while let Some(message) = socket.next().await {
         match message {
             Ok(Message::Text(text)) => {
-                if let Err(error) = handle_text(
-                    &text,
-                    &state,
-                    &asr,
-                    &mut session,
-                    &mut gateway_call_id,
-                    &mut media_format,
-                    &mut reorder,
-                    &mut decoded_frame_count,
-                )
-                .await
-                {
-                    log_media_error(&state, gateway_call_id.as_deref(), error).await;
+                if let Err(error) = handle_text(&text, &state, &asr, &mut media_state).await {
+                    log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
                 }
             }
             Ok(Message::Close(_)) => break,
@@ -102,7 +112,7 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
             Err(error) => {
                 log_media_error(
                     &state,
-                    gateway_call_id.as_deref(),
+                    media_state.gateway_call_id.as_deref(),
                     anyhow::Error::from(error),
                 )
                 .await;
@@ -111,10 +121,20 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
         }
     }
 
-    if let (Some(call_id), Some(asr_session)) = (gateway_call_id.as_deref(), session.take()) {
+    if let (Some(call_id), Some(asr_session)) = (
+        media_state.gateway_call_id.as_deref(),
+        media_state.session.take(),
+    ) {
         match asr_session.finish().await {
             Ok(events) => {
-                record_transcript_events(&state, call_id, None, media_format.as_ref(), events).await
+                record_transcript_events(
+                    &state,
+                    call_id,
+                    None,
+                    media_state.media_format.as_ref(),
+                    events,
+                )
+                .await
             }
             Err(error) => log_media_error(&state, Some(call_id), error).await,
         }
@@ -130,11 +150,7 @@ async fn handle_text(
     text: &str,
     state: &SharedState,
     asr: &SharedAsrFactory,
-    session: &mut Option<Box<dyn InboundAsrSession>>,
-    gateway_call_id: &mut Option<String>,
-    media_format: &mut Option<MediaFormat>,
-    reorder: &mut SequencedFrameReorder<EncodedMediaFrame>,
-    decoded_frame_count: &mut usize,
+    media_state: &mut MediaSocketState,
 ) -> anyhow::Result<()> {
     let discriminator: EventDiscriminator =
         serde_json::from_str(text).context("parse Telnyx media event discriminator")?;
@@ -147,9 +163,9 @@ async fn handle_text(
             let Some(call_id) = register_start(state, &event, &format).await else {
                 return Ok(());
             };
-            *media_format = Some(format.clone());
-            *gateway_call_id = Some(call_id);
-            *session = Some(asr.open_session().await?);
+            media_state.media_format = Some(format);
+            media_state.gateway_call_id = Some(call_id);
+            media_state.session = Some(asr.open_session().await?);
             Ok(())
         }
         "media" => {
@@ -162,7 +178,7 @@ async fn handle_text(
             let payload = STANDARD
                 .decode(event.media.payload.as_bytes())
                 .context("decode Telnyx media payload base64")?;
-            let ready = match reorder.push(SequencedFrame {
+            let ready = match media_state.reorder.push(SequencedFrame {
                 sequence,
                 payload: EncodedMediaFrame {
                     payload,
@@ -177,16 +193,7 @@ async fn handle_text(
                 Err(error) => return Err(anyhow::Error::from(error)),
             };
             for frame in ready {
-                ingest_frame(
-                    state,
-                    session,
-                    gateway_call_id.as_deref(),
-                    media_format.as_ref(),
-                    event.stream_id.as_str(),
-                    frame.payload,
-                    decoded_frame_count,
-                )
-                .await?;
+                ingest_frame(state, media_state, event.stream_id.as_str(), frame.payload).await?;
             }
             Ok(())
         }
@@ -194,10 +201,10 @@ async fn handle_text(
             let event: StopEvent = serde_json::from_str(text).context("parse stop event")?;
             finish_stream(
                 state,
-                session,
-                gateway_call_id.as_deref(),
+                &mut media_state.session,
+                media_state.gateway_call_id.as_deref(),
                 event.stream_id,
-                media_format.as_ref(),
+                media_state.media_format.as_ref(),
             )
             .await
         }
@@ -282,26 +289,37 @@ async fn register_start(
 
 async fn ingest_frame(
     state: &SharedState,
-    session: &mut Option<Box<dyn InboundAsrSession>>,
-    gateway_call_id: Option<&str>,
-    media_format: Option<&MediaFormat>,
+    media_state: &mut MediaSocketState,
     stream_id: &str,
     frame: EncodedMediaFrame,
-    decoded_frame_count: &mut usize,
 ) -> anyhow::Result<()> {
-    let Some(session) = session.as_mut() else {
+    let Some(session) = media_state.session.as_mut() else {
         bail!("media frame arrived before ASR session opened");
     };
-    let Some(format) = media_format else {
+    let Some(format) = media_state.media_format.as_ref() else {
         bail!("media frame arrived before media format was known");
     };
-    let Some(gateway_call_id) = gateway_call_id else {
+    let Some(gateway_call_id) = media_state.gateway_call_id.as_deref() else {
         bail!("media frame arrived before gateway call was known");
     };
 
     let mut samples = decode_payload(format, &frame.payload)?;
-    *decoded_frame_count += 1;
-    log_decoded_frame_stats(*decoded_frame_count, format, stream_id, &frame, &samples);
+    media_state.decoded_frame_count += 1;
+    let stats = sample_stats(&samples);
+    log_decoded_frame_stats(
+        media_state.decoded_frame_count,
+        format,
+        stream_id,
+        &frame,
+        &stats,
+        samples.len(),
+    );
+    if !media_state
+        .asr_gate
+        .accept(media_state.decoded_frame_count, stream_id, &stats)
+    {
+        return Ok(());
+    }
     if format.sample_rate_hz != 16_000 {
         samples = resample_i16_mono(
             &WindowedSincResampler::default(),
@@ -340,12 +358,12 @@ fn log_decoded_frame_stats(
     format: &MediaFormat,
     stream_id: &str,
     frame: &EncodedMediaFrame,
-    samples: &[i16],
+    stats: &SampleStats,
+    sample_count: usize,
 ) {
-    if frame_index > 5 {
+    if frame_index > 5 && !frame_index.is_multiple_of(50) {
         return;
     }
-    let stats = sample_stats(samples);
     tracing::debug!(
         stream_id,
         frame_index,
@@ -354,7 +372,7 @@ fn log_decoded_frame_stats(
         sample_rate_hz = format.sample_rate_hz,
         channels = format.channels,
         payload_len = frame.payload.len(),
-        samples = samples.len(),
+        samples = sample_count,
         peak = stats.peak,
         rms = stats.rms,
         mean = stats.mean,
@@ -395,6 +413,45 @@ fn sample_stats(samples: &[i16]) -> SampleStats {
         peak,
         rms: (sum_squares / len).sqrt() as f32,
         mean: (sum / len) as f32,
+    }
+}
+
+#[derive(Default)]
+struct AsrGate {
+    speech_started: bool,
+    suppressed_frames: usize,
+}
+
+impl AsrGate {
+    fn accept(&mut self, frame_index: usize, stream_id: &str, stats: &SampleStats) -> bool {
+        if self.speech_started {
+            return true;
+        }
+        if stats.rms >= SPEECH_RMS_THRESHOLD || stats.peak >= SPEECH_PEAK_THRESHOLD {
+            self.speech_started = true;
+            tracing::info!(
+                stream_id,
+                frame_index,
+                suppressed_frames = self.suppressed_frames,
+                peak = stats.peak,
+                rms = stats.rms,
+                "media.speech.detected"
+            );
+            return true;
+        }
+
+        self.suppressed_frames = self.suppressed_frames.saturating_add(1);
+        if self.suppressed_frames <= 5 || self.suppressed_frames.is_multiple_of(50) {
+            tracing::debug!(
+                stream_id,
+                frame_index,
+                suppressed_frames = self.suppressed_frames,
+                peak = stats.peak,
+                rms = stats.rms,
+                "media.frame.suppressed_low_energy"
+            );
+        }
+        false
     }
 }
 
@@ -549,11 +606,7 @@ mod tests {
             )
         };
         let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
-        let mut session = None;
-        let mut selected_call = None;
-        let mut media_format = None;
-        let mut reorder = SequencedFrameReorder::new_lazily(32);
-        let mut decoded_frame_count = 0usize;
+        let mut media_state = MediaSocketState::new();
 
         let start = serde_json::json!({
             "event": "start",
@@ -569,33 +622,15 @@ mod tests {
             }
         })
         .to_string();
-        handle_text(
-            &start,
-            &state,
-            &asr,
-            &mut session,
-            &mut selected_call,
-            &mut media_format,
-            &mut reorder,
-            &mut decoded_frame_count,
-        )
-        .await
-        .expect("start event should open ASR session");
+        handle_text(&start, &state, &asr, &mut media_state)
+            .await
+            .expect("start event should open ASR session");
 
-        let chunk = STANDARD.encode(l16_samples(8_000));
+        let chunk = STANDARD.encode(l16_samples(8_000, 4_000));
         let media_one = media_event("stream-1", "7", &chunk);
-        handle_text(
-            &media_one,
-            &state,
-            &asr,
-            &mut session,
-            &mut selected_call,
-            &mut media_format,
-            &mut reorder,
-            &mut decoded_frame_count,
-        )
-        .await
-        .expect("first non-one media chunk should establish reorder base");
+        handle_text(&media_one, &state, &asr, &mut media_state)
+            .await
+            .expect("first non-one media chunk should establish reorder base");
         assert!(state
             .read()
             .await
@@ -606,40 +641,25 @@ mod tests {
             .is_empty());
 
         let media_two = media_event("stream-1", "8", &chunk);
-        handle_text(
-            &media_two,
-            &state,
-            &asr,
-            &mut session,
-            &mut selected_call,
-            &mut media_format,
-            &mut reorder,
-            &mut decoded_frame_count,
-        )
-        .await
-        .expect("contiguous media should feed ASR");
+        handle_text(&media_two, &state, &asr, &mut media_state)
+            .await
+            .expect("contiguous media should feed ASR");
 
         let stop = serde_json::json!({
             "event": "stop",
             "stream_id": "stream-1"
         })
         .to_string();
-        handle_text(
-            &stop,
-            &state,
-            &asr,
-            &mut session,
-            &mut selected_call,
-            &mut media_format,
-            &mut reorder,
-            &mut decoded_frame_count,
-        )
-        .await
-        .expect("stop should finish ASR session");
+        handle_text(&stop, &state, &asr, &mut media_state)
+            .await
+            .expect("stop should finish ASR session");
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
-        assert_eq!(selected_call.as_deref(), Some(gateway_call_id.as_str()));
+        assert_eq!(
+            media_state.gateway_call_id.as_deref(),
+            Some(gateway_call_id.as_str())
+        );
         assert_eq!(call.status, CallStatus::Ended);
         assert_eq!(call.ids.stream_id.as_deref(), Some("stream-1"));
         assert_eq!(call.media.encoding.as_deref(), Some("L16"));
@@ -650,34 +670,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn low_energy_media_is_suppressed_until_speech() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open ASR session");
+
+        let silence = STANDARD.encode(l16_samples(8_000, 0));
+        handle_text(
+            &media_event("stream-1", "1", &silence),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("silence should be accepted by transport");
+        assert!(state
+            .read()
+            .await
+            .calls
+            .get(&gateway_call_id)
+            .expect("call exists")
+            .transcripts
+            .is_empty());
+
+        let speech = STANDARD.encode(l16_samples(16_000, 4_000));
+        handle_text(
+            &media_event("stream-1", "2", &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("speech should pass into ASR");
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.transcripts.len(), 1);
+        assert_eq!(call.transcripts[0].text, "received 16000 samples");
+    }
+
+    #[tokio::test]
     async fn media_start_requires_operator_answer_gate() {
         for status in [CallStatus::IgnoredInbound, CallStatus::PendingInbound] {
             let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
             let gateway_call_id = seed_call(&state, "call-1", status).await;
             let counting_asr = Arc::new(CountingAsrFactory::default());
             let asr: SharedAsrFactory = counting_asr.clone();
-            let mut session = None;
-            let mut selected_call = None;
-            let mut media_format = None;
-            let mut reorder = SequencedFrameReorder::new_lazily(32);
-            let mut decoded_frame_count = 0usize;
+            let mut media_state = MediaSocketState::new();
 
             handle_text(
                 &start_event("call-1", "stream-1", "L16"),
                 &state,
                 &asr,
-                &mut session,
-                &mut selected_call,
-                &mut media_format,
-                &mut reorder,
-                &mut decoded_frame_count,
+                &mut media_state,
             )
             .await
             .expect("start should be ignored before operator answer");
 
-            assert!(session.is_none());
-            assert!(selected_call.is_none());
-            assert!(media_format.is_none());
+            assert!(media_state.session.is_none());
+            assert!(media_state.gateway_call_id.is_none());
+            assert!(media_state.media_format.is_none());
             assert_eq!(counting_asr.opens(), 0);
             let guard = state.read().await;
             let call = guard.calls.get(&gateway_call_id).expect("call exists");
@@ -692,28 +754,20 @@ mod tests {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let counting_asr = Arc::new(CountingAsrFactory::default());
         let asr: SharedAsrFactory = counting_asr.clone();
-        let mut session = None;
-        let mut selected_call = None;
-        let mut media_format = None;
-        let mut reorder = SequencedFrameReorder::new_lazily(32);
-        let mut decoded_frame_count = 0usize;
+        let mut media_state = MediaSocketState::new();
 
         handle_text(
             &start_event("missing-call", "stream-1", "L16"),
             &state,
             &asr,
-            &mut session,
-            &mut selected_call,
-            &mut media_format,
-            &mut reorder,
-            &mut decoded_frame_count,
+            &mut media_state,
         )
         .await
         .expect("unknown start should be ignored");
 
-        assert!(session.is_none());
-        assert!(selected_call.is_none());
-        assert!(media_format.is_none());
+        assert!(media_state.session.is_none());
+        assert!(media_state.gateway_call_id.is_none());
+        assert!(media_state.media_format.is_none());
         assert_eq!(counting_asr.opens(), 0);
         assert!(state.read().await.calls.is_empty());
     }
@@ -724,21 +778,13 @@ mod tests {
         let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
         let asr: SharedAsrFactory = counting_asr.clone();
-        let mut session = None;
-        let mut selected_call = None;
-        let mut media_format = None;
-        let mut reorder = SequencedFrameReorder::new_lazily(32);
-        let mut decoded_frame_count = 0usize;
+        let mut media_state = MediaSocketState::new();
 
         let error = handle_text(
             &start_event("call-1", "stream-1", "OPUS"),
             &state,
             &asr,
-            &mut session,
-            &mut selected_call,
-            &mut media_format,
-            &mut reorder,
-            &mut decoded_frame_count,
+            &mut media_state,
         )
         .await
         .expect_err("unsupported codec should fail at start");
@@ -746,9 +792,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unsupported inbound media encoding"));
-        assert!(session.is_none());
-        assert!(selected_call.is_none());
-        assert!(media_format.is_none());
+        assert!(media_state.session.is_none());
+        assert!(media_state.gateway_call_id.is_none());
+        assert!(media_state.media_format.is_none());
         assert_eq!(counting_asr.opens(), 0);
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");
@@ -757,10 +803,10 @@ mod tests {
         assert!(call.transcripts.is_empty());
     }
 
-    fn l16_samples(count: usize) -> Vec<u8> {
+    fn l16_samples(count: usize, sample: i16) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(count * 2);
         for _ in 0..count {
-            bytes.extend_from_slice(&0_i16.to_be_bytes());
+            bytes.extend_from_slice(&sample.to_be_bytes());
         }
         bytes
     }
