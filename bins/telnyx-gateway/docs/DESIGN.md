@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Updated milestone 1 live ASR handling after long-call logs showed continuous Telnyx media delivery but Sherpa getting stuck in repeated-token output; the gateway now treats speech gaps and repeated-token detection as ASR-session reset boundaries while keeping one assembled call transcript for the operator. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Updated milestone 1 live-call behavior from receive-only PCMU to bidirectional PCMU RTP with outbound silence keepalive after Telnyx reported provider-normal caller hangups while the gateway was only listening; added assembled transcript display so raw partial/final fragments do not replace readable call-level transcript text. | Audio Codecs and Formats, Inbound Call Handler Design, Operator REPL and TUI Control Surface |
 | 2026-06-01 | @codex-364-impl: Added live-call termination diagnostics to milestone 1 so Telnyx `call.hangup`/`call.ended`/stream termination fields are preserved in structured logs and selected-call detail instead of reducing every provider-side close to `ended`. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Refined live milestone 1 handling so the ASR path gates both initial silence and sustained low-energy tails, suppresses repeated-token Sherpa hallucinations from the operator transcript stream while logging them as suppressed events, and keeps the shell prompt cursor aligned by rendered rows when command output wraps. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
@@ -396,7 +397,9 @@ operator provisions Telnyx application and phone number
 
 No TTS, outbound audio, external appserver, socket client, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane.
 
-Milestone 1 ASR input should suppress low-energy initial media until speech is detected, allow only a short low-energy hangover after speech, and suppress sustained low-energy tails so silence does not keep advancing the streaming decoder. Because the current Sherpa backend has known repeated-token failure modes, the gateway should suppress pathological repeated-token transcript text from the operator transcript stream and emit a structured `transcript.suppressed_repeated_token` log with the same call, stream, codec, and sample-rate metadata.
+Milestone 1 ASR input should suppress low-energy initial media until speech is detected, allow only a short low-energy hangover after speech, and suppress sustained low-energy tails so silence does not keep advancing the streaming decoder. Because the current Sherpa backend has known repeated-token failure modes, the gateway should suppress pathological repeated-token transcript text from the operator transcript stream, emit a structured `transcript.suppressed_repeated_token` log with the same call, stream, codec, and sample-rate metadata, and reset the ASR session before feeding subsequent speech. A sustained silence gap followed by resumed speech should also finalize the previous ASR session and open a fresh one; this keeps long calls from depending on one stale decoder state for the whole call.
+
+Current Sherpa `final` events are word-level rather than sentence-level. The selected-call detail should therefore keep an assembled call transcript that appends accepted final fragments and overlays the current partial, while the raw recent partial/final event list remains available for debugging.
 
 Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, transcript partial/final events, and Telnyx termination details such as hangup cause/source or SIP cause when the provider sends them.
 
@@ -2528,10 +2531,12 @@ Recommended inbound flow:
 10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
 11. Until milestone 2/M3 supplies real outbound TTS audio, the gateway sends low-amplitude/silence PCMU `media` frames back over the WebSocket as a keepalive so the single-leg PSTN call does not terminate while Motlie is receive-only at the application level.
 12. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
-13. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
-14. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
-15. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
-16. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
+13. When sustained silence is followed by resumed speech, the gateway finishes the previous ASR session, records any usable final text, opens a fresh ASR session, and feeds the resumed speech into that new session.
+14. If Sherpa emits a repeated-token hallucination such as a growing `Q` run, the gateway suppresses that event from operator-visible transcripts, logs it, resets the ASR session, and waits for the next speech-energy frame before feeding the backend again.
+15. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
+16. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
+17. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
+18. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
 
 The inbound handler should therefore be ASR-first. It must not require outbound TTS or a conversation handler to be useful.
 

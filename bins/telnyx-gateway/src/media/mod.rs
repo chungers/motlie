@@ -154,14 +154,14 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
     ) {
         match asr_session.finish().await {
             Ok(events) => {
-                record_transcript_events(
+                let _ = record_transcript_events(
                     &state,
                     call_id,
                     None,
                     media_state.media_format.as_ref(),
                     events,
                 )
-                .await
+                .await;
             }
             Err(error) => log_media_error(&state, Some(call_id), error).await,
         }
@@ -259,7 +259,14 @@ async fn handle_text(
                 Err(error) => return Err(anyhow::Error::from(error)),
             };
             for frame in ready {
-                ingest_frame(state, media_state, event.stream_id.as_str(), frame.payload).await?;
+                ingest_frame(
+                    state,
+                    asr,
+                    media_state,
+                    event.stream_id.as_str(),
+                    frame.payload,
+                )
+                .await?;
             }
             Ok(())
         }
@@ -356,36 +363,65 @@ async fn register_start(
 
 async fn ingest_frame(
     state: &SharedState,
+    asr: &SharedAsrFactory,
     media_state: &mut MediaSocketState,
     stream_id: &str,
     frame: EncodedMediaFrame,
 ) -> anyhow::Result<()> {
-    let Some(session) = media_state.session.as_mut() else {
-        bail!("media frame arrived before ASR session opened");
-    };
-    let Some(format) = media_state.media_format.as_ref() else {
-        bail!("media frame arrived before media format was known");
-    };
-    let Some(gateway_call_id) = media_state.gateway_call_id.as_deref() else {
-        bail!("media frame arrived before gateway call was known");
-    };
+    let format = media_state
+        .media_format
+        .clone()
+        .context("media frame arrived before media format was known")?;
+    let gateway_call_id = media_state
+        .gateway_call_id
+        .clone()
+        .context("media frame arrived before gateway call was known")?;
 
-    let mut samples = decode_payload(format, &frame.payload)?;
+    let mut samples = decode_payload(&format, &frame.payload)?;
     media_state.decoded_frame_count += 1;
     let stats = sample_stats(&samples);
     log_decoded_frame_stats(
         media_state.decoded_frame_count,
-        format,
+        &format,
         stream_id,
         &frame,
         &stats,
         samples.len(),
     );
-    if !media_state
+    match media_state
         .asr_gate
         .accept(media_state.decoded_frame_count, stream_id, &stats)
     {
-        return Ok(());
+        AsrFrameDecision::Suppress => return Ok(()),
+        AsrFrameDecision::Continue => {}
+        AsrFrameDecision::NewUtterance => {
+            finish_asr_session(
+                state,
+                &mut media_state.session,
+                Some(&gateway_call_id),
+                Some(stream_id.to_string()),
+                Some(&format),
+            )
+            .await?;
+            open_asr_session(
+                asr,
+                media_state,
+                &gateway_call_id,
+                stream_id,
+                "speech_resumed",
+            )
+            .await?;
+        }
+    }
+    if media_state.session.is_none() {
+        open_asr_session(
+            asr,
+            media_state,
+            &gateway_call_id,
+            stream_id,
+            "missing_session",
+        )
+        .await?;
     }
     if format.sample_rate_hz != 16_000 {
         samples = resample_i16_mono(
@@ -396,17 +432,44 @@ async fn ingest_frame(
         )?;
     }
 
+    let Some(session) = media_state.session.as_mut() else {
+        bail!("ASR session unavailable after reopen");
+    };
     let events = session
         .ingest(AudioBuf::<i16, 16_000, Mono>::new(samples))
         .await?;
-    record_transcript_events(
+    if record_transcript_events(
         state,
-        gateway_call_id,
+        &gateway_call_id,
         Some(stream_id),
-        Some(format),
+        Some(&format),
         events,
     )
-    .await;
+    .await
+    {
+        media_state.session = None;
+        media_state.asr_gate.wait_for_next_speech();
+        open_asr_session(
+            asr,
+            media_state,
+            &gateway_call_id,
+            stream_id,
+            "repeated_token",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn open_asr_session(
+    asr: &SharedAsrFactory,
+    media_state: &mut MediaSocketState,
+    gateway_call_id: &str,
+    stream_id: &str,
+    reason: &'static str,
+) -> anyhow::Result<()> {
+    media_state.session = Some(asr.open_session().await?);
+    tracing::info!(gateway_call_id, stream_id, reason, "asr.session.opened");
     Ok(())
 }
 
@@ -497,8 +560,20 @@ struct AsrGate {
     suppressed_tail_frames: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsrFrameDecision {
+    Suppress,
+    Continue,
+    NewUtterance,
+}
+
 impl AsrGate {
-    fn accept(&mut self, frame_index: usize, stream_id: &str, stats: &SampleStats) -> bool {
+    fn accept(
+        &mut self,
+        frame_index: usize,
+        stream_id: &str,
+        stats: &SampleStats,
+    ) -> AsrFrameDecision {
         if stats.has_speech_energy() {
             let was_started = self.speech_started;
             let resumed_after_tail = self.low_energy_run > LOW_ENERGY_HANGOVER_FRAMES;
@@ -523,13 +598,17 @@ impl AsrGate {
                     "media.speech.resumed"
                 );
             }
-            return true;
+            return if resumed_after_tail {
+                AsrFrameDecision::NewUtterance
+            } else {
+                AsrFrameDecision::Continue
+            };
         }
 
         if self.speech_started {
             self.low_energy_run = self.low_energy_run.saturating_add(1);
             if self.low_energy_run <= LOW_ENERGY_HANGOVER_FRAMES {
-                return true;
+                return AsrFrameDecision::Continue;
             }
             self.suppressed_tail_frames = self.suppressed_tail_frames.saturating_add(1);
             if self.suppressed_tail_frames <= 5 || self.suppressed_tail_frames.is_multiple_of(50) {
@@ -543,7 +622,7 @@ impl AsrGate {
                     "media.frame.suppressed_low_energy_tail"
                 );
             }
-            return false;
+            return AsrFrameDecision::Suppress;
         }
 
         self.suppressed_initial_frames = self.suppressed_initial_frames.saturating_add(1);
@@ -558,7 +637,12 @@ impl AsrGate {
                 "media.frame.suppressed_low_energy"
             );
         }
-        false
+        AsrFrameDecision::Suppress
+    }
+
+    fn wait_for_next_speech(&mut self) {
+        self.speech_started = false;
+        self.low_energy_run = 0;
     }
 }
 
@@ -605,14 +689,29 @@ async fn finish_stream(
     stream_id: Option<String>,
     media_format: Option<&MediaFormat>,
 ) -> anyhow::Result<()> {
-    if let (Some(call_id), Some(asr_session)) = (gateway_call_id, session.take()) {
-        let events = asr_session.finish().await?;
-        record_transcript_events(state, call_id, stream_id.as_deref(), media_format, events).await;
+    finish_asr_session(state, session, gateway_call_id, stream_id, media_format).await?;
+    if let Some(call_id) = gateway_call_id {
         let mut guard = state.write().await;
         if let Some(call) = guard.calls.get_mut(call_id) {
             call.status = CallStatus::Ended;
             call.push_timeline("media stream stopped");
         }
+    }
+    Ok(())
+}
+
+async fn finish_asr_session(
+    state: &SharedState,
+    session: &mut Option<Box<dyn InboundAsrSession>>,
+    gateway_call_id: Option<&str>,
+    stream_id: Option<String>,
+    media_format: Option<&MediaFormat>,
+) -> anyhow::Result<()> {
+    if let (Some(call_id), Some(asr_session)) = (gateway_call_id, session.take()) {
+        let events = asr_session.finish().await?;
+        let _ =
+            record_transcript_events(state, call_id, stream_id.as_deref(), media_format, events)
+                .await;
     }
     Ok(())
 }
@@ -623,8 +722,9 @@ async fn record_transcript_events(
     stream_id: Option<&str>,
     media_format: Option<&MediaFormat>,
     events: Vec<TranscriptEvent>,
-) {
+) -> bool {
     let mut guard = state.write().await;
+    let mut suppressed_repeated_token = false;
     for event in events {
         let kind = if event.is_final() {
             TranscriptKind::Final
@@ -652,6 +752,7 @@ async fn record_transcript_events(
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
 
         if looks_like_repeated_token_hallucination(&text) {
+            suppressed_repeated_token = true;
             tracing::warn!(
                 gateway_call_id,
                 call_control_id = call_control_id.as_deref(),
@@ -682,6 +783,7 @@ async fn record_transcript_events(
             "{kind_label}"
         );
     }
+    suppressed_repeated_token
 }
 
 async fn log_media_error(state: &SharedState, gateway_call_id: Option<&str>, error: anyhow::Error) {
@@ -943,6 +1045,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn speech_resume_after_silence_reopens_asr_session() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let counting_asr = Arc::new(CountingAsrFactory::default());
+        let asr: SharedAsrFactory = counting_asr.clone();
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open ASR session");
+
+        let speech = STANDARD.encode(l16_samples(320, 4_000));
+        handle_text(
+            &media_event("stream-1", "1", &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("first speech frame should pass into ASR");
+
+        let silence = STANDARD.encode(l16_samples(320, 0));
+        for sequence in 2..=(LOW_ENERGY_HANGOVER_FRAMES + 3) {
+            handle_text(
+                &media_event("stream-1", &sequence.to_string(), &silence),
+                &state,
+                &asr,
+                &mut media_state,
+            )
+            .await
+            .expect("silence should be accepted by transport");
+        }
+        assert_eq!(counting_asr.opens(), 1);
+
+        handle_text(
+            &media_event(
+                "stream-1",
+                &(LOW_ENERGY_HANGOVER_FRAMES + 4).to_string(),
+                &speech,
+            ),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("resumed speech should reopen ASR and then ingest");
+
+        assert_eq!(counting_asr.opens(), 2);
+        assert_eq!(counting_asr.ingests(), 2 + LOW_ENERGY_HANGOVER_FRAMES);
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&_gateway_call_id).expect("call exists");
+        assert_eq!(call.status, CallStatus::MediaStarted);
+    }
+
+    #[tokio::test]
     async fn repeated_token_transcripts_are_suppressed_from_call_detail() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
@@ -952,7 +1115,7 @@ mod tests {
             channels: 1,
         };
 
-        record_transcript_events(
+        let needs_reset = record_transcript_events(
             &state,
             &gateway_call_id,
             Some("stream-1"),
@@ -969,6 +1132,7 @@ mod tests {
             ],
         )
         .await;
+        assert!(needs_reset);
 
         let guard = state.read().await;
         let call = guard.calls.get(&gateway_call_id).expect("call exists");

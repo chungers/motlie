@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Added milestone 1 ASR-session reset work from live long-call logs: speech resumed after sustained silence opens a fresh Sherpa session, repeated-token hallucinations request a reset, and the TUI keeps one assembled call transcript because current Sherpa finals are word-level. |
 | 2026-06-01 | @codex-364-impl | Updated milestone 1 live behavior to answer with bidirectional PCMU RTP and send outbound silence keepalive after Telnyx reported normal caller-side hangups in receive-only mode; added assembled transcript display above raw partial/final events. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 live-call termination diagnostics: preserve Telnyx hangup/source/SIP fields in call state, selected-call detail, structured logs, and webhook tests. |
 | 2026-06-01 | @codex-364-impl | Refined milestone 1 live handling: suppress initial silence and sustained low-energy tails before Sherpa, suppress repeated-token transcript hallucinations from the TUI transcript stream while logging them as suppressed events, and align the shell cursor by rendered rows when output wraps. |
@@ -430,7 +431,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Inbound Call Handler Design`, `Audio Codecs and Formats`
 - [ ] Preserve Telnyx termination details from `streaming.stopped`, `streaming.failed`, `call.hangup`, and `call.ended` webhooks in selected-call detail and structured logs so live drops can be classified as caller hangup, provider timeout, media failure, or another carrier/SIP cause.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
-- [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing only a short post-speech low-energy hangover, suppressing sustained low-energy tails, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata.
+- [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing only a short post-speech low-energy hangover, suppressing sustained low-energy tails, resetting the ASR session when speech resumes after a sustained silence gap, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata and opening a fresh ASR session for subsequent speech.
   DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
 - [ ] Keep inbound disabled by default at process startup; incoming webhooks must not be answered until the operator enables inbound handling.
   DESIGN reference: `Staged Build Strategy`, `Operator REPL and TUI Control Surface`
@@ -506,7 +507,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
-- [ ] Add regression tests for ASR low-energy gating before speech, sustained low-energy tail suppression after speech, repeated-token transcript suppression, and shell cursor alignment when command output wraps across multiple rendered rows.
+- [ ] Add regression tests for ASR low-energy gating before speech, sustained low-energy tail suppression after speech, ASR-session reopen on speech resume after sustained silence, repeated-token transcript suppression/reset signaling, and shell cursor alignment when command output wraps across multiple rendered rows.
   DESIGN reference: `Testing Scope for PLAN`, `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, highlighted roster rows, unread event counts, auto-selection only when no active call is selected, source-local selected-call default command targets, TUI/socket selection isolation, command-source mux ordering, `answer` command transition, and selected-call detail event emission.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
