@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Recorded the first outbound ASR-only live attempt blocker: Telnyx returned `403 D38` because the Call Control application has no Outbound Voice Profile assignment; live validation resumes after Telnyx account setup. |
 | 2026-06-01 | @codex-364-impl | Added an ASR-only outbound live-test command, `test dial-transcribe <to> [--from <from>]`, that reuses Telnyx outbound dial setup, bidirectional RTP media, silence keepalive, capture, and Sherpa transcription while leaving TTS for milestone 2. |
 | 2026-06-01 | @codex-364-impl | Recorded post-fix live validation for two `L16 16 kHz` inbound calls, with measured WER around `16-18%`, and fixed bare `answer` to prefer the single waiting inbound call when stale ended calls remain selected. |
 | 2026-06-01 | @codex-364-impl | Corrected the milestone 1 Telnyx `L16` comparison path to decode observed WebSocket `L16` payloads as little-endian PCM, added provider-neutral little-endian L16 helpers, and added a fixed read-aloud reference for WER checks. |
