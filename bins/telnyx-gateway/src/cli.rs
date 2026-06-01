@@ -32,4 +32,7 @@ pub struct Cli {
 
     #[arg(long)]
     pub no_asr_download: bool,
+
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
 }

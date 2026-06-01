@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -17,8 +18,13 @@ use motlie_telnyx_gateway::serve::{serve, AppServices};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    motlie_telnyx_gateway::logging::init();
     let cli = Cli::parse();
+    let default_tui_log = PathBuf::from("telnyx-gateway.log");
+    let log_file = cli
+        .log_file
+        .as_deref()
+        .or_else(|| cli.tui.then_some(default_tui_log.as_path()));
+    let _logging_guard = motlie_telnyx_gateway::logging::init(log_file)?;
 
     let state = shared_state(cli.bind);
     {
