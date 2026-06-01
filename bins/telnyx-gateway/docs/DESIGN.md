@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Added a milestone 1 local command-socket subset for agent-assisted live testing: headless startup can load known config, accept line-oriented Motlie driver commands, return JSON command responses, answer inbound calls, expose `call show` transcript snapshots, and shut down without scraping the TUI; richer event polling and mux validation remain milestone 4. | Staged Build Strategy, Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Updated milestone 1 live ASR handling after long-call logs showed continuous Telnyx media delivery but Sherpa getting stuck in repeated-token output; the gateway now treats speech gaps and repeated-token detection as ASR-session reset boundaries while keeping one assembled call transcript for the operator. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Updated milestone 1 live-call behavior from receive-only PCMU to bidirectional PCMU RTP with outbound silence keepalive after Telnyx reported provider-normal caller hangups while the gateway was only listening; added assembled transcript display so raw partial/final fragments do not replace readable call-level transcript text. | Audio Codecs and Formats, Inbound Call Handler Design, Operator REPL and TUI Control Surface |
 | 2026-06-01 | @codex-364-impl: Added live-call termination diagnostics to milestone 1 so Telnyx `call.hangup`/`call.ended`/stream termination fields are preserved in structured logs and selected-call detail instead of reducing every provider-side close to `ended`. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
@@ -395,7 +396,7 @@ operator provisions Telnyx application and phone number
 -> selected-call detail pane transcript
 ```
 
-No TTS, outbound audio, external appserver, socket client, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane.
+No TTS, outbound audio, external appserver, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane. The TUI remains the primary M1 operator UI, but a minimal local command socket may drive the same command set for agent-assisted live tests where an agent starts the gateway, asks the human to dial, answers the pending call, and polls transcript state without scraping terminal UI output.
 
 Milestone 1 ASR input should suppress low-energy initial media until speech is detected, allow only a short low-energy hangover after speech, and suppress sustained low-energy tails so silence does not keep advancing the streaming decoder. Because the current Sherpa backend has known repeated-token failure modes, the gateway should suppress pathological repeated-token transcript text from the operator transcript stream, emit a structured `transcript.suppressed_repeated_token` log with the same call, stream, codec, and sample-rate metadata, and reset the ASR session before feeding subsequent speech. A sustained silence gap followed by resumed speech should also finalize the previous ASR session and open a fresh one; this keeps long calls from depending on one stale decoder state for the whole call.
 
@@ -646,7 +647,9 @@ The gateway should expose the same `motlie-driver` command family through startu
 
 The Unix-domain socket is the preferred interface for local agent tooling. It should be sufficient for an agent to configure the gateway, poll call/event state, answer or hang up calls, dial outbound calls, and send `say` text without using application webhooks or the HTTP Control API. Appserver webhooks and the Control API remain separate integration surfaces for other processes and services.
 
-The socket should use newline-delimited JSON request/response frames around the same `motlie-driver` command grammar as the TUI REPL:
+The milestone 1 socket subset can be line-oriented for immediate local testing: each input line is Motlie driver command text such as `status`, `inbound enable --manual`, `calls`, `answer`, `call show`, or `shutdown`, and each output line is a JSON command result with `ok`, `lines`, `effects`, and `error`.
+
+Milestone 4 should generalize this into newline-delimited JSON request/response frames around the same `motlie-driver` command grammar as the TUI REPL:
 
 ```json
 {"id":"req-1","command":"status"}

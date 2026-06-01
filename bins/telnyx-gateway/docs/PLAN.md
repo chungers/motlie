@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Added a milestone 1 agent-assisted live-test control path: `--socket` starts a local command socket with line-oriented Motlie driver commands, JSON command responses, `call show` transcript snapshots, and `shutdown`; milestone 4 still owns richer event polling, request IDs, socket/TUI mux validation, and appserver integration. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 ASR-session reset work from live long-call logs: speech resumed after sustained silence opens a fresh Sherpa session, repeated-token hallucinations request a reset, and the TUI keeps one assembled call transcript because current Sherpa finals are word-level. |
 | 2026-06-01 | @codex-364-impl | Updated milestone 1 live behavior to answer with bidirectional PCMU RTP and send outbound silence keepalive after Telnyx reported normal caller-side hangups in receive-only mode; added assembled transcript display above raw partial/final events. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 live-call termination diagnostics: preserve Telnyx hangup/source/SIP fields in call state, selected-call detail, structured logs, and webhook tests. |
@@ -425,6 +426,8 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Implement `inbound enable --manual` -> `call.initiated` -> highlighted pending/waiting call roster row -> optional `call use <call>` -> `answer [call]` -> `answer + streaming` -> WebSocket media -> ASR -> `TuiTranscriptSink` selected-call detail -> hangup flow.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
+- [ ] Implement the milestone 1 local command-socket subset for agent-assisted live validation: headless `--socket <path>` startup, one command line in / one JSON response line out, `status`, `inbound enable --manual`, `calls`, `answer`, `call show`, and `shutdown`.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Getting Started: Local Deployment`
 - [ ] Show call state, media metadata, assembled transcript text, recent partial/final transcript events, errors, and terminal call state in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Answer milestone 1 calls with bidirectional `PCMU` RTP and send outbound PCMU silence keepalive frames until milestone 2/M3 replaces that path with real TTS audio.
