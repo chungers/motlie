@@ -5,43 +5,16 @@ Milestone 1 is inbound call transcription in the operator TUI.
 ## ONNX Runtime
 
 The Sherpa-backed gateway must link ONNX Runtime statically for live tests and
-deployments. Build ONNX Runtime `v1.24.2`, matching the `ort` crate generation
-used by this workspace, from an official release tag and point `ORT_LIB_PATH` at
-the static build output.
+deployments. The workspace `ort 2.0.0-rc.12` dependency enables
+`download-binaries`, so Cargo downloads the matching Pyke ONNX Runtime 1.24.x
+static archive and links `libonnxruntime.a`.
 
 This follows the general Motlie ORT/ONNX backend policy in
 [`../../libs/model/docs/ORT_ONNX_POLICY.md`](../../libs/model/docs/ORT_ONNX_POLICY.md).
 
-Do not set `ORT_PREFER_DYNAMIC_LINK=1`, and do not rely on `LD_LIBRARY_PATH` or
-the downloaded ONNX Runtime `.tgz` shared-library package for the gateway.
-
-Host requirements are build tools only: `git`, Python `3.10+`, CMake `3.28+`,
-and a Linux C++ compiler such as GCC `8+`. ONNX Runtime should build its own
-third-party C/C++ dependencies from source; do not install ORT internals such as
-protobuf, FlatBuffers, Abseil, re2, nsync, or cpuinfo as host packages for this
-runbook.
-
-Ubuntu static build:
-
-```sh
-command -v git
-python3 -c 'import sys; assert sys.version_info >= (3, 10), sys.version'
-cmake --version
-${CXX:-c++} --version
-
-export ORT_VERSION=v1.24.2
-export ORT_SRC="$HOME/src/onnxruntime-${ORT_VERSION#v}"
-git clone --branch "$ORT_VERSION" --depth 1 --recursive --shallow-submodules \
-  https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
-cd "$ORT_SRC"
-./build.sh --config Release --parallel --compile_no_warning_as_error \
-  --skip_submodule_sync --skip_tests \
-  --cmake_extra_defines FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
-
-export ORT_LIB_PATH="$ORT_SRC/build/Linux/Release"
-test -f "$ORT_LIB_PATH/libonnxruntime.a" || test -f "$ORT_LIB_PATH/libonnxruntime_common.a"
-unset ORT_PREFER_DYNAMIC_LINK
-```
+The gateway runbook does not use ORT-specific environment variables. Do not set
+`ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and do not build
+ONNX Runtime from source for the gateway.
 
 ## Run
 
@@ -59,8 +32,6 @@ unset ORT_PREFER_DYNAMIC_LINK
 2. Start the gateway:
 
    ```sh
-   export ORT_LIB_PATH="$HOME/src/onnxruntime-1.24.2/build/Linux/Release"
-   unset ORT_PREFER_DYNAMIC_LINK
    export TELNYX_API_KEY=...
    cargo run -p motlie-telnyx-gateway --features sherpa -- --tui --bind 127.0.0.1:8080
    ```
@@ -121,8 +92,7 @@ assumption can be revisited with observed Telnyx payloads.
 ## ASR Artifacts
 
 Sherpa ONNX is the live M1 ASR backend. Build the gateway with `--features sherpa`
-and point `ORT_LIB_PATH` at a static ONNX Runtime build directory before running
-the live test.
+with no ORT-specific environment variables before running the live test.
 
 Artifacts are loaded from:
 

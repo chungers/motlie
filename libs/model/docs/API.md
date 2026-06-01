@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-31 | @codex-364-impl: Updated the ORT/ONNX note to require Cargo's `ort/download-binaries` static archive path instead of manual `ORT_LIB_PATH` or source-built ONNX Runtime. | Notes |
 | 2026-05-31 | @codex-364-impl: Added the general ORT/ONNX backend policy link so API implementers treat static ONNX Runtime linkage as a model-backend requirement, not a Telnyx-specific runbook detail. | Notes |
 | 2026-04-24 | @codex-gpt55: Added `QuantizationBits::Five` and `QuantizationBits::FloatEight` so GGUF Q5 and FP8 can be represented without overloading Q8. | Core Types, Bundle API Sketch |
 | 2026-04-07 | @codex-researcher: Initial API sketch for `libs/model` and `libs/model::eval`. Reflects the current scaffold and keeps the focus on stable contract shapes. | All |
@@ -30,8 +31,9 @@ For implementers, this document should be read as the current contract specifica
 
 ORT/ONNX backend implementers must also follow
 [ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md): static ONNX Runtime linkage,
-`ORT_LIB_PATH` pointed at a source-built static ORT release directory,
-`ORT_PREFER_DYNAMIC_LINK` unset, and ONNX Runtime-owned C/C++ dependency builds.
+the workspace `ort/download-binaries` feature path, no manual `ORT_LIB_PATH`,
+no dynamic-link runbook, no vendored ONNX Runtime, and no ONNX Runtime source
+build.
 
 ## Overview
 

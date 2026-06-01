@@ -69,8 +69,9 @@ own `ModelCheckpoint` format variant, which this design accommodates cleanly.
 
 Any ORT/ONNX backend added through this architecture must follow
 [ORT_ONNX_POLICY.md](./ORT_ONNX_POLICY.md): static ONNX Runtime linkage,
-source-built ONNX Runtime, no dynamic-link runbooks, and ONNX Runtime-owned
-third-party C/C++ dependency builds.
+Cargo's `ort/download-binaries` static archive path, no manual `ORT_LIB_PATH`,
+no dynamic-link runbooks, no vendored ONNX Runtime, and no ONNX Runtime source
+builds.
 
 ---
 
