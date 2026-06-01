@@ -114,27 +114,16 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
         .split(root[1]);
 
-    let shell_height = root[0].height.saturating_sub(2) as usize;
-    let history_capacity = shell_height.saturating_sub(1);
-    let mut shell_lines = history
-        .iter()
-        .rev()
-        .take(history_capacity)
-        .rev()
-        .cloned()
-        .map(Line::from)
-        .collect::<Vec<_>>();
-    shell_lines.push(Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
-        Span::raw(input.to_string()),
-    ]));
+    let shell_inner_height = root[0].height.saturating_sub(2) as usize;
+    let shell_inner_width = root[0].width.saturating_sub(2) as usize;
+    let shell_view = build_shell_view(history, input, shell_inner_height, shell_inner_width);
     frame.render_widget(
-        Paragraph::new(shell_lines)
+        Paragraph::new(shell_view.lines)
             .block(Block::default().title("Shell").borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
         root[0],
     );
-    set_shell_cursor(frame, root[0], history_capacity, history.len(), input);
+    set_shell_cursor(frame, root[0], shell_view.prompt_row, input);
 
     let call_items = if state.calls.is_empty() {
         vec![ListItem::new("no calls")]
@@ -185,20 +174,67 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
     );
 }
 
+struct ShellView {
+    lines: Vec<Line<'static>>,
+    prompt_row: u16,
+}
+
+fn build_shell_view(
+    history: &[String],
+    input: &str,
+    inner_height: usize,
+    inner_width: usize,
+) -> ShellView {
+    if inner_height == 0 {
+        return ShellView {
+            lines: Vec::new(),
+            prompt_row: 0,
+        };
+    }
+
+    let width = inner_width.max(1);
+    let mut selected = Vec::new();
+    let mut used_rows = 1usize;
+    for line in history.iter().rev() {
+        let rows = display_rows(line, width);
+        if used_rows.saturating_add(rows) > inner_height {
+            break;
+        }
+        selected.push(line.clone());
+        used_rows += rows;
+    }
+    selected.reverse();
+
+    let mut lines = selected.into_iter().map(Line::from).collect::<Vec<_>>();
+    lines.push(Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::raw(input.to_string()),
+    ]));
+
+    ShellView {
+        lines,
+        prompt_row: used_rows.saturating_sub(1) as u16,
+    }
+}
+
+fn display_rows(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let chars = text.chars().count().max(1);
+    chars.div_ceil(width)
+}
+
 fn set_shell_cursor(
     frame: &mut ratatui::Frame<'_>,
     area: ratatui::layout::Rect,
-    history_capacity: usize,
-    history_len: usize,
+    prompt_row: u16,
     input: &str,
 ) {
     if area.width <= 2 || area.height <= 2 {
         return;
     }
 
-    let visible_history = history_len.min(history_capacity) as u16;
-    let prompt_y = area.y + 1 + visible_history;
     let inner_width = area.width.saturating_sub(2);
+    let prompt_y = area.y + 1 + prompt_row.min(area.height.saturating_sub(3));
     let prompt_offset = 2 + input.chars().count() as u16;
     let cursor_offset = prompt_offset.min(inner_width.saturating_sub(1));
     frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, prompt_y));
@@ -325,5 +361,35 @@ impl Drop for TerminalGuard {
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_rows_counts_wrapped_terminal_rows() {
+        assert_eq!(display_rows("", 8), 1);
+        assert_eq!(display_rows("12345678", 8), 1);
+        assert_eq!(display_rows("123456789", 8), 2);
+    }
+
+    #[test]
+    fn shell_prompt_row_accounts_for_wrapped_history() {
+        let history = vec!["short".to_string(), "1234567890".to_string()];
+        let view = build_shell_view(&history, "", 4, 5);
+
+        assert_eq!(view.prompt_row, 3);
+        assert_eq!(view.lines.len(), 3);
+    }
+
+    #[test]
+    fn shell_prompt_stays_visible_when_recent_output_is_too_tall() {
+        let history = vec!["12345678901234567890".to_string()];
+        let view = build_shell_view(&history, "", 3, 4);
+
+        assert_eq!(view.prompt_row, 0);
+        assert_eq!(view.lines.len(), 1);
     }
 }

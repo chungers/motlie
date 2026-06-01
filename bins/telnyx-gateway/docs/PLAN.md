@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Refined milestone 1 live handling: suppress initial silence and sustained low-energy tails before Sherpa, suppress repeated-token transcript hallucinations from the TUI transcript stream while logging them as suppressed events, and align the shell cursor by rendered rows when output wraps. |
 | 2026-06-01 | @codex-364-impl | Merged the TUI command input and REPL history into one shell-style left pane. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 ASR start-of-speech gating: low-energy initial telephony frames are logged and withheld from Sherpa until speech energy is detected. |
 | 2026-06-01 | @codex-364-impl | Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path. |
@@ -417,10 +418,14 @@ Close the loop on independently useful product flows before combining them.
 
 - [ ] Implement startup into an idle listener with `--tui`; the left pane is the command surface and the right side is split into call roster plus selected-call detail.
   DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Keep the shell-style TUI prompt and cursor aligned to the rendered `>` prompt when command output spans multiple terminal rows.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Implement `inbound enable --manual` -> `call.initiated` -> highlighted pending/waiting call roster row -> optional `call use <call>` -> `answer [call]` -> `answer + streaming` -> WebSocket media -> ASR -> `TuiTranscriptSink` selected-call detail -> hangup flow.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Show call state, media metadata, partial/final transcript text, errors, and terminal call state in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
+- [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing only a short post-speech low-energy hangover, suppressing sustained low-energy tails, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata.
+  DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
 - [ ] Keep inbound disabled by default at process startup; incoming webhooks must not be answered until the operator enables inbound handling.
   DESIGN reference: `Staged Build Strategy`, `Operator REPL and TUI Control Surface`
 - [ ] Validate that `stream_bidirectional_target_legs=self` is correct for the initial single-leg AI call pattern.
@@ -495,6 +500,8 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Telnyx v1 Pipelines`
 - [ ] Add regression tests for out-of-order chunks, duplicate chunks, empty media, unsupported codecs, and invalid pipeline assemblies.
   DESIGN reference: `Testing Scope for PLAN`, `Recommended Safety Properties`
+- [ ] Add regression tests for ASR low-energy gating before speech, sustained low-energy tail suppression after speech, repeated-token transcript suppression, and shell cursor alignment when command output wraps across multiple rendered rows.
+  DESIGN reference: `Testing Scope for PLAN`, `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, highlighted roster rows, unread event counts, auto-selection only when no active call is selected, source-local selected-call default command targets, TUI/socket selection isolation, command-source mux ordering, `answer` command transition, and selected-call detail event emission.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Add a milestone 1 structured-log check that verifies gateway call id, Telnyx diagnostic ids, stream id, observed codec, observed sample rate, and transcript partial/final events are logged during an inbound transcription session.
