@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Added live-call termination diagnostics to milestone 1 so Telnyx `call.hangup`/`call.ended`/stream termination fields are preserved in structured logs and selected-call detail instead of reducing every provider-side close to `ended`. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Refined live milestone 1 handling so the ASR path gates both initial silence and sustained low-energy tails, suppresses repeated-token Sherpa hallucinations from the operator transcript stream while logging them as suppressed events, and keeps the shell prompt cursor aligned by rendered rows when command output wraps. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Merged the TUI command input and REPL history into one shell-style left pane so operator commands, output, and the active prompt share one terminal-like surface. | Operator REPL and TUI Control Surface |
 | 2026-06-01 | @codex-364-impl: Added an explicit ASR start-of-speech gate for milestone 1 so low-energy initial telephony frames are logged but not fed into Sherpa, preventing silence-driven partial transcript growth during live inbound tests. | Inbound Call Handler Design, Testing Scope |
@@ -396,7 +397,7 @@ No TTS, outbound audio, external appserver, socket client, or `ConversationHandl
 
 Milestone 1 ASR input should suppress low-energy initial media until speech is detected, allow only a short low-energy hangover after speech, and suppress sustained low-energy tails so silence does not keep advancing the streaming decoder. Because the current Sherpa backend has known repeated-token failure modes, the gateway should suppress pathological repeated-token transcript text from the operator transcript stream and emit a structured `transcript.suppressed_repeated_token` log with the same call, stream, codec, and sample-rate metadata.
 
-Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
+Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, transcript partial/final events, and Telnyx termination details such as hangup cause/source or SIP cause when the provider sends them.
 
 Recommended inbound surface:
 
@@ -738,6 +739,7 @@ Right top call roster:
 Right bottom selected-call detail:
 
 - shows the currently selected call's full state, provider IDs, webhook/media status, codec, sample rate, and latest errors
+- shows Telnyx termination reason/cause when the call ends or the media stream stops
 - shows timeline events for that call
 - shows milestone 1 ASR partials/finals as a transcript stream
 - shows milestone 2 TTS playback state and the latest `say` requests
