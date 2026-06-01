@@ -144,6 +144,12 @@ After the callee answers, `call show` displays the transcript and the capture
 directory contains the raw media JSONL, decoded WAV, ASR input WAV, and
 transcript JSONL.
 
+Telnyx outbound calls require the Call Control application to be assigned to an
+Outbound Voice Profile. If Telnyx returns `403 D38` with `Connection has no
+Outbound Profile assigned`, create or select an Outbound Voice Profile in the
+Telnyx portal and add the Call Control application to that profile before
+running `test dial-transcribe` again.
+
 1. Expose the local listener with Tailscale Funnel:
 
    ```sh
