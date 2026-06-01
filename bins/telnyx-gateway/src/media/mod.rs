@@ -557,7 +557,7 @@ async fn finalize_capture(media_state: &mut MediaSocketState) {
 fn decode_payload(format: &MediaFormat, payload: &[u8]) -> anyhow::Result<Vec<i16>> {
     validate_media_format(format)?;
     match format.encoding.as_str() {
-        "L16" => Ok(l16::decode_l16_be(payload)?),
+        "L16" => Ok(l16::decode_l16_le(payload)?),
         "PCMU" => Ok(g711::decode_pcmu(payload)),
         "PCMA" => Ok(g711::decode_pcma(payload)),
         other => bail!("unsupported inbound media encoding {other}"),
@@ -950,6 +950,21 @@ mod tests {
         )
         .expect("pcma should decode");
         assert_eq!(pcma.len(), 2);
+    }
+
+    #[test]
+    fn telnyx_l16_decodes_as_little_endian_pcm() {
+        let decoded = decode_payload(
+            &MediaFormat {
+                encoding: "L16".to_string(),
+                sample_rate_hz: 16_000,
+                channels: 1,
+            },
+            &[0x26, 0x03, 0x10, 0x02, 0x07, 0x01, 0x34, 0xff],
+        )
+        .expect("l16 should decode");
+
+        assert_eq!(decoded, vec![806, 528, 263, -204]);
     }
 
     #[test]
@@ -1423,7 +1438,7 @@ mod tests {
     fn l16_samples(count: usize, sample: i16) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(count * 2);
         for _ in 0..count {
-            bytes.extend_from_slice(&sample.to_be_bytes());
+            bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
     }

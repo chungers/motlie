@@ -82,6 +82,10 @@ config set media-codec L16
 config set media-sample-rate 16000
 ```
 
+The gateway decodes Telnyx `L16` WebSocket payloads as little-endian PCM. The
+first captured `L16` live call showed clipped, unusable audio when interpreted as
+big-endian and normal speech levels when interpreted as little-endian.
+
 Each accepted media stream creates:
 
 - `telnyx-media.jsonl`: raw Telnyx WebSocket events after `start`
@@ -89,6 +93,13 @@ Each accepted media stream creates:
 - `asr-input-16khz.wav`: samples fed into Sherpa after gating and resampling
 - `transcripts.jsonl`: partial/final transcript events, including suppressed events
 - `manifest.json`: call, stream, codec, sample-rate, and file metadata
+
+For WER checks, read this exact reference text at a steady pace after the call is
+answered:
+
+```text
+The quick brown fox jumps over the lazy dog. Motlie is testing inbound speech through Telnyx. Please record every word in this sentence clearly. The final answer should contain numbers one two three and the phrase blue copper river.
+```
 
 1. Expose the local listener with Tailscale Funnel:
 

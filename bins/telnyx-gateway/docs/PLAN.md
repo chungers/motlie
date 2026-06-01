@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Corrected the milestone 1 Telnyx `L16` comparison path to decode observed WebSocket `L16` payloads as little-endian PCM, added provider-neutral little-endian L16 helpers, and added a fixed read-aloud reference for WER checks. |
 | 2026-06-01 | @codex-364-impl | Added the post-live-test ASR quality loop for milestone 1: gateway media capture writes raw Telnyx JSONL, decoded inbound WAV, Sherpa input WAV, transcript JSONL, and manifest files, while replayable config can switch answer media between the known-good `PCMU 8 kHz` path and an `L16 16 kHz` comparison run. |
 | 2026-06-01 | @codex-364-impl | Updated milestone 1 ASR quality work to use upstream `sherpa-onnx` for online recognition, endpointing, and static native archive linking; normal speech pauses now stay in one ASR session while repeated-token suppression remains a reset safety valve. |
 | 2026-06-01 | @codex-364-impl | Added a milestone 1 agent-assisted live-test control path: `--socket` starts a local command socket with line-oriented Motlie driver commands, JSON command responses, `call show` transcript snapshots, and `shutdown`; milestone 4 still owns richer event polling, request IDs, socket/TUI mux validation, and appserver integration. |
@@ -168,7 +169,7 @@ Build the provider-neutral media adaptation pipeline with explicit stage contrac
   DESIGN reference: `Behavior Contracts`, `Resampling and Format Normalization`
 - [ ] Add the provider-neutral `i16_to_f32` conversion helper in `motlie_voice::pipeline::convert` and implement i16 telephony resampler wrappers as `i16 -> f32 -> resample_f32 -> i16` over the f32 `Resampler` path until an i16-native resampler is justified.
   DESIGN reference: `Behavior Contracts`, `Resampling and Format Normalization`
-- [ ] Implement provider-neutral G.711 and `L16` codecs in `libs/voice/src/codec/`.
+- [ ] Implement provider-neutral G.711 and `L16` codecs in `libs/voice/src/codec/`, including explicit big-endian and little-endian L16 helpers so provider adapters choose the byte order proven by their media captures.
   DESIGN reference: `Codec and Container Gaps`, `Crate Hierarchy and API Surfaces`
 - [ ] Keep stage responsibilities split; do not collapse decode, resample, and packetization into one opaque adapter.
   DESIGN reference: `Required Concrete Stage Inventory`
@@ -566,7 +567,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] Capture and review the exact observed `start.media_format` values from Telnyx.
   DESIGN reference: `Open Concerns`
-- [ ] Use captured WAV/JSONL artifacts to compare `PCMU 8 kHz` against `L16 16 kHz` and to tune Sherpa decoding/endpointing without requiring a fresh phone call for every ASR experiment.
+- [ ] Use captured WAV/JSONL artifacts to compare `PCMU 8 kHz` against `L16 16 kHz`, verify the observed L16 byte order, and tune Sherpa decoding/endpointing without requiring a fresh phone call for every ASR experiment.
   DESIGN reference: `Inbound Call Handler Design`, `Recommended ASR/TTS Stack`
 - [ ] Verify conversational latency for the Sherpa + Piper duplex path once milestone 3 exists, and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`
