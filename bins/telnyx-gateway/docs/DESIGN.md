@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Updated the milestone 1 `L16` comparison path after capture analysis showed Telnyx WebSocket `L16` payloads must be decoded as little-endian PCM for the tested account/carrier path; big-endian interpretation produced clipped, unusable ASR input. | Audio Codecs and Formats, Inbound Call Handler Design, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Added the post-live-test ASR quality loop for milestone 1: keep `PCMU 8 kHz` as the safe default, make the Telnyx answer media request configurable for `L16 16 kHz` comparison runs, and capture raw Telnyx JSONL, decoded WAV, Sherpa input WAV, transcript JSONL, and manifests for offline replay/tuning. | Audio Codecs and Formats, Inbound Call Handler Design, Testing Scope, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Updated the milestone 1 ASR design to prefer upstream `sherpa-onnx` over Motlie's former hand-rolled ONNX decoder; the gateway now preserves normal speech pauses for Sherpa endpointing and uses the upstream crate's static native archive download/link path instead of the workspace Pyke `ort` path. | Recommended ASR/TTS Stack, Inbound Call Handler Design, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Added a milestone 1 local command-socket subset for agent-assisted live testing: headless startup can load known config, accept line-oriented Motlie driver commands, return JSON command responses, answer inbound calls, expose `call show` transcript snapshots, and shut down without scraping the TUI; richer event polling and mux validation remain milestone 4. | Staged Build Strategy, Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API, Getting Started: Local Deployment |
@@ -236,6 +237,7 @@ Implications for Motlie:
 - the most direct fit to the later duplex ASR/TTS contracts is `L16` bidirectional RTP at `16 kHz`
 - milestone 1 live inbound transcription defaults to `PCMU` at `8 kHz` for inbound media and enables bidirectional RTP in the same codec so the gateway can send outbound silence keepalive while it is otherwise only transcribing
 - after the first successful upstream Sherpa live test, the gateway should expose an operator-controlled `L16 16 kHz` comparison mode; `PCMU 8 kHz` remains the rollback/default path until captured evidence shows `L16` is both stable and higher quality on the active Telnyx account/carrier path
+- milestone 1 live capture showed Telnyx WebSocket `L16` payloads decoding correctly as little-endian PCM on the tested account/carrier path; provider-neutral codec helpers should support both byte orders, but the Telnyx gateway must use the observed Telnyx byte order for inbound `L16`
 - PSTN-originated inbound audio may still start as `PCMU` or `PCMA` at `8 kHz`
 - the gateway must be able to decode G.711 and possibly other Telnyx codecs if the inbound stream format is not already linear PCM
 
