@@ -19,12 +19,17 @@ use crate::operator::state::{
     CallStatus, LogLevel, MediaMetadata, SharedState, StreamAttachOutcome, TranscriptKind,
 };
 
+mod capture;
+
+use capture::MediaCapture;
+
 const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
 const LOW_ENERGY_HANGOVER_FRAMES: usize = 75;
 const REPEATED_TOKEN_RUN_THRESHOLD: usize = 16;
 const REPEATED_Q_RUN_THRESHOLD: usize = 8;
-const PCMU_SILENCE_FRAME: [u8; 160] = [0xff; 160];
+const PCMU_SILENCE_BYTE: u8 = 0xff;
+const PCMA_SILENCE_BYTE: u8 = 0xd5;
 const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,6 +97,7 @@ struct MediaSocketState {
     asr_gate: AsrGate,
     silence_keepalive: bool,
     silence_keepalive_frames: usize,
+    capture: Option<MediaCapture>,
 }
 
 impl MediaSocketState {
@@ -105,6 +111,7 @@ impl MediaSocketState {
             asr_gate: AsrGate::default(),
             silence_keepalive: false,
             silence_keepalive_frames: 0,
+            capture: None,
         }
     }
 }
@@ -159,6 +166,7 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
                     call_id,
                     None,
                     media_state.media_format.as_ref(),
+                    media_state.capture.as_mut(),
                     events,
                 )
                 .await;
@@ -171,16 +179,21 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
             call.push_timeline("media websocket closed");
         }
     }
+    finalize_capture(&mut media_state).await;
 }
 
 async fn send_silence_keepalive(
     socket: &mut WebSocket,
     media_state: &mut MediaSocketState,
 ) -> anyhow::Result<()> {
+    let format = media_state
+        .media_format
+        .as_ref()
+        .context("send silence keepalive before media format was known")?;
     socket
-        .send(Message::Text(pcmu_silence_keepalive_message().into()))
+        .send(Message::Text(silence_keepalive_message(format)?.into()))
         .await
-        .context("send PCMU silence keepalive to Telnyx")?;
+        .context("send silence keepalive to Telnyx")?;
 
     media_state.silence_keepalive_frames = media_state.silence_keepalive_frames.saturating_add(1);
     if media_state.silence_keepalive_frames == 1
@@ -195,15 +208,32 @@ async fn send_silence_keepalive(
     Ok(())
 }
 
-fn pcmu_silence_keepalive_message() -> String {
-    let payload = STANDARD.encode(PCMU_SILENCE_FRAME);
-    serde_json::json!({
+fn silence_keepalive_message(format: &MediaFormat) -> anyhow::Result<String> {
+    let payload = STANDARD.encode(silence_payload(format)?);
+    Ok(serde_json::json!({
         "event": "media",
         "media": {
             "payload": payload
         }
     })
-    .to_string()
+    .to_string())
+}
+
+fn silence_payload(format: &MediaFormat) -> anyhow::Result<Vec<u8>> {
+    let samples_per_frame = samples_per_20ms(format.sample_rate_hz)?;
+    match format.encoding.as_str() {
+        "PCMU" => Ok(vec![PCMU_SILENCE_BYTE; samples_per_frame]),
+        "PCMA" => Ok(vec![PCMA_SILENCE_BYTE; samples_per_frame]),
+        "L16" => Ok(vec![0; samples_per_frame * 2]),
+        other => bail!("unsupported silence keepalive encoding {other}"),
+    }
+}
+
+fn samples_per_20ms(sample_rate_hz: u32) -> anyhow::Result<usize> {
+    if sample_rate_hz == 0 || !sample_rate_hz.is_multiple_of(50) {
+        bail!("sample rate {sample_rate_hz} cannot be packetized into 20ms frames");
+    }
+    Ok((sample_rate_hz / 50) as usize)
 }
 
 async fn handle_text(
@@ -223,6 +253,28 @@ async fn handle_text(
             let Some(call_id) = register_start(state, &event, &format).await else {
                 return Ok(());
             };
+            if let Some(capture_root) = state.read().await.config.capture_dir.clone() {
+                match MediaCapture::start(&capture_root, &call_id, &event.stream_id, &format) {
+                    Ok(mut capture) => {
+                        record_raw_capture(Some(&mut capture), text);
+                        tracing::info!(
+                            gateway_call_id = call_id,
+                            stream_id = event.stream_id,
+                            capture_dir = %capture.dir().display(),
+                            "media.capture.started"
+                        );
+                        media_state.capture = Some(capture);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            gateway_call_id = call_id,
+                            stream_id = event.stream_id,
+                            error = %error,
+                            "media.capture.start_failed"
+                        );
+                    }
+                }
+            }
             media_state.media_format = Some(format);
             media_state.gateway_call_id = Some(call_id);
             media_state.session = Some(asr.open_session().await?);
@@ -235,6 +287,7 @@ async fn handle_text(
             Ok(())
         }
         "media" => {
+            record_raw_capture(media_state.capture.as_mut(), text);
             let event: MediaEvent = serde_json::from_str(text).context("parse media event")?;
             let sequence = event
                 .media
@@ -271,16 +324,20 @@ async fn handle_text(
             Ok(())
         }
         "stop" => {
+            record_raw_capture(media_state.capture.as_mut(), text);
             let event: StopEvent = serde_json::from_str(text).context("parse stop event")?;
             media_state.silence_keepalive = false;
-            finish_stream(
+            let result = finish_stream(
                 state,
                 &mut media_state.session,
                 media_state.gateway_call_id.as_deref(),
                 event.stream_id,
                 media_state.media_format.as_ref(),
+                media_state.capture.as_mut(),
             )
-            .await
+            .await;
+            finalize_capture(media_state).await;
+            result
         }
         "mark" | "clear" | "dtmf" => Ok(()),
         "error" => bail!("Telnyx media error event: {text}"),
@@ -379,6 +436,7 @@ async fn ingest_frame(
 
     let mut samples = decode_payload(&format, &frame.payload)?;
     media_state.decoded_frame_count += 1;
+    record_decoded_capture(media_state.capture.as_mut(), &samples);
     let stats = sample_stats(&samples);
     log_decoded_frame_stats(
         media_state.decoded_frame_count,
@@ -413,6 +471,7 @@ async fn ingest_frame(
             16_000,
         )?;
     }
+    record_asr_capture(media_state.capture.as_mut(), &samples);
 
     let Some(session) = media_state.session.as_mut() else {
         bail!("ASR session unavailable after reopen");
@@ -425,6 +484,7 @@ async fn ingest_frame(
         &gateway_call_id,
         Some(stream_id),
         Some(&format),
+        media_state.capture.as_mut(),
         events,
     )
     .await
@@ -453,6 +513,45 @@ async fn open_asr_session(
     media_state.session = Some(asr.open_session().await?);
     tracing::info!(gateway_call_id, stream_id, reason, "asr.session.opened");
     Ok(())
+}
+
+fn record_raw_capture(capture: Option<&mut MediaCapture>, raw: &str) {
+    if let Some(capture) = capture {
+        if let Err(error) = capture.record_raw_event(raw) {
+            tracing::warn!(error = %error, "media.capture.raw_failed");
+        }
+    }
+}
+
+fn record_decoded_capture(capture: Option<&mut MediaCapture>, samples: &[i16]) {
+    if let Some(capture) = capture {
+        if let Err(error) = capture.record_decoded_samples(samples) {
+            tracing::warn!(error = %error, "media.capture.decoded_failed");
+        }
+    }
+}
+
+fn record_asr_capture(capture: Option<&mut MediaCapture>, samples: &[i16]) {
+    if let Some(capture) = capture {
+        if let Err(error) = capture.record_asr_samples(samples) {
+            tracing::warn!(error = %error, "media.capture.asr_failed");
+        }
+    }
+}
+
+fn record_transcript_capture(capture: &mut MediaCapture, kind: &str, text: &str, suppressed: bool) {
+    if let Err(error) = capture.record_transcript(kind, text, suppressed) {
+        tracing::warn!(error = %error, "media.capture.transcript_failed");
+    }
+}
+
+async fn finalize_capture(media_state: &mut MediaSocketState) {
+    if let Some(capture) = media_state.capture.take() {
+        match capture.finalize() {
+            Ok(dir) => tracing::info!(capture_dir = %dir.display(), "media.capture.finalized"),
+            Err(error) => tracing::warn!(error = %error, "media.capture.finalize_failed"),
+        }
+    }
 }
 
 fn decode_payload(format: &MediaFormat, payload: &[u8]) -> anyhow::Result<Vec<i16>> {
@@ -665,8 +764,17 @@ async fn finish_stream(
     gateway_call_id: Option<&str>,
     stream_id: Option<String>,
     media_format: Option<&MediaFormat>,
+    capture: Option<&mut MediaCapture>,
 ) -> anyhow::Result<()> {
-    finish_asr_session(state, session, gateway_call_id, stream_id, media_format).await?;
+    finish_asr_session(
+        state,
+        session,
+        gateway_call_id,
+        stream_id,
+        media_format,
+        capture,
+    )
+    .await?;
     if let Some(call_id) = gateway_call_id {
         let mut guard = state.write().await;
         if let Some(call) = guard.calls.get_mut(call_id) {
@@ -683,12 +791,19 @@ async fn finish_asr_session(
     gateway_call_id: Option<&str>,
     stream_id: Option<String>,
     media_format: Option<&MediaFormat>,
+    capture: Option<&mut MediaCapture>,
 ) -> anyhow::Result<()> {
     if let (Some(call_id), Some(asr_session)) = (gateway_call_id, session.take()) {
         let events = asr_session.finish().await?;
-        let _ =
-            record_transcript_events(state, call_id, stream_id.as_deref(), media_format, events)
-                .await;
+        let _ = record_transcript_events(
+            state,
+            call_id,
+            stream_id.as_deref(),
+            media_format,
+            capture,
+            events,
+        )
+        .await;
     }
     Ok(())
 }
@@ -698,6 +813,7 @@ async fn record_transcript_events(
     gateway_call_id: &str,
     stream_id: Option<&str>,
     media_format: Option<&MediaFormat>,
+    mut capture: Option<&mut MediaCapture>,
     events: Vec<TranscriptEvent>,
 ) -> bool {
     let mut guard = state.write().await;
@@ -714,6 +830,10 @@ async fn record_transcript_events(
             "transcript.partial"
         };
         let text = event.text().to_string();
+        let suppressed = looks_like_repeated_token_hallucination(&text);
+        if let Some(capture) = capture.as_deref_mut() {
+            record_transcript_capture(capture, kind_label, &text, suppressed);
+        }
         let call = guard.calls.get(gateway_call_id);
         let call_control_id = call.map(|call| call.ids.call_control_id.clone());
         let call_session_id = call.and_then(|call| call.ids.call_session_id.clone());
@@ -728,7 +848,7 @@ async fn record_transcript_events(
             .map(|format| format.sample_rate_hz)
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
 
-        if looks_like_repeated_token_hallucination(&text) {
+        if suppressed {
             suppressed_repeated_token = true;
             tracing::warn!(
                 gateway_call_id,
@@ -834,7 +954,12 @@ mod tests {
 
     #[test]
     fn pcmu_silence_keepalive_message_is_telnyx_media_json() {
-        let message = pcmu_silence_keepalive_message();
+        let format = MediaFormat {
+            encoding: "PCMU".to_string(),
+            sample_rate_hz: 8_000,
+            channels: 1,
+        };
+        let message = silence_keepalive_message(&format).expect("keepalive should encode");
         let value: serde_json::Value =
             serde_json::from_str(&message).expect("keepalive should be JSON");
         let payload = value["media"]["payload"]
@@ -845,7 +970,20 @@ mod tests {
             .expect("payload should be base64");
 
         assert_eq!(value["event"], "media");
-        assert_eq!(decoded, PCMU_SILENCE_FRAME);
+        assert_eq!(decoded, vec![PCMU_SILENCE_BYTE; 160]);
+    }
+
+    #[test]
+    fn l16_silence_keepalive_uses_20ms_16khz_pcm() {
+        let format = MediaFormat {
+            encoding: "L16".to_string(),
+            sample_rate_hz: 16_000,
+            channels: 1,
+        };
+        let payload = silence_payload(&format).expect("L16 silence should encode");
+
+        assert_eq!(payload.len(), 640);
+        assert!(payload.iter().all(|byte| *byte == 0));
     }
 
     #[tokio::test]
@@ -927,6 +1065,74 @@ mod tests {
         assert_eq!(call.transcripts.len(), 2);
         assert_eq!(call.transcripts[0].text, "received 16000 samples");
         assert_eq!(call.transcripts[1].text, "received 16000 samples");
+    }
+
+    #[tokio::test]
+    async fn media_capture_writes_replay_artifacts() {
+        let capture_root = std::env::temp_dir().join(format!(
+            "motlie-telnyx-capture-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = {
+            let mut guard = state.write().await;
+            guard.config.capture_dir = Some(capture_root.clone());
+            guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: None,
+                },
+                Some("+15550000001".to_string()),
+                Some("+15550000002".to_string()),
+                CallStatus::Answering,
+            )
+        };
+        let asr: SharedAsrFactory = Arc::new(EchoAsrFactory);
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open ASR session");
+        let speech = STANDARD.encode(l16_samples(16_000, 4_000));
+        handle_text(
+            &media_event("stream-1", "1", &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("media should be captured");
+        handle_text(
+            &serde_json::json!({
+                "event": "stop",
+                "stream_id": "stream-1"
+            })
+            .to_string(),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("stop should finish capture");
+
+        let capture_dir = capture_root.join(&gateway_call_id).join("stream-1");
+        assert!(capture_dir.join("manifest.json").is_file());
+        assert!(capture_dir.join("telnyx-media.jsonl").is_file());
+        assert!(capture_dir.join("decoded-inbound.wav").is_file());
+        assert!(capture_dir.join("asr-input-16khz.wav").is_file());
+        assert!(capture_dir.join("transcripts.jsonl").is_file());
+        let transcripts = std::fs::read_to_string(capture_dir.join("transcripts.jsonl"))
+            .expect("transcript capture should be readable");
+        assert!(transcripts.contains("received 16000 samples"));
+
+        std::fs::remove_dir_all(&capture_root).expect("capture temp dir should be removed");
     }
 
     #[tokio::test]
@@ -1097,6 +1303,7 @@ mod tests {
             &gateway_call_id,
             Some("stream-1"),
             Some(&format),
+            None,
             vec![
                 TranscriptEvent::Partial {
                     text: "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ".to_string(),

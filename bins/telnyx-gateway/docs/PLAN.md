@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Added the post-live-test ASR quality loop for milestone 1: gateway media capture writes raw Telnyx JSONL, decoded inbound WAV, Sherpa input WAV, transcript JSONL, and manifest files, while replayable config can switch answer media between the known-good `PCMU 8 kHz` path and an `L16 16 kHz` comparison run. |
 | 2026-06-01 | @codex-364-impl | Updated milestone 1 ASR quality work to use upstream `sherpa-onnx` for online recognition, endpointing, and static native archive linking; normal speech pauses now stay in one ASR session while repeated-token suppression remains a reset safety valve. |
 | 2026-06-01 | @codex-364-impl | Added a milestone 1 agent-assisted live-test control path: `--socket` starts a local command socket with line-oriented Motlie driver commands, JSON command responses, `call show` transcript snapshots, and `shutdown`; milestone 4 still owns richer event polling, request IDs, socket/TUI mux validation, and appserver integration. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 ASR-session reset work from live long-call logs: speech resumed after sustained silence opens a fresh Sherpa session, repeated-token hallucinations request a reset, and the TUI keeps one assembled call transcript because current Sherpa finals are word-level. |
@@ -431,7 +432,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Getting Started: Local Deployment`
 - [ ] Show call state, media metadata, assembled transcript text, recent partial/final transcript events, errors, and terminal call state in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
-- [ ] Answer milestone 1 calls with bidirectional `PCMU` RTP and send outbound PCMU silence keepalive frames until milestone 2/M3 replaces that path with real TTS audio.
+- [ ] Answer milestone 1 calls with bidirectional RTP and send outbound silence keepalive frames until milestone 2/M3 replaces that path with real TTS audio; default to the live-validated `PCMU 8 kHz` path, but allow operator config to request `L16 16 kHz` for measured ASR quality comparison.
   DESIGN reference: `Inbound Call Handler Design`, `Audio Codecs and Formats`
 - [ ] Preserve Telnyx termination details from `streaming.stopped`, `streaming.failed`, `call.hangup`, and `call.ended` webhooks in selected-call detail and structured logs so live drops can be classified as caller hangup, provider timeout, media failure, or another carrier/SIP cause.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
@@ -443,6 +444,8 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Open Concerns`
 - [ ] Add structured logs for the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
   DESIGN reference: `Open Concerns`
+- [ ] Add operator-configurable capture for ASR quality debugging: raw Telnyx media JSONL, decoded inbound WAV at observed format, `16 kHz` Sherpa input WAV, transcript-event JSONL, and a manifest under a per-call/per-stream directory.
+  DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
 
 ### 8.2 - Milestone 2 outbound TUI dialer/TTS flow (#365)
 
@@ -563,6 +566,8 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`
 - [ ] Capture and review the exact observed `start.media_format` values from Telnyx.
   DESIGN reference: `Open Concerns`
+- [ ] Use captured WAV/JSONL artifacts to compare `PCMU 8 kHz` against `L16 16 kHz` and to tune Sherpa decoding/endpointing without requiring a fresh phone call for every ASR experiment.
+  DESIGN reference: `Inbound Call Handler Design`, `Recommended ASR/TTS Stack`
 - [ ] Verify conversational latency for the Sherpa + Piper duplex path once milestone 3 exists, and document measured numbers nearby in this PLAN or a follow-up note.
   DESIGN reference: `Real-Time Latency Requirements`
 - [ ] Document first-audio latency separately from outbound transport packet cadence, because Piper currently produces a full buffer before packetized streaming begins.

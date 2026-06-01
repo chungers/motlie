@@ -2,6 +2,7 @@ use anyhow::{bail, Context};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -27,6 +28,79 @@ pub struct PhoneNumber {
     pub connection_id: Option<String>,
     pub connection_name: Option<String>,
     pub status: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TelnyxStreamCodec {
+    Pcmu,
+    L16,
+}
+
+impl TelnyxStreamCodec {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pcmu => "PCMU",
+            Self::L16 => "L16",
+        }
+    }
+
+    pub fn default_sample_rate_hz(self) -> u32 {
+        match self {
+            Self::Pcmu => 8_000,
+            Self::L16 => 16_000,
+        }
+    }
+}
+
+impl FromStr for TelnyxStreamCodec {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_uppercase().as_str() {
+            "PCMU" => Ok(Self::Pcmu),
+            "L16" => Ok(Self::L16),
+            other => bail!("unsupported Telnyx media codec {other}; expected PCMU or L16"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TelnyxMediaConfig {
+    pub codec: TelnyxStreamCodec,
+    pub sample_rate_hz: u32,
+}
+
+impl Default for TelnyxMediaConfig {
+    fn default() -> Self {
+        Self {
+            codec: TelnyxStreamCodec::Pcmu,
+            sample_rate_hz: TelnyxStreamCodec::Pcmu.default_sample_rate_hz(),
+        }
+    }
+}
+
+impl TelnyxMediaConfig {
+    pub fn new(codec: TelnyxStreamCodec, sample_rate_hz: u32) -> anyhow::Result<Self> {
+        let config = Self {
+            codec,
+            sample_rate_hz,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(self) -> anyhow::Result<()> {
+        let expected = self.codec.default_sample_rate_hz();
+        if self.sample_rate_hz != expected {
+            bail!(
+                "{} must use {} Hz for Telnyx RTP media, got {} Hz",
+                self.codec.as_str(),
+                expected,
+                self.sample_rate_hz
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,16 +360,18 @@ impl TelnyxClient {
 pub struct AnswerRequest<'a> {
     pub call_control_id: &'a str,
     pub stream_url: &'a str,
+    pub media: TelnyxMediaConfig,
 }
 
 fn answer_request_body(request: &AnswerRequest<'_>) -> serde_json::Value {
+    let codec = request.media.codec.as_str();
     json!({
         "stream_url": request.stream_url,
         "stream_track": "inbound_track",
-        "stream_codec": "PCMU",
+        "stream_codec": codec,
         "stream_bidirectional_mode": "rtp",
-        "stream_bidirectional_codec": "PCMU",
-        "stream_bidirectional_sampling_rate": 8000,
+        "stream_bidirectional_codec": codec,
+        "stream_bidirectional_sampling_rate": request.media.sample_rate_hz,
         "stream_bidirectional_target_legs": "self",
         "command_id": format!("motlie-answer-{}", Uuid::new_v4()),
     })
@@ -325,6 +401,7 @@ mod tests {
         let body = answer_request_body(&AnswerRequest {
             call_control_id: "call-1",
             stream_url: "wss://example.test/telnyx/media",
+            media: TelnyxMediaConfig::default(),
         });
 
         assert_eq!(body["stream_url"], "wss://example.test/telnyx/media");
@@ -334,5 +411,19 @@ mod tests {
         assert_eq!(body["stream_bidirectional_codec"], "PCMU");
         assert_eq!(body["stream_bidirectional_sampling_rate"], 8000);
         assert_eq!(body["stream_bidirectional_target_legs"], "self");
+    }
+
+    #[test]
+    fn answer_request_body_can_request_l16_16khz() {
+        let body = answer_request_body(&AnswerRequest {
+            call_control_id: "call-1",
+            stream_url: "wss://example.test/telnyx/media",
+            media: TelnyxMediaConfig::new(TelnyxStreamCodec::L16, 16_000)
+                .expect("L16 config should be valid"),
+        });
+
+        assert_eq!(body["stream_codec"], "L16");
+        assert_eq!(body["stream_bidirectional_codec"], "L16");
+        assert_eq!(body["stream_bidirectional_sampling_rate"], 16_000);
     }
 }

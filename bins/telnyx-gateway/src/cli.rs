@@ -35,4 +35,7 @@ pub struct Cli {
 
     #[arg(long)]
     pub log_file: Option<PathBuf>,
+
+    #[arg(long)]
+    pub capture_dir: Option<PathBuf>,
 }
