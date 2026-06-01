@@ -139,11 +139,7 @@ impl TelnyxClient {
         let body = json!({
             "stream_url": request.stream_url,
             "stream_track": "inbound_track",
-            "stream_codec": "L16",
-            "stream_bidirectional_mode": "rtp",
-            "stream_bidirectional_codec": "L16",
-            "stream_bidirectional_sampling_rate": 16000,
-            "stream_bidirectional_target_legs": "self",
+            "stream_codec": "PCMU",
             "command_id": format!("motlie-answer-{}", Uuid::new_v4()),
         });
         self.post_command(

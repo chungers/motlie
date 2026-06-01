@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Adjusted the milestone 1 live inbound path to request inbound-only `PCMU` media and defer bidirectional `L16` validation to outbound/duplex milestones after the first live test produced unusable `L16` ASR output. | Audio Codecs and Formats, Inbound Call Handler Design |
 | 2026-05-31 | @codex-364-impl: Clarified that the Unix-domain socket is the local agent-tooling interface: it can provide command execution, call snapshots, cursor-based event polling, and optional tmux/mstream-style wake-up notifications without depending on appserver webhooks or the HTTP Control API. | Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API |
 | 2026-05-31 | @codex-364-impl: Updated the gateway ORT policy to use Cargo's `ort/download-binaries` static `libonnxruntime.a` path with no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source-build runbook. | Recommended ASR/TTS Stack, Getting Started: Local Deployment |
 | 2026-05-31 | @codex-364-impl: Clarified that static ONNX Runtime builds should build ORT's own C/C++ dependencies from source through FetchContent; operators only provision host build tools, not ORT internal libraries. | Recommended ASR/TTS Stack |
@@ -222,7 +223,8 @@ Important details:
 
 Implications for Motlie:
 
-- the most direct fit to existing ASR/TTS contracts is `L16` bidirectional RTP at `16 kHz`
+- the most direct fit to the later duplex ASR/TTS contracts is `L16` bidirectional RTP at `16 kHz`
+- milestone 1 inbound-only transcription should avoid bidirectional fields and may prefer `PCMU` at `8 kHz` until live `L16` behavior is validated
 - PSTN-originated inbound audio may still start as `PCMU` or `PCMA` at `8 kHz`
 - the gateway must be able to decode G.711 and possibly other Telnyx codecs if the inbound stream format is not already linear PCM
 
@@ -2508,10 +2510,8 @@ Recommended inbound flow:
 8. The answer action attaches media streaming with:
    - `stream_url=wss://.../telnyx/media`
    - `stream_track=inbound_track`
-   - `stream_bidirectional_mode=rtp`
-   - `stream_bidirectional_codec=L16`
-   - `stream_bidirectional_sampling_rate=16000`
-   - `stream_bidirectional_target_legs=self`
+   - `stream_codec=PCMU` for the milestone 1 inbound-only live path
+   - no `stream_bidirectional_*` fields until milestone 2 or milestone 3 needs outbound audio
 9. Telnyx opens the WebSocket.
 10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
 11. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.

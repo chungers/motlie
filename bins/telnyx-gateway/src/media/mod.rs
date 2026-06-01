@@ -77,6 +77,7 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
     let mut gateway_call_id: Option<String> = None;
     let mut media_format: Option<MediaFormat> = None;
     let mut reorder = SequencedFrameReorder::new_lazily(32);
+    let mut decoded_frame_count = 0usize;
 
     while let Some(message) = socket.next().await {
         match message {
@@ -89,6 +90,7 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
                     &mut gateway_call_id,
                     &mut media_format,
                     &mut reorder,
+                    &mut decoded_frame_count,
                 )
                 .await
                 {
@@ -132,6 +134,7 @@ async fn handle_text(
     gateway_call_id: &mut Option<String>,
     media_format: &mut Option<MediaFormat>,
     reorder: &mut SequencedFrameReorder<EncodedMediaFrame>,
+    decoded_frame_count: &mut usize,
 ) -> anyhow::Result<()> {
     let discriminator: EventDiscriminator =
         serde_json::from_str(text).context("parse Telnyx media event discriminator")?;
@@ -181,6 +184,7 @@ async fn handle_text(
                     media_format.as_ref(),
                     event.stream_id.as_str(),
                     frame.payload,
+                    decoded_frame_count,
                 )
                 .await?;
             }
@@ -283,6 +287,7 @@ async fn ingest_frame(
     media_format: Option<&MediaFormat>,
     stream_id: &str,
     frame: EncodedMediaFrame,
+    decoded_frame_count: &mut usize,
 ) -> anyhow::Result<()> {
     let Some(session) = session.as_mut() else {
         bail!("media frame arrived before ASR session opened");
@@ -295,6 +300,8 @@ async fn ingest_frame(
     };
 
     let mut samples = decode_payload(format, &frame.payload)?;
+    *decoded_frame_count += 1;
+    log_decoded_frame_stats(*decoded_frame_count, format, stream_id, &frame, &samples);
     if format.sample_rate_hz != 16_000 {
         samples = resample_i16_mono(
             &WindowedSincResampler::default(),
@@ -325,6 +332,69 @@ fn decode_payload(format: &MediaFormat, payload: &[u8]) -> anyhow::Result<Vec<i1
         "PCMU" => Ok(g711::decode_pcmu(payload)),
         "PCMA" => Ok(g711::decode_pcma(payload)),
         other => bail!("unsupported inbound media encoding {other}"),
+    }
+}
+
+fn log_decoded_frame_stats(
+    frame_index: usize,
+    format: &MediaFormat,
+    stream_id: &str,
+    frame: &EncodedMediaFrame,
+    samples: &[i16],
+) {
+    if frame_index > 5 {
+        return;
+    }
+    let stats = sample_stats(samples);
+    tracing::debug!(
+        stream_id,
+        frame_index,
+        track = frame.track.as_deref().unwrap_or("<unknown>"),
+        codec = format.encoding,
+        sample_rate_hz = format.sample_rate_hz,
+        channels = format.channels,
+        payload_len = frame.payload.len(),
+        samples = samples.len(),
+        peak = stats.peak,
+        rms = stats.rms,
+        mean = stats.mean,
+        "media.frame.decoded"
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SampleStats {
+    peak: i16,
+    rms: f32,
+    mean: f32,
+}
+
+fn sample_stats(samples: &[i16]) -> SampleStats {
+    if samples.is_empty() {
+        return SampleStats {
+            peak: 0,
+            rms: 0.0,
+            mean: 0.0,
+        };
+    }
+
+    let mut peak = 0i16;
+    let mut sum = 0f64;
+    let mut sum_squares = 0f64;
+    for &sample in samples {
+        let abs = sample.saturating_abs();
+        if abs > peak {
+            peak = abs;
+        }
+        let value = f64::from(sample);
+        sum += value;
+        sum_squares += value * value;
+    }
+    let len = samples.len() as f64;
+    SampleStats {
+        peak,
+        rms: (sum_squares / len).sqrt() as f32,
+        mean: (sum / len) as f32,
     }
 }
 
@@ -483,6 +553,7 @@ mod tests {
         let mut selected_call = None;
         let mut media_format = None;
         let mut reorder = SequencedFrameReorder::new_lazily(32);
+        let mut decoded_frame_count = 0usize;
 
         let start = serde_json::json!({
             "event": "start",
@@ -506,6 +577,7 @@ mod tests {
             &mut selected_call,
             &mut media_format,
             &mut reorder,
+            &mut decoded_frame_count,
         )
         .await
         .expect("start event should open ASR session");
@@ -520,6 +592,7 @@ mod tests {
             &mut selected_call,
             &mut media_format,
             &mut reorder,
+            &mut decoded_frame_count,
         )
         .await
         .expect("first non-one media chunk should establish reorder base");
@@ -541,6 +614,7 @@ mod tests {
             &mut selected_call,
             &mut media_format,
             &mut reorder,
+            &mut decoded_frame_count,
         )
         .await
         .expect("contiguous media should feed ASR");
@@ -558,6 +632,7 @@ mod tests {
             &mut selected_call,
             &mut media_format,
             &mut reorder,
+            &mut decoded_frame_count,
         )
         .await
         .expect("stop should finish ASR session");
@@ -585,6 +660,7 @@ mod tests {
             let mut selected_call = None;
             let mut media_format = None;
             let mut reorder = SequencedFrameReorder::new_lazily(32);
+            let mut decoded_frame_count = 0usize;
 
             handle_text(
                 &start_event("call-1", "stream-1", "L16"),
@@ -594,6 +670,7 @@ mod tests {
                 &mut selected_call,
                 &mut media_format,
                 &mut reorder,
+                &mut decoded_frame_count,
             )
             .await
             .expect("start should be ignored before operator answer");
@@ -619,6 +696,7 @@ mod tests {
         let mut selected_call = None;
         let mut media_format = None;
         let mut reorder = SequencedFrameReorder::new_lazily(32);
+        let mut decoded_frame_count = 0usize;
 
         handle_text(
             &start_event("missing-call", "stream-1", "L16"),
@@ -628,6 +706,7 @@ mod tests {
             &mut selected_call,
             &mut media_format,
             &mut reorder,
+            &mut decoded_frame_count,
         )
         .await
         .expect("unknown start should be ignored");
@@ -649,6 +728,7 @@ mod tests {
         let mut selected_call = None;
         let mut media_format = None;
         let mut reorder = SequencedFrameReorder::new_lazily(32);
+        let mut decoded_frame_count = 0usize;
 
         let error = handle_text(
             &start_event("call-1", "stream-1", "OPUS"),
@@ -658,6 +738,7 @@ mod tests {
             &mut selected_call,
             &mut media_format,
             &mut reorder,
+            &mut decoded_frame_count,
         )
         .await
         .expect_err("unsupported codec should fail at start");
