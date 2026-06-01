@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Updated the milestone 1 ASR design to prefer upstream `sherpa-onnx` over Motlie's former hand-rolled ONNX decoder; the gateway now preserves normal speech pauses for Sherpa endpointing and uses the upstream crate's static native archive download/link path instead of the workspace Pyke `ort` path. | Recommended ASR/TTS Stack, Inbound Call Handler Design, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Added a milestone 1 local command-socket subset for agent-assisted live testing: headless startup can load known config, accept line-oriented Motlie driver commands, return JSON command responses, answer inbound calls, expose `call show` transcript snapshots, and shut down without scraping the TUI; richer event polling and mux validation remain milestone 4. | Staged Build Strategy, Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Updated milestone 1 live ASR handling after long-call logs showed continuous Telnyx media delivery but Sherpa getting stuck in repeated-token output; the gateway now treats speech gaps and repeated-token detection as ASR-session reset boundaries while keeping one assembled call transcript for the operator. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Updated milestone 1 live-call behavior from receive-only PCMU to bidirectional PCMU RTP with outbound silence keepalive after Telnyx reported provider-normal caller hangups while the gateway was only listening; added assembled transcript display so raw partial/final fragments do not replace readable call-level transcript text. | Audio Codecs and Formats, Inbound Call Handler Design, Operator REPL and TUI Control Surface |
@@ -2432,7 +2433,7 @@ Recommended design rule:
 
 - Telnyx v1 should treat `sherpa-onnx` as the default recommended ASR backend for the real-time conversational flow
 - the gateway itself should still accept any injected typed ASR that implements `StreamingTranscriber`
-- gateway live-test and deployment runbooks must use static ONNX Runtime linkage for Sherpa through the workspace `ort/download-binaries` path; Cargo downloads and statically links the prebuilt `libonnxruntime.a` archive
+- gateway live-test and deployment runbooks must use the upstream `sherpa-onnx` Rust crate for Sherpa; Cargo downloads and statically links the upstream prebuilt `sherpa-onnx` native archive, including the ONNX Runtime library Sherpa uses internally
 - gateway runbooks must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not require building ONNX Runtime from source or vendoring ONNX Runtime
 
 ### Recommended TTS: Piper
@@ -2534,7 +2535,7 @@ Recommended inbound flow:
 10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
 11. Until milestone 2/M3 supplies real outbound TTS audio, the gateway sends low-amplitude/silence PCMU `media` frames back over the WebSocket as a keepalive so the single-leg PSTN call does not terminate while Motlie is receive-only at the application level.
 12. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
-13. When sustained silence is followed by resumed speech, the gateway finishes the previous ASR session, records any usable final text, opens a fresh ASR session, and feeds the resumed speech into that new session.
+13. The gateway passes a seconds-scale low-energy hangover through the active ASR session so upstream Sherpa endpointing can finalize utterances; normal speech pauses do not force a new ASR session.
 14. If Sherpa emits a repeated-token hallucination such as a growing `Q` run, the gateway suppresses that event from operator-visible transcripts, logs it, resets the ASR session, and waits for the next speech-energy frame before feeding the backend again.
 15. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
 16. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.

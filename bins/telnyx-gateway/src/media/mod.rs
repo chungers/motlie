@@ -21,7 +21,7 @@ use crate::operator::state::{
 
 const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
-const LOW_ENERGY_HANGOVER_FRAMES: usize = 15;
+const LOW_ENERGY_HANGOVER_FRAMES: usize = 75;
 const REPEATED_TOKEN_RUN_THRESHOLD: usize = 16;
 const REPEATED_Q_RUN_THRESHOLD: usize = 8;
 const PCMU_SILENCE_FRAME: [u8; 160] = [0xff; 160];
@@ -394,24 +394,6 @@ async fn ingest_frame(
     {
         AsrFrameDecision::Suppress => return Ok(()),
         AsrFrameDecision::Continue => {}
-        AsrFrameDecision::NewUtterance => {
-            finish_asr_session(
-                state,
-                &mut media_state.session,
-                Some(&gateway_call_id),
-                Some(stream_id.to_string()),
-                Some(&format),
-            )
-            .await?;
-            open_asr_session(
-                asr,
-                media_state,
-                &gateway_call_id,
-                stream_id,
-                "speech_resumed",
-            )
-            .await?;
-        }
     }
     if media_state.session.is_none() {
         open_asr_session(
@@ -564,7 +546,6 @@ struct AsrGate {
 enum AsrFrameDecision {
     Suppress,
     Continue,
-    NewUtterance,
 }
 
 impl AsrGate {
@@ -598,11 +579,7 @@ impl AsrGate {
                     "media.speech.resumed"
                 );
             }
-            return if resumed_after_tail {
-                AsrFrameDecision::NewUtterance
-            } else {
-                AsrFrameDecision::Continue
-            };
+            return AsrFrameDecision::Continue;
         }
 
         if self.speech_started {
@@ -1045,7 +1022,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn speech_resume_after_silence_reopens_asr_session() {
+    async fn speech_resume_after_silence_keeps_asr_session() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
         let counting_asr = Arc::new(CountingAsrFactory::default());
@@ -1095,9 +1072,9 @@ mod tests {
             &mut media_state,
         )
         .await
-        .expect("resumed speech should reopen ASR and then ingest");
+        .expect("resumed speech should continue ASR ingestion");
 
-        assert_eq!(counting_asr.opens(), 2);
+        assert_eq!(counting_asr.opens(), 1);
         assert_eq!(counting_asr.ingests(), 2 + LOW_ENERGY_HANGOVER_FRAMES);
 
         let guard = state.read().await;

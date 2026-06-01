@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Updated milestone 1 ASR quality work to use upstream `sherpa-onnx` for online recognition, endpointing, and static native archive linking; normal speech pauses now stay in one ASR session while repeated-token suppression remains a reset safety valve. |
 | 2026-06-01 | @codex-364-impl | Added a milestone 1 agent-assisted live-test control path: `--socket` starts a local command socket with line-oriented Motlie driver commands, JSON command responses, `call show` transcript snapshots, and `shutdown`; milestone 4 still owns richer event polling, request IDs, socket/TUI mux validation, and appserver integration. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 ASR-session reset work from live long-call logs: speech resumed after sustained silence opens a fresh Sherpa session, repeated-token hallucinations request a reset, and the TUI keeps one assembled call transcript because current Sherpa finals are word-level. |
 | 2026-06-01 | @codex-364-impl | Updated milestone 1 live behavior to answer with bidirectional PCMU RTP and send outbound silence keepalive after Telnyx reported normal caller-side hangups in receive-only mode; added assembled transcript display above raw partial/final events. |
@@ -180,7 +181,7 @@ Assemble and validate the first useful Telnyx slice: inbound call handling plus 
 - [ ] Implement the Sherpa inbound path:
   Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> Sherpa ingest flow.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Require static ONNX Runtime linkage for the Sherpa live-test path through the workspace `ort/download-binaries` dependency: Cargo downloads and statically links `libonnxruntime.a`; the runbook must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not ask operators to build ONNX Runtime from source.
+- [ ] Require upstream `sherpa-onnx` static native linkage for the Sherpa live-test path: Cargo downloads and statically links the prebuilt `sherpa-onnx` native archive, including Sherpa's internal ONNX Runtime library; the runbook must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not ask operators to build ONNX Runtime from source.
   DESIGN reference: `Recommended ASR/TTS Stack`
 
 ### 4.2 - Transcript sinks
@@ -434,7 +435,7 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Inbound Call Handler Design`, `Audio Codecs and Formats`
 - [ ] Preserve Telnyx termination details from `streaming.stopped`, `streaming.failed`, `call.hangup`, and `call.ended` webhooks in selected-call detail and structured logs so live drops can be classified as caller hangup, provider timeout, media failure, or another carrier/SIP cause.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
-- [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing only a short post-speech low-energy hangover, suppressing sustained low-energy tails, resetting the ASR session when speech resumes after a sustained silence gap, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata and opening a fresh ASR session for subsequent speech.
+- [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing a seconds-scale post-speech low-energy hangover so upstream Sherpa endpointing can finalize utterances, suppressing sustained low-energy tails after that hangover, keeping the ASR session alive across normal resumed speech, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata and opening a fresh ASR session only as a safety reset.
   DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
 - [ ] Keep inbound disabled by default at process startup; incoming webhooks must not be answered until the operator enables inbound handling.
   DESIGN reference: `Staged Build Strategy`, `Operator REPL and TUI Control Surface`
