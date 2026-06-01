@@ -8,7 +8,7 @@ use crossterm::terminal::{
 };
 use motlie_driver::{CommandEffect, CommandEngine};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -109,37 +109,32 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
         .split(frame.area());
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
-        .split(root[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
         .split(root[1]);
 
-    let history_lines = history
+    let shell_height = root[0].height.saturating_sub(2) as usize;
+    let history_capacity = shell_height.saturating_sub(1);
+    let mut shell_lines = history
         .iter()
         .rev()
-        .take(left[0].height.saturating_sub(2) as usize)
+        .take(history_capacity)
         .rev()
         .cloned()
         .map(Line::from)
         .collect::<Vec<_>>();
+    shell_lines.push(Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::raw(input.to_string()),
+    ]));
     frame.render_widget(
-        Paragraph::new(history_lines)
-            .block(Block::default().title("REPL").borders(Borders::ALL))
+        Paragraph::new(shell_lines)
+            .block(Block::default().title("Shell").borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
-        left[0],
+        root[0],
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan)),
-            Span::raw(input.to_string()),
-        ]))
-        .block(Block::default().title("Command").borders(Borders::ALL)),
-        left[1],
-    );
+    set_shell_cursor(frame, root[0], history_capacity, history.len(), input);
 
     let call_items = if state.calls.is_empty() {
         vec![ListItem::new("no calls")]
@@ -188,6 +183,25 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &GatewayState, history: &[String]
             .wrap(Wrap { trim: false }),
         right[1],
     );
+}
+
+fn set_shell_cursor(
+    frame: &mut ratatui::Frame<'_>,
+    area: ratatui::layout::Rect,
+    history_capacity: usize,
+    history_len: usize,
+    input: &str,
+) {
+    if area.width <= 2 || area.height <= 2 {
+        return;
+    }
+
+    let visible_history = history_len.min(history_capacity) as u16;
+    let prompt_y = area.y + 1 + visible_history;
+    let inner_width = area.width.saturating_sub(2);
+    let prompt_offset = 2 + input.chars().count() as u16;
+    let cursor_offset = prompt_offset.min(inner_width.saturating_sub(1));
+    frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, prompt_y));
 }
 
 fn selected_detail_lines(state: &GatewayState) -> Vec<Line<'static>> {

@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Merged the TUI command input and REPL history into one shell-style left pane so operator commands, output, and the active prompt share one terminal-like surface. | Operator REPL and TUI Control Surface |
 | 2026-06-01 | @codex-364-impl: Added an explicit ASR start-of-speech gate for milestone 1 so low-energy initial telephony frames are logged but not fed into Sherpa, preventing silence-driven partial transcript growth during live inbound tests. | Inbound Call Handler Design, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path, so logs cannot corrupt the alternate-screen TUI. | Operator REPL and TUI Control Surface, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Adjusted the milestone 1 live inbound path to request inbound-only `PCMU` media and defer bidirectional `L16` validation to outbound/duplex milestones after the first live test produced unusable `L16` ASR output. | Audio Codecs and Formats, Inbound Call Handler Design |
@@ -721,7 +722,7 @@ Mux rules:
 
 When `--tui` is enabled, the TUI should have one command pane and one call/status area:
 
-- left pane: `motlie-driver` REPL input, command history, and completions/help
+- left pane: shell-style `motlie-driver` REPL surface combining command history, command output, and the active prompt in one pane
 - right area: split vertically into a top call roster and a bottom selected-call detail pane
 
 Right top call roster:

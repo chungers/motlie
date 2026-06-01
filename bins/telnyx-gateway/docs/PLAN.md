@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Merged the TUI command input and REPL history into one shell-style left pane. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 ASR start-of-speech gating: low-energy initial telephony frames are logged and withheld from Sherpa until speech energy is detected. |
 | 2026-06-01 | @codex-364-impl | Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path. |
 | 2026-06-01 | @codex-364-impl | Adjusted milestone 1 live validation to request inbound-only `PCMU` media and defer `stream_bidirectional_target_legs`/bidirectional `L16` validation to later outbound or duplex milestones. |
