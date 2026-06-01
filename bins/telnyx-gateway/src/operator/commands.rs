@@ -198,6 +198,7 @@ pub struct InboundEnableArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum CallCommand {
+    Show { call: Option<String> },
     Use { call: String },
 }
 
@@ -656,6 +657,7 @@ async fn call_command(
     command: CallCommand,
 ) -> DriverResult<CommandOutput> {
     match command {
+        CallCommand::Show { call } => call_show(&context.state, call).await,
         CallCommand::Use { call } => {
             let mut guard = context.state.write().await;
             if !guard.calls.contains_key(&call) {
@@ -670,6 +672,77 @@ async fn call_command(
             }
             Ok(CommandOutput::line(format!("selected call {call}")))
         }
+    }
+}
+
+async fn call_show(state: &SharedState, target: Option<String>) -> DriverResult<CommandOutput> {
+    let guard = state.read().await;
+    let id = resolve_call_id(&guard, target.as_deref())?;
+    let call = guard.calls.get(&id).ok_or_else(|| DriverError::NotFound {
+        kind: "call",
+        name: id.clone(),
+    })?;
+    let mut lines = vec![
+        format!("call: {}", call.gateway_call_id),
+        format!("state: {}", call.status.label()),
+        format!("from: {}", call.from.as_deref().unwrap_or("<unknown>")),
+        format!("to: {}", call.to.as_deref().unwrap_or("<unknown>")),
+        format!("call_control_id: {}", call.ids.call_control_id),
+        format!(
+            "call_session_id: {}",
+            call.ids.call_session_id.as_deref().unwrap_or("<none>")
+        ),
+        format!(
+            "call_leg_id: {}",
+            call.ids.call_leg_id.as_deref().unwrap_or("<none>")
+        ),
+        format!(
+            "stream_id: {}",
+            call.ids.stream_id.as_deref().unwrap_or("<none>")
+        ),
+        format!(
+            "media: {} {}Hz {}ch",
+            call.media.encoding.as_deref().unwrap_or("<unknown>"),
+            call.media
+                .sample_rate_hz
+                .map(|rate| rate.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            call.media
+                .channels
+                .map(|channels| channels.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        ),
+    ];
+    if let Some(reason) = &call.terminal_reason {
+        lines.push(format!("ended: {reason}"));
+    }
+    lines.push("assembled transcript:".to_string());
+    lines.push(assembled_transcript_text(call));
+    lines.push("recent events:".to_string());
+    for transcript in call.transcripts.iter().rev().take(12).rev() {
+        let prefix = match transcript.kind {
+            crate::operator::state::TranscriptKind::Partial => "partial",
+            crate::operator::state::TranscriptKind::Final => "final",
+        };
+        lines.push(format!("{prefix}: {}", transcript.text));
+    }
+    Ok(CommandOutput {
+        lines,
+        effects: Vec::new(),
+    })
+}
+
+fn assembled_transcript_text(call: &crate::operator::state::CallSession) -> String {
+    match (
+        call.final_transcript.trim(),
+        call.current_partial.as_deref().map(str::trim),
+    ) {
+        ("", Some(partial)) if !partial.is_empty() => partial.to_string(),
+        (final_text, Some(partial)) if !final_text.is_empty() && !partial.is_empty() => {
+            format!("{final_text} {partial}")
+        }
+        (final_text, _) if !final_text.is_empty() => final_text.to_string(),
+        _ => "<none>".to_string(),
     }
 }
 
@@ -767,6 +840,17 @@ fn resolve_call_mut<'a>(
     state: &'a mut GatewayState,
     target: Option<&str>,
 ) -> DriverResult<&'a mut crate::operator::state::CallSession> {
+    let id = resolve_call_id(state, target)?;
+    state
+        .calls
+        .get_mut(&id)
+        .ok_or_else(|| DriverError::NotFound {
+            kind: "call",
+            name: id,
+        })
+}
+
+fn resolve_call_id(state: &GatewayState, target: Option<&str>) -> DriverResult<String> {
     let id = match target {
         Some(value) => value.to_string(),
         None => state
@@ -781,13 +865,7 @@ fn resolve_call_mut<'a>(
             })
             .ok_or_else(|| DriverError::message("no call selected; run call use <call>"))?,
     };
-    state
-        .calls
-        .get_mut(&id)
-        .ok_or_else(|| DriverError::NotFound {
-            kind: "call",
-            name: id,
-        })
+    Ok(id)
 }
 
 fn driver_anyhow(error: anyhow::Error) -> DriverError {
@@ -892,5 +970,48 @@ mod tests {
         let guard = state.read().await;
         let call = guard.calls.values().next().expect("call exists");
         assert_eq!(call.status, CallStatus::Answered);
+    }
+
+    #[tokio::test]
+    async fn call_show_returns_assembled_transcript() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        {
+            let mut guard = state.write().await;
+            let gateway_call_id = guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-1".to_string(),
+                    call_session_id: Some("sess-1".to_string()),
+                    call_leg_id: Some("leg-1".to_string()),
+                    stream_id: Some("stream-1".to_string()),
+                },
+                Some("+15550000001".to_string()),
+                Some("+15550000002".to_string()),
+                CallStatus::Answered,
+            );
+            guard.selected_call = Some(gateway_call_id.clone());
+            guard.add_transcript(
+                &gateway_call_id,
+                crate::operator::state::TranscriptKind::Final,
+                "HELLO".to_string(),
+            );
+            guard.add_transcript(
+                &gateway_call_id,
+                crate::operator::state::TranscriptKind::Partial,
+                "WORLD".to_string(),
+            );
+        }
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state, telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("call show").await.expect("call show");
+
+        assert!(output
+            .lines
+            .iter()
+            .any(|line| line == "assembled transcript:"));
+        assert!(output.lines.iter().any(|line| line == "HELLO WORLD"));
+        assert!(output.lines.iter().any(|line| line == "final: HELLO"));
+        assert!(output.lines.iter().any(|line| line == "partial: WORLD"));
     }
 }

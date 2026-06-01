@@ -12,9 +12,10 @@ use motlie_telnyx_gateway::adapter::{EchoAsrFactory, SharedAsrFactory};
 use motlie_telnyx_gateway::call_control::TelnyxClient;
 use motlie_telnyx_gateway::cli::Cli;
 use motlie_telnyx_gateway::operator::commands::{GatewayCommand, GatewayContext};
-use motlie_telnyx_gateway::operator::socket::describe_socket_deferral;
 use motlie_telnyx_gateway::operator::state::{shared_state, LogLevel};
 use motlie_telnyx_gateway::serve::{serve, AppServices};
+use tokio::sync::Mutex;
+use tokio::time::{self, Duration};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,9 +34,6 @@ async fn main() -> anyhow::Result<()> {
             LogLevel::Info,
             format!("listener configured on {}", cli.bind),
         );
-        if let Some(socket) = &cli.socket {
-            guard.log(LogLevel::Warn, describe_socket_deferral(socket));
-        }
     }
 
     let api_key = std::env::var(&cli.telnyx_api_key_env).ok();
@@ -48,25 +46,74 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let server = tokio::spawn(serve(cli.bind, services));
-    let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(GatewayContext::new(
-        state.clone(),
-        telnyx,
-    ));
+    let context = GatewayContext::new(state.clone(), telnyx);
+    let mut replay_engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone());
 
     if let Some(path) = &cli.load {
-        replay_commands(&mut engine, path).await?;
+        replay_commands(&mut replay_engine, path).await?;
     }
 
+    let socket_task = if let Some(path) = cli.socket.clone() {
+        let socket_engine = Arc::new(Mutex::new(
+            CommandEngine::<GatewayContext, GatewayCommand>::new(context.clone()),
+        ));
+        {
+            let mut guard = state.write().await;
+            guard.log(
+                LogLevel::Info,
+                format!("operator socket listening on {}", path.display()),
+            );
+        }
+        Some(tokio::spawn(
+            motlie_telnyx_gateway::operator::socket::run_command_socket(path, socket_engine),
+        ))
+    } else {
+        None
+    };
+
     if cli.tui {
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
         motlie_telnyx_gateway::operator::tui::run_tui(&mut engine).await?;
     } else {
         println!("telnyx-gateway listening on {}", cli.bind);
-        println!("inbound is disabled by default; use --tui for M1 operator control");
-        tokio::signal::ctrl_c().await?;
+        if cli.socket.is_some() {
+            println!(
+                "inbound is disabled by default; use the command socket for M1 operator control"
+            );
+            wait_for_shutdown(state.clone()).await?;
+        } else {
+            println!(
+                "inbound is disabled by default; use --tui or --socket for M1 operator control"
+            );
+            tokio::signal::ctrl_c().await?;
+        }
+    }
+
+    if let Some(task) = socket_task {
+        task.abort();
     }
 
     server.abort();
     Ok(())
+}
+
+async fn wait_for_shutdown(
+    state: motlie_telnyx_gateway::operator::state::SharedState,
+) -> anyhow::Result<()> {
+    let mut tick = time::interval(Duration::from_millis(200));
+    loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                return Ok(());
+            }
+            _ = tick.tick() => {
+                if state.read().await.shutdown_requested {
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 fn build_asr_factory(_cli: &Cli) -> SharedAsrFactory {

@@ -18,6 +18,54 @@ ONNX Runtime from source for the gateway.
 
 ## Run
 
+### Agent-Assisted Headless Test
+
+For live tests with an agent operator, run the gateway without the TUI and expose
+a local Unix-domain command socket:
+
+```sh
+cd ~/sessions/issue-358-telnyx-voice/codex-358-research/motlie
+rm -f /tmp/motlie-telnyx-gateway.sock
+: > /home/dchung/telnyx-gateway-live.log
+
+env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
+  TELNYX_API_KEY="$TELNYX_API_KEY" \
+  cargo run -p motlie-telnyx-gateway --features sherpa -- \
+    --bind 127.0.0.1:8080 \
+    --load /home/dchung/telnyx-test/config.repl \
+    --socket /tmp/motlie-telnyx-gateway.sock \
+    --log-file /home/dchung/telnyx-gateway-live.log
+```
+
+The socket accepts one gateway REPL command per line and returns one JSON object
+per line:
+
+```sh
+python3 - <<'PY'
+import json, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/motlie-telnyx-gateway.sock")
+for command in ["status", "inbound enable --manual", "calls", "call show"]:
+    sock.sendall((command + "\n").encode())
+    print(json.loads(sock.recv(65536)))
+PY
+```
+
+During a shared live test the agent can start the gateway, enable manual
+inbound handling, ask the human to dial the Telnyx number, run `calls`, run
+`answer`, and then poll `call show` plus the structured log file for transcript
+quality. Stop the gateway with:
+
+```sh
+python3 - <<'PY'
+import json, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/motlie-telnyx-gateway.sock")
+sock.sendall(b"shutdown\n")
+print(json.loads(sock.recv(65536)))
+PY
+```
+
 1. Expose the local listener with Tailscale Funnel:
 
    ```sh
