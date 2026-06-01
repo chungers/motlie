@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
-use crate::call_control::{AnswerRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec};
+use crate::call_control::{
+    AnswerRequest, DialRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec,
+};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::state::{CallStatus, GatewayState, InboundMode, LogLevel, SharedState};
 
@@ -124,6 +126,10 @@ pub enum GatewayCommand {
     Answer(CallTarget),
     Reject(CallTarget),
     Hangup(CallTarget),
+    Test {
+        #[command(subcommand)]
+        command: TestCommand,
+    },
     Transcript {
         #[command(subcommand)]
         command: TranscriptCommand,
@@ -222,6 +228,18 @@ pub struct CallTarget {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum TestCommand {
+    DialTranscribe(DialTranscribeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DialTranscribeArgs {
+    pub to: String,
+    #[arg(long)]
+    pub from: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum TranscriptCommand {
     Follow { call: Option<String> },
     Clear { call: Option<String> },
@@ -270,6 +288,7 @@ impl CommandSet<GatewayContext> for GatewayCommand {
             Self::Answer(target) => context.answer_call(target.call).await,
             Self::Reject(target) => call_control(context, target.call, CallControlOp::Reject).await,
             Self::Hangup(target) => call_control(context, target.call, CallControlOp::Hangup).await,
+            Self::Test { command } => test_command(context, command).await,
             Self::Transcript { command } => transcript_command(context, command).await,
             Self::Log { command } => log_command(context, command).await,
         }
@@ -680,6 +699,101 @@ async fn inbound_command(
     }
 }
 
+async fn test_command(
+    context: &mut GatewayContext,
+    command: TestCommand,
+) -> DriverResult<CommandOutput> {
+    match command {
+        TestCommand::DialTranscribe(args) => dial_transcribe(context, args).await,
+    }
+}
+
+async fn dial_transcribe(
+    context: &mut GatewayContext,
+    args: DialTranscribeArgs,
+) -> DriverResult<CommandOutput> {
+    let (connection_id, from, stream_url, webhook_url, media) = {
+        let guard = context.state.read().await;
+        let connection_id = guard
+            .config
+            .selected_connection_id
+            .clone()
+            .ok_or_else(|| DriverError::message("telnyx app use <connection-id> first"))?;
+        let from = args
+            .from
+            .clone()
+            .or_else(|| guard.config.default_from_number.clone())
+            .or_else(|| guard.config.selected_phone_number.clone())
+            .ok_or_else(|| {
+                DriverError::message("pass --from <e164> or config set from-number <e164> first")
+            })?;
+        let stream_url = guard
+            .config
+            .public_media_url
+            .clone()
+            .ok_or_else(|| DriverError::message("config set media-url <wss-url> first"))?;
+        (
+            connection_id,
+            from,
+            stream_url,
+            guard.config.public_webhook_url.clone(),
+            guard.config.telnyx_media,
+        )
+    };
+
+    let dialed = context
+        .telnyx
+        .dial_call(&DialRequest {
+            connection_id: &connection_id,
+            to: &args.to,
+            from: &from,
+            stream_url: &stream_url,
+            webhook_url: webhook_url.as_deref(),
+            media,
+        })
+        .await
+        .map_err(driver_anyhow)?;
+
+    let gateway_call_id = {
+        let mut guard = context.state.write().await;
+        let gateway_call_id = guard.add_or_update_outbound_call(
+            crate::operator::state::TelnyxIds {
+                call_control_id: dialed.call_control_id.clone(),
+                call_session_id: dialed.call_session_id.clone(),
+                call_leg_id: dialed.call_leg_id.clone(),
+                stream_id: None,
+            },
+            Some(from.clone()),
+            Some(args.to.clone()),
+            CallStatus::Dialing,
+        );
+        guard.log(
+            LogLevel::Info,
+            format!(
+                "dial-transcribe requested for {gateway_call_id} to {}",
+                args.to
+            ),
+        );
+        gateway_call_id
+    };
+
+    tracing::info!(
+        gateway_call_id,
+        call_control_id = dialed.call_control_id,
+        call_session_id = dialed.call_session_id.as_deref(),
+        call_leg_id = dialed.call_leg_id.as_deref(),
+        to = args.to,
+        from,
+        stream_url,
+        stream_codec = media.codec.as_str(),
+        stream_sample_rate_hz = media.sample_rate_hz,
+        "call.outbound.dial_transcribe"
+    );
+    Ok(CommandOutput::line(format!(
+        "dial-transcribe requested for {gateway_call_id}"
+    )))
+}
+
 async fn calls(state: &SharedState) -> DriverResult<CommandOutput> {
     let guard = state.read().await;
     let lines = if guard.calls.is_empty() {
@@ -962,7 +1076,7 @@ mod tests {
 
     use super::*;
     use crate::call_control::TelnyxClient;
-    use crate::operator::state::{shared_state, CallStatus, TelnyxIds};
+    use crate::operator::state::{CallStatus, TelnyxIds, shared_state};
 
     #[tokio::test]
     async fn inbound_is_disabled_by_default() {
@@ -1113,6 +1227,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dial_transcribe_creates_outbound_call_session() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        {
+            let mut guard = state.write().await;
+            guard.config.selected_connection_id = Some("conn-1".to_string());
+            guard.config.selected_phone_number = Some("+15550000001".to_string());
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            guard.config.public_webhook_url =
+                Some("https://example.test/telnyx/webhooks".to_string());
+            guard.config.telnyx_media = TelnyxMediaConfig::new(TelnyxStreamCodec::L16, 16_000)
+                .expect("L16 config should be valid");
+        }
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine
+            .run_line("test dial-transcribe +15550000002")
+            .await
+            .expect("dial-transcribe");
+
+        assert!(output.lines[0].starts_with("dial-transcribe requested for gwc_"));
+        let guard = state.read().await;
+        let call_id = guard
+            .selected_call
+            .as_deref()
+            .expect("outbound call should be selected");
+        let call = guard.calls.get(call_id).expect("call should exist");
+        assert_eq!(
+            call.direction,
+            crate::operator::state::CallDirection::Outbound
+        );
+        assert_eq!(call.status, CallStatus::Dialing);
+        assert_eq!(call.from.as_deref(), Some("+15550000001"));
+        assert_eq!(call.to.as_deref(), Some("+15550000002"));
+        assert!(call.ids.call_control_id.starts_with("dry-run-dial-"));
+    }
+
+    #[tokio::test]
     async fn call_show_returns_assembled_transcript() {
         let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
         {
@@ -1146,10 +1299,12 @@ mod tests {
 
         let output = engine.run_line("call show").await.expect("call show");
 
-        assert!(output
-            .lines
-            .iter()
-            .any(|line| line == "assembled transcript:"));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line == "assembled transcript:")
+        );
         assert!(output.lines.iter().any(|line| line == "HELLO WORLD"));
         assert!(output.lines.iter().any(|line| line == "final: HELLO"));
         assert!(output.lines.iter().any(|line| line == "partial: WORLD"));

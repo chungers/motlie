@@ -61,6 +61,7 @@ pub enum CallDirection {
 pub enum CallStatus {
     PendingInbound,
     IgnoredInbound,
+    Dialing,
     Answering,
     Answered,
     MediaStarted,
@@ -74,6 +75,7 @@ impl CallStatus {
         match self {
             Self::PendingInbound => "waiting",
             Self::IgnoredInbound => "disabled",
+            Self::Dialing => "dialing",
             Self::Answering => "answering",
             Self::Answered => "answered",
             Self::MediaStarted => "media",
@@ -84,7 +86,7 @@ impl CallStatus {
     }
 
     pub fn allows_media_start(self) -> bool {
-        matches!(self, Self::Answering | Self::Answered)
+        matches!(self, Self::Dialing | Self::Answering | Self::Answered)
     }
 }
 
@@ -135,7 +137,8 @@ pub struct CallSession {
 }
 
 impl CallSession {
-    pub fn pending_inbound(
+    pub fn new(
+        direction: CallDirection,
         ids: TelnyxIds,
         from: Option<String>,
         to: Option<String>,
@@ -143,7 +146,7 @@ impl CallSession {
     ) -> Self {
         let mut call = Self {
             gateway_call_id: format!("gwc_{}", Uuid::new_v4().simple()),
-            direction: CallDirection::Inbound,
+            direction,
             status,
             ids,
             from,
@@ -159,6 +162,24 @@ impl CallSession {
         };
         call.push_timeline("call created");
         call
+    }
+
+    pub fn pending_inbound(
+        ids: TelnyxIds,
+        from: Option<String>,
+        to: Option<String>,
+        status: CallStatus,
+    ) -> Self {
+        Self::new(CallDirection::Inbound, ids, from, to, status)
+    }
+
+    pub fn outbound(
+        ids: TelnyxIds,
+        from: Option<String>,
+        to: Option<String>,
+        status: CallStatus,
+    ) -> Self {
+        Self::new(CallDirection::Outbound, ids, from, to, status)
     }
 
     pub fn push_timeline(&mut self, message: impl Into<String>) {
@@ -271,6 +292,38 @@ impl GatewayState {
         if self.selected_call.is_none() && status == CallStatus::PendingInbound {
             self.selected_call = Some(gateway_call_id.clone());
         }
+        self.calls.insert(gateway_call_id.clone(), call);
+        gateway_call_id
+    }
+
+    pub fn add_or_update_outbound_call(
+        &mut self,
+        ids: TelnyxIds,
+        from: Option<String>,
+        to: Option<String>,
+        status: CallStatus,
+    ) -> String {
+        if let Some(existing) = self.call_control_index.get(&ids.call_control_id).cloned() {
+            if let Some(call) = self.calls.get_mut(&existing) {
+                call.status = status;
+                call.ids.call_session_id = ids.call_session_id.or(call.ids.call_session_id.clone());
+                call.ids.call_leg_id = ids.call_leg_id.or(call.ids.call_leg_id.clone());
+                if from.is_some() {
+                    call.from = from;
+                }
+                if to.is_some() {
+                    call.to = to;
+                }
+                call.push_timeline(format!("call status -> {}", status.label()));
+            }
+            return existing;
+        }
+
+        let call = CallSession::outbound(ids.clone(), from, to, status);
+        let gateway_call_id = call.gateway_call_id.clone();
+        self.call_control_index
+            .insert(ids.call_control_id, gateway_call_id.clone());
+        self.selected_call = Some(gateway_call_id.clone());
         self.calls.insert(gateway_call_id.clone(), call);
         gateway_call_id
     }

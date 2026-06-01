@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -28,6 +28,13 @@ pub struct PhoneNumber {
     pub connection_id: Option<String>,
     pub connection_name: Option<String>,
     pub status: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DialedCall {
+    pub call_control_id: String,
+    pub call_leg_id: Option<String>,
+    pub call_session_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,6 +228,18 @@ impl TelnyxClient {
         .await
     }
 
+    pub async fn dial_call(&self, request: &DialRequest<'_>) -> anyhow::Result<DialedCall> {
+        if self.dry_run {
+            return Ok(DialedCall {
+                call_control_id: format!("dry-run-dial-{}", Uuid::new_v4()),
+                call_leg_id: Some(format!("dry-run-leg-{}", Uuid::new_v4())),
+                call_session_id: Some(format!("dry-run-session-{}", Uuid::new_v4())),
+            });
+        }
+        let body = dial_request_body(request);
+        self.post_one("calls", &body).await
+    }
+
     pub async fn reject_call(&self, call_control_id: &str) -> anyhow::Result<()> {
         self.post_command(
             &format!(
@@ -363,6 +382,15 @@ pub struct AnswerRequest<'a> {
     pub media: TelnyxMediaConfig,
 }
 
+pub struct DialRequest<'a> {
+    pub connection_id: &'a str,
+    pub to: &'a str,
+    pub from: &'a str,
+    pub stream_url: &'a str,
+    pub webhook_url: Option<&'a str>,
+    pub media: TelnyxMediaConfig,
+}
+
 fn answer_request_body(request: &AnswerRequest<'_>) -> serde_json::Value {
     let codec = request.media.codec.as_str();
     json!({
@@ -375,6 +403,31 @@ fn answer_request_body(request: &AnswerRequest<'_>) -> serde_json::Value {
         "stream_bidirectional_target_legs": "self",
         "command_id": format!("motlie-answer-{}", Uuid::new_v4()),
     })
+}
+
+fn dial_request_body(request: &DialRequest<'_>) -> serde_json::Value {
+    let codec = request.media.codec.as_str();
+    let mut body = json!({
+        "connection_id": request.connection_id,
+        "to": request.to,
+        "from": request.from,
+        "stream_url": request.stream_url,
+        "stream_track": "inbound_track",
+        "stream_codec": codec,
+        "stream_bidirectional_mode": "rtp",
+        "stream_bidirectional_codec": codec,
+        "stream_bidirectional_sampling_rate": request.media.sample_rate_hz,
+        "stream_bidirectional_target_legs": "self",
+        "stream_establish_before_call_originate": true,
+        "send_silence_when_idle": true,
+        "command_id": format!("motlie-dial-{}", Uuid::new_v4()),
+    });
+    if let Some(webhook_url) = request.webhook_url {
+        if let serde_json::Value::Object(map) = &mut body {
+            map.insert("webhook_url".to_string(), json!(webhook_url));
+        }
+    }
+    body
 }
 
 async fn decode_response<T>(response: reqwest::Response) -> anyhow::Result<T>
@@ -425,5 +478,32 @@ mod tests {
         assert_eq!(body["stream_codec"], "L16");
         assert_eq!(body["stream_bidirectional_codec"], "L16");
         assert_eq!(body["stream_bidirectional_sampling_rate"], 16_000);
+    }
+
+    #[test]
+    fn dial_request_body_starts_outbound_streaming_for_asr_test() {
+        let body = dial_request_body(&DialRequest {
+            connection_id: "conn-1",
+            to: "+15550000001",
+            from: "+15550000002",
+            stream_url: "wss://example.test/telnyx/media",
+            webhook_url: Some("https://example.test/telnyx/webhooks"),
+            media: TelnyxMediaConfig::new(TelnyxStreamCodec::L16, 16_000)
+                .expect("L16 config should be valid"),
+        });
+
+        assert_eq!(body["connection_id"], "conn-1");
+        assert_eq!(body["to"], "+15550000001");
+        assert_eq!(body["from"], "+15550000002");
+        assert_eq!(body["stream_url"], "wss://example.test/telnyx/media");
+        assert_eq!(body["stream_track"], "inbound_track");
+        assert_eq!(body["stream_codec"], "L16");
+        assert_eq!(body["stream_bidirectional_mode"], "rtp");
+        assert_eq!(body["stream_bidirectional_codec"], "L16");
+        assert_eq!(body["stream_bidirectional_sampling_rate"], 16_000);
+        assert_eq!(body["stream_bidirectional_target_legs"], "self");
+        assert_eq!(body["stream_establish_before_call_originate"], true);
+        assert_eq!(body["send_silence_when_idle"], true);
+        assert_eq!(body["webhook_url"], "https://example.test/telnyx/webhooks");
     }
 }
