@@ -435,7 +435,7 @@ Follow the current backend-local pattern:
 - CUDA support is enabled by Cargo feature on the backend crate
 - runtime still honors the existing `MOTLIE_MODEL_FORCE_CPU` convention where practical
 
-For the `sherpa-onnx` backend specifically, ONNX Runtime provisioning should be explicit. Do not enable `ort` build-time binary download inside the library crate. Require operators to provide ONNX Runtime through `ORT_LIB_PATH`, `pkg-config`, or another explicit system installation path, then layer the backend-local CUDA execution-provider selection on top of that runtime.
+For the `sherpa-onnx` backend specifically, ONNX Runtime provisioning should be static and automatic through the workspace `ort` dependency. Enable `ort/download-binaries` so Cargo downloads the prebuilt static `libonnxruntime.a` archive, do not require `ORT_LIB_PATH` or `LD_LIBRARY_PATH`, and layer any backend-local CUDA execution-provider selection on top of that runtime.
 
 This avoids expanding `StartOptions` in the first ASR slice. If multiple backends later need explicit accelerator selection, that can be added as a generic model-layer startup option.
 

@@ -234,7 +234,7 @@ Track the true-streaming ONNX backend as the second ASR slice on top of the same
   DESIGN reference: `Generic Backend Design`
 - [x] Implement the streaming transducer runtime with persistent stream state and incremental decode over `ort`.
   DESIGN reference: `Recommended Vertical Slice`, `Generic Backend Design`
-- [x] Keep ONNX Runtime provisioning explicit by avoiding `ort` build-time binary download; require ONNX Runtime through `ORT_LIB_PATH`, `pkg-config`, or another explicit system installation path.
+- [x] Keep ONNX Runtime provisioning static by enabling the workspace `ort/download-binaries` path so Cargo downloads and statically links the prebuilt `libonnxruntime.a` archive with no manual ORT env vars.
   DESIGN reference: `Generic Backend Design`
 - [x] Reuse the existing `MOTLIE_MODEL_FORCE_CPU` convention as the runtime escape hatch when the backend is compiled with CUDA support.
   DESIGN reference: `Generic Backend Design`, `Feature Flag Design`
