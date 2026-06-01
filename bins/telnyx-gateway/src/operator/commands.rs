@@ -743,6 +743,8 @@ async fn transcript_command(
             let mut guard = context.state.write().await;
             let session = resolve_call_mut(&mut guard, call.as_deref())?;
             session.transcripts.clear();
+            session.final_transcript.clear();
+            session.current_partial = None;
             session.push_timeline("transcript cleared");
             Ok(CommandOutput::line("transcript cleared"))
         }

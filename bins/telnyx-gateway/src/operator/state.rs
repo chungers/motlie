@@ -122,6 +122,8 @@ pub struct CallSession {
     pub to: Option<String>,
     pub media: MediaMetadata,
     pub transcripts: Vec<TranscriptLine>,
+    pub final_transcript: String,
+    pub current_partial: Option<String>,
     pub timeline: Vec<TimelineEntry>,
     pub unread_events: u32,
     pub last_error: Option<String>,
@@ -144,6 +146,8 @@ impl CallSession {
             to,
             media: MediaMetadata::default(),
             transcripts: Vec::new(),
+            final_transcript: String::new(),
+            current_partial: None,
             timeline: Vec::new(),
             unread_events: 0,
             last_error: None,
@@ -313,6 +317,13 @@ impl GatewayState {
         if let Some(call) = self.calls.get_mut(gateway_call_id) {
             call.status = CallStatus::Transcribing;
             call.unread_events = call.unread_events.saturating_add(1);
+            match kind {
+                TranscriptKind::Partial => call.current_partial = Some(text.clone()),
+                TranscriptKind::Final => {
+                    append_transcript_fragment(&mut call.final_transcript, &text);
+                    call.current_partial = None;
+                }
+            }
             call.transcripts.push(TranscriptLine {
                 at: Utc::now(),
                 kind,
@@ -322,6 +333,46 @@ impl GatewayState {
     }
 }
 
+fn append_transcript_fragment(transcript: &mut String, fragment: &str) {
+    let fragment = fragment.trim();
+    if fragment.is_empty() {
+        return;
+    }
+    if !transcript.is_empty() {
+        transcript.push(' ');
+    }
+    transcript.push_str(fragment);
+}
+
 pub fn shared_state(bind: SocketAddr) -> SharedState {
     Arc::new(RwLock::new(GatewayState::new(bind)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assembled_transcript_tracks_finals_and_current_partial() {
+        let mut state = GatewayState::new("127.0.0.1:0".parse().expect("valid addr"));
+        let call_id = state.add_or_update_inbound_call(
+            TelnyxIds {
+                call_control_id: "call-1".to_string(),
+                call_session_id: None,
+                call_leg_id: None,
+                stream_id: None,
+            },
+            None,
+            None,
+            CallStatus::PendingInbound,
+        );
+
+        state.add_transcript(&call_id, TranscriptKind::Partial, "HEL".to_string());
+        state.add_transcript(&call_id, TranscriptKind::Final, "HELLO".to_string());
+        state.add_transcript(&call_id, TranscriptKind::Partial, "WOR".to_string());
+
+        let call = state.calls.get(&call_id).expect("call exists");
+        assert_eq!(call.final_transcript, "HELLO");
+        assert_eq!(call.current_partial.as_deref(), Some("WOR"));
+    }
 }

@@ -2,6 +2,8 @@ use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use std::time::Duration;
+
 use futures_util::StreamExt;
 use motlie_model::typed::{AudioBuf, Mono};
 use motlie_voice::app::TranscriptEvent;
@@ -10,6 +12,7 @@ use motlie_voice::pipeline::reorder::{SequencedFrame, SequencedFrameReorder};
 use motlie_voice::pipeline::resample::{resample_i16_mono, WindowedSincResampler};
 use motlie_voice::VoiceError;
 use serde::Deserialize;
+use tokio::time::{self, MissedTickBehavior};
 
 use crate::adapter::{InboundAsrSession, SharedAsrFactory};
 use crate::operator::state::{
@@ -20,6 +23,9 @@ const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
 const LOW_ENERGY_HANGOVER_FRAMES: usize = 15;
 const REPEATED_TOKEN_RUN_THRESHOLD: usize = 16;
+const REPEATED_Q_RUN_THRESHOLD: usize = 8;
+const PCMU_SILENCE_FRAME: [u8; 160] = [0xff; 160];
+const SILENCE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EncodedMediaFrame {
@@ -84,6 +90,8 @@ struct MediaSocketState {
     reorder: SequencedFrameReorder<EncodedMediaFrame>,
     decoded_frame_count: usize,
     asr_gate: AsrGate,
+    silence_keepalive: bool,
+    silence_keepalive_frames: usize,
 }
 
 impl MediaSocketState {
@@ -95,30 +103,47 @@ impl MediaSocketState {
             reorder: SequencedFrameReorder::new_lazily(32),
             decoded_frame_count: 0,
             asr_gate: AsrGate::default(),
+            silence_keepalive: false,
+            silence_keepalive_frames: 0,
         }
     }
 }
 
 pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: SharedAsrFactory) {
     let mut media_state = MediaSocketState::new();
+    let mut silence_keepalive = time::interval(SILENCE_KEEPALIVE_INTERVAL);
+    silence_keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    while let Some(message) = socket.next().await {
-        match message {
-            Ok(Message::Text(text)) => {
-                if let Err(error) = handle_text(&text, &state, &asr, &mut media_state).await {
-                    log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
+    loop {
+        tokio::select! {
+            message = socket.next() => {
+                let Some(message) = message else {
+                    break;
+                };
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if let Err(error) = handle_text(&text, &state, &asr, &mut media_state).await {
+                            log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
+                        }
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                    Err(error) => {
+                        log_media_error(
+                            &state,
+                            media_state.gateway_call_id.as_deref(),
+                            anyhow::Error::from(error),
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-            Err(error) => {
-                log_media_error(
-                    &state,
-                    media_state.gateway_call_id.as_deref(),
-                    anyhow::Error::from(error),
-                )
-                .await;
-                break;
+            _ = silence_keepalive.tick(), if media_state.silence_keepalive => {
+                if let Err(error) = send_silence_keepalive(&mut socket, &mut media_state).await {
+                    log_media_error(&state, media_state.gateway_call_id.as_deref(), error).await;
+                    break;
+                }
             }
         }
     }
@@ -148,6 +173,39 @@ pub async fn handle_socket(mut socket: WebSocket, state: SharedState, asr: Share
     }
 }
 
+async fn send_silence_keepalive(
+    socket: &mut WebSocket,
+    media_state: &mut MediaSocketState,
+) -> anyhow::Result<()> {
+    socket
+        .send(Message::Text(pcmu_silence_keepalive_message().into()))
+        .await
+        .context("send PCMU silence keepalive to Telnyx")?;
+
+    media_state.silence_keepalive_frames = media_state.silence_keepalive_frames.saturating_add(1);
+    if media_state.silence_keepalive_frames == 1
+        || media_state.silence_keepalive_frames.is_multiple_of(500)
+    {
+        tracing::debug!(
+            gateway_call_id = media_state.gateway_call_id.as_deref(),
+            frames = media_state.silence_keepalive_frames,
+            "media.silence_keepalive.sent"
+        );
+    }
+    Ok(())
+}
+
+fn pcmu_silence_keepalive_message() -> String {
+    let payload = STANDARD.encode(PCMU_SILENCE_FRAME);
+    serde_json::json!({
+        "event": "media",
+        "media": {
+            "payload": payload
+        }
+    })
+    .to_string()
+}
+
 async fn handle_text(
     text: &str,
     state: &SharedState,
@@ -168,6 +226,12 @@ async fn handle_text(
             media_state.media_format = Some(format);
             media_state.gateway_call_id = Some(call_id);
             media_state.session = Some(asr.open_session().await?);
+            media_state.silence_keepalive = true;
+            tracing::debug!(
+                gateway_call_id = media_state.gateway_call_id.as_deref(),
+                stream_id = event.stream_id,
+                "media.silence_keepalive.started"
+            );
             Ok(())
         }
         "media" => {
@@ -201,6 +265,7 @@ async fn handle_text(
         }
         "stop" => {
             let event: StopEvent = serde_json::from_str(text).context("parse stop event")?;
+            media_state.silence_keepalive = false;
             finish_stream(
                 state,
                 &mut media_state.session,
@@ -518,10 +583,9 @@ fn looks_like_repeated_token_hallucination(text: &str) -> bool {
         max_run = max_run.max(run);
     }
 
-    if chars < REPEATED_TOKEN_RUN_THRESHOLD {
-        return false;
-    }
-    max_run >= REPEATED_TOKEN_RUN_THRESHOLD || q_count.saturating_mul(3) >= chars.saturating_mul(2)
+    max_run >= REPEATED_TOKEN_RUN_THRESHOLD
+        || (q_count >= REPEATED_Q_RUN_THRESHOLD
+            && q_count.saturating_mul(3) >= chars.saturating_mul(2))
 }
 
 fn transcript_preview(text: &str) -> String {
@@ -687,6 +751,22 @@ mod tests {
         )
         .expect("pcma should decode");
         assert_eq!(pcma.len(), 2);
+    }
+
+    #[test]
+    fn pcmu_silence_keepalive_message_is_telnyx_media_json() {
+        let message = pcmu_silence_keepalive_message();
+        let value: serde_json::Value =
+            serde_json::from_str(&message).expect("keepalive should be JSON");
+        let payload = value["media"]["payload"]
+            .as_str()
+            .expect("payload should be a string");
+        let decoded = STANDARD
+            .decode(payload.as_bytes())
+            .expect("payload should be base64");
+
+        assert_eq!(value["event"], "media");
+        assert_eq!(decoded, PCMU_SILENCE_FRAME);
     }
 
     #[tokio::test]
@@ -901,6 +981,7 @@ mod tests {
         assert!(looks_like_repeated_token_hallucination(
             "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
         ));
+        assert!(looks_like_repeated_token_hallucination("GOODQQQQQQQQ"));
         assert!(!looks_like_repeated_token_hallucination(
             "meet me at the front desk"
         ));

@@ -6,12 +6,13 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Updated milestone 1 live-call behavior from receive-only PCMU to bidirectional PCMU RTP with outbound silence keepalive after Telnyx reported provider-normal caller hangups while the gateway was only listening; added assembled transcript display so raw partial/final fragments do not replace readable call-level transcript text. | Audio Codecs and Formats, Inbound Call Handler Design, Operator REPL and TUI Control Surface |
 | 2026-06-01 | @codex-364-impl: Added live-call termination diagnostics to milestone 1 so Telnyx `call.hangup`/`call.ended`/stream termination fields are preserved in structured logs and selected-call detail instead of reducing every provider-side close to `ended`. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Refined live milestone 1 handling so the ASR path gates both initial silence and sustained low-energy tails, suppresses repeated-token Sherpa hallucinations from the operator transcript stream while logging them as suppressed events, and keeps the shell prompt cursor aligned by rendered rows when command output wraps. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Merged the TUI command input and REPL history into one shell-style left pane so operator commands, output, and the active prompt share one terminal-like surface. | Operator REPL and TUI Control Surface |
 | 2026-06-01 | @codex-364-impl: Added an explicit ASR start-of-speech gate for milestone 1 so low-energy initial telephony frames are logged but not fed into Sherpa, preventing silence-driven partial transcript growth during live inbound tests. | Inbound Call Handler Design, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path, so logs cannot corrupt the alternate-screen TUI. | Operator REPL and TUI Control Surface, Getting Started: Local Deployment |
-| 2026-06-01 | @codex-364-impl: Adjusted the milestone 1 live inbound path to request inbound-only `PCMU` media and defer bidirectional `L16` validation to outbound/duplex milestones after the first live test produced unusable `L16` ASR output. | Audio Codecs and Formats, Inbound Call Handler Design |
+| 2026-06-01 | @codex-364-impl: Recorded the now-superseded receive-only `PCMU` live-test attempt after the first live `L16` ASR output was unusable; later live evidence required bidirectional `PCMU` RTP silence keepalive for milestone 1. | Audio Codecs and Formats, Inbound Call Handler Design |
 | 2026-05-31 | @codex-364-impl: Clarified that the Unix-domain socket is the local agent-tooling interface: it can provide command execution, call snapshots, cursor-based event polling, and optional tmux/mstream-style wake-up notifications without depending on appserver webhooks or the HTTP Control API. | Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API |
 | 2026-05-31 | @codex-364-impl: Updated the gateway ORT policy to use Cargo's `ort/download-binaries` static `libonnxruntime.a` path with no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source-build runbook. | Recommended ASR/TTS Stack, Getting Started: Local Deployment |
 | 2026-05-31 | @codex-364-impl: Clarified that static ONNX Runtime builds should build ORT's own C/C++ dependencies from source through FetchContent; operators only provision host build tools, not ORT internal libraries. | Recommended ASR/TTS Stack |
@@ -229,7 +230,7 @@ Important details:
 Implications for Motlie:
 
 - the most direct fit to the later duplex ASR/TTS contracts is `L16` bidirectional RTP at `16 kHz`
-- milestone 1 inbound-only transcription should avoid bidirectional fields and may prefer `PCMU` at `8 kHz` until live `L16` behavior is validated
+- milestone 1 live inbound transcription uses `PCMU` at `8 kHz` for inbound media and enables bidirectional RTP in the same codec so the gateway can send outbound silence keepalive while it is otherwise only transcribing
 - PSTN-originated inbound audio may still start as `PCMU` or `PCMA` at `8 kHz`
 - the gateway must be able to decode G.711 and possibly other Telnyx codecs if the inbound stream format is not already linear PCM
 
@@ -741,7 +742,7 @@ Right bottom selected-call detail:
 - shows the currently selected call's full state, provider IDs, webhook/media status, codec, sample rate, and latest errors
 - shows Telnyx termination reason/cause when the call ends or the media stream stops
 - shows timeline events for that call
-- shows milestone 1 ASR partials/finals as a transcript stream
+- shows milestone 1 ASR as an assembled transcript plus recent raw partial/final transcript events for debugging
 - shows milestone 2 TTS playback state and the latest `say` requests
 - shows context-aware action hints such as `answer`, `reject`, `hangup`, `say <text>`, `transcript follow`, or `conversation attach`
 
@@ -2518,15 +2519,19 @@ Recommended inbound flow:
 8. The answer action attaches media streaming with:
    - `stream_url=wss://.../telnyx/media`
    - `stream_track=inbound_track`
-   - `stream_codec=PCMU` for the milestone 1 inbound-only live path
-   - no `stream_bidirectional_*` fields until milestone 2 or milestone 3 needs outbound audio
+   - `stream_codec=PCMU` for the milestone 1 live path
+   - `stream_bidirectional_mode=rtp`
+   - `stream_bidirectional_codec=PCMU`
+   - `stream_bidirectional_sampling_rate=8000`
+   - `stream_bidirectional_target_legs=self`
 9. Telnyx opens the WebSocket.
 10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
-11. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
-12. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
-13. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
-14. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
-15. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
+11. Until milestone 2/M3 supplies real outbound TTS audio, the gateway sends low-amplitude/silence PCMU `media` frames back over the WebSocket as a keepalive so the single-leg PSTN call does not terminate while Motlie is receive-only at the application level.
+12. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
+13. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
+14. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
+15. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
+16. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.
 
 The inbound handler should therefore be ASR-first. It must not require outbound TTS or a conversation handler to be useful.
 
