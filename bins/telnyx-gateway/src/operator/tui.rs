@@ -276,9 +276,11 @@ fn selected_detail_lines(state: &GatewayState) -> Vec<Line<'static>> {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "?".to_string())
         )),
-        Line::from(""),
-        Line::from("transcript:"),
     ];
+    if let Some(reason) = &call.terminal_reason {
+        lines.push(Line::from(format!("ended: {reason}")));
+    }
+    lines.extend([Line::from(""), Line::from("transcript:")]);
 
     for transcript in call.transcripts.iter().rev().take(12).rev() {
         let prefix = match transcript.kind {

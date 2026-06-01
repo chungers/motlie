@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Added milestone 1 live-call termination diagnostics: preserve Telnyx hangup/source/SIP fields in call state, selected-call detail, structured logs, and webhook tests. |
 | 2026-06-01 | @codex-364-impl | Refined milestone 1 live handling: suppress initial silence and sustained low-energy tails before Sherpa, suppress repeated-token transcript hallucinations from the TUI transcript stream while logging them as suppressed events, and align the shell cursor by rendered rows when output wraps. |
 | 2026-06-01 | @codex-364-impl | Merged the TUI command input and REPL history into one shell-style left pane. |
 | 2026-06-01 | @codex-364-impl | Added milestone 1 ASR start-of-speech gating: low-energy initial telephony frames are logged and withheld from Sherpa until speech energy is detected. |
@@ -424,6 +425,8 @@ Close the loop on independently useful product flows before combining them.
   DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Show call state, media metadata, partial/final transcript text, errors, and terminal call state in the selected-call detail pane.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
+- [ ] Preserve Telnyx termination details from `streaming.stopped`, `streaming.failed`, `call.hangup`, and `call.ended` webhooks in selected-call detail and structured logs so live drops can be classified as caller hangup, provider timeout, media failure, or another carrier/SIP cause.
+  DESIGN reference: `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Gate ASR ingestion for milestone 1 by suppressing low-energy initial frames, allowing only a short post-speech low-energy hangover, suppressing sustained low-energy tails, and filtering pathological repeated-token Sherpa transcripts out of the TUI transcript stream while logging `transcript.suppressed_repeated_token` with call/stream/media metadata.
   DESIGN reference: `Inbound Call Handler Design`, `Testing Scope for PLAN`
 - [ ] Keep inbound disabled by default at process startup; incoming webhooks must not be answered until the operator enables inbound handling.
@@ -504,7 +507,7 @@ Make each milestone reviewable and runnable independently before combining them.
   DESIGN reference: `Testing Scope for PLAN`, `Inbound Call Handler Design`, `Operator REPL and TUI Control Surface`
 - [ ] Add operator-state tests for disabled inbound mode, manual inbound pending-call behavior, highlighted roster rows, unread event counts, auto-selection only when no active call is selected, source-local selected-call default command targets, TUI/socket selection isolation, command-source mux ordering, `answer` command transition, and selected-call detail event emission.
   DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
-- [ ] Add a milestone 1 structured-log check that verifies gateway call id, Telnyx diagnostic ids, stream id, observed codec, observed sample rate, and transcript partial/final events are logged during an inbound transcription session.
+- [ ] Add a milestone 1 structured-log check that verifies gateway call id, Telnyx diagnostic ids, stream id, observed codec, observed sample rate, transcript partial/final events, and Telnyx termination details are logged during an inbound transcription session.
   DESIGN reference: `Inbound Call Handler Design`, `Open Concerns`
 - [ ] Add Control API tests for authenticated call list/detail reads, call attachment create/list/delete, attach-before-answer and attach-after-answer behavior, answer/reject/hangup, outbound dial/say, idempotency handling, and refusal of unauthenticated mutating requests.
   DESIGN reference: `Application Webhooks and Gateway Control API`

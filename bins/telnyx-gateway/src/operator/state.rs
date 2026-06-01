@@ -125,6 +125,7 @@ pub struct CallSession {
     pub timeline: Vec<TimelineEntry>,
     pub unread_events: u32,
     pub last_error: Option<String>,
+    pub terminal_reason: Option<String>,
 }
 
 impl CallSession {
@@ -146,6 +147,7 @@ impl CallSession {
             timeline: Vec::new(),
             unread_events: 0,
             last_error: None,
+            terminal_reason: None,
         };
         call.push_timeline("call created");
         call

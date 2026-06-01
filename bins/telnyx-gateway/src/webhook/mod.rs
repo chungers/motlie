@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::operator::state::{CallStatus, InboundMode, LogLevel, SharedState, TelnyxIds};
@@ -28,6 +30,13 @@ pub struct TelnyxWebhookPayload {
     pub to: Option<String>,
     pub stream_url: Option<String>,
     pub hangup_cause: Option<String>,
+    pub hangup_source: Option<String>,
+    pub sip_hangup_cause: Option<String>,
+    pub sip_reason: Option<String>,
+    pub cause: Option<String>,
+    pub reason: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 pub async fn handle_voice_webhook(
@@ -41,6 +50,7 @@ pub async fn handle_voice_webhook(
         "call.answered" => {
             update_call_status(
                 state,
+                event_type,
                 &envelope.data.payload,
                 CallStatus::Answered,
                 "call answered",
@@ -51,6 +61,7 @@ pub async fn handle_voice_webhook(
         "call.hangup" | "call.ended" => {
             update_call_status(
                 state,
+                event_type,
                 &envelope.data.payload,
                 CallStatus::Ended,
                 "call ended",
@@ -61,6 +72,7 @@ pub async fn handle_voice_webhook(
         "streaming.started" => {
             update_call_status(
                 state,
+                event_type,
                 &envelope.data.payload,
                 CallStatus::MediaStarted,
                 "streaming started webhook",
@@ -71,6 +83,7 @@ pub async fn handle_voice_webhook(
         "streaming.stopped" => {
             update_call_status(
                 state,
+                event_type,
                 &envelope.data.payload,
                 CallStatus::Ended,
                 "streaming stopped webhook",
@@ -85,7 +98,14 @@ pub async fn handle_voice_webhook(
                 .hangup_cause
                 .clone()
                 .unwrap_or_else(|| "streaming failed".to_string());
-            update_call_status(state, &envelope.data.payload, CallStatus::Failed, &message).await;
+            update_call_status(
+                state,
+                event_type,
+                &envelope.data.payload,
+                CallStatus::Failed,
+                &message,
+            )
+            .await;
             Ok("ok".to_string())
         }
         other => {
@@ -163,6 +183,7 @@ async fn handle_call_initiated(
 
 async fn update_call_status(
     state: SharedState,
+    event_type: &str,
     payload: &TelnyxWebhookPayload,
     status: CallStatus,
     message: &str,
@@ -173,15 +194,82 @@ async fn update_call_status(
     let mut guard = state.write().await;
     if let Some(call) = guard.call_by_control_id_mut(call_control_id) {
         call.status = status;
-        call.push_timeline(message);
+        let terminal_reason = termination_reason(event_type, payload);
+        if matches!(status, CallStatus::Ended | CallStatus::Failed) {
+            call.terminal_reason = terminal_reason.clone();
+        }
+        let timeline_message = terminal_reason
+            .as_ref()
+            .map(|reason| format!("{message}: {reason}"))
+            .unwrap_or_else(|| message.to_string());
+        call.push_timeline(timeline_message);
         tracing::info!(
             gateway_call_id = call.gateway_call_id,
             call_control_id,
             call_session_id = call.ids.call_session_id.as_deref(),
             call_leg_id = call.ids.call_leg_id.as_deref(),
             status = status.label(),
+            telnyx_event = event_type,
+            hangup_cause = payload.hangup_cause.as_deref(),
+            hangup_source = payload.hangup_source.as_deref(),
+            sip_hangup_cause = payload.sip_hangup_cause.as_deref(),
+            sip_reason = payload.sip_reason.as_deref(),
+            cause = payload.cause.as_deref(),
+            reason = payload.reason.as_deref(),
+            payload_extra = ?payload.extra,
+            terminal_reason = terminal_reason.as_deref(),
             "{message}"
         );
+    }
+}
+
+fn termination_reason(event_type: &str, payload: &TelnyxWebhookPayload) -> Option<String> {
+    let mut parts = vec![format!("event={event_type}")];
+    push_detail(&mut parts, "hangup_cause", payload.hangup_cause.as_deref());
+    push_detail(
+        &mut parts,
+        "hangup_source",
+        payload.hangup_source.as_deref(),
+    );
+    push_detail(
+        &mut parts,
+        "sip_hangup_cause",
+        payload.sip_hangup_cause.as_deref(),
+    );
+    push_detail(&mut parts, "sip_reason", payload.sip_reason.as_deref());
+    push_detail(&mut parts, "cause", payload.cause.as_deref());
+    push_detail(&mut parts, "reason", payload.reason.as_deref());
+
+    for key in [
+        "call_hangup_cause",
+        "hangup_code",
+        "sip_code",
+        "disconnect_reason",
+        "termination_reason",
+    ] {
+        if let Some(value) = payload.extra.get(key).and_then(payload_value_string) {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+
+    if parts.len() == 1 && !matches!(event_type, "call.hangup" | "call.ended") {
+        return None;
+    }
+    Some(parts.join(" "))
+}
+
+fn push_detail(parts: &mut Vec<String>, key: &str, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        parts.push(format!("{key}={value}"));
+    }
+}
+
+fn payload_value_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
     }
 }
 
@@ -249,5 +337,61 @@ mod tests {
             .expect("call should be recorded");
         assert_eq!(call.status, CallStatus::PendingInbound);
         assert!(guard.selected_call.is_some());
+    }
+
+    #[tokio::test]
+    async fn call_end_records_telnyx_termination_reason() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        state.write().await.inbound_mode = InboundMode::Manual;
+        handle_voice_webhook(
+            state.clone(),
+            serde_json::json!({
+                "data": {
+                    "event_type": "call.initiated",
+                    "payload": {
+                        "direction": "incoming",
+                        "state": "parked",
+                        "call_control_id": "call-1",
+                        "call_session_id": "sess-1",
+                        "call_leg_id": "leg-1"
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("call.initiated should be accepted");
+
+        handle_voice_webhook(
+            state.clone(),
+            serde_json::json!({
+                "data": {
+                    "event_type": "call.hangup",
+                    "payload": {
+                        "call_control_id": "call-1",
+                        "call_session_id": "sess-1",
+                        "call_leg_id": "leg-1",
+                        "hangup_cause": "normal_clearing",
+                        "hangup_source": "caller",
+                        "sip_hangup_cause": "200",
+                        "sip_code": 200
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("call.hangup should be accepted");
+
+        let guard = state.read().await;
+        let call = guard.calls.values().next().expect("call exists");
+        let reason = call
+            .terminal_reason
+            .as_deref()
+            .expect("termination reason should be recorded");
+        assert_eq!(call.status, CallStatus::Ended);
+        assert!(reason.contains("event=call.hangup"));
+        assert!(reason.contains("hangup_cause=normal_clearing"));
+        assert!(reason.contains("hangup_source=caller"));
+        assert!(reason.contains("sip_hangup_cause=200"));
+        assert!(reason.contains("sip_code=200"));
     }
 }
