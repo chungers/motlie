@@ -124,6 +124,26 @@ selected, bare `answer` targeted that old call instead of the single new waiting
 call. The command now prefers the single `waiting` inbound call when no explicit
 call id is provided.
 
+### ASR-Only Outbound Test
+
+For human-assisted ASR testing without waiting for an inbound call, the gateway
+can place a test outbound call and transcribe the callee. This is not milestone 2
+TTS: the gateway sends only silence keepalive frames on the outbound RTP path.
+
+```text
+config set media-codec L16
+config set media-sample-rate 16000
+config set capture-dir /home/dchung/telnyx-test/captures
+test dial-transcribe +14155097294 --from +14159148777
+```
+
+The command uses the selected Telnyx application, public media URL, and same
+Sherpa ASR/media capture pipeline as inbound calls. If `--from` is omitted, the
+gateway uses `config set from-number <e164>`, then the selected Telnyx number.
+After the callee answers, `call show` displays the transcript and the capture
+directory contains the raw media JSONL, decoded WAV, ASR input WAV, and
+transcript JSONL.
+
 1. Expose the local listener with Tailscale Funnel:
 
    ```sh

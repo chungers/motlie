@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::operator::state::{CallStatus, InboundMode, LogLevel, SharedState, TelnyxIds};
+use crate::operator::state::{
+    CallDirection, CallStatus, InboundMode, LogLevel, SharedState, TelnyxIds,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct TelnyxWebhookEnvelope {
@@ -130,22 +132,33 @@ async fn handle_call_initiated(
         || payload.state.as_deref() == Some("parked");
 
     let mut guard = state.write().await;
-    let status = if is_inbound && guard.inbound_mode != InboundMode::Disabled {
-        CallStatus::PendingInbound
-    } else {
-        CallStatus::IgnoredInbound
+    let ids = TelnyxIds {
+        call_control_id: call_control_id.clone(),
+        call_session_id: payload.call_session_id.clone(),
+        call_leg_id: payload.call_leg_id.clone(),
+        stream_id: None,
     };
-    let gateway_call_id = guard.add_or_update_inbound_call(
-        TelnyxIds {
-            call_control_id: call_control_id.clone(),
-            call_session_id: payload.call_session_id.clone(),
-            call_leg_id: payload.call_leg_id.clone(),
-            stream_id: None,
-        },
-        payload.from.clone(),
-        payload.to.clone(),
-        status,
-    );
+    let (gateway_call_id, status) = if is_inbound {
+        let status = if guard.inbound_mode != InboundMode::Disabled {
+            CallStatus::PendingInbound
+        } else {
+            CallStatus::IgnoredInbound
+        };
+        (
+            guard.add_or_update_inbound_call(ids, payload.from.clone(), payload.to.clone(), status),
+            status,
+        )
+    } else {
+        (
+            guard.add_or_update_outbound_call(
+                ids,
+                payload.from.clone(),
+                payload.to.clone(),
+                CallStatus::Dialing,
+            ),
+            CallStatus::Dialing,
+        )
+    };
 
     if status == CallStatus::PendingInbound {
         guard.log(
@@ -163,6 +176,24 @@ async fn handle_call_initiated(
             event_id = envelope.data.id.as_deref(),
             occurred_at = envelope.data.occurred_at.as_deref(),
             "call.inbound.pending"
+        );
+    } else if status == CallStatus::Dialing {
+        guard.log(
+            LogLevel::Info,
+            format!(
+                "outbound call dialing: {gateway_call_id} to {:?}",
+                payload.to
+            ),
+        );
+        tracing::info!(
+            gateway_call_id,
+            call_control_id,
+            call_session_id = payload.call_session_id.as_deref(),
+            call_leg_id = payload.call_leg_id.as_deref(),
+            event_id = envelope.data.id.as_deref(),
+            occurred_at = envelope.data.occurred_at.as_deref(),
+            direction = ?CallDirection::Outbound,
+            "call.outbound.dialing"
         );
     } else {
         guard.log(
@@ -276,7 +307,7 @@ fn payload_value_string(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operator::state::{shared_state, InboundMode};
+    use crate::operator::state::{InboundMode, shared_state};
 
     #[tokio::test]
     async fn inbound_disabled_does_not_create_pending_call() {
@@ -337,6 +368,41 @@ mod tests {
             .expect("call should be recorded");
         assert_eq!(call.status, CallStatus::PendingInbound);
         assert!(guard.selected_call.is_some());
+    }
+
+    #[tokio::test]
+    async fn outbound_initiated_creates_dialing_call() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let body = serde_json::json!({
+            "data": {
+                "event_type": "call.initiated",
+                "payload": {
+                    "direction": "outgoing",
+                    "call_control_id": "call-1",
+                    "call_session_id": "sess-1",
+                    "call_leg_id": "leg-1",
+                    "from": "+15550000001",
+                    "to": "+15550000002"
+                }
+            }
+        });
+
+        handle_voice_webhook(state.clone(), body)
+            .await
+            .expect("webhook should be accepted");
+
+        let guard = state.read().await;
+        let call = guard
+            .calls
+            .values()
+            .next()
+            .expect("call should be recorded");
+        assert_eq!(call.direction, CallDirection::Outbound);
+        assert_eq!(call.status, CallStatus::Dialing);
+        assert_eq!(
+            guard.selected_call.as_deref(),
+            Some(call.gateway_call_id.as_str())
+        );
     }
 
     #[tokio::test]
