@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path. |
 | 2026-06-01 | @codex-364-impl | Adjusted milestone 1 live validation to request inbound-only `PCMU` media and defer `stream_bidirectional_target_legs`/bidirectional `L16` validation to later outbound or duplex milestones. |
 | 2026-05-31 | @codex-364-impl | Clarified socket mode as the local agent-tooling surface: NDJSON command execution, structured snapshots, cursor-based event polling, and optional tmux/mstream wake-up notifications are socket responsibilities, while webhooks/Control API remain appserver integration surfaces. |
 | 2026-05-31 | @codex-364-impl | Updated gateway ORT guidance to use `ort/download-binaries`: Cargo downloads and statically links `libonnxruntime.a`; no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source build. |
