@@ -101,6 +101,29 @@ answered:
 The quick brown fox jumps over the lazy dog. Motlie is testing inbound speech through Telnyx. Please record every word in this sentence clearly. The final answer should contain numbers one two three and the phrase blue copper river.
 ```
 
+### Live Validation Notes
+
+On 2026-06-01, after fixing the Telnyx `L16` byte order, the gateway completed
+two manual inbound calls with `L16 16000Hz` media and capture enabled.
+
+- Call `gwc_7fec3c0fa50d49ceafd08638c4c51edb`, stream
+  `e0084c78-905f-4939-999c-023a305957e6`, captured under
+  `/home/dchung/telnyx-test/captures/gwc_7fec3c0fa50d49ceafd08638c4c51edb/e0084c78-905f-4939-999c-023a305957e6`.
+  The reference-section WER was `17.9%` (`7 / 39` words). Main errors:
+  `Motlie -> MOTLEY`, `inbound -> BOWED` with inserted `IN GROUNDS IN`,
+  `Telnyx -> TONICS`, and `this -> THE`.
+- Call `gwc_cbbe4d99f1394bd0a96c5103a33592ea`, stream
+  `42271dff-afc5-4ddf-b67b-08ffd517d0b3`, captured under
+  `/home/dchung/telnyx-test/captures/gwc_cbbe4d99f1394bd0a96c5103a33592ea/42271dff-afc5-4ddf-b67b-08ffd517d0b3`.
+  The intended-snippet WER was `16.2%` (`6 / 37` words). Main errors:
+  `Sherpa -> SHIRBA`, inserted `TO`, `Today -> DAY`, `are -> RE`,
+  `whether -> WEATHER`, and `improve -> IMPROVED`.
+
+The second run also exposed an operator-control issue: when an ended call stayed
+selected, bare `answer` targeted that old call instead of the single new waiting
+call. The command now prefers the single `waiting` inbound call when no explicit
+call id is provided.
+
 1. Expose the local listener with Tailscale Funnel:
 
    ```sh

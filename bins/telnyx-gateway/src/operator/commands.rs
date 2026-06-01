@@ -28,22 +28,31 @@ impl GatewayContext {
                 .clone()
                 .ok_or_else(|| DriverError::message("config set media-url <wss-url> first"))?;
             let media = guard.config.telnyx_media;
-            let call = resolve_call_mut(&mut guard, target.as_deref())?;
-            if call.status != CallStatus::PendingInbound {
-                return Err(DriverError::message(format!(
-                    "call {} is {}, expected waiting",
-                    call.gateway_call_id,
-                    call.status.label()
-                )));
-            }
-            call.status = CallStatus::Answering;
-            call.push_timeline("operator requested answer");
-            (
-                call.gateway_call_id.clone(),
-                call.ids.call_control_id.clone(),
-                media_url,
-                media,
-            )
+            let call_id = resolve_answer_call_id(&guard, target.as_deref())?;
+            let (gateway_call_id, call_control_id) = {
+                let call = guard
+                    .calls
+                    .get_mut(&call_id)
+                    .ok_or_else(|| DriverError::NotFound {
+                        kind: "call",
+                        name: call_id.clone(),
+                    })?;
+                if call.status != CallStatus::PendingInbound {
+                    return Err(DriverError::message(format!(
+                        "call {} is {}, expected waiting",
+                        call.gateway_call_id,
+                        call.status.label()
+                    )));
+                }
+                call.status = CallStatus::Answering;
+                call.push_timeline("operator requested answer");
+                (
+                    call.gateway_call_id.clone(),
+                    call.ids.call_control_id.clone(),
+                )
+            };
+            guard.selected_call = Some(gateway_call_id.clone());
+            (gateway_call_id, call_control_id, media_url, media)
         };
 
         {
@@ -913,6 +922,27 @@ fn resolve_call_id(state: &GatewayState, target: Option<&str>) -> DriverResult<S
     Ok(id)
 }
 
+fn resolve_answer_call_id(state: &GatewayState, target: Option<&str>) -> DriverResult<String> {
+    if let Some(value) = target {
+        return Ok(value.to_string());
+    }
+
+    let mut waiting = state
+        .calls
+        .values()
+        .filter(|call| call.status == CallStatus::PendingInbound)
+        .map(|call| call.gateway_call_id.clone());
+    let Some(first_waiting) = waiting.next() else {
+        return resolve_call_id(state, None);
+    };
+    if waiting.next().is_some() {
+        return Err(DriverError::message(
+            "multiple waiting calls; run answer <call>",
+        ));
+    }
+    Ok(first_waiting)
+}
+
 fn driver_anyhow(error: anyhow::Error) -> DriverError {
     DriverError::message(format!("{error:#}"))
 }
@@ -1024,6 +1054,62 @@ mod tests {
         let guard = state.read().await;
         let call = guard.calls.values().next().expect("call exists");
         assert_eq!(call.status, CallStatus::Answered);
+    }
+
+    #[tokio::test]
+    async fn answer_prefers_single_waiting_call_over_selected_ended_call() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let waiting_call_id = {
+            let mut guard = state.write().await;
+            guard.config.public_media_url = Some("wss://example.test/telnyx/media".to_string());
+            let ended_call_id = guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-ended".to_string(),
+                    call_session_id: Some("sess-ended".to_string()),
+                    call_leg_id: Some("leg-ended".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::Ended,
+            );
+            let waiting_call_id = guard.add_or_update_inbound_call(
+                TelnyxIds {
+                    call_control_id: "call-waiting".to_string(),
+                    call_session_id: Some("sess-waiting".to_string()),
+                    call_leg_id: Some("leg-waiting".to_string()),
+                    stream_id: None,
+                },
+                None,
+                None,
+                CallStatus::PendingInbound,
+            );
+            guard.selected_call = Some(ended_call_id);
+            waiting_call_id
+        };
+        let telnyx = TelnyxClient::new("https://api.telnyx.com/v2", None, true);
+        let context = GatewayContext::new(state.clone(), telnyx);
+        let mut engine = CommandEngine::<GatewayContext, GatewayCommand>::new(context);
+
+        let output = engine.run_line("answer").await.expect("answer");
+
+        assert_eq!(
+            output.lines,
+            vec![format!("answer requested for {waiting_call_id}")]
+        );
+        let guard = state.read().await;
+        assert_eq!(
+            guard.selected_call.as_deref(),
+            Some(waiting_call_id.as_str())
+        );
+        assert_eq!(
+            guard
+                .calls
+                .get(&waiting_call_id)
+                .expect("waiting call exists")
+                .status,
+            CallStatus::Answering
+        );
     }
 
     #[tokio::test]

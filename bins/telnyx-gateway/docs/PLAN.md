@@ -4,6 +4,7 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
+| 2026-06-01 | @codex-364-impl | Recorded post-fix live validation for two `L16 16 kHz` inbound calls, with measured WER around `16-18%`, and fixed bare `answer` to prefer the single waiting inbound call when stale ended calls remain selected. |
 | 2026-06-01 | @codex-364-impl | Corrected the milestone 1 Telnyx `L16` comparison path to decode observed WebSocket `L16` payloads as little-endian PCM, added provider-neutral little-endian L16 helpers, and added a fixed read-aloud reference for WER checks. |
 | 2026-06-01 | @codex-364-impl | Added the post-live-test ASR quality loop for milestone 1: gateway media capture writes raw Telnyx JSONL, decoded inbound WAV, Sherpa input WAV, transcript JSONL, and manifest files, while replayable config can switch answer media between the known-good `PCMU 8 kHz` path and an `L16 16 kHz` comparison run. |
 | 2026-06-01 | @codex-364-impl | Updated milestone 1 ASR quality work to use upstream `sherpa-onnx` for online recognition, endpointing, and static native archive linking; normal speech pauses now stay in one ASR session while repeated-token suppression remains a reset safety valve. |
