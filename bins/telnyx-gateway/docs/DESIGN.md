@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Refined live milestone 1 handling so the ASR path gates both initial silence and sustained low-energy tails, suppresses repeated-token Sherpa hallucinations from the operator transcript stream while logging them as suppressed events, and keeps the shell prompt cursor aligned by rendered rows when command output wraps. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Merged the TUI command input and REPL history into one shell-style left pane so operator commands, output, and the active prompt share one terminal-like surface. | Operator REPL and TUI Control Surface |
 | 2026-06-01 | @codex-364-impl: Added an explicit ASR start-of-speech gate for milestone 1 so low-energy initial telephony frames are logged but not fed into Sherpa, preventing silence-driven partial transcript growth during live inbound tests. | Inbound Call Handler Design, Testing Scope |
 | 2026-06-01 | @codex-364-impl: Moved TUI-mode tracing away from the terminal by default; `--tui` writes structured logs to `telnyx-gateway.log` unless `--log-file` overrides the path, so logs cannot corrupt the alternate-screen TUI. | Operator REPL and TUI Control Surface, Getting Started: Local Deployment |
@@ -393,6 +394,8 @@ operator provisions Telnyx application and phone number
 
 No TTS, outbound audio, external appserver, socket client, or `ConversationHandler` is required for this milestone. The gateway should listen, surface pending calls in the roster, answer on operator command, stream, normalize, transcribe, and render transcript events in the selected-call detail pane.
 
+Milestone 1 ASR input should suppress low-energy initial media until speech is detected, allow only a short low-energy hangover after speech, and suppress sustained low-energy tails so silence does not keep advancing the streaming decoder. Because the current Sherpa backend has known repeated-token failure modes, the gateway should suppress pathological repeated-token transcript text from the operator transcript stream and emit a structured `transcript.suppressed_repeated_token` log with the same call, stream, codec, and sample-rate metadata.
+
 Milestone 1 structured logs must include the gateway call id, Telnyx diagnostic ids such as `call_control_id`, `call_session_id`, and `call_leg_id` when present, `stream_id`, observed codec, observed sample rate, and transcript partial/final events.
 
 Recommended inbound surface:
@@ -722,7 +725,7 @@ Mux rules:
 
 When `--tui` is enabled, the TUI should have one command pane and one call/status area:
 
-- left pane: shell-style `motlie-driver` REPL surface combining command history, command output, and the active prompt in one pane
+- left pane: shell-style `motlie-driver` REPL surface combining command history, command output, and the active prompt in one pane; prompt placement and cursor position must be based on rendered terminal rows so wrapped or multi-line command output cannot leave the cursor detached from the `>` prompt
 - right area: split vertically into a top call roster and a bottom selected-call detail pane
 
 Right top call roster:

@@ -18,6 +18,8 @@ use crate::operator::state::{
 
 const SPEECH_RMS_THRESHOLD: f32 = 180.0;
 const SPEECH_PEAK_THRESHOLD: i16 = 900;
+const LOW_ENERGY_HANGOVER_FRAMES: usize = 15;
+const REPEATED_TOKEN_RUN_THRESHOLD: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EncodedMediaFrame {
@@ -387,6 +389,12 @@ struct SampleStats {
     mean: f32,
 }
 
+impl SampleStats {
+    fn has_speech_energy(&self) -> bool {
+        self.rms >= SPEECH_RMS_THRESHOLD || self.peak >= SPEECH_PEAK_THRESHOLD
+    }
+}
+
 fn sample_stats(samples: &[i16]) -> SampleStats {
     if samples.is_empty() {
         return SampleStats {
@@ -419,33 +427,67 @@ fn sample_stats(samples: &[i16]) -> SampleStats {
 #[derive(Default)]
 struct AsrGate {
     speech_started: bool,
-    suppressed_frames: usize,
+    low_energy_run: usize,
+    suppressed_initial_frames: usize,
+    suppressed_tail_frames: usize,
 }
 
 impl AsrGate {
     fn accept(&mut self, frame_index: usize, stream_id: &str, stats: &SampleStats) -> bool {
-        if self.speech_started {
-            return true;
-        }
-        if stats.rms >= SPEECH_RMS_THRESHOLD || stats.peak >= SPEECH_PEAK_THRESHOLD {
+        if stats.has_speech_energy() {
+            let was_started = self.speech_started;
+            let resumed_after_tail = self.low_energy_run > LOW_ENERGY_HANGOVER_FRAMES;
             self.speech_started = true;
-            tracing::info!(
-                stream_id,
-                frame_index,
-                suppressed_frames = self.suppressed_frames,
-                peak = stats.peak,
-                rms = stats.rms,
-                "media.speech.detected"
-            );
+            self.low_energy_run = 0;
+            if !was_started {
+                tracing::info!(
+                    stream_id,
+                    frame_index,
+                    suppressed_frames = self.suppressed_initial_frames,
+                    peak = stats.peak,
+                    rms = stats.rms,
+                    "media.speech.detected"
+                );
+            } else if resumed_after_tail {
+                tracing::info!(
+                    stream_id,
+                    frame_index,
+                    suppressed_tail_frames = self.suppressed_tail_frames,
+                    peak = stats.peak,
+                    rms = stats.rms,
+                    "media.speech.resumed"
+                );
+            }
             return true;
         }
 
-        self.suppressed_frames = self.suppressed_frames.saturating_add(1);
-        if self.suppressed_frames <= 5 || self.suppressed_frames.is_multiple_of(50) {
+        if self.speech_started {
+            self.low_energy_run = self.low_energy_run.saturating_add(1);
+            if self.low_energy_run <= LOW_ENERGY_HANGOVER_FRAMES {
+                return true;
+            }
+            self.suppressed_tail_frames = self.suppressed_tail_frames.saturating_add(1);
+            if self.suppressed_tail_frames <= 5 || self.suppressed_tail_frames.is_multiple_of(50) {
+                tracing::debug!(
+                    stream_id,
+                    frame_index,
+                    suppressed_tail_frames = self.suppressed_tail_frames,
+                    low_energy_run = self.low_energy_run,
+                    peak = stats.peak,
+                    rms = stats.rms,
+                    "media.frame.suppressed_low_energy_tail"
+                );
+            }
+            return false;
+        }
+
+        self.suppressed_initial_frames = self.suppressed_initial_frames.saturating_add(1);
+        if self.suppressed_initial_frames <= 5 || self.suppressed_initial_frames.is_multiple_of(50)
+        {
             tracing::debug!(
                 stream_id,
                 frame_index,
-                suppressed_frames = self.suppressed_frames,
+                suppressed_frames = self.suppressed_initial_frames,
                 peak = stats.peak,
                 rms = stats.rms,
                 "media.frame.suppressed_low_energy"
@@ -453,6 +495,43 @@ impl AsrGate {
         }
         false
     }
+}
+
+fn looks_like_repeated_token_hallucination(text: &str) -> bool {
+    let mut previous = None;
+    let mut run = 0usize;
+    let mut max_run = 0usize;
+    let mut chars = 0usize;
+    let mut q_count = 0usize;
+
+    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+        chars += 1;
+        if ch == 'Q' {
+            q_count += 1;
+        }
+        if previous == Some(ch) {
+            run += 1;
+        } else {
+            previous = Some(ch);
+            run = 1;
+        }
+        max_run = max_run.max(run);
+    }
+
+    if chars < REPEATED_TOKEN_RUN_THRESHOLD {
+        return false;
+    }
+    max_run >= REPEATED_TOKEN_RUN_THRESHOLD || q_count.saturating_mul(3) >= chars.saturating_mul(2)
+}
+
+fn transcript_preview(text: &str) -> String {
+    const PREVIEW_CHARS: usize = 48;
+
+    let mut preview = text.chars().take(PREVIEW_CHARS).collect::<String>();
+    if text.chars().count() > PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview
 }
 
 async fn finish_stream(
@@ -494,23 +573,45 @@ async fn record_transcript_events(
             "transcript.partial"
         };
         let text = event.text().to_string();
-        guard.add_transcript(gateway_call_id, kind, text.clone());
         let call = guard.calls.get(gateway_call_id);
-        let effective_stream_id =
-            stream_id.or_else(|| call.and_then(|call| call.ids.stream_id.as_deref()));
+        let call_control_id = call.map(|call| call.ids.call_control_id.clone());
+        let call_session_id = call.and_then(|call| call.ids.call_session_id.clone());
+        let call_leg_id = call.and_then(|call| call.ids.call_leg_id.clone());
+        let effective_stream_id = stream_id
+            .map(str::to_string)
+            .or_else(|| call.and_then(|call| call.ids.stream_id.clone()));
         let codec = media_format
-            .map(|format| format.encoding.as_str())
-            .or_else(|| call.and_then(|call| call.media.encoding.as_deref()));
+            .map(|format| format.encoding.clone())
+            .or_else(|| call.and_then(|call| call.media.encoding.clone()));
         let sample_rate_hz = media_format
             .map(|format| format.sample_rate_hz)
             .or_else(|| call.and_then(|call| call.media.sample_rate_hz));
+
+        if looks_like_repeated_token_hallucination(&text) {
+            tracing::warn!(
+                gateway_call_id,
+                call_control_id = call_control_id.as_deref(),
+                call_session_id = call_session_id.as_deref(),
+                call_leg_id = call_leg_id.as_deref(),
+                stream_id = effective_stream_id.as_deref(),
+                codec = codec.as_deref(),
+                sample_rate_hz,
+                transcript_kind = kind_label,
+                transcript_chars = text.chars().count(),
+                transcript_preview = transcript_preview(&text),
+                "transcript.suppressed_repeated_token"
+            );
+            continue;
+        }
+
+        guard.add_transcript(gateway_call_id, kind, text.clone());
         tracing::info!(
             gateway_call_id,
-            call_control_id = call.map(|call| call.ids.call_control_id.as_str()),
-            call_session_id = call.and_then(|call| call.ids.call_session_id.as_deref()),
-            call_leg_id = call.and_then(|call| call.ids.call_leg_id.as_deref()),
-            stream_id = effective_stream_id,
-            codec,
+            call_control_id = call_control_id.as_deref(),
+            call_session_id = call_session_id.as_deref(),
+            call_leg_id = call_leg_id.as_deref(),
+            stream_id = effective_stream_id.as_deref(),
+            codec = codec.as_deref(),
             sample_rate_hz,
             transcript_kind = kind_label,
             transcript_text = text,
@@ -720,6 +821,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn low_energy_media_is_suppressed_after_hangover() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let _gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let counting_asr = Arc::new(CountingAsrFactory::default());
+        let asr: SharedAsrFactory = counting_asr.clone();
+        let mut media_state = MediaSocketState::new();
+
+        handle_text(
+            &start_event("call-1", "stream-1", "L16"),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("start event should open ASR session");
+
+        let speech = STANDARD.encode(l16_samples(320, 4_000));
+        handle_text(
+            &media_event("stream-1", "1", &speech),
+            &state,
+            &asr,
+            &mut media_state,
+        )
+        .await
+        .expect("speech should pass into ASR");
+
+        let silence = STANDARD.encode(l16_samples(320, 0));
+        for sequence in 2..=(LOW_ENERGY_HANGOVER_FRAMES + 3) {
+            handle_text(
+                &media_event("stream-1", &sequence.to_string(), &silence),
+                &state,
+                &asr,
+                &mut media_state,
+            )
+            .await
+            .expect("silence should be accepted by transport");
+        }
+
+        assert_eq!(counting_asr.ingests(), 1 + LOW_ENERGY_HANGOVER_FRAMES);
+    }
+
+    #[tokio::test]
+    async fn repeated_token_transcripts_are_suppressed_from_call_detail() {
+        let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
+        let gateway_call_id = seed_call(&state, "call-1", CallStatus::Answering).await;
+        let format = MediaFormat {
+            encoding: "PCMU".to_string(),
+            sample_rate_hz: 8_000,
+            channels: 1,
+        };
+
+        record_transcript_events(
+            &state,
+            &gateway_call_id,
+            Some("stream-1"),
+            Some(&format),
+            vec![
+                TranscriptEvent::Partial {
+                    text: "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                },
+                TranscriptEvent::Final {
+                    text: "hello there".to_string(),
+                    update: motlie_model::TranscriptionUpdate::default(),
+                },
+            ],
+        )
+        .await;
+
+        let guard = state.read().await;
+        let call = guard.calls.get(&gateway_call_id).expect("call exists");
+        assert_eq!(call.transcripts.len(), 1);
+        assert_eq!(call.transcripts[0].text, "hello there");
+    }
+
+    #[test]
+    fn repeated_token_detector_ignores_normal_transcripts() {
+        assert!(looks_like_repeated_token_hallucination(
+            "MEQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+        ));
+        assert!(!looks_like_repeated_token_hallucination(
+            "meet me at the front desk"
+        ));
+        assert!(!looks_like_repeated_token_hallucination("queue"));
+    }
+
+    #[tokio::test]
     async fn media_start_requires_operator_answer_gate() {
         for status in [CallStatus::IgnoredInbound, CallStatus::PendingInbound] {
             let state = shared_state("127.0.0.1:0".parse().expect("valid addr"));
@@ -859,11 +1047,16 @@ mod tests {
     #[derive(Default)]
     struct CountingAsrFactory {
         opens: AtomicUsize,
+        ingests: Arc<AtomicUsize>,
     }
 
     impl CountingAsrFactory {
         fn opens(&self) -> usize {
             self.opens.load(Ordering::SeqCst)
+        }
+
+        fn ingests(&self) -> usize {
+            self.ingests.load(Ordering::SeqCst)
         }
     }
 
@@ -871,11 +1064,15 @@ mod tests {
     impl InboundAsrFactory for CountingAsrFactory {
         async fn open_session(&self) -> anyhow::Result<Box<dyn InboundAsrSession>> {
             self.opens.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(CountingAsrSession))
+            Ok(Box::new(CountingAsrSession {
+                ingests: Arc::clone(&self.ingests),
+            }))
         }
     }
 
-    struct CountingAsrSession;
+    struct CountingAsrSession {
+        ingests: Arc<AtomicUsize>,
+    }
 
     #[async_trait]
     impl InboundAsrSession for CountingAsrSession {
@@ -883,6 +1080,7 @@ mod tests {
             &mut self,
             _audio: AudioBuf<i16, 16_000, Mono>,
         ) -> anyhow::Result<Vec<TranscriptEvent>> {
+            self.ingests.fetch_add(1, Ordering::SeqCst);
             Ok(Vec::new())
         }
 
