@@ -2,15 +2,14 @@
 
 Milestone 1 is inbound call transcription in the operator TUI.
 
-## ONNX Runtime
+## Sherpa Runtime
 
-The Sherpa-backed gateway must link ONNX Runtime statically for live tests and
-deployments. The workspace `ort 2.0.0-rc.12` dependency enables
-`download-binaries`, so Cargo downloads the matching Pyke ONNX Runtime 1.24.x
-static archive and links `libonnxruntime.a`.
+The Sherpa-backed gateway uses the upstream `sherpa-onnx` Rust crate. That
+crate statically links its downloaded prebuilt `sherpa-onnx` native archive,
+including the ONNX Runtime library used internally by Sherpa.
 
-This follows the general Motlie ORT/ONNX backend policy in
-[`../../libs/model/docs/ORT_ONNX_POLICY.md`](../../libs/model/docs/ORT_ONNX_POLICY.md).
+This follows the Sherpa exception in the general Motlie ORT/ONNX backend policy
+in [`../../libs/model/docs/ORT_ONNX_POLICY.md`](../../libs/model/docs/ORT_ONNX_POLICY.md).
 
 The gateway runbook does not use ORT-specific environment variables. Do not set
 `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and do not build
