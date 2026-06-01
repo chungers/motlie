@@ -186,7 +186,7 @@ async fn send_silence_keepalive(
     if media_state.silence_keepalive_frames == 1
         || media_state.silence_keepalive_frames.is_multiple_of(500)
     {
-        tracing::debug!(
+        tracing::info!(
             gateway_call_id = media_state.gateway_call_id.as_deref(),
             frames = media_state.silence_keepalive_frames,
             "media.silence_keepalive.sent"
@@ -227,7 +227,7 @@ async fn handle_text(
             media_state.gateway_call_id = Some(call_id);
             media_state.session = Some(asr.open_session().await?);
             media_state.silence_keepalive = true;
-            tracing::debug!(
+            tracing::info!(
                 gateway_call_id = media_state.gateway_call_id.as_deref(),
                 stream_id = event.stream_id,
                 "media.silence_keepalive.started"
