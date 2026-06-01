@@ -6,7 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
-| 2026-05-31 | @codex-364-impl: Established the general ONNX Runtime policy for all `libs/model` ORT/ONNX backends: static linkage, source-built ONNX Runtime, and ORT-owned third-party dependency builds. | All |
+| 2026-05-31 | @codex-364-impl: Changed the ORT/ONNX policy from source-built ONNX Runtime to the `ort/download-binaries` path, which downloads and statically links Pyke's `libonnxruntime.a` archive. | All |
+| 2026-05-31 | @codex-364-impl: Superseded the earlier manual ONNX Runtime provisioning guidance with a general static-linkage policy for all `libs/model` ORT/ONNX backends. | All |
 
 This policy applies to every Motlie model backend that uses ONNX Runtime or
 loads `.onnx` artifacts, including Piper, Sherpa ONNX, Moonshine, and future
@@ -16,63 +17,59 @@ ORT-backed bundles.
 
 - Motlie ORT/ONNX backends must link ONNX Runtime statically for local
   validation, CI, live tests, and deployment.
-- `ORT_LIB_PATH` must point at a source-built static ONNX Runtime release
-  directory containing `libonnxruntime.a` or `libonnxruntime_common.a`.
+- Motlie ORT/ONNX backends must use the workspace `ort` dependency with
+  `download-binaries`, `tls-native`, and `api-24` enabled.
+- The accepted default path is the `ort-sys` prebuilt download for the target,
+  statically linked as `libonnxruntime.a`.
+- `ORT_LIB_PATH` and `ORT_LIB_LOCATION` must remain unset so builds do not
+  bypass the downloaded static archive with a user-provided or source-built ORT.
 - `ORT_PREFER_DYNAMIC_LINK` must remain unset.
+- `ORT_SKIP_DOWNLOAD`, `ORT_OFFLINE`, and Cargo offline mode must not be used
+  for ORT-backed build targets because they disable the prebuilt archive path.
 - `LD_LIBRARY_PATH` and extracted `onnxruntime-linux-*.tgz` shared-library
   releases are not accepted runbook paths.
-- Motlie crates must not enable `ort` build-time binary downloads for library
-  backends.
-- ONNX Runtime's source build owns its third-party C/C++ dependency builds.
-  Operators should provide host build tools only, not ORT internal libraries
-  such as protobuf, FlatBuffers, Abseil, re2, nsync, or cpuinfo.
+- Motlie docs and scripts must not ask operators to build ONNX Runtime from
+  source for normal ORT-backed model use.
+- Motlie crates must not add local ONNX Runtime build scripts, vendored ORT
+  source trees, or manual `ORT_LIB_PATH` setup for this path.
 
 ## Host Requirements
 
-The host must provide build tools that ONNX Runtime cannot compile without:
+The host must allow Cargo to fetch the `ort-sys` prebuilt archive for the
+target. No ONNX Runtime source checkout or CMake build is part of the Motlie
+runbook.
 
-- `git`
-- Python `3.10+`
-- CMake `3.28+`
-- a Linux C++ compiler such as GCC `8+`
+For Linux targets, the final binary still links the C++ standard library used by
+the prebuilt static archive. A normal Rust/C++ toolchain environment is expected.
 
-The runbook should verify these tools. It should not install ONNX Runtime
-internal dependencies as host packages.
+## Canonical Cargo Path
 
-## Canonical Static Build
+Use the checked-in workspace dependency:
 
-Use the ONNX Runtime release that matches the checked-in `ort` / `ort-sys`
-binding generation. For `ort-sys 2.0.0-rc.12`, use ONNX Runtime `v1.24.2`:
-
-```sh
-command -v git
-python3 -c 'import sys; assert sys.version_info >= (3, 10), sys.version'
-cmake --version
-${CXX:-c++} --version
-
-export ORT_VERSION=v1.24.2
-export ORT_SRC="$HOME/src/onnxruntime-${ORT_VERSION#v}"
-git clone --branch "$ORT_VERSION" --depth 1 --recursive --shallow-submodules \
-  https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
-cd "$ORT_SRC"
-./build.sh --config Release --parallel --compile_no_warning_as_error \
-  --skip_submodule_sync --skip_tests \
-  --cmake_extra_defines FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
-
-export ORT_LIB_PATH="$ORT_SRC/build/Linux/Release"
-test -f "$ORT_LIB_PATH/libonnxruntime.a" || test -f "$ORT_LIB_PATH/libonnxruntime_common.a"
-unset ORT_PREFER_DYNAMIC_LINK
+```toml
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "api-24"] }
 ```
 
-`FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER` keeps the ONNX Runtime source build
-from preferring system packages for FetchContent-managed dependencies.
+For `x86_64-unknown-linux-gnu`, `ort-sys 2.0.0-rc.12` resolves the
+`ms@1.24.2` Pyke archive and links the downloaded file as:
+
+```sh
+cargo:rustc-link-lib=static=onnxruntime
+```
+
+Operator runbooks for ORT-backed builds should not set ORT-specific
+environment variables.
+
+Do not use `cargo --offline` for the first ORT-backed build. The downloaded
+archive is cached under Cargo's cache directory after `ort-sys` fetches and
+verifies it.
 
 ## Crate Expectations
 
 The shared `libs/model/backends/ort` crate and every concrete ORT-backed model
-crate should depend on `ort` with `default-features = false`. A concrete backend
-may add feature flags such as CUDA execution-provider support, but it must not
-silently change the linkage policy.
+crate should depend on `ort.workspace = true`. A concrete backend may add
+feature flags such as CUDA execution-provider support, but it must not silently
+change the linkage policy.
 
-Validation scripts should fail when `ORT_PREFER_DYNAMIC_LINK` is set or when
-`ORT_LIB_PATH` points only at shared ONNX Runtime libraries.
+Validation scripts should fail when an environment override would bypass the
+downloaded static archive path.

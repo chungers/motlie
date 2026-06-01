@@ -63,20 +63,6 @@ find_espeak_dir() {
   return 1
 }
 
-find_ort_dir() {
-  if [[ -n "${ORT_LIB_PATH:-}" ]]; then
-    local dir
-    for dir in "${ORT_LIB_PATH}" "${ORT_LIB_PATH}/Release" "${ORT_LIB_PATH}/RelWithDebInfo" "${ORT_LIB_PATH}/MinSizeRel" "${ORT_LIB_PATH}/Debug"; do
-      [[ -e "${dir}/libonnxruntime.a" || -e "${dir}/libonnxruntime_common.a" ]] && {
-        printf '%s\n' "${dir}"
-        return 0
-      }
-    done
-  fi
-
-  return 1
-}
-
 check_espeak() {
   local dir
   dir="$(find_espeak_dir)" || fail "libespeak-ng not found. Install libespeak-ng-dev or set ESPEAK_NG_LIB_DIR."
@@ -84,15 +70,31 @@ check_espeak() {
 }
 
 check_ort() {
+  [[ -z "${ORT_LIB_PATH:-}" ]] || fail "ORT_LIB_PATH must not be set for Motlie model checks; ort/download-binaries fetches and statically links libonnxruntime.a."
+  [[ -z "${ORT_LIB_LOCATION:-}" ]] || fail "ORT_LIB_LOCATION must not be set for Motlie model checks; ort/download-binaries fetches and statically links libonnxruntime.a."
+
   case "${ORT_PREFER_DYNAMIC_LINK:-}" in
     1|true|TRUE|True)
-      fail "ORT_PREFER_DYNAMIC_LINK must not be set for Motlie model checks; build static ONNX Runtime and set ORT_LIB_PATH to its build output."
+      fail "ORT_PREFER_DYNAMIC_LINK must not be set for Motlie model checks; ort/download-binaries statically links libonnxruntime.a."
+      ;;
+  esac
+  case "${ORT_SKIP_DOWNLOAD:-}" in
+    1|true|TRUE|True)
+      fail "ORT_SKIP_DOWNLOAD must not be set for Motlie model checks; ort/download-binaries must fetch the prebuilt static archive."
+      ;;
+  esac
+  case "${ORT_OFFLINE:-}" in
+    1|true|TRUE|True)
+      fail "ORT_OFFLINE must not be set for Motlie model checks; ort/download-binaries must fetch the prebuilt static archive."
+      ;;
+  esac
+  case "${CARGO_NET_OFFLINE:-}" in
+    1|true|TRUE|True)
+      fail "CARGO_NET_OFFLINE must not be set for Motlie ORT model checks; ort/download-binaries must fetch the prebuilt static archive."
       ;;
   esac
 
-  local dir
-  dir="$(find_ort_dir)" || fail "Static ONNX Runtime not found. Build ONNX Runtime from source and set ORT_LIB_PATH to a directory containing libonnxruntime.a or libonnxruntime_common.a."
-  note "found static ONNX Runtime in ${dir}"
+  note "ORT prebuilt static archive download is enabled through the workspace ort dependency"
 }
 
 check_qwen_submodule() {

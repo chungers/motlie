@@ -4,8 +4,9 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-31 | @codex-364-impl | Clarified that ONNX Runtime source builds own their third-party C/C++ dependencies through FetchContent; Motlie runbooks should verify host build tools, not install ORT internal dependency packages. |
-| 2026-05-31 | @codex-364-impl | Changed ONNX Runtime provisioning guidance from shared-library discovery to static source-built linkage through `ORT_LIB_PATH`; dynamic `ORT_PREFER_DYNAMIC_LINK` runbooks are no longer accepted. |
+| 2026-05-31 | @codex-364-impl | Replaced manual/source-built ONNX Runtime setup with the workspace `ort/download-binaries` policy: Cargo downloads and statically links the prebuilt `libonnxruntime.a` archive with no ORT env vars. |
+| 2026-05-31 | @codex-364-impl | Superseded earlier manual ONNX Runtime provisioning guidance with the `ort/download-binaries` static-link policy above. |
+| 2026-05-31 | @codex-364-impl | Superseded earlier shared-library guidance with static linkage through the downloaded `libonnxruntime.a` archive. |
 | 2026-04-24 | @codex-gpt55 | Added Qwen3.6 27B GGUF build guidance for the new llama.cpp curated example, including the feature gate, CUDA gate, and current FP8 GGUF limitation. |
 | 2026-04-22 | @codex-tts | Added a dedicated `smoke-qwen3-whisper` mode to `scripts/check_curated_model_examples.sh` for issue `#211`. This exercises `tts_qwen3_tts_cpp | asr_whisper` under the same feature set to catch Linux `ggml` symbol-interposition regressions around `-Wl,-Bsymbolic`. |
 | 2026-04-21 | @codex-tts | Removed the non-functional Qwen3-TTS ONNX curated backend per issue `#210`. The ONNX Runtime prerequisite list now covers only the surviving ORT-backed bundles: Piper, sherpa-onnx, and Moonshine. |
@@ -29,7 +30,7 @@ The main principles are:
 |--------|-------------|--------------------|
 | Piper | System `libespeak-ng` shared library | `motlie-model-espeak-ng/build.rs` fails explicitly if the library cannot be found. |
 | Piper | `espeak-ng-data` runtime assets | Runtime prerequisite. Set `PIPER_ESPEAKNG_DATA_DIRECTORY` if the data is not installed in a standard system location. |
-| sherpa-onnx / Moonshine / Piper | Static ONNX Runtime build | `scripts/check_models_build_prereqs.sh --require-ort` requires `ORT_LIB_PATH` to point at a directory containing `libonnxruntime.a` or `libonnxruntime_common.a`, and rejects `ORT_PREFER_DYNAMIC_LINK`. |
+| sherpa-onnx / Moonshine / Piper | Static ONNX Runtime archive downloaded by `ort` | `scripts/check_models_build_prereqs.sh --require-ort` rejects ORT env overrides; the workspace `ort` dependency enables `download-binaries` and statically links the downloaded `libonnxruntime.a`. |
 | qwen3-tts.cpp | Vendored submodule checkout | `git submodule update --init --recursive libs/model/backends/qwen3_tts_cpp/vendor/qwen3-tts.cpp` |
 | llama.cpp GGUF | Optional CUDA build | Add `llama-cpp-cuda` to the `motlie-models` feature set. Runtime GPU offload can be disabled with `MOTLIE_MODEL_FORCE_CPU=1` or controlled with `MOTLIE_MODEL_GPU_LAYERS=<n>`. |
 
@@ -39,7 +40,6 @@ The main principles are:
 |----------|---------|
 | `ESPEAK_NG_LIB_DIR` | Directory containing `libespeak-ng.so`, `libespeak-ng.so.1`, or `libespeak-ng.dylib` when the library is not in a standard linker path. |
 | `PIPER_ESPEAKNG_DATA_DIRECTORY` | Directory containing `espeak-ng-data/` for Piper phonemization runtime assets. |
-| `ORT_LIB_PATH` | Directory containing the static ONNX Runtime build used by ORT-backed backends and examples, such as `$HOME/src/onnxruntime-1.24.2/build/Linux/Release`. |
 | `MOTLIE_MODEL_FORCE_CPU` | Set to `1` to force llama.cpp-backed bundles to use zero GPU-offloaded layers. |
 | `MOTLIE_MODEL_GPU_LAYERS` | Explicit llama.cpp GPU layer count. When unset, llama.cpp-backed bundles request full offload and the compiled backend decides what is available. |
 
@@ -79,43 +79,24 @@ Full local build path when ONNX Runtime is available:
 ## Static ONNX Runtime Policy
 
 ORT-backed Motlie examples and gateway flows should link ONNX Runtime
-statically. Build ONNX Runtime from the release tag that matches the checked-in
-`ort`/`ort-sys` bindings, set `ORT_LIB_PATH` to the static build output, and
-leave `ORT_PREFER_DYNAMIC_LINK` unset.
+statically through Cargo's `ort/download-binaries` path. Do not build ONNX
+Runtime from source, do not vendor ONNX Runtime, and do not set `ORT_LIB_PATH`
+or `LD_LIBRARY_PATH`.
 
 The canonical backend-family policy lives in
 [`../../model/docs/ORT_ONNX_POLICY.md`](../../model/docs/ORT_ONNX_POLICY.md).
 
-Ubuntu static build for the current `ort-sys 2.0.0-rc.12` binding generation:
+The workspace pins `ort 2.0.0-rc.12` with these features:
 
-```bash
-command -v git
-python3 -c 'import sys; assert sys.version_info >= (3, 10), sys.version'
-cmake --version
-${CXX:-c++} --version
-
-export ORT_VERSION=v1.24.2
-export ORT_SRC="$HOME/src/onnxruntime-${ORT_VERSION#v}"
-git clone --branch "$ORT_VERSION" --depth 1 --recursive --shallow-submodules \
-  https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
-cd "$ORT_SRC"
-./build.sh --config Release --parallel --compile_no_warning_as_error \
-  --skip_submodule_sync --skip_tests \
-  --cmake_extra_defines FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
-
-export ORT_LIB_PATH="$ORT_SRC/build/Linux/Release"
-test -f "$ORT_LIB_PATH/libonnxruntime.a" || test -f "$ORT_LIB_PATH/libonnxruntime_common.a"
-unset ORT_PREFER_DYNAMIC_LINK
+```text
+download-binaries,tls-native,api-24
 ```
 
-Do not use `ORT_PREFER_DYNAMIC_LINK=1`, `LD_LIBRARY_PATH`, or an extracted
-`onnxruntime-linux-*.tgz` shared-library package as the documented path for
-local validation, CI, live tests, or deployment.
+For supported targets, `ort-sys` downloads the matching Pyke archive and links
+it as `static=onnxruntime`. For the current Linux x86_64 live-test target, that
+archive contains `libonnxruntime.a`.
 
-Do not install ORT internal dependencies such as protobuf, FlatBuffers, Abseil,
-re2, nsync, or cpuinfo as host packages for this path. The
-`FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER` CMake define keeps the source build
-from preferring system packages for FetchContent-managed dependencies.
+The ORT-backed build environment should have zero ORT-specific env vars.
 
 Dedicated qwen3-tts.cpp / whisper co-link smoke for Linux symbol-interposition regressions:
 

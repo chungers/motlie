@@ -4,8 +4,10 @@
 
 | Date | Who | Summary |
 |------|-----|---------|
-| 2026-05-31 | @codex-364-impl | Clarified ONNX Runtime host preparation: operators provide only build tools, while the ONNX Runtime source build owns ORT third-party dependency builds through FetchContent. |
-| 2026-05-31 | @codex-364-impl | Added the static ONNX Runtime requirement for Sherpa/Piper runbooks: build ONNX Runtime from the matching release tag, point `ORT_LIB_PATH` at the static build output, and reject dynamic-link startup guidance. |
+| 2026-05-31 | @codex-364-impl | Clarified socket mode as the local agent-tooling surface: NDJSON command execution, structured snapshots, cursor-based event polling, and optional tmux/mstream wake-up notifications are socket responsibilities, while webhooks/Control API remain appserver integration surfaces. |
+| 2026-05-31 | @codex-364-impl | Updated gateway ORT guidance to use `ort/download-binaries`: Cargo downloads and statically links `libonnxruntime.a`; no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source build. |
+| 2026-05-31 | @codex-364-impl | Superseded earlier manual ONNX Runtime provisioning guidance with the `ort/download-binaries` static-link policy above. |
+| 2026-05-31 | @codex-364-impl | Superseded earlier shared-library guidance with static linkage through the downloaded `libonnxruntime.a` archive. |
 | 2026-05-30 | @codex-358-research | Addressed review round 1 by co-locating M4 with M1-M3, marking Control API/webhook Phase 6 work as M4 definition/stub work, adding M3 conversation webhook events, aligning M1 structured-log acceptance with #364, and updating operator module trees. |
 | 2026-05-30 | @codex-358-research | Reviewed the design and split product tracking into four milestone issues: M1 inbound TUI transcription (#364), M2 outbound TUI dialer/TTS (#365), M3 full-duplex TUI chat conversation (#366), and M4 external socket/webhook/appserver integration (#367). |
 | 2026-05-30 | @codex-358-research | Added startup-selected operator input modes: `--tui` for the local terminal UI, `--socket <path>` for headless Unix-domain command control, and a command-source mux that serializes both sources through one dispatcher when enabled together. |
@@ -31,11 +33,11 @@ Derived from [DESIGN.md](./DESIGN.md). This PLAN assumes brownfield work against
 Execution policy for the initial implementation:
 
 - the gateway starts as an idle operator-controlled application with an HTTP/WebSocket listener; `--tui` enables the local TUI, `--socket <path>` enables headless Unix-domain command control, and the gateway does not answer inbound calls until an operator command source enables inbound mode or runs `answer`
-- in milestone 4 (#367), the same call-control actions must also be available through an authenticated Gateway Control API, and gateway application webhooks must allow external servers to receive call/transcript/TTS events
+- in milestone 4 (#367), local agents must be able to drive the gateway through the Unix-domain socket using NDJSON command requests, structured command results, call snapshots, and cursor-based event polling; authenticated Gateway Control API and gateway application webhooks remain separate appserver integration surfaces
 - milestone 1 (#364) is inbound calls answered and managed in the TUI, with ASR transcription in the selected-call detail pane
 - milestone 2 (#365) is outbound dialing plus TTS driven by the TUI command surface and selected-call detail text input
 - milestone 3 (#366) is full-duplex conversation driven by a TUI chat interface over the selected call
-- milestone 4 (#367) is external integration: socket mux, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
+- milestone 4 (#367) is external integration: local agent socket tooling, application webhooks, Gateway Control API call attachment/read flows, and a harness appserver
 - `Sherpa + Piper` remains the first complete duplex backend pairing once milestone 3 exists
 - `Moonshine` and `Qwen3-TTS` may influence generic pipeline design, but they must not add blocking requirements to phases 1 through 9
 - all work needed only for those follow-on pairings belongs in phase 10 or later
@@ -169,8 +171,7 @@ Assemble and validate the first useful Telnyx slice: inbound call handling plus 
 - [ ] Implement the Sherpa inbound path:
   Telnyx sequence-map -> provider-neutral reorder -> decode -> mono normalize -> `16 kHz` resample -> Sherpa ingest flow.
   DESIGN reference: `Concrete Combination Requirements`
-- [ ] Require static ONNX Runtime linkage for the Sherpa live-test path: build ONNX Runtime from the matching release tag, point `ORT_LIB_PATH` at the static build directory, keep `ORT_PREFER_DYNAMIC_LINK` unset, and do not make `LD_LIBRARY_PATH` part of the operator runbook.
-  The runbook may verify host build tools (`git`, Python, CMake, GCC), but ONNX Runtime must build its own third-party C/C++ dependencies from source instead of requiring operators to install ORT internal libraries as host packages.
+- [ ] Require static ONNX Runtime linkage for the Sherpa live-test path through the workspace `ort/download-binaries` dependency: Cargo downloads and statically links `libonnxruntime.a`; the runbook must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not ask operators to build ONNX Runtime from source.
   DESIGN reference: `Recommended ASR/TTS Stack`
 
 ### 4.2 - Transcript sinks
@@ -297,7 +298,13 @@ Wire call-control operations for inbound and outbound calls.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Make `call use <call>` update source-local `selected_call`; allow `answer`, `reject`, `hangup`, and `say <text>` to target that source-local selection when no call id is supplied, without changing another source's selection.
   DESIGN reference: `Operator REPL and TUI Control Surface`
-- [ ] Define the Unix-domain socket command protocol as newline-delimited `motlie-driver` command text with one structured response per command, restrictive filesystem permissions, stale-socket safety, and optional peer credential checks where available; implement and validate it in milestone 4.
+- [ ] Define the Unix-domain socket command protocol as newline-delimited JSON frames containing `motlie-driver` command text, request IDs, structured command responses, and optional structured `data`; keep restrictive filesystem permissions, stale-socket safety, and optional peer credential checks where available. Implement and validate it in milestone 4.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add socket-visible structured snapshots for agent polling: `calls --json`, `call get <call_id> --json`, and equivalent status/config resources that do not require parsing TUI text.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add an in-memory gateway event journal with monotonic sequence cursors and a socket command `events poll --after <cursor> [--call <call_id>] [--types <event,...>] [--limit <n>]`; return structured `cursor_expired` errors when a client falls behind the retained ring buffer.
+  DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Add optional local agent wake-up notifiers, such as tmux send-keys or mstream channel notifications, that emit short hints telling an agent to poll the socket; treat these as opt-in hints rather than authoritative event delivery.
   DESIGN reference: `Operator REPL and TUI Control Surface`
 - [ ] Define command-source mux ordering so TUI, socket, replay, and Control API commands enter the shared controller through one total-order dispatcher while responses route back to the source that submitted each command; implement and validate it in milestone 4.
   DESIGN reference: `Operator REPL and TUI Control Surface`
@@ -455,6 +462,8 @@ Close the loop on independently useful product flows before combining them.
 
 - [ ] Implement startup with `--socket <path>` for headless Unix-domain command control; when both `--tui` and `--socket` are present, route both through the command-source mux.
   DESIGN reference: `Operator REPL and TUI Control Surface`
+- [ ] Implement the local-agent milestone 4 flow over the socket only: configure gateway state, enable inbound, poll `events poll` until `call.inbound.pending`, inspect `call get`, run `answer <call_id>`, poll transcript events, and run `hangup <call_id>` without using appserver webhooks or the HTTP Control API.
+  DESIGN reference: `Operator REPL and TUI Control Surface`, `Inbound Call Handler Design`
 - [ ] Implement the programmatic milestone 1 flow: application webhook subscription -> `call.inbound.pending` event -> optional `GET /api/v1/calls/{call_id}` state reconciliation -> `POST /api/v1/calls/{call_id}/attachments` to bind transcript/event delivery -> `POST /api/v1/calls/{call_id}/answer` -> media start -> `transcript.partial` / `transcript.final` webhooks.
   DESIGN reference: `Application Webhooks and Gateway Control API`, `Inbound Call Handler Design`
 - [ ] Implement the programmatic milestone 2 flow: `POST /api/v1/calls` -> outbound Telnyx dial with media -> `POST /api/v1/calls/{call_id}/say` -> outbound TTS media -> TTS playback webhooks.

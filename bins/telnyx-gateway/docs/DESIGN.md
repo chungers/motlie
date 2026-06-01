@@ -6,6 +6,8 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-05-31 | @codex-364-impl: Clarified that the Unix-domain socket is the local agent-tooling interface: it can provide command execution, call snapshots, cursor-based event polling, and optional tmux/mstream-style wake-up notifications without depending on appserver webhooks or the HTTP Control API. | Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API |
+| 2026-05-31 | @codex-364-impl: Updated the gateway ORT policy to use Cargo's `ort/download-binaries` static `libonnxruntime.a` path with no `ORT_LIB_PATH`, dynamic-link, vendored ORT, or source-build runbook. | Recommended ASR/TTS Stack, Getting Started: Local Deployment |
 | 2026-05-31 | @codex-364-impl: Clarified that static ONNX Runtime builds should build ORT's own C/C++ dependencies from source through FetchContent; operators only provision host build tools, not ORT internal libraries. | Recommended ASR/TTS Stack |
 | 2026-05-31 | @codex-364-impl: Made static ONNX Runtime linkage the required Sherpa/Piper operational policy for gateway live tests and deployments; dynamic `ORT_PREFER_DYNAMIC_LINK` runbooks are explicitly rejected. | Recommended ASR/TTS Stack, Getting Started: Local Deployment |
 | 2026-05-30 | @codex-358-research: Addressed PR #363 review round 1 by moving M4, the design-quality assessment, and the recommended v1 pipelines under the staged build strategy; marking Control API and application webhook flows as milestone 4 work; aligning M1 structured logging with #364; adding operator session/socket/mux modules; and matching M3 prose to `ConversationCommand::{Say, Call, Noop}`. | Staged Build Strategy, Application Webhooks and Gateway Control API, Operator REPL and TUI Control Surface, Inbound Call Handler Design, Crate Hierarchy and API Surfaces |
@@ -623,23 +625,67 @@ These pipelines align with what currently works while allowing useful validation
 The gateway should expose the same `motlie-driver` command family through startup-selected input sources:
 
 - `--tui` enables the local terminal UI with a left REPL pane and right call roster/detail area
-- `--socket <path>` enables a Unix-domain command socket for headless local control
+- `--socket <path>` enables a Unix-domain command socket for headless local agent/tooling control
 - `--load <dump_path>` replays durable configuration commands during startup before live command sources are accepted
 - the authenticated HTTP Control API remains the remote application-server control surface for call reads, attachments, answer/reject/hangup, dial, and say
 
-`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still operator-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--load` and/or the authenticated HTTP Control API for configuration and control.
+`--tui` and `--socket` are independent. If both are present, the gateway runs both and multiplexes their commands through one command dispatcher. If only `--socket` is present, the gateway is headless but still locally agent-controllable. If only `--tui` is present, behavior matches the local interactive flow. If neither is present, no local operator command input is started; the process must rely on `--load` and/or the authenticated HTTP Control API for configuration and control.
 
-The Unix-domain socket should use the same command grammar as the TUI REPL. A simple v1 protocol can be newline-delimited UTF-8 command text with one structured response per command; later versions can add a JSON request envelope if multiple clients need request IDs, capabilities, or event streaming:
+The Unix-domain socket is the preferred interface for local agent tooling. It should be sufficient for an agent to configure the gateway, poll call/event state, answer or hang up calls, dial outbound calls, and send `say` text without using application webhooks or the HTTP Control API. Appserver webhooks and the Control API remain separate integration surfaces for other processes and services.
 
-```text
-/run/motlie/telnyx-gateway.sock
-> status
-< {"ok":true,"command_id":"cmd_01HZ...","summary":"listener ready"}
-> answer call_01HZ...
-< {"ok":true,"command_id":"cmd_01HZ...","summary":"answering call_01HZ..."}
+The socket should use newline-delimited JSON request/response frames around the same `motlie-driver` command grammar as the TUI REPL:
+
+```json
+{"id":"req-1","command":"status"}
+{"id":"req-1","ok":true,"command_id":"cmd_01HZ...","lines":["listener ready"],"data":{"listener":"ready"}}
+{"id":"req-2","command":"answer call_01HZ..."}
+{"id":"req-2","ok":true,"command_id":"cmd_01HZ...","lines":["answering call_01HZ..."]}
 ```
 
+Each response must carry the request `id`, a stable success/error shape, command output lines for human-readable parity with the TUI, and structured `data` for machine use when the command has a natural resource representation. Errors should include a machine-readable code and a human-readable message.
+
 The socket is a local privileged control surface. It should bind only to a filesystem path chosen by `--socket`, set restrictive permissions by default, unlink stale socket files only after verifying they are sockets, and avoid accepting remote TCP traffic. Authentication can be filesystem-permission based for v1, with optional peer credential checks where available.
+
+Agent event access should be polling-first. Some agents cannot receive pushed events; they can only run commands and inspect responses. The socket therefore needs command-level snapshots plus cursor polling over the gateway event journal:
+
+```text
+calls --json
+call get <call_id> --json
+events poll --after <cursor> [--call <call_id>] [--types <event,...>] [--limit <n>]
+```
+
+Recommended polling response:
+
+```json
+{
+  "id": "req-3",
+  "ok": true,
+  "data": {
+    "events": [
+      {
+        "seq": 101,
+        "type": "call.inbound.pending",
+        "call_id": "call_01HZ...",
+        "created_at": "2026-05-31T21:08:12Z",
+        "summary": "inbound call waiting"
+      }
+    ],
+    "next_cursor": 101
+  }
+}
+```
+
+The event journal should be an in-memory ring buffer at minimum. Every event needs a monotonic `seq`, stable `type`, timestamp, gateway call id when applicable, and enough provider diagnostic fields for troubleshooting. If an agent polls with a cursor older than the retained journal, the socket should return a structured `cursor_expired` error and the agent should recover by calling `calls --json` and resuming from the latest cursor.
+
+Socket event polling is the authoritative agent event path. Optional wake-up notifications may be layered on top for agents that sit inside a tmux session or mstream-driven prompt:
+
+```text
+agent notify tmux --target <target> --types call.inbound.pending,transcript.final
+agent notify mstream --channel <channel> --types call.inbound.pending,call.ended
+agent notify disable
+```
+
+These notifications are hints, not delivery guarantees. They should carry only a short wake-up message such as "motlie event: call.inbound.pending call_01HZ..." so the agent can decide to poll the socket. They must be opt-in, local-only, rate-limited, and avoid secrets or raw transcript text unless explicitly enabled by the operator.
 
 The command-source mux should convert every command into a common envelope:
 
@@ -963,6 +1009,7 @@ The gateway should support external automation in addition to the operator TUI. 
 - Telnyx webhooks come into `bins/telnyx-gateway` from Telnyx.
 - Gateway application webhooks go out from `bins/telnyx-gateway` to a user's application server.
 - The Gateway Control API is called by that application server to list current calls, inspect one call, attach to a call's event/transcript stream, answer, reject, hang up, dial, and say text.
+- The Unix-domain socket is not an appserver webhook/control API substitute; it is the local agent-tooling interface and can provide command execution, snapshots, event polling, and optional local wake-up notifications without exposing HTTP control routes.
 
 This lets the gateway act as a telephony edge service. Another server can subscribe to call events, decide what to do, reconcile current state through `GET` endpoints, then call back into the gateway without embedding Telnyx protocol logic, media adaptation, ASR, or TTS.
 
@@ -2368,8 +2415,8 @@ Recommended design rule:
 
 - Telnyx v1 should treat `sherpa-onnx` as the default recommended ASR backend for the real-time conversational flow
 - the gateway itself should still accept any injected typed ASR that implements `StreamingTranscriber`
-- gateway live-test and deployment runbooks must use static ONNX Runtime linkage for Sherpa: `ORT_LIB_PATH` points at a source-built static ONNX Runtime release directory, `ORT_PREFER_DYNAMIC_LINK` is unset, and `LD_LIBRARY_PATH` is not part of the required ASR startup path
-- the ONNX Runtime source build should build ORT's third-party C/C++ dependencies itself; runbooks may require host build tools such as `git`, Python, CMake, and GCC, but they must not require installing ORT internal libraries such as protobuf, FlatBuffers, Abseil, re2, nsync, or cpuinfo as host packages
+- gateway live-test and deployment runbooks must use static ONNX Runtime linkage for Sherpa through the workspace `ort/download-binaries` path; Cargo downloads and statically links the prebuilt `libonnxruntime.a` archive
+- gateway runbooks must not set `ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK`, or `LD_LIBRARY_PATH`, and must not require building ONNX Runtime from source or vendoring ONNX Runtime
 
 ### Recommended TTS: Piper
 
