@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::call_control::TelnyxMediaConfig;
+
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -32,6 +34,8 @@ pub struct GatewayConfig {
     pub bind: Option<SocketAddr>,
     pub public_webhook_url: Option<String>,
     pub public_media_url: Option<String>,
+    pub telnyx_media: TelnyxMediaConfig,
+    pub capture_dir: Option<PathBuf>,
     pub selected_connection_id: Option<String>,
     pub selected_application_name: Option<String>,
     pub selected_phone_number: Option<String>,
@@ -219,6 +223,7 @@ impl GatewayState {
         Self {
             config: GatewayConfig {
                 bind: Some(bind),
+                telnyx_media: TelnyxMediaConfig::default(),
                 ..GatewayConfig::default()
             },
             inbound_mode: InboundMode::Disabled,

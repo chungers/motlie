@@ -6,6 +6,7 @@
 
 | Date | Change | Sections |
 |------|--------|----------|
+| 2026-06-01 | @codex-364-impl: Added the post-live-test ASR quality loop for milestone 1: keep `PCMU 8 kHz` as the safe default, make the Telnyx answer media request configurable for `L16 16 kHz` comparison runs, and capture raw Telnyx JSONL, decoded WAV, Sherpa input WAV, transcript JSONL, and manifests for offline replay/tuning. | Audio Codecs and Formats, Inbound Call Handler Design, Testing Scope, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Updated the milestone 1 ASR design to prefer upstream `sherpa-onnx` over Motlie's former hand-rolled ONNX decoder; the gateway now preserves normal speech pauses for Sherpa endpointing and uses the upstream crate's static native archive download/link path instead of the workspace Pyke `ort` path. | Recommended ASR/TTS Stack, Inbound Call Handler Design, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Added a milestone 1 local command-socket subset for agent-assisted live testing: headless startup can load known config, accept line-oriented Motlie driver commands, return JSON command responses, answer inbound calls, expose `call show` transcript snapshots, and shut down without scraping the TUI; richer event polling and mux validation remain milestone 4. | Staged Build Strategy, Operator REPL and TUI Control Surface, Application Webhooks and Gateway Control API, Getting Started: Local Deployment |
 | 2026-06-01 | @codex-364-impl: Updated milestone 1 live ASR handling after long-call logs showed continuous Telnyx media delivery but Sherpa getting stuck in repeated-token output; the gateway now treats speech gaps and repeated-token detection as ASR-session reset boundaries while keeping one assembled call transcript for the operator. | Inbound Call Handler Design, Operator REPL and TUI Control Surface, Testing Scope |
@@ -233,7 +234,8 @@ Important details:
 Implications for Motlie:
 
 - the most direct fit to the later duplex ASR/TTS contracts is `L16` bidirectional RTP at `16 kHz`
-- milestone 1 live inbound transcription uses `PCMU` at `8 kHz` for inbound media and enables bidirectional RTP in the same codec so the gateway can send outbound silence keepalive while it is otherwise only transcribing
+- milestone 1 live inbound transcription defaults to `PCMU` at `8 kHz` for inbound media and enables bidirectional RTP in the same codec so the gateway can send outbound silence keepalive while it is otherwise only transcribing
+- after the first successful upstream Sherpa live test, the gateway should expose an operator-controlled `L16 16 kHz` comparison mode; `PCMU 8 kHz` remains the rollback/default path until captured evidence shows `L16` is both stable and higher quality on the active Telnyx account/carrier path
 - PSTN-originated inbound audio may still start as `PCMU` or `PCMA` at `8 kHz`
 - the gateway must be able to decode G.711 and possibly other Telnyx codecs if the inbound stream format is not already linear PCM
 
@@ -2526,18 +2528,20 @@ Recommended inbound flow:
 8. The answer action attaches media streaming with:
    - `stream_url=wss://.../telnyx/media`
    - `stream_track=inbound_track`
-   - `stream_codec=PCMU` for the milestone 1 live path
+   - `stream_codec=PCMU` for the milestone 1 default live path, or `L16` for an explicit ASR quality comparison run
    - `stream_bidirectional_mode=rtp`
-   - `stream_bidirectional_codec=PCMU`
-   - `stream_bidirectional_sampling_rate=8000`
+   - `stream_bidirectional_codec` matching the requested stream codec
+   - `stream_bidirectional_sampling_rate=8000` for `PCMU`, or `16000` for `L16`
    - `stream_bidirectional_target_legs=self`
 9. Telnyx opens the WebSocket.
 10. On `start`, the gateway finalizes session media metadata and opens a typed `StreamingTranscriber` session.
-11. Until milestone 2/M3 supplies real outbound TTS audio, the gateway sends low-amplitude/silence PCMU `media` frames back over the WebSocket as a keepalive so the single-leg PSTN call does not terminate while Motlie is receive-only at the application level.
+11. Until milestone 2/M3 supplies real outbound TTS audio, the gateway sends silence `media` frames matching the observed/requested bidirectional RTP codec back over the WebSocket as a keepalive so the single-leg PSTN call does not terminate while Motlie is receive-only at the application level.
 12. Each inbound `media` event is mapped to provider-neutral sequence metadata, reordered, decoded, converted to normalized PCM, and pushed into the ASR stream.
 13. The gateway passes a seconds-scale low-energy hangover through the active ASR session so upstream Sherpa endpointing can finalize utterances; normal speech pauses do not force a new ASR session.
 14. If Sherpa emits a repeated-token hallucination such as a growing `Q` run, the gateway suppresses that event from operator-visible transcripts, logs it, resets the ASR session, and waits for the next speech-energy frame before feeding the backend again.
 15. ASR updates are converted to `TranscriptEvent` values and sent to the configured `TranscriptSink`.
+
+Milestone 1 quality debugging should capture replayable artifacts for accepted media streams when the operator enables a capture directory. Each call/stream directory should contain raw Telnyx media JSONL, decoded inbound WAV at the observed codec/sample rate, the `16 kHz` WAV actually fed into Sherpa after gating/resampling, transcript-event JSONL, and a manifest with call ids, stream id, observed codec, and sample rate. Capture failures should warn but must not fail the live call.
 16. In milestone 1, a sink such as `TuiTranscriptSink` or `StdoutTranscriptSink` emits transcripts and returns no call-control actions; `WebhookTranscriptSink` is milestone 4 external-integration work.
 17. In milestone 3, a sink can forward final transcript events to a `ConversationHandler`, then route resulting `ConversationCommand::Say { text }` values to outbound TTS.
 18. On hangup or `stop`, the gateway finishes the ASR stream and tears down the session.

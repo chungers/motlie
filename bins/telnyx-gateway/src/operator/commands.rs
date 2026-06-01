@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use motlie_driver::{CommandOutput, CommandSet, DriverError, DriverResult};
 
-use crate::call_control::{AnswerRequest, TelnyxClient};
+use crate::call_control::{AnswerRequest, TelnyxClient, TelnyxMediaConfig, TelnyxStreamCodec};
 use crate::operator::persistence::write_state_dump;
 use crate::operator::state::{CallStatus, GatewayState, InboundMode, LogLevel, SharedState};
 
@@ -20,13 +20,14 @@ impl GatewayContext {
     }
 
     async fn answer_call(&self, target: Option<String>) -> DriverResult<CommandOutput> {
-        let (gateway_call_id, call_control_id, stream_url) = {
+        let (gateway_call_id, call_control_id, stream_url, media) = {
             let mut guard = self.state.write().await;
             let media_url = guard
                 .config
                 .public_media_url
                 .clone()
                 .ok_or_else(|| DriverError::message("config set media-url <wss-url> first"))?;
+            let media = guard.config.telnyx_media;
             let call = resolve_call_mut(&mut guard, target.as_deref())?;
             if call.status != CallStatus::PendingInbound {
                 return Err(DriverError::message(format!(
@@ -41,6 +42,7 @@ impl GatewayContext {
                 call.gateway_call_id.clone(),
                 call.ids.call_control_id.clone(),
                 media_url,
+                media,
             )
         };
 
@@ -56,6 +58,7 @@ impl GatewayContext {
             .answer_call(&AnswerRequest {
                 call_control_id: &call_control_id,
                 stream_url: &stream_url,
+                media,
             })
             .await
             .map_err(driver_anyhow)?;
@@ -64,6 +67,8 @@ impl GatewayContext {
             gateway_call_id,
             call_control_id,
             stream_url,
+            stream_codec = media.codec.as_str(),
+            stream_sample_rate_hz = media.sample_rate_hz,
             "call.answering"
         );
         Ok(CommandOutput::line(format!(
@@ -299,6 +304,20 @@ async fn status(state: &SharedState) -> DriverResult<CommandOutput> {
                 .as_deref()
                 .unwrap_or("<unset>")
         ),
+        format!(
+            "media-codec: {} {}Hz",
+            guard.config.telnyx_media.codec.as_str(),
+            guard.config.telnyx_media.sample_rate_hz
+        ),
+        format!(
+            "capture-dir: {}",
+            guard
+                .config
+                .capture_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unset>".to_string())
+        ),
         format!("calls: {}", guard.calls.len()),
     ];
     if guard.inbound_mode == InboundMode::Disabled {
@@ -330,7 +349,7 @@ async fn config_command(
         ConfigCommand::Show => {
             let guard = context.state.read().await;
             Ok(CommandOutput::text(format!(
-                "webhook-url={}\nmedia-url={}\nfrom-number={}\nstate-path={}",
+                "webhook-url={}\nmedia-url={}\nmedia-codec={}\nmedia-sample-rate={}\ncapture-dir={}\nfrom-number={}\nstate-path={}",
                 guard
                     .config
                     .public_webhook_url
@@ -341,6 +360,14 @@ async fn config_command(
                     .public_media_url
                     .as_deref()
                     .unwrap_or("<unset>"),
+                guard.config.telnyx_media.codec.as_str(),
+                guard.config.telnyx_media.sample_rate_hz,
+                guard
+                    .config
+                    .capture_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unset>".to_string()),
                 guard
                     .config
                     .default_from_number
@@ -359,8 +386,26 @@ async fn config_command(
             match key.as_str() {
                 "webhook-url" => guard.config.public_webhook_url = Some(value.clone()),
                 "media-url" => guard.config.public_media_url = Some(value.clone()),
+                "media-codec" => {
+                    let codec = value.parse::<TelnyxStreamCodec>().map_err(driver_anyhow)?;
+                    guard.config.telnyx_media =
+                        TelnyxMediaConfig::new(codec, codec.default_sample_rate_hz())
+                            .map_err(driver_anyhow)?;
+                }
+                "media-sample-rate" => {
+                    let sample_rate_hz = value.parse::<u32>().map_err(|error| {
+                        DriverError::invalid_argument(
+                            "value",
+                            format!("invalid media sample rate {value}: {error}"),
+                        )
+                    })?;
+                    guard.config.telnyx_media =
+                        TelnyxMediaConfig::new(guard.config.telnyx_media.codec, sample_rate_hz)
+                            .map_err(driver_anyhow)?;
+                }
+                "capture-dir" => guard.config.capture_dir = Some(expand_user_path(&value)),
                 "from-number" => guard.config.default_from_number = Some(value.clone()),
-                "state-path" => guard.config.state_path = Some(PathBuf::from(&value)),
+                "state-path" => guard.config.state_path = Some(expand_user_path(&value)),
                 _ => {
                     return Err(DriverError::invalid_argument(
                         "key",
@@ -870,6 +915,15 @@ fn resolve_call_id(state: &GatewayState, target: Option<&str>) -> DriverResult<S
 
 fn driver_anyhow(error: anyhow::Error) -> DriverError {
     DriverError::message(format!("{error:#}"))
+}
+
+fn expand_user_path(value: &str) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(value)
 }
 
 #[cfg(test)]

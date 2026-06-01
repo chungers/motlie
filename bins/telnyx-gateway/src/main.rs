@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
             LogLevel::Info,
             format!("listener configured on {}", cli.bind),
         );
+        guard.config.capture_dir = cli.capture_dir.clone();
     }
 
     let api_key = std::env::var(&cli.telnyx_api_key_env).ok();

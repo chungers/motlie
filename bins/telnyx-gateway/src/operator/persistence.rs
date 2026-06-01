@@ -17,6 +17,19 @@ pub fn render_state_dump(state: &GatewayState) -> String {
     if let Some(url) = &state.config.public_media_url {
         lines.push(format!("config set media-url {url}"));
     }
+    if state.config.telnyx_media != Default::default() {
+        lines.push(format!(
+            "config set media-codec {}",
+            state.config.telnyx_media.codec.as_str()
+        ));
+        lines.push(format!(
+            "config set media-sample-rate {}",
+            state.config.telnyx_media.sample_rate_hz
+        ));
+    }
+    if let Some(path) = &state.config.capture_dir {
+        lines.push(format!("config set capture-dir {}", path.display()));
+    }
     if let Some(number) = &state.config.default_from_number {
         lines.push(format!("config set from-number {number}"));
     }

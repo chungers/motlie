@@ -33,7 +33,8 @@ env -u ORT_LIB_PATH -u ORT_LIB_LOCATION -u ORT_PREFER_DYNAMIC_LINK \
     --bind 127.0.0.1:8080 \
     --load /home/dchung/telnyx-test/config.repl \
     --socket /tmp/motlie-telnyx-gateway.sock \
-    --log-file /home/dchung/telnyx-gateway-live.log
+    --log-file /home/dchung/telnyx-gateway-live.log \
+    --capture-dir /home/dchung/telnyx-test/captures
 ```
 
 The socket accepts one gateway REPL command per line and returns one JSON object
@@ -64,6 +65,30 @@ sock.sendall(b"shutdown\n")
 print(json.loads(sock.recv(65536)))
 PY
 ```
+
+The milestone 1 default media request is the known-good live path:
+
+```text
+config set media-codec PCMU
+config set media-sample-rate 8000
+```
+
+To compare ASR quality against Telnyx linear PCM, enable capture and request
+`L16` before answering the next call:
+
+```text
+config set capture-dir /home/dchung/telnyx-test/captures
+config set media-codec L16
+config set media-sample-rate 16000
+```
+
+Each accepted media stream creates:
+
+- `telnyx-media.jsonl`: raw Telnyx WebSocket events after `start`
+- `decoded-inbound.wav`: decoded inbound media at the observed Telnyx format
+- `asr-input-16khz.wav`: samples fed into Sherpa after gating and resampling
+- `transcripts.jsonl`: partial/final transcript events, including suppressed events
+- `manifest.json`: call, stream, codec, sample-rate, and file metadata
 
 1. Expose the local listener with Tailscale Funnel:
 
