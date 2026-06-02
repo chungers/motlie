@@ -3,7 +3,8 @@
 ## Changelog
 | Date | Who | Summary |
 | --- | --- | --- |
-| 2026-06-01 16:03 PDT | @codex-191-asr | Updated the Phase 3 assumptions after PR #368 / commit `a5c27cd4`: the live Sherpa baseline is now the upstream `sherpa-onnx` crate with its own bundled native archive and internal ONNX Runtime, separate from Motlie's shared `ort` runtime. |
+| 2026-06-01 22:49 PDT | @codex-191-asr | Addressed PR #369 review round 1 by making upstream-Sherpa and static-ORT claims conditional on PR #368 merging into `feature/models`, correcting streaming contract names, and framing sub-100 ms GPU latency as feasibility only. |
+| 2026-06-01 16:03 PDT | @codex-191-asr | Recorded the planned Phase 3 assumption from PR #368 commit `a5c27cd4` on `feature/telnyx-voice`: once that work merges into `feature/models`, the live Sherpa baseline becomes the upstream `sherpa-onnx` crate with its own bundled native archive and internal ONNX Runtime, separate from Motlie shared `ort` runtime. |
 | 2026-06-01 14:30 PDT | @codex-191-asr | Folded in issue #191 refinement: batched Whisper as complementary final-pass evaluation, telephony 8 kHz robustness, same-ONNX-Runtime preference, and DGX CUDA placement. |
 | 2026-04-17 | @codex-asr | Renamed the shipped Moonshine example path from `v0.7` to `asr_moonshine`. |
 | 2026-04-16 | @codex-asr | Added the Phase 3 decision record: sherpa-onnx remains the primary telephony-grade streaming backend, while Moonshine is the secondary batch/offline backend. Documented the measured latency/accuracy tradeoff and the implementation constraint that Moonshine currently runs CPU-only in Motlie because incremental CUDA chunking is unstable. |
@@ -11,16 +12,18 @@
 
 ## Decision
 
-- Upstream `sherpa-onnx` remains the primary ASR backend for telephony and real-time streaming. The canonical baseline is now the official Rust crate `OnlineRecognizer` / `OnlineStream` path, not Motlie's former hand-rolled decoder over the shared `motlie-model-ort` helper.
+- `sherpa-onnx` remains the primary ASR backend for telephony and real-time streaming. This PR targets `feature/models`, where the current backend still uses the shared `motlie-model-ort` path; the Phase 3 baseline assumes PR #368 / commit `a5c27cd4` from `feature/telnyx-voice` is merged into `feature/models`, after which the canonical baseline becomes the official upstream `sherpa-onnx` Rust crate `OnlineRecognizer` / `OnlineStream` path.
 - `Moonshine Streaming` remains the primary in-scope `transcribe-rs` streaming candidate, but not the live baseline until it can meet telephony chunk latency and stability requirements.
 - VAD-gated or utterance-batched Whisper is in scope only as a complementary final-pass / hybrid path. It is not the live engine, and live Whisper micro-chunking remains excluded.
 - Nemotron / Parakeet / Canary are DGX batched-GPU investigations, not live-streaming selection candidates unless a Rust-native streaming path exists.
+
+Convergence note: PR #369 remains targeted at `feature/models`. All upstream-Sherpa and static-ORT `download-binaries` statements below are forward-looking assumptions from PR #368 / commit `a5c27cd4` on `feature/telnyx-voice`; they apply to `feature/models` only after that PR backend and ORT policy work merges there.
 
 ## Data
 
 | Backend | Mode | Latency | WER | Streaming viability | Telephony 8 kHz axis | Integration / role | Notes |
 | --- | --- | ---: | ---: | --- | --- | --- | --- |
-| upstream sherpa-onnx | CPU chunked streaming | 6.6 ms/chunk historical baseline; remeasure upstream crate on Telnyx PCMU | 0.296 historical baseline; remeasure upstream crate on narrowband | Yes | Must be measured on Telnyx-style 8 kHz mu-law upsampled to 16 kHz | Live baseline; Sherpa exception with bundled native archive and internal ORT | PR #368 replaced the custom decoder and improved live output from one-word/repeated artifacts to multi-word transcripts |
+| sherpa-onnx today / upstream sherpa-onnx after #368 | CPU chunked streaming | 6.6 ms/chunk historical baseline; remeasure after #368 convergence on Telnyx PCMU | 0.296 historical baseline; remeasure after #368 convergence on narrowband | Yes | Must be measured on Telnyx-style 8 kHz mu-law upsampled to 16 kHz | Current `feature/models`: shared `motlie-model-ort` decoder. Planned after #368: Sherpa exception with bundled native archive and internal ORT. | PR #368 on `feature/telnyx-voice` replaced the custom decoder and improved live output from one-word/repeated artifacts to multi-word transcripts; this row assumes that work merges into `feature/models`. |
 | Moonshine | CPU chunked streaming | 450 ms/chunk | 0.000-0.063 | No for telephony | Must be measured on the same narrowband corpus before any accuracy claim | Primary `transcribe-rs` streaming candidate; shared Motlie `ort` runtime | Strong accuracy, but chunk latency is too high |
 | Moonshine | CUDA incremental chunks | Crash | n/a | No | Same narrowband axis applies after CUDA stability exists | DGX investigation only | Whole-file path works; chunked incremental path is unstable |
 | whisper.cpp / Whisper | CUDA or CPU utterance batch | 13.7 s/file measured for rolling-window batch | 0.441 measured for rolling-window batch | No for live partials | Important final-pass candidate on narrowband utterances | Complementary final-pass / hybrid; `whisper.cpp` is separate from ORT | Batch-oriented fallback; measure WER uplift vs added utterance latency |
@@ -29,13 +32,13 @@
 
 ## Rationale
 
-- The historical Sherpa streaming baseline was about 68x faster per chunk than Moonshine on CPU; PR #368 makes the upstream `sherpa-onnx` crate the baseline to remeasure against Telnyx PCMU.
+- The historical Sherpa streaming baseline was about 68x faster per chunk than Moonshine on CPU. The #369 document treats PR #368 as the convergence path that would make upstream `sherpa-onnx` the canonical baseline after it merges into `feature/models`; until then, `feature/models` still carries the shared `motlie-model-ort` decoder.
 - Moonshine accuracy is attractive, but that does not offset the chunk-latency gap for telephony workloads.
 - Moonshine therefore fits best as the secondary chunk-capable backend that still shares the same PCM chunk contract as the primary backend, but is used for non-telephony workloads because its chunk latency is much higher.
 - Current Moonshine CUDA incremental behavior is unstable, so the Motlie integration keeps the backend CPU-only for now.
 - Telnyx media arrives as 8 kHz mu-law narrowband audio that is decoded and upsampled to 16 kHz. This front-end and model-domain mismatch is now a first-class accuracy axis for every candidate; generic wideband WER alone is not sufficient.
 - Simulated-streaming Whisper should be evaluated as a final-pass quality upgrade after VAD endpointing, LocalAgreement, or Simul-Whisper style stabilization. The acceptance metric is WER uplift over the live sherpa transcript versus the added finalization latency. Per-frame or micro-chunked Whisper remains excluded for live partials because it worsens both latency and WER.
-- The integration preference now has two static CPU runtime lanes. Motlie-owned ORT backends such as Moonshine and Piper use the shared workspace `ort` / `download-binaries` path. The live Sherpa backend is the explicit Sherpa exception: upstream `sherpa-onnx` owns its downloaded static native archive and internal ONNX Runtime. These are separate runtimes; do not assume Sherpa live streaming shares the Motlie `ort` runtime. `faster-whisper` / CTranslate2 and `whisper.cpp` remain additional runtime stacks.
+- The desired post-convergence integration preference has two static CPU runtime lanes. Motlie-owned ORT backends such as Moonshine and Piper use the shared workspace `ort` / `download-binaries` path after the #368 ORT policy is merged into `feature/models`. The planned live Sherpa backend is the explicit Sherpa exception: upstream `sherpa-onnx` owns its downloaded static native archive and internal ONNX Runtime. These are separate runtimes; do not assume Sherpa live streaming shares the Motlie `ort` runtime. `faster-whisper` / CTranslate2 and `whisper.cpp` remain additional runtime stacks.
 
 ## CUDA / GPU Findings On DGX Spark
 
@@ -47,9 +50,9 @@ Verified by @codex-191-asr at 2026-06-01 14:30 PDT and refreshed at 2026-06-01 1
 - Host memory reports `MemTotal: 127600748 kB` and `MemAvailable: 112503684 kB` (`free -h`: `121Gi` total, `107Gi` available). Treat that as the on-box unified-memory availability signal rather than a discrete VRAM number from SMI.
 - `uname -m` is `aarch64`; `nvcc --version` reports CUDA compilation tools `13.0`, `V13.0.88`.
 - CUDA dynamic libraries are present under `/usr/local/cuda/targets/sbsa-linux/lib`, including `libcudart.so.13` and `libcublas.so.13`; no `libcudnn*.so*` files were found in that directory. The earlier temporary CUDA ONNX Runtime shared library path `/tmp/onnxruntime-cuda/build/Linux-sm121/Release/libonnxruntime.so` is not present on this run.
-- PR #368 commit `a5c27cd4` changes `libs/model/backends/sherpa_onnx` to depend on `sherpa-onnx = "1.13.2"` and removes the former `motlie-model-ort` / `ort` / `ndarray` custom decoder path.
+- PR #368 commit `a5c27cd4` on `feature/telnyx-voice` would change `feature/models` after merge by making `libs/model/backends/sherpa_onnx` depend on `sherpa-onnx = "1.13.2"` and removing the former `motlie-model-ort` / `ort` / `ndarray` custom decoder path.
 - `cargo info sherpa-onnx@1.13.2` and `cargo info sherpa-onnx-sys@1.13.2` show only `default = [static]`, `static`, and `shared` features; no published `cuda` feature exists in this crate version. PR #368 keeps the Motlie wrapper `cuda` feature as `cuda = []` with the note that upstream currently publishes CPU static archives through the Rust crate.
-- The downloaded `sherpa-onnx-sys 1.13.2` build script statically links `onnxruntime` inside the Sherpa native archive set and selects archives such as `sherpa-onnx-v1.13.2-linux-aarch64-static-lib.tar.bz2`. This verifies the Sherpa exception mechanism on this host: Sherpa owns its bundled native archive and internal ORT, separate from Motlie's shared `ort` runtime.
+- The downloaded `sherpa-onnx-sys 1.13.2` build script statically links `onnxruntime` inside the Sherpa native archive set and selects archives such as `sherpa-onnx-v1.13.2-linux-aarch64-static-lib.tar.bz2`. This verifies the Sherpa exception mechanism for the PR #368 path on this host; it is not a statement that the current `feature/models` branch already uses that runtime.
 
 CUDA-accelerated ASR paths to keep in the evaluation set:
 
@@ -57,19 +60,20 @@ CUDA-accelerated ASR paths to keep in the evaluation set:
 - `whisper.cpp` CUDA for GGML/GGUF-style Whisper final pass, already a separate toolchain from ONNX Runtime.
 - NVIDIA Parakeet, Canary, and Nemotron through NeMo / Riva / NIM-style service boundaries for DGX-hosted batch or appserver-side final pass.
 
-Sub-100 ms GPU ASR latency is feasible when a GPU service is available, but it should not change the gateway live-engine decision by itself. For Motlie-owned ORT backends, CUDA still means provider/runtime libraries outside the static CPU `ort/download-binaries` policy. For upstream Sherpa, the mechanism differs: `sherpa-onnx 1.13.2` currently exposes CPU static/shared archive modes, not a Motlie `ort/cuda` execution-provider switch. A future Sherpa GPU path would need to be evaluated as a Sherpa-owned native archive, shared build, or service boundary. Therefore the conclusion still holds: CUDA ASR belongs in a DGX-hosted batched final-pass or appserver-side role, while the CPU-portable gateway keeps upstream `sherpa-onnx` as the live streaming baseline and Moonshine Streaming as the in-scope `transcribe-rs` streaming candidate.
+Sub-100 ms GPU ASR latency is a feasibility claim for GPU-backed ASR services, not a measurement produced by this PR. For the post-#368 Motlie-owned ORT lane, CUDA still means provider/runtime libraries outside the static CPU `ort/download-binaries` policy. For the planned upstream Sherpa lane, the mechanism differs: `sherpa-onnx 1.13.2` currently exposes CPU static/shared archive modes, not a Motlie `ort/cuda` execution-provider switch. A future Sherpa GPU path would need to be evaluated as a Sherpa-owned native archive, shared build, or service boundary. Therefore the conclusion still holds: CUDA ASR belongs in a DGX-hosted batched final-pass or appserver-side role, while the CPU-portable gateway keeps the streaming Sherpa baseline and Moonshine Streaming as the in-scope `transcribe-rs` streaming candidate after the #368 convergence work lands.
 
 ## Integration Shape
 
 - Live baseline backend crate: `libs/model/backends/sherpa_onnx/`
-- Live baseline runtime substrate: upstream `sherpa-onnx` Rust crate, statically linked by default through its downloaded prebuilt native archive, including Sherpa's internal ONNX Runtime.
-- Live baseline contract: existing `TranscriptionModel` / `TranscriptionStream`, adapted over upstream `OnlineRecognizer` / `OnlineStream`.
+- Current `feature/models` live runtime substrate: shared Motlie ORT through the existing Sherpa custom decoder.
+- Planned live runtime substrate after PR #368 merges into `feature/models`: upstream `sherpa-onnx` Rust crate, statically linked by default through its downloaded prebuilt native archive, including Sherpa internal ONNX Runtime.
+- Live baseline contract: existing `StreamingTranscriber` / `TranscriptionSession`, adapted over upstream `OnlineRecognizer` / `OnlineStream` only after the #368 convergence work lands.
 - Moonshine candidate backend crate: `libs/model/backends/moonshine/`
-- Moonshine runtime substrate: shared Motlie ONNX Runtime via `transcribe-rs` Moonshine streaming runtime and workspace `ort` download-binaries.
-- Moonshine contract: existing `TranscriptionModel` / `TranscriptionStream`
+- Moonshine runtime substrate after the #368 ORT policy lands: shared Motlie ONNX Runtime via `transcribe-rs` Moonshine streaming runtime and workspace `ort` download-binaries.
+- Moonshine contract: existing `StreamingTranscriber` / `TranscriptionSession`
 - Moonshine curated bundle: `libs/models/src/asr/moonshine_streaming_en.rs`
 - Moonshine example: `libs/models/examples/asr_moonshine/main.rs`
-- Gateway integration preference: upstream Sherpa bundled/internal ORT for live streaming; shared static CPU Motlie ORT for Moonshine/Piper/future Motlie-owned ORT backends; keep CUDA ORT and CTranslate2/NeMo/Riva toolchains outside the CPU-portable gateway live path.
+- Gateway integration preference after convergence: upstream Sherpa bundled/internal ORT for live streaming; shared static CPU Motlie ORT for Moonshine/Piper/future Motlie-owned ORT backends; keep CUDA ORT and CTranslate2/NeMo/Riva toolchains outside the CPU-portable gateway live path.
 - Hybrid final-pass contract: live partials/finals continue to come from the streaming engine; a VAD-gated batched final pass may replace or annotate the final transcript only after measuring WER uplift against added latency.
 
 ## Contract Semantics
