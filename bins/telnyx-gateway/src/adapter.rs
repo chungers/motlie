@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "sherpa")]
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use motlie_model::typed::{AudioBuf, Mono};
 #[cfg(feature = "sherpa")]
@@ -118,6 +118,16 @@ impl SherpaAsrArtifact {
         match self {
             Self::ZipformerEn20230626 => "sherpa-zipformer-en-2023-06-26",
             Self::ZipformerEnKroko20250806 => "sherpa-zipformer-en-kroko-2025-08-06",
+        }
+    }
+
+    #[cfg(feature = "sherpa")]
+    fn asr_model(self) -> motlie_models::AsrModels {
+        match self {
+            Self::ZipformerEn20230626 => motlie_models::AsrModels::SherpaOnnxStreamingEn,
+            Self::ZipformerEnKroko20250806 => {
+                motlie_models::AsrModels::SherpaOnnxStreamingEnKroko2025
+            }
         }
     }
 }
@@ -273,13 +283,9 @@ async fn start_sherpa_artifact(
     artifact: SherpaAsrArtifact,
     options: StartOptions,
 ) -> Result<motlie_model_sherpa_onnx::SherpaOnnxHandle, ModelError> {
-    match artifact {
-        SherpaAsrArtifact::ZipformerEn20230626 => {
-            motlie_models::asr::sherpa_onnx_streaming_en::start_typed(options).await
-        }
-        SherpaAsrArtifact::ZipformerEnKroko20250806 => {
-            motlie_models::asr::sherpa_onnx_streaming_en_kroko_2025::start_typed(options).await
-        }
+    match artifact.asr_model().bundle().start(options).await? {
+        motlie_models::CuratedHandle::SherpaOnnxStreamingEn(handle)
+        | motlie_models::CuratedHandle::SherpaOnnxStreamingEnKroko2025(handle) => Ok(handle),
     }
 }
 
@@ -288,17 +294,9 @@ fn download_sherpa_artifact(
     artifact: SherpaAsrArtifact,
     artifact_root: &Path,
 ) -> anyhow::Result<()> {
-    let mut catalog = motlie_models::Catalog::new();
-    let descriptor = match artifact {
-        SherpaAsrArtifact::ZipformerEn20230626 => {
-            motlie_models::asr::sherpa_onnx_streaming_en::descriptor()
-        }
-        SherpaAsrArtifact::ZipformerEnKroko20250806 => {
-            motlie_models::asr::sherpa_onnx_streaming_en_kroko_2025::descriptor()
-        }
-    };
-    catalog.register_descriptor(descriptor.clone());
-    motlie_models::download_bundle_artifacts(&catalog, &descriptor.id, artifact_root)
+    let catalog = motlie_models::Catalog::with_defaults();
+    let model = artifact.asr_model();
+    motlie_models::download_bundle_artifacts(&catalog, &model.bundle_id(), artifact_root)
         .map(|_| ())
         .map_err(anyhow::Error::from)
         .with_context(|| format!("download {} Sherpa ONNX artifacts", artifact.label()))
